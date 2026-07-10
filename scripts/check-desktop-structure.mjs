@@ -54,8 +54,8 @@ assert(
   "release workflow must bypass the local auto-versioning wrapper"
 );
 assert(
-  releaseWorkflow.includes("--target universal-apple-darwin"),
-  "release workflow must build a Universal macOS app"
+  releaseWorkflow.includes("--target universal-apple-darwin --bundles app"),
+  "release workflow must build a Universal app without the fragile DMG step"
 );
 assert(
   ciWorkflow.includes("retention-days: 7"),
