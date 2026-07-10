@@ -6,6 +6,17 @@ The product goal is a trusted local execution environment: cloud models do
 reasoning, while the local app owns tools, permissions, memory, retrieval,
 browser automation, and audit logs.
 
+## Download
+
+The current internal test build is available for Apple Silicon Macs:
+
+- [Cindx 0.0.4 for macOS (arm64)](releases/Cindx_0.0.4_aarch64.zip)
+- [Installation and verification notes](releases/README.md)
+
+This build is ad-hoc signed but not Apple-notarized. macOS may require the
+one-time Gatekeeper steps documented with the package. Intel Macs need a
+separate `x86_64` build.
+
 ## Current Status
 
 This repository has a runnable desktop MVP:
@@ -61,8 +72,10 @@ crates/
   agent-core/           Shared domain types and contracts.
   agent-graph/          Graph extraction and graph+RAG traversal.
   agent-memory/         Event-log checkpoints and restore context packs.
+  agent-mcp/            MCP transports, catalog cache, and remote tools.
   agent-rag/            Local RAG adapter, indexing, and search.
   agent-runtime/        Model-tool-observation agent loop.
+  agent-skills/         Skill discovery, trust, and progressive loading.
   agent-storage/        Event log and state persistence.
   model-provider/       Cloud model provider abstraction.
   orchestrator/         Routing, learned router, and workflow planning.
