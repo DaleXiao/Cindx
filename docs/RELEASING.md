@@ -23,8 +23,10 @@ git push origin v0.0.5
 ```
 
 The workflow builds `universal-apple-darwin`, creates a prerelease named
-`Cindx v0.0.5`, and uploads the Tauri bundles to GitHub Releases. Universal
-bundles run on Apple Silicon and Intel Macs.
+`Cindx v0.0.5`, and uploads the archived `.app` bundle to GitHub Releases. The
+Universal application runs on Apple Silicon and Intel Macs. DMG generation is
+deliberately disabled because it adds a separate macOS scripting failure point
+without improving internal testing.
 
 The same release can be started from Actions > Release > Run workflow by
 entering a tag that matches the committed version. The workflow creates the tag

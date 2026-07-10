@@ -97,4 +97,4 @@ jobs:
           prerelease: true
           generateReleaseNotes: true
           releaseCommitish: ${{ github.sha }}
-          args: --target universal-apple-darwin
+          args: --target universal-apple-darwin --bundles app
