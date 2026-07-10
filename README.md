@@ -12,6 +12,7 @@ The current internal test build is available for Apple Silicon Macs:
 
 - [Cindx 0.0.4 for macOS (arm64)](releases/Cindx_0.0.4_aarch64.zip)
 - [Installation and verification notes](releases/README.md)
+- [Automated builds and releases](docs/RELEASING.md)
 
 This build is ad-hoc signed but not Apple-notarized. macOS may require the
 one-time Gatekeeper steps documented with the package. Intel Macs need a
