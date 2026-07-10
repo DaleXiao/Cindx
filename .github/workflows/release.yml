@@ -56,14 +56,27 @@ jobs:
           node scripts/check-desktop-structure.mjs
 
       - name: Import optional Apple Developer certificate
+        id: apple-signing
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          if [ -z "$APPLE_CERTIFICATE" ]; then
+          set -euo pipefail
+          echo "certificate_configured=false" >> "$GITHUB_OUTPUT"
+          echo "notarization_configured=false" >> "$GITHUB_OUTPUT"
+
+          if [ -z "$APPLE_CERTIFICATE" ] && [ -z "$APPLE_CERTIFICATE_PASSWORD" ]; then
             echo "APPLE_CERTIFICATE is not configured; building an unsigned prerelease."
             exit 0
           fi
+          if [ -z "$APPLE_CERTIFICATE" ] || [ -z "$APPLE_CERTIFICATE_PASSWORD" ]; then
+            echo "::error::APPLE_CERTIFICATE and APPLE_CERTIFICATE_PASSWORD must either both be configured or both be omitted."
+            exit 1
+          fi
+
           KEYCHAIN_PATH="$RUNNER_TEMP/cindx-build.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
           CERTIFICATE_PATH="$RUNNER_TEMP/cindx-certificate.p12"
@@ -76,13 +89,25 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F'"' '/Developer ID Application/ { print $2; exit }')"
           test -n "$SIGNING_IDENTITY"
-          echo "APPLE_SIGNING_IDENTITY=$SIGNING_IDENTITY" >> "$GITHUB_ENV"
+          echo "certificate_configured=true" >> "$GITHUB_OUTPUT"
+          echo "identity=$SIGNING_IDENTITY" >> "$GITHUB_OUTPUT"
 
-      - name: Build and publish Universal app
+          if [ -z "$APPLE_ID" ] && [ -z "$APPLE_PASSWORD" ] && [ -z "$APPLE_TEAM_ID" ]; then
+            echo "Apple notarization credentials are not configured; building a signed prerelease without notarization."
+            exit 0
+          fi
+          if [ -z "$APPLE_ID" ] || [ -z "$APPLE_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            echo "::error::APPLE_ID, APPLE_PASSWORD, and APPLE_TEAM_ID must all be configured for notarization."
+            exit 1
+          fi
+          echo "notarization_configured=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build and publish signed and notarized Universal app
+        if: steps.apple-signing.outputs.certificate_configured == 'true' && steps.apple-signing.outputs.notarization_configured == 'true'
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          APPLE_SIGNING_IDENTITY: ${{ steps.apple-signing.outputs.identity }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -95,6 +120,47 @@ jobs:
             Internal Cindx macOS test build.
 
             This Universal package supports Apple Silicon and Intel Macs. Builds are signed and notarized only when the repository Apple secrets are configured.
+          releaseDraft: false
+          prerelease: true
+          generateReleaseNotes: true
+          releaseCommitish: ${{ github.sha }}
+          args: --target universal-apple-darwin --bundles app
+
+      - name: Build and publish signed Universal app
+        if: steps.apple-signing.outputs.certificate_configured == 'true' && steps.apple-signing.outputs.notarization_configured != 'true'
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ steps.apple-signing.outputs.identity }}
+        with:
+          projectPath: apps/desktop
+          tauriScript: ./node_modules/.bin/tauri
+          tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || 'v__VERSION__' }}
+          releaseName: Cindx v__VERSION__
+          releaseBody: |
+            Internal Cindx macOS test build.
+
+            This Universal package supports Apple Silicon and Intel Macs. This build is signed but not notarized.
+          releaseDraft: false
+          prerelease: true
+          generateReleaseNotes: true
+          releaseCommitish: ${{ github.sha }}
+          args: --target universal-apple-darwin --bundles app
+
+      - name: Build and publish unsigned Universal app
+        if: steps.apple-signing.outputs.certificate_configured != 'true'
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop
+          tauriScript: ./node_modules/.bin/tauri
+          tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || 'v__VERSION__' }}
+          releaseName: Cindx v__VERSION__
+          releaseBody: |
+            Internal Cindx macOS test build.
+
+            This Universal package supports Apple Silicon and Intel Macs. This build is unsigned and is intended for internal testing.
           releaseDraft: false
           prerelease: true
           generateReleaseNotes: true
