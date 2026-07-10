@@ -58,6 +58,16 @@ jobs:
         working-directory: apps/desktop
         run: npm exec tauri build -- --target aarch64-apple-darwin --bundles app
 
+      - name: Probe clean-machine startup
+        if: github.event_name != 'pull_request'
+        run: |
+          APP_PATH="apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Cindx.app"
+          PROBE_HOME="$RUNNER_TEMP/cindx-clean-home"
+          mkdir -p "$PROBE_HOME"
+          HOME="$PROBE_HOME" CINDX_DATA_DIR="$PROBE_HOME/data" CINDX_STARTUP_PROBE=1 "$APP_PATH/Contents/MacOS/cindx-desktop"
+          test -f "$PROBE_HOME/data/state.sqlite3"
+          grep -q "startup probe completed" "$PROBE_HOME/data/startup.log"
+
       - name: Package ad-hoc signed test app
         if: github.event_name != 'pull_request'
         run: |

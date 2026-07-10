@@ -93,3 +93,15 @@ The initial Rust workspace compiles and tests with the project check script.
 
 Known note: the first install attempt used the old `rustup-init` Homebrew
 formula name. The correct formula is `rustup`.
+
+## Installed Application Data
+
+Release builds do not use the source checkout for runtime state. On macOS,
+Cindx stores its database and configuration under:
+
+```text
+~/Library/Application Support/Cindx
+```
+
+Startup diagnostics are appended to `startup.log` in the same directory. Set
+`CINDX_DATA_DIR` only for isolated development or CI probes.

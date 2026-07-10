@@ -8,15 +8,15 @@ browser automation, and audit logs.
 
 ## Download
 
-The current internal test build is available for Apple Silicon Macs:
+Current macOS builds are published through GitHub:
 
-- [Cindx 0.0.4 for macOS (arm64)](releases/Cindx_0.0.4_aarch64.zip)
-- [Installation and verification notes](releases/README.md)
+- [Latest Cindx prerelease](https://github.com/DaleXiao/Cindx/releases)
+- [Installation and troubleshooting notes](releases/README.md)
 - [Automated builds and releases](docs/RELEASING.md)
 
-This build is ad-hoc signed but not Apple-notarized. macOS may require the
-one-time Gatekeeper steps documented with the package. Intel Macs need a
-separate `x86_64` build.
+Tagged releases are Universal macOS bundles for Apple Silicon and Intel Macs.
+Signing and notarization depend on the repository Apple secrets documented in
+the release guide.
 
 ## Current Status
 

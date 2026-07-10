@@ -7,6 +7,10 @@ frontend, and desktop structure checks. Pushes to `main` also produce an
 Apple Silicon test ZIP in the workflow run. The artifact is retained for seven
 days and is not committed to Git history.
 
+The packaged binary is also run in startup-probe mode with a clean temporary
+Home. This verifies that first launch does not depend on a build-machine path and
+that the user-scoped SQLite state can be created before an artifact is uploaded.
+
 ## Tagged releases
 
 A tag matching the committed application version starts the Release workflow.

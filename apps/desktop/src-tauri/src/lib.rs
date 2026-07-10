@@ -3455,7 +3455,29 @@ fn resolve_browser_permission(
 }
 
 pub fn run() {
-    let mut store = open_app_store().expect("error while opening Cindx state store");
+    install_startup_panic_log();
+    if let Err(error) = migrate_legacy_app_data() {
+        append_startup_log(&format!("legacy data migration failed: {error}"));
+    }
+    append_startup_log(&format!(
+        "starting Cindx {} on {} with data root {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::ARCH,
+        app_data_root().display()
+    ));
+    let mut store = match open_app_store() {
+        Ok(store) => store,
+        Err(error) => {
+            append_startup_log(&format!(
+                "persistent state unavailable; using in-memory state: {error}"
+            ));
+            SqliteStore::in_memory().unwrap_or_else(|memory_error| {
+                panic!(
+                    "failed to open persistent state ({error}) and in-memory state ({memory_error})"
+                )
+            })
+        }
+    };
     if let Err(error) = redact_persisted_events(&mut store) {
         eprintln!("failed to redact persisted Cindx history: {error}");
     }
@@ -3478,6 +3500,13 @@ pub fn run() {
         }
     }
     apply_sidecar_env(&sidecar_config);
+    if std::env::var("CINDX_STARTUP_PROBE")
+        .map(|value| config_bool(&value))
+        .unwrap_or(false)
+    {
+        append_startup_log("startup probe completed");
+        return;
+    }
 
     let app = tauri::Builder::default()
         .manage(AppState {
@@ -7579,18 +7608,39 @@ fn find_node_executable() -> Option<PathBuf> {
 }
 
 fn default_browser_sidecar_path() -> PathBuf {
-    repo_root_path().join("scripts").join("sidecars").join("browser-sidecar.js")
+    bundled_or_development_resource("browser-sidecar.js")
 }
 
 fn default_computer_sidecar_path() -> PathBuf {
-    repo_root_path().join("scripts").join("sidecars").join("computer-sidecar.js")
+    bundled_or_development_resource("computer-sidecar.js")
 }
 
-fn repo_root_path() -> PathBuf {
+fn development_repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .join("..")
+}
+
+fn bundled_or_development_resource(file_name: &str) -> PathBuf {
+    let packaged = std::env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(Path::to_path_buf))
+        .and_then(|macos| macos.parent().map(Path::to_path_buf))
+        .map(|contents| contents.join("Resources").join("sidecars").join(file_name));
+    if let Some(path) = packaged.as_ref().filter(|path| path.is_file()) {
+        return path.clone();
+    }
+
+    let development = development_repo_root()
+        .join("scripts")
+        .join("sidecars")
+        .join(file_name);
+    if development.is_file() {
+        return development;
+    }
+
+    packaged.unwrap_or(development)
 }
 
 fn config_bool(value: &str) -> bool {
@@ -7663,6 +7713,7 @@ fn open_app_store() -> Result<SqliteStore, StorageError> {
     let database_path = database_path();
     if let Some(parent) = database_path.parent() {
         fs::create_dir_all(parent).map_err(|error| StorageError::new(error.to_string()))?;
+        secure_directory(parent).map_err(|error| StorageError::new(error.to_string()))?;
     }
 
     let store = SqliteStore::open(&database_path)?;
@@ -7674,31 +7725,31 @@ fn open_app_store() -> Result<SqliteStore, StorageError> {
 }
 
 fn database_path() -> PathBuf {
-    workspace_root().join(".cindx").join("state.sqlite3")
+    app_data_root().join("state.sqlite3")
 }
 
 fn provider_config_path() -> PathBuf {
-    workspace_root().join(".cindx").join("provider.conf")
+    app_data_root().join("provider.conf")
 }
 
 fn workspace_config_path() -> PathBuf {
-    workspace_root().join(".cindx").join("workspace.conf")
+    app_data_root().join("workspace.conf")
 }
 
 fn project_session_config_path() -> PathBuf {
-    workspace_root().join(".cindx").join("projects.conf")
+    app_data_root().join("projects.conf")
 }
 
 fn sidecar_config_path() -> PathBuf {
-    workspace_root().join(".cindx").join("sidecars.conf")
+    app_data_root().join("sidecars.conf")
 }
 
 fn mcp_config_path() -> PathBuf {
-    workspace_root().join(".cindx").join("mcp-servers.json")
+    app_data_root().join("mcp-servers.json")
 }
 
 fn mcp_catalog_cache_path() -> PathBuf {
-    workspace_root().join(".cindx").join("mcp-catalog.json")
+    app_data_root().join("mcp-catalog.json")
 }
 
 fn rag_index_path_for(workspace_root: &Path) -> PathBuf {
@@ -7764,11 +7815,133 @@ fn graph_rag_trace_for(
 }
 
 fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")))
-        .to_path_buf()
+    if let Some(root) = runtime_path_from_env("CINDX_DEFAULT_WORKSPACE") {
+        if root.is_dir() {
+            return root;
+        }
+    }
+    if let Some(home) = user_home_directory() {
+        if home.is_dir() {
+            return home;
+        }
+    }
+    std::env::current_dir()
+        .ok()
+        .filter(|path| path.is_dir())
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+fn app_data_root() -> PathBuf {
+    app_data_root_for(
+        runtime_path_from_env("CINDX_DATA_DIR"),
+        user_home_directory(),
+    )
+}
+
+fn app_data_root_for(override_root: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
+    if let Some(root) = override_root {
+        return root;
+    }
+    if let Some(home) = home {
+        #[cfg(target_os = "macos")]
+        return home.join("Library").join("Application Support").join("Cindx");
+        #[cfg(not(target_os = "macos"))]
+        return home.join(".cindx");
+    }
+    std::env::temp_dir().join("Cindx")
+}
+
+fn runtime_path_from_env(key: &str) -> Option<PathBuf> {
+    let value = std::env::var_os(key)?;
+    if value.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        std::env::current_dir().ok().map(|current| current.join(path))
+    }
+}
+
+fn user_home_directory() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn migrate_legacy_app_data() -> Result<(), std::io::Error> {
+    if runtime_path_from_env("CINDX_DATA_DIR").is_some() {
+        return Ok(());
+    }
+    let source = development_repo_root().join(".cindx");
+    let destination = app_data_root();
+    if source == destination || !source.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(&destination)?;
+    secure_directory(&destination)?;
+    for file_name in [
+        "state.sqlite3",
+        "state.sqlite3-shm",
+        "state.sqlite3-wal",
+        "provider.conf",
+        "workspace.conf",
+        "projects.conf",
+        "sidecars.conf",
+        "mcp-servers.json",
+        "mcp-catalog.json",
+    ] {
+        let source_path = source.join(file_name);
+        let destination_path = destination.join(file_name);
+        if source_path.is_file() && !destination_path.exists() {
+            fs::copy(&source_path, &destination_path)?;
+            secure_private_file(&destination_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn secure_directory(path: &Path) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+fn secure_private_file(path: &Path) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn append_startup_log(message: &str) {
+    let root = app_data_root();
+    if fs::create_dir_all(&root).is_err() {
+        return;
+    }
+    let _ = secure_directory(&root);
+    let path = root.join("startup.log");
+    let mut options = fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let Ok(mut file) = options.open(&path) else {
+        return;
+    };
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    let _ = writeln!(file, "{timestamp_ms} {message}");
+    let _ = secure_private_file(&path);
+}
+
+fn install_startup_panic_log() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        append_startup_log(&format!("panic: {info}"));
+        previous(info);
+    }));
 }
 
 fn phase3_task_id() -> TaskId {
@@ -8035,6 +8208,23 @@ fn truncate_for_timeline(value: &str) -> String {
 mod tests {
     use super::*;
     use tools::encode_input;
+
+    #[test]
+    fn installed_app_data_is_user_scoped_and_overrideable() {
+        let home = PathBuf::from("/Users/new-cindx-user");
+        let expected = home
+            .join("Library")
+            .join("Application Support")
+            .join("Cindx");
+        assert_eq!(app_data_root_for(None, Some(home)), expected);
+
+        let override_root = PathBuf::from("/tmp/cindx-portable-data");
+        assert_eq!(
+            app_data_root_for(Some(override_root.clone()), None),
+            override_root
+        );
+        assert_eq!(database_path(), app_data_root().join("state.sqlite3"));
+    }
 
     #[test]
     fn runtime_status_exposes_expected_modes() {
