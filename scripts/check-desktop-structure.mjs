@@ -110,6 +110,13 @@ assert(
   "Tauri bundle must use the generated macOS app icon"
 );
 assert(
+  tauriConfig.bundle.resources["../../../scripts/sidecars/browser-sidecar.js"] ===
+    "sidecars/browser-sidecar.js" &&
+    tauriConfig.bundle.resources["../../../scripts/sidecars/computer-sidecar.js"] ===
+      "sidecars/computer-sidecar.js",
+  "Packaged apps must carry browser and computer sidecar resources"
+);
+assert(
   capability.permissions.includes("core:default"),
   "Default Tauri capability should include core permissions"
 );
@@ -402,6 +409,15 @@ assert(
     rustLib.includes("drop(store);") &&
     appSource.includes("markSessionBusy"),
   "Agent tool execution must release the shared event-store lock"
+);
+assert(
+  rustLib.includes('join("Application Support").join("Cindx")') &&
+    rustLib.includes("persistent state unavailable; using in-memory state") &&
+    rustLib.includes("install_startup_panic_log") &&
+    rustLib.includes('std::env::var("CINDX_STARTUP_PROBE")') &&
+    ciWorkflow.includes("Probe clean-machine startup") &&
+    !rustLib.includes('workspace_root().join(".cindx").join("state.sqlite3")'),
+  "Installed apps must use user-scoped data and survive persistent-state failures"
 );
 
 const nonGrayColors = [...styles.matchAll(/#([0-9a-fA-F]{6})(?![0-9a-fA-F])/g)]
