@@ -30,6 +30,11 @@ const cargoToml = read("apps/desktop/src-tauri/Cargo.toml");
 const cargoLock = read("apps/desktop/src-tauri/Cargo.lock");
 const runTauriSource = read("scripts/run-tauri.mjs");
 const releaseWorkflow = read(".github/workflows/release.yml");
+const unsignedReleaseStart = releaseWorkflow.indexOf(
+  "- name: Build and publish unsigned Universal app"
+);
+const unsignedReleaseBlock =
+  unsignedReleaseStart >= 0 ? releaseWorkflow.slice(unsignedReleaseStart) : "";
 const ciWorkflow = read(".github/workflows/ci.yml");
 const releaseVersionCheck = read("scripts/check-release-version.mjs");
 const toolsSource = read("crates/tools/src/lib.rs");
@@ -54,10 +59,20 @@ assert(
   "release workflow must bypass the local auto-versioning wrapper"
 );
 assert(
-  releaseWorkflow.includes("APPLE_CERTIFICATE is not configured") &&
-    releaseWorkflow.includes("APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}") &&
+  releaseWorkflow.includes("id: apple-signing") &&
+    releaseWorkflow.includes("certificate_configured=false") &&
+    releaseWorkflow.includes("notarization_configured=false") &&
+    releaseWorkflow.includes(
+      "APPLE_SIGNING_IDENTITY: ${{ steps.apple-signing.outputs.identity }}"
+    ) &&
+    releaseWorkflow.includes("Build and publish signed and notarized Universal app") &&
+    releaseWorkflow.includes("Build and publish signed Universal app") &&
+    unsignedReleaseStart >= 0 &&
+    !unsignedReleaseBlock.includes("APPLE_") &&
+    !releaseWorkflow.includes("APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}") &&
+    !releaseWorkflow.includes("$GITHUB_ENV") &&
     !releaseWorkflow.includes("    env:\n      APPLE_CERTIFICATE:"),
-  "Apple certificate payloads must be scoped to import and not inherited by Tauri"
+  "release workflow must keep unsigned builds free of empty Apple signing variables"
 );
 assert(
   releaseWorkflow.includes("--target universal-apple-darwin --bundles app"),

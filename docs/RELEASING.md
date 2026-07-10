@@ -48,8 +48,16 @@ Actions secrets:
 - `APPLE_PASSWORD`: app-specific Apple ID password
 - `APPLE_TEAM_ID`
 
-When the certificate secret is present, the workflow imports it into a temporary
-keychain and passes only the resulting signing identity to Tauri. The certificate
-payload and password are scoped to the import step so Tauri cannot attempt a
-second `security import`. The remaining Apple credentials are scoped to the
-publish step for notarization.
+The workflow selects exactly one release path:
+
+- With no certificate secrets, it builds an unsigned prerelease and does not set
+  any Apple signing environment variables.
+- With both certificate secrets, it imports the certificate into a temporary
+  keychain and builds a signed prerelease.
+- With the certificate and all three notarization secrets, it builds a signed
+  and notarized prerelease.
+
+Partial certificate or notarization configuration fails early with a clear
+error. The certificate payload and password are scoped to the import step so
+Tauri cannot attempt a second `security import`, and an absent signing identity
+is never passed to Tauri as an empty string.
