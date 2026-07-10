@@ -1,25 +1,30 @@
 use agent_core::{
     Event, EventId, EventKind, Message, MessageRole, Metadata, ModelRole, PermissionDecision,
     PermissionRequest, PermissionRequestId, PermissionResolution, PermissionRisk, TaskId,
-    ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk,
+    ToolArtifact, ToolContent, ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk,
 };
 use agent_graph::{extract_graph_from_chunk, graph_rag_walk, FileGraphStore, GraphRagTrace, GraphStore};
 use agent_memory::{
     build_restore_context_pack, build_session_checkpoint_at, CheckpointOptions, RestoreContextPack,
     SessionCheckpoint,
 };
+use agent_mcp::{McpCatalogService, McpServerConfig, McpTransportConfig};
 use agent_rag::{
     build_grounded_answer_prompt, export_lancedb_records_jsonl, index_workspace,
     index_workspace_with_embedder, EmbeddingBatch, FileRagAdapter, IndexOptions, RagAdapter,
     RagChunk, RagEmbedder, RagIndexStats, RagSearchResult,
 };
+use agent_skills::{SkillCatalog, SkillPreference, SkillRecord};
 use agent_runtime::{
     advance_with_model_response, append_tool_observation,
     model_request_for_turn_with_system_prompt, observation_from_tool_result,
+    record_tool_outcome, repeated_tool_failure_count,
     resume_agent_loop_from_messages, start_agent_loop, start_agent_loop_with_history,
     tool_invocation_from_request, AgentAdvance, AgentRuntimeConfig, DEFAULT_AGENT_SYSTEM_PROMPT,
+    MAX_IDENTICAL_TOOL_FAILURES,
 };
 use agent_storage::{EventStore, PermissionAuditRecord, PermissionStore, SqliteStore, StorageError};
+use base64::Engine;
 use model_provider::{
     EmbeddingRequest, ModelCallMode, ModelRequest, OpenAiCompatibleConfig,
     OpenAiCompatibleProvider, ModelProvider,
@@ -35,7 +40,7 @@ use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
@@ -58,6 +63,88 @@ struct AppState {
     workspace_config: Mutex<WorkspaceConfig>,
     sidecar_config: Mutex<SidecarConfig>,
     project_session_config: Mutex<ProjectSessionConfig>,
+    mcp_catalog: Mutex<McpCatalogService>,
+    suspended_agent_runs: Mutex<BTreeMap<String, SuspendedAgentRun>>,
+    allow_exit: AtomicBool,
+    quit_prompt_active: AtomicBool,
+}
+
+#[derive(Debug, Clone)]
+struct SuspendedAgentRun {
+    runtime: agent_runtime::AgentLoopState,
+    prompt: String,
+    run_context: Metadata,
+    workspace_root: PathBuf,
+    collaboration: Option<AgentCollaboration>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedToolObservation {
+    call_id: agent_core::ToolCallId,
+    tool_name: String,
+    input_json: String,
+    status: ToolOutcomeStatus,
+    observation: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpServerView {
+    id: String,
+    name: String,
+    enabled: bool,
+    require_approval: bool,
+    timeout_ms: u64,
+    transport_type: String,
+    command: Option<String>,
+    args: Vec<String>,
+    url: Option<String>,
+    secret_keys: Vec<String>,
+    tool_count: usize,
+    refreshed_at_ms: Option<u64>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpStateView {
+    servers: Vec<McpServerView>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpServersInput {
+    servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpServerInput {
+    server: McpServerConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpServerPolicyInput {
+    server_id: String,
+    enabled: bool,
+    require_approval: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillStateView {
+    skills: Vec<SkillRecord>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillPreferenceInput {
+    skill_id: String,
+    enabled: bool,
+    trusted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -800,6 +887,178 @@ fn save_sidecar_config(
 }
 
 #[tauri::command]
+fn get_mcp_state(state: tauri::State<'_, AppState>) -> Result<McpStateView, String> {
+    let catalog = state
+        .mcp_catalog
+        .lock()
+        .map_err(|error| format!("MCP catalog lock poisoned: {error}"))?;
+    Ok(mcp_state_view(&catalog, None))
+}
+
+#[tauri::command]
+fn save_mcp_servers(
+    state: tauri::State<'_, AppState>,
+    input: McpServersInput,
+) -> Result<McpStateView, String> {
+    let mut catalog = state
+        .mcp_catalog
+        .lock()
+        .map_err(|error| format!("MCP catalog lock poisoned: {error}"))?;
+    catalog
+        .save_servers(input.servers)
+        .map_err(|error| error.to_string())?;
+    Ok(mcp_state_view(&catalog, None))
+}
+
+#[tauri::command]
+fn upsert_mcp_server(
+    state: tauri::State<'_, AppState>,
+    input: McpServerInput,
+) -> Result<McpStateView, String> {
+    let mut catalog = state
+        .mcp_catalog
+        .lock()
+        .map_err(|error| format!("MCP catalog lock poisoned: {error}"))?;
+    catalog
+        .upsert_server(input.server)
+        .map_err(|error| error.to_string())?;
+    Ok(mcp_state_view(&catalog, None))
+}
+
+#[tauri::command]
+fn update_mcp_server_policy(
+    state: tauri::State<'_, AppState>,
+    input: McpServerPolicyInput,
+) -> Result<McpStateView, String> {
+    let mut catalog = state
+        .mcp_catalog
+        .lock()
+        .map_err(|error| format!("MCP catalog lock poisoned: {error}"))?;
+    catalog
+        .update_policy(&input.server_id, input.enabled, input.require_approval)
+        .map_err(|error| error.to_string())?;
+    Ok(mcp_state_view(&catalog, None))
+}
+
+#[tauri::command]
+fn remove_mcp_server(
+    state: tauri::State<'_, AppState>,
+    server_id: String,
+) -> Result<McpStateView, String> {
+    let mut catalog = state
+        .mcp_catalog
+        .lock()
+        .map_err(|error| format!("MCP catalog lock poisoned: {error}"))?;
+    catalog
+        .remove_server(&server_id)
+        .map_err(|error| error.to_string())?;
+    Ok(mcp_state_view(&catalog, None))
+}
+
+#[tauri::command]
+async fn refresh_mcp_server(
+    app: tauri::AppHandle,
+    server_id: String,
+) -> Result<McpStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut catalog = state
+            .mcp_catalog
+            .lock()
+            .map_err(|error| format!("MCP catalog lock poisoned: {error}"))?;
+        let last_error = catalog
+            .refresh_server(&server_id)
+            .err()
+            .map(|error| error.to_string());
+        Ok(mcp_state_view(&catalog, last_error))
+    })
+    .await
+    .map_err(|error| format!("MCP refresh failed to join: {error}"))?
+}
+
+fn mcp_state_view(catalog: &McpCatalogService, last_error: Option<String>) -> McpStateView {
+    let servers = catalog
+        .states()
+        .into_iter()
+        .map(|state| {
+            let (transport_type, command, args, url, secret_keys) = match &state.config.transport {
+                McpTransportConfig::Stdio { command, args, env } => (
+                    "stdio".to_string(),
+                    Some(command.clone()),
+                    args.clone(),
+                    None,
+                    env.keys().cloned().collect(),
+                ),
+                McpTransportConfig::StreamableHttp { url, headers } => (
+                    "streamable_http".to_string(),
+                    None,
+                    Vec::new(),
+                    Some(url.clone()),
+                    headers.keys().cloned().collect(),
+                ),
+            };
+            McpServerView {
+                id: state.config.id,
+                name: state.config.name,
+                enabled: state.config.enabled,
+                require_approval: state.config.require_approval,
+                timeout_ms: state.config.timeout_ms,
+                transport_type,
+                command,
+                args,
+                url,
+                secret_keys,
+                tool_count: state.tool_count,
+                refreshed_at_ms: state.refreshed_at_ms,
+                last_error: state.last_error,
+            }
+        })
+        .collect();
+    McpStateView { servers, last_error }
+}
+
+#[tauri::command]
+fn get_skill_state(state: tauri::State<'_, AppState>) -> Result<SkillStateView, String> {
+    let root = active_workspace_root(&state)?;
+    let catalog = skill_catalog_for_root(&root);
+    Ok(SkillStateView {
+        skills: catalog.list(),
+        last_error: None,
+    })
+}
+
+#[tauri::command]
+fn refresh_skills(state: tauri::State<'_, AppState>) -> Result<SkillStateView, String> {
+    let root = active_workspace_root(&state)?;
+    let catalog = skill_catalog_for_root(&root);
+    let skills = catalog.refresh()?;
+    Ok(SkillStateView {
+        skills,
+        last_error: None,
+    })
+}
+
+#[tauri::command]
+fn save_skill_preference(
+    state: tauri::State<'_, AppState>,
+    input: SkillPreferenceInput,
+) -> Result<SkillStateView, String> {
+    let root = active_workspace_root(&state)?;
+    let catalog = skill_catalog_for_root(&root);
+    let skills = catalog.set_preference(
+        &input.skill_id,
+        SkillPreference {
+            enabled: input.enabled,
+            trusted: input.trusted,
+        },
+    )?;
+    Ok(SkillStateView {
+        skills,
+        last_error: None,
+    })
+}
+
+#[tauri::command]
 fn get_project_session_state(
     state: tauri::State<'_, AppState>,
 ) -> Result<ProjectSessionState, String> {
@@ -1256,7 +1515,18 @@ fn save_workspace_root(
 }
 
 fn runtime_status(state: &tauri::State<'_, AppState>) -> Result<RuntimeStatus, String> {
-    Ok(runtime_status_for_root(active_workspace_root(state)?))
+    let root = active_workspace_root(state)?;
+    let mut status = runtime_status_for_root(root.clone());
+    let registry = tool_registry_for_state(state, &root)?;
+    status.registered_tools = registry
+        .specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .chain(["rag.index", "rag.search", "rag.answer"].into_iter().map(str::to_string))
+        .collect();
+    status.registered_tools.sort();
+    status.registered_tools.dedup();
+    Ok(status)
 }
 
 fn runtime_status_for_root(root: PathBuf) -> RuntimeStatus {
@@ -1707,6 +1977,7 @@ fn run_agent_task_blocking(
 ) -> Result<AgentState, String> {
     let prompt = input.prompt.trim().to_string();
     let session_id = input.session_id;
+    clear_suspended_agent_run(&state, &session_id)?;
     let mut run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
     if prompt.is_empty() {
         return agent_state_with_error_in_context(&state, &run_context, "agent prompt is empty");
@@ -1793,6 +2064,19 @@ fn run_agent_task_blocking(
         history
     };
 
+    if let Some(skill_context) = skill_catalog_for_root(&root).context_for_prompt(&prompt)? {
+        history.push(Message {
+            role: MessageRole::System,
+            content: skill_context,
+            metadata: [
+                ("internal".to_string(), "true".to_string()),
+                ("kind".to_string(), "skill_context".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        });
+    }
+
     let collaboration = if collaboration_policy != OrchestrationPolicy::Single {
         let collaboration_id = unique_id("collab");
         let planner_prompt = build_collaboration_planner_prompt(&prompt, &history);
@@ -1855,6 +2139,7 @@ fn cancel_agent_task(
     state: tauri::State<'_, AppState>,
     input: SessionActionInput,
 ) -> Result<AgentState, String> {
+    clear_suspended_agent_run(&state, &input.session_id)?;
     let run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
     let session_id = run_context.get("session_id").map(String::as_str);
     let mut store = state
@@ -1889,6 +2174,7 @@ fn retry_agent_task(
     state: tauri::State<'_, AppState>,
     input: SessionActionInput,
 ) -> Result<AgentState, String> {
+    clear_suspended_agent_run(&state, &input.session_id)?;
     let mut run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
     run_context.insert("agent_run_id".to_string(), unique_id("agent-run"));
     let config = clone_provider_config(&state)?;
@@ -2022,14 +2308,14 @@ fn resolve_agent_permission_blocking(
     }
     drop(store);
 
-    resolve_agent_permission_request(
+    let mut resolved_observations = vec![resolve_agent_permission_request(
         &state,
         &request,
         &decision,
         "local-user",
         &root,
         &run_context,
-    )?;
+    )?];
 
     if matches!(&decision, PermissionDecision::AllowForSession) {
         let pending = {
@@ -2050,16 +2336,22 @@ fn resolve_agent_permission_blocking(
             .collect::<Vec<_>>()
         };
         for pending_request in pending {
-            resolve_agent_permission_request(
+            resolved_observations.push(resolve_agent_permission_request(
                 &state,
                 &pending_request,
                 &PermissionDecision::AllowForSession,
                 "session-grant",
                 &root,
                 &run_context,
-            )?;
+            )?);
         }
     }
+
+    append_observations_to_suspended_run(
+        &state,
+        &session_id.clone().unwrap_or_default(),
+        &resolved_observations,
+    )?;
 
     let mut store = state
         .store
@@ -2104,6 +2396,20 @@ fn resolve_agent_permission_blocking(
     let transcript = agent_transcript_from_active_events(&active_events);
     drop(store);
 
+    if let Some(session_id) = session_id {
+        if let Some(suspended) = take_suspended_agent_run(&state, session_id)? {
+            return continue_agent_loop(
+                &state,
+                &config,
+                &suspended.workspace_root,
+                suspended.runtime,
+                suspended.prompt,
+                suspended.run_context,
+                suspended.collaboration.as_ref(),
+            );
+        }
+    }
+
     let runtime = resume_agent_loop_from_messages(
         phase16_task_id(),
         prompt.clone(),
@@ -2120,7 +2426,7 @@ fn resolve_agent_permission_request(
     resolved_by: &str,
     root: &Path,
     run_context: &Metadata,
-) -> Result<(), String> {
+) -> Result<ResolvedToolObservation, String> {
     let request_id = request.id.clone();
     let tool_call_id = request
         .metadata
@@ -2132,6 +2438,11 @@ fn resolve_agent_permission_request(
         .get("tool_name")
         .cloned()
         .unwrap_or_else(|| request.action.clone());
+    let tool_input = request
+        .metadata
+        .get("tool_input")
+        .cloned()
+        .unwrap_or_default();
     let mut store = state
         .store
         .lock()
@@ -2166,7 +2477,7 @@ fn resolve_agent_permission_request(
     )
     .map_err(|error| error.to_string())?;
 
-    if matches!(
+    let (observation, status) = if matches!(
         decision,
         PermissionDecision::AllowOnce | PermissionDecision::AllowForSession
     ) {
@@ -2174,11 +2485,7 @@ fn resolve_agent_permission_request(
             id: agent_core::ToolCallId(tool_call_id.clone()),
             task_id: request.task_id.clone(),
             tool_name: tool_name.clone(),
-            input_json: request
-                .metadata
-                .get("tool_input")
-                .cloned()
-                .unwrap_or_default(),
+            input_json: tool_input.clone(),
             proposed_by_model: "agent-loop".to_string(),
             metadata: Metadata::new(),
         };
@@ -2203,6 +2510,7 @@ fn resolve_agent_permission_request(
             Some(run_context),
         )
         .map_err(|error| error.to_string())?;
+        (observation, result.status)
     } else {
         let observation = observation_from_tool_result(
             &request.action,
@@ -2237,8 +2545,15 @@ fn resolve_agent_permission_request(
             Some(run_context),
         )
         .map_err(|error| error.to_string())?;
-    }
-    Ok(())
+        (observation, ToolOutcomeStatus::Denied)
+    };
+    Ok(ResolvedToolObservation {
+        call_id: agent_core::ToolCallId(tool_call_id),
+        tool_name,
+        input_json: tool_input,
+        status,
+        observation,
+    })
 }
 
 #[tauri::command]
@@ -2268,7 +2583,7 @@ fn run_tool(
         proposed_by_model: "local-user".to_string(),
         metadata: Metadata::new(),
     };
-    let registry = ToolRegistry::with_workspace_tools(root.clone());
+    let registry = tool_registry_for_state(&state, &root)?;
     let Some(tool) = registry.get(&tool_name) else {
         return phase5_state_with_error(&state, format!("unknown tool: {tool_name}"));
     };
@@ -2974,7 +3289,7 @@ fn run_browser_tool(
         proposed_by_model: "local-user".to_string(),
         metadata: Metadata::new(),
     };
-    let registry = ToolRegistry::with_workspace_tools(root.clone());
+    let registry = tool_registry_for_state(&state, &root)?;
     let Some(tool) = registry.get(&tool_name) else {
         return phase8_state_with_error(&state, format!("unknown tool: {tool_name}"));
     };
@@ -3145,6 +3460,7 @@ pub fn run() {
         eprintln!("failed to redact persisted Cindx history: {error}");
     }
     let provider_config = load_provider_config();
+    let mcp_catalog = McpCatalogService::load(mcp_config_path(), mcp_catalog_cache_path());
     let mut workspace_config = load_workspace_config();
     let sidecar_config = load_sidecar_config();
     let project_session_config = load_project_session_config(&workspace_config.root);
@@ -3163,18 +3479,38 @@ pub fn run() {
     }
     apply_sidecar_env(&sidecar_config);
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(AppState {
             store: Mutex::new(store),
             provider_config: Mutex::new(provider_config),
             workspace_config: Mutex::new(workspace_config),
             sidecar_config: Mutex::new(sidecar_config),
             project_session_config: Mutex::new(project_session_config),
+            mcp_catalog: Mutex::new(mcp_catalog),
+            suspended_agent_runs: Mutex::new(BTreeMap::new()),
+            allow_exit: AtomicBool::new(false),
+            quit_prompt_active: AtomicBool::new(false),
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if !confirm_application_exit(window.app_handle()) {
+                    api.prevent_close();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_runtime_status,
             get_sidecar_state,
             save_sidecar_config,
+            get_mcp_state,
+            save_mcp_servers,
+            upsert_mcp_server,
+            update_mcp_server_policy,
+            remove_mcp_server,
+            refresh_mcp_server,
+            get_skill_state,
+            refresh_skills,
+            save_skill_preference,
             get_project_session_state,
             create_project,
             create_session,
@@ -3211,11 +3547,192 @@ pub fn run() {
             get_phase8_state,
             get_context_state,
             compact_context,
+            read_artifact_image,
             run_browser_tool,
             resolve_browser_permission
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Cindx desktop app");
+        .build(tauri::generate_context!())
+        .expect("error while building Cindx desktop app");
+
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            if !confirm_application_exit(app_handle) {
+                api.prevent_exit();
+            }
+        }
+    });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QuitConfirmation {
+    confirmed: bool,
+    suppress_future: bool,
+}
+
+fn confirm_application_exit(app_handle: &tauri::AppHandle) -> bool {
+    let state = app_handle.state::<AppState>();
+    if state.allow_exit.load(Ordering::SeqCst) {
+        return true;
+    }
+    if quit_confirmation_suppressed(app_handle) {
+        state.allow_exit.store(true, Ordering::SeqCst);
+        return true;
+    }
+    if state.quit_prompt_active.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+
+    let confirmation = show_native_quit_confirmation();
+    state.quit_prompt_active.store(false, Ordering::SeqCst);
+    if !confirmation.confirmed {
+        return false;
+    }
+    if confirmation.suppress_future {
+        if let Err(error) = persist_quit_confirmation_suppression(app_handle) {
+            eprintln!("failed to save quit confirmation preference: {error}");
+        }
+    }
+    state.allow_exit.store(true, Ordering::SeqCst);
+    true
+}
+
+fn quit_confirmation_preference_path(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app_handle
+        .path()
+        .app_config_dir()
+        .map(|path| path.join("preferences.conf"))
+        .map_err(|error| format!("failed to resolve app config directory: {error}"))
+}
+
+fn quit_confirmation_suppressed(app_handle: &tauri::AppHandle) -> bool {
+    let Ok(path) = quit_confirmation_preference_path(app_handle) else {
+        return false;
+    };
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    quit_confirmation_suppressed_text(&text)
+}
+
+fn quit_confirmation_suppressed_text(text: &str) -> bool {
+    text.lines()
+        .any(|line| line.trim() == "skip_quit_confirmation=true")
+}
+
+fn persist_quit_confirmation_suppression(
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    let path = quit_confirmation_preference_path(app_handle)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create app config directory: {error}"))?;
+    }
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(&path)
+        .map_err(|error| format!("failed to open quit preference: {error}"))?;
+    file.write_all(b"skip_quit_confirmation=true\n")
+        .map_err(|error| format!("failed to write quit preference: {error}"))?;
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("failed to secure quit preference: {error}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn show_native_quit_confirmation() -> QuitConfirmation {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{
+        NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSControlStateValueOn,
+    };
+    use objc2_foundation::NSString;
+
+    let Some(main_thread) = MainThreadMarker::new() else {
+        return QuitConfirmation {
+            confirmed: false,
+            suppress_future: false,
+        };
+    };
+    let alert = NSAlert::new(main_thread);
+    alert.setAlertStyle(NSAlertStyle::Informational);
+    alert.setMessageText(&NSString::from_str("Quit Cindx?"));
+    alert.setInformativeText(&NSString::from_str(
+        "Any running agent work will stop when the app quits.",
+    ));
+    alert.addButtonWithTitle(&NSString::from_str("Quit Cindx"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    alert.setShowsSuppressionButton(true);
+    if let Some(button) = alert.suppressionButton() {
+        button.setTitle(&NSString::from_str("Don't ask again"));
+    }
+
+    let response = alert.runModal();
+    let suppress_future = alert
+        .suppressionButton()
+        .is_some_and(|button| button.state() == NSControlStateValueOn);
+    QuitConfirmation {
+        confirmed: response == NSAlertFirstButtonReturn,
+        suppress_future,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_native_quit_confirmation() -> QuitConfirmation {
+    QuitConfirmation {
+        confirmed: true,
+        suppress_future: false,
+    }
+}
+
+#[tauri::command]
+fn read_artifact_image(state: tauri::State<'_, AppState>, path: String) -> Result<String, String> {
+    let workspace_root = state
+        .workspace_config
+        .lock()
+        .map_err(|error| format!("workspace config lock poisoned: {error}"))?
+        .root
+        .clone();
+    let requested = PathBuf::from(&path);
+    let requested = if requested.is_absolute() {
+        requested
+    } else {
+        workspace_root.join(requested)
+    };
+    let canonical_root = fs::canonicalize(&workspace_root)
+        .map_err(|error| format!("failed to resolve workspace root: {error}"))?;
+    let canonical_path = fs::canonicalize(&requested)
+        .map_err(|error| format!("failed to resolve artifact image: {error}"))?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err("artifact image must be inside the active workspace".to_string());
+    }
+
+    let metadata = fs::metadata(&canonical_path)
+        .map_err(|error| format!("failed to inspect artifact image: {error}"))?;
+    if metadata.len() > 24 * 1024 * 1024 {
+        return Err("artifact image exceeds the 24 MB preview limit".to_string());
+    }
+
+    let extension = canonical_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mime = match extension.as_str() {
+        "avif" => "image/avif",
+        "bmp" => "image/bmp",
+        "gif" => "image/gif",
+        "jpeg" | "jpg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        _ => return Err("artifact is not a supported preview image".to_string()),
+    };
+    let bytes = fs::read(&canonical_path)
+        .map_err(|error| format!("failed to read artifact image: {error}"))?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:{mime};base64,{encoded}"))
 }
 
 fn request_mock_permission_in_store(store: &mut SqliteStore) -> Result<Phase3State, StorageError> {
@@ -4037,8 +4554,10 @@ fn continue_agent_loop(
         embedding_model: config.model_for_role(&ModelRole::Embedder),
         timeout_seconds: 180,
     });
-    let registry = ToolRegistry::with_workspace_tools(workspace_root.to_path_buf());
-    let tools = registry.specs();
+    let registry = tool_registry_for_state(state, workspace_root)?;
+    let tools = registry
+        .exposure_plan(&prompt, config.context_window_tokens)
+        .inline;
 
     loop {
         let request = model_request_for_turn_with_system_prompt(
@@ -4158,6 +4677,7 @@ fn continue_agent_loop(
 
         match advance {
             AgentAdvance::Completed { answer } => {
+                clear_suspended_agent_run_for_context(state, &run_context)?;
                 let final_answer = if let Some(collaboration) = collaboration {
                     synthesize_agent_answer(
                         state,
@@ -4220,6 +4740,7 @@ fn continue_agent_loop(
                     .map_err(|error| error.to_string());
             }
             AgentAdvance::Failed { message } => {
+                clear_suspended_agent_run_for_context(state, &run_context)?;
                 return agent_state_with_error_in_context(state, &run_context, message);
             }
             AgentAdvance::ToolCalls { calls } => {
@@ -4233,7 +4754,48 @@ fn continue_agent_loop(
                     append_tool_proposed_event(&mut store, &invocation, Some(&run_context))
                         .map_err(|error| error.to_string())?;
 
-                    let registry = ToolRegistry::with_workspace_tools(workspace_root.to_path_buf());
+                    if repeated_tool_failure_count(
+                        &runtime,
+                        &call.tool_name,
+                        &call.input,
+                    ) >= MAX_IDENTICAL_TOOL_FAILURES
+                    {
+                        let observation = observation_from_tool_result(
+                            &call.tool_name,
+                            "failed",
+                            "Cindx blocked this identical tool call after repeated failures. Change the arguments or use a different approach.",
+                        );
+                        append_tool_finished_event(
+                            &mut store,
+                            &runtime.task_id,
+                            &call.call_id.0,
+                            &call.tool_name,
+                            "failed",
+                            &observation,
+                            [("failure_code".to_string(), "repeated_call_blocked".to_string())]
+                                .into_iter()
+                                .collect(),
+                            Some(&run_context),
+                        )
+                        .map_err(|error| error.to_string())?;
+                        let previous_message_count = runtime.messages.len();
+                        append_tool_observation(
+                            &mut runtime,
+                            call.call_id.clone(),
+                            &observation,
+                        );
+                        persist_new_runtime_messages(
+                            &mut store,
+                            &runtime.task_id,
+                            &runtime.messages,
+                            previous_message_count,
+                            &run_context,
+                        )
+                        .map_err(|error| error.to_string())?;
+                        continue;
+                    }
+
+                    let registry = tool_registry_for_state(state, workspace_root)?;
                     let Some(tool) = registry.get(&call.tool_name) else {
                         let observation = observation_from_tool_result(
                             &call.tool_name,
@@ -4273,13 +4835,15 @@ fn continue_agent_loop(
                         request.metadata.insert("phase".to_string(), "16".to_string());
                         request
                             .metadata
-                            .insert("tool_input".to_string(), invocation.input_json.clone());
+                            .entry("tool_input".to_string())
+                            .or_insert_with(|| invocation.input_json.clone());
                         request
                             .metadata
                             .insert("tool_call_id".to_string(), invocation.id.0.clone());
                         request
                             .metadata
-                            .insert("tool_name".to_string(), invocation.tool_name.clone());
+                            .entry("tool_name".to_string())
+                            .or_insert_with(|| invocation.tool_name.clone());
                         request
                             .metadata
                             .insert("agent_prompt".to_string(), prompt.clone());
@@ -4354,6 +4918,12 @@ fn continue_agent_loop(
                         tool_outcome_label(&result.status),
                         &result.output,
                     );
+                    record_tool_outcome(
+                        &mut runtime,
+                        &call.tool_name,
+                        &call.input,
+                        &result.status,
+                    );
                     let previous_message_count = runtime.messages.len();
                     append_tool_observation(
                         &mut runtime,
@@ -4386,12 +4956,93 @@ fn continue_agent_loop(
                         run_context.clone(),
                     )
                     .map_err(|error| error.to_string())?;
+                    remember_suspended_agent_run(
+                        state,
+                        SuspendedAgentRun {
+                            runtime: runtime.clone(),
+                            prompt: prompt.clone(),
+                            run_context: run_context.clone(),
+                            workspace_root: workspace_root.to_path_buf(),
+                            collaboration: collaboration.cloned(),
+                        },
+                    )?;
                     return agent_state_for_session(&store, None, session_id)
                         .map_err(|error| error.to_string());
                 }
             }
         }
     }
+}
+
+fn remember_suspended_agent_run(
+    state: &tauri::State<'_, AppState>,
+    run: SuspendedAgentRun,
+) -> Result<(), String> {
+    let Some(session_id) = run.run_context.get("session_id").cloned() else {
+        return Ok(());
+    };
+    state
+        .suspended_agent_runs
+        .lock()
+        .map_err(|error| format!("suspended agent runs lock poisoned: {error}"))?
+        .insert(session_id, run);
+    Ok(())
+}
+
+fn take_suspended_agent_run(
+    state: &tauri::State<'_, AppState>,
+    session_id: &str,
+) -> Result<Option<SuspendedAgentRun>, String> {
+    Ok(state
+        .suspended_agent_runs
+        .lock()
+        .map_err(|error| format!("suspended agent runs lock poisoned: {error}"))?
+        .remove(session_id))
+}
+
+fn clear_suspended_agent_run(
+    state: &tauri::State<'_, AppState>,
+    session_id: &str,
+) -> Result<(), String> {
+    let _ = take_suspended_agent_run(state, session_id)?;
+    Ok(())
+}
+
+fn clear_suspended_agent_run_for_context(
+    state: &tauri::State<'_, AppState>,
+    run_context: &Metadata,
+) -> Result<(), String> {
+    if let Some(session_id) = run_context.get("session_id") {
+        clear_suspended_agent_run(state, session_id)?;
+    }
+    Ok(())
+}
+
+fn append_observations_to_suspended_run(
+    state: &tauri::State<'_, AppState>,
+    session_id: &str,
+    observations: &[ResolvedToolObservation],
+) -> Result<(), String> {
+    if session_id.is_empty() || observations.is_empty() {
+        return Ok(());
+    }
+    let Some(mut suspended) = take_suspended_agent_run(state, session_id)? else {
+        return Ok(());
+    };
+    for resolved in observations {
+        record_tool_outcome(
+            &mut suspended.runtime,
+            &resolved.tool_name,
+            &resolved.input_json,
+            &resolved.status,
+        );
+        append_tool_observation(
+            &mut suspended.runtime,
+            resolved.call_id.clone(),
+            &resolved.observation,
+        );
+    }
+    remember_suspended_agent_run(state, suspended)
 }
 
 #[cfg(test)]
@@ -5066,6 +5717,11 @@ fn trace_artifact_path(event: &Event) -> Option<String> {
         .metadata
         .get("result_artifact_path")
         .or_else(|| event.metadata.get("result_text_path"))
+        .or_else(|| {
+            (event.metadata.get("tool").map(String::as_str) == Some("file.write"))
+                .then(|| event.metadata.get("result_path"))
+                .flatten()
+        })
         .or_else(|| event.metadata.get("context_checkpoint_path"))
         .or_else(|| event.metadata.get("lancedb_export_path"))
         .cloned()
@@ -5333,24 +5989,21 @@ fn execute_agent_tool_invocation(
         .map_err(|error| error.to_string())?;
     }
 
-    let registry = ToolRegistry::with_workspace_tools(workspace_root.to_path_buf());
-    let result = match registry.get(&tool_name) {
+    let registry = tool_registry_for_state(state, workspace_root)?;
+    let mut result = match registry.get(&tool_name) {
         Some(tool) => match tool.execute(invocation) {
             Ok(result) => result,
-            Err(error) => ToolResult {
-                invocation_id: agent_core::ToolCallId(tool_call_id.clone()),
-                status: ToolOutcomeStatus::Failed,
-                output: error.message,
-                metadata: Metadata::new(),
-            },
+            Err(error) => ToolResult::failed(
+                agent_core::ToolCallId(tool_call_id.clone()),
+                error.message,
+            ),
         },
-        None => ToolResult {
-            invocation_id: agent_core::ToolCallId(tool_call_id.clone()),
-            status: ToolOutcomeStatus::Failed,
-            output: "unknown tool".to_string(),
-            metadata: Metadata::new(),
-        },
+        None => ToolResult::failed(
+            agent_core::ToolCallId(tool_call_id.clone()),
+            "unknown tool",
+        ),
     };
+    materialize_tool_result_artifacts(&mut result, workspace_root)?;
 
     let mut store = state
         .store
@@ -5368,6 +6021,65 @@ fn execute_agent_tool_invocation(
     )
     .map_err(|error| error.to_string())?;
     Ok(result)
+}
+
+fn materialize_tool_result_artifacts(
+    result: &mut ToolResult,
+    workspace_root: &Path,
+) -> Result<(), String> {
+    let output_dir = workspace_root.join(".cindx").join("artifacts");
+    let mut image_index = 0usize;
+    for content in &result.content {
+        let ToolContent::Image { mime_type, data } = content else {
+            continue;
+        };
+        fs::create_dir_all(&output_dir)
+            .map_err(|error| format!("failed to create tool artifact directory: {error}"))?;
+        let extension = match mime_type.as_str() {
+            "image/jpeg" => "jpg",
+            "image/webp" => "webp",
+            "image/gif" => "gif",
+            _ => "png",
+        };
+        let filename = format!("{}-{image_index}.{extension}", result.invocation_id.0);
+        let path = output_dir.join(&filename);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|error| format!("invalid tool image data: {error}"))?;
+        fs::write(&path, bytes)
+            .map_err(|error| format!("failed to write tool image artifact: {error}"))?;
+        result.artifacts.push(ToolArtifact {
+            path: path.display().to_string(),
+            mime_type: Some(mime_type.clone()),
+            title: Some("MCP image output".to_string()),
+        });
+        image_index += 1;
+    }
+    if result.artifacts.is_empty() {
+        if let Some(path) = result.metadata.get("artifact_path").cloned() {
+            result.artifacts.push(ToolArtifact {
+                path,
+                mime_type: None,
+                title: None,
+            });
+        }
+    }
+    if let Some(structured) = &result.structured_output_json {
+        result
+            .metadata
+            .insert("structured_output".to_string(), structured.clone());
+    }
+    if !result.artifacts.is_empty() {
+        result.metadata.insert(
+            "artifact_count".to_string(),
+            result.artifacts.len().to_string(),
+        );
+        result.metadata.insert(
+            "artifact_path".to_string(),
+            result.artifacts[0].path.clone(),
+        );
+    }
+    Ok(())
 }
 
 fn execute_tool_invocation_with_result(
@@ -5399,12 +6111,7 @@ fn execute_tool_invocation_with_result(
     let tool_name = invocation.tool_name.clone();
     let registry = ToolRegistry::with_workspace_tools(workspace_root.to_path_buf());
     let Some(tool) = registry.get(&invocation.tool_name) else {
-        let result = ToolResult {
-            invocation_id: invocation.id,
-            status: ToolOutcomeStatus::Failed,
-            output: "unknown tool".to_string(),
-            metadata: Metadata::new(),
-        };
+        let result = ToolResult::failed(invocation.id, "unknown tool");
         append_tool_finished_event(
             store,
             &task_id,
@@ -5443,12 +6150,7 @@ fn execute_tool_invocation_with_result(
                 Metadata::new(),
                 run_context,
             )?;
-            ToolResult {
-                invocation_id: agent_core::ToolCallId(tool_call_id),
-                status: ToolOutcomeStatus::Failed,
-                output: error.message,
-                metadata: Metadata::new(),
-            }
+            ToolResult::failed(agent_core::ToolCallId(tool_call_id), error.message)
         }
     };
 
@@ -6926,6 +7628,37 @@ fn active_workspace_root(state: &tauri::State<'_, AppState>) -> Result<PathBuf, 
         .map_err(|error| format!("workspace config lock poisoned: {error}"))
 }
 
+fn tool_registry_for_state(
+    state: &tauri::State<'_, AppState>,
+    workspace_root: &Path,
+) -> Result<ToolRegistry, String> {
+    let mut registry = ToolRegistry::with_workspace_tools(workspace_root.to_path_buf());
+    let catalog = state
+        .mcp_catalog
+        .lock()
+        .map_err(|error| format!("MCP catalog lock poisoned: {error}"))?;
+    for tool in catalog.cached_tools() {
+        registry.register(tool);
+    }
+    drop(catalog);
+    for tool in skill_catalog_for_root(workspace_root).tools() {
+        registry.register(tool);
+    }
+    registry.install_meta_tools();
+    Ok(registry)
+}
+
+fn skill_catalog_for_root(workspace_root: &Path) -> SkillCatalog {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root.to_path_buf());
+    SkillCatalog::load(
+        home.join(".cindx/skills"),
+        workspace_root,
+        home.join(".cindx/skill-preferences.json"),
+    )
+}
+
 fn open_app_store() -> Result<SqliteStore, StorageError> {
     let database_path = database_path();
     if let Some(parent) = database_path.parent() {
@@ -6958,6 +7691,14 @@ fn project_session_config_path() -> PathBuf {
 
 fn sidecar_config_path() -> PathBuf {
     workspace_root().join(".cindx").join("sidecars.conf")
+}
+
+fn mcp_config_path() -> PathBuf {
+    workspace_root().join(".cindx").join("mcp-servers.json")
+}
+
+fn mcp_catalog_cache_path() -> PathBuf {
+    workspace_root().join(".cindx").join("mcp-catalog.json")
 }
 
 fn rag_index_path_for(workspace_root: &Path) -> PathBuf {
@@ -7299,11 +8040,21 @@ mod tests {
     fn runtime_status_exposes_expected_modes() {
         let status = runtime_status_for_root(workspace_root());
 
-        assert_eq!(status.app_version, "0.1.0");
+        assert_eq!(status.app_version, env!("CARGO_PKG_VERSION"));
         assert!(status
             .orchestration_modes
             .contains(&"plan_execute_review".to_string()));
         assert!(status.registered_tools.contains(&"shell.run".to_string()));
+    }
+
+    #[test]
+    fn quit_confirmation_preference_requires_explicit_suppression() {
+        assert!(quit_confirmation_suppressed_text(
+            "theme=system\nskip_quit_confirmation=true\n"
+        ));
+        assert!(!quit_confirmation_suppressed_text(
+            "skip_quit_confirmation=false\n"
+        ));
     }
 
     #[test]
@@ -8292,10 +9043,12 @@ mod tests {
             &mut store,
             &phase16_task_id(),
             "call-1",
-            "file.read",
+            "file.write",
             "succeeded",
-            "README content",
-            Metadata::new(),
+            "written ok",
+            [("path".to_string(), "notes/result.md".to_string())]
+                .into_iter()
+                .collect(),
             None,
         )
         .expect("tool finish should append");
@@ -8316,8 +9069,9 @@ mod tests {
             .turns
             .iter()
             .flat_map(|turn| turn.steps.iter())
-            .any(|step| step.tool_name.as_deref() == Some("file.read")
-                && step.output_preview.as_deref() == Some("README content")));
+            .any(|step| step.tool_name.as_deref() == Some("file.write")
+                && step.output_preview.as_deref() == Some("written ok")
+                && step.artifact_path.as_deref() == Some("notes/result.md")));
     }
 
     #[test]

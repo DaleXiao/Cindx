@@ -1,6 +1,8 @@
 import {
   Activity,
   Bot,
+  Check,
+  ChevronRight,
   Copy,
   FileText,
   Pencil,
@@ -81,6 +83,15 @@ function EventIcon({ event }: { event: TimelineEntry }) {
 function MessageIcon({ role }: { role: ChatMessageView["role"] }) {
   if (role === "tool") return <TerminalSquare aria-hidden="true" />;
   return <Bot aria-hidden="true" />;
+}
+
+function toolMessageSummary(content: string) {
+  const tool = content.match(/^tool=(.+)$/m)?.[1]?.trim();
+  const status = content.match(/^status=(.+)$/m)?.[1]?.trim();
+  return {
+    label: tool || "Tool output",
+    succeeded: status === "succeeded" || status === "completed"
+  };
 }
 
 export function SessionThread({
@@ -370,33 +381,74 @@ export function SessionThread({
       >
         {items.map((item, itemIndex) => {
           if (item.type === "event") {
+            const isDone = item.event.state.toLowerCase() === "done";
             return (
-              <button
-                className={`thread-event ${selectedId === item.id ? "selected" : ""}`}
-                type="button"
+              <details
+                className={`thread-event-disclosure ${selectedId === item.id ? "selected" : ""}`}
                 key={item.id}
                 data-minimap-id={item.id}
                 data-minimap-index={itemIndex}
                 data-minimap-kind="event"
-                onClick={() => onSelect(item)}
               >
-                <span className="thread-event-icon">
-                  <EventIcon event={item.event} />
-                </span>
-                <span className="thread-event-copy">
-                  <strong>{item.event.label}</strong>
-                  <span>{item.event.detail}</span>
-                </span>
-                <span className="thread-event-meta">
-                  <em>{item.event.state}</em>
-                  <time>{formatThreadTime(item.event.timestampMs)}</time>
-                </span>
-              </button>
+                <summary onClick={() => onSelect(item)}>
+                  <ChevronRight className="thread-disclosure-chevron" aria-hidden="true" />
+                  <span className="thread-event-icon">
+                    <EventIcon event={item.event} />
+                  </span>
+                  <span className="thread-event-copy">
+                    <strong>{item.event.label}</strong>
+                  </span>
+                  <span className="thread-event-meta">
+                    {isDone ? (
+                      <Check className="thread-state-check" aria-label="Done" />
+                    ) : (
+                      <em>{item.event.state}</em>
+                    )}
+                    <time>{formatThreadTime(item.event.timestampMs)}</time>
+                  </span>
+                </summary>
+                <button
+                  className="thread-event-detail"
+                  type="button"
+                  onClick={() => onSelect(item)}
+                >
+                  {item.event.detail}
+                </button>
+              </details>
             );
           }
 
           const isUser = item.message.role === "user";
           const isAssistant = item.message.role === "assistant";
+          if (item.message.role === "tool") {
+            const summary = toolMessageSummary(item.message.content);
+            return (
+              <details
+                className={`thread-tool-message ${selectedId === item.id ? "selected" : ""}`}
+                key={item.id}
+                data-minimap-id={item.id}
+                data-minimap-index={itemIndex}
+                data-minimap-kind={item.message.role}
+              >
+                <summary onClick={() => onSelect(item)}>
+                  <ChevronRight className="thread-disclosure-chevron" aria-hidden="true" />
+                  <TerminalSquare aria-hidden="true" />
+                  <strong>{summary.label}</strong>
+                  {summary.succeeded && (
+                    <Check className="thread-state-check" aria-label="Done" />
+                  )}
+                  <time>{formatThreadTime(item.message.timestampMs)}</time>
+                </summary>
+                <button
+                  className="thread-tool-message-body"
+                  type="button"
+                  onClick={() => onSelect(item)}
+                >
+                  <pre>{item.message.content || "Tool request"}</pre>
+                </button>
+              </details>
+            );
+          }
           return (
             <article
               className={`thread-message thread-message-${item.message.role} ${

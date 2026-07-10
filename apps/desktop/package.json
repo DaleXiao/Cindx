@@ -1,13 +1,13 @@
 {
   "name": "cindx-desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.0.3",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "tauri": "PATH=/opt/homebrew/opt/rustup/bin:$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH tauri"
+    "tauri": "node ../../scripts/run-tauri.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

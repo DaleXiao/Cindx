@@ -1,5 +1,7 @@
 # Modules
 
+The tool and harness architecture is specified in [TOOL_HARNESS_SPEC.md](./TOOL_HARNESS_SPEC.md).
+
 ## apps/desktop
 
 Tauri desktop application.

@@ -1,13 +1,24 @@
 import {
   Activity,
+  Bug,
+  ChevronRight,
   Clock3,
   Database,
+  File,
   FileText,
   Globe2,
+  Image,
   ShieldCheck,
   TerminalSquare
 } from "lucide-react";
-import type { PointerEvent as ReactPointerEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent
+} from "react";
+import { readArtifactImage } from "../tauri";
 import type {
   AgentState,
   AgentTraceStepView,
@@ -38,6 +49,8 @@ type InspectorProps = {
   ragSources: RagSourceView[];
   browserObservations: BrowserObservationView[];
   toolResults: ToolRunView[];
+  traceArtifacts: AgentTraceStepView[];
+  workspaceRoot: string;
   agentStatus: AgentState["status"] | "idle";
   agentTurnCount: number;
   agentMaxTurns: number;
@@ -66,6 +79,55 @@ function clampWidth(width: number) {
   return Math.min(520, Math.max(280, width));
 }
 
+type OutputArtifact = {
+  id: string;
+  path: string;
+  toolName: string;
+  status: string;
+  timestampMs: number;
+};
+
+const IMAGE_EXTENSIONS = new Set(["avif", "bmp", "gif", "jpeg", "jpg", "png", "webp"]);
+
+function artifactName(path: string) {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? path;
+}
+
+function isImageArtifact(path: string) {
+  const parts = path.split(".");
+  const extension = parts[parts.length - 1]?.toLowerCase() ?? "";
+  return IMAGE_EXTENSIONS.has(extension);
+}
+
+function absoluteArtifactPath(workspaceRoot: string, path: string) {
+  if (path.startsWith("/")) return path;
+  if (!workspaceRoot) return path;
+  return `${workspaceRoot.replace(/\/$/, "")}/${path.replace(/^\.\//, "")}`;
+}
+
+function ArtifactImage({ path }: { path: string }) {
+  const [source, setSource] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setSource(null);
+    void readArtifactImage(path)
+      .then((dataUrl) => {
+        if (active) setSource(dataUrl);
+      })
+      .catch(() => {
+        if (active) setSource("");
+      });
+    return () => {
+      active = false;
+    };
+  }, [path]);
+
+  if (!source) return <Image aria-label={source === "" ? "Preview unavailable" : "Loading preview"} />;
+  return <img src={source} alt={artifactName(path)} />;
+}
+
 export function Inspector({
   open,
   width,
@@ -78,6 +140,8 @@ export function Inspector({
   ragSources,
   browserObservations,
   toolResults,
+  traceArtifacts,
+  workspaceRoot,
   agentStatus,
   agentTurnCount,
   agentMaxTurns,
@@ -86,11 +150,56 @@ export function Inspector({
   onWidthChange,
   onReview
 }: InspectorProps) {
+  const [debugOpen, setDebugOpen] = useState(false);
+  const previousTab = useRef(tab);
   const reviewTotal = reviewCounts.agent + reviewCounts.tool + reviewCounts.browser;
   const hasArtifacts = Boolean(ragAnswer || ragSources.length || browserObservations.length || toolResults.length);
   const hasContext = Boolean(
     contextCheckpoint && (contextCheckpoint.eventCount > 0 || contextCheckpoint.path)
   );
+  const outputArtifacts = useMemo(() => {
+    const outputs = new Map<string, OutputArtifact>();
+    const addOutput = (artifact: OutputArtifact) => {
+      const absolutePath = absoluteArtifactPath(workspaceRoot, artifact.path);
+      outputs.set(absolutePath, { ...artifact, path: absolutePath });
+    };
+
+    traceArtifacts.forEach((step) => {
+      if (!step.artifactPath || step.status === "failed") return;
+      addOutput({
+        id: step.id,
+        path: step.artifactPath,
+        toolName: step.toolName ?? step.label,
+        status: step.status,
+        timestampMs: step.finishedAtMs ?? step.startedAtMs
+      });
+    });
+    browserObservations.forEach((observation) => {
+      [observation.artifactPath, observation.textPath].forEach((path, index) => {
+        if (!path || observation.status === "failed") return;
+        addOutput({
+          id: `${observation.invocationId}-${index}`,
+          path,
+          toolName: observation.toolName,
+          status: observation.status,
+          timestampMs: observation.timestampMs
+        });
+      });
+    });
+
+    return [...outputs.values()].sort((left, right) => right.timestampMs - left.timestampMs);
+  }, [browserObservations, traceArtifacts, workspaceRoot]);
+
+  useEffect(() => {
+    if (threadSelection || traceStep) setDebugOpen(true);
+  }, [threadSelection, traceStep]);
+
+  useEffect(() => {
+    if (previousTab.current !== tab) {
+      previousTab.current = tab;
+      setDebugOpen(true);
+    }
+  }, [tab]);
 
   function beginResize(event: ReactPointerEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -132,34 +241,88 @@ export function Inspector({
         }}
       />
 
-      <nav className="inspector-tabs" aria-label="Inspector views" role="tablist">
-        {(["details", "artifacts", "context"] as InspectorTab[]).map((item, index, tabs) => (
-          <button
-            className={`inspector-tab ${tab === item ? "active" : ""}`}
-            type="button"
-            role="tab"
-            aria-selected={tab === item}
-            aria-controls="inspector-panel"
-            key={item}
-            onClick={() => onTabChange(item)}
-            onKeyDown={(event) => {
-              const delta = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
-              if (!delta) return;
-              event.preventDefault();
-              const nextIndex = (index + delta + tabs.length) % tabs.length;
-              onTabChange(tabs[nextIndex]);
-              const buttons = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
-                '[role="tab"]'
-              );
-              buttons?.[nextIndex]?.focus();
-            }}
-          >
-            {item === "details" ? "Details" : item === "artifacts" ? "Artifacts" : "Context"}
-          </button>
-        ))}
-      </nav>
-
       <div className="inspector-scroll">
+        <section className="inspector-outputs" aria-label="Agent outputs">
+          <header>
+            <div>
+              <File aria-hidden="true" />
+              <h2>Outputs</h2>
+            </div>
+            {outputArtifacts.length > 0 && <span>{outputArtifacts.length}</span>}
+          </header>
+          {outputArtifacts.length === 0 ? (
+            <div className="inspector-output-empty">
+              <span>Files and images created by the agent appear here.</span>
+            </div>
+          ) : (
+            <div className="inspector-output-list">
+              {outputArtifacts.map((artifact) => {
+                const imageArtifact = isImageArtifact(artifact.path);
+                return (
+                  <article
+                    className={`inspector-output ${imageArtifact ? "image" : "file"}`}
+                    key={`${artifact.id}-${artifact.path}`}
+                  >
+                    <div className={`inspector-output-preview ${imageArtifact ? "image" : "file"}`}>
+                      {imageArtifact ? (
+                        <ArtifactImage path={artifact.path} />
+                      ) : (
+                        <File aria-hidden="true" />
+                      )}
+                    </div>
+                    <div className="inspector-output-copy">
+                      <strong title={artifact.path}>{artifactName(artifact.path)}</strong>
+                      <span title={artifact.path}>{artifact.path}</span>
+                    </div>
+                    {imageArtifact && <Image className="inspector-output-kind" aria-label="Image" />}
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        <details
+          className="inspector-debug"
+          open={debugOpen}
+          onToggle={(event) => setDebugOpen(event.currentTarget.open)}
+        >
+          <summary>
+            <Bug aria-hidden="true" />
+            <span>
+              <strong>Debug</strong>
+              <small>Details, artifacts, and context</small>
+            </span>
+            <ChevronRight className="inspector-debug-chevron" aria-hidden="true" />
+          </summary>
+          <div className="inspector-debug-body">
+            <nav className="inspector-tabs" aria-label="Debug views" role="tablist">
+              {(["details", "artifacts", "context"] as InspectorTab[]).map((item, index, tabs) => (
+                <button
+                  className={`inspector-tab ${tab === item ? "active" : ""}`}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === item}
+                  aria-controls="inspector-panel"
+                  key={item}
+                  onClick={() => onTabChange(item)}
+                  onKeyDown={(event) => {
+                    const delta = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+                    if (!delta) return;
+                    event.preventDefault();
+                    const nextIndex = (index + delta + tabs.length) % tabs.length;
+                    onTabChange(tabs[nextIndex]);
+                    const buttons = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+                      '[role="tab"]'
+                    );
+                    buttons?.[nextIndex]?.focus();
+                  }}
+                >
+                  {item === "details" ? "Details" : item === "artifacts" ? "Artifacts" : "Context"}
+                </button>
+              ))}
+            </nav>
+
         {tab === "details" && (
           <div className="inspector-panel" id="inspector-panel" role="tabpanel">
             {traceStep ? (
@@ -393,6 +556,8 @@ export function Inspector({
             )}
           </div>
         )}
+          </div>
+        </details>
       </div>
     </aside>
   );

@@ -114,11 +114,79 @@ pub enum ToolRisk {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolSource {
+    BuiltIn,
+    Mcp { server_id: String },
+    Skill { skill_id: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolExposure {
+    Inline,
+    Deferred,
+    Auto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolSpec {
     pub name: String,
+    pub namespace: String,
     pub description: String,
     pub risk: ToolRisk,
+    pub source: ToolSource,
+    pub exposure: ToolExposure,
     pub input_schema_json: String,
+    pub output_schema_json: Option<String>,
+}
+
+impl ToolSpec {
+    pub fn new(
+        name: impl Into<String>,
+        namespace: impl Into<String>,
+        description: impl Into<String>,
+        risk: ToolRisk,
+        source: ToolSource,
+        exposure: ToolExposure,
+        input_schema_json: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            namespace: namespace.into(),
+            description: description.into(),
+            risk,
+            source,
+            exposure,
+            input_schema_json: input_schema_json.into(),
+            output_schema_json: None,
+        }
+    }
+
+    pub fn builtin(
+        name: impl Into<String>,
+        namespace: impl Into<String>,
+        description: impl Into<String>,
+        risk: ToolRisk,
+        input_schema_json: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            name,
+            namespace,
+            description,
+            risk,
+            ToolSource::BuiltIn,
+            ToolExposure::Auto,
+            input_schema_json,
+        )
+    }
+
+    pub fn validate_input_schema(&self) -> Result<(), String> {
+        let value: serde_json::Value = serde_json::from_str(&self.input_schema_json)
+            .map_err(|error| format!("invalid JSON schema for {}: {error}", self.name))?;
+        if value.get("type").and_then(serde_json::Value::as_str) != Some("object") {
+            return Err(format!("tool {} input schema must describe an object", self.name));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,11 +208,75 @@ pub enum ToolOutcomeStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolContent {
+    Text(String),
+    Image { mime_type: String, data: String },
+    Resource { uri: String, text: Option<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolArtifact {
+    pub path: String,
+    pub mime_type: Option<String>,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolFailure {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolResult {
     pub invocation_id: ToolCallId,
     pub status: ToolOutcomeStatus,
     pub output: String,
+    pub content: Vec<ToolContent>,
+    pub structured_output_json: Option<String>,
+    pub artifacts: Vec<ToolArtifact>,
+    pub failure: Option<ToolFailure>,
     pub metadata: Metadata,
+}
+
+impl ToolResult {
+    pub fn text(
+        invocation_id: ToolCallId,
+        status: ToolOutcomeStatus,
+        output: impl Into<String>,
+        metadata: Metadata,
+    ) -> Self {
+        let output = output.into();
+        let failure = if matches!(status, ToolOutcomeStatus::Failed) {
+            Some(ToolFailure {
+                code: "tool_execution_failed".to_string(),
+                message: output.clone(),
+                retryable: false,
+            })
+        } else {
+            None
+        };
+        Self {
+            invocation_id,
+            status,
+            content: vec![ToolContent::Text(output.clone())],
+            output,
+            structured_output_json: None,
+            artifacts: Vec::new(),
+            failure,
+            metadata,
+        }
+    }
+
+    pub fn failed(invocation_id: ToolCallId, error: impl Into<String>) -> Self {
+        Self::text(
+            invocation_id,
+            ToolOutcomeStatus::Failed,
+            error,
+            Metadata::new(),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
