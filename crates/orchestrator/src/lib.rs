@@ -1,0 +1,738 @@
+use agent_core::{Metadata, ModelRole};
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrchestrationPolicy {
+    Single,
+    PlanExecuteReview,
+    BestOfN { candidates: usize },
+    AutoRouter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrchestrationStep {
+    pub role: ModelRole,
+    pub instruction: String,
+    pub metadata: Metadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrchestrationPlan {
+    pub policy: OrchestrationPolicy,
+    pub steps: Vec<OrchestrationStep>,
+    pub metadata: Metadata,
+}
+
+impl OrchestrationPolicy {
+    pub fn label(&self) -> &'static str {
+        match self {
+            OrchestrationPolicy::Single => "single",
+            OrchestrationPolicy::PlanExecuteReview => "plan_execute_review",
+            OrchestrationPolicy::BestOfN { .. } => "best_of_n",
+            OrchestrationPolicy::AutoRouter => "auto_router",
+        }
+    }
+}
+
+pub fn parse_policy(label: &str) -> Option<OrchestrationPolicy> {
+    match label {
+        "single" => Some(OrchestrationPolicy::Single),
+        "plan_execute_review" => Some(OrchestrationPolicy::PlanExecuteReview),
+        "best_of_n" => Some(OrchestrationPolicy::BestOfN { candidates: 3 }),
+        "auto_router" => Some(OrchestrationPolicy::AutoRouter),
+        _ => None,
+    }
+}
+
+pub fn role_label(role: &ModelRole) -> &'static str {
+    match role {
+        ModelRole::Planner => "planner",
+        ModelRole::Executor => "executor",
+        ModelRole::Reviewer => "reviewer",
+        ModelRole::Summarizer => "summarizer",
+        ModelRole::Embedder => "embedder",
+    }
+}
+
+pub fn step_prompt(
+    plan: &OrchestrationPlan,
+    step_index: usize,
+    user_prompt: &str,
+    previous_outputs: &[String],
+) -> Option<String> {
+    let step = plan.steps.get(step_index)?;
+    let mut prompt = String::new();
+    prompt.push_str("You are running inside Cindx orchestration.\n");
+    prompt.push_str(&format!("Policy: {}\n", plan.policy.label()));
+    prompt.push_str(&format!("Role: {}\n", role_label(&step.role)));
+    prompt.push_str(&format!("Step instruction: {}\n\n", step.instruction));
+    prompt.push_str("User request:\n");
+    prompt.push_str(user_prompt);
+    prompt.push('\n');
+
+    if !previous_outputs.is_empty() {
+        prompt.push_str("\nPrevious step outputs:\n");
+        for (index, output) in previous_outputs.iter().enumerate() {
+            prompt.push_str(&format!("Step {}:\n{}\n", index + 1, output));
+        }
+    }
+
+    Some(prompt)
+}
+
+pub fn default_plan(policy: OrchestrationPolicy) -> OrchestrationPlan {
+    let steps = match policy {
+        OrchestrationPolicy::Single => vec![OrchestrationStep {
+            role: ModelRole::Executor,
+            instruction: "Answer or act directly with tool support when needed.".to_string(),
+            metadata: Metadata::new(),
+        }],
+        OrchestrationPolicy::PlanExecuteReview => vec![
+            OrchestrationStep {
+                role: ModelRole::Planner,
+                instruction: "Create a concise, checkable plan.".to_string(),
+                metadata: Metadata::new(),
+            },
+            OrchestrationStep {
+                role: ModelRole::Executor,
+                instruction: "Execute the approved plan through local tools.".to_string(),
+                metadata: Metadata::new(),
+            },
+            OrchestrationStep {
+                role: ModelRole::Reviewer,
+                instruction: "Review the result against the request and evidence.".to_string(),
+                metadata: Metadata::new(),
+            },
+        ],
+        OrchestrationPolicy::BestOfN { candidates } => vec![
+            OrchestrationStep {
+                role: ModelRole::Planner,
+                instruction: format!("Generate {candidates} independent candidate approaches."),
+                metadata: Metadata::new(),
+            },
+            OrchestrationStep {
+                role: ModelRole::Reviewer,
+                instruction: "Select or synthesize the best candidate using external evidence when possible.".to_string(),
+                metadata: Metadata::new(),
+            },
+        ],
+        OrchestrationPolicy::AutoRouter => vec![OrchestrationStep {
+            role: ModelRole::Executor,
+            instruction: "Answer or act directly after the router selects a concrete policy.".to_string(),
+            metadata: Metadata::new(),
+        }],
+    };
+
+    OrchestrationPlan {
+        policy,
+        steps,
+        metadata: Metadata::new(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TaskClass {
+    General,
+    Coding,
+    Research,
+    Retrieval,
+    Browser,
+    Computer,
+}
+
+impl TaskClass {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Coding => "coding",
+            Self::Research => "research",
+            Self::Retrieval => "retrieval",
+            Self::Browser => "browser",
+            Self::Computer => "computer",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelCandidate {
+    pub name: String,
+    pub role: ModelRole,
+    pub supports_tools: bool,
+    pub supports_vision: bool,
+    pub cost_tier: u8,
+    pub latency_tier: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingContext {
+    pub task_class: TaskClass,
+    pub prompt_length: usize,
+    pub needs_tools: bool,
+    pub needs_retrieval: bool,
+    pub needs_vision: bool,
+    pub user_policy_override: Option<OrchestrationPolicy>,
+    pub model_candidates: Vec<ModelCandidate>,
+}
+
+impl RoutingContext {
+    pub fn from_prompt(prompt: &str, model_candidates: Vec<ModelCandidate>) -> Self {
+        let task_class = classify_task(prompt);
+        Self {
+            task_class: task_class.clone(),
+            prompt_length: prompt.chars().count(),
+            needs_tools: matches!(
+                task_class,
+                TaskClass::Coding | TaskClass::Browser | TaskClass::Computer
+            ) || contains_any(prompt, &["tool", "file", "shell", "run", "edit"]),
+            needs_retrieval: matches!(task_class, TaskClass::Retrieval)
+                || contains_any(prompt, &["rag", "search", "retrieve", "source", "docs"]),
+            needs_vision: matches!(task_class, TaskClass::Computer)
+                || contains_any(prompt, &["screenshot", "screen", "visible", "ui"]),
+            user_policy_override: None,
+            model_candidates,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingDecision {
+    pub policy: OrchestrationPolicy,
+    pub model: String,
+    pub verifier_role: Option<ModelRole>,
+    pub retrieval_mode: String,
+    pub explanation: String,
+    pub metadata: Metadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoutingOutcome {
+    Succeeded,
+    Failed,
+    UserRejected,
+}
+
+impl RoutingOutcome {
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Succeeded)
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::UserRejected => "user_rejected",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingTelemetry {
+    pub task_class: TaskClass,
+    pub selected_policy: OrchestrationPolicy,
+    pub selected_model: String,
+    pub latency_ms: u64,
+    pub outcome: RoutingOutcome,
+    pub cost_proxy: u64,
+    pub tool_count: u64,
+    pub retrieval_count: u64,
+    pub user_override: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LearnedRoute {
+    pub task_class: TaskClass,
+    pub policy: OrchestrationPolicy,
+    pub model: String,
+    pub examples: usize,
+    pub success_rate: f32,
+    pub average_latency_ms: u64,
+    pub average_cost_proxy: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingEvaluationReport {
+    pub examples: usize,
+    pub baseline_policy: String,
+    pub router_policy_matches_baseline: usize,
+    pub router_policy_differs_from_baseline: usize,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RuleBasedRouter;
+
+impl RuleBasedRouter {
+    pub fn route(&self, context: &RoutingContext) -> RoutingDecision {
+        if let Some(policy) = context
+            .user_policy_override
+            .as_ref()
+            .filter(|policy| **policy != OrchestrationPolicy::AutoRouter)
+        {
+            return self.decision(
+                context,
+                policy.clone(),
+                "user override selected an explicit policy",
+            );
+        }
+
+        let (policy, reason) = match context.task_class {
+            TaskClass::Computer | TaskClass::Browser => (
+                OrchestrationPolicy::PlanExecuteReview,
+                "interactive tool use needs planning and review",
+            ),
+            TaskClass::Coding => (
+                OrchestrationPolicy::PlanExecuteReview,
+                "coding tasks benefit from plan-execute-review",
+            ),
+            TaskClass::Retrieval => (
+                OrchestrationPolicy::PlanExecuteReview,
+                "retrieval tasks need grounded synthesis and review",
+            ),
+            TaskClass::Research => (
+                OrchestrationPolicy::BestOfN { candidates: 3 },
+                "research tasks benefit from multiple candidate approaches",
+            ),
+            TaskClass::General if context.prompt_length < 400 && !context.needs_tools => {
+                (OrchestrationPolicy::Single, "short general prompt can run directly")
+            }
+            TaskClass::General => (
+                OrchestrationPolicy::PlanExecuteReview,
+                "long or tool-adjacent prompt gets reviewed execution",
+            ),
+        };
+
+        self.decision(context, policy, reason)
+    }
+
+    pub fn explain(&self, context: &RoutingContext) -> String {
+        self.route(context).explanation
+    }
+
+    fn decision(
+        &self,
+        context: &RoutingContext,
+        policy: OrchestrationPolicy,
+        reason: &str,
+    ) -> RoutingDecision {
+        let model = select_model(context, !matches!(policy, OrchestrationPolicy::Single));
+        let retrieval_mode = if context.needs_retrieval {
+            "graph_rag".to_string()
+        } else {
+            "none".to_string()
+        };
+        let verifier_role = if matches!(
+            policy,
+            OrchestrationPolicy::PlanExecuteReview | OrchestrationPolicy::BestOfN { .. }
+        ) {
+            Some(ModelRole::Reviewer)
+        } else {
+            None
+        };
+        let mut metadata = Metadata::new();
+        metadata.insert("task_class".to_string(), context.task_class.label().to_string());
+        metadata.insert("needs_tools".to_string(), context.needs_tools.to_string());
+        metadata.insert(
+            "needs_retrieval".to_string(),
+            context.needs_retrieval.to_string(),
+        );
+        metadata.insert("needs_vision".to_string(), context.needs_vision.to_string());
+
+        RoutingDecision {
+            policy,
+            model,
+            verifier_role,
+            retrieval_mode,
+            explanation: format!(
+                "class={} prompt_length={} reason={reason}",
+                context.task_class.label(),
+                context.prompt_length
+            ),
+            metadata,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LearnedModelRouter {
+    routes: BTreeMap<TaskClass, LearnedRoute>,
+    fallback: RuleBasedRouter,
+}
+
+impl LearnedModelRouter {
+    pub fn train(telemetry: &[RoutingTelemetry]) -> Self {
+        let mut grouped: BTreeMap<TaskClass, BTreeMap<(String, String), RouteAccumulator>> =
+            BTreeMap::new();
+        for entry in telemetry.iter().filter(|entry| !entry.user_override) {
+            let key = (
+                entry.selected_policy.label().to_string(),
+                entry.selected_model.clone(),
+            );
+            grouped
+                .entry(entry.task_class.clone())
+                .or_default()
+                .entry(key)
+                .or_default()
+                .record(entry);
+        }
+
+        let mut routes = BTreeMap::new();
+        for (task_class, candidates) in grouped {
+            if let Some(((policy_label, model), accumulator)) = candidates
+                .into_iter()
+                .max_by(|(_, left), (_, right)| left.score().cmp(&right.score()))
+            {
+                if let Some(policy) = parse_policy(&policy_label) {
+                    routes.insert(
+                        task_class.clone(),
+                        LearnedRoute {
+                            task_class,
+                            policy,
+                            model,
+                            examples: accumulator.examples,
+                            success_rate: accumulator.success_rate(),
+                            average_latency_ms: accumulator.average_latency_ms(),
+                            average_cost_proxy: accumulator.average_cost_proxy(),
+                        },
+                    );
+                }
+            }
+        }
+
+        Self {
+            routes,
+            fallback: RuleBasedRouter,
+        }
+    }
+
+    pub fn route(&self, context: &RoutingContext) -> RoutingDecision {
+        if context
+            .user_policy_override
+            .as_ref()
+            .is_some_and(|policy| *policy != OrchestrationPolicy::AutoRouter)
+        {
+            return self.fallback.route(context);
+        }
+        let Some(route) = self.routes.get(&context.task_class) else {
+            return self.fallback.route(context);
+        };
+        let mut decision = self
+            .fallback
+            .decision(context, route.policy.clone(), "learned from successful local traces");
+        decision.model = route.model.clone();
+        decision.explanation = format!(
+            "class={} learned_policy={} examples={} success_rate={:.2}",
+            context.task_class.label(),
+            route.policy.label(),
+            route.examples,
+            route.success_rate
+        );
+        decision
+            .metadata
+            .insert("router".to_string(), "learned_table_v1".to_string());
+        decision
+    }
+
+    pub fn learned_route(&self, task_class: &TaskClass) -> Option<&LearnedRoute> {
+        self.routes.get(task_class)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct RouteAccumulator {
+    examples: usize,
+    successes: usize,
+    latency_ms: u64,
+    cost_proxy: u64,
+}
+
+impl RouteAccumulator {
+    fn record(&mut self, telemetry: &RoutingTelemetry) {
+        self.examples += 1;
+        if telemetry.outcome.is_success() {
+            self.successes += 1;
+        }
+        self.latency_ms = self.latency_ms.saturating_add(telemetry.latency_ms);
+        self.cost_proxy = self.cost_proxy.saturating_add(telemetry.cost_proxy);
+    }
+
+    fn success_rate(&self) -> f32 {
+        if self.examples == 0 {
+            0.0
+        } else {
+            self.successes as f32 / self.examples as f32
+        }
+    }
+
+    fn average_latency_ms(&self) -> u64 {
+        if self.examples == 0 {
+            0
+        } else {
+            self.latency_ms / self.examples as u64
+        }
+    }
+
+    fn average_cost_proxy(&self) -> u64 {
+        if self.examples == 0 {
+            0
+        } else {
+            self.cost_proxy / self.examples as u64
+        }
+    }
+
+    fn score(&self) -> i64 {
+        (self.successes as i64 * 10_000)
+            - (self.average_cost_proxy() as i64)
+            - (self.average_latency_ms() as i64 / 100)
+    }
+}
+
+pub fn classify_task(prompt: &str) -> TaskClass {
+    if contains_any(prompt, &["computer", "desktop", "screenshot", "screen", "click", "keyboard"]) {
+        TaskClass::Computer
+    } else if contains_any(prompt, &["browser", "webpage", "website", "scroll", "form"]) {
+        TaskClass::Browser
+    } else if contains_any(
+        prompt,
+        &["rag", "retrieve", "search", "source", "sources", "citation", "docs"],
+    ) {
+        TaskClass::Retrieval
+    } else if contains_any(prompt, &["code", "rust", "typescript", "file", "test", "compile", "bug"]) {
+        TaskClass::Coding
+    } else if contains_any(prompt, &["research", "compare", "investigate", "latest", "study"]) {
+        TaskClass::Research
+    } else {
+        TaskClass::General
+    }
+}
+
+pub fn evaluate_router_against_baseline(
+    router: &LearnedModelRouter,
+    contexts: &[RoutingContext],
+    baseline_policy: OrchestrationPolicy,
+) -> RoutingEvaluationReport {
+    let mut matches_baseline = 0;
+    for context in contexts {
+        if router.route(context).policy.label() == baseline_policy.label() {
+            matches_baseline += 1;
+        }
+    }
+    let differs = contexts.len().saturating_sub(matches_baseline);
+
+    RoutingEvaluationReport {
+        examples: contexts.len(),
+        baseline_policy: baseline_policy.label().to_string(),
+        router_policy_matches_baseline: matches_baseline,
+        router_policy_differs_from_baseline: differs,
+        summary: format!(
+            "Compared {} router decisions against baseline {}: {} same, {} different.",
+            contexts.len(),
+            baseline_policy.label(),
+            matches_baseline,
+            differs
+        ),
+    }
+}
+
+fn select_model(context: &RoutingContext, prefer_strong: bool) -> String {
+    let mut candidates = context
+        .model_candidates
+        .iter()
+        .filter(|candidate| !context.needs_tools || candidate.supports_tools)
+        .filter(|candidate| !context.needs_vision || candidate.supports_vision)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        candidates = context.model_candidates.iter().collect();
+    }
+    if candidates.is_empty() {
+        return "executor".to_string();
+    }
+    candidates.sort_by(|left, right| {
+        if prefer_strong {
+            right
+                .cost_tier
+                .cmp(&left.cost_tier)
+                .then_with(|| left.latency_tier.cmp(&right.latency_tier))
+        } else {
+            left.latency_tier
+                .cmp(&right.latency_tier)
+                .then_with(|| left.cost_tier.cmp(&right.cost_tier))
+        }
+    });
+    candidates
+        .first()
+        .map(|candidate| candidate.name.clone())
+        .unwrap_or_else(|| "executor".to_string())
+}
+
+fn contains_any(value: &str, needles: &[&str]) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    needles
+        .iter()
+        .any(|needle| contains_keyword(&normalized, needle))
+}
+
+fn contains_keyword(normalized: &str, needle: &str) -> bool {
+    let needle = needle.to_ascii_lowercase();
+    if needle.chars().all(|character| character.is_ascii_alphanumeric()) {
+        normalized
+            .split(|character: char| !character.is_alphanumeric())
+            .any(|token| token == needle)
+    } else {
+        normalized.contains(&needle)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidates() -> Vec<ModelCandidate> {
+        vec![
+            ModelCandidate {
+                name: "fast-mini".to_string(),
+                role: ModelRole::Executor,
+                supports_tools: true,
+                supports_vision: false,
+                cost_tier: 1,
+                latency_tier: 1,
+            },
+            ModelCandidate {
+                name: "strong-vision".to_string(),
+                role: ModelRole::Executor,
+                supports_tools: true,
+                supports_vision: true,
+                cost_tier: 4,
+                latency_tier: 3,
+            },
+        ]
+    }
+
+    #[test]
+    fn labels_are_stable_for_persisted_traces() {
+        assert_eq!(OrchestrationPolicy::Single.label(), "single");
+        assert_eq!(
+            OrchestrationPolicy::PlanExecuteReview.label(),
+            "plan_execute_review"
+        );
+        assert_eq!(
+            OrchestrationPolicy::BestOfN { candidates: 3 }.label(),
+            "best_of_n"
+        );
+        assert_eq!(OrchestrationPolicy::AutoRouter.label(), "auto_router");
+    }
+
+    #[test]
+    fn plan_execute_review_has_expected_roles() {
+        let plan = default_plan(OrchestrationPolicy::PlanExecuteReview);
+        let roles: Vec<ModelRole> = plan.steps.into_iter().map(|step| step.role).collect();
+
+        assert_eq!(
+            roles,
+            vec![ModelRole::Planner, ModelRole::Executor, ModelRole::Reviewer]
+        );
+    }
+
+    #[test]
+    fn parses_policy_labels() {
+        assert_eq!(parse_policy("single"), Some(OrchestrationPolicy::Single));
+        assert_eq!(
+            parse_policy("plan_execute_review"),
+            Some(OrchestrationPolicy::PlanExecuteReview)
+        );
+        assert_eq!(
+            parse_policy("best_of_n"),
+            Some(OrchestrationPolicy::BestOfN { candidates: 3 })
+        );
+        assert_eq!(parse_policy("auto_router"), Some(OrchestrationPolicy::AutoRouter));
+        assert_eq!(parse_policy("unknown"), None);
+    }
+
+    #[test]
+    fn step_prompt_includes_previous_outputs() {
+        let plan = default_plan(OrchestrationPolicy::PlanExecuteReview);
+        let prompt = step_prompt(
+            &plan,
+            1,
+            "Change README",
+            &["Plan: inspect first".to_string()],
+        )
+        .expect("step should exist");
+
+        assert!(prompt.contains("Role: executor"));
+        assert!(prompt.contains("Change README"));
+        assert!(prompt.contains("Plan: inspect first"));
+    }
+
+    #[test]
+    fn rule_router_explains_retrieval_graph_rag_choice() {
+        let context = RoutingContext::from_prompt("Search the docs with RAG and cite sources", candidates());
+        let router = RuleBasedRouter;
+        let decision = router.route(&context);
+
+        assert_eq!(decision.policy, OrchestrationPolicy::PlanExecuteReview);
+        assert_eq!(decision.retrieval_mode, "graph_rag");
+        assert!(decision.explanation.contains("class=retrieval"));
+    }
+
+    #[test]
+    fn rule_router_respects_user_override() {
+        let mut context = RoutingContext::from_prompt("Research three implementation options", candidates());
+        context.user_policy_override = Some(OrchestrationPolicy::Single);
+        let decision = RuleBasedRouter.route(&context);
+
+        assert_eq!(decision.policy, OrchestrationPolicy::Single);
+        assert!(decision.explanation.contains("user override"));
+    }
+
+    #[test]
+    fn learned_router_uses_successful_trace_table() {
+        let telemetry = vec![
+            RoutingTelemetry {
+                task_class: TaskClass::Research,
+                selected_policy: OrchestrationPolicy::BestOfN { candidates: 3 },
+                selected_model: "strong-vision".to_string(),
+                latency_ms: 900,
+                outcome: RoutingOutcome::Succeeded,
+                cost_proxy: 120,
+                tool_count: 0,
+                retrieval_count: 2,
+                user_override: false,
+            },
+            RoutingTelemetry {
+                task_class: TaskClass::Research,
+                selected_policy: OrchestrationPolicy::Single,
+                selected_model: "fast-mini".to_string(),
+                latency_ms: 200,
+                outcome: RoutingOutcome::Failed,
+                cost_proxy: 20,
+                tool_count: 0,
+                retrieval_count: 0,
+                user_override: false,
+            },
+        ];
+        let router = LearnedModelRouter::train(&telemetry);
+        let context = RoutingContext::from_prompt("Research and compare local agent routers", candidates());
+        let decision = router.route(&context);
+
+        assert_eq!(decision.policy, OrchestrationPolicy::BestOfN { candidates: 3 });
+        assert_eq!(decision.model, "strong-vision");
+        assert!(decision.explanation.contains("learned_policy=best_of_n"));
+    }
+
+    #[test]
+    fn evaluation_report_compares_against_baseline_policy() {
+        let router = LearnedModelRouter::train(&[]);
+        let contexts = vec![
+            RoutingContext::from_prompt("hello", candidates()),
+            RoutingContext::from_prompt("Use computer screenshot to inspect the UI", candidates()),
+        ];
+        let report =
+            evaluate_router_against_baseline(&router, &contexts, OrchestrationPolicy::Single);
+
+        assert_eq!(report.examples, 2);
+        assert_eq!(report.baseline_policy, "single");
+        assert_eq!(report.router_policy_matches_baseline, 1);
+        assert_eq!(report.router_policy_differs_from_baseline, 1);
+        assert!(report.summary.contains("baseline single"));
+    }
+}

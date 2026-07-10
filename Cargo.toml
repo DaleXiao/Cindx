@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/agent-core",
+  "crates/agent-graph",
+  "crates/agent-memory",
+  "crates/agent-rag",
+  "crates/agent-runtime",
+  "crates/agent-storage",
+  "crates/model-provider",
+  "crates/orchestrator",
+  "crates/tools",
+]
+exclude = ["apps/desktop/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
