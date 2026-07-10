@@ -49,4 +49,7 @@ Actions secrets:
 - `APPLE_TEAM_ID`
 
 When the certificate secret is present, the workflow imports it into a temporary
-keychain. Tauri uses the remaining Apple credentials for notarization.
+keychain and passes only the resulting signing identity to Tauri. The certificate
+payload and password are scoped to the import step so Tauri cannot attempt a
+second `security import`. The remaining Apple credentials are scoped to the
+publish step for notarization.

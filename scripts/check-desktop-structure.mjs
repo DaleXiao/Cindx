@@ -54,6 +54,12 @@ assert(
   "release workflow must bypass the local auto-versioning wrapper"
 );
 assert(
+  releaseWorkflow.includes("APPLE_CERTIFICATE is not configured") &&
+    releaseWorkflow.includes("APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}") &&
+    !releaseWorkflow.includes("    env:\n      APPLE_CERTIFICATE:"),
+  "Apple certificate payloads must be scoped to import and not inherited by Tauri"
+);
+assert(
   releaseWorkflow.includes("--target universal-apple-darwin --bundles app"),
   "release workflow must build a Universal app without the fragile DMG step"
 );
