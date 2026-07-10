@@ -29,6 +29,9 @@ const rustLib = read("apps/desktop/src-tauri/src/lib.rs");
 const cargoToml = read("apps/desktop/src-tauri/Cargo.toml");
 const cargoLock = read("apps/desktop/src-tauri/Cargo.lock");
 const runTauriSource = read("scripts/run-tauri.mjs");
+const releaseWorkflow = read(".github/workflows/release.yml");
+const ciWorkflow = read(".github/workflows/ci.yml");
+const releaseVersionCheck = read("scripts/check-release-version.mjs");
 const toolsSource = read("crates/tools/src/lib.rs");
 const ragSource = read("crates/agent-rag/src/lib.rs");
 const mainSource = read("apps/desktop/src/main.tsx");
@@ -45,6 +48,22 @@ assert(
     runTauriSource.includes("rollbackDesktopVersion") &&
     runTauriSource.includes("stable-aarch64-apple-darwin"),
   "desktop Tauri builds must increment the patch version and retain the Rust toolchain PATH"
+);
+assert(
+  releaseWorkflow.includes("tauriScript: ./node_modules/.bin/tauri"),
+  "release workflow must bypass the local auto-versioning wrapper"
+);
+assert(
+  releaseWorkflow.includes("--target universal-apple-darwin"),
+  "release workflow must build a Universal macOS app"
+);
+assert(
+  ciWorkflow.includes("retention-days: 7"),
+  "main-branch test builds must have bounded artifact retention"
+);
+assert(
+  releaseVersionCheck.includes("does not match committed version"),
+  "release workflow must reject mismatched tags"
 );
 assert(packageJson.dependencies.react, "React dependency is missing");
 assert(packageJson.dependencies["@tauri-apps/api"], "Tauri API dependency is missing");
