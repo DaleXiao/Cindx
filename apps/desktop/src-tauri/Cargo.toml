@@ -1,6 +1,6 @@
 [package]
 name = "cindx-desktop"
-version = "0.1.0"
+version = "0.0.3"
 edition = "2021"
 license = "UNLICENSED"
 
@@ -15,11 +15,20 @@ tauri-build = { version = "2", features = [] }
 agent-core = { path = "../../../crates/agent-core" }
 agent-graph = { path = "../../../crates/agent-graph" }
 agent-memory = { path = "../../../crates/agent-memory" }
+agent-mcp = { path = "../../../crates/agent-mcp" }
 agent-rag = { path = "../../../crates/agent-rag" }
 agent-runtime = { path = "../../../crates/agent-runtime" }
+agent-skills = { path = "../../../crates/agent-skills" }
 agent-storage = { path = "../../../crates/agent-storage" }
+base64 = "0.22"
 model-provider = { path = "../../../crates/model-provider" }
 orchestrator = { path = "../../../crates/orchestrator" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tauri = { version = "2", features = [] }
 tools = { path = "../../../crates/tools" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSResponder", "NSView"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }

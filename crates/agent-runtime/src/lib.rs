@@ -1,7 +1,9 @@
-use agent_core::{Message, MessageRole, Metadata, ModelRole, TaskId, ToolCallId, ToolInvocation, ToolSpec};
-use model_provider::{tool_arguments_to_key_value_input, tool_function_name, ModelCallMode, ModelRequest, ModelResponse};
+use agent_core::{Message, MessageRole, Metadata, ModelRole, TaskId, ToolCallId, ToolInvocation, ToolOutcomeStatus, ToolSpec};
+use model_provider::{tool_function_name, ModelCallMode, ModelRequest, ModelResponse};
+use std::collections::BTreeMap;
 
 pub const DEFAULT_MAX_AGENT_TURNS: usize = 24;
+pub const MAX_IDENTICAL_TOOL_FAILURES: usize = 2;
 pub const DEFAULT_AGENT_SYSTEM_PROMPT: &str = "You are Cindx, a desktop-first assistant. Work carefully, be direct, and ask for clarification when the task is ambiguous.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +26,7 @@ pub struct AgentLoopState {
     pub messages: Vec<Message>,
     pub turn: usize,
     pub max_turns: usize,
+    pub failed_tool_signatures: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +59,7 @@ pub fn start_agent_loop(
         user_prompt,
         turn: 0,
         max_turns: config.max_turns.max(1),
+        failed_tool_signatures: BTreeMap::new(),
     }
 }
 
@@ -77,6 +81,7 @@ pub fn start_agent_loop_with_history(
         messages: history,
         turn: 0,
         max_turns: config.max_turns.max(1),
+        failed_tool_signatures: BTreeMap::new(),
     }
 }
 
@@ -109,6 +114,7 @@ pub fn resume_agent_loop_from_messages(
         messages,
         turn,
         max_turns: config.max_turns.max(1),
+        failed_tool_signatures: BTreeMap::new(),
     }
 }
 
@@ -190,11 +196,10 @@ pub fn advance_with_model_response(
             .into_iter()
             .map(|call| {
                 let tool_name = original_tool_name(&call.name, tools);
-                let input = tool_arguments_to_key_value_input(&call.arguments_json);
                 AgentToolRequest {
                     call_id: ToolCallId(call.id),
                     tool_name,
-                    input,
+                    input: call.arguments_json,
                 }
             })
             .collect::<Vec<_>>();
@@ -267,6 +272,39 @@ pub fn observation_from_tool_result(tool_name: &str, status: &str, output: &str)
     )
 }
 
+pub fn repeated_tool_failure_count(
+    state: &AgentLoopState,
+    tool_name: &str,
+    input_json: &str,
+) -> usize {
+    state
+        .failed_tool_signatures
+        .get(&tool_signature(tool_name, input_json))
+        .copied()
+        .unwrap_or_default()
+}
+
+pub fn record_tool_outcome(
+    state: &mut AgentLoopState,
+    tool_name: &str,
+    input_json: &str,
+    status: &ToolOutcomeStatus,
+) {
+    let signature = tool_signature(tool_name, input_json);
+    if matches!(status, ToolOutcomeStatus::Failed | ToolOutcomeStatus::Denied) {
+        *state.failed_tool_signatures.entry(signature).or_default() += 1;
+    } else {
+        state.failed_tool_signatures.remove(&signature);
+    }
+}
+
+fn tool_signature(tool_name: &str, input_json: &str) -> String {
+    let canonical = serde_json::from_str::<serde_json::Value>(input_json)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|_| input_json.trim().to_string());
+    format!("{tool_name}\n{canonical}")
+}
+
 pub fn agent_system_prompt(tools: &[ToolSpec]) -> String {
     agent_system_prompt_with_override(tools, None)
 }
@@ -325,6 +363,36 @@ mod tests {
     #[test]
     fn default_turn_budget_supports_multi_step_agent_runs() {
         assert_eq!(AgentRuntimeConfig::default().max_turns, 24);
+    }
+
+    #[test]
+    fn repeated_identical_tool_failures_are_counted_by_canonical_arguments() {
+        let mut state = start_agent_loop(
+            TaskId("task-1".to_string()),
+            "test",
+            AgentRuntimeConfig::default(),
+        );
+        record_tool_outcome(
+            &mut state,
+            "shell.run",
+            r#"{"cwd":".","command":"false"}"#,
+            &ToolOutcomeStatus::Failed,
+        );
+        record_tool_outcome(
+            &mut state,
+            "shell.run",
+            r#"{"command":"false","cwd":"."}"#,
+            &ToolOutcomeStatus::Failed,
+        );
+
+        assert_eq!(
+            repeated_tool_failure_count(
+                &state,
+                "shell.run",
+                r#"{"command":"false","cwd":"."}"#
+            ),
+            MAX_IDENTICAL_TOOL_FAILURES
+        );
     }
 
     #[test]
@@ -395,7 +463,7 @@ mod tests {
             AgentAdvance::ToolCalls { calls } => {
                 assert_eq!(calls.len(), 1);
                 assert_eq!(calls[0].tool_name, "file.read");
-                assert_eq!(calls[0].input, "path=README.md");
+                assert_eq!(calls[0].input, r#"{"input":"path=README.md"}"#);
             }
             other => panic!("unexpected advance: {other:?}"),
         }
@@ -494,11 +562,17 @@ mod tests {
     }
 
     fn tool(name: &str, schema: &str) -> ToolSpec {
-        ToolSpec {
-            name: name.to_string(),
-            description: format!("{name} description"),
-            risk: ToolRisk::ReadOnly,
-            input_schema_json: schema.to_string(),
-        }
+        let schema = if schema.trim_start().starts_with('{') {
+            schema.to_string()
+        } else {
+            r#"{"type":"object","properties":{"path":{"type":"string","description":"workspace-relative path"}},"required":["path"],"additionalProperties":false}"#.to_string()
+        };
+        ToolSpec::builtin(
+            name,
+            name.split('.').next().unwrap_or("test"),
+            format!("{name} description"),
+            ToolRisk::ReadOnly,
+            schema,
+        )
     }
 }

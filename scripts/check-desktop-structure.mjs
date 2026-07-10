@@ -15,6 +15,7 @@ const assert = (condition, message) => {
 };
 
 const packageJson = parseJson("apps/desktop/package.json");
+const packageLock = parseJson("apps/desktop/package-lock.json");
 const tauriConfig = parseJson("apps/desktop/src-tauri/tauri.conf.json");
 const capability = parseJson("apps/desktop/src-tauri/capabilities/default.json");
 const appSource = read("apps/desktop/src/App.tsx");
@@ -25,6 +26,9 @@ const sidebarSource = read("apps/desktop/src/components/Sidebar.tsx");
 const styles = read("apps/desktop/src/styles.css");
 const tauriBridge = read("apps/desktop/src/tauri.ts");
 const rustLib = read("apps/desktop/src-tauri/src/lib.rs");
+const cargoToml = read("apps/desktop/src-tauri/Cargo.toml");
+const cargoLock = read("apps/desktop/src-tauri/Cargo.lock");
+const runTauriSource = read("scripts/run-tauri.mjs");
 const toolsSource = read("crates/tools/src/lib.rs");
 const ragSource = read("crates/agent-rag/src/lib.rs");
 const mainSource = read("apps/desktop/src/main.tsx");
@@ -34,16 +38,28 @@ const viteConfig = read("apps/desktop/vite.config.ts");
 assert(packageJson.name === "cindx-desktop", "desktop package name changed");
 assert(packageJson.scripts.dev.includes("vite"), "desktop dev script must run Vite");
 assert(packageJson.scripts.build.includes("vite build"), "desktop build script must build Vite");
-assert(packageJson.scripts.tauri.includes("tauri"), "desktop tauri script must call Tauri CLI");
 assert(
-  packageJson.scripts.tauri.includes("rustup/bin"),
-  "desktop tauri script must include the Rust toolchain PATH"
+  packageJson.scripts.tauri.includes("run-tauri.mjs") &&
+    runTauriSource.includes('args[0] === "build"') &&
+    runTauriSource.includes("nextPatchVersion") &&
+    runTauriSource.includes("rollbackDesktopVersion") &&
+    runTauriSource.includes("stable-aarch64-apple-darwin"),
+  "desktop Tauri builds must increment the patch version and retain the Rust toolchain PATH"
 );
 assert(packageJson.dependencies.react, "React dependency is missing");
 assert(packageJson.dependencies["@tauri-apps/api"], "Tauri API dependency is missing");
 assert(packageJson.devDependencies["@tauri-apps/cli"], "Tauri CLI dependency is missing");
 
 assert(tauriConfig.productName === "Cindx", "Tauri product name changed");
+assert(
+  /^\d+\.\d+\.\d+$/.test(packageJson.version) &&
+    packageLock.version === packageJson.version &&
+    packageLock.packages[""].version === packageJson.version &&
+    tauriConfig.version === packageJson.version &&
+    cargoToml.includes(`version = "${packageJson.version}"`) &&
+    cargoLock.includes(`name = "cindx-desktop"\nversion = "${packageJson.version}"`),
+  "Cindx version files must remain synchronized after every patch build"
+);
 assert(
   tauriConfig.build.devUrl === "http://127.0.0.1:5173",
   "Tauri devUrl should match Vite dev server"
@@ -143,8 +159,9 @@ assert(
 assert(
   appSource.includes("window-toolbar-panel-left") &&
     appSource.includes("window-toolbar-panel-right") &&
-    styles.includes("background: var(--panel)"),
-  "Titlebar pane regions must match their sidebar backgrounds"
+    styles.includes("backdrop-filter: saturate(1.3) blur(18px)") &&
+    styles.includes("background: rgba(250, 250, 250, 0.76)"),
+  "Titlebar regions must use one restrained translucent material"
 );
 assert(composerSource.includes('event.key !== "Enter"'), "Composer must support Enter to send");
 assert(composerSource.includes("event.shiftKey"), "Composer must reserve Shift+Enter for a new line");
@@ -205,6 +222,13 @@ assert(
   "Assistant output must begin without a robot icon or Cindx label"
 );
 assert(
+  sessionThreadSource.includes("thread-event-disclosure") &&
+    sessionThreadSource.includes("thread-tool-message") &&
+    sessionThreadSource.includes('aria-label="Done"') &&
+    styles.includes(".thread-state-check"),
+  "Tool activity must default to compact disclosures and render done as a check"
+);
+assert(
   sessionThreadSource.includes("thread-thinking") &&
     sessionThreadSource.includes("Thinking") &&
     !sessionThreadSource.includes("LoaderCircle") &&
@@ -259,6 +283,23 @@ assert(
 assert(appSource.includes('id: "runtime"'), "Settings must expose Runtime");
 assert(appSource.includes('id: "permissions"'), "Settings must expose Permissions");
 assert(
+  appSource.includes('id: "about"') &&
+    appSource.includes('data-settings-group="about"') &&
+    appSource.includes("runtime?.appVersion") &&
+    appSource.includes("about-app"),
+  "Settings must expose an About page with the packaged runtime version"
+);
+assert(
+  rustLib.includes("WindowEvent::CloseRequested") &&
+    rustLib.includes("RunEvent::ExitRequested") &&
+    rustLib.includes("NSAlert::new") &&
+    rustLib.includes("setShowsSuppressionButton(true)") &&
+    rustLib.includes("Don't ask again") &&
+    rustLib.includes("skip_quit_confirmation=true") &&
+    cargoToml.includes("objc2-app-kit"),
+  "macOS quit paths must use a native AppKit confirmation with persistent suppression"
+);
+assert(
   appSource.includes('id: "agent"') &&
     appSource.includes("Agent system prompt") &&
     appSource.includes("providerDraft.agentSystemPrompt") &&
@@ -268,6 +309,20 @@ assert(
   "Settings must persist and apply an editable Agent system prompt"
 );
 assert(!styles.includes("artifact-sidebar"), "Legacy artifact sidebar styles must be removed");
+assert(
+  inspectorSource.includes("inspector-outputs") &&
+    inspectorSource.includes("inspector-debug") &&
+    inspectorSource.includes("readArtifactImage") &&
+    inspectorSource.includes("useState(false)"),
+  "Inspector must lead with output previews and keep debug reference views collapsed"
+);
+assert(
+  tauriBridge.includes('invoke<string>("read_artifact_image"') &&
+    rustLib.includes("fn read_artifact_image") &&
+    rustLib.includes("canonical_path.starts_with(&canonical_root)") &&
+    rustLib.includes("24 * 1024 * 1024"),
+  "Artifact image previews must stay inside the workspace and enforce a size limit"
+);
 assert(!tauriBridge.includes("apiKeyPreview"), "Provider state must not expose API key suffixes");
 assert(appSource.includes("<ModelSelect"), "Provider models must use select controls");
 assert(appSource.includes("listProviderModels"), "Provider settings must load the remote model catalog");

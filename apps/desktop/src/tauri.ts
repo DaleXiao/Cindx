@@ -1,5 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import desktopPackage from "../package.json";
+
+export const DESKTOP_VERSION = desktopPackage.version;
 
 export type RuntimeStatus = {
   appVersion: string;
@@ -29,6 +32,66 @@ export type SidecarConfigInput = {
   browserPath: string;
   computerPath: string;
   autoConfigure: boolean;
+};
+
+export type McpTransportConfig =
+  | {
+      type: "stdio";
+      command: string;
+      args: string[];
+      env: Record<string, string>;
+    }
+  | {
+      type: "streamable_http";
+      url: string;
+      headers: Record<string, string>;
+    };
+
+export type McpServerConfig = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  requireApproval: boolean;
+  timeoutMs: number;
+  transport: McpTransportConfig;
+};
+
+export type McpServerView = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  requireApproval: boolean;
+  timeoutMs: number;
+  transportType: "stdio" | "streamable_http";
+  command: string | null;
+  args: string[];
+  url: string | null;
+  secretKeys: string[];
+  toolCount: number;
+  refreshedAtMs: number | null;
+  lastError: string | null;
+};
+
+export type McpState = {
+  servers: McpServerView[];
+  lastError: string | null;
+};
+
+export type SkillRecord = {
+  id: string;
+  name: string;
+  description: string;
+  folderName: string;
+  root: string;
+  scope: "global" | "project" | "compatibility";
+  enabled: boolean;
+  trusted: boolean;
+  requiredTools: string[];
+};
+
+export type SkillState = {
+  skills: SkillRecord[];
+  lastError: string | null;
 };
 
 export type ProjectView = {
@@ -616,7 +679,7 @@ export async function getRuntimeStatus(): Promise<RuntimeStatus> {
     return await invoke<RuntimeStatus>("get_runtime_status");
   } catch {
     return {
-      appVersion: "0.1.0",
+      appVersion: DESKTOP_VERSION,
       kernelStatus: "browser preview",
       workspaceRoot: ".",
       orchestrationModes: ["single", "plan_execute_review", "best_of_n", "auto_router"],
@@ -652,7 +715,7 @@ export async function saveWorkspaceRoot(path: string): Promise<RuntimeStatus> {
   } catch (error) {
     if (isTauriRuntime()) throw error;
     return {
-      appVersion: "0.1.0",
+      appVersion: DESKTOP_VERSION,
       kernelStatus: "browser preview",
       workspaceRoot: path,
       orchestrationModes: ["single", "plan_execute_review", "best_of_n", "auto_router"],
@@ -688,6 +751,62 @@ export async function getSidecarState(): Promise<SidecarState> {
   } catch {
     return browserSidecarState;
   }
+}
+
+export async function getMcpState(): Promise<McpState> {
+  try {
+    return await invoke<McpState>("get_mcp_state");
+  } catch (error) {
+    return { servers: [], lastError: String(error) };
+  }
+}
+
+export async function saveMcpServers(servers: McpServerConfig[]): Promise<McpState> {
+  return await invoke<McpState>("save_mcp_servers", { input: { servers } });
+}
+
+export async function upsertMcpServer(server: McpServerConfig): Promise<McpState> {
+  return await invoke<McpState>("upsert_mcp_server", { input: { server } });
+}
+
+export async function updateMcpServerPolicy(
+  serverId: string,
+  enabled: boolean,
+  requireApproval: boolean
+): Promise<McpState> {
+  return await invoke<McpState>("update_mcp_server_policy", {
+    input: { serverId, enabled, requireApproval }
+  });
+}
+
+export async function removeMcpServer(serverId: string): Promise<McpState> {
+  return await invoke<McpState>("remove_mcp_server", { serverId });
+}
+
+export async function refreshMcpServer(serverId: string): Promise<McpState> {
+  return await invoke<McpState>("refresh_mcp_server", { serverId });
+}
+
+export async function getSkillState(): Promise<SkillState> {
+  try {
+    return await invoke<SkillState>("get_skill_state");
+  } catch (error) {
+    return { skills: [], lastError: String(error) };
+  }
+}
+
+export async function refreshSkills(): Promise<SkillState> {
+  return await invoke<SkillState>("refresh_skills");
+}
+
+export async function saveSkillPreference(
+  skillId: string,
+  enabled: boolean,
+  trusted: boolean
+): Promise<SkillState> {
+  return await invoke<SkillState>("save_skill_preference", {
+    input: { skillId, enabled, trusted }
+  });
 }
 
 export async function saveSidecarConfig(input: SidecarConfigInput): Promise<SidecarState> {
@@ -1693,6 +1812,10 @@ export async function subscribeToModelStream(
   } catch {
     return () => {};
   }
+}
+
+export async function readArtifactImage(path: string): Promise<string> {
+  return invoke<string>("read_artifact_image", { path });
 }
 
 function createBrowserContextCheckpoint(path: string | null): ContextCheckpointView {

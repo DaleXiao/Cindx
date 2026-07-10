@@ -11,12 +11,25 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 [[package]]
 name = "agent-core"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "agent-graph"
 version = "0.1.0"
 dependencies = [
  "agent-rag",
+]
+
+[[package]]
+name = "agent-mcp"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "serde",
+ "serde_json",
+ "tools",
 ]
 
 [[package]]
@@ -36,6 +49,17 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "model-provider",
+ "serde_json",
+]
+
+[[package]]
+name = "agent-skills"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "serde",
+ "serde_json",
+ "tools",
 ]
 
 [[package]]
@@ -360,17 +384,24 @@ dependencies = [
 
 [[package]]
 name = "cindx-desktop"
-version = "0.1.0"
+version = "0.0.3"
 dependencies = [
  "agent-core",
  "agent-graph",
+ "agent-mcp",
  "agent-memory",
  "agent-rag",
  "agent-runtime",
+ "agent-skills",
  "agent-storage",
+ "base64 0.22.1",
  "model-provider",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "orchestrator",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tools",
@@ -1781,6 +1812,7 @@ name = "model-provider"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "serde_json",
 ]
 
 [[package]]
@@ -3465,6 +3497,7 @@ name = "tools"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "serde_json",
 ]
 
 [[package]]

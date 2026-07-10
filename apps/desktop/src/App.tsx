@@ -2,13 +2,16 @@ import {
   Activity,
   ArrowLeft,
   ArchiveRestore,
+  BookOpen,
   Bot,
+  Cable,
   CheckCircle2,
   ChevronRight,
   Clock3,
   Database,
   FileText,
   Globe2,
+  Info,
   KeyRound,
   LayoutDashboard,
   PanelLeftClose,
@@ -23,6 +26,7 @@ import {
   ShieldCheck,
   ShieldQuestion,
   TerminalSquare,
+  Trash2,
   TriangleAlert,
   XCircle
 } from "lucide-react";
@@ -47,6 +51,7 @@ import {
   createProject,
   createSession,
   deleteSession,
+  DESKTOP_VERSION,
   exportAgentTraceJsonl,
   getAgentState,
   getAgentTraceState,
@@ -60,6 +65,8 @@ import {
   getProjectSessionState,
   getRuntimeStatus,
   getSidecarState,
+  getMcpState,
+  getSkillState,
   indexWorkspaceRag,
   forkSession,
   listProviderModels,
@@ -69,6 +76,8 @@ import {
   Phase6State,
   Phase7State,
   Phase8State,
+  McpServerConfig,
+  McpState,
   ProviderConfigInput,
   ProviderConfigState,
   ProjectSessionState,
@@ -86,6 +95,13 @@ import {
   runOrchestration,
   saveProviderConfig,
   saveSidecarConfig,
+  refreshMcpServer,
+  refreshSkills,
+  removeMcpServer,
+  saveSkillPreference,
+  SkillState,
+  updateMcpServerPolicy,
+  upsertMcpServer,
   saveWorkspaceRoot,
   searchRag,
   selectProject,
@@ -93,6 +109,8 @@ import {
   SidecarState,
   subscribeToModelStream
 } from "./tauri";
+
+const appIconUrl = new URL("../src-tauri/icons/icon.png", import.meta.url).href;
 
 function providerDraftFromState(provider: ProviderConfigState): ProviderConfigInput {
   return {
@@ -187,7 +205,10 @@ const settingsCategories = [
   { id: "agent", label: "Agent", description: "System instructions and behavior" },
   { id: "knowledge", label: "Knowledge", description: "Context, memory, and retrieval" },
   { id: "tools", label: "Tools", description: "Browser and local tool controls" },
-  { id: "permissions", label: "Permissions", description: "Approvals and review history" }
+  { id: "mcp", label: "MCP", description: "External tool servers and catalogs" },
+  { id: "skills", label: "Skills", description: "Reusable agent instructions and resources" },
+  { id: "permissions", label: "Permissions", description: "Approvals and review history" },
+  { id: "about", label: "About", description: "Version and application information" }
 ] as const;
 
 type SettingsCategory = (typeof settingsCategories)[number]["id"];
@@ -199,7 +220,10 @@ function SettingsCategoryIcon({ category }: { category: SettingsCategory }) {
   if (category === "agent") return <Bot aria-hidden="true" />;
   if (category === "knowledge") return <Database aria-hidden="true" />;
   if (category === "tools") return <TerminalSquare aria-hidden="true" />;
-  return <ShieldCheck aria-hidden="true" />;
+  if (category === "mcp") return <Cable aria-hidden="true" />;
+  if (category === "skills") return <BookOpen aria-hidden="true" />;
+  if (category === "permissions") return <ShieldCheck aria-hidden="true" />;
+  return <Info aria-hidden="true" />;
 }
 
 export function App() {
@@ -228,6 +252,8 @@ export function App() {
     useState<SessionThreadSelection | null>(null);
   const [selectedTraceStepId, setSelectedTraceStepId] = useState<string | null>(null);
   const [sidecarState, setSidecarState] = useState<SidecarState | null>(null);
+  const [mcpState, setMcpState] = useState<McpState | null>(null);
+  const [skillState, setSkillState] = useState<SkillState | null>(null);
   const [projectSessionState, setProjectSessionState] = useState<ProjectSessionState | null>(null);
   const [sidecarDraft, setSidecarDraft] = useState({
     browserPath: "",
@@ -264,6 +290,15 @@ export function App() {
   const [contextBusy, setContextBusy] = useState(false);
   const [traceBusy, setTraceBusy] = useState(false);
   const [sidecarBusy, setSidecarBusy] = useState(false);
+  const [mcpBusy, setMcpBusy] = useState(false);
+  const [skillBusy, setSkillBusy] = useState(false);
+  const [mcpDraft, setMcpDraft] = useState({
+    name: "",
+    command: "",
+    args: "",
+    envKey: "",
+    envValue: ""
+  });
   const [projectSessionBusy, setProjectSessionBusy] = useState(false);
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(() => new Set());
   const [sessionStatusOverrides, setSessionStatusOverrides] = useState<Record<string, string>>({});
@@ -312,6 +347,14 @@ export function App() {
           computerPath: state.computer.path,
           autoConfigure: state.autoConfigure
         });
+        setComposerError((current) => current ?? state.lastError);
+      });
+      getMcpState().then((state) => {
+        setMcpState(state);
+        setComposerError((current) => current ?? state.lastError);
+      });
+      getSkillState().then((state) => {
+        setSkillState(state);
         setComposerError((current) => current ?? state.lastError);
       });
       getPhase3State().then(setPhase3);
@@ -785,6 +828,102 @@ export function App() {
       setComposerError(next.lastError);
     } finally {
       setSidecarBusy(false);
+    }
+  }
+
+  async function handleAddMcpServer() {
+    const name = mcpDraft.name.trim();
+    const command = mcpDraft.command.trim();
+    if (!name || !command) return;
+    const id = `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "mcp"}-${Date.now()}`;
+    const env =
+      mcpDraft.envKey.trim() && mcpDraft.envValue
+        ? { [mcpDraft.envKey.trim()]: mcpDraft.envValue }
+        : {};
+    const server: McpServerConfig = {
+      id,
+      name,
+      enabled: true,
+      requireApproval: true,
+      timeoutMs: 30000,
+      transport: {
+        type: "stdio",
+        command,
+        args: mcpDraft.args.split(/\s+/).filter(Boolean),
+        env
+      }
+    };
+    setMcpBusy(true);
+    setComposerError(null);
+    try {
+      setMcpState(await upsertMcpServer(server));
+      setMcpDraft({ name: "", command: "", args: "", envKey: "", envValue: "" });
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMcpBusy(false);
+    }
+  }
+
+  async function handleRefreshMcpServer(serverId: string) {
+    setMcpBusy(true);
+    setComposerError(null);
+    try {
+      const next = await refreshMcpServer(serverId);
+      setMcpState(next);
+      setComposerError(next.lastError);
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMcpBusy(false);
+    }
+  }
+
+  async function handleMcpPolicy(
+    serverId: string,
+    enabled: boolean,
+    requireApproval: boolean
+  ) {
+    setMcpBusy(true);
+    try {
+      setMcpState(await updateMcpServerPolicy(serverId, enabled, requireApproval));
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMcpBusy(false);
+    }
+  }
+
+  async function handleRemoveMcpServer(serverId: string) {
+    setMcpBusy(true);
+    try {
+      setMcpState(await removeMcpServer(serverId));
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMcpBusy(false);
+    }
+  }
+
+  async function handleRefreshSkills() {
+    setSkillBusy(true);
+    try {
+      setSkillState(await refreshSkills());
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSkillBusy(false);
+    }
+  }
+
+  async function handleSkillPreference(skillId: string, enabled: boolean, trusted: boolean) {
+    setSkillBusy(true);
+    try {
+      setSkillState(await saveSkillPreference(skillId, enabled, trusted));
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSkillBusy(false);
     }
   }
 
@@ -2240,6 +2379,248 @@ export function App() {
                 </div>
               </details>
             </section>
+
+            <section className="settings-section" data-settings-group="mcp">
+              <div className="section-title">
+                <Cable size={17} aria-hidden="true" />
+                <h2>MCP servers</h2>
+              </div>
+              <div className="integration-list">
+                {(mcpState?.servers ?? []).length === 0 ? (
+                  <div className="settings-empty">No MCP servers configured</div>
+                ) : (
+                  mcpState?.servers.map((server) => (
+                    <div className="integration-row" key={server.id}>
+                      <div className="integration-main">
+                        <strong>{server.name}</strong>
+                        <span>
+                          {server.transportType === "stdio" ? server.command : server.url}
+                        </span>
+                        <small>
+                          {server.toolCount} tools
+                          {server.refreshedAtMs
+                            ? ` · refreshed ${formatTime(server.refreshedAtMs)}`
+                            : " · catalog not loaded"}
+                        </small>
+                        {server.lastError && (
+                          <small className="settings-inline-error">{server.lastError}</small>
+                        )}
+                      </div>
+                      <div className="integration-controls">
+                        <label className="checkbox-row">
+                          <input
+                            type="checkbox"
+                            checked={server.enabled}
+                            disabled={mcpBusy}
+                            onChange={(event) =>
+                              void handleMcpPolicy(
+                                server.id,
+                                event.target.checked,
+                                server.requireApproval
+                              )
+                            }
+                          />
+                          <span>Enabled</span>
+                        </label>
+                        <label className="checkbox-row">
+                          <input
+                            type="checkbox"
+                            checked={server.requireApproval}
+                            disabled={mcpBusy}
+                            onChange={(event) =>
+                              void handleMcpPolicy(
+                                server.id,
+                                server.enabled,
+                                event.target.checked
+                              )
+                            }
+                          />
+                          <span>Ask before use</span>
+                        </label>
+                        <button
+                          className="icon-button"
+                          type="button"
+                          title="Refresh catalog"
+                          disabled={mcpBusy || !server.enabled}
+                          onClick={() => void handleRefreshMcpServer(server.id)}
+                        >
+                          <RefreshCw aria-hidden="true" />
+                        </button>
+                        <button
+                          className="icon-button"
+                          type="button"
+                          title="Remove server"
+                          disabled={mcpBusy}
+                          onClick={() => void handleRemoveMcpServer(server.id)}
+                        >
+                          <Trash2 aria-hidden="true" />
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+              <details className="advanced-settings">
+                <summary>Add stdio server</summary>
+                <div className="provider-form">
+                  <div className="role-grid">
+                    <label>
+                      <span>Name</span>
+                      <input
+                        value={mcpDraft.name}
+                        onChange={(event) => setMcpDraft({ ...mcpDraft, name: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>Command</span>
+                      <input
+                        value={mcpDraft.command}
+                        spellCheck={false}
+                        onChange={(event) =>
+                          setMcpDraft({ ...mcpDraft, command: event.target.value })
+                        }
+                      />
+                    </label>
+                  </div>
+                  <label>
+                    <span>Arguments</span>
+                    <input
+                      value={mcpDraft.args}
+                      spellCheck={false}
+                      placeholder="--flag value"
+                      onChange={(event) => setMcpDraft({ ...mcpDraft, args: event.target.value })}
+                    />
+                  </label>
+                  <div className="role-grid">
+                    <label>
+                      <span>Secret environment key</span>
+                      <input
+                        value={mcpDraft.envKey}
+                        spellCheck={false}
+                        placeholder="API_KEY"
+                        onChange={(event) =>
+                          setMcpDraft({ ...mcpDraft, envKey: event.target.value })
+                        }
+                      />
+                    </label>
+                    <label>
+                      <span>Secret value</span>
+                      <input
+                        type="password"
+                        value={mcpDraft.envValue}
+                        autoComplete="off"
+                        onChange={(event) =>
+                          setMcpDraft({ ...mcpDraft, envValue: event.target.value })
+                        }
+                      />
+                    </label>
+                  </div>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    disabled={mcpBusy || !mcpDraft.name.trim() || !mcpDraft.command.trim()}
+                    onClick={() => void handleAddMcpServer()}
+                  >
+                    <Cable aria-hidden="true" />
+                    <span>{mcpBusy ? "Saving" : "Add server"}</span>
+                  </button>
+                </div>
+              </details>
+            </section>
+
+            <section className="settings-section" data-settings-group="skills">
+              <div className="section-title">
+                <BookOpen size={17} aria-hidden="true" />
+                <h2>Skills</h2>
+              </div>
+              <div className="settings-toolbar">
+                <span>{skillState?.skills.length ?? 0} discovered</span>
+                <button
+                  className="icon-button"
+                  type="button"
+                  title="Refresh skills"
+                  disabled={skillBusy}
+                  onClick={() => void handleRefreshSkills()}
+                >
+                  <RefreshCw aria-hidden="true" />
+                </button>
+              </div>
+              <div className="integration-list">
+                {(skillState?.skills ?? []).length === 0 ? (
+                  <div className="settings-empty">
+                    Add SKILL.md packages under .cindx/skills or ~/.cindx/skills
+                  </div>
+                ) : (
+                  skillState?.skills.map((skill) => (
+                    <div className="integration-row" key={skill.id}>
+                      <div className="integration-main">
+                        <strong>{skill.name}</strong>
+                        <span>{skill.description || skill.folderName}</span>
+                        <small>
+                          {skill.scope} · {skill.requiredTools.length} declared tools
+                        </small>
+                      </div>
+                      <div className="integration-controls">
+                        <label className="checkbox-row">
+                          <input
+                            type="checkbox"
+                            checked={skill.trusted}
+                            disabled={skillBusy}
+                            onChange={(event) =>
+                              void handleSkillPreference(
+                                skill.id,
+                                event.target.checked ? skill.enabled : false,
+                                event.target.checked
+                              )
+                            }
+                          />
+                          <span>Trusted</span>
+                        </label>
+                        <label className="checkbox-row">
+                          <input
+                            type="checkbox"
+                            checked={skill.enabled}
+                            disabled={skillBusy || !skill.trusted}
+                            onChange={(event) =>
+                              void handleSkillPreference(
+                                skill.id,
+                                event.target.checked,
+                                skill.trusted
+                              )
+                            }
+                          />
+                          <span>Enabled</span>
+                        </label>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+
+            <section className="settings-section about-settings" data-settings-group="about">
+              <div className="about-app">
+                <img src={appIconUrl} alt="" />
+                <div>
+                  <h2>Cindx</h2>
+                  <span>Version {runtime?.appVersion ?? DESKTOP_VERSION}</span>
+                </div>
+              </div>
+              <dl className="settings-facts">
+                <div>
+                  <dt>Application</dt>
+                  <dd>Cindx</dd>
+                </div>
+                <div>
+                  <dt>Version</dt>
+                  <dd>{runtime?.appVersion ?? DESKTOP_VERSION}</dd>
+                </div>
+                <div>
+                  <dt>Platform</dt>
+                  <dd>Desktop</dd>
+                </div>
+              </dl>
+            </section>
           </section>
         )}
       </section>
@@ -2256,6 +2637,10 @@ export function App() {
         ragSources={ragSources}
         browserObservations={browserObservations}
         toolResults={toolResults}
+        traceArtifacts={(agentTraceState?.turns ?? [])
+          .flatMap((turn) => turn.steps)
+          .filter((step) => Boolean(step.artifactPath))}
+        workspaceRoot={runtime?.workspaceRoot ?? ""}
         agentStatus={agentState?.status ?? "idle"}
         agentTurnCount={agentState?.turnCount ?? 0}
         agentMaxTurns={agentState?.maxTurns ?? 24}

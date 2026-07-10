@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_core::{
@@ -39,8 +40,15 @@ pub trait Tool: Send + Sync {
     fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError>;
 }
 
+#[derive(Clone)]
 pub struct ToolRegistry {
-    tools: BTreeMap<String, Box<dyn Tool>>,
+    tools: BTreeMap<String, Arc<dyn Tool>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolExposurePlan {
+    pub inline: Vec<ToolSpec>,
+    pub deferred: Vec<ToolSpec>,
 }
 
 impl ToolRegistry {
@@ -74,7 +82,7 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
-        self.tools.insert(tool.spec().name.clone(), tool);
+        self.tools.insert(tool.spec().name.clone(), Arc::from(tool));
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
@@ -84,12 +92,299 @@ impl ToolRegistry {
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools.get(name).map(|tool| tool.as_ref())
     }
+
+    pub fn install_meta_tools(&mut self) {
+        if self.tools.contains_key("tool.search") {
+            return;
+        }
+        let catalog = self.clone();
+        self.register(Box::new(ToolSearchMeta {
+            catalog: catalog.clone(),
+        }));
+        self.register(Box::new(ToolInspectMeta {
+            catalog: catalog.clone(),
+        }));
+        self.register(Box::new(ToolInvokeMeta { catalog }));
+    }
+
+    pub fn exposure_plan(&self, prompt: &str, context_window: u64) -> ToolExposurePlan {
+        let mut candidates = self
+            .tools
+            .values()
+            .map(|tool| tool.spec())
+            .filter(|spec| spec.namespace != "meta")
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| left.name.cmp(&right.name));
+
+        let auto_count = candidates
+            .iter()
+            .filter(|spec| matches!(spec.exposure, agent_core::ToolExposure::Auto))
+            .count();
+        let max_auto = if context_window < 32_000 { 10 } else { 24 };
+        if auto_count <= max_auto {
+            return ToolExposurePlan {
+                inline: candidates,
+                deferred: Vec::new(),
+            };
+        }
+
+        let query = prompt.to_ascii_lowercase();
+        candidates.sort_by(|left, right| {
+            tool_relevance(right, &query)
+                .cmp(&tool_relevance(left, &query))
+                .then(left.name.cmp(&right.name))
+        });
+        let mut inline = Vec::new();
+        let mut deferred = Vec::new();
+        let mut auto_inline = 0usize;
+        for spec in candidates {
+            match spec.exposure {
+                agent_core::ToolExposure::Inline => inline.push(spec),
+                agent_core::ToolExposure::Deferred => deferred.push(spec),
+                agent_core::ToolExposure::Auto if auto_inline < max_auto => {
+                    auto_inline += 1;
+                    inline.push(spec);
+                }
+                agent_core::ToolExposure::Auto => deferred.push(spec),
+            }
+        }
+        if !deferred.is_empty() {
+            for name in ["tool.search", "tool.inspect", "tool.invoke"] {
+                if let Some(tool) = self.tools.get(name) {
+                    inline.push(tool.spec());
+                }
+            }
+        }
+        inline.sort_by(|left, right| left.name.cmp(&right.name));
+        deferred.sort_by(|left, right| left.name.cmp(&right.name));
+        ToolExposurePlan { inline, deferred }
+    }
 }
 
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn tool_relevance(spec: &ToolSpec, query: &str) -> usize {
+    let mut score = 0;
+    for token in query.split(|character: char| !character.is_alphanumeric()) {
+        if token.len() < 3 {
+            continue;
+        }
+        if spec.name.to_ascii_lowercase().contains(token) {
+            score += 4;
+        }
+        if spec.namespace.to_ascii_lowercase().contains(token) {
+            score += 3;
+        }
+        if spec.description.to_ascii_lowercase().contains(token) {
+            score += 1;
+        }
+    }
+    score
+}
+
+struct ToolSearchMeta {
+    catalog: ToolRegistry,
+}
+
+impl Tool for ToolSearchMeta {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec::new(
+            "tool.search",
+            "meta",
+            "Search the deferred Cindx tool catalog by query or namespace.",
+            ToolRisk::ReadOnly,
+            agent_core::ToolSource::BuiltIn,
+            agent_core::ToolExposure::Inline,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "namespace": { "type": "string" }
+                },
+                "additionalProperties": false
+            })
+            .to_string(),
+        )
+    }
+
+    fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
+        None
+    }
+
+    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
+        let input: serde_json::Value = serde_json::from_str(&invocation.input_json)
+            .map_err(|error| ToolError::new(format!("invalid tool search input: {error}")))?;
+        let query = input
+            .get("query")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let namespace = input
+            .get("namespace")
+            .and_then(serde_json::Value::as_str);
+        let mut rows = self
+            .catalog
+            .specs()
+            .into_iter()
+            .filter(|spec| spec.namespace != "meta")
+            .filter(|spec| namespace.is_none_or(|namespace| spec.namespace == namespace))
+            .filter(|spec| {
+                query.is_empty()
+                    || format!("{} {} {}", spec.name, spec.namespace, spec.description)
+                        .to_ascii_lowercase()
+                        .contains(&query)
+            })
+            .map(|spec| format!("{}\t{}\t{}", spec.name, spec.namespace, spec.description))
+            .collect::<Vec<_>>();
+        rows.sort();
+        rows.truncate(20);
+        Ok(ToolResult::text(
+            invocation.id,
+            ToolOutcomeStatus::Succeeded,
+            if rows.is_empty() {
+                "No matching tools.".to_string()
+            } else {
+                rows.join("\n")
+            },
+            Metadata::new(),
+        ))
+    }
+}
+
+struct ToolInspectMeta {
+    catalog: ToolRegistry,
+}
+
+impl Tool for ToolInspectMeta {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec::new(
+            "tool.inspect",
+            "meta",
+            "Inspect one deferred tool's description and JSON schema before invoking it.",
+            ToolRisk::ReadOnly,
+            agent_core::ToolSource::BuiltIn,
+            agent_core::ToolExposure::Inline,
+            serde_json::json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name"],
+                "additionalProperties": false
+            })
+            .to_string(),
+        )
+    }
+
+    fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
+        None
+    }
+
+    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
+        let (name, _) = meta_target(&invocation.input_json)?;
+        let spec = self
+            .catalog
+            .get(&name)
+            .map(Tool::spec)
+            .ok_or_else(|| ToolError::new(format!("unknown tool: {name}")))?;
+        let output = serde_json::json!({
+            "name": spec.name,
+            "namespace": spec.namespace,
+            "description": spec.description,
+            "inputSchema": serde_json::from_str::<serde_json::Value>(&spec.input_schema_json).unwrap_or_default(),
+            "risk": format!("{:?}", spec.risk),
+        })
+        .to_string();
+        Ok(ToolResult::text(
+            invocation.id,
+            ToolOutcomeStatus::Succeeded,
+            output,
+            Metadata::new(),
+        ))
+    }
+}
+
+struct ToolInvokeMeta {
+    catalog: ToolRegistry,
+}
+
+impl ToolInvokeMeta {
+    fn target_invocation(&self, invocation: &ToolInvocation) -> Result<ToolInvocation, ToolError> {
+        let (name, arguments) = meta_target(&invocation.input_json)?;
+        if name.starts_with("tool.") {
+            return Err(ToolError::new("meta tools cannot invoke other meta tools"));
+        }
+        if self.catalog.get(&name).is_none() {
+            return Err(ToolError::new(format!("unknown tool: {name}")));
+        }
+        Ok(ToolInvocation {
+            id: invocation.id.clone(),
+            task_id: invocation.task_id.clone(),
+            tool_name: name,
+            input_json: arguments.to_string(),
+            proposed_by_model: invocation.proposed_by_model.clone(),
+            metadata: invocation.metadata.clone(),
+        })
+    }
+}
+
+impl Tool for ToolInvokeMeta {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec::new(
+            "tool.invoke",
+            "meta",
+            "Invoke a deferred tool by exact name with a JSON arguments object.",
+            ToolRisk::SensitiveContext,
+            agent_core::ToolSource::BuiltIn,
+            agent_core::ToolExposure::Inline,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "arguments": { "type": "object" }
+                },
+                "required": ["name", "arguments"],
+                "additionalProperties": false
+            })
+            .to_string(),
+        )
+    }
+
+    fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
+        let target = self.target_invocation(invocation).ok()?;
+        self.catalog
+            .get(&target.tool_name)
+            .and_then(|tool| tool.permission_request(&target))
+    }
+
+    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
+        let target = self.target_invocation(&invocation)?;
+        self.catalog
+            .get(&target.tool_name)
+            .ok_or_else(|| ToolError::new(format!("unknown tool: {}", target.tool_name)))?
+            .execute(target)
+    }
+}
+
+fn meta_target(input: &str) -> Result<(String, serde_json::Value), ToolError> {
+    let input: serde_json::Value = serde_json::from_str(input)
+        .map_err(|error| ToolError::new(format!("invalid meta tool input: {error}")))?;
+    let name = input
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| ToolError::new("meta tool requires a target name"))?
+        .to_string();
+    let arguments = input
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !arguments.is_object() {
+        return Err(ToolError::new("meta tool arguments must be an object"));
+    }
+    Ok((name, arguments))
 }
 
 pub struct ReadFileTool {
@@ -106,12 +401,12 @@ impl ReadFileTool {
 
 impl Tool for ReadFileTool {
     fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "file.read".to_string(),
-            description: "Read a UTF-8 file inside the workspace.".to_string(),
-            risk: ToolRisk::ReadOnly,
-            input_schema_json: "path=<workspace-relative-path>".to_string(),
-        }
+        builtin_tool_spec(
+            "file.read",
+            "Read a UTF-8 file inside the workspace.",
+            ToolRisk::ReadOnly,
+            "path=<workspace-relative-path>",
+        )
     }
 
     fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -148,12 +443,12 @@ impl ListDirectoryTool {
 
 impl Tool for ListDirectoryTool {
     fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "file.list".to_string(),
-            description: "List files and directories inside the workspace.".to_string(),
-            risk: ToolRisk::ReadOnly,
-            input_schema_json: "path=<workspace-relative-path>".to_string(),
-        }
+        builtin_tool_spec(
+            "file.list",
+            "List files and directories inside the workspace.",
+            ToolRisk::ReadOnly,
+            "path=<optional workspace-relative-path>",
+        )
     }
 
     fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -215,14 +510,12 @@ impl SearchFilesTool {
 
 impl Tool for SearchFilesTool {
     fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "file.search".to_string(),
-            description: "Search UTF-8 files inside the workspace for a literal query.".to_string(),
-            risk: ToolRisk::ReadOnly,
-            input_schema_json:
-                "query=<literal text>\npath=<optional workspace-relative path>\nmax_results=<optional number>"
-                    .to_string(),
-        }
+        builtin_tool_spec(
+            "file.search",
+            "Search UTF-8 files inside the workspace for a literal query.",
+            ToolRisk::ReadOnly,
+            "query=<literal text>\npath=<optional workspace-relative path>\nmax_results=<optional number>",
+        )
     }
 
     fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -275,12 +568,12 @@ impl WriteFileTool {
 
 impl Tool for WriteFileTool {
     fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "file.write".to_string(),
-            description: "Write UTF-8 content to a file inside the workspace.".to_string(),
-            risk: ToolRisk::WritesWorkspace,
-            input_schema_json: "path=<workspace-relative-path>\ncontent=<utf-8 content>".to_string(),
-        }
+        builtin_tool_spec(
+            "file.write",
+            "Write UTF-8 content to a file inside the workspace.",
+            ToolRisk::WritesWorkspace,
+            "path=<workspace-relative-path>\ncontent=<utf-8 content>",
+        )
     }
 
     fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -343,12 +636,12 @@ impl ShellRunTool {
 
 impl Tool for ShellRunTool {
     fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "shell.run".to_string(),
-            description: "Run a shell command in the workspace.".to_string(),
-            risk: ToolRisk::ExecutesProcess,
-            input_schema_json: "command=<shell command>\ncwd=<optional workspace-relative path>".to_string(),
-        }
+        builtin_tool_spec(
+            "shell.run",
+            "Run a shell command in the workspace.",
+            ToolRisk::ExecutesProcess,
+            "command=<shell command>\ncwd=<optional workspace-relative path>",
+        )
     }
 
     fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -424,12 +717,12 @@ pub struct WebSearchTool;
 
 impl Tool for WebSearchTool {
     fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "web.search".to_string(),
-            description: "Search the web through a lightweight HTML endpoint.".to_string(),
-            risk: ToolRisk::UsesNetwork,
-            input_schema_json: "query=<search query>\nmax_results=<optional number>".to_string(),
-        }
+        builtin_tool_spec(
+            "web.search",
+            "Search the web through a lightweight HTML endpoint.",
+            ToolRisk::UsesNetwork,
+            "query=<search query>\nmax_results=<optional number>",
+        )
     }
 
     fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -483,12 +776,12 @@ pub struct BrowserOpenTool;
 
 impl Tool for BrowserOpenTool {
     fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "browser.open".to_string(),
-            description: "Open a URL in the system browser.".to_string(),
-            risk: ToolRisk::UsesNetwork,
-            input_schema_json: "url=<http-or-https-url>".to_string(),
-        }
+        builtin_tool_spec(
+            "browser.open",
+            "Open a URL in the system browser.",
+            ToolRisk::UsesNetwork,
+            "url=<http-or-https-url>",
+        )
     }
 
     fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -534,12 +827,12 @@ pub struct BrowserExtractTextTool;
 
 impl Tool for BrowserExtractTextTool {
     fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "browser.extract_text".to_string(),
-            description: "Fetch a webpage and extract readable text.".to_string(),
-            risk: ToolRisk::UsesNetwork,
-            input_schema_json: "url=<http-or-https-url>".to_string(),
-        }
+        builtin_tool_spec(
+            "browser.extract_text",
+            "Fetch a webpage and extract readable text.",
+            ToolRisk::UsesNetwork,
+            "url=<http-or-https-url>",
+        )
     }
 
     fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -579,14 +872,12 @@ impl BrowserCaptureTool {
 
 impl Tool for BrowserCaptureTool {
     fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "browser.capture".to_string(),
-            description: "Capture a webpage screenshot when Playwright is available, with HTML/text fallback.".to_string(),
-            risk: ToolRisk::UsesNetwork,
-            input_schema_json:
-                "url=<http-or-https-url>\noutput_dir=<optional workspace-relative directory>"
-                    .to_string(),
-        }
+        builtin_tool_spec(
+            "browser.capture",
+            "Capture a webpage screenshot when Playwright is available, with HTML/text fallback.",
+            ToolRisk::UsesNetwork,
+            "url=<http-or-https-url>\noutput_dir=<optional workspace-relative directory>",
+        )
     }
 
     fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -756,12 +1047,12 @@ impl BrowserActionTool {
 
 impl Tool for BrowserActionTool {
     fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: self.kind.tool_name().to_string(),
-            description: self.kind.description().to_string(),
-            risk: self.kind.risk(),
-            input_schema_json: self.kind.schema().to_string(),
-        }
+        builtin_tool_spec(
+            self.kind.tool_name(),
+            self.kind.description(),
+            self.kind.risk(),
+            self.kind.schema(),
+        )
     }
 
     fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -956,12 +1247,12 @@ impl ComputerTool {
 
 impl Tool for ComputerTool {
     fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: self.kind.tool_name().to_string(),
-            description: self.kind.description().to_string(),
-            risk: self.kind.risk(),
-            input_schema_json: self.kind.schema().to_string(),
-        }
+        builtin_tool_spec(
+            self.kind.tool_name(),
+            self.kind.description(),
+            self.kind.risk(),
+            self.kind.schema(),
+        )
     }
 
     fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -1054,7 +1345,80 @@ impl Tool for ComputerTool {
     }
 }
 
+fn builtin_tool_spec(
+    name: &str,
+    description: &str,
+    risk: ToolRisk,
+    legacy_schema: &str,
+) -> ToolSpec {
+    let namespace = name.split('.').next().unwrap_or("builtin");
+    ToolSpec::builtin(
+        name,
+        namespace,
+        description,
+        risk,
+        object_schema_from_fields(legacy_schema),
+    )
+}
+
+fn object_schema_from_fields(fields: &str) -> String {
+    let mut properties = serde_json::Map::new();
+    let mut required = Vec::new();
+    for row in fields.lines() {
+        let Some((name, descriptor)) = row.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        let description = descriptor
+            .trim()
+            .trim_matches(|character| character == '<' || character == '>');
+        if name.is_empty() {
+            continue;
+        }
+        let value_type = match name {
+            "destructive" => "boolean",
+            "x" | "y" | "delta_x" | "delta_y" | "limit" | "max_results" => "integer",
+            _ => "string",
+        };
+        properties.insert(
+            name.to_string(),
+            serde_json::json!({
+                "type": value_type,
+                "description": description,
+            }),
+        );
+        if !description.to_ascii_lowercase().contains("optional") {
+            required.push(serde_json::Value::String(name.to_string()));
+        }
+    }
+    serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false,
+    })
+    .to_string()
+}
+
 pub fn parse_input(input: &str) -> BTreeMap<String, String> {
+    if let Ok(serde_json::Value::Object(values)) = serde_json::from_str(input) {
+        if values.len() == 1 {
+            if let Some(serde_json::Value::String(legacy)) = values.get("input") {
+                return parse_input(legacy);
+            }
+        }
+        return values
+            .into_iter()
+            .map(|(key, value)| {
+                let value = match value {
+                    serde_json::Value::String(value) => value,
+                    other => other.to_string(),
+                };
+                (key, value)
+            })
+            .collect();
+    }
+
     let mut parsed = BTreeMap::new();
     let mut current_key: Option<String> = None;
     for line in input.lines() {
@@ -1113,12 +1477,7 @@ fn tool_result(
     output: String,
     metadata: Metadata,
 ) -> ToolResult {
-    ToolResult {
-        invocation_id,
-        status,
-        output,
-        metadata,
-    }
+    ToolResult::text(invocation_id, status, output, metadata)
 }
 
 fn resolve_workspace_path(workspace_root: &Path, path: &str) -> Result<PathBuf, ToolError> {
@@ -1873,6 +2232,35 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    struct CatalogTool {
+        name: String,
+    }
+
+    impl Tool for CatalogTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec::builtin(
+                self.name.clone(),
+                "catalog",
+                format!("Catalog tool {}", self.name),
+                ToolRisk::ReadOnly,
+                r#"{"type":"object","properties":{},"additionalProperties":false}"#,
+            )
+        }
+
+        fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
+            None
+        }
+
+        fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
+            Ok(ToolResult::text(
+                invocation.id,
+                ToolOutcomeStatus::Succeeded,
+                self.name.clone(),
+                Metadata::new(),
+            ))
+        }
+    }
+
     fn temp_workspace() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "cindx-tools-test-{}",
@@ -1911,6 +2299,49 @@ mod tests {
         assert!(specs.iter().any(|spec| spec.name == "computer.type"));
         assert!(specs.iter().any(|spec| spec.name == "computer.key"));
         assert!(specs.iter().any(|spec| spec.name == "computer.scroll"));
+        assert!(specs
+            .iter()
+            .all(|spec| spec.validate_input_schema().is_ok()));
+    }
+
+    #[test]
+    fn large_catalog_defers_tools_and_injects_meta_tools() {
+        let mut registry = ToolRegistry::new();
+        for index in 0..30 {
+            registry.register(Box::new(CatalogTool {
+                name: format!("catalog.tool_{index}"),
+            }));
+        }
+        registry.install_meta_tools();
+        let plan = registry.exposure_plan("use catalog tool 29", 16_000);
+
+        assert_eq!(plan.deferred.len(), 20);
+        assert!(plan.inline.iter().any(|spec| spec.name == "tool.search"));
+        assert!(plan.inline.iter().any(|spec| spec.name == "tool.inspect"));
+        assert!(plan.inline.iter().any(|spec| spec.name == "tool.invoke"));
+    }
+
+    #[test]
+    fn meta_invoke_preserves_target_permission_gate() {
+        let root = temp_workspace();
+        let mut registry = ToolRegistry::with_workspace_tools(root);
+        registry.install_meta_tools();
+        let invocation = invocation(
+            "tool.invoke",
+            serde_json::json!({
+                "name": "file.write",
+                "arguments": { "path": "note.txt", "content": "hello" }
+            })
+            .to_string(),
+        );
+        let request = registry
+            .get("tool.invoke")
+            .unwrap()
+            .permission_request(&invocation)
+            .expect("write target should require permission");
+
+        assert_eq!(request.action, "file.write");
+        assert_eq!(request.metadata.get("tool_name").map(String::as_str), Some("file.write"));
     }
 
     #[test]

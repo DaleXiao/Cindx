@@ -725,45 +725,21 @@ fn tool_spec_json(tool: &ToolSpec) -> String {
         tool.description,
         tool.name
     );
-    let mut properties = Vec::new();
-    let mut required = Vec::new();
-    for row in tool.input_schema_json.lines() {
-        let Some((name, descriptor)) = row.split_once('=') else {
-            continue;
-        };
-        let name = name.trim();
-        let descriptor = descriptor.trim().trim_matches(|character| character == '<' || character == '>');
-        if name.is_empty() {
-            continue;
-        }
-        let value_type = match name {
-            "destructive" => "boolean",
-            "x" | "y" | "delta_x" | "delta_y" | "limit" | "max_results" => "integer",
-            _ => "string",
-        };
-        properties.push(format!(
-            "\"{}\":{{\"type\":\"{}\",\"description\":\"{}\"}}",
-            json_escape(name),
-            value_type,
-            json_escape(descriptor)
-        ));
-        if !descriptor.to_ascii_lowercase().contains("optional") {
-            required.push(format!("\"{}\"", json_escape(name)));
-        }
-    }
-    if properties.is_empty() {
-        properties.push(
-            "\"input\":{\"type\":\"string\",\"description\":\"Newline-delimited key=value tool input.\"}"
-                .to_string(),
-        );
-        required.push("\"input\"".to_string());
-    }
+    let parameters = serde_json::from_str::<serde_json::Value>(&tool.input_schema_json)
+        .ok()
+        .filter(|schema| schema.get("type").and_then(serde_json::Value::as_str) == Some("object"))
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            })
+        });
     format!(
-        "{{\"type\":\"function\",\"function\":{{\"name\":\"{}\",\"description\":\"{}\",\"parameters\":{{\"type\":\"object\",\"properties\":{{{}}},\"required\":[{}],\"additionalProperties\":false}}}}}}",
+        "{{\"type\":\"function\",\"function\":{{\"name\":\"{}\",\"description\":\"{}\",\"parameters\":{}}}}}",
         json_escape(&function_name),
         json_escape(&description),
-        properties.join(","),
-        required.join(",")
+        parameters
     )
 }
 
@@ -1134,20 +1110,28 @@ mod tests {
                 metadata: Metadata::new(),
             }],
             false,
-            &[ToolSpec {
-                name: "file.read".to_string(),
-                description: "Read a file.".to_string(),
-                risk: ToolRisk::ReadOnly,
-                input_schema_json: "path=<workspace-relative-path>".to_string(),
-            }],
+            &[ToolSpec::builtin(
+                "file.read",
+                "file",
+                "Read a file.",
+                ToolRisk::ReadOnly,
+                r#"{"type":"object","properties":{"path":{"type":"string","description":"workspace-relative path"}},"required":["path"],"additionalProperties":false}"#,
+            )],
         )
         .expect("body should encode");
 
         assert!(body.contains("\"tools\""));
         assert!(body.contains("\"name\":\"file_read\""));
         assert!(body.contains("Original tool name: file.read"));
-        assert!(body.contains("\"properties\":{\"path\":{\"type\":\"string\""));
-        assert!(body.contains("\"required\":[\"path\"]"));
+        let value: serde_json::Value = serde_json::from_str(&body).expect("valid request JSON");
+        assert_eq!(
+            value["tools"][0]["function"]["parameters"]["properties"]["path"]["type"],
+            "string"
+        );
+        assert_eq!(
+            value["tools"][0]["function"]["parameters"]["required"][0],
+            "path"
+        );
         assert!(body.contains("\"tool_choice\":\"auto\""));
     }
 
