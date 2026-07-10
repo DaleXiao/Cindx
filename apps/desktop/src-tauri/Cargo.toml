@@ -1,0 +1,25 @@
+[package]
+name = "cindx-desktop"
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+
+[lib]
+name = "cindx_desktop"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+agent-core = { path = "../../../crates/agent-core" }
+agent-graph = { path = "../../../crates/agent-graph" }
+agent-memory = { path = "../../../crates/agent-memory" }
+agent-rag = { path = "../../../crates/agent-rag" }
+agent-runtime = { path = "../../../crates/agent-runtime" }
+agent-storage = { path = "../../../crates/agent-storage" }
+model-provider = { path = "../../../crates/model-provider" }
+orchestrator = { path = "../../../crates/orchestrator" }
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }
+tools = { path = "../../../crates/tools" }
