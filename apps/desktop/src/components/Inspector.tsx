@@ -28,6 +28,7 @@ import type {
   ToolRunView
 } from "../tauri";
 import type { SessionThreadSelection } from "./SessionThread";
+import { TraceStatusIcon } from "./TraceStatusIcon";
 
 export type InspectorTab = "details" | "artifacts" | "context";
 
@@ -334,7 +335,9 @@ export function Inspector({
                 <dl className="detail-list">
                   <div>
                     <dt>Status</dt>
-                    <dd>{traceStep.status}</dd>
+                    <dd>
+                      <TraceStatusIcon status={traceStep.status} />
+                    </dd>
                   </div>
                   <div>
                     <dt>Duration</dt>
