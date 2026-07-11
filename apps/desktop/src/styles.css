@@ -175,6 +175,7 @@ pre {
   padding: 0 14px;
   pointer-events: none;
   background: transparent;
+  box-shadow: inset 0 -1px 0 var(--border);
 }
 
 .app-shell[data-sidebar-open="false"] .window-workspace-header {

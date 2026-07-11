@@ -29,7 +29,11 @@ assert(
   css.includes(".window-toolbar::before") && css.includes(".app-shell::after"),
   "Pane dividers must extend through the titlebar"
 );
-assert(css.includes(".window-workspace-header"), "Workspace metadata must live in the titlebar");
+assert(
+  css.includes(".window-workspace-header") &&
+    css.includes("box-shadow: inset 0 -1px 0 var(--border)"),
+  "Workspace metadata and its lower divider must live in the titlebar"
+);
 assert(!css.includes(".topbar {"), "Workspace must not retain a second header row");
 assert(
     css.includes("--inspector-layout-width: min(var(--inspector-width, 320px), calc(100vw - 240px))") &&
