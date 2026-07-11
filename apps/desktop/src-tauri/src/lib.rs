@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 use tools::{ToolRegistry, WebSearchConfig};
 
 const PHASE3_TASK_ID: &str = "phase-3-demo";
@@ -4014,20 +4014,6 @@ pub fn run() {
             suspended_agent_runs: Mutex::new(BTreeMap::new()),
             allow_exit: AtomicBool::new(false),
             quit_prompt_active: AtomicBool::new(false),
-        })
-        .setup(|app| {
-            #[cfg(target_os = "macos")]
-            if let Some(window) = app.get_webview_window("main") {
-                if let Err(error) = window_vibrancy::apply_vibrancy(
-                    &window,
-                    window_vibrancy::NSVisualEffectMaterial::HeaderView,
-                    Some(window_vibrancy::NSVisualEffectState::FollowsWindowActiveState),
-                    None,
-                ) {
-                    append_startup_log(&format!("titlebar vibrancy unavailable: {error}"));
-                }
-            }
-            Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
