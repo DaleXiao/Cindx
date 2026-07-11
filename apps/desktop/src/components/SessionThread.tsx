@@ -1,11 +1,15 @@
 import {
   Activity,
   Bot,
+  ChevronDown,
+  ChevronUp,
   Copy,
   FileText,
   Pencil,
+  Search,
   ShieldCheck,
-  TerminalSquare
+  TerminalSquare,
+  X
 } from "lucide-react";
 import {
   useCallback,
@@ -15,7 +19,8 @@ import {
   useState,
   type ComponentPropsWithoutRef,
   type KeyboardEvent as ReactKeyboardEvent,
-  type PointerEvent as ReactPointerEvent
+  type PointerEvent as ReactPointerEvent,
+  type RefObject
 } from "react";
 import Markdown from "markdown-to-jsx";
 import type { AgentState, ChatMessageView, TimelineEntry } from "../tauri";
@@ -35,6 +40,7 @@ export type SessionThreadSelection =
     };
 
 type SessionThreadProps = {
+  sessionId: string | null;
   messages: ChatMessageView[];
   timeline: TimelineEntry[];
   streamAnswer: string;
@@ -42,6 +48,17 @@ type SessionThreadProps = {
   selectedId: string | null;
   onSelect: (selection: SessionThreadSelection) => void;
   onEditMessage: (content: string) => void;
+};
+
+type ThreadFindProps = {
+  open: boolean;
+  query: string;
+  currentIndex: number;
+  matchCount: number;
+  inputRef: RefObject<HTMLInputElement>;
+  onQueryChange: (query: string) => void;
+  onMove: (direction: number) => void;
+  onClose: () => void;
 };
 
 type ThreadScrollMetrics = {
@@ -75,6 +92,65 @@ type ThreadRow =
 const MIN_MINIMAP_MARKERS = 2;
 const MAX_MINIMAP_MARKERS = 32;
 const MINIMAP_MARKER_GAP = 14;
+
+function ThreadFind({
+  open,
+  query,
+  currentIndex,
+  matchCount,
+  inputRef,
+  onQueryChange,
+  onMove,
+  onClose
+}: ThreadFindProps) {
+  if (!open) return null;
+  return (
+    <div className="thread-find" role="search">
+      <Search aria-hidden="true" />
+      <input
+        ref={inputRef}
+        value={query}
+        aria-label="Find in current session"
+        placeholder="Find in session"
+        onChange={(event) => onQueryChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onClose();
+          }
+          if (event.key === "Enter") {
+            event.preventDefault();
+            onMove(event.shiftKey ? -1 : 1);
+          }
+        }}
+      />
+      <span aria-live="polite">
+        {query ? `${matchCount === 0 ? 0 : currentIndex + 1}/${matchCount}` : ""}
+      </span>
+      <button
+        type="button"
+        disabled={matchCount === 0}
+        aria-label="Previous match"
+        title="Previous match"
+        onClick={() => onMove(-1)}
+      >
+        <ChevronUp aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        disabled={matchCount === 0}
+        aria-label="Next match"
+        title="Next match"
+        onClick={() => onMove(1)}
+      >
+        <ChevronDown aria-hidden="true" />
+      </button>
+      <button type="button" aria-label="Close find" title="Close" onClick={onClose}>
+        <X aria-hidden="true" />
+      </button>
+    </div>
+  );
+}
 
 function minimapMarkerPosition(index: number, markerCount: number) {
   const centerIndex = Math.max(0, markerCount - 1) / 2;
@@ -290,6 +366,7 @@ function AgentMarkdown({ content, streaming = false }: { content: string; stream
 }
 
 export function SessionThread({
+  sessionId,
   messages,
   timeline,
   streamAnswer,
@@ -299,12 +376,16 @@ export function SessionThread({
   onEditMessage
 }: SessionThreadProps) {
   const threadRef = useRef<HTMLElement>(null);
+  const threadFindInputRef = useRef<HTMLInputElement>(null);
   const minimapRef = useRef<HTMLDivElement>(null);
   const minimapPointerRef = useRef<number | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [hoveredMinimapIndex, setHoveredMinimapIndex] = useState<number | null>(null);
   const [previewMinimapIndex, setPreviewMinimapIndex] = useState<number | null>(null);
   const [minimapDragging, setMinimapDragging] = useState(false);
+  const [threadFindOpen, setThreadFindOpen] = useState(false);
+  const [threadFindQuery, setThreadFindQuery] = useState("");
+  const [threadFindIndex, setThreadFindIndex] = useState(0);
   const [scrollMetrics, setScrollMetrics] = useState<ThreadScrollMetrics>({
     scrollTop: 0,
     scrollHeight: 1,
@@ -331,6 +412,19 @@ export function SessionThread({
       return leftTimestamp - rightTimestamp;
     });
   }, [messages, timeline]);
+  const threadFindMatches = useMemo(() => {
+    const query = threadFindQuery.trim().toLocaleLowerCase();
+    if (!query) return [];
+    return items
+      .filter(
+        (item) =>
+          item.type === "message" &&
+          item.message.role !== "tool" &&
+          !isToolRequestPlaceholder(item) &&
+          item.message.content.toLocaleLowerCase().includes(query)
+      )
+      .map((item) => item.id);
+  }, [items, threadFindQuery]);
   const threadRows = useMemo(() => groupThreadItems(items), [items]);
   const hasStreamAnswer = Boolean(streamAnswer);
   const minimapMarkers = useMemo<MinimapMarker[]>(() => {
@@ -394,6 +488,62 @@ export function SessionThread({
         : nextMetrics
     );
   }, []);
+
+  const scrollToThreadFindMatch = useCallback(
+    (index: number) => {
+      const thread = threadRef.current;
+      const id = threadFindMatches[index];
+      if (!thread || !id) return;
+      const match = thread.querySelector<HTMLElement>(`[data-thread-search-id="${id}"]`);
+      if (!match) return;
+      thread.scrollTop = Math.max(
+        0,
+        match.offsetTop - Math.max(18, (thread.clientHeight - match.clientHeight) / 2)
+      );
+      syncScrollMetrics();
+    },
+    [syncScrollMetrics, threadFindMatches]
+  );
+
+  const closeThreadFind = useCallback(() => {
+    setThreadFindOpen(false);
+    setThreadFindQuery("");
+    setThreadFindIndex(0);
+  }, []);
+
+  function moveThreadFind(direction: number) {
+    if (threadFindMatches.length === 0) return;
+    const next =
+      (threadFindIndex + direction + threadFindMatches.length) % threadFindMatches.length;
+    setThreadFindIndex(next);
+    scrollToThreadFindMatch(next);
+  }
+
+  useEffect(() => {
+    const handleFindShortcut = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        setThreadFindOpen(true);
+        window.requestAnimationFrame(() => threadFindInputRef.current?.focus());
+      } else if (event.key === "Escape" && threadFindOpen) {
+        event.preventDefault();
+        closeThreadFind();
+      }
+    };
+    window.addEventListener("keydown", handleFindShortcut);
+    return () => window.removeEventListener("keydown", handleFindShortcut);
+  }, [closeThreadFind, threadFindOpen]);
+
+  useEffect(() => {
+    closeThreadFind();
+  }, [closeThreadFind, sessionId]);
+
+  useEffect(() => {
+    setThreadFindIndex(0);
+    if (threadFindMatches.length === 0) return;
+    const frame = window.requestAnimationFrame(() => scrollToThreadFindMatch(0));
+    return () => window.cancelAnimationFrame(frame);
+  }, [scrollToThreadFindMatch, threadFindMatches.length]);
 
   useEffect(() => {
     const thread = threadRef.current;
@@ -548,6 +698,16 @@ export function SessionThread({
   if (items.length === 0 && !streamAnswer) {
     return (
       <div className="session-thread-shell">
+        <ThreadFind
+          open={threadFindOpen}
+          query={threadFindQuery}
+          currentIndex={threadFindIndex}
+          matchCount={threadFindMatches.length}
+          inputRef={threadFindInputRef}
+          onQueryChange={setThreadFindQuery}
+          onMove={moveThreadFind}
+          onClose={closeThreadFind}
+        />
         <section
           className="session-thread session-thread-empty"
           id="session-thread-scroll"
@@ -569,6 +729,16 @@ export function SessionThread({
 
   return (
     <div className="session-thread-shell">
+      <ThreadFind
+        open={threadFindOpen}
+        query={threadFindQuery}
+        currentIndex={threadFindIndex}
+        matchCount={threadFindMatches.length}
+        inputRef={threadFindInputRef}
+        onQueryChange={setThreadFindQuery}
+        onMove={moveThreadFind}
+        onClose={closeThreadFind}
+      />
       <section
         className="session-thread"
         id="session-thread-scroll"
@@ -677,11 +847,16 @@ export function SessionThread({
             <article
               className={`thread-message thread-message-${item.message.role} ${
                 selectedId === item.id ? "selected" : ""
+              } ${
+                threadFindMatches[threadFindIndex] === item.id
+                  ? "thread-search-current"
+                  : ""
               }`}
               key={item.id}
               data-minimap-id={item.id}
               data-minimap-index={itemIndex}
               data-minimap-kind={item.message.role}
+              data-thread-search-id={item.id}
               role={isUser ? undefined : "button"}
               tabIndex={0}
               onClick={() => onSelect(item)}

@@ -920,6 +920,77 @@ pre {
   background: var(--bg);
 }
 
+.thread-find {
+  position: absolute;
+  z-index: 12;
+  top: 10px;
+  right: 18px;
+  display: grid;
+  width: min(360px, calc(100% - 56px));
+  min-height: 34px;
+  grid-template-columns: 14px minmax(0, 1fr) 38px repeat(3, 26px);
+  align-items: center;
+  gap: 3px;
+  padding: 3px 5px 3px 9px;
+  color: var(--muted);
+  background: rgba(250, 250, 250, 0.98);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  box-shadow: 0 8px 22px rgb(0 0 0 / 10%);
+}
+
+.thread-find > svg {
+  width: 13px;
+  height: 13px;
+}
+
+.thread-find input {
+  width: 100%;
+  min-width: 0;
+  height: 26px;
+  padding: 0 5px;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  font-size: 11px;
+}
+
+.thread-find > span {
+  color: var(--subtle);
+  font-size: 9px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.thread-find button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  place-items: center;
+}
+
+.thread-find button:hover:not(:disabled),
+.thread-find button:focus-visible {
+  color: var(--text);
+  background: var(--surface-active);
+}
+
+.thread-find button svg {
+  width: 13px;
+  height: 13px;
+}
+
+.thread-message.thread-search-current {
+  box-shadow:
+    0 0 0 2px #d9d9d9,
+    0 8px 20px rgb(0 0 0 / 6%);
+}
+
 .session-thread {
   display: flex;
   width: 100%;
@@ -1698,7 +1769,8 @@ details[open] > summary .disclosure-triangle {
 @media (prefers-reduced-motion: reduce) {
   .composer-working-ring,
   .session-status-working svg,
-  .session-status-attention > span {
+  .session-status-attention > span,
+  .skills-refresh-turn {
     animation: none;
   }
 
@@ -2727,6 +2799,28 @@ textarea::placeholder {
   white-space: nowrap;
 }
 
+.rag-stats .runtime-state-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.runtime-state-value[data-state="ready"],
+.runtime-state-value[data-state="auto"] {
+  color: #2f9e64;
+}
+
+.runtime-state-value svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+}
+
+.runtime-state-value span {
+  color: currentColor;
+  font-size: inherit;
+}
+
 .rag-stats span {
   color: var(--muted);
   font-size: 9px;
@@ -2736,6 +2830,121 @@ textarea::placeholder {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.knowledge-query {
+  padding-top: 4px;
+}
+
+.settings-inline-error {
+  padding: 8px 9px;
+  color: #4b4b4b;
+  background: #f5f5f5;
+  border-left: 2px solid #777777;
+  font-size: 10px;
+}
+
+.knowledge-answer,
+.knowledge-results {
+  display: grid;
+  gap: 8px;
+}
+
+.knowledge-answer > strong,
+.knowledge-results > strong {
+  font-size: 10px;
+}
+
+.knowledge-result {
+  display: grid;
+  gap: 4px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.knowledge-result header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.knowledge-result header strong {
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledge-result header span,
+.knowledge-result small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.knowledge-result p {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #444444;
+  font-size: 10px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.registered-tools-details summary strong {
+  color: var(--subtle);
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.registered-tool-list {
+  display: grid;
+  border-top: 1px solid var(--border);
+}
+
+.registered-tool-row {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.registered-tool-row > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.registered-tool-row strong {
+  font-size: 10px;
+}
+
+.registered-tool-row small,
+.registered-tool-row em {
+  color: var(--muted);
+  font-size: 9px;
+  font-style: normal;
+}
+
+.registered-tool-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skills-refresh-turn {
+  animation: skills-refresh-turn 520ms var(--ease-out-quart);
+}
+
+@keyframes skills-refresh-turn {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .tool-schema,
@@ -3207,13 +3416,14 @@ textarea::placeholder {
 
 .inspector-debug-body {
   position: absolute;
-  right: 0;
-  bottom: 44px;
-  left: 0;
+  right: 8px;
+  bottom: 52px;
+  left: 8px;
   max-height: min(640px, calc(100vh - var(--titlebar-height) - 72px));
   overflow: auto;
   background: rgba(252, 252, 252, 0.98);
-  border-top: 0.5px solid #ededed;
+  border: 0.5px solid #e4e4e4;
+  border-radius: 8px;
   box-shadow: 0 -12px 30px rgb(0 0 0 / 10%);
 }
 
