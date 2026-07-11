@@ -602,6 +602,8 @@ export function App() {
   const agentWorking = Boolean(activeSessionBusy || agentState?.status === "running");
   const traceTurns = agentTraceState?.turns ?? [];
   const traceSteps = traceTurns.flatMap((turn) => turn.steps);
+  const activeSessionTraceSteps =
+    activeSession && agentTraceState?.sessionId === activeSession.id ? traceSteps : [];
   const selectedTraceStep =
     traceSteps.find((step) => step.id === selectedTraceStepId) ??
     (traceSteps.length > 0 ? traceSteps[traceSteps.length - 1] : null);
@@ -2995,6 +2997,7 @@ export function App() {
         open={inspectorOpen}
         width={inspectorWidth}
         tab={inspectorTab}
+        sessionId={activeSession?.id ?? null}
         threadSelection={activeView === "timeline" ? selectedThreadItem : null}
         traceStep={activeView === "trace" ? selectedTraceStep : null}
         traceExportPath={agentTraceState?.exportPath ?? null}
@@ -3003,9 +3006,7 @@ export function App() {
         ragSources={ragSources}
         browserObservations={browserObservations}
         toolResults={toolResults}
-        traceArtifacts={(agentTraceState?.turns ?? [])
-          .flatMap((turn) => turn.steps)
-          .filter((step) => Boolean(step.artifactPath))}
+        sessionTraceSteps={activeSessionTraceSteps}
         workspaceRoot={runtime?.workspaceRoot ?? ""}
         agentStatus={agentState?.status ?? "idle"}
         agentTurnCount={agentState?.turnCount ?? 0}
