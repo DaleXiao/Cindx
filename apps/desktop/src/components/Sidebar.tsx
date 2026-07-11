@@ -2,7 +2,6 @@ import {
   Activity,
   Check,
   FolderOpen,
-  LayoutDashboard,
   LoaderCircle,
   MoreHorizontal,
   Plus,
@@ -125,6 +124,23 @@ export function Sidebar({
   const [projectRenameDraft, setProjectRenameDraft] = useState("");
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  const searchActive = searchOpen && Boolean(searchQuery.trim());
+
+  function finishSearchSelection() {
+    if (!searchOpen) return;
+    onSearchQueryChange("");
+    onSearchToggle();
+  }
+
+  function selectProjectResult(projectId: string) {
+    onProjectSelect(projectId);
+    finishSearchSelection();
+  }
+
+  function selectSessionResult(sessionId: string) {
+    onSessionSelect(sessionId);
+    finishSearchSelection();
+  }
 
   function cancelSessionRename() {
     setRenamingSessionId(null);
@@ -242,29 +258,6 @@ export function Sidebar({
         </button>
       </div>
 
-      <div className="sidebar-actions" aria-label="Workspace views">
-        <button
-          className={`icon-button ${activeView === "timeline" ? "active" : ""}`}
-          aria-label="Session thread"
-          aria-pressed={activeView === "timeline"}
-          title="Session"
-          onClick={() => onViewChange("timeline")}
-          type="button"
-        >
-          <LayoutDashboard aria-hidden="true" />
-        </button>
-        <button
-          className={`icon-button ${activeView === "trace" ? "active" : ""}`}
-          aria-label="Agent trace"
-          aria-pressed={activeView === "trace"}
-          title="Trace"
-          onClick={() => onViewChange("trace")}
-          type="button"
-        >
-          <Activity aria-hidden="true" />
-        </button>
-      </div>
-
       {searchOpen && (
         <label className="sidebar-search">
           <Search aria-hidden="true" />
@@ -274,6 +267,12 @@ export function Sidebar({
             onChange={(event) => onSearchQueryChange(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Escape") onSearchToggle();
+              if (event.key === "Enter" && searchActive) {
+                event.preventDefault();
+                const firstSession = sessions[0];
+                if (firstSession) selectSessionResult(firstSession.id);
+                else if (projects[0]) selectProjectResult(projects[0].id);
+              }
             }}
             placeholder="Search"
             aria-label="Search projects and sessions"
@@ -322,10 +321,15 @@ export function Sidebar({
 
         <div className="project-list">
           {projects.length === 0 ? (
-            <div className="nav-empty">No projects</div>
+            <div className="nav-empty">{searchActive ? "No results" : "No projects"}</div>
           ) : (
             projects.map((project) => {
-              const expanded = project.active && !collapsedProjectIds.has(project.id);
+              const projectSessions = sessions.filter(
+                (session) => session.projectId === project.id
+              );
+              const expanded = searchActive
+                ? projectSessions.length > 0
+                : project.active && !collapsedProjectIds.has(project.id);
 
               return (
                 <div className="project-node" key={project.id}>
@@ -342,10 +346,23 @@ export function Sidebar({
                       className="project-disclosure"
                       type="button"
                       disabled={busy}
-                      aria-label={`${expanded ? "Collapse" : "Expand"} sessions for ${project.name}`}
+                      aria-label={
+                        searchActive
+                          ? `Open ${project.name}`
+                          : `${expanded ? "Collapse" : "Expand"} sessions for ${project.name}`
+                      }
                       aria-expanded={expanded}
-                      title={expanded ? "Collapse sessions" : "Expand sessions"}
-                      onClick={() => handleProjectDisclosure(project, expanded)}
+                      title={
+                        searchActive
+                          ? "Open project"
+                          : expanded
+                            ? "Collapse sessions"
+                            : "Expand sessions"
+                      }
+                      onClick={() => {
+                        if (searchActive) selectProjectResult(project.id);
+                        else handleProjectDisclosure(project, expanded);
+                      }}
                     >
                       <DisclosureTriangle />
                     </button>
@@ -402,7 +419,7 @@ export function Sidebar({
                       <>
                         <button
                           className="nav-item project-item"
-                          onClick={() => onProjectSelect(project.id)}
+                          onClick={() => selectProjectResult(project.id)}
                           type="button"
                           disabled={busy}
                           title={project.root}
@@ -430,26 +447,28 @@ export function Sidebar({
                   </div>
 
                   {expanded && (
-                  <div className="session-branch">
-                    <div className="nav-heading-row session-heading">
-                      <div className="nav-heading">Sessions</div>
-                      <button
-                        className="nav-add-button"
-                        type="button"
-                        aria-label="New session"
-                        title="New session"
-                        disabled={busy}
-                        onClick={onSessionCreate}
-                      >
-                        <Plus aria-hidden="true" />
-                      </button>
-                    </div>
+                    <div className="session-branch">
+                      {!searchActive && (
+                        <div className="nav-heading-row session-heading">
+                          <div className="nav-heading">Sessions</div>
+                          <button
+                            className="nav-add-button"
+                            type="button"
+                            aria-label="New session"
+                            title="New session"
+                            disabled={busy}
+                            onClick={onSessionCreate}
+                          >
+                            <Plus aria-hidden="true" />
+                          </button>
+                        </div>
+                      )}
 
-                    <div className="session-list">
-                      {sessions.length === 0 ? (
-                        <div className="nav-empty">No sessions</div>
-                      ) : (
-                        sessions.map((session) => (
+                      <div className="session-list">
+                        {projectSessions.length === 0 ? (
+                          <div className="nav-empty">No sessions</div>
+                        ) : (
+                          projectSessions.map((session) => (
                           <div
                             className="session-row"
                             key={session.id}
@@ -516,7 +535,7 @@ export function Sidebar({
                                   className={`nav-item session-item ${
                                     session.active && activeView === "timeline" ? "active" : ""
                                   }`}
-                                  onClick={() => onSessionSelect(session.id)}
+                                  onClick={() => selectSessionResult(session.id)}
                                   type="button"
                                   disabled={busy}
                                 >
@@ -542,10 +561,10 @@ export function Sidebar({
                               </>
                             )}
                           </div>
-                        ))
-                      )}
+                          ))
+                        )}
+                      </div>
                     </div>
-                  </div>
                   )}
                 </div>
               );
@@ -566,6 +585,16 @@ export function Sidebar({
           type="button"
         >
           <Settings aria-hidden="true" />
+        </button>
+        <button
+          className={`icon-button sidebar-trace ${activeView === "trace" ? "active" : ""}`}
+          aria-label="Agent trace"
+          aria-pressed={activeView === "trace"}
+          title="Agent trace"
+          onClick={() => onViewChange("trace")}
+          type="button"
+        >
+          <Activity aria-hidden="true" />
         </button>
       </div>
     </aside>

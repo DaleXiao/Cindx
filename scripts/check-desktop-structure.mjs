@@ -384,7 +384,33 @@ assert(
     styles.includes(".archived-session-row + .archived-session-row"),
   "Project and session rows must stay compact, borderless, and hierarchy-line free"
 );
-assert(sidebarSource.includes("sidebar-footer"), "Settings must remain in the sidebar footer");
+assert(
+  sidebarSource.includes("sidebar-footer") &&
+    sidebarSource.includes("sidebar-settings") &&
+    sidebarSource.includes("sidebar-trace") &&
+    sidebarSource.indexOf('aria-label="Settings"') <
+      sidebarSource.indexOf('aria-label="Agent trace"') &&
+    !sidebarSource.includes("LayoutDashboard") &&
+    !styles.includes(".sidebar-actions"),
+  "Settings and Agent Trace must share the sidebar footer without the old top session controls"
+);
+assert(
+  appSource.includes("matchingSessionExists") &&
+    appSource.includes("if (normalizedSidebarQuery)") &&
+    sidebarSource.includes("searchActive") &&
+    sidebarSource.includes("projectSessions = sessions.filter") &&
+    sidebarSource.includes("selectSessionResult") &&
+    sidebarSource.includes('"No results"'),
+  "Sidebar search must expose matching sessions across projects and navigate to a selected result"
+);
+assert(
+  (appSource.match(/<span>Back to App<\/span>/g)?.length ?? 0) === 2 &&
+    appSource.includes('className="workspace-page-navigation"') &&
+    appSource.includes('className="workspace-page-navigation settings-page-navigation"') &&
+    styles.includes(".workspace-return-button") &&
+    styles.includes("grid-template-rows: auto auto minmax(0, 1fr)"),
+  "Trace and Settings must each expose an in-page return to the app"
+);
 assert(
   sidebarSource.includes('icons/icon.png') && sidebarSource.includes("appIconUrl"),
   "Sidebar brand must use the high-resolution packaged app icon"
