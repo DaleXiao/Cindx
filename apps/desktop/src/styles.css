@@ -641,6 +641,14 @@ pre {
   border-radius: 7px;
 }
 
+.session-name {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .session-row {
   position: relative;
   min-width: 0;
@@ -820,10 +828,6 @@ pre {
   min-width: 0;
   align-items: baseline;
   gap: 8px;
-}
-
-.settings-back {
-  flex: 0 0 auto;
 }
 
 .window-workspace-header h1 {
@@ -2340,27 +2344,82 @@ textarea::placeholder {
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-columns: minmax(0, 760px);
+  grid-template-columns: 168px minmax(0, 760px);
   align-content: start;
+  align-items: start;
   justify-content: center;
-  gap: 0;
-  padding: 0 24px 32px;
+  gap: 28px;
+  padding: 20px 24px 32px;
   overflow: auto;
   background: var(--bg);
 }
 
-.settings-page-navigation {
-  min-height: 44px;
-  padding: 8px 0;
+.settings-sidebar {
+  position: sticky;
+  top: 20px;
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 14px;
 }
 
-.settings-page-navigation .settings-back {
-  width: 26px;
-  height: 26px;
+.settings-app-return {
+  justify-self: start;
 }
 
-.settings-view:not([data-active-group="index"]) .settings-section {
-  padding-top: 12px;
+.settings-tabs {
+  display: grid;
+  gap: 2px;
+}
+
+.settings-tabs > button {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  color: var(--muted);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+}
+
+.settings-tabs > button:hover,
+.settings-tabs > button:focus-visible {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.settings-tabs > button.active {
+  color: var(--text);
+  background: var(--surface-active);
+}
+
+.settings-tabs svg {
+  width: 14px;
+  height: 14px;
+}
+
+.settings-tabs span {
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 450;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-tabs > button.active span {
+  font-weight: 700;
+}
+
+.settings-detail {
+  display: grid;
+  min-width: 0;
+  align-content: start;
 }
 
 .inspector-tab {
@@ -2383,65 +2442,10 @@ textarea::placeholder {
   border-bottom-color: var(--text);
 }
 
-.settings-index {
-  display: grid;
-  padding: 10px 0;
-}
-
-.settings-index > button {
-  display: grid;
-  min-height: 58px;
-  grid-template-columns: 26px minmax(0, 1fr) 18px;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 6px;
-  text-align: left;
-  background: transparent;
-  border: 0;
-  border-bottom: 1px solid var(--border);
-}
-
-.settings-index > button:hover {
-  background: var(--surface-hover);
-}
-
-.settings-index > button > span:nth-child(2) {
-  display: grid;
-  gap: 2px;
-}
-
-.settings-index strong {
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.settings-index small {
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.settings-index-icon {
-  display: grid;
-  width: 26px;
-  height: 26px;
-  color: #555555;
-  place-items: center;
-}
-
-.settings-index-icon svg,
-.settings-index > button > svg {
-  width: 14px;
-  height: 14px;
-}
-
-.settings-index > button > svg {
-  color: var(--subtle);
-}
-
 .settings-section {
   display: none;
   gap: 12px;
-  padding: 20px 0;
+  padding: 12px 0 20px;
   border: 0;
 }
 
@@ -3681,7 +3685,13 @@ textarea::placeholder {
   }
 
   .settings-view {
-    padding-inline: 14px;
+    grid-template-columns: 140px minmax(0, 1fr);
+    gap: 14px;
+    padding: 14px;
+  }
+
+  .settings-sidebar {
+    top: 14px;
   }
 
 }

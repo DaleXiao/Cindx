@@ -426,7 +426,8 @@ assert(
 assert(
   (appSource.match(/<span>Back to App<\/span>/g)?.length ?? 0) === 2 &&
     appSource.includes('className="workspace-page-navigation"') &&
-    appSource.includes('className="workspace-page-navigation settings-page-navigation"') &&
+    appSource.includes('className="settings-sidebar"') &&
+    appSource.includes('className="workspace-return-button settings-app-return"') &&
     styles.includes(".workspace-return-button") &&
     styles.includes("grid-template-rows: auto auto minmax(0, 1fr)"),
   "Trace and Settings must each expose an in-page return to the app"
@@ -444,9 +445,16 @@ assert(
     styles.includes(".session-status-working") &&
     styles.includes(".session-status-complete") &&
     styles.includes(".session-status-attention") &&
+    sidebarSource.includes("if (active) return null") &&
+    sidebarSource.includes("active={session.active}") &&
+    sidebarSource.includes('className="session-name"') &&
+    !sidebarSource.includes("<strong>{session.name}</strong>") &&
+    styles.includes(".session-name") &&
+    appSource.includes("trackedSessionTaskIdsRef") &&
+    appSource.includes("markSessionTaskStarted(sessionId)") &&
     appSource.includes('next[sessionId] = "Completed"') &&
     appSource.includes('next[sessionId] = "Blocked"'),
-  "Sidebar rows must replace redundant metadata with icon-only live session state"
+  "Sidebar rows must show normal-weight titles and only icon-only background task state"
 );
 assert(
   sidebarSource.includes("onSessionRename") &&
@@ -566,9 +574,11 @@ assert(
   "Chat title and status controls must remain hidden in Settings and optically aligned elsewhere"
 );
 assert(
-  appSource.includes("settings-page-navigation") &&
-    appSource.includes('aria-label="Back to Settings"'),
-  "Settings detail pages must keep an in-content route back to the category list"
+  appSource.includes('className="settings-tabs"') &&
+    appSource.includes('aria-current={settingsCategory === category.id ? "page" : undefined}') &&
+    styles.includes(".settings-tabs > button.active span") &&
+    !appSource.includes('aria-label="Back to Settings"'),
+  "Settings must keep a persistent vertical category tab list with a bold active title"
 );
 assert(
   appSource.includes("window-workspace-header") && !appSource.includes('className="topbar"'),
@@ -632,8 +642,11 @@ assert(
   "Expandable settings must use a consistent equilateral disclosure marker"
 );
 assert(
-  appSource.includes("settings-index") && appSource.includes("Back to Settings"),
-  "Settings must expose an index page and a detail back action"
+  appSource.includes('className="settings-sidebar"') &&
+    appSource.includes('className="settings-detail"') &&
+    !appSource.includes("settings-index") &&
+    styles.includes("grid-template-columns: 168px minmax(0, 760px)"),
+  "Settings must use persistent left tabs and right-side details"
 );
 assert(
   rustLib.includes("maybe_auto_name_session") && appSource.includes("sessionTitleFromPrompt"),
