@@ -6,3 +6,4 @@ dist/
 /.env
 /.env.*
 !/examples/.env.example
+/releases/*.zip

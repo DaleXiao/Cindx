@@ -1,6 +1,6 @@
 use agent_core::{Message, MessageRole, Metadata, ModelRole, ToolSpec};
-use std::io::{BufRead, BufReader, Read};
-use std::process::{Command, Stdio};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::process::{Child, Command, Stdio};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelCallMode {
@@ -128,6 +128,92 @@ pub struct OpenAiCompatibleProvider {
     config: OpenAiCompatibleConfig,
 }
 
+fn curl_config_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+fn curl_request_config(url: &str, api_key: &str, request_body: Option<&str>) -> String {
+    let authorization = format!("Authorization: Bearer {api_key}");
+    let mut config = format!(
+        "url = \"{}\"\nheader = \"{}\"\n",
+        curl_config_escape(url),
+        curl_config_escape(&authorization)
+    );
+    if let Some(request_body) = request_body {
+        config.push_str("request = \"POST\"\n");
+        config.push_str("header = \"Content-Type: application/json\"\n");
+        config.push_str(&format!(
+            "data-binary = \"{}\"\n",
+            curl_config_escape(request_body)
+        ));
+    }
+    config
+}
+
+fn curl_command(timeout_seconds: u64, no_buffer: bool) -> Command {
+    let mut command = Command::new("/usr/bin/curl");
+    command
+        .arg("-sS")
+        .arg("--fail-with-body")
+        .arg("--max-time")
+        .arg(timeout_seconds.to_string());
+    if no_buffer {
+        command.arg("--no-buffer");
+    }
+    command.arg("--config").arg("-");
+    command
+}
+
+fn spawn_curl(
+    config: &str,
+    timeout_seconds: u64,
+    no_buffer: bool,
+) -> Result<Child, ModelError> {
+    let mut child = curl_command(timeout_seconds, no_buffer)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| ModelError::new(format!("failed to start curl: {error}")))?;
+
+    let write_result = child
+        .stdin
+        .take()
+        .ok_or_else(|| ModelError::new("curl stdin was not available"))
+        .and_then(|mut stdin| {
+            stdin
+                .write_all(config.as_bytes())
+                .map_err(|error| ModelError::new(format!("failed to configure curl: {error}")))
+        });
+    if let Err(error) = write_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+
+    Ok(child)
+}
+
+fn execute_curl(
+    config: &str,
+    timeout_seconds: u64,
+) -> Result<std::process::Output, ModelError> {
+    spawn_curl(config, timeout_seconds, false)?
+        .wait_with_output()
+        .map_err(|error| ModelError::new(format!("failed to wait for curl: {error}")))
+}
+
 impl OpenAiCompatibleProvider {
     pub fn new(config: OpenAiCompatibleConfig) -> Self {
         Self { config }
@@ -138,16 +224,9 @@ impl OpenAiCompatibleProvider {
             return Err(ModelError::new("provider base URL and API key are required"));
         }
 
-        let output = Command::new("/usr/bin/curl")
-            .arg("-sS")
-            .arg("--fail-with-body")
-            .arg("--max-time")
-            .arg(self.config.timeout_seconds.to_string())
-            .arg("-H")
-            .arg(format!("Authorization: Bearer {}", self.config.api_key))
-            .arg(self.config.models_url())
-            .output()
-            .map_err(|error| ModelError::new(format!("failed to start curl: {error}")))?;
+        let curl_config =
+            curl_request_config(&self.config.models_url(), &self.config.api_key, None);
+        let output = execute_curl(&curl_config, self.config.timeout_seconds)?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         if !output.status.success() {
@@ -174,25 +253,12 @@ impl OpenAiCompatibleProvider {
 
         let request_body =
             build_chat_request_json_with_tools(&self.config.model, &request.messages, true, &request.tools)?;
-        let mut child = Command::new("/usr/bin/curl")
-            .arg("-sS")
-            .arg("--no-buffer")
-            .arg("--fail-with-body")
-            .arg("--max-time")
-            .arg(self.config.timeout_seconds.to_string())
-            .arg("-X")
-            .arg("POST")
-            .arg(self.config.chat_completions_url())
-            .arg("-H")
-            .arg("Content-Type: application/json")
-            .arg("-H")
-            .arg(format!("Authorization: Bearer {}", self.config.api_key))
-            .arg("-d")
-            .arg(request_body)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| ModelError::new(format!("failed to start curl: {error}")))?;
+        let curl_config = curl_request_config(
+            &self.config.chat_completions_url(),
+            &self.config.api_key,
+            Some(&request_body),
+        );
+        let mut child = spawn_curl(&curl_config, self.config.timeout_seconds, true)?;
 
         let stdout = child
             .stdout
@@ -274,22 +340,12 @@ impl OpenAiCompatibleProvider {
             false,
             &request.tools,
         )?;
-        let output = Command::new("/usr/bin/curl")
-            .arg("-sS")
-            .arg("--fail-with-body")
-            .arg("--max-time")
-            .arg(self.config.timeout_seconds.to_string())
-            .arg("-X")
-            .arg("POST")
-            .arg(self.config.chat_completions_url())
-            .arg("-H")
-            .arg("Content-Type: application/json")
-            .arg("-H")
-            .arg(format!("Authorization: Bearer {}", self.config.api_key))
-            .arg("-d")
-            .arg(request_body)
-            .output()
-            .map_err(|error| ModelError::new(format!("failed to start curl: {error}")))?;
+        let curl_config = curl_request_config(
+            &self.config.chat_completions_url(),
+            &self.config.api_key,
+            Some(&request_body),
+        );
+        let output = execute_curl(&curl_config, self.config.timeout_seconds)?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         if !output.status.success() {
@@ -318,22 +374,12 @@ impl OpenAiCompatibleProvider {
             &request.input,
             request.dimensions,
         )?;
-        let output = Command::new("/usr/bin/curl")
-            .arg("-sS")
-            .arg("--fail-with-body")
-            .arg("--max-time")
-            .arg(self.config.timeout_seconds.to_string())
-            .arg("-X")
-            .arg("POST")
-            .arg(self.config.embeddings_url())
-            .arg("-H")
-            .arg("Content-Type: application/json")
-            .arg("-H")
-            .arg(format!("Authorization: Bearer {}", self.config.api_key))
-            .arg("-d")
-            .arg(request_body)
-            .output()
-            .map_err(|error| ModelError::new(format!("failed to start curl: {error}")))?;
+        let curl_config = curl_request_config(
+            &self.config.embeddings_url(),
+            &self.config.api_key,
+            Some(&request_body),
+        );
+        let output = execute_curl(&curl_config, self.config.timeout_seconds)?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         if !output.status.success() {
@@ -1069,6 +1115,28 @@ mod tests {
         );
         assert_eq!(config.models_url(), "https://example.test/v1/models");
         assert_eq!(config.embeddings_url(), "https://example.test/v1/embeddings");
+    }
+
+    #[test]
+    fn curl_receives_credentials_and_request_body_over_stdin() {
+        let config = curl_request_config(
+            "https://example.test/v1/chat/completions",
+            "test-secret",
+            Some("{\"prompt\":\"hello\\nworld\"}"),
+        );
+        let command = curl_command(10, true);
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(config.contains("Authorization: Bearer test-secret"));
+        assert!(config.contains("data-binary"));
+        assert!(arguments.iter().any(|argument| argument == "--config"));
+        assert!(arguments.iter().any(|argument| argument == "-"));
+        assert!(!arguments.iter().any(|argument| argument.contains("test-secret")));
+        assert!(!arguments.iter().any(|argument| argument.contains("hello")));
+        assert_eq!(curl_config_escape("a\"b\\c\n"), "a\\\"b\\\\c\\n");
     }
 
     #[test]
