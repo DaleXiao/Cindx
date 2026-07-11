@@ -3,6 +3,7 @@ import {
   Check,
   FolderOpen,
   LayoutDashboard,
+  LoaderCircle,
   MoreHorizontal,
   Plus,
   Search,
@@ -16,6 +17,54 @@ import type { ProjectView, SessionView } from "../tauri";
 import { DisclosureTriangle } from "./DisclosureTriangle";
 
 const appIconUrl = new URL("../../src-tauri/icons/icon.png", import.meta.url).href;
+
+type SessionVisualState = "working" | "complete" | "attention" | null;
+
+function sessionVisualState(status: string): SessionVisualState {
+  const normalized = status.trim().toLowerCase();
+  if (["working", "running"].includes(normalized)) return "working";
+  if (["completed", "succeeded", "done"].includes(normalized)) return "complete";
+  if (
+    [
+      "review",
+      "waiting_for_permission",
+      "failed",
+      "blocked",
+      "cancelled",
+      "attention"
+    ].includes(normalized)
+  ) {
+    return "attention";
+  }
+  return null;
+}
+
+function SessionStatusIndicator({ status }: { status: string }) {
+  const state = sessionVisualState(status);
+  if (!state) return null;
+
+  const label =
+    state === "working"
+      ? "Session is working"
+      : state === "complete"
+        ? "Session completed"
+        : "Session needs attention";
+
+  return (
+    <span
+      className={`session-status session-status-${state}`}
+      role="status"
+      aria-label={label}
+      title={label}
+    >
+      {state === "working" ? (
+        <LoaderCircle aria-hidden="true" />
+      ) : (
+        <span aria-hidden="true" />
+      )}
+    </span>
+  );
+}
 
 export type WorkspaceView = "timeline" | "trace" | "settings";
 
@@ -475,6 +524,7 @@ export function Sidebar({
                                     <strong>{session.name}</strong>
                                   </span>
                                 </button>
+                                <SessionStatusIndicator status={session.status} />
                                 <button
                                   className="session-more"
                                   type="button"

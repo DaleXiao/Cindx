@@ -621,6 +621,9 @@ export function App() {
       const next = { ...current };
       if (status === "waiting_for_permission") next[sessionId] = "Review";
       else if (status === "running") next[sessionId] = "Working";
+      else if (status === "completed") next[sessionId] = "Completed";
+      else if (status === "failed") next[sessionId] = "Blocked";
+      else if (status === "cancelled") next[sessionId] = "Attention";
       else delete next[sessionId];
       return next;
     });

@@ -250,13 +250,14 @@ assert(
     appSource.includes("window-toolbar-panel-right") &&
     styles.includes("backdrop-filter: saturate(1.3) blur(18px)") &&
     styles.includes("background: rgba(250, 250, 250, 0.62)") &&
+    /\.window-toolbar-panel \{[\s\S]*?background: var\(--panel\);/.test(styles) &&
     tauriConfig.app.macOSPrivateApi === true &&
     tauriConfig.app.windows.every((window) => window.transparent === true) &&
     cargoToml.includes('features = ["macos-private-api"]') &&
     cargoToml.includes('window-vibrancy = "0.6.0"') &&
     rustLib.includes("window_vibrancy::apply_vibrancy") &&
     rustLib.includes("NSVisualEffectMaterial::HeaderView"),
-  "Titlebar must expose the native macOS material through a translucent web layer"
+  "Titlebar must keep glass in the workspace while matching side panes with opaque panel color"
 );
 assert(composerSource.includes('event.key !== "Enter"'), "Composer must support Enter to send");
 assert(composerSource.includes("event.shiftKey"), "Composer must reserve Shift+Enter for a new line");
@@ -319,12 +320,14 @@ assert(
 );
 assert(
   sessionThreadSource.includes("groupThreadItems") &&
-    sessionThreadSource.includes("containsToolActivity") &&
+    !sessionThreadSource.includes("containsToolActivity") &&
+    sessionThreadSource.includes("while (end < items.length && isActivityCandidate(items[end]))") &&
     sessionThreadSource.includes("thread-tool-chain") &&
     sessionThreadSource.includes("Agent activity") &&
+    sessionThreadSource.includes('<Activity aria-hidden="true" />') &&
     sessionThreadSource.includes("<ToolChainItem") &&
     styles.includes(".thread-tool-chain-items"),
-  "A complete agent activity chain must default to one parent disclosure"
+  "All contiguous agent reasoning, collaboration, and tool activity must default to one parent disclosure"
 );
 assert(
   disclosureTriangleSource.includes('import { Triangle } from "lucide-react"') &&
@@ -374,10 +377,12 @@ assert(
 assert(
   styles.includes(".project-item") &&
     styles.includes(".session-item") &&
-    styles.includes("border-radius: 8px;") &&
+    /\.project-row \{[\s\S]*?border: 0;[\s\S]*?border-radius: 7px;/.test(styles) &&
+    /\.session-branch \{[\s\S]*?border-left: 0;/.test(styles) &&
+    /\.session-item \{[\s\S]*?min-height: 30px;[\s\S]*?border-radius: 7px;/.test(styles) &&
     styles.includes(".settings-section {") &&
     styles.includes(".archived-session-row + .archived-session-row"),
-  "Project, session, and archived-session geometry must retain the quieter rounded treatment"
+  "Project and session rows must stay compact, borderless, and hierarchy-line free"
 );
 assert(sidebarSource.includes("sidebar-footer"), "Settings must remain in the sidebar footer");
 assert(
@@ -388,8 +393,14 @@ assert(!sidebarSource.includes("Local agent"), "Sidebar brand must not show the 
 assert(
   !sidebarSource.includes("{project.status}") &&
     !sidebarSource.includes("{session.detail}") &&
-    !sidebarSource.includes("{session.status}"),
-  "Sidebar rows must not show redundant project or session metadata"
+    sidebarSource.includes("SessionStatusIndicator") &&
+    sidebarSource.includes("LoaderCircle") &&
+    styles.includes(".session-status-working") &&
+    styles.includes(".session-status-complete") &&
+    styles.includes(".session-status-attention") &&
+    appSource.includes('next[sessionId] = "Completed"') &&
+    appSource.includes('next[sessionId] = "Blocked"'),
+  "Sidebar rows must replace redundant metadata with icon-only live session state"
 );
 assert(
   sidebarSource.includes("onSessionRename") &&
@@ -482,7 +493,15 @@ assert(
 assert(!tauriBridge.includes("apiKeyPreview"), "Provider state must not expose API key suffixes");
 assert(appSource.includes("<ModelSelect"), "Provider models must use select controls");
 assert(appSource.includes("listProviderModels"), "Provider settings must load the remote model catalog");
-assert(appSource.includes("context-usage"), "Topbar must expose context token usage");
+assert(
+  appSource.includes("context-usage") &&
+    /\.topbar-actions \{[\s\S]*?gap: 12px;/.test(styles) &&
+    /\.context-usage \{[\s\S]*?width: 132px;/.test(styles) &&
+    /\.context-usage progress \{[\s\S]*?width: 124px;[\s\S]*?height: 2px;[\s\S]*?border-radius: 999px;/.test(
+      styles
+    ),
+  "Topbar must expose compact rounded context usage with breathing room before runtime state"
+);
 assert(
   appSource.includes('activeView !== "settings"') &&
     styles.includes(".topbar-title") &&
@@ -575,12 +594,22 @@ assert(
 const nonGrayColors = [...styles.matchAll(/#([0-9a-fA-F]{6})(?![0-9a-fA-F])/g)]
   .map((match) => match[1].toLowerCase())
   .filter(
-    (hex) => !["2563eb", "2f9e64", "9fe3b0", "f1fff4", "d8f0dd", "afd2b7"].includes(hex)
+    (hex) =>
+      ![
+        "2563eb",
+        "2f9e64",
+        "39b96b",
+        "9fe3b0",
+        "e05b5b",
+        "f1fff4",
+        "d8f0dd",
+        "afd2b7"
+      ].includes(hex)
   )
   .filter((hex) => hex.slice(0, 2) !== hex.slice(2, 4) || hex.slice(2, 4) !== hex.slice(4, 6));
 assert(
   nonGrayColors.length === 0,
-  "Desktop theme must remain grayscale except for the Cindx blue and user message green"
+  "Desktop theme must remain grayscale except for brand, message, and session-state accents"
 );
 assert(appSource.includes("Permissions"), "App must render permission UI");
 assert(appSource.includes("Orchestration"), "App must render orchestration UI");

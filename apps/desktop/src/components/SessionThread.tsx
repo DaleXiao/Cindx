@@ -136,14 +136,6 @@ function isActivityCandidate(item: SessionThreadSelection) {
   );
 }
 
-function containsToolActivity(items: SessionThreadSelection[]) {
-  return items.some(
-    (item) =>
-      (item.type === "event" && ["tool", "permission"].includes(item.event.kind)) ||
-      (item.type === "message" && item.message.role === "tool")
-  );
-}
-
 function groupThreadItems(items: SessionThreadSelection[]): ThreadRow[] {
   const rows: ThreadRow[] = [];
   let index = 0;
@@ -158,18 +150,12 @@ function groupThreadItems(items: SessionThreadSelection[]): ThreadRow[] {
     let end = index + 1;
     while (end < items.length && isActivityCandidate(items[end])) end += 1;
     const candidates = items.slice(index, end);
-    if (containsToolActivity(candidates)) {
-      rows.push({
-        type: "tool-chain",
-        id: `tool-chain-${candidates[0].id}`,
-        items: candidates,
-        itemIndex: index
-      });
-    } else {
-      candidates.forEach((item, offset) => {
-        rows.push({ type: "item", item, itemIndex: index + offset });
-      });
-    }
+    rows.push({
+      type: "tool-chain",
+      id: `tool-chain-${candidates[0].id}`,
+      items: candidates,
+      itemIndex: index
+    });
     index = end;
   }
 
@@ -605,7 +591,7 @@ export function SessionThread({
               >
                 <summary>
                   <DisclosureTriangle />
-                  <TerminalSquare aria-hidden="true" />
+                  <Activity aria-hidden="true" />
                   <strong>Agent activity</strong>
                   <TraceStatusIcon status={toolChainStatus(row.items)} />
                   <time>{formatThreadTime(latestTimestamp)}</time>

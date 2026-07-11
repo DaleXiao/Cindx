@@ -140,7 +140,7 @@ pre {
   top: 0;
   bottom: 0;
   pointer-events: none;
-  background: transparent;
+  background: var(--panel);
   z-index: 0;
   transition: opacity 120ms ease-out;
 }
@@ -447,7 +447,7 @@ pre {
 .project-list,
 .session-list {
   display: grid;
-  gap: 3px;
+  gap: 2px;
 }
 
 .project-list {
@@ -462,12 +462,12 @@ pre {
 .project-row {
   position: relative;
   display: grid;
-  min-height: 38px;
+  min-height: 34px;
   grid-template-columns: 24px minmax(0, 1fr);
   align-items: center;
   background: transparent;
-  border: 1px solid transparent;
-  border-radius: 8px;
+  border: 0;
+  border-radius: 7px;
 }
 
 .project-row:hover {
@@ -476,13 +476,12 @@ pre {
 
 .project-row.active {
   background: var(--surface-active);
-  border-color: #d8d8d8;
 }
 
 .project-disclosure {
   display: grid;
   width: 24px;
-  height: 36px;
+  height: 32px;
   padding: 0;
   place-items: center;
   color: var(--muted);
@@ -505,10 +504,10 @@ pre {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 7px 8px;
+  padding: 5px 8px;
   text-align: left;
   background: transparent;
-  border: 1px solid transparent;
+  border: 0;
   border-radius: var(--radius);
 }
 
@@ -518,7 +517,6 @@ pre {
 
 .nav-item.active {
   background: var(--surface-active);
-  border-color: #d8d8d8;
 }
 
 .nav-item > span {
@@ -539,7 +537,7 @@ pre {
 }
 
 .project-item {
-  min-height: 36px;
+  min-height: 32px;
   padding-right: 30px;
   padding-left: 2px;
   background: transparent;
@@ -629,9 +627,9 @@ pre {
 .session-branch {
   display: grid;
   gap: 4px;
-  margin: 3px 0 8px 11px;
-  padding-left: 9px;
-  border-left: 1px solid #d6d6d6;
+  margin: 2px 0 6px 20px;
+  padding-left: 0;
+  border-left: 0;
 }
 
 .session-heading {
@@ -643,10 +641,10 @@ pre {
 }
 
 .session-item {
-  min-height: 34px;
-  padding-right: 30px;
-  padding-block: 5px;
-  border-radius: 8px;
+  min-height: 30px;
+  padding-right: 58px;
+  padding-block: 3px;
+  border-radius: 7px;
 }
 
 .session-row {
@@ -657,7 +655,7 @@ pre {
 .session-rename-form {
   display: grid;
   min-width: 0;
-  min-height: 34px;
+  min-height: 30px;
   grid-template-columns: minmax(0, 1fr) 26px 26px;
   align-items: center;
   gap: 2px;
@@ -666,7 +664,7 @@ pre {
 .session-rename-input {
   width: 100%;
   min-width: 0;
-  height: 30px;
+  height: 28px;
   padding: 0 7px;
   background: var(--surface);
   border: 1px solid var(--border-strong);
@@ -699,8 +697,8 @@ pre {
 
 .session-more {
   position: absolute;
-  top: 3px;
-  right: 4px;
+  top: 50%;
+  right: 3px;
   display: inline-grid;
   width: 26px;
   height: 28px;
@@ -711,6 +709,47 @@ pre {
   border: 0;
   border-radius: var(--icon-radius);
   opacity: 0;
+  transform: translateY(-50%);
+}
+
+.session-status {
+  position: absolute;
+  top: 50%;
+  right: 35px;
+  display: grid;
+  width: 14px;
+  height: 14px;
+  pointer-events: none;
+  place-items: center;
+  transform: translateY(-50%);
+}
+
+.session-status-working svg {
+  width: 13px;
+  height: 13px;
+  color: #777777;
+  animation: spin 900ms linear infinite;
+}
+
+.session-status > span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.session-status-complete > span {
+  background: #39b96b;
+  box-shadow:
+    0 0 0 2px rgb(57 185 107 / 14%),
+    0 0 8px rgb(57 185 107 / 65%);
+}
+
+.session-status-attention > span {
+  background: #e05b5b;
+  box-shadow:
+    0 0 0 2px rgb(224 91 91 / 14%),
+    0 0 8px rgb(224 91 91 / 65%);
+  animation: session-status-breathe 1800ms ease-in-out infinite;
 }
 
 .session-row:hover .session-more,
@@ -813,12 +852,12 @@ pre {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 6px;
+  gap: 12px;
 }
 
 .context-usage {
   display: grid;
-  width: 148px;
+  width: 132px;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 3px 8px;
@@ -834,21 +873,25 @@ pre {
 }
 
 .context-usage progress {
-  width: 100%;
+  width: 124px;
   height: 2px;
   grid-column: 1 / -1;
   overflow: hidden;
+  justify-self: start;
   appearance: none;
   background: #e5e5e5;
   border: 0;
+  border-radius: 999px;
 }
 
 .context-usage progress::-webkit-progress-bar {
   background: #e5e5e5;
+  border-radius: 999px;
 }
 
 .context-usage progress::-webkit-progress-value {
   background: #9fe3b0;
+  border-radius: 999px;
 }
 
 .runtime-pill {
@@ -1650,8 +1693,17 @@ details[open] > summary .disclosure-triangle {
   }
 }
 
+@keyframes session-status-breathe {
+  50% {
+    opacity: 0.55;
+    transform: scale(0.84);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .composer-working-ring {
+  .composer-working-ring,
+  .session-status-working svg,
+  .session-status-attention > span {
     animation: none;
   }
 
