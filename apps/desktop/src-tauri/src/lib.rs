@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tools::{ToolRegistry, WebSearchConfig};
 
 const PHASE3_TASK_ID: &str = "phase-3-demo";
