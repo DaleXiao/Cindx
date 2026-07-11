@@ -23,6 +23,7 @@ const sessionThreadSource = read("apps/desktop/src/components/SessionThread.tsx"
 const composerSource = read("apps/desktop/src/components/Composer.tsx");
 const inspectorSource = read("apps/desktop/src/components/Inspector.tsx");
 const sidebarSource = read("apps/desktop/src/components/Sidebar.tsx");
+const traceStatusIconSource = read("apps/desktop/src/components/TraceStatusIcon.tsx");
 const styles = read("apps/desktop/src/styles.css");
 const tauriBridge = read("apps/desktop/src/tauri.ts");
 const rustLib = read("apps/desktop/src-tauri/src/lib.rs");
@@ -337,6 +338,12 @@ assert(
 );
 assert(!sidebarSource.includes("Local agent"), "Sidebar brand must not show the old subtitle");
 assert(
+  !sidebarSource.includes("{project.status}") &&
+    !sidebarSource.includes("{session.detail}") &&
+    !sidebarSource.includes("{session.status}"),
+  "Sidebar rows must not show redundant project or session metadata"
+);
+assert(
   sidebarSource.includes("onSessionRename") &&
     sidebarSource.includes('text: "Rename"') &&
     sidebarSource.includes('window.prompt("Rename session", session.name)') &&
@@ -347,6 +354,17 @@ assert(
 assert(sidebarSource.includes("onSessionFork"), "Session menu must expose fork");
 assert(sidebarSource.includes("onSessionArchive"), "Session menu must expose archive");
 assert(sidebarSource.includes("onSessionDelete"), "Session menu must expose delete");
+assert(
+  traceStatusIconSource.includes("CheckCircle2") &&
+    traceStatusIconSource.includes("ShieldQuestion") &&
+    traceStatusIconSource.includes("XCircle") &&
+    appSource.includes('<TraceStatusIcon status={agentTraceState?.status ?? "idle"}') &&
+    appSource.includes("<TraceStatusIcon status={turn.status}") &&
+    appSource.includes("<TraceStatusIcon status={step.status}") &&
+    inspectorSource.includes("<TraceStatusIcon status={traceStep.status}") &&
+    !appSource.includes("<em>{step.status}</em>"),
+  "Agent trace statuses must render as accessible SVG icons"
+);
 assert(
   sidebarSource.includes("Menu.new") &&
     sidebarSource.includes("menu.popup") &&

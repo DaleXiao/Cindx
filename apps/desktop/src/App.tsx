@@ -35,6 +35,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { Inspector, type InspectorTab } from "./components/Inspector";
 import { Composer } from "./components/Composer";
 import { Sidebar, type WorkspaceView } from "./components/Sidebar";
+import { TraceStatusIcon } from "./components/TraceStatusIcon";
 import {
   SessionThread,
   type SessionThreadSelection
@@ -1410,7 +1411,7 @@ export function App() {
             <section className="trace-summary">
               <div>
                 <span>Status</span>
-                <strong>{agentTraceState?.status ?? "idle"}</strong>
+                <TraceStatusIcon status={agentTraceState?.status ?? "idle"} />
               </div>
               <div>
                 <span>Turns</span>
@@ -1451,9 +1452,10 @@ export function App() {
                     <div className="trace-turn-header">
                       <div>
                         <h2>{turn.label}</h2>
-                        <span>
-                          {turn.status} · {formatDuration(turn.durationMs)}
-                        </span>
+                        <div className="trace-turn-meta">
+                          <TraceStatusIcon status={turn.status} />
+                          <span>{formatDuration(turn.durationMs)}</span>
+                        </div>
                       </div>
                       <em>{turn.steps.length} steps</em>
                     </div>
@@ -1479,7 +1481,7 @@ export function App() {
                             <small>{step.detail}</small>
                           </span>
                           <span className="trace-step-meta">
-                            <em>{step.status}</em>
+                            <TraceStatusIcon status={step.status} />
                             <small>{formatDuration(step.latencyMs)}</small>
                           </span>
                         </button>

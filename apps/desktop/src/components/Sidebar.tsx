@@ -218,7 +218,6 @@ export function Sidebar({
                   <span>
                     <strong>{project.name}</strong>
                   </span>
-                  <em>{project.status}</em>
                 </button>
 
                 {project.active && (
@@ -260,9 +259,7 @@ export function Sidebar({
                             >
                               <span>
                                 <strong>{session.name}</strong>
-                                <small>{session.detail}</small>
                               </span>
-                              <em>{session.status}</em>
                             </button>
                             <button
                               className="session-more"

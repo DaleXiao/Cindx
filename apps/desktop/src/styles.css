@@ -484,8 +484,7 @@ pre {
   gap: 2px;
 }
 
-.nav-item strong,
-.nav-item small {
+.nav-item strong {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -496,19 +495,8 @@ pre {
   font-weight: 650;
 }
 
-.nav-item small,
-.nav-item em {
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.nav-item em {
-  flex: 0 0 auto;
-  font-style: normal;
-}
-
 .project-item {
-  min-height: 46px;
+  min-height: 38px;
   border-radius: 8px;
 }
 
@@ -529,9 +517,9 @@ pre {
 }
 
 .session-item {
-  min-height: 38px;
+  min-height: 34px;
   padding-right: 30px;
-  padding-block: 6px;
+  padding-block: 5px;
   border-radius: 8px;
 }
 
@@ -542,7 +530,7 @@ pre {
 
 .session-more {
   position: absolute;
-  top: 5px;
+  top: 3px;
   right: 4px;
   display: inline-grid;
   width: 26px;
@@ -1694,6 +1682,52 @@ textarea::placeholder {
   font-size: 13px;
 }
 
+.trace-status-icon {
+  display: inline-grid;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: var(--subtle);
+  vertical-align: middle;
+  place-items: center;
+}
+
+.trace-status-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.trace-status-icon[data-state="done"] {
+  color: #2f9e64;
+}
+
+.trace-status-icon[data-state="running"] {
+  color: #2563eb;
+}
+
+.trace-status-icon[data-state="waiting"] {
+  color: #707070;
+}
+
+.trace-status-icon[data-state="failed"] {
+  color: #555555;
+}
+
+.trace-status-icon[data-state="cancelled"] {
+  color: #707070;
+}
+
+.trace-summary .trace-status-icon {
+  width: 18px;
+  height: 18px;
+  justify-self: start;
+}
+
+.trace-summary .trace-status-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
 .trace-summary .secondary-button {
   align-self: center;
   margin: 8px 10px;
@@ -1724,11 +1758,17 @@ textarea::placeholder {
   font-size: 13px;
 }
 
-.trace-turn-header span,
+.trace-turn-meta,
 .trace-turn-header em {
   color: var(--muted);
   font-size: 10px;
   font-style: normal;
+}
+
+.trace-turn-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .trace-step-list {
@@ -1796,11 +1836,9 @@ textarea::placeholder {
   justify-items: end;
 }
 
-.trace-step-meta em,
 .trace-step-meta small {
   color: var(--muted);
   font-size: 9px;
-  font-style: normal;
 }
 
 /* Settings */
