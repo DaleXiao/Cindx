@@ -166,6 +166,16 @@ assert(
   sessionThreadSource.includes('aria-label="Session thread"'),
   "Session thread must expose its semantic region"
 );
+assert(
+  packageJson.dependencies["markdown-to-jsx"] &&
+    sessionThreadSource.includes('from "markdown-to-jsx"') &&
+    sessionThreadSource.includes("disableParsingRawHTML: true") &&
+    sessionThreadSource.includes("<AgentMarkdown content={item.message.content}") &&
+    sessionThreadSource.includes("<AgentMarkdown content={streamAnswer} streaming") &&
+    styles.includes(".thread-markdown pre code") &&
+    styles.includes(".thread-markdown table"),
+  "Assistant messages must render safe Markdown in completed and streaming states"
+);
 assert(!appSource.includes("Agent Output"), "Primary model output must not be duplicated in the inspector");
 assert(
   inspectorSource.includes('"details", "artifacts", "context"'),

@@ -15,9 +15,11 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentPropsWithoutRef,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent
 } from "react";
+import Markdown from "markdown-to-jsx";
 import type { AgentState, ChatMessageView, TimelineEntry } from "../tauri";
 
 export type SessionThreadSelection =
@@ -92,6 +94,57 @@ function toolMessageSummary(content: string) {
     label: tool || "Tool output",
     succeeded: status === "succeeded" || status === "completed"
   };
+}
+
+function MarkdownLink({
+  children,
+  href,
+  onClick,
+  onKeyDown,
+  ...props
+}: ComponentPropsWithoutRef<"a">) {
+  const opensExternally = Boolean(href && /^(https?:|mailto:)/i.test(href));
+  return (
+    <a
+      {...props}
+      href={href}
+      target={opensExternally ? "_blank" : undefined}
+      rel={opensExternally ? "noreferrer noopener" : undefined}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick?.(event);
+      }}
+      onKeyDown={(event) => {
+        event.stopPropagation();
+        onKeyDown?.(event);
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
+function AgentMarkdown({ content, streaming = false }: { content: string; streaming?: boolean }) {
+  return (
+    <Markdown
+      className="thread-markdown"
+      options={{
+        disableParsingRawHTML: true,
+        enforceAtxHeadings: true,
+        forceBlock: true,
+        forceWrapper: true,
+        optimizeForStreaming: streaming,
+        wrapper: "div",
+        overrides: {
+          a: {
+            component: MarkdownLink
+          }
+        }
+      }}
+    >
+      {content || "Tool request"}
+    </Markdown>
+  );
 }
 
 export function SessionThread({
@@ -477,7 +530,11 @@ export function SessionThread({
                   <time>{formatThreadTime(item.message.timestampMs)}</time>
                 </header>
               )}
-              <p>{item.message.content || "Tool request"}</p>
+              {isAssistant ? (
+                <AgentMarkdown content={item.message.content} />
+              ) : (
+                <p>{item.message.content || "Tool request"}</p>
+              )}
               {isAssistant && (
                 <footer className="thread-message-agent-meta">
                   <time>{formatThreadTime(item.message.timestampMs)}</time>
@@ -524,7 +581,7 @@ export function SessionThread({
             <div className="thread-thinking thread-streaming-status" role="status">
               <span>Thinking</span>
             </div>
-            <p>{streamAnswer}</p>
+            <AgentMarkdown content={streamAnswer} streaming />
           </article>
         )}
 
