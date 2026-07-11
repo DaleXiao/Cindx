@@ -43,6 +43,7 @@ const ciWorkflow = read(".github/workflows/ci.yml");
 const releaseVersionCheck = read("scripts/check-release-version.mjs");
 const toolsSource = read("crates/tools/src/lib.rs");
 const ragSource = read("crates/agent-rag/src/lib.rs");
+const orchestratorSource = read("crates/orchestrator/src/lib.rs");
 const mainSource = read("apps/desktop/src/main.tsx");
 const html = read("apps/desktop/index.html");
 const viteConfig = read("apps/desktop/vite.config.ts");
@@ -691,13 +692,22 @@ assert(
 );
 assert(
   rustLib.includes("synthesize_agent_answer(") &&
+    rustLib.includes("run_adaptive_collaboration(") &&
+    rustLib.includes("parse_adaptive_workflow(") &&
     rustLib.includes("run_collaboration_candidates(") &&
     rustLib.includes("std::thread::spawn") &&
+    rustLib.includes('"coordinator"') &&
+    rustLib.includes('format!("worker_{}", step_index + 1)') &&
+    rustLib.includes('("access_list".to_string(), spec.access.join(","))') &&
     rustLib.includes('"arbiter"') &&
     rustLib.includes('"planner"') &&
     rustLib.includes('"reviewer"') &&
-    rustLib.includes('"synthesizer"'),
-  "Primary agent must run parallel multi-model deliberation and synthesis"
+    rustLib.includes('"synthesizer"') &&
+    orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 5") &&
+    orchestratorSource.includes("adaptive_workflow_layers") &&
+    orchestratorSource.includes("adaptive_worker_prompt") &&
+    orchestratorSource.includes("must only access earlier steps"),
+  "Primary agent must run bounded, dependency-aware multi-model workflows with isolated context and fallback synthesis"
 );
 assert(
   rustLib.includes('"prompt_tokens"') && rustLib.includes("context_remaining_percent"),
