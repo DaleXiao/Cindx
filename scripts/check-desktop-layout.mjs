@@ -16,7 +16,11 @@ assert(windowConfig.minWidth === 960, "Minimum desktop width must remain 960px")
 assert(windowConfig.titleBarStyle === "Overlay", "macOS title bar must use the overlay layout");
 assert(windowConfig.hiddenTitle === true, "macOS title text must remain hidden");
 assert(css.includes("grid-template-columns: 236px minmax(0, 1fr) var(--inspector-layout-width)"), "Wide layout must use three panes");
-assert(css.includes("grid-template-rows: 38px minmax(0, 1fr)"), "Layout must reserve a custom titlebar row");
+assert(
+  css.includes("--titlebar-height: 46px") &&
+    css.includes("grid-template-rows: var(--titlebar-height) minmax(0, 1fr)"),
+  "Layout must reserve a custom titlebar row"
+);
 assert(css.includes("@media (max-width: 1180px)"), "Compact desktop breakpoint is missing");
 assert(css.includes('position: fixed;\n    z-index: 20;'), "Compact inspector must become an overlay");
 assert(css.includes('.app-shell[data-inspector-open="false"]'), "Inspector must support a collapsed layout");

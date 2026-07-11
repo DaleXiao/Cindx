@@ -30,7 +30,6 @@ import {
   TriangleAlert,
   XCircle
 } from "lucide-react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Inspector, type InspectorTab } from "./components/Inspector";
 import { Composer } from "./components/Composer";
@@ -1258,13 +1257,7 @@ export function App() {
       data-inspector-open={inspectorOpen}
       style={{ "--inspector-width": `${inspectorWidth}px` } as CSSProperties}
     >
-      <header
-        className="window-toolbar"
-        onMouseDown={(event) => {
-          if (event.button !== 0 || (event.target as Element).closest("button")) return;
-          void getCurrentWindow().startDragging();
-        }}
-      >
+      <header className="window-toolbar" data-tauri-drag-region>
         <span className="window-toolbar-panel window-toolbar-panel-left" aria-hidden="true" />
         <span className="window-toolbar-panel window-toolbar-panel-right" aria-hidden="true" />
         {activeView !== "settings" && (
