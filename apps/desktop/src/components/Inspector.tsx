@@ -1,7 +1,6 @@
 import {
   Activity,
   Bug,
-  ChevronRight,
   Clock3,
   Database,
   File,
@@ -28,6 +27,7 @@ import type {
   ToolRunView
 } from "../tauri";
 import type { SessionThreadSelection } from "./SessionThread";
+import { DisclosureTriangle } from "./DisclosureTriangle";
 import { TraceStatusIcon } from "./TraceStatusIcon";
 
 export type InspectorTab = "details" | "artifacts" | "context";
@@ -294,7 +294,7 @@ export function Inspector({
               <strong>Debug</strong>
               <small>Details, artifacts, and context</small>
             </span>
-            <ChevronRight className="inspector-debug-chevron" aria-hidden="true" />
+            <DisclosureTriangle />
           </summary>
           <div className="inspector-debug-body">
             <nav className="inspector-tabs" aria-label="Debug views" role="tablist">
@@ -372,7 +372,10 @@ export function Inspector({
                   </pre>
                 )}
                 <details className="metadata-details">
-                  <summary>Metadata</summary>
+                  <summary>
+                    <DisclosureTriangle />
+                    <span>Metadata</span>
+                  </summary>
                   <pre className="inspector-code">{JSON.stringify(traceStep.metadata, null, 2)}</pre>
                 </details>
                 {traceExportPath && <p className="inspector-path">{traceExportPath}</p>}

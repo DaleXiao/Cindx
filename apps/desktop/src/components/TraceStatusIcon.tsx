@@ -20,7 +20,7 @@ export function TraceStatusIcon({ status, className }: TraceStatusIconProps) {
   if (["done", "completed", "success", "succeeded", "resolved"].includes(normalized)) {
     state = "done";
     icon = <CheckCircle2 aria-hidden="true" />;
-  } else if (["failed", "error"].includes(normalized)) {
+  } else if (["failed", "error", "denied"].includes(normalized)) {
     state = "failed";
     icon = <XCircle aria-hidden="true" />;
   } else if (["cancelled", "canceled"].includes(normalized)) {

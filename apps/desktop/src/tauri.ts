@@ -1349,9 +1349,21 @@ export async function exportAgentTraceJsonl(sessionId?: string | null): Promise<
   }
 }
 
+function currentAgentTimeContext() {
+  const now = new Date();
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "local";
+  const localTime = new Intl.DateTimeFormat(undefined, {
+    dateStyle: "full",
+    timeStyle: "long"
+  }).format(now);
+  return `${localTime} (${timeZone}; UTC ${now.toISOString()})`;
+}
+
 export async function runAgentTask(prompt: string, sessionId: string): Promise<AgentState> {
   try {
-    return await invoke<AgentState>("run_agent_task", { input: { prompt, sessionId } });
+    return await invoke<AgentState>("run_agent_task", {
+      input: { prompt, sessionId, currentTime: currentAgentTimeContext() }
+    });
   } catch {
     const now = Date.now();
     browserAgentState = {

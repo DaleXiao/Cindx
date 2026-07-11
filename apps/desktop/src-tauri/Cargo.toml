@@ -32,3 +32,4 @@ tools = { path = "../../../crates/tools" }
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSResponder", "NSView"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
+window-vibrancy = "0.6.0"
