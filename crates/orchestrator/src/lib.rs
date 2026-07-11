@@ -1,5 +1,5 @@
 use agent_core::{Metadata, ModelRole};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrchestrationPolicy {
@@ -128,6 +128,143 @@ pub fn default_plan(policy: OrchestrationPolicy) -> OrchestrationPlan {
         steps,
         metadata: Metadata::new(),
     }
+}
+
+pub const MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 5;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptiveWorkflowStep {
+    pub id: String,
+    pub model: String,
+    pub subtask: String,
+    pub access: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptiveWorkflow {
+    pub steps: Vec<AdaptiveWorkflowStep>,
+}
+
+pub fn validate_adaptive_workflow(
+    workflow: &AdaptiveWorkflow,
+    allowed_models: &[String],
+) -> Result<(), String> {
+    if workflow.steps.is_empty() {
+        return Err("adaptive workflow must contain at least one step".to_string());
+    }
+    if workflow.steps.len() > MAX_ADAPTIVE_WORKFLOW_STEPS {
+        return Err(format!(
+            "adaptive workflow exceeds the {MAX_ADAPTIVE_WORKFLOW_STEPS}-step budget"
+        ));
+    }
+
+    let allowed_models = allowed_models.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let mut seen_ids = BTreeSet::new();
+    for step in &workflow.steps {
+        if step.id.trim().is_empty() {
+            return Err("adaptive workflow step id is empty".to_string());
+        }
+        if seen_ids.contains(step.id.as_str()) {
+            return Err(format!("adaptive workflow step id is duplicated: {}", step.id));
+        }
+        if !allowed_models.contains(step.model.as_str()) {
+            return Err(format!("adaptive workflow selected an unknown model: {}", step.model));
+        }
+        if step.subtask.trim().is_empty() {
+            return Err(format!("adaptive workflow step {} has an empty subtask", step.id));
+        }
+
+        let mut unique_access = BTreeSet::new();
+        for dependency in &step.access {
+            if !unique_access.insert(dependency.as_str()) {
+                return Err(format!(
+                    "adaptive workflow step {} repeats dependency {dependency}",
+                    step.id
+                ));
+            }
+            if !seen_ids.contains(dependency.as_str()) {
+                return Err(format!(
+                    "adaptive workflow step {} must only access earlier steps: {dependency}",
+                    step.id
+                ));
+            }
+        }
+        seen_ids.insert(step.id.as_str());
+    }
+
+    if workflow.steps.len() > 1
+        && workflow
+            .steps
+            .last()
+            .is_some_and(|step| step.access.is_empty())
+    {
+        return Err("the final adaptive workflow step must synthesize prior work".to_string());
+    }
+
+    adaptive_workflow_layers(workflow)?;
+    Ok(())
+}
+
+pub fn adaptive_workflow_layers(workflow: &AdaptiveWorkflow) -> Result<Vec<Vec<usize>>, String> {
+    let mut indexes = BTreeMap::new();
+    let mut step_layers = vec![0usize; workflow.steps.len()];
+    for (step_index, step) in workflow.steps.iter().enumerate() {
+        if indexes.contains_key(step.id.as_str()) {
+            return Err(format!("adaptive workflow step id is duplicated: {}", step.id));
+        }
+        let mut layer = 0;
+        for dependency in &step.access {
+            let dependency_index = indexes.get(dependency.as_str()).copied().ok_or_else(|| {
+                format!(
+                    "adaptive workflow step {} must only access earlier steps: {dependency}",
+                    step.id
+                )
+            })?;
+            layer = layer.max(step_layers[dependency_index] + 1);
+        }
+        step_layers[step_index] = layer;
+        indexes.insert(step.id.as_str(), step_index);
+    }
+
+    let mut layers = Vec::<Vec<usize>>::new();
+    for (step_index, layer) in step_layers.into_iter().enumerate() {
+        if layers.len() <= layer {
+            layers.resize_with(layer + 1, Vec::new);
+        }
+        layers[layer].push(step_index);
+    }
+    Ok(layers)
+}
+
+pub fn adaptive_worker_prompt(
+    workflow: &AdaptiveWorkflow,
+    step_index: usize,
+    user_prompt: &str,
+    shared_memory: &str,
+    outputs: &BTreeMap<String, String>,
+) -> Option<String> {
+    let step = workflow.steps.get(step_index)?;
+    let mut prompt = format!(
+        "You are isolated worker {} in a Cindx adaptive multi-model workflow. Complete only the assigned subtask. Do not assume you can see other workers unless their output is explicitly included below. Return concrete findings for a later worker, not a user-facing answer.\n\nUser request:\n{}\n\nAssigned subtask:\n{}\n\nShared memory from earlier user turns:\n{}",
+        step.id,
+        user_prompt,
+        step.subtask,
+        if shared_memory.trim().is_empty() {
+            "(none)"
+        } else {
+            shared_memory
+        }
+    );
+    prompt.push_str("\n\nAuthorized prior step outputs:\n");
+    if step.access.is_empty() {
+        prompt.push_str("(none - work independently)\n");
+    } else {
+        for dependency in &step.access {
+            let output = outputs.get(dependency)?;
+            prompt.push_str(&format!("[{dependency}]\n{output}\n\n"));
+        }
+    }
+    Some(prompt)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -532,8 +669,9 @@ pub fn classify_task(prompt: &str) -> TaskClass {
         prompt,
         &[
             "research", "compare", "investigate", "latest", "study", "collaboration", "multi-model",
-            "multiple models", "研究", "调研", "比较", "对比", "分析", "调查", "最新", "评估", "对标",
-            "协同", "多模型", "多个模型",
+            "multiple models", "orchestration", "orchestrator", "fugu", "reproduce", "replicate",
+            "研究", "调研", "比较", "对比", "分析", "调查", "最新", "评估", "对标", "协同",
+            "协作", "多模型", "多个模型", "复现",
         ],
     ) {
         TaskClass::Research
@@ -701,6 +839,120 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_workflow_builds_parallel_dependency_layers() {
+        let workflow = AdaptiveWorkflow {
+            steps: vec![
+                AdaptiveWorkflowStep {
+                    id: "research".to_string(),
+                    model: "strong-vision".to_string(),
+                    subtask: "Research the primary approach.".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "challenge".to_string(),
+                    model: "fast-mini".to_string(),
+                    subtask: "Find independent failure modes.".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "verify".to_string(),
+                    model: "strong-vision".to_string(),
+                    subtask: "Verify the research.".to_string(),
+                    access: vec!["research".to_string()],
+                },
+                AdaptiveWorkflowStep {
+                    id: "synthesize".to_string(),
+                    model: "fast-mini".to_string(),
+                    subtask: "Produce an execution brief.".to_string(),
+                    access: vec!["challenge".to_string(), "verify".to_string()],
+                },
+            ],
+        };
+
+        validate_adaptive_workflow(
+            &workflow,
+            &["fast-mini".to_string(), "strong-vision".to_string()],
+        )
+        .expect("workflow should be valid");
+        assert_eq!(
+            adaptive_workflow_layers(&workflow).expect("layers should build"),
+            vec![vec![0, 1], vec![2], vec![3]]
+        );
+    }
+
+    #[test]
+    fn adaptive_worker_only_receives_authorized_outputs() {
+        let workflow = AdaptiveWorkflow {
+            steps: vec![
+                AdaptiveWorkflowStep {
+                    id: "allowed".to_string(),
+                    model: "fast-mini".to_string(),
+                    subtask: "First branch.".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "isolated".to_string(),
+                    model: "strong-vision".to_string(),
+                    subtask: "Independent branch.".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "consumer".to_string(),
+                    model: "fast-mini".to_string(),
+                    subtask: "Use one branch.".to_string(),
+                    access: vec!["allowed".to_string()],
+                },
+            ],
+        };
+        let outputs = [
+            ("allowed".to_string(), "VISIBLE_FINDING".to_string()),
+            ("isolated".to_string(), "HIDDEN_FINDING".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let prompt = adaptive_worker_prompt(&workflow, 2, "Investigate", "prior turn", &outputs)
+            .expect("worker prompt should build");
+
+        assert!(prompt.contains("VISIBLE_FINDING"));
+        assert!(!prompt.contains("HIDDEN_FINDING"));
+    }
+
+    #[test]
+    fn adaptive_workflow_rejects_forward_access_and_unknown_models() {
+        let workflow = AdaptiveWorkflow {
+            steps: vec![
+                AdaptiveWorkflowStep {
+                    id: "first".to_string(),
+                    model: "fast-mini".to_string(),
+                    subtask: "Try to read the future.".to_string(),
+                    access: vec!["later".to_string()],
+                },
+                AdaptiveWorkflowStep {
+                    id: "later".to_string(),
+                    model: "fast-mini".to_string(),
+                    subtask: "Later work.".to_string(),
+                    access: vec!["first".to_string()],
+                },
+            ],
+        };
+
+        let error = validate_adaptive_workflow(&workflow, &["fast-mini".to_string()])
+            .expect_err("workflow should be rejected");
+        assert!(error.contains("only access earlier steps"));
+
+        let mut unknown_model_workflow = workflow;
+        unknown_model_workflow.steps[0].access.clear();
+        unknown_model_workflow.steps[0].model = "unknown".to_string();
+        let error = validate_adaptive_workflow(
+            &unknown_model_workflow,
+            &["fast-mini".to_string()],
+        )
+        .expect_err("unknown model should be rejected");
+        assert!(error.contains("unknown model"));
+    }
+
+    #[test]
     fn rule_router_explains_retrieval_graph_rag_choice() {
         let context = RoutingContext::from_prompt("Search the docs with RAG and cite sources", candidates());
         let router = RuleBasedRouter;
@@ -715,6 +967,21 @@ mod tests {
     fn chinese_collaboration_request_routes_to_real_ensemble() {
         let context = RoutingContext::from_prompt(
             "分析多个模型协同，并对标 Sakana Fugu Ultra",
+            candidates(),
+        );
+        let decision = RuleBasedRouter.route(&context);
+
+        assert_eq!(context.task_class, TaskClass::Research);
+        assert_eq!(
+            decision.policy,
+            OrchestrationPolicy::BestOfN { candidates: 3 }
+        );
+    }
+
+    #[test]
+    fn fugu_reproduction_request_routes_to_adaptive_ensemble() {
+        let context = RoutingContext::from_prompt(
+            "继续完善 Sakana Fugu Ultra 的复现",
             candidates(),
         );
         let decision = RuleBasedRouter.route(&context);

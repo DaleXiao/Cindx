@@ -30,8 +30,10 @@ use model_provider::{
     OpenAiCompatibleProvider, ModelProvider,
 };
 use orchestrator::{
-    default_plan, parse_policy, role_label, step_prompt, ModelCandidate, OrchestrationPolicy,
-    RoutingContext, RoutingDecision, RuleBasedRouter,
+    adaptive_worker_prompt, adaptive_workflow_layers, default_plan, parse_policy, role_label,
+    step_prompt, validate_adaptive_workflow, AdaptiveWorkflow, AdaptiveWorkflowStep, ModelCandidate,
+    OrchestrationPolicy, RoutingContext, RoutingDecision, RuleBasedRouter,
+    MAX_ADAPTIVE_WORKFLOW_STEPS,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -4477,12 +4479,38 @@ struct AgentCollaboration {
     candidate_models: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AdaptiveWorkflowPayload {
+    steps: Vec<AdaptiveWorkflowStepPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdaptiveWorkflowStepPayload {
+    id: String,
+    model: String,
+    subtask: String,
+    #[serde(default, alias = "access_list", alias = "accessList")]
+    access: Vec<String>,
+}
+
 #[derive(Debug)]
 struct CollaborationCandidateSpec {
     stage: String,
     model: String,
     prompt: String,
     request_id: String,
+}
+
+#[derive(Debug)]
+struct AdaptiveCollaborationSpec {
+    step_index: usize,
+    step_id: String,
+    stage: String,
+    model: String,
+    subtask: String,
+    prompt: String,
+    request_id: String,
+    access: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -4579,6 +4607,102 @@ fn build_collaboration_arbiter_prompt(
     )
 }
 
+fn build_adaptive_coordinator_prompt(
+    config: &ProviderConfig,
+    prompt: &str,
+    history: &[Message],
+    models: &[String],
+) -> String {
+    let recent_context = collaboration_recent_context(history);
+    let worker_pool = models
+        .iter()
+        .map(|model| format!("- {model}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        concat!(
+            "You are the coordinator model for a Fugu-style Cindx workflow. Design a query-specific dependency graph instead of using a fixed planner/reviewer pipeline. Return only strict JSON with this schema:\n",
+            "{{\"steps\":[{{\"id\":\"research\",\"model\":\"exact model from pool\",\"subtask\":\"specific natural-language assignment\",\"access\":[]}},{{\"id\":\"synthesize\",\"model\":\"exact model from pool\",\"subtask\":\"synthesize a checkable execution brief\",\"access\":[\"research\"]}}]}}\n\n",
+            "Rules:\n",
+            "- Use between 2 and {max_steps} steps.\n",
+            "- Preserve the listed order: access may reference only earlier step ids.\n",
+            "- Steps with no dependencies run independently and in parallel.\n",
+            "- Choose models by likely task fit; a model may be used more than once, including the coordinator model itself.\n",
+            "- Keep workers isolated: include an earlier result only when it is necessary and listed in access.\n",
+            "- The final step must access prior work and synthesize one concrete execution brief for a separate tool-using executor.\n",
+            "- Use exact model strings from the worker pool. Do not include markdown fences or commentary.\n\n",
+            "Configured role hints:\nPlanner: {planner}\nExecutor: {executor}\nReviewer: {reviewer}\nSynthesizer: {summarizer}\n\n",
+            "Allowed worker pool:\n{worker_pool}\n\n",
+            "User request:\n{prompt}\n\nRecent session memory:\n{recent_context}"
+        ),
+        max_steps = MAX_ADAPTIVE_WORKFLOW_STEPS,
+        planner = config.model_for_role(&ModelRole::Planner),
+        executor = config.model_for_role(&ModelRole::Executor),
+        reviewer = config.model_for_role(&ModelRole::Reviewer),
+        summarizer = config.model_for_role(&ModelRole::Summarizer),
+        worker_pool = worker_pool,
+        prompt = prompt,
+        recent_context = if recent_context.is_empty() {
+            "(none)"
+        } else {
+            &recent_context
+        }
+    )
+}
+
+fn parse_adaptive_workflow(
+    response: &str,
+    allowed_models: &[String],
+) -> Result<AdaptiveWorkflow, String> {
+    let start = response
+        .find('{')
+        .ok_or_else(|| "coordinator did not return a JSON object".to_string())?;
+    let end = response
+        .rfind('}')
+        .filter(|end| *end >= start)
+        .ok_or_else(|| "coordinator returned incomplete JSON".to_string())?;
+    let payload = serde_json::from_str::<AdaptiveWorkflowPayload>(&response[start..=end])
+        .map_err(|error| format!("coordinator workflow JSON is invalid: {error}"))?;
+    let workflow = AdaptiveWorkflow {
+        steps: payload
+            .steps
+            .into_iter()
+            .map(|step| AdaptiveWorkflowStep {
+                id: step.id.trim().to_string(),
+                model: step.model.trim().to_string(),
+                subtask: step.subtask.trim().to_string(),
+                access: step
+                    .access
+                    .into_iter()
+                    .map(|dependency| dependency.trim().to_string())
+                    .collect(),
+            })
+            .collect(),
+    };
+    if workflow.steps.len() < 2 {
+        return Err("adaptive collaboration requires at least two worker steps".to_string());
+    }
+    validate_adaptive_workflow(&workflow, allowed_models)?;
+    Ok(workflow)
+}
+
+fn adaptive_stage_metadata(spec: &AdaptiveCollaborationSpec) -> Metadata {
+    [
+        ("workflow_step_id".to_string(), spec.step_id.clone()),
+        (
+            "workflow_step_index".to_string(),
+            spec.step_index.to_string(),
+        ),
+        ("access_list".to_string(), spec.access.join(",")),
+        (
+            "subtask".to_string(),
+            truncate_for_collaboration(&spec.subtask, 2_000),
+        ),
+    ]
+    .into_iter()
+    .collect()
+}
+
 fn collaboration_candidate_models(config: &ProviderConfig, candidates: usize) -> Vec<String> {
     let mut models = Vec::new();
     for role in [
@@ -4643,7 +4767,7 @@ fn synthesize_agent_answer(
     )
     .unwrap_or_else(|error| format!("Reviewer unavailable: {error}"));
     let synthesis_prompt = format!(
-        "You are the final synthesizer in a multi-model Cindx team. Produce the strongest possible final response to the user using the executor draft, reviewer corrections, team guidance, and tool evidence. Resolve disagreements using evidence. Do not mention the internal pipeline. Be precise, complete, and concise; never claim work that the evidence does not support.\n\nCollaboration policy: {}\nCandidate models: {}\n\nUser request:\n{}\n\nTeam guidance:\n{}\n\nExecutor draft:\n{}\n\nReviewer corrections:\n{}\n\nTool evidence:\n{}",
+        "You are the final synthesizer in a multi-model Cindx team. Produce the strongest possible final response to the user using the executor draft, reviewer corrections, team guidance, and tool evidence. Resolve disagreements using evidence. Do not mention the internal pipeline. Be precise, complete, and concise; never claim work that the evidence does not support.\n\nCollaboration policy: {}\nWorker pool: {}\n\nUser request:\n{}\n\nTeam guidance:\n{}\n\nExecutor draft:\n{}\n\nReviewer corrections:\n{}\n\nTool evidence:\n{}",
         collaboration.policy,
         collaboration.candidate_models.join(", "),
         prompt,
@@ -4685,7 +4809,20 @@ fn record_collaboration_stage_started(
     role: &ModelRole,
     model: &str,
     request_id: &str,
+    stage_metadata: &Metadata,
 ) -> Result<(), String> {
+    let mut metadata = [
+        ("collaboration_id".to_string(), collaboration_id.to_string()),
+        ("request_id".to_string(), request_id.to_string()),
+        ("stage".to_string(), stage.to_string()),
+        ("role".to_string(), role_label(role).to_string()),
+        ("model".to_string(), model.to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    for (key, value) in stage_metadata {
+        metadata.insert(key.clone(), value.clone());
+    }
     let mut store = state
         .store
         .lock()
@@ -4695,18 +4832,7 @@ fn record_collaboration_stage_started(
         task_id,
         EventKind::ModelRequestStarted,
         format!("Collaboration {stage} started"),
-        metadata_with_context(
-            [
-                ("collaboration_id".to_string(), collaboration_id.to_string()),
-                ("request_id".to_string(), request_id.to_string()),
-                ("stage".to_string(), stage.to_string()),
-                ("role".to_string(), role_label(role).to_string()),
-                ("model".to_string(), model.to_string()),
-            ]
-            .into_iter()
-            .collect(),
-            run_context,
-        ),
+        metadata_with_context(metadata, run_context),
     )
     .map_err(|error| error.to_string())?;
     Ok(())
@@ -4781,6 +4907,7 @@ fn record_collaboration_stage_finished(
     model: &str,
     request_id: &str,
     completion: &CollaborationCompletion,
+    stage_metadata: &Metadata,
 ) -> Result<(), String> {
     let mut metadata = [
         ("collaboration_id".to_string(), collaboration_id.to_string()),
@@ -4792,6 +4919,9 @@ fn record_collaboration_stage_finished(
     ]
     .into_iter()
     .collect::<Metadata>();
+    for (key, value) in stage_metadata {
+        metadata.insert(key.clone(), value.clone());
+    }
     let summary = if let Some(content) = completion.content.as_ref() {
         metadata.insert("output".to_string(), content.clone());
         metadata.insert("status".to_string(), "completed".to_string());
@@ -4846,6 +4976,7 @@ fn run_collaboration_stage(
         &role,
         model,
         &request_id,
+        &Metadata::new(),
     )?;
     let completion = complete_collaboration_model(
         config.clone(),
@@ -4864,12 +4995,149 @@ fn run_collaboration_stage(
         model,
         &request_id,
         &completion,
+        &Metadata::new(),
     )?;
     completion.content.ok_or_else(|| {
         completion
             .error
             .unwrap_or_else(|| "collaboration model returned no content".to_string())
     })
+}
+
+fn run_adaptive_collaboration(
+    state: &tauri::State<'_, AppState>,
+    config: &ProviderConfig,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    collaboration_id: &str,
+    prompt: &str,
+    history: &[Message],
+    models: &[String],
+) -> Result<String, String> {
+    if models.is_empty() {
+        return Err("adaptive collaboration has no configured worker models".to_string());
+    }
+    let coordinator_model = config.model_for_role(&ModelRole::Planner);
+    let workflow_response = run_collaboration_stage(
+        state,
+        config,
+        task_id,
+        run_context,
+        collaboration_id,
+        "coordinator",
+        ModelRole::Planner,
+        &coordinator_model,
+        build_adaptive_coordinator_prompt(config, prompt, history, models),
+    )?;
+    let workflow = parse_adaptive_workflow(&workflow_response, models)?;
+    let layers = adaptive_workflow_layers(&workflow)?;
+    let shared_memory = collaboration_recent_context(history);
+    let system_prompt = agent_system_prompt_for_run(&config.agent_system_prompt, run_context);
+    let mut outputs = BTreeMap::new();
+
+    for layer in layers {
+        let specs = layer
+            .into_iter()
+            .map(|step_index| {
+                let step = &workflow.steps[step_index];
+                let worker_prompt = adaptive_worker_prompt(
+                    &workflow,
+                    step_index,
+                    prompt,
+                    &shared_memory,
+                    &outputs,
+                )
+                .ok_or_else(|| format!("adaptive worker prompt is missing for {}", step.id))?;
+                Ok(AdaptiveCollaborationSpec {
+                    step_index,
+                    step_id: step.id.clone(),
+                    stage: format!("worker_{}", step_index + 1),
+                    model: step.model.clone(),
+                    subtask: step.subtask.clone(),
+                    prompt: worker_prompt,
+                    request_id: unique_id("collaboration-model"),
+                    access: step.access.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        for spec in &specs {
+            let metadata = adaptive_stage_metadata(spec);
+            record_collaboration_stage_started(
+                state,
+                task_id,
+                run_context,
+                collaboration_id,
+                &spec.stage,
+                &ModelRole::Executor,
+                &spec.model,
+                &spec.request_id,
+                &metadata,
+            )?;
+        }
+
+        let handles = specs
+            .iter()
+            .map(|spec| {
+                let config = config.clone();
+                let model = spec.model.clone();
+                let prompt = spec.prompt.clone();
+                let system_prompt = system_prompt.clone();
+                std::thread::spawn(move || {
+                    complete_collaboration_model(
+                        config,
+                        ModelRole::Executor,
+                        model,
+                        system_prompt,
+                        prompt,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let completions = handles
+            .into_iter()
+            .map(|handle| {
+                handle.join().unwrap_or_else(|_| {
+                    CollaborationCompletion::failed("adaptive collaboration worker panicked")
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for (spec, completion) in specs.iter().zip(&completions) {
+            let metadata = adaptive_stage_metadata(spec);
+            record_collaboration_stage_finished(
+                state,
+                task_id,
+                run_context,
+                collaboration_id,
+                &spec.stage,
+                &ModelRole::Executor,
+                &spec.model,
+                &spec.request_id,
+                completion,
+                &metadata,
+            )?;
+            let content = completion
+                .content
+                .as_ref()
+                .filter(|content| !content.trim().is_empty())
+                .ok_or_else(|| {
+                    completion
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| format!("adaptive worker {} returned no content", spec.step_id))
+                })?;
+            outputs.insert(spec.step_id.clone(), content.clone());
+        }
+    }
+
+    let final_step = workflow
+        .steps
+        .last()
+        .ok_or_else(|| "adaptive workflow has no final step".to_string())?;
+    outputs
+        .remove(&final_step.id)
+        .ok_or_else(|| "adaptive workflow final output is missing".to_string())
 }
 
 fn run_collaboration_candidates(
@@ -4903,6 +5171,7 @@ fn run_collaboration_candidates(
             &ModelRole::Planner,
             &spec.model,
             &spec.request_id,
+            &Metadata::new(),
         )?;
     }
 
@@ -4946,6 +5215,7 @@ fn run_collaboration_candidates(
             &spec.model,
             &spec.request_id,
             completion,
+            &Metadata::new(),
         )?;
         if let Some(content) = completion
             .content
@@ -4990,8 +5260,14 @@ fn prepare_agent_collaboration(
     let id = unique_id("collab");
     let (guidance, candidate_models) = match policy {
         OrchestrationPolicy::BestOfN { candidates } => {
-            let models = collaboration_candidate_models(config, *candidates);
-            let guidance = run_collaboration_candidates(
+            let models =
+                collaboration_candidate_models(config, MAX_ADAPTIVE_WORKFLOW_STEPS);
+            let fallback_models = models
+                .iter()
+                .take((*candidates).max(1))
+                .cloned()
+                .collect::<Vec<_>>();
+            let guidance = run_adaptive_collaboration(
                 state,
                 config,
                 task_id,
@@ -5001,6 +5277,18 @@ fn prepare_agent_collaboration(
                 history,
                 &models,
             )
+            .or_else(|_| {
+                run_collaboration_candidates(
+                    state,
+                    config,
+                    task_id,
+                    run_context,
+                    &id,
+                    prompt,
+                    history,
+                    &fallback_models,
+                )
+            })
             .unwrap_or_default();
             (guidance, models)
         }
@@ -8523,15 +8811,21 @@ fn timeline_event_label(event: &Event) -> String {
 
 fn collaboration_stage_display_label(stage: &str) -> String {
     match stage {
+        "coordinator" => "Coordinator".to_string(),
         "planner" => "Planner".to_string(),
         "arbiter" => "Arbiter".to_string(),
         "executor" => "Executor".to_string(),
         "reviewer" => "Reviewer".to_string(),
         "synthesizer" => "Synthesis".to_string(),
-        _ => stage
-            .strip_prefix("candidate_")
-            .map(|index| format!("Candidate {index}"))
-            .unwrap_or_else(|| "Model collaboration".to_string()),
+        _ => {
+            if let Some(index) = stage.strip_prefix("candidate_") {
+                format!("Candidate {index}")
+            } else if let Some(index) = stage.strip_prefix("worker_") {
+                format!("Worker {index}")
+            } else {
+                "Model collaboration".to_string()
+            }
+        }
     }
 }
 
@@ -8915,6 +9209,48 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_coordinator_parses_bounded_dependency_workflow() {
+        let response = r#"```json
+        {"steps":[
+          {"id":"independent-a","model":"planner-a","subtask":"Analyze one path","access":[]},
+          {"id":"independent-b","model":"reviewer-b","subtask":"Challenge assumptions","access":[]},
+          {"id":"final","model":"summary-c","subtask":"Synthesize guidance","access":["independent-a","independent-b"]}
+        ]}
+        ```"#;
+        let models = vec![
+            "planner-a".to_string(),
+            "reviewer-b".to_string(),
+            "summary-c".to_string(),
+        ];
+
+        let workflow =
+            parse_adaptive_workflow(response, &models).expect("workflow should parse");
+
+        assert_eq!(workflow.steps.len(), 3);
+        assert_eq!(
+            workflow.steps[2].access,
+            vec!["independent-a".to_string(), "independent-b".to_string()]
+        );
+        assert_eq!(
+            adaptive_workflow_layers(&workflow).expect("layers should build"),
+            vec![vec![0, 1], vec![2]]
+        );
+    }
+
+    #[test]
+    fn adaptive_coordinator_rejects_models_outside_the_configured_pool() {
+        let response = r#"{"steps":[
+          {"id":"first","model":"configured","subtask":"Analyze","access":[]},
+          {"id":"final","model":"unconfigured","subtask":"Synthesize","access":["first"]}
+        ]}"#;
+
+        let error = parse_adaptive_workflow(response, &["configured".to_string()])
+            .expect_err("unknown model should be rejected");
+
+        assert!(error.contains("unknown model"));
+    }
+
+    #[test]
     fn collaboration_stages_have_visible_timeline_labels() {
         let event = Event {
             id: EventId("candidate-event".to_string()),
@@ -8932,6 +9268,8 @@ mod tests {
         };
 
         assert_eq!(timeline_event_label(&event), "Candidate 2");
+        assert_eq!(collaboration_stage_display_label("coordinator"), "Coordinator");
+        assert_eq!(collaboration_stage_display_label("worker_3"), "Worker 3");
         assert_eq!(collaboration_stage_display_label("arbiter"), "Arbiter");
         assert_eq!(collaboration_stage_display_label("synthesizer"), "Synthesis");
     }
