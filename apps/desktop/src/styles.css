@@ -2363,7 +2363,7 @@ textarea::placeholder {
 
 .settings-app-return {
   position: relative;
-  top: -8px;
+  top: -12px;
   justify-self: start;
 }
 

@@ -147,14 +147,12 @@ assert(
   "The macOS titlebar must hide its title and host the pane controls"
 );
 const titlebarHeight = 46;
-const titlebarCenterY = titlebarHeight / 2;
-const macOSTrafficLightOpticalOffsetY = -2;
+// This is the user-confirmed macOS alignment; do not retune it indirectly.
+const confirmedMacOSTrafficLightY = 25;
 
 assert(
   tauriConfig.app.windows.every(
-    (window) =>
-      window.trafficLightPosition?.y ===
-      titlebarCenterY + macOSTrafficLightOpticalOffsetY
+    (window) => window.trafficLightPosition?.y === confirmedMacOSTrafficLightY
   ) &&
     styles.includes(`--titlebar-height: ${titlebarHeight}px`) &&
     styles.includes("--titlebar-control-size: 28px") &&
@@ -163,7 +161,7 @@ assert(
       "top: calc((var(--titlebar-height) - var(--titlebar-control-size)) / 2)"
     ) &&
     !styles.includes("--titlebar-content-offset-y"),
-  "Native traffic lights and custom titlebar controls must retain their optical alignment"
+  "Native traffic lights must retain the user-confirmed y=25 alignment"
 );
 assert(
   tauriConfig.bundle.icon.includes("icons/icon.icns"),
@@ -691,7 +689,7 @@ assert(
     appSource.includes('className="settings-detail"') &&
     !appSource.includes("settings-index") &&
     styles.includes("grid-template-columns: 168px minmax(0, 760px)") &&
-    /\.settings-app-return \{[\s\S]*?top: -8px;/.test(styles),
+    /\.settings-app-return \{[\s\S]*?top: -12px;/.test(styles),
   "Settings must use persistent left tabs and right-side details"
 );
 assert(
