@@ -996,6 +996,33 @@ export async function forkSession(sessionId: string): Promise<ProjectSessionStat
   }
 }
 
+export async function renameSession(
+  sessionId: string,
+  name: string
+): Promise<ProjectSessionState> {
+  try {
+    return await invoke<ProjectSessionState>("rename_session", {
+      input: { sessionId, name }
+    });
+  } catch {
+    const normalizedName = name.trim().replace(/[\n\r]/g, "");
+    const source = browserProjectSessionState.sessions.find(
+      (session) => session.id === sessionId
+    );
+    if (!normalizedName || !source) return browserProjectSessionState;
+    const now = Date.now();
+    browserProjectSessionState = {
+      ...browserProjectSessionState,
+      sessions: browserProjectSessionState.sessions.map((session) =>
+        session.id === sessionId
+          ? { ...session, name: normalizedName, updatedAtMs: now }
+          : session
+      )
+    };
+    return browserProjectSessionState;
+  }
+}
+
 export async function archiveSession(sessionId: string): Promise<ProjectSessionState> {
   try {
     return await invoke<ProjectSessionState>("archive_session", { input: { sessionId } });

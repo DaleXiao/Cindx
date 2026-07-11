@@ -454,6 +454,13 @@ struct CreateSessionInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RenameSessionInput {
+    session_id: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SelectProjectInput {
     project_id: String,
 }
@@ -1179,6 +1186,46 @@ fn create_session(
     config.active_session_id = session_id;
     save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
 
+    Ok(project_session_state(&config, None))
+}
+
+#[tauri::command]
+fn rename_session(
+    state: tauri::State<'_, AppState>,
+    input: RenameSessionInput,
+) -> Result<ProjectSessionState, String> {
+    let name = normalized_config_value(&input.name);
+    if name.is_empty() {
+        return project_session_state_with_error(&state, "session name is empty");
+    }
+    let mut config = state
+        .project_session_config
+        .lock()
+        .map_err(|error| format!("project session config lock poisoned: {error}"))?;
+    let now = current_time_millis();
+    let project_id = {
+        let Some(session) = config
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == input.session_id)
+        else {
+            return Ok(project_session_state(
+                &config,
+                Some("session not found".to_string()),
+            ));
+        };
+        session.name = name;
+        session.updated_at_ms = now;
+        session.project_id.clone()
+    };
+    if let Some(project) = config
+        .projects
+        .iter_mut()
+        .find(|project| project.id == project_id)
+    {
+        project.updated_at_ms = now;
+    }
+    save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
     Ok(project_session_state(&config, None))
 }
 
@@ -3543,6 +3590,7 @@ pub fn run() {
             get_project_session_state,
             create_project,
             create_session,
+            rename_session,
             fork_session,
             archive_session,
             restore_session,

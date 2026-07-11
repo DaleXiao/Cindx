@@ -336,6 +336,14 @@ assert(
   "Sidebar brand must use the high-resolution packaged app icon"
 );
 assert(!sidebarSource.includes("Local agent"), "Sidebar brand must not show the old subtitle");
+assert(
+  sidebarSource.includes("onSessionRename") &&
+    sidebarSource.includes('text: "Rename"') &&
+    sidebarSource.includes('window.prompt("Rename session", session.name)') &&
+    appSource.includes("handleRenameSession") &&
+    tauriBridge.includes('invoke<ProjectSessionState>("rename_session"'),
+  "Session menu must rename sessions through the persisted Tauri command"
+);
 assert(sidebarSource.includes("onSessionFork"), "Session menu must expose fork");
 assert(sidebarSource.includes("onSessionArchive"), "Session menu must expose archive");
 assert(sidebarSource.includes("onSessionDelete"), "Session menu must expose delete");
@@ -588,6 +596,7 @@ assert(rustLib.includes("fn get_phase4_state("), "Phase 4 state command is missi
 assert(rustLib.includes("fn save_provider_config("), "Phase 4 provider config command is missing");
 assert(rustLib.includes("async fn list_provider_models("), "Provider model catalog command is missing");
 assert(rustLib.includes("async fn run_agent_task("), "Agent task must not block the IPC thread");
+assert(rustLib.includes("fn rename_session("), "Session rename command is missing");
 assert(rustLib.includes("fn fork_session("), "Session fork command is missing");
 assert(rustLib.includes("fn archive_session("), "Session archive command is missing");
 assert(rustLib.includes("fn restore_session("), "Session restore command is missing");
