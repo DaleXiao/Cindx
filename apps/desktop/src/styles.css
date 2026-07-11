@@ -20,7 +20,7 @@
   --radius: 6px;
   --icon-radius: 9px;
   --titlebar-height: 46px;
-  --titlebar-content-center-y: calc(var(--titlebar-height) / 2);
+  --titlebar-control-size: 28px;
   --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
 }
 
@@ -210,10 +210,10 @@ pre {
 .window-pane-toggle {
   position: absolute;
   z-index: 3;
-  top: calc(var(--titlebar-content-center-y) - 14px);
+  top: calc((var(--titlebar-height) - var(--titlebar-control-size)) / 2);
   display: grid;
-  width: 28px;
-  height: 28px;
+  width: var(--titlebar-control-size);
+  height: var(--titlebar-control-size);
   padding: 0;
   place-items: center;
   color: #696969;

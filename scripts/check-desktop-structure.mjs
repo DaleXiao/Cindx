@@ -135,12 +135,20 @@ assert(
   ),
   "The macOS titlebar must hide its title and host the pane controls"
 );
+const titlebarHeight = 46;
+const macOSTrafficLightSize = 14;
+const centeredTrafficLightTop = (titlebarHeight - macOSTrafficLightSize) / 2;
+
 assert(
-  tauriConfig.app.windows.every((window) => window.trafficLightPosition?.y === 23) &&
-    styles.includes("--titlebar-height: 46px") &&
-    styles.includes("--titlebar-content-center-y: calc(var(--titlebar-height) / 2)") &&
+  tauriConfig.app.windows.every(
+    (window) => window.trafficLightPosition?.y === centeredTrafficLightTop
+  ) &&
+    styles.includes(`--titlebar-height: ${titlebarHeight}px`) &&
+    styles.includes("--titlebar-control-size: 28px") &&
     styles.includes("grid-template-rows: var(--titlebar-height) minmax(0, 1fr)") &&
-    styles.includes("top: calc(var(--titlebar-content-center-y) - 14px)") &&
+    styles.includes(
+      "top: calc((var(--titlebar-height) - var(--titlebar-control-size)) / 2)"
+    ) &&
     !styles.includes("--titlebar-content-offset-y"),
   "Native traffic lights and custom titlebar controls must retain their optical alignment"
 );
