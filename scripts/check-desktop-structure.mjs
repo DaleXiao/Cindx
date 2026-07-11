@@ -360,6 +360,15 @@ assert(
 );
 assert(sidebarSource.includes("session-branch"), "Sessions must be nested below the active project");
 assert(
+  sidebarSource.includes("collapsedProjectIds") &&
+    sidebarSource.includes('className="project-disclosure"') &&
+    sidebarSource.includes("aria-expanded={expanded}") &&
+    sidebarSource.includes("handleProjectDisclosure(project, expanded)") &&
+    sidebarSource.includes("<DisclosureTriangle />") &&
+    styles.includes('.project-disclosure[aria-expanded="true"] .disclosure-triangle'),
+  "Each project must expose an accessible disclosure control for its sessions"
+);
+assert(
   styles.includes(".project-item") &&
     styles.includes(".session-item") &&
     styles.includes("border-radius: 8px;") &&
