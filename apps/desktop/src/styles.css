@@ -19,8 +19,8 @@
   --ink: #202020;
   --radius: 6px;
   --icon-radius: 9px;
-  --titlebar-content-center-y: 26px;
-  --titlebar-content-offset-y: 7px;
+  --titlebar-height: 46px;
+  --titlebar-content-center-y: calc(var(--titlebar-height) / 2);
   --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
 }
 
@@ -84,7 +84,7 @@ pre {
   position: relative;
   display: grid;
   grid-template-columns: 236px minmax(0, 1fr) var(--inspector-layout-width);
-  grid-template-rows: 38px minmax(0, 1fr);
+  grid-template-rows: var(--titlebar-height) minmax(0, 1fr);
   width: 100%;
   height: 100%;
   min-height: 0;
@@ -128,6 +128,8 @@ pre {
   grid-column: 1 / -1;
   grid-row: 1;
   min-width: 0;
+  -webkit-user-select: none;
+  user-select: none;
   background: rgba(250, 250, 250, 0.62);
   -webkit-backdrop-filter: saturate(1.3) blur(18px);
   backdrop-filter: saturate(1.3) blur(18px);
@@ -171,6 +173,7 @@ pre {
   justify-content: space-between;
   gap: 14px;
   padding: 0 14px;
+  pointer-events: none;
   background: transparent;
 }
 
@@ -653,7 +656,6 @@ pre {
   min-width: 0;
   align-items: center;
   gap: 8px;
-  transform: translateY(var(--titlebar-content-offset-y));
 }
 
 .topbar-title > div {
@@ -689,7 +691,6 @@ pre {
   flex: 0 0 auto;
   align-items: center;
   gap: 6px;
-  transform: translateY(var(--titlebar-content-offset-y));
 }
 
 .context-usage {
@@ -2984,7 +2985,7 @@ textarea::placeholder {
   .inspector[data-open="true"] {
     position: fixed;
     z-index: 20;
-    top: 38px;
+    top: var(--titlebar-height);
     right: 0;
     bottom: 0;
     width: var(--inspector-layout-width);
@@ -3005,7 +3006,7 @@ textarea::placeholder {
   .app-shell[data-sidebar-open="false"],
   .app-shell[data-sidebar-open="false"][data-inspector-open="false"] {
     grid-template-columns: 1fr;
-    grid-template-rows: 38px minmax(0, 1fr);
+    grid-template-rows: var(--titlebar-height) minmax(0, 1fr);
     height: auto;
     min-height: 100%;
   }

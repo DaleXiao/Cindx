@@ -135,11 +135,12 @@ assert(
   "The macOS titlebar must hide its title and host the pane controls"
 );
 assert(
-  tauriConfig.app.windows.every((window) => window.trafficLightPosition?.y === 28) &&
-    styles.includes("--titlebar-content-center-y: 26px") &&
-    styles.includes("--titlebar-content-offset-y: 7px") &&
+  tauriConfig.app.windows.every((window) => window.trafficLightPosition?.y === 32) &&
+    styles.includes("--titlebar-height: 46px") &&
+    styles.includes("--titlebar-content-center-y: calc(var(--titlebar-height) / 2)") &&
+    styles.includes("grid-template-rows: var(--titlebar-height) minmax(0, 1fr)") &&
     styles.includes("top: calc(var(--titlebar-content-center-y) - 14px)") &&
-    styles.includes("transform: translateY(var(--titlebar-content-offset-y))"),
+    !styles.includes("--titlebar-content-offset-y"),
   "Native traffic lights and custom titlebar controls must retain their optical alignment"
 );
 assert(
@@ -203,8 +204,11 @@ assert(
   "The titlebar must expose a stable sidebar toggle"
 );
 assert(
-  appSource.includes("getCurrentWindow().startDragging()"),
-  "The custom titlebar must explicitly start native window dragging"
+  appSource.includes('className="window-toolbar" data-tauri-drag-region') &&
+    styles.includes(".window-workspace-header") &&
+    styles.includes("pointer-events: none") &&
+    !appSource.includes("getCurrentWindow().startDragging()"),
+  "The custom titlebar must expose a native drag region without blocking pane controls"
 );
 assert(
   appSource.includes("workspaceViewBeforeSettings") &&
@@ -450,7 +454,8 @@ assert(appSource.includes("context-usage"), "Topbar must expose context token us
 assert(
   appSource.includes('activeView !== "settings"') &&
     styles.includes(".topbar-title") &&
-    styles.includes("transform: translateY(var(--titlebar-content-offset-y))"),
+    styles.includes(".topbar-actions") &&
+    !styles.includes("--titlebar-content-offset-y"),
   "Chat title and status controls must remain hidden in Settings and optically aligned elsewhere"
 );
 assert(
