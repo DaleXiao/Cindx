@@ -604,7 +604,7 @@ export function SessionThread({
                 <summary>
                   <DisclosureTriangle />
                   <TerminalSquare aria-hidden="true" />
-                  <strong>Tool activity</strong>
+                  <strong>Agent activity</strong>
                   <TraceStatusIcon status={toolChainStatus(row.items)} />
                   <time>{formatThreadTime(latestTimestamp)}</time>
                 </summary>

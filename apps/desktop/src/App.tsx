@@ -1762,6 +1762,7 @@ export function App() {
                         }
                       >
                         <option value="auto_router">Adaptive</option>
+                        <option value="best_of_n">Ensemble deliberation</option>
                         <option value="plan_execute_review">Quality synthesis</option>
                         <option value="single">Single model</option>
                       </select>
