@@ -346,10 +346,14 @@ assert(
 assert(
   sidebarSource.includes("onSessionRename") &&
     sidebarSource.includes('text: "Rename"') &&
-    sidebarSource.includes('window.prompt("Rename session", session.name)') &&
+    sidebarSource.includes('className="session-rename-form"') &&
+    sidebarSource.includes('aria-label="Save session name"') &&
+    sidebarSource.includes('aria-label="Cancel session rename"') &&
+    !sidebarSource.includes("window.prompt") &&
+    styles.includes(".session-rename-input") &&
     appSource.includes("handleRenameSession") &&
     tauriBridge.includes('invoke<ProjectSessionState>("rename_session"'),
-  "Session menu must rename sessions through the persisted Tauri command"
+  "Session menu must provide inline editing through the persisted Tauri command"
 );
 assert(sidebarSource.includes("onSessionFork"), "Session menu must expose fork");
 assert(sidebarSource.includes("onSessionArchive"), "Session menu must expose archive");

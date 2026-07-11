@@ -528,6 +528,49 @@ pre {
   min-width: 0;
 }
 
+.session-rename-form {
+  display: grid;
+  min-width: 0;
+  min-height: 34px;
+  grid-template-columns: minmax(0, 1fr) 26px 26px;
+  align-items: center;
+  gap: 2px;
+}
+
+.session-rename-input {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 7px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  font-size: 12px;
+}
+
+.session-rename-action {
+  display: inline-grid;
+  width: 26px;
+  height: 28px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  place-items: center;
+}
+
+.session-rename-action:hover,
+.session-rename-action:focus-visible {
+  color: var(--text);
+  background: var(--surface-active);
+}
+
+.session-rename-action svg {
+  width: 13px;
+  height: 13px;
+}
+
 .session-more {
   position: absolute;
   top: 3px;
