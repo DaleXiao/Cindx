@@ -23,6 +23,7 @@ import {
   type RefObject
 } from "react";
 import Markdown from "markdown-to-jsx";
+import { openArtifact, openExternalUrl } from "../tauri";
 import type { AgentState, ChatMessageView, TimelineEntry } from "../tauri";
 import { DisclosureTriangle } from "./DisclosureTriangle";
 import { TraceStatusIcon } from "./TraceStatusIcon";
@@ -48,6 +49,7 @@ type SessionThreadProps = {
   selectedId: string | null;
   onSelect: (selection: SessionThreadSelection) => void;
   onEditMessage: (content: string) => void;
+  onLinkOpenError: (message: string) => void;
 };
 
 type ThreadFindProps = {
@@ -314,23 +316,67 @@ function ToolChainItem({
   );
 }
 
+type MarkdownLinkProps = ComponentPropsWithoutRef<"a"> & {
+  onOpenError?: (message: string) => void;
+};
+
+function externalLinkTarget(href: string) {
+  if (/^(https?:|mailto:)/i.test(href)) return href;
+  if (/^www\./i.test(href)) return `https://${href}`;
+  return null;
+}
+
+function artifactLinkTarget(href: string) {
+  let target = href;
+  if (/^file:\/\//i.test(target)) {
+    try {
+      target = new URL(target).pathname;
+    } catch {
+      target = target.replace(/^file:\/\//i, "");
+    }
+  } else {
+    target = target.split(/[?#]/, 1)[0];
+  }
+  try {
+    target = decodeURIComponent(target);
+  } catch {
+    // Keep the original path when a link contains a malformed escape.
+  }
+  return target.replace(/:\d+(?::\d+)?$/, "");
+}
+
 function MarkdownLink({
   children,
   href,
   onClick,
   onKeyDown,
+  onOpenError,
   ...props
-}: ComponentPropsWithoutRef<"a">) {
-  const opensExternally = Boolean(href && /^(https?:|mailto:)/i.test(href));
+}: MarkdownLinkProps) {
+  const externalTarget = href ? externalLinkTarget(href) : null;
+  const reportError = (target: string, error: unknown) => {
+    const detail = error instanceof Error ? error.message : String(error);
+    onOpenError?.(`Could not open ${target}: ${detail}`);
+  };
   return (
     <a
       {...props}
       href={href}
-      target={opensExternally ? "_blank" : undefined}
-      rel={opensExternally ? "noreferrer noopener" : undefined}
+      target={externalTarget ? "_blank" : undefined}
+      rel={externalTarget ? "noreferrer noopener" : undefined}
       onClick={(event) => {
         event.stopPropagation();
         onClick?.(event);
+        if (event.defaultPrevented || !href || href.startsWith("#")) return;
+        event.preventDefault();
+        if (externalTarget) {
+          void openExternalUrl(externalTarget).catch((error) => reportError(externalTarget, error));
+          return;
+        }
+        const artifactTarget = artifactLinkTarget(href);
+        if (artifactTarget) {
+          void openArtifact(artifactTarget).catch((error) => reportError(artifactTarget, error));
+        }
       }}
       onKeyDown={(event) => {
         event.stopPropagation();
@@ -342,7 +388,15 @@ function MarkdownLink({
   );
 }
 
-function AgentMarkdown({ content, streaming = false }: { content: string; streaming?: boolean }) {
+function AgentMarkdown({
+  content,
+  streaming = false,
+  onOpenError
+}: {
+  content: string;
+  streaming?: boolean;
+  onOpenError: (message: string) => void;
+}) {
   return (
     <Markdown
       className="thread-markdown"
@@ -355,7 +409,8 @@ function AgentMarkdown({ content, streaming = false }: { content: string; stream
         wrapper: "div",
         overrides: {
           a: {
-            component: MarkdownLink
+            component: MarkdownLink,
+            props: { onOpenError }
           }
         }
       }}
@@ -373,7 +428,8 @@ export function SessionThread({
   status,
   selectedId,
   onSelect,
-  onEditMessage
+  onEditMessage,
+  onLinkOpenError
 }: SessionThreadProps) {
   const threadRef = useRef<HTMLElement>(null);
   const threadFindInputRef = useRef<HTMLInputElement>(null);
@@ -877,7 +933,7 @@ export function SessionThread({
                 </header>
               )}
               {isAssistant ? (
-                <AgentMarkdown content={item.message.content} />
+                <AgentMarkdown content={item.message.content} onOpenError={onLinkOpenError} />
               ) : (
                 <p>{item.message.content || "Tool request"}</p>
               )}
@@ -927,7 +983,11 @@ export function SessionThread({
             <div className="thread-thinking thread-streaming-status" role="status">
               <span>Thinking</span>
             </div>
-            <AgentMarkdown content={streamAnswer} streaming />
+            <AgentMarkdown
+              content={streamAnswer}
+              streaming
+              onOpenError={onLinkOpenError}
+            />
           </article>
         )}
 

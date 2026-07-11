@@ -1583,6 +1583,7 @@ export function App() {
                 setActiveComposerDraft(content);
                 setComposerFocusRequest((request) => request + 1);
               }}
+              onLinkOpenError={setComposerError}
             />
 
             <Composer

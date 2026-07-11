@@ -1969,6 +1969,14 @@ export async function readArtifactPreview(path: string): Promise<ArtifactPreview
   return invoke<ArtifactPreview>("read_artifact_preview", { path });
 }
 
+export async function openArtifact(path: string): Promise<void> {
+  return invoke<void>("open_artifact", { path });
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+  return invoke<void>("open_external_url", { url });
+}
+
 function createBrowserContextCheckpoint(path: string | null): ContextCheckpointView {
   const now = Date.now();
   const restorePack = [
