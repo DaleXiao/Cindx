@@ -25,7 +25,7 @@ model-provider = { path = "../../../crates/model-provider" }
 orchestrator = { path = "../../../crates/orchestrator" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["macos-private-api"] }
 tools = { path = "../../../crates/tools" }
 
 [target.'cfg(target_os = "macos")'.dependencies]

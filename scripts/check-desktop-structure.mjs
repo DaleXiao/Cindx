@@ -236,6 +236,7 @@ assert(
     styles.includes("background: rgba(250, 250, 250, 0.62)") &&
     tauriConfig.app.macOSPrivateApi === true &&
     tauriConfig.app.windows.every((window) => window.transparent === true) &&
+    cargoToml.includes('features = ["macos-private-api"]') &&
     cargoToml.includes('window-vibrancy = "0.6.0"') &&
     rustLib.includes("window_vibrancy::apply_vibrancy") &&
     rustLib.includes("NSVisualEffectMaterial::HeaderView"),
