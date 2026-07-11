@@ -137,10 +137,13 @@ assert(
 );
 const titlebarHeight = 46;
 const titlebarCenterY = titlebarHeight / 2;
+const macOSTrafficLightOpticalOffsetY = 2;
 
 assert(
   tauriConfig.app.windows.every(
-    (window) => window.trafficLightPosition?.y === titlebarCenterY
+    (window) =>
+      window.trafficLightPosition?.y ===
+      titlebarCenterY + macOSTrafficLightOpticalOffsetY
   ) &&
     styles.includes(`--titlebar-height: ${titlebarHeight}px`) &&
     styles.includes("--titlebar-control-size: 28px") &&
