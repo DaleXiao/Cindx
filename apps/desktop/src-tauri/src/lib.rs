@@ -46,7 +46,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
-use tools::ToolRegistry;
+use tools::{ToolRegistry, WebSearchConfig};
 
 const PHASE3_TASK_ID: &str = "phase-3-demo";
 const PHASE4_TASK_ID: &str = "phase-4-demo";
@@ -67,6 +67,7 @@ struct AppState {
     provider_config: Mutex<ProviderConfig>,
     workspace_config: Mutex<WorkspaceConfig>,
     sidecar_config: Mutex<SidecarConfig>,
+    web_search_config: Mutex<WebSearchConfig>,
     project_session_config: Mutex<ProjectSessionConfig>,
     mcp_catalog: Mutex<McpCatalogService>,
     suspended_agent_runs: Mutex<BTreeMap<String, SuspendedAgentRun>>,
@@ -542,6 +543,21 @@ struct SidecarConfigInput {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct WebSearchConfigState {
+    endpoint: String,
+    api_key_set: bool,
+    configured: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WebSearchConfigInput {
+    endpoint: String,
+    api_key: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct TimelineEntry {
     label: String,
     detail: String,
@@ -949,6 +965,54 @@ fn save_sidecar_config(
         .map_err(|error| format!("sidecar config lock poisoned: {error}"))?;
     *stored = config.clone();
     Ok(sidecar_state(&config, None))
+}
+
+#[tauri::command]
+fn get_web_search_config(
+    state: tauri::State<'_, AppState>,
+) -> Result<WebSearchConfigState, String> {
+    let config = state
+        .web_search_config
+        .lock()
+        .map_err(|error| format!("web search config lock poisoned: {error}"))?;
+    Ok(web_search_config_state(&config))
+}
+
+#[tauri::command]
+fn save_web_search_config(
+    state: tauri::State<'_, AppState>,
+    input: WebSearchConfigInput,
+) -> Result<WebSearchConfigState, String> {
+    let endpoint = normalized_config_value(&input.endpoint);
+    if !endpoint.is_empty()
+        && !(endpoint.starts_with("https://") || endpoint.starts_with("http://"))
+    {
+        return Err("web search endpoint must start with http:// or https://".to_string());
+    }
+
+    let mut config = state
+        .web_search_config
+        .lock()
+        .map_err(|error| format!("web search config lock poisoned: {error}"))?;
+    config.endpoint = endpoint;
+    if config.endpoint.is_empty() {
+        config.api_key.clear();
+    } else {
+        let api_key = normalized_config_value(&input.api_key);
+        if !api_key.is_empty() {
+            config.api_key = api_key;
+        }
+    }
+    save_web_search_config_to_disk(&config).map_err(|error| error.to_string())?;
+    Ok(web_search_config_state(&config))
+}
+
+fn web_search_config_state(config: &WebSearchConfig) -> WebSearchConfigState {
+    WebSearchConfigState {
+        endpoint: config.endpoint.clone(),
+        api_key_set: !config.api_key.trim().is_empty(),
+        configured: !config.endpoint.trim().is_empty(),
+    }
 }
 
 #[tauri::command]
@@ -3052,7 +3116,8 @@ fn run_tool(
         return phase5_state(&store, None, &root).map_err(|error| error.to_string());
     }
 
-    execute_tool_invocation(&mut store, invocation, &root).map_err(|error| error.to_string())?;
+    execute_tool_invocation(&mut store, invocation, &root, Some(&registry))
+        .map_err(|error| error.to_string())?;
     phase5_state(&store, None, &root).map_err(|error| error.to_string())
 }
 
@@ -3063,6 +3128,7 @@ fn resolve_tool_permission(
     decision: String,
 ) -> Result<Phase5State, String> {
     let root = active_workspace_root(&state)?;
+    let registry = tool_registry_for_state(&state, &root)?;
     let decision = parse_permission_decision(&decision).map_err(|error| error.to_string())?;
     let request_id = PermissionRequestId(request_id);
     let mut store = state
@@ -3126,7 +3192,8 @@ fn resolve_tool_permission(
             proposed_by_model: "local-user".to_string(),
             metadata: Metadata::new(),
         };
-        execute_tool_invocation(&mut store, invocation, &root).map_err(|error| error.to_string())?;
+        execute_tool_invocation(&mut store, invocation, &root, Some(&registry))
+            .map_err(|error| error.to_string())?;
     } else {
         append_event(
             &mut store,
@@ -3761,7 +3828,8 @@ fn run_browser_tool(
         return phase8_state(&store, None).map_err(|error| error.to_string());
     }
 
-    execute_tool_invocation(&mut store, invocation, &root).map_err(|error| error.to_string())?;
+    execute_tool_invocation(&mut store, invocation, &root, Some(&registry))
+        .map_err(|error| error.to_string())?;
     phase8_state(&store, None).map_err(|error| error.to_string())
 }
 
@@ -3772,6 +3840,7 @@ fn resolve_browser_permission(
     decision: String,
 ) -> Result<Phase8State, String> {
     let root = active_workspace_root(&state)?;
+    let registry = tool_registry_for_state(&state, &root)?;
     let decision = parse_permission_decision(&decision).map_err(|error| error.to_string())?;
     let request_id = PermissionRequestId(request_id);
     let mut store = state
@@ -3840,7 +3909,8 @@ fn resolve_browser_permission(
             proposed_by_model: "local-user".to_string(),
             metadata: Metadata::new(),
         };
-        execute_tool_invocation(&mut store, invocation, &root).map_err(|error| error.to_string())?;
+        execute_tool_invocation(&mut store, invocation, &root, Some(&registry))
+            .map_err(|error| error.to_string())?;
     } else {
         append_event(
             &mut store,
@@ -3907,6 +3977,7 @@ pub fn run() {
     let mcp_catalog = McpCatalogService::load(mcp_config_path(), mcp_catalog_cache_path());
     let mut workspace_config = load_workspace_config();
     let sidecar_config = load_sidecar_config();
+    let web_search_config = load_web_search_config();
     let project_session_config = load_project_session_config(&workspace_config.root);
     if let Some(project) = project_session_config.active_project() {
         if let Ok(root) = validate_workspace_root(&project.root) {
@@ -3936,6 +4007,7 @@ pub fn run() {
             provider_config: Mutex::new(provider_config),
             workspace_config: Mutex::new(workspace_config),
             sidecar_config: Mutex::new(sidecar_config),
+            web_search_config: Mutex::new(web_search_config),
             project_session_config: Mutex::new(project_session_config),
             mcp_catalog: Mutex::new(mcp_catalog),
             suspended_agent_runs: Mutex::new(BTreeMap::new()),
@@ -3967,6 +4039,8 @@ pub fn run() {
             get_runtime_status,
             get_sidecar_state,
             save_sidecar_config,
+            get_web_search_config,
+            save_web_search_config,
             get_mcp_state,
             save_mcp_servers,
             upsert_mcp_server,
@@ -7182,8 +7256,10 @@ fn execute_tool_invocation(
     store: &mut SqliteStore,
     invocation: ToolInvocation,
     workspace_root: &Path,
+    registry: Option<&ToolRegistry>,
 ) -> Result<(), StorageError> {
-    execute_tool_invocation_with_result(store, invocation, workspace_root, None).map(|_| ())
+    execute_tool_invocation_with_result(store, invocation, workspace_root, registry, None)
+        .map(|_| ())
 }
 
 fn execute_agent_tool_invocation(
@@ -7448,6 +7524,7 @@ fn execute_tool_invocation_with_result(
     store: &mut SqliteStore,
     invocation: ToolInvocation,
     workspace_root: &Path,
+    registry: Option<&ToolRegistry>,
     run_context: Option<&Metadata>,
 ) -> Result<ToolResult, StorageError> {
     let metadata = [
@@ -7471,7 +7548,12 @@ fn execute_tool_invocation_with_result(
     let task_id = invocation.task_id.clone();
     let tool_call_id = invocation.id.0.clone();
     let tool_name = invocation.tool_name.clone();
-    let registry = ToolRegistry::with_workspace_tools(workspace_root.to_path_buf());
+    let fallback_registry = registry
+        .is_none()
+        .then(|| ToolRegistry::with_workspace_tools(workspace_root.to_path_buf()));
+    let registry = registry
+        .or(fallback_registry.as_ref())
+        .expect("tool registry should be available");
     let Some(tool) = registry.get(&invocation.tool_name) else {
         let result = ToolResult::failed(invocation.id, "unknown tool");
         append_tool_finished_event(
@@ -8856,6 +8938,47 @@ fn save_sidecar_config_to_disk(config: &SidecarConfig) -> Result<(), std::io::Er
     Ok(())
 }
 
+fn load_web_search_config() -> WebSearchConfig {
+    let mut config = WebSearchConfig::default();
+    let Ok(text) = fs::read_to_string(web_search_config_path()) else {
+        return config;
+    };
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "endpoint" => config.endpoint = value.to_string(),
+            "api_key" => config.api_key = value.to_string(),
+            _ => {}
+        }
+    }
+    config
+}
+
+fn save_web_search_config_to_disk(config: &WebSearchConfig) -> Result<(), std::io::Error> {
+    let path = web_search_config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut options = fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&path)?;
+    file.write_all(
+        format!(
+            "endpoint={}\napi_key={}\n",
+            sanitize_config_value(&config.endpoint),
+            sanitize_config_value(&config.api_key)
+        )
+        .as_bytes(),
+    )?;
+    #[cfg(unix)]
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
 fn apply_sidecar_env(config: &SidecarConfig) {
     if config.auto_configure {
         std::env::set_var("CINDX_BROWSER_SIDECAR", &config.browser_path);
@@ -9101,7 +9224,15 @@ fn tool_registry_for_state(
     state: &tauri::State<'_, AppState>,
     workspace_root: &Path,
 ) -> Result<ToolRegistry, String> {
-    let mut registry = ToolRegistry::with_workspace_tools(workspace_root.to_path_buf());
+    let web_search_config = state
+        .web_search_config
+        .lock()
+        .map_err(|error| format!("web search config lock poisoned: {error}"))?
+        .clone();
+    let mut registry = ToolRegistry::with_workspace_tools_and_web_search(
+        workspace_root.to_path_buf(),
+        web_search_config,
+    );
     let catalog = state
         .mcp_catalog
         .lock()
@@ -9161,6 +9292,10 @@ fn project_session_config_path() -> PathBuf {
 
 fn sidecar_config_path() -> PathBuf {
     app_data_root().join("sidecars.conf")
+}
+
+fn web_search_config_path() -> PathBuf {
+    app_data_root().join("web-search.conf")
 }
 
 fn mcp_config_path() -> PathBuf {
@@ -10089,6 +10224,7 @@ mod tests {
                 metadata: Metadata::new(),
             },
             &root,
+            None,
         )
         .expect("tool should execute");
 

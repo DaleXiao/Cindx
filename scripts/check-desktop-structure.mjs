@@ -33,6 +33,7 @@ const rustLib = read("apps/desktop/src-tauri/src/lib.rs");
 const cargoToml = read("apps/desktop/src-tauri/Cargo.toml");
 const cargoLock = read("apps/desktop/src-tauri/Cargo.lock");
 const runTauriSource = read("scripts/run-tauri.mjs");
+const stampBuildVersionSource = read("scripts/stamp-build-version.mjs");
 const releaseWorkflow = read(".github/workflows/release.yml");
 const unsignedReleaseStart = releaseWorkflow.indexOf(
   "- name: Build and publish unsigned Universal app"
@@ -42,6 +43,8 @@ const unsignedReleaseBlock =
 const ciWorkflow = read(".github/workflows/ci.yml");
 const releaseVersionCheck = read("scripts/check-release-version.mjs");
 const toolsSource = read("crates/tools/src/lib.rs");
+const agentSkillsSource = read("crates/agent-skills/src/lib.rs");
+const builtinSkillCreator = read("crates/agent-skills/builtins/skill-creator/SKILL.md");
 const modelProviderSource = read("crates/model-provider/src/lib.rs");
 const ragSource = read("crates/agent-rag/src/lib.rs");
 const orchestratorSource = read("crates/orchestrator/src/lib.rs");
@@ -87,6 +90,13 @@ assert(
 assert(
   ciWorkflow.includes("retention-days: 7"),
   "main-branch test builds must have bounded artifact retention"
+);
+assert(
+  ciWorkflow.includes("Stamp build version") &&
+    ciWorkflow.includes('stamp-build-version.mjs "$GITHUB_RUN_NUMBER"') &&
+    stampBuildVersionSource.includes("Math.max(Number(match[3]) + 1, runNumber)") &&
+    stampBuildVersionSource.includes("apps/desktop/src-tauri/Cargo.lock"),
+  "Every CI app build must stamp one synchronized monotonic patch version"
 );
 assert(
   releaseVersionCheck.includes("does not match committed version"),
@@ -312,6 +322,16 @@ assert(
   "User messages must expose copy and edit actions"
 );
 assert(
+  sessionThreadSource.includes('event.key.toLowerCase() === "f"') &&
+    sessionThreadSource.includes("Find in current session") &&
+    sessionThreadSource.includes("threadFindMatches") &&
+    sessionThreadSource.includes("data-thread-search-id") &&
+    appSource.includes("sessionId={activeSession?.id ?? null}") &&
+    styles.includes(".thread-find") &&
+    styles.includes(".thread-message.thread-search-current"),
+  "Cmd+F must search and navigate message content only within the active session"
+);
+assert(
   sessionThreadSource.includes("thread-message-agent-meta") &&
     sessionThreadSource.includes("!isUser && !isAssistant") &&
     sessionThreadSource.includes("thread-streaming-status") &&
@@ -482,6 +502,10 @@ assert(
   "Settings must expose an About page with the packaged runtime version"
 );
 assert(
+  appSource.includes("<dt>Created by</dt>") && appSource.includes("<dd>Dale, 2026</dd>"),
+  "About must show the project credit instead of a generic platform label"
+);
+assert(
   rustLib.includes("WindowEvent::CloseRequested") &&
     rustLib.includes("RunEvent::ExitRequested") &&
     rustLib.includes("NSAlert::new") &&
@@ -508,6 +532,12 @@ assert(
     inspectorSource.includes('sandbox=""') &&
     inspectorSource.includes("useState(false)"),
   "Inspector must preview outputs and keep the bottom debug drawer collapsed"
+);
+assert(
+  /\.inspector-debug-body \{[\s\S]*?right: 8px;[\s\S]*?left: 8px;[\s\S]*?border-radius: 8px;/.test(
+    styles
+  ),
+  "The floating debug drawer must keep subtle rounded side insets"
 );
 assert(
   tauriBridge.includes('invoke<string>("read_artifact_image"') &&
@@ -549,6 +579,46 @@ assert(
   "Provider settings must expose collaboration quality and ensemble modes"
 );
 assert(appSource.includes("Archived sessions"), "Settings must expose archived session recovery");
+assert(
+  (appSource.match(/className="runtime-state-value"/g)?.length ?? 0) === 3 &&
+    appSource.includes('data-state={sidecarState?.autoConfigure ? "auto" : "manual"}') &&
+    /\.runtime-state-value\[data-state="ready"\],[\s\S]*?color: #2f9e64;/.test(styles),
+  "Runtime Ready and Auto states must use green SVG status indicators"
+);
+assert(
+  appSource.includes("skillRefreshTurn") &&
+    appSource.includes("skills-refresh-turn") &&
+    styles.includes("@keyframes skills-refresh-turn"),
+  "Skills refresh must replay a one-turn icon animation for every click"
+);
+assert(
+  agentSkillsSource.includes("BUILTIN_SKILL_CREATOR_ID") &&
+    agentSkillsSource.includes("include_str!") &&
+    agentSkillsSource.includes("unwrap_or(true)") &&
+    builtinSkillCreator.includes("name: Claude Code Skill Creator") &&
+    builtinSkillCreator.includes("SKILL.md contract"),
+  "The trusted Claude Code Skill Creator must ship inside the Rust skill catalog"
+);
+assert(
+  appSource.includes("Knowledge sources") &&
+    appSource.includes("knowledge-results") &&
+    appSource.includes("phase7.stats.chunksIndexed === 0") &&
+    !appSource.includes("Test retrieval") &&
+    tauriBridge.includes("if (isTauriRuntime()) throw error"),
+  "Knowledge search must auto-index, expose results inline, and surface real Tauri errors"
+);
+assert(
+  appSource.includes("Web search API") &&
+    appSource.includes("Save web search") &&
+    appSource.includes("registered-tools-details") &&
+    tauriBridge.includes('invoke<WebSearchConfigState>("save_web_search_config"') &&
+    rustLib.includes("fn save_web_search_config(") &&
+    rustLib.includes("web-search.conf") &&
+    rustLib.includes("with_workspace_tools_and_web_search") &&
+    toolsSource.includes("fetch_search_api") &&
+    toolsSource.includes('"Authorization: Bearer {}"'),
+  "Tools settings must persist a private custom web search API and expand built-in tool details"
+);
 assert(
   appSource.includes("<TriangleAlert size={14}") &&
     styles.includes(".permission-callout > svg") &&

@@ -68,6 +68,7 @@ import {
   getProjectSessionState,
   getRuntimeStatus,
   getSidecarState,
+  getWebSearchConfig,
   getMcpState,
   getSkillState,
   indexWorkspaceRag,
@@ -101,6 +102,7 @@ import {
   runOrchestration,
   saveProviderConfig,
   saveSidecarConfig,
+  saveWebSearchConfig,
   refreshMcpServer,
   refreshSkills,
   removeMcpServer,
@@ -113,6 +115,7 @@ import {
   selectProject,
   selectSession,
   SidecarState,
+  WebSearchConfigState,
   stageAgentAttachments,
   subscribeToModelStream
 } from "./tauri";
@@ -268,6 +271,7 @@ export function App() {
     useState<SessionThreadSelection | null>(null);
   const [selectedTraceStepId, setSelectedTraceStepId] = useState<string | null>(null);
   const [sidecarState, setSidecarState] = useState<SidecarState | null>(null);
+  const [webSearchConfig, setWebSearchConfig] = useState<WebSearchConfigState | null>(null);
   const [mcpState, setMcpState] = useState<McpState | null>(null);
   const [skillState, setSkillState] = useState<SkillState | null>(null);
   const [projectSessionState, setProjectSessionState] = useState<ProjectSessionState | null>(null);
@@ -276,6 +280,7 @@ export function App() {
     computerPath: "",
     autoConfigure: true
   });
+  const [webSearchDraft, setWebSearchDraft] = useState({ endpoint: "", apiKey: "" });
   const [providerDraft, setProviderDraft] = useState<ProviderConfigInput | null>(null);
   const [workspaceDraft, setWorkspaceDraft] = useState("");
   const [newProjectName, setNewProjectName] = useState("");
@@ -310,8 +315,10 @@ export function App() {
   const [contextBusy, setContextBusy] = useState(false);
   const [traceBusy, setTraceBusy] = useState(false);
   const [sidecarBusy, setSidecarBusy] = useState(false);
+  const [webSearchBusy, setWebSearchBusy] = useState(false);
   const [mcpBusy, setMcpBusy] = useState(false);
   const [skillBusy, setSkillBusy] = useState(false);
+  const [skillRefreshTurn, setSkillRefreshTurn] = useState(0);
   const [mcpDraft, setMcpDraft] = useState({
     name: "",
     command: "",
@@ -324,6 +331,8 @@ export function App() {
   const [sessionStatusOverrides, setSessionStatusOverrides] = useState<Record<string, string>>({});
   const activeSessionIdRef = useRef<string | null>(null);
   const [composerError, setComposerError] = useState<string | null>(null);
+  const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
+  const [webSearchError, setWebSearchError] = useState<string | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -368,6 +377,10 @@ export function App() {
           autoConfigure: state.autoConfigure
         });
         setComposerError((current) => current ?? state.lastError);
+      });
+      getWebSearchConfig().then((state) => {
+        setWebSearchConfig(state);
+        setWebSearchDraft({ endpoint: state.endpoint, apiKey: "" });
       });
       getMcpState().then((state) => {
         setMcpState(state);
@@ -939,6 +952,23 @@ export function App() {
     }
   }
 
+  async function handleSaveWebSearch() {
+    setWebSearchBusy(true);
+    setWebSearchError(null);
+    setComposerError(null);
+    try {
+      const next = await saveWebSearchConfig(webSearchDraft);
+      setWebSearchConfig(next);
+      setWebSearchDraft({ endpoint: next.endpoint, apiKey: "" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setWebSearchError(message);
+      setComposerError(message);
+    } finally {
+      setWebSearchBusy(false);
+    }
+  }
+
   async function handleAddMcpServer() {
     const name = mcpDraft.name.trim();
     const command = mcpDraft.command.trim();
@@ -1014,6 +1044,7 @@ export function App() {
   }
 
   async function handleRefreshSkills() {
+    setSkillRefreshTurn((current) => current + 1);
     setSkillBusy(true);
     try {
       setSkillState(await refreshSkills());
@@ -1205,6 +1236,7 @@ export function App() {
 
   async function handleIndexRag() {
     setRagBusy(true);
+    setKnowledgeError(null);
     setComposerError(null);
     try {
       const next = await indexWorkspaceRag();
@@ -1212,6 +1244,10 @@ export function App() {
       setInspectorTab("artifacts");
       setInspectorOpen(true);
       setComposerError(next.lastError);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setKnowledgeError(message);
+      setComposerError(message);
     } finally {
       setRagBusy(false);
     }
@@ -1220,13 +1256,26 @@ export function App() {
   async function handleSearchRag() {
     if (!ragQuery.trim()) return;
     setRagBusy(true);
+    setKnowledgeError(null);
     setComposerError(null);
     try {
+      if (!phase7 || phase7.stats.chunksIndexed === 0) {
+        const indexed = await indexWorkspaceRag();
+        setPhase7(indexed);
+        if (indexed.lastError) {
+          setComposerError(indexed.lastError);
+          return;
+        }
+      }
       const next = await searchRag(ragQuery, 6);
       setPhase7(next);
       setInspectorTab("artifacts");
       setInspectorOpen(true);
       setComposerError(next.lastError);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setKnowledgeError(message);
+      setComposerError(message);
     } finally {
       setRagBusy(false);
     }
@@ -1235,13 +1284,26 @@ export function App() {
   async function handleAnswerWithRag() {
     if (!ragQuery.trim()) return;
     setRagBusy(true);
+    setKnowledgeError(null);
     setComposerError(null);
     try {
+      if (!phase7 || phase7.stats.chunksIndexed === 0) {
+        const indexed = await indexWorkspaceRag();
+        setPhase7(indexed);
+        if (indexed.lastError) {
+          setComposerError(indexed.lastError);
+          return;
+        }
+      }
       const next = await answerWithRag(ragQuery, 6);
       setPhase7(next);
       setInspectorTab("artifacts");
       setInspectorOpen(true);
       setComposerError(next.lastError);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setKnowledgeError(message);
+      setComposerError(message);
     } finally {
       setRagBusy(false);
     }
@@ -1476,6 +1538,7 @@ export function App() {
         {activeView === "timeline" ? (
           <>
             <SessionThread
+              sessionId={activeSession?.id ?? null}
               messages={agentState?.messages ?? []}
               timeline={agentState?.timeline ?? []}
               streamAnswer={streamAnswer}
@@ -1694,15 +1757,45 @@ export function App() {
               </div>
               <div className="rag-stats">
                 <div>
-                  <strong>{sidecarState?.browser.healthy ? "Ready" : "Check"}</strong>
+                  <strong
+                    className="runtime-state-value"
+                    data-state={sidecarState?.browser.healthy ? "ready" : "attention"}
+                  >
+                    {sidecarState?.browser.healthy ? (
+                      <CheckCircle2 aria-hidden="true" />
+                    ) : (
+                      <TriangleAlert aria-hidden="true" />
+                    )}
+                    <span>{sidecarState?.browser.healthy ? "Ready" : "Check"}</span>
+                  </strong>
                   <span>Browser</span>
                 </div>
                 <div>
-                  <strong>{sidecarState?.computer.healthy ? "Ready" : "Check"}</strong>
+                  <strong
+                    className="runtime-state-value"
+                    data-state={sidecarState?.computer.healthy ? "ready" : "attention"}
+                  >
+                    {sidecarState?.computer.healthy ? (
+                      <CheckCircle2 aria-hidden="true" />
+                    ) : (
+                      <TriangleAlert aria-hidden="true" />
+                    )}
+                    <span>{sidecarState?.computer.healthy ? "Ready" : "Check"}</span>
+                  </strong>
                   <span>Computer</span>
                 </div>
                 <div>
-                  <strong>{sidecarState?.autoConfigure ? "Auto" : "Manual"}</strong>
+                  <strong
+                    className="runtime-state-value"
+                    data-state={sidecarState?.autoConfigure ? "auto" : "manual"}
+                  >
+                    {sidecarState?.autoConfigure ? (
+                      <RefreshCw aria-hidden="true" />
+                    ) : (
+                      <Settings aria-hidden="true" />
+                    )}
+                    <span>{sidecarState?.autoConfigure ? "Auto" : "Manual"}</span>
+                  </strong>
                   <span>Env</span>
                 </div>
               </div>
@@ -2290,17 +2383,13 @@ export function App() {
                 <Database size={17} aria-hidden="true" />
                 <span>{ragBusy ? "Working" : "Index workspace"}</span>
               </button>
-              <details className="advanced-settings">
-                <summary>
-                  <DisclosureTriangle />
-                  <span>Test retrieval</span>
-                </summary>
-                <div className="tool-runner">
+              <div className="tool-runner knowledge-query">
                 <label>
                   <span>Question</span>
                   <textarea
                     value={ragQuery}
                     onChange={(event) => setRagQuery(event.target.value)}
+                    placeholder="Search the active workspace"
                     rows={4}
                   />
                 </label>
@@ -2324,8 +2413,81 @@ export function App() {
                     <span>Answer</span>
                   </button>
                 </div>
+              </div>
+              {(knowledgeError || phase7?.lastError) && (
+                <div className="settings-inline-error">
+                  {knowledgeError || phase7?.lastError}
                 </div>
-              </details>
+              )}
+              {phase7?.answer && (
+                <section className="knowledge-answer" aria-label="Knowledge answer">
+                  <strong>Answer</strong>
+                  <pre className="source-preview">{phase7.answer}</pre>
+                </section>
+              )}
+              {ragSources.length > 0 && (
+                <section className="knowledge-results" aria-label="Knowledge sources">
+                  <strong>Sources</strong>
+                  {ragSources.slice(0, 6).map((source) => (
+                    <article
+                      className="knowledge-result"
+                      key={`${source.path}-${source.startLine}-${source.fileHash}`}
+                    >
+                      <header>
+                        <strong>{source.path}</strong>
+                        <span>{source.score.toFixed(2)}</span>
+                      </header>
+                      <small>
+                        Lines {source.startLine}-{source.endLine} · {source.reason}
+                      </small>
+                      <p>{source.text}</p>
+                    </article>
+                  ))}
+                </section>
+              )}
+            </section>
+
+            <section className="settings-section" data-settings-group="tools">
+              <div className="section-title">
+                <Globe2 size={17} aria-hidden="true" />
+                <h2>Web search API</h2>
+              </div>
+              <div className="provider-form">
+                <label>
+                  <span>Endpoint</span>
+                  <input
+                    value={webSearchDraft.endpoint}
+                    placeholder="https://search.example.com/api"
+                    onChange={(event) =>
+                      setWebSearchDraft({ ...webSearchDraft, endpoint: event.target.value })
+                    }
+                  />
+                </label>
+                <label>
+                  <span>API key</span>
+                  <input
+                    type="password"
+                    value={webSearchDraft.apiKey}
+                    autoComplete="off"
+                    placeholder={webSearchConfig?.apiKeySet ? "Configured" : "Optional"}
+                    onChange={(event) =>
+                      setWebSearchDraft({ ...webSearchDraft, apiKey: event.target.value })
+                    }
+                  />
+                </label>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={webSearchBusy}
+                  onClick={() => void handleSaveWebSearch()}
+                >
+                  <Save aria-hidden="true" />
+                  <span>{webSearchBusy ? "Saving" : "Save web search"}</span>
+                </button>
+              </div>
+              {webSearchError && (
+                <div className="settings-inline-error">{webSearchError}</div>
+              )}
             </section>
 
             <section className="settings-section" data-settings-group="tools">
@@ -2347,6 +2509,32 @@ export function App() {
                   <dd>Reviewed</dd>
                 </div>
               </dl>
+              <details className="advanced-settings registered-tools-details">
+                <summary>
+                  <DisclosureTriangle />
+                  <span>Registered tools</span>
+                  <strong>{phase5?.tools.length ?? runtime?.registeredTools.length ?? 0}</strong>
+                </summary>
+                <div className="registered-tool-list">
+                  {(phase5?.tools ?? []).length > 0
+                    ? phase5?.tools.map((tool) => (
+                        <div className="registered-tool-row" key={tool.name}>
+                          <span>
+                            <strong>{tool.name}</strong>
+                            <small>{tool.description}</small>
+                          </span>
+                          <em>{tool.risk}</em>
+                        </div>
+                      ))
+                    : runtime?.registeredTools.map((tool) => (
+                        <div className="registered-tool-row" key={tool}>
+                          <span>
+                            <strong>{tool}</strong>
+                          </span>
+                        </div>
+                      ))}
+                </div>
+              </details>
               <details className="advanced-settings">
                 <summary>
                   <DisclosureTriangle />
@@ -2697,13 +2885,18 @@ export function App() {
               <div className="settings-toolbar">
                 <span>{skillState?.skills.length ?? 0} discovered</span>
                 <button
-                  className="icon-button"
+                  className="icon-button skills-refresh"
                   type="button"
+                  aria-label="Refresh skills"
                   title="Refresh skills"
                   disabled={skillBusy}
                   onClick={() => void handleRefreshSkills()}
                 >
-                  <RefreshCw aria-hidden="true" />
+                  <RefreshCw
+                    aria-hidden="true"
+                    className={skillRefreshTurn > 0 ? "skills-refresh-turn" : undefined}
+                    key={skillRefreshTurn}
+                  />
                 </button>
               </div>
               <div className="integration-list">
@@ -2777,8 +2970,8 @@ export function App() {
                   <dd>{runtime?.appVersion ?? DESKTOP_VERSION}</dd>
                 </div>
                 <div>
-                  <dt>Platform</dt>
-                  <dd>Desktop</dd>
+                  <dt>Created by</dt>
+                  <dd>Dale, 2026</dd>
                 </div>
               </dl>
             </section>

@@ -14,6 +14,8 @@ use tools::{Tool, ToolError};
 
 const MAX_SKILL_INSTRUCTIONS: usize = 16_000;
 const MAX_SELECTED_SKILLS: usize = 2;
+const BUILTIN_SKILL_CREATOR_ID: &str = "global:skill-creator";
+const BUILTIN_SKILL_CREATOR: &str = include_str!("../builtins/skill-creator/SKILL.md");
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -96,6 +98,28 @@ impl SkillCatalog {
             .preferences
             .clone();
         let mut skills = Vec::new();
+        let builtin_preference = preferences.skills.get(BUILTIN_SKILL_CREATOR_ID);
+        skills.push(SkillRecord {
+            id: BUILTIN_SKILL_CREATOR_ID.to_string(),
+            name: "Claude Code Skill Creator".to_string(),
+            description: "Create and improve Claude Code compatible skills with focused instructions, resources, and validation.".to_string(),
+            folder_name: "skill-creator".to_string(),
+            root: PathBuf::from("__cindx_builtin__/skill-creator"),
+            scope: SkillScope::Global,
+            enabled: builtin_preference
+                .map(|preference| preference.enabled)
+                .unwrap_or(true),
+            trusted: builtin_preference
+                .map(|preference| preference.trusted)
+                .unwrap_or(true),
+            required_tools: vec![
+                "file.read".to_string(),
+                "file.list".to_string(),
+                "file.search".to_string(),
+                "file.write".to_string(),
+                "shell.run".to_string(),
+            ],
+        });
         let roots = [
             (self.global_root.clone(), SkillScope::Global, true),
             (
@@ -114,7 +138,7 @@ impl SkillCatalog {
                 false,
             ),
         ];
-        let mut seen = BTreeSet::new();
+        let mut seen = BTreeSet::from([BUILTIN_SKILL_CREATOR_ID.to_string()]);
         for (root, scope, trusted_default) in roots {
             for mut skill in discover_skills(&root, scope.clone())? {
                 if !seen.insert(skill.id.clone()) {
@@ -389,6 +413,12 @@ fn discover_skills(root: &Path, scope: SkillScope) -> Result<Vec<SkillRecord>, S
 }
 
 fn read_skill_instructions(skill: &SkillRecord) -> Result<String, String> {
+    if skill.id == BUILTIN_SKILL_CREATOR_ID {
+        return Ok(strip_frontmatter(BUILTIN_SKILL_CREATOR)
+            .chars()
+            .take(MAX_SKILL_INSTRUCTIONS)
+            .collect());
+    }
     let path = skill.root.join("SKILL.md");
     let text = fs::read_to_string(&path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
@@ -498,9 +528,12 @@ mod tests {
             root.join("preferences.json"),
         );
         let skills = catalog.list();
-        assert_eq!(skills.len(), 1);
-        assert!(skills[0].enabled);
-        assert!(skills[0].trusted);
+        let pdf = skills
+            .iter()
+            .find(|skill| skill.folder_name == "pdf")
+            .expect("project skill should be discovered");
+        assert!(pdf.enabled);
+        assert!(pdf.trusted);
         let context = catalog
             .context_for_prompt("Please inspect this PDF layout")
             .unwrap()
@@ -521,8 +554,34 @@ mod tests {
             root.join("project"),
             root.join("preferences.json"),
         );
-        assert!(!catalog.list()[0].enabled);
+        let external = catalog
+            .list()
+            .into_iter()
+            .find(|skill| skill.folder_name == "external")
+            .expect("compatibility skill should be discovered");
+        assert!(!external.enabled);
         assert!(catalog.context_for_prompt("external").unwrap().is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn includes_trusted_builtin_skill_creator() {
+        let root = test_root();
+        let catalog = SkillCatalog::load(
+            root.join("global"),
+            root.join("project"),
+            root.join("preferences.json"),
+        );
+        let skill = catalog
+            .list()
+            .into_iter()
+            .find(|skill| skill.id == BUILTIN_SKILL_CREATOR_ID)
+            .expect("built-in skill creator should be present");
+        assert!(skill.enabled);
+        assert!(skill.trusted);
+        assert!(read_skill_instructions(&skill)
+            .unwrap()
+            .contains("SKILL.md contract"));
         let _ = fs::remove_dir_all(root);
     }
 }

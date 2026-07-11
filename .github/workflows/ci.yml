@@ -40,6 +40,9 @@ jobs:
         working-directory: apps/desktop
         run: npm ci
 
+      - name: Stamp build version
+        run: node scripts/stamp-build-version.mjs "$GITHUB_RUN_NUMBER"
+
       - name: Test Rust workspace
         run: cargo test --workspace --locked
 

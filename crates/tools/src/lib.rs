@@ -51,6 +51,12 @@ pub struct ToolExposurePlan {
     pub deferred: Vec<ToolSpec>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WebSearchConfig {
+    pub endpoint: String,
+    pub api_key: String,
+}
+
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
@@ -59,6 +65,13 @@ impl ToolRegistry {
     }
 
     pub fn with_workspace_tools(workspace_root: impl Into<PathBuf>) -> Self {
+        Self::with_workspace_tools_and_web_search(workspace_root, WebSearchConfig::default())
+    }
+
+    pub fn with_workspace_tools_and_web_search(
+        workspace_root: impl Into<PathBuf>,
+        web_search_config: WebSearchConfig,
+    ) -> Self {
         let workspace_root = workspace_root.into();
         let mut registry = Self::new();
         registry.register(Box::new(ReadFileTool::new(workspace_root.clone())));
@@ -66,7 +79,7 @@ impl ToolRegistry {
         registry.register(Box::new(SearchFilesTool::new(workspace_root.clone())));
         registry.register(Box::new(WriteFileTool::new(workspace_root.clone())));
         registry.register(Box::new(ShellRunTool::new(workspace_root.clone())));
-        registry.register(Box::new(WebSearchTool));
+        registry.register(Box::new(WebSearchTool::new(web_search_config)));
         registry.register(Box::new(BrowserOpenTool));
         registry.register(Box::new(BrowserExtractTextTool));
         registry.register(Box::new(BrowserCaptureTool::new(workspace_root.clone())));
@@ -714,13 +727,22 @@ impl Tool for ShellRunTool {
     }
 }
 
-pub struct WebSearchTool;
+#[derive(Debug, Clone, Default)]
+pub struct WebSearchTool {
+    config: WebSearchConfig,
+}
+
+impl WebSearchTool {
+    pub fn new(config: WebSearchConfig) -> Self {
+        Self { config }
+    }
+}
 
 impl Tool for WebSearchTool {
     fn spec(&self) -> ToolSpec {
         builtin_tool_spec(
             "web.search",
-            "Search the web through a lightweight HTML endpoint.",
+            "Search the web through the configured search API or the built-in public fallback.",
             ToolRisk::UsesNetwork,
             "query=<search query>\nmax_results=<optional number>",
         )
@@ -755,14 +777,29 @@ impl Tool for WebSearchTool {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(8)
             .clamp(1, 20);
-        let url = format!("https://duckduckgo.com/html/?q={}", url_encode(&query));
-        let html = fetch_url(&url)?;
-        let text = trim_lines(&html_to_text(&html), max_results * 4);
+        let (text, url, provider) = if self.config.endpoint.trim().is_empty() {
+            let url = format!("https://duckduckgo.com/html/?q={}", url_encode(&query));
+            let html = fetch_url(&url)?;
+            (
+                trim_lines(&html_to_text(&html), max_results * 4),
+                url,
+                "public_fallback".to_string(),
+            )
+        } else {
+            let endpoint = self.config.endpoint.trim().to_string();
+            let response = fetch_search_api(&self.config, &query, max_results)?;
+            (
+                response.chars().take(64_000).collect(),
+                endpoint,
+                "configured_api".to_string(),
+            )
+        };
 
         let mut metadata = Metadata::new();
         metadata.insert("query".to_string(), query);
         metadata.insert("url".to_string(), url);
         metadata.insert("max_results".to_string(), max_results.to_string());
+        metadata.insert("provider".to_string(), provider);
 
         Ok(tool_result(
             invocation.id,
@@ -2040,6 +2077,71 @@ fn fetch_url(url: &str) -> Result<String, ToolError> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+fn fetch_search_api(
+    config: &WebSearchConfig,
+    query: &str,
+    max_results: usize,
+) -> Result<String, ToolError> {
+    let endpoint = config.endpoint.trim();
+    if endpoint.contains('\n')
+        || endpoint.contains('\r')
+        || !(endpoint.starts_with("https://") || endpoint.starts_with("http://"))
+    {
+        return Err(ToolError::new(
+            "web search endpoint must be a single-line HTTP or HTTPS URL",
+        ));
+    }
+    if config.api_key.contains('\n') || config.api_key.contains('\r') {
+        return Err(ToolError::new("web search API key must be a single line"));
+    }
+
+    let uses_url_template = endpoint.contains("{query}") || endpoint.contains("{limit}");
+    let url = endpoint
+        .replace("{query}", &url_encode(query))
+        .replace("{limit}", &max_results.to_string());
+    let mut command = Command::new("/usr/bin/curl");
+    command
+        .arg("-L")
+        .arg("--silent")
+        .arg("--show-error")
+        .arg("--fail")
+        .arg("--max-time")
+        .arg("25")
+        .arg("--user-agent")
+        .arg("Cindx/1");
+    if !config.api_key.trim().is_empty() {
+        command
+            .arg("--header")
+            .arg(format!("Authorization: Bearer {}", config.api_key.trim()));
+    }
+    if !uses_url_template {
+        command
+            .arg("--request")
+            .arg("POST")
+            .arg("--header")
+            .arg("Content-Type: application/json")
+            .arg("--data")
+            .arg(
+                serde_json::json!({
+                    "query": query,
+                    "max_results": max_results
+                })
+                .to_string(),
+            );
+    }
+    let output = command
+        .arg(&url)
+        .output()
+        .map_err(|error| ToolError::new(format!("failed to run search API request: {error}")))?;
+    if !output.status.success() {
+        return Err(ToolError::new(format!(
+            "search API request failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 fn html_to_text(html: &str) -> String {
     let mut text = String::new();
     let mut in_tag = false;
@@ -2335,6 +2437,21 @@ mod tests {
     }
 
     #[test]
+    fn configured_web_search_rejects_non_http_endpoint() {
+        let tool = WebSearchTool::new(WebSearchConfig {
+            endpoint: "file:///tmp/search".to_string(),
+            api_key: "secret".to_string(),
+        });
+        let error = tool
+            .execute(invocation(
+                "web.search",
+                encode_input(&[("query", "local agent")]),
+            ))
+            .expect_err("non-HTTP endpoint must fail before a request is sent");
+        assert!(error.message.contains("HTTP or HTTPS"));
+    }
+
+    #[test]
     fn large_catalog_defers_tools_and_injects_meta_tools() {
         let mut registry = ToolRegistry::new();
         for index in 0..30 {
@@ -2440,7 +2557,7 @@ mod tests {
 
     #[test]
     fn network_and_browser_tools_request_permission() {
-        let web = WebSearchTool;
+        let web = WebSearchTool::default();
         let browser = BrowserExtractTextTool;
         let browser_type = BrowserActionTool::type_text(temp_workspace());
         let computer_screenshot = ComputerTool::screenshot(temp_workspace());

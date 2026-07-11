@@ -34,6 +34,17 @@ export type SidecarConfigInput = {
   autoConfigure: boolean;
 };
 
+export type WebSearchConfigState = {
+  endpoint: string;
+  apiKeySet: boolean;
+  configured: boolean;
+};
+
+export type WebSearchConfigInput = {
+  endpoint: string;
+  apiKey: string;
+};
+
 export type McpTransportConfig =
   | {
       type: "stdio";
@@ -453,6 +464,12 @@ let browserSidecarState: SidecarState = {
   lastError: null
 };
 
+let browserWebSearchConfig: WebSearchConfigState = {
+  endpoint: "",
+  apiKeySet: false,
+  configured: false
+};
+
 let browserProjectSessionState: ProjectSessionState = {
   projects: [
     {
@@ -772,6 +789,31 @@ export async function getSidecarState(): Promise<SidecarState> {
     return await invoke<SidecarState>("get_sidecar_state");
   } catch {
     return browserSidecarState;
+  }
+}
+
+export async function getWebSearchConfig(): Promise<WebSearchConfigState> {
+  try {
+    return await invoke<WebSearchConfigState>("get_web_search_config");
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    return browserWebSearchConfig;
+  }
+}
+
+export async function saveWebSearchConfig(
+  input: WebSearchConfigInput
+): Promise<WebSearchConfigState> {
+  try {
+    return await invoke<WebSearchConfigState>("save_web_search_config", { input });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    browserWebSearchConfig = {
+      endpoint: input.endpoint,
+      apiKeySet: Boolean(input.apiKey),
+      configured: Boolean(input.endpoint)
+    };
+    return browserWebSearchConfig;
   }
 }
 
@@ -1693,7 +1735,8 @@ export async function getPhase7State(): Promise<Phase7State> {
 export async function indexWorkspaceRag(): Promise<Phase7State> {
   try {
     return await invoke<Phase7State>("index_workspace_rag");
-  } catch {
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
     const now = Date.now();
     browserPhase7State = {
       ...browserPhase7State,
@@ -1721,7 +1764,8 @@ export async function indexWorkspaceRag(): Promise<Phase7State> {
 export async function searchRag(query: string, limit = 6): Promise<Phase7State> {
   try {
     return await invoke<Phase7State>("search_rag", { input: { query, limit } });
-  } catch {
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
     const now = Date.now();
     browserPhase7State = {
       ...browserPhase7State,
@@ -1756,7 +1800,8 @@ export async function searchRag(query: string, limit = 6): Promise<Phase7State> 
 export async function answerWithRag(query: string, limit = 6): Promise<Phase7State> {
   try {
     return await invoke<Phase7State>("answer_with_rag", { input: { query, limit } });
-  } catch {
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
     const now = Date.now();
     browserPhase7State = {
       ...browserPhase7State,
