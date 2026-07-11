@@ -88,6 +88,7 @@ import {
   resolvePermission,
   RuntimeStatus,
   retryAgentTask,
+  renameSession,
   restoreSession,
   runAgentTask,
   runBrowserTool,
@@ -768,6 +769,18 @@ export function App() {
     }
   }
 
+  async function handleRenameSession(sessionId: string, name: string) {
+    setProjectSessionBusy(true);
+    setComposerError(null);
+    try {
+      await refreshWorkspaceAfterProjectSession(await renameSession(sessionId, name));
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setProjectSessionBusy(false);
+    }
+  }
+
   async function handleArchiveSession(sessionId: string) {
     if (busySessionIds.has(sessionId) || sessionStatusOverrides[sessionId] === "Review") {
       setComposerError("Stop the running session before archiving it.");
@@ -1348,6 +1361,7 @@ export function App() {
         onSessionCreate={() => void handleCreateSession()}
         onProjectSelect={(projectId) => void handleSelectProject(projectId)}
         onSessionSelect={(sessionId) => void handleSelectSession(sessionId)}
+        onSessionRename={(sessionId, name) => void handleRenameSession(sessionId, name)}
         onSessionFork={(sessionId) => void handleForkSession(sessionId)}
         onSessionArchive={(sessionId) => void handleArchiveSession(sessionId)}
         onSessionDelete={(sessionId) => void handleDeleteSession(sessionId)}

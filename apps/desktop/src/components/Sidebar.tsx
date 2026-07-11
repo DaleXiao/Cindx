@@ -33,6 +33,7 @@ type SidebarProps = {
   onSessionCreate: () => void;
   onProjectSelect: (projectId: string) => void;
   onSessionSelect: (sessionId: string) => void;
+  onSessionRename: (sessionId: string, name: string) => void;
   onSessionFork: (sessionId: string) => void;
   onSessionArchive: (sessionId: string) => void;
   onSessionDelete: (sessionId: string) => void;
@@ -56,6 +57,7 @@ export function Sidebar({
   onSessionCreate,
   onProjectSelect,
   onSessionSelect,
+  onSessionRename,
   onSessionFork,
   onSessionArchive,
   onSessionDelete
@@ -65,6 +67,16 @@ export function Sidebar({
   async function openSessionMenu(session: SessionView, x: number, y: number) {
     const menu = await Menu.new({
       items: [
+        {
+          id: `rename-${session.id}`,
+          text: "Rename",
+          action: () => {
+            const name = window.prompt("Rename session", session.name)?.trim();
+            if (name && name !== session.name) {
+              onSessionRename(session.id, name);
+            }
+          }
+        },
         {
           id: `fork-${session.id}`,
           text: "Fork",
