@@ -130,11 +130,12 @@ pub fn default_plan(policy: OrchestrationPolicy) -> OrchestrationPlan {
     }
 }
 
-pub const MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 5;
+pub const MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdaptiveWorkflowStep {
     pub id: String,
+    pub role: String,
     pub model: String,
     pub subtask: String,
     pub access: Vec<String>,
@@ -173,6 +174,15 @@ pub fn validate_adaptive_workflow(
         if step.subtask.trim().is_empty() {
             return Err(format!("adaptive workflow step {} has an empty subtask", step.id));
         }
+        if !matches!(
+            step.role.as_str(),
+            "thinker" | "worker" | "verifier" | "synthesizer"
+        ) {
+            return Err(format!(
+                "adaptive workflow step {} selected an unknown role: {}",
+                step.id, step.role
+            ));
+        }
 
         let mut unique_access = BTreeSet::new();
         for dependency in &step.access {
@@ -199,6 +209,13 @@ pub fn validate_adaptive_workflow(
             .is_some_and(|step| step.access.is_empty())
     {
         return Err("the final adaptive workflow step must synthesize prior work".to_string());
+    }
+    if workflow
+        .steps
+        .last()
+        .is_some_and(|step| step.role != "synthesizer")
+    {
+        return Err("the final adaptive workflow step must use the synthesizer role".to_string());
     }
 
     adaptive_workflow_layers(workflow)?;
@@ -244,9 +261,17 @@ pub fn adaptive_worker_prompt(
     outputs: &BTreeMap<String, String>,
 ) -> Option<String> {
     let step = workflow.steps.get(step_index)?;
+    let role_instruction = match step.role.as_str() {
+        "thinker" => "Explore an independent approach, decompose the problem, and expose assumptions.",
+        "verifier" => "Audit supplied work against evidence, identify disagreements, and state exact corrections.",
+        "synthesizer" => "Resolve disagreements and produce one checkable execution brief grounded in the supplied work.",
+        _ => "Produce concrete work for the assigned subtask and report evidence and uncertainty.",
+    };
     let mut prompt = format!(
-        "You are isolated worker {} in a Cindx adaptive multi-model workflow. Complete only the assigned subtask. Do not assume you can see other workers unless their output is explicitly included below. Return concrete findings for a later worker, not a user-facing answer.\n\nUser request:\n{}\n\nAssigned subtask:\n{}\n\nShared memory from earlier user turns:\n{}",
+        "You are isolated {} {} in a Cindx adaptive multi-model workflow. {} Complete only the assigned subtask. Do not assume you can see other agents unless their output is explicitly included below. Return concrete findings for a later agent, not a user-facing answer.\n\nUser request:\n{}\n\nAssigned subtask:\n{}\n\nShared memory from earlier user turns:\n{}",
+        step.role,
         step.id,
+        role_instruction,
         user_prompt,
         step.subtask,
         if shared_memory.trim().is_empty() {
@@ -844,24 +869,28 @@ mod tests {
             steps: vec![
                 AdaptiveWorkflowStep {
                     id: "research".to_string(),
+                    role: "thinker".to_string(),
                     model: "strong-vision".to_string(),
                     subtask: "Research the primary approach.".to_string(),
                     access: Vec::new(),
                 },
                 AdaptiveWorkflowStep {
                     id: "challenge".to_string(),
+                    role: "thinker".to_string(),
                     model: "fast-mini".to_string(),
                     subtask: "Find independent failure modes.".to_string(),
                     access: Vec::new(),
                 },
                 AdaptiveWorkflowStep {
                     id: "verify".to_string(),
+                    role: "verifier".to_string(),
                     model: "strong-vision".to_string(),
                     subtask: "Verify the research.".to_string(),
                     access: vec!["research".to_string()],
                 },
                 AdaptiveWorkflowStep {
                     id: "synthesize".to_string(),
+                    role: "synthesizer".to_string(),
                     model: "fast-mini".to_string(),
                     subtask: "Produce an execution brief.".to_string(),
                     access: vec!["challenge".to_string(), "verify".to_string()],
@@ -886,18 +915,21 @@ mod tests {
             steps: vec![
                 AdaptiveWorkflowStep {
                     id: "allowed".to_string(),
+                    role: "thinker".to_string(),
                     model: "fast-mini".to_string(),
                     subtask: "First branch.".to_string(),
                     access: Vec::new(),
                 },
                 AdaptiveWorkflowStep {
                     id: "isolated".to_string(),
+                    role: "worker".to_string(),
                     model: "strong-vision".to_string(),
                     subtask: "Independent branch.".to_string(),
                     access: Vec::new(),
                 },
                 AdaptiveWorkflowStep {
                     id: "consumer".to_string(),
+                    role: "synthesizer".to_string(),
                     model: "fast-mini".to_string(),
                     subtask: "Use one branch.".to_string(),
                     access: vec!["allowed".to_string()],
@@ -924,12 +956,14 @@ mod tests {
             steps: vec![
                 AdaptiveWorkflowStep {
                     id: "first".to_string(),
+                    role: "thinker".to_string(),
                     model: "fast-mini".to_string(),
                     subtask: "Try to read the future.".to_string(),
                     access: vec!["later".to_string()],
                 },
                 AdaptiveWorkflowStep {
                     id: "later".to_string(),
+                    role: "synthesizer".to_string(),
                     model: "fast-mini".to_string(),
                     subtask: "Later work.".to_string(),
                     access: vec!["first".to_string()],

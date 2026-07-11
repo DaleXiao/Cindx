@@ -56,6 +56,9 @@ const PHASE7_TASK_ID: &str = "phase-7-rag";
 const PHASE8_TASK_ID: &str = "phase-8-browser";
 const PHASE15_TASK_ID: &str = "phase-15-context";
 const PHASE16_TASK_ID: &str = "phase-16-agent-loop";
+const MAX_ATTACHMENT_FILES: usize = 10;
+const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
+const MAX_ATTACHMENT_TOTAL_BYTES: usize = 50 * 1024 * 1024;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -87,6 +90,7 @@ struct ResolvedToolObservation {
     input_json: String,
     status: ToolOutcomeStatus,
     observation: String,
+    image_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -463,6 +467,55 @@ struct RenameSessionInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RenameProjectInput {
+    project_id: String,
+    name: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentAttachmentView {
+    id: String,
+    name: String,
+    path: String,
+    mime_type: String,
+    size_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AttachmentUploadInput {
+    name: String,
+    mime_type: String,
+    data_base64: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StageAgentAttachmentsInput {
+    session_id: String,
+    files: Vec<AttachmentUploadInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoveAgentAttachmentInput {
+    session_id: String,
+    path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArtifactPreviewView {
+    kind: String,
+    mime_type: String,
+    content: Option<String>,
+    data_url: Option<String>,
+    size_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SelectProjectInput {
     project_id: String,
 }
@@ -811,6 +864,8 @@ struct AgentTaskInput {
     prompt: String,
     session_id: String,
     current_time: String,
+    #[serde(default)]
+    attachments: Vec<AgentAttachmentView>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1193,6 +1248,35 @@ fn create_session(
 }
 
 #[tauri::command]
+fn rename_project(
+    state: tauri::State<'_, AppState>,
+    input: RenameProjectInput,
+) -> Result<ProjectSessionState, String> {
+    let name = normalized_config_value(&input.name);
+    if name.is_empty() {
+        return project_session_state_with_error(&state, "project name is empty");
+    }
+    let mut config = state
+        .project_session_config
+        .lock()
+        .map_err(|error| format!("project session config lock poisoned: {error}"))?;
+    let Some(project) = config
+        .projects
+        .iter_mut()
+        .find(|project| project.id == input.project_id)
+    else {
+        return Ok(project_session_state(
+            &config,
+            Some("project not found".to_string()),
+        ));
+    };
+    project.name = name;
+    project.updated_at_ms = current_time_millis();
+    save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+    Ok(project_session_state(&config, None))
+}
+
+#[tauri::command]
 fn rename_session(
     state: tauri::State<'_, AppState>,
     input: RenameSessionInput,
@@ -1230,6 +1314,77 @@ fn rename_session(
     }
     save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
     Ok(project_session_state(&config, None))
+}
+
+#[tauri::command]
+fn stage_agent_attachments(
+    state: tauri::State<'_, AppState>,
+    input: StageAgentAttachmentsInput,
+) -> Result<Vec<AgentAttachmentView>, String> {
+    if input.files.is_empty() {
+        return Ok(Vec::new());
+    }
+    if input.files.len() > MAX_ATTACHMENT_FILES {
+        return Err(format!(
+            "a message can include at most {MAX_ATTACHMENT_FILES} attachments"
+        ));
+    }
+
+    let root = project_root_for_session(&state, &input.session_id)?;
+    let attachment_root = root
+        .join(".cindx")
+        .join("attachments")
+        .join(slug_label(&input.session_id));
+    fs::create_dir_all(&attachment_root)
+        .map_err(|error| format!("failed to create attachment directory: {error}"))?;
+
+    let mut decoded_files = Vec::with_capacity(input.files.len());
+    let mut total_bytes = 0usize;
+    for file in input.files {
+        let encoded = file
+            .data_base64
+            .split_once(',')
+            .map(|(_, data)| data)
+            .unwrap_or(file.data_base64.as_str());
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|error| format!("{} is not valid base64: {error}", file.name))?;
+        if bytes.len() > MAX_ATTACHMENT_BYTES {
+            return Err(format!("{} exceeds the 20 MB attachment limit", file.name));
+        }
+        total_bytes = total_bytes.saturating_add(bytes.len());
+        if total_bytes > MAX_ATTACHMENT_TOTAL_BYTES {
+            return Err("attachments exceed the 50 MB message limit".to_string());
+        }
+        decoded_files.push((file, bytes));
+    }
+
+    let mut staged = Vec::with_capacity(decoded_files.len());
+    for (index, (file, bytes)) in decoded_files.into_iter().enumerate() {
+        let name = safe_attachment_name(&file.name);
+        let id = unique_id("attachment");
+        let path = attachment_root.join(format!("{id}-{index}-{name}"));
+        fs::write(&path, &bytes)
+            .map_err(|error| format!("failed to stage attachment {name}: {error}"))?;
+        staged.push(AgentAttachmentView {
+            id,
+            name,
+            path: path.display().to_string(),
+            mime_type: normalized_attachment_mime(&file.mime_type, &path),
+            size_bytes: bytes.len() as u64,
+        });
+    }
+    Ok(staged)
+}
+
+#[tauri::command]
+fn remove_agent_attachment(
+    state: tauri::State<'_, AppState>,
+    input: RemoveAgentAttachmentInput,
+) -> Result<(), String> {
+    let root = project_root_for_session(&state, &input.session_id)?;
+    let path = validated_attachment_path(&root, &input.path)?;
+    fs::remove_file(path).map_err(|error| format!("failed to remove attachment: {error}"))
 }
 
 #[tauri::command]
@@ -2021,17 +2176,103 @@ fn automatic_session_title(prompt: &str) -> String {
     }
 }
 
+fn validate_agent_attachments(
+    workspace_root: &Path,
+    attachments: Vec<AgentAttachmentView>,
+) -> Result<Vec<AgentAttachmentView>, String> {
+    if attachments.len() > MAX_ATTACHMENT_FILES {
+        return Err(format!(
+            "a message can include at most {MAX_ATTACHMENT_FILES} attachments"
+        ));
+    }
+    let mut validated = Vec::with_capacity(attachments.len());
+    let mut total_bytes = 0u64;
+    for attachment in attachments {
+        if validated
+            .iter()
+            .any(|existing: &AgentAttachmentView| existing.path == attachment.path)
+        {
+            continue;
+        }
+        let path = validated_attachment_path(workspace_root, &attachment.path)?;
+        let metadata = fs::metadata(&path)
+            .map_err(|error| format!("failed to inspect attachment: {error}"))?;
+        if metadata.len() > MAX_ATTACHMENT_BYTES as u64 {
+            return Err(format!("{} exceeds the 20 MB attachment limit", attachment.name));
+        }
+        total_bytes = total_bytes.saturating_add(metadata.len());
+        if total_bytes > MAX_ATTACHMENT_TOTAL_BYTES as u64 {
+            return Err("attachments exceed the 50 MB message limit".to_string());
+        }
+        validated.push(AgentAttachmentView {
+            id: attachment.id,
+            name: safe_attachment_name(&attachment.name),
+            path: path.display().to_string(),
+            mime_type: normalized_attachment_mime(&attachment.mime_type, &path),
+            size_bytes: metadata.len(),
+        });
+    }
+    Ok(validated)
+}
+
+fn prompt_with_attachments(prompt: &str, attachments: &[AgentAttachmentView]) -> String {
+    if attachments.is_empty() {
+        return prompt.to_string();
+    }
+    let manifest = attachments
+        .iter()
+        .map(|attachment| {
+            format!(
+                "- {} ({}, {} bytes): {}",
+                attachment.name, attachment.mime_type, attachment.size_bytes, attachment.path
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "{prompt}\n\nAttached files have been staged inside the active workspace:\n{manifest}\nUse file tools when inspection is needed. Attached images are also supplied as visual references to compatible models."
+    )
+}
+
+fn add_attachment_metadata(metadata: &mut Metadata, attachments: &[AgentAttachmentView]) {
+    if attachments.is_empty() {
+        return;
+    }
+    metadata.insert(
+        "attachment_paths".to_string(),
+        attachments
+            .iter()
+            .map(|attachment| attachment.path.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    metadata.insert(
+        "attachment_names".to_string(),
+        attachments
+            .iter()
+            .map(|attachment| attachment.name.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let image_paths = attachments
+        .iter()
+        .filter(|attachment| attachment.mime_type.starts_with("image/"))
+        .map(|attachment| attachment.path.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !image_paths.is_empty() {
+        metadata.insert("image_paths".to_string(), image_paths);
+    }
+}
+
 fn run_agent_task_blocking(
     state: tauri::State<'_, AppState>,
     input: AgentTaskInput,
 ) -> Result<AgentState, String> {
-    let prompt = input.prompt.trim().to_string();
+    let user_prompt = input.prompt.trim().to_string();
     let session_id = input.session_id;
     clear_suspended_agent_run(&state, &session_id)?;
     let mut run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
-    if prompt.is_empty() {
-        return agent_state_with_error_in_context(&state, &run_context, "agent prompt is empty");
-    }
     let config = clone_provider_config(&state)?;
     if !config.is_ready() {
         return agent_state_with_error_in_context(
@@ -2045,7 +2286,32 @@ fn run_agent_task_blocking(
         .get("project_root")
         .map(PathBuf::from)
         .unwrap_or(active_workspace_root(&state)?);
-    maybe_auto_name_session(&state, &session_id, &prompt)?;
+    let attachments = validate_agent_attachments(&root, input.attachments)?;
+    if user_prompt.is_empty() && attachments.is_empty() {
+        return agent_state_with_error_in_context(&state, &run_context, "agent prompt is empty");
+    }
+    let display_prompt = if user_prompt.is_empty() {
+        format!(
+            "Review attached {}",
+            attachments
+                .iter()
+                .map(|attachment| attachment.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        user_prompt
+    };
+    let prompt = prompt_with_attachments(&display_prompt, &attachments);
+    let title_source = if display_prompt.trim().is_empty() {
+        attachments
+            .first()
+            .map(|attachment| attachment.name.as_str())
+            .unwrap_or("New Session")
+    } else {
+        &display_prompt
+    };
+    maybe_auto_name_session(&state, &session_id, title_source)?;
     run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
     run_context.insert("agent_run_id".to_string(), unique_id("agent-run"));
     run_context.insert(
@@ -2095,7 +2361,7 @@ fn run_agent_task_blocking(
             .filter_map(message_from_event)
             .collect::<Vec<_>>();
         let mut start_metadata = run_context.clone();
-        start_metadata.insert("prompt".to_string(), prompt.clone());
+        start_metadata.insert("prompt".to_string(), display_prompt.clone());
         start_metadata.insert(
             "requested_policy".to_string(),
             requested_policy.label().to_string(),
@@ -2120,12 +2386,14 @@ fn run_agent_task_blocking(
             start_metadata,
         )
         .map_err(|error| error.to_string())?;
+        let mut message_metadata = run_context.clone();
+        add_attachment_metadata(&mut message_metadata, &attachments);
         append_message_event_with_metadata(
             &mut store,
             &task_id,
             MessageRole::User,
-            &prompt,
-            run_context.clone(),
+            &display_prompt,
+            message_metadata,
         )
             .map_err(|error| error.to_string())?;
         history
@@ -2172,7 +2440,7 @@ fn run_agent_task_blocking(
         }
     }
 
-    let runtime = if history.is_empty() {
+    let mut runtime = if history.is_empty() {
         start_agent_loop(task_id, prompt.clone(), AgentRuntimeConfig::default())
     } else {
         start_agent_loop_with_history(
@@ -2182,6 +2450,14 @@ fn run_agent_task_blocking(
             AgentRuntimeConfig::default(),
         )
     };
+    if let Some(message) = runtime
+        .messages
+        .iter_mut()
+        .rev()
+        .find(|message| matches!(message.role, MessageRole::User))
+    {
+        add_attachment_metadata(&mut message.metadata, &attachments);
+    }
     continue_agent_loop(
         &state,
         &config,
@@ -2616,7 +2892,7 @@ fn resolve_agent_permission_request(
     )
     .map_err(|error| error.to_string())?;
 
-    let (observation, status) = if matches!(
+    let (observation, status, image_paths) = if matches!(
         decision,
         PermissionDecision::AllowOnce | PermissionDecision::AllowForSession
     ) {
@@ -2630,11 +2906,8 @@ fn resolve_agent_permission_request(
         };
         drop(store);
         let result = execute_agent_tool_invocation(state, invocation, root, run_context)?;
-        let observation = observation_from_tool_result(
-            &tool_name,
-            tool_outcome_label(&result.status),
-            &result.output,
-        );
+        let observation = observation_from_agent_tool_result(&tool_name, &result);
+        let image_paths = tool_result_image_paths(&result);
         let mut store = state
             .store
             .lock()
@@ -2649,7 +2922,16 @@ fn resolve_agent_permission_request(
             Some(run_context),
         )
         .map_err(|error| error.to_string())?;
-        (observation, result.status)
+        if !image_paths.is_empty() {
+            append_visual_reference_event(
+                &mut store,
+                &request.task_id,
+                &tool_name,
+                &image_paths,
+                run_context,
+            )?;
+        }
+        (observation, result.status, image_paths)
     } else {
         let observation = observation_from_tool_result(
             &request.action,
@@ -2684,7 +2966,7 @@ fn resolve_agent_permission_request(
             Some(run_context),
         )
         .map_err(|error| error.to_string())?;
-        (observation, ToolOutcomeStatus::Denied)
+        (observation, ToolOutcomeStatus::Denied, Vec::new())
     };
     Ok(ResolvedToolObservation {
         call_id: agent_core::ToolCallId(tool_call_id),
@@ -2692,6 +2974,7 @@ fn resolve_agent_permission_request(
         input_json: tool_input,
         status,
         observation,
+        image_paths,
     })
 }
 
@@ -3696,7 +3979,10 @@ pub fn run() {
             get_project_session_state,
             create_project,
             create_session,
+            rename_project,
             rename_session,
+            stage_agent_attachments,
+            remove_agent_attachment,
             fork_session,
             archive_session,
             restore_session,
@@ -3731,6 +4017,7 @@ pub fn run() {
             get_context_state,
             compact_context,
             read_artifact_image,
+            read_artifact_preview,
             run_browser_tool,
             resolve_browser_permission
         ])
@@ -3872,26 +4159,7 @@ fn show_native_quit_confirmation() -> QuitConfirmation {
 
 #[tauri::command]
 fn read_artifact_image(state: tauri::State<'_, AppState>, path: String) -> Result<String, String> {
-    let workspace_root = state
-        .workspace_config
-        .lock()
-        .map_err(|error| format!("workspace config lock poisoned: {error}"))?
-        .root
-        .clone();
-    let requested = PathBuf::from(&path);
-    let requested = if requested.is_absolute() {
-        requested
-    } else {
-        workspace_root.join(requested)
-    };
-    let canonical_root = fs::canonicalize(&workspace_root)
-        .map_err(|error| format!("failed to resolve workspace root: {error}"))?;
-    let canonical_path = fs::canonicalize(&requested)
-        .map_err(|error| format!("failed to resolve artifact image: {error}"))?;
-    if !canonical_path.starts_with(&canonical_root) {
-        return Err("artifact image must be inside the active workspace".to_string());
-    }
-
+    let canonical_path = validated_workspace_artifact_path(&state, &path)?;
     let metadata = fs::metadata(&canonical_path)
         .map_err(|error| format!("failed to inspect artifact image: {error}"))?;
     if metadata.len() > 24 * 1024 * 1024 {
@@ -3916,6 +4184,100 @@ fn read_artifact_image(state: tauri::State<'_, AppState>, path: String) -> Resul
         .map_err(|error| format!("failed to read artifact image: {error}"))?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
     Ok(format!("data:{mime};base64,{encoded}"))
+}
+
+#[tauri::command]
+fn read_artifact_preview(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<ArtifactPreviewView, String> {
+    let canonical_path = validated_workspace_artifact_path(&state, &path)?;
+    let metadata = fs::metadata(&canonical_path)
+        .map_err(|error| format!("failed to inspect artifact: {error}"))?;
+    let extension = canonical_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let image_mime = match extension.as_str() {
+        "avif" => Some("image/avif"),
+        "bmp" => Some("image/bmp"),
+        "gif" => Some("image/gif"),
+        "jpeg" | "jpg" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    };
+    if let Some(mime_type) = image_mime {
+        if metadata.len() > 24 * 1024 * 1024 {
+            return Err("artifact image exceeds the 24 MB preview limit".to_string());
+        }
+        let bytes = fs::read(&canonical_path)
+            .map_err(|error| format!("failed to read artifact image: {error}"))?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        return Ok(ArtifactPreviewView {
+            kind: "image".to_string(),
+            mime_type: mime_type.to_string(),
+            content: None,
+            data_url: Some(format!("data:{mime_type};base64,{encoded}")),
+            size_bytes: metadata.len(),
+        });
+    }
+
+    let (kind, mime_type) = match extension.as_str() {
+        "html" | "htm" => ("html", "text/html"),
+        "md" | "markdown" => ("markdown", "text/markdown"),
+        "css" => ("text", "text/css"),
+        "csv" => ("text", "text/csv"),
+        "json" => ("text", "application/json"),
+        "js" | "jsx" | "mjs" | "ts" | "tsx" => ("text", "text/javascript"),
+        "log" | "rs" | "swift" | "toml" | "txt" | "xml" | "yaml" | "yml" => {
+            ("text", "text/plain")
+        }
+        _ => ("file", "application/octet-stream"),
+    };
+    if kind == "file" {
+        return Ok(ArtifactPreviewView {
+            kind: kind.to_string(),
+            mime_type: mime_type.to_string(),
+            content: None,
+            data_url: None,
+            size_bytes: metadata.len(),
+        });
+    }
+    if metadata.len() > 2 * 1024 * 1024 {
+        return Err("text artifact exceeds the 2 MB preview limit".to_string());
+    }
+    let content = fs::read_to_string(&canonical_path)
+        .map_err(|error| format!("failed to read text artifact: {error}"))?;
+    Ok(ArtifactPreviewView {
+        kind: kind.to_string(),
+        mime_type: mime_type.to_string(),
+        content: Some(content),
+        data_url: None,
+        size_bytes: metadata.len(),
+    })
+}
+
+fn validated_workspace_artifact_path(
+    state: &tauri::State<'_, AppState>,
+    value: &str,
+) -> Result<PathBuf, String> {
+    let workspace_root = active_workspace_root(state)?;
+    let requested = PathBuf::from(value);
+    let requested = if requested.is_absolute() {
+        requested
+    } else {
+        workspace_root.join(requested)
+    };
+    let canonical_root = fs::canonicalize(&workspace_root)
+        .map_err(|error| format!("failed to resolve workspace root: {error}"))?;
+    let canonical_path = fs::canonicalize(&requested)
+        .map_err(|error| format!("failed to resolve artifact: {error}"))?;
+    if !canonical_path.starts_with(&canonical_root) || !canonical_path.is_file() {
+        return Err("artifact must be a file inside the active workspace".to_string());
+    }
+    Ok(canonical_path)
 }
 
 fn request_mock_permission_in_store(store: &mut SqliteStore) -> Result<Phase3State, StorageError> {
@@ -4487,6 +4849,8 @@ struct AdaptiveWorkflowPayload {
 #[derive(Debug, Deserialize)]
 struct AdaptiveWorkflowStepPayload {
     id: String,
+    #[serde(default)]
+    role: Option<String>,
     model: String,
     subtask: String,
     #[serde(default, alias = "access_list", alias = "accessList")]
@@ -4505,6 +4869,7 @@ struct CollaborationCandidateSpec {
 struct AdaptiveCollaborationSpec {
     step_index: usize,
     step_id: String,
+    role: String,
     stage: String,
     model: String,
     subtask: String,
@@ -4622,14 +4987,16 @@ fn build_adaptive_coordinator_prompt(
     format!(
         concat!(
             "You are the coordinator model for a Fugu-style Cindx workflow. Design a query-specific dependency graph instead of using a fixed planner/reviewer pipeline. Return only strict JSON with this schema:\n",
-            "{{\"steps\":[{{\"id\":\"research\",\"model\":\"exact model from pool\",\"subtask\":\"specific natural-language assignment\",\"access\":[]}},{{\"id\":\"synthesize\",\"model\":\"exact model from pool\",\"subtask\":\"synthesize a checkable execution brief\",\"access\":[\"research\"]}}]}}\n\n",
+            "{{\"steps\":[{{\"id\":\"approach_a\",\"role\":\"thinker\",\"model\":\"exact model from pool\",\"subtask\":\"independent approach\",\"access\":[]}},{{\"id\":\"approach_b\",\"role\":\"worker\",\"model\":\"exact model from pool\",\"subtask\":\"independent alternative\",\"access\":[]}},{{\"id\":\"verify\",\"role\":\"verifier\",\"model\":\"exact model from pool\",\"subtask\":\"audit evidence and disagreements\",\"access\":[\"approach_a\",\"approach_b\"]}},{{\"id\":\"synthesize\",\"role\":\"synthesizer\",\"model\":\"exact model from pool\",\"subtask\":\"synthesize a checkable execution brief\",\"access\":[\"approach_a\",\"approach_b\",\"verify\"]}}]}}\n\n",
             "Rules:\n",
-            "- Use between 2 and {max_steps} steps.\n",
+            "- Use between 4 and {max_steps} steps; this is quality-first Ultra mode.\n",
+            "- role must be exactly thinker, worker, verifier, or synthesizer.\n",
             "- Preserve the listed order: access may reference only earlier step ids.\n",
-            "- Steps with no dependencies run independently and in parallel.\n",
+            "- Start with at least two independent thinker/worker branches so they run in parallel.\n",
+            "- Include at least one verifier after those branches; it must explicitly audit evidence and disagreements.\n",
             "- Choose models by likely task fit; a model may be used more than once, including the coordinator model itself.\n",
             "- Keep workers isolated: include an earlier result only when it is necessary and listed in access.\n",
-            "- The final step must access prior work and synthesize one concrete execution brief for a separate tool-using executor.\n",
+            "- The final step must use role synthesizer, access at least two prior branches, and produce one concrete execution brief for a separate tool-using executor.\n",
             "- Use exact model strings from the worker pool. Do not include markdown fences or commentary.\n\n",
             "Configured role hints:\nPlanner: {planner}\nExecutor: {executor}\nReviewer: {reviewer}\nSynthesizer: {summarizer}\n\n",
             "Allowed worker pool:\n{worker_pool}\n\n",
@@ -4663,24 +5030,58 @@ fn parse_adaptive_workflow(
         .ok_or_else(|| "coordinator returned incomplete JSON".to_string())?;
     let payload = serde_json::from_str::<AdaptiveWorkflowPayload>(&response[start..=end])
         .map_err(|error| format!("coordinator workflow JSON is invalid: {error}"))?;
+    let step_count = payload.steps.len();
     let workflow = AdaptiveWorkflow {
         steps: payload
             .steps
             .into_iter()
-            .map(|step| AdaptiveWorkflowStep {
-                id: step.id.trim().to_string(),
-                model: step.model.trim().to_string(),
-                subtask: step.subtask.trim().to_string(),
-                access: step
+            .enumerate()
+            .map(|(index, step)| {
+                let access = step
                     .access
                     .into_iter()
                     .map(|dependency| dependency.trim().to_string())
-                    .collect(),
+                    .collect::<Vec<_>>();
+                let role = step.role.unwrap_or_else(|| {
+                    if index + 1 == step_count {
+                        "synthesizer".to_string()
+                    } else if access.is_empty() {
+                        "thinker".to_string()
+                    } else {
+                        "worker".to_string()
+                    }
+                });
+                AdaptiveWorkflowStep {
+                    id: step.id.trim().to_string(),
+                    role: role.trim().to_ascii_lowercase(),
+                    model: step.model.trim().to_string(),
+                    subtask: step.subtask.trim().to_string(),
+                    access,
+                }
             })
             .collect(),
     };
-    if workflow.steps.len() < 2 {
-        return Err("adaptive collaboration requires at least two worker steps".to_string());
+    if workflow.steps.len() < 4 {
+        return Err("Ultra collaboration requires at least four adaptive steps".to_string());
+    }
+    if !workflow.steps.iter().any(|step| step.role == "verifier") {
+        return Err("Ultra collaboration requires at least one verifier".to_string());
+    }
+    let independent_branches = workflow
+        .steps
+        .iter()
+        .take(workflow.steps.len().saturating_sub(1))
+        .filter(|step| step.access.is_empty() && matches!(step.role.as_str(), "thinker" | "worker"))
+        .count();
+    if independent_branches < 2 {
+        return Err("Ultra collaboration requires at least two independent branches".to_string());
+    }
+    if workflow
+        .steps
+        .last()
+        .is_some_and(|step| step.access.len() < 2)
+    {
+        return Err("Ultra collaboration synthesis must access at least two prior branches".to_string());
     }
     validate_adaptive_workflow(&workflow, allowed_models)?;
     Ok(workflow)
@@ -4689,6 +5090,7 @@ fn parse_adaptive_workflow(
 fn adaptive_stage_metadata(spec: &AdaptiveCollaborationSpec) -> Metadata {
     [
         ("workflow_step_id".to_string(), spec.step_id.clone()),
+        ("workflow_role".to_string(), spec.role.clone()),
         (
             "workflow_step_index".to_string(),
             spec.step_index.to_string(),
@@ -4701,6 +5103,15 @@ fn adaptive_stage_metadata(spec: &AdaptiveCollaborationSpec) -> Metadata {
     ]
     .into_iter()
     .collect()
+}
+
+fn adaptive_model_role(role: &str) -> ModelRole {
+    match role {
+        "thinker" => ModelRole::Planner,
+        "verifier" => ModelRole::Reviewer,
+        "synthesizer" => ModelRole::Summarizer,
+        _ => ModelRole::Executor,
+    }
 }
 
 fn collaboration_candidate_models(config: &ProviderConfig, candidates: usize) -> Vec<String> {
@@ -5051,6 +5462,7 @@ fn run_adaptive_collaboration(
                 Ok(AdaptiveCollaborationSpec {
                     step_index,
                     step_id: step.id.clone(),
+                    role: step.role.clone(),
                     stage: format!("worker_{}", step_index + 1),
                     model: step.model.clone(),
                     subtask: step.subtask.clone(),
@@ -5063,13 +5475,14 @@ fn run_adaptive_collaboration(
 
         for spec in &specs {
             let metadata = adaptive_stage_metadata(spec);
+            let role = adaptive_model_role(&spec.role);
             record_collaboration_stage_started(
                 state,
                 task_id,
                 run_context,
                 collaboration_id,
                 &spec.stage,
-                &ModelRole::Executor,
+                &role,
                 &spec.model,
                 &spec.request_id,
                 &metadata,
@@ -5081,12 +5494,13 @@ fn run_adaptive_collaboration(
             .map(|spec| {
                 let config = config.clone();
                 let model = spec.model.clone();
+                let role = adaptive_model_role(&spec.role);
                 let prompt = spec.prompt.clone();
                 let system_prompt = system_prompt.clone();
                 std::thread::spawn(move || {
                     complete_collaboration_model(
                         config,
-                        ModelRole::Executor,
+                        role,
                         model,
                         system_prompt,
                         prompt,
@@ -5105,13 +5519,14 @@ fn run_adaptive_collaboration(
 
         for (spec, completion) in specs.iter().zip(&completions) {
             let metadata = adaptive_stage_metadata(spec);
+            let role = adaptive_model_role(&spec.role);
             record_collaboration_stage_finished(
                 state,
                 task_id,
                 run_context,
                 collaboration_id,
                 &spec.stage,
-                &ModelRole::Executor,
+                &role,
                 &spec.model,
                 &spec.request_id,
                 completion,
@@ -5293,20 +5708,33 @@ fn prepare_agent_collaboration(
             (guidance, models)
         }
         _ => {
-            let model = config.model_for_role(&ModelRole::Planner);
-            let guidance = run_collaboration_stage(
+            let models = collaboration_candidate_models(config, MAX_ADAPTIVE_WORKFLOW_STEPS);
+            let planner_model = config.model_for_role(&ModelRole::Planner);
+            let guidance = run_adaptive_collaboration(
                 state,
                 config,
                 task_id,
                 run_context,
                 &id,
-                "planner",
-                ModelRole::Planner,
-                &model,
-                build_collaboration_planner_prompt(prompt, history),
+                prompt,
+                history,
+                &models,
             )
+            .or_else(|_| {
+                run_collaboration_stage(
+                    state,
+                    config,
+                    task_id,
+                    run_context,
+                    &id,
+                    "planner",
+                    ModelRole::Planner,
+                    &planner_model,
+                    build_collaboration_planner_prompt(prompt, history),
+                )
+            })
             .unwrap_or_default();
-            (guidance, vec![model])
+            (guidance, models)
         }
     };
     Some(AgentCollaboration {
@@ -5713,11 +6141,8 @@ fn continue_agent_loop(
                         workspace_root,
                         &run_context,
                     )?;
-                    let observation = observation_from_tool_result(
-                        &tool_name,
-                        tool_outcome_label(&result.status),
-                        &result.output,
-                    );
+                    let observation = observation_from_agent_tool_result(&tool_name, &result);
+                    let image_paths = tool_result_image_paths(&result);
                     record_tool_outcome(
                         &mut runtime,
                         &call.tool_name,
@@ -5730,6 +6155,7 @@ fn continue_agent_loop(
                         call.call_id.clone(),
                         &observation,
                     );
+                    append_visual_reference_message(&mut runtime, &tool_name, &image_paths);
                     let mut store = state
                         .store
                         .lock()
@@ -5840,6 +6266,11 @@ fn append_observations_to_suspended_run(
             &mut suspended.runtime,
             resolved.call_id.clone(),
             &resolved.observation,
+        );
+        append_visual_reference_message(
+            &mut suspended.runtime,
+            &resolved.tool_name,
+            &resolved.image_paths,
         );
     }
     remember_suspended_agent_run(state, suspended)
@@ -6821,6 +7252,101 @@ fn execute_agent_tool_invocation(
     Ok(result)
 }
 
+fn observation_from_agent_tool_result(tool_name: &str, result: &ToolResult) -> String {
+    let mut output = result.output.clone();
+    if !result.artifacts.is_empty() {
+        output.push_str("\n\nArtifacts available in the active workspace:\n");
+        output.push_str(
+            &result
+                .artifacts
+                .iter()
+                .map(|artifact| format!("- {}", artifact.path))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    observation_from_tool_result(tool_name, tool_outcome_label(&result.status), &output)
+}
+
+fn tool_result_image_paths(result: &ToolResult) -> Vec<String> {
+    result
+        .artifacts
+        .iter()
+        .filter(|artifact| {
+            artifact
+                .mime_type
+                .as_deref()
+                .is_some_and(|mime_type| mime_type.starts_with("image/"))
+                || matches!(
+                    Path::new(&artifact.path)
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                        .as_str(),
+                    "avif" | "gif" | "jpeg" | "jpg" | "png" | "webp"
+                )
+        })
+        .map(|artifact| artifact.path.clone())
+        .collect()
+}
+
+fn append_visual_reference_message(
+    runtime: &mut agent_runtime::AgentLoopState,
+    tool_name: &str,
+    image_paths: &[String],
+) {
+    if image_paths.is_empty() {
+        return;
+    }
+    runtime.messages.push(Message {
+        role: MessageRole::User,
+        content: format!(
+            "Visual reference captured by {tool_name}. Inspect the attached screenshot before deciding the next action."
+        ),
+        metadata: [
+            ("internal".to_string(), "true".to_string()),
+            ("kind".to_string(), "visual_reference".to_string()),
+            ("tool".to_string(), tool_name.to_string()),
+            ("image_paths".to_string(), image_paths.join("\n")),
+        ]
+        .into_iter()
+        .collect(),
+    });
+}
+
+fn append_visual_reference_event(
+    store: &mut SqliteStore,
+    task_id: &TaskId,
+    tool_name: &str,
+    image_paths: &[String],
+    run_context: &Metadata,
+) -> Result<(), String> {
+    if image_paths.is_empty() {
+        return Ok(());
+    }
+    append_message_event_with_metadata(
+        store,
+        task_id,
+        MessageRole::User,
+        &format!(
+            "Visual reference captured by {tool_name}. Inspect the attached screenshot before deciding the next action."
+        ),
+        metadata_with_context(
+            [
+                ("internal".to_string(), "true".to_string()),
+                ("kind".to_string(), "visual_reference".to_string()),
+                ("tool".to_string(), tool_name.to_string()),
+                ("image_paths".to_string(), image_paths.join("\n")),
+            ]
+            .into_iter()
+            .collect(),
+            run_context,
+        ),
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn materialize_tool_result_artifacts(
     result: &mut ToolResult,
     workspace_root: &Path,
@@ -6853,14 +7379,42 @@ fn materialize_tool_result_artifacts(
         });
         image_index += 1;
     }
-    if result.artifacts.is_empty() {
-        if let Some(path) = result.metadata.get("artifact_path").cloned() {
-            result.artifacts.push(ToolArtifact {
-                path,
-                mime_type: None,
-                title: None,
-            });
+    for key in ["artifact_path", "screenshot_path", "text_path"] {
+        let Some(path) = result.metadata.get(key).cloned() else {
+            continue;
+        };
+        let path = if Path::new(&path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            workspace_root.join(path)
+        };
+        let path = path.display().to_string();
+        if result.artifacts.iter().any(|artifact| artifact.path == path) {
+            continue;
         }
+        let mime_type = match Path::new(&path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "avif" => Some("image/avif"),
+            "gif" => Some("image/gif"),
+            "jpeg" | "jpg" => Some("image/jpeg"),
+            "png" => Some("image/png"),
+            "webp" => Some("image/webp"),
+            "html" | "htm" => Some("text/html"),
+            "md" | "markdown" => Some("text/markdown"),
+            "txt" => Some("text/plain"),
+            _ => None,
+        }
+        .map(str::to_string);
+        result.artifacts.push(ToolArtifact {
+            path,
+            mime_type,
+            title: None,
+        });
     }
     if let Some(structured) = &result.structured_output_json {
         result
@@ -6872,9 +7426,19 @@ fn materialize_tool_result_artifacts(
             "artifact_count".to_string(),
             result.artifacts.len().to_string(),
         );
+        let primary_artifact = result
+            .artifacts
+            .iter()
+            .find(|artifact| {
+                artifact
+                    .mime_type
+                    .as_deref()
+                    .is_some_and(|mime_type| mime_type.starts_with("image/"))
+            })
+            .unwrap_or(&result.artifacts[0]);
         result.metadata.insert(
             "artifact_path".to_string(),
-            result.artifacts[0].path.clone(),
+            primary_artifact.path.clone(),
         );
     }
     Ok(())
@@ -7428,7 +7992,9 @@ fn message_from_event(event: &Event) -> Option<Message> {
     if event.kind != EventKind::MessageAdded {
         return None;
     }
-    if event.metadata.get("internal").map(String::as_str) == Some("true") {
+    if event.metadata.get("internal").map(String::as_str) == Some("true")
+        && event.metadata.get("kind").map(String::as_str) != Some("visual_reference")
+    {
         return None;
     }
 
@@ -8447,6 +9013,90 @@ fn active_workspace_root(state: &tauri::State<'_, AppState>) -> Result<PathBuf, 
         .map_err(|error| format!("workspace config lock poisoned: {error}"))
 }
 
+fn project_root_for_session(
+    state: &tauri::State<'_, AppState>,
+    session_id: &str,
+) -> Result<PathBuf, String> {
+    let config = state
+        .project_session_config
+        .lock()
+        .map_err(|error| format!("project session config lock poisoned: {error}"))?;
+    let session = config
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id && session.archived_at_ms.is_none())
+        .ok_or_else(|| "session not found".to_string())?;
+    let project = config
+        .projects
+        .iter()
+        .find(|project| project.id == session.project_id)
+        .ok_or_else(|| "project not found for session".to_string())?;
+    validate_workspace_root(&project.root)
+}
+
+fn safe_attachment_name(value: &str) -> String {
+    let file_name = Path::new(value)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("attachment");
+    let sanitized = file_name
+        .chars()
+        .filter(|character| !character.is_control())
+        .map(|character| match character {
+            '/' | '\\' | ':' => '_',
+            other => other,
+        })
+        .take(120)
+        .collect::<String>();
+    if sanitized.trim().is_empty() {
+        "attachment".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn normalized_attachment_mime(value: &str, path: &Path) -> String {
+    let value = normalized_config_value(value).to_ascii_lowercase();
+    if value.starts_with("image/") || value.starts_with("text/") {
+        return value;
+    }
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "avif" => "image/avif",
+        "gif" => "image/gif",
+        "jpeg" | "jpg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "html" | "htm" => "text/html",
+        "md" | "markdown" => "text/markdown",
+        "json" => "application/json",
+        "txt" => "text/plain",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+fn attachment_storage_root(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(".cindx").join("attachments")
+}
+
+fn validated_attachment_path(workspace_root: &Path, value: &str) -> Result<PathBuf, String> {
+    let attachment_root = attachment_storage_root(workspace_root);
+    let canonical_root = fs::canonicalize(&attachment_root)
+        .map_err(|error| format!("failed to resolve attachment directory: {error}"))?;
+    let canonical_path = fs::canonicalize(value)
+        .map_err(|error| format!("failed to resolve attachment: {error}"))?;
+    if !canonical_path.starts_with(&canonical_root) || !canonical_path.is_file() {
+        return Err("attachment must be a staged file for this project".to_string());
+    }
+    Ok(canonical_path)
+}
+
 fn tool_registry_for_state(
     state: &tauri::State<'_, AppState>,
     workspace_root: &Path,
@@ -9050,6 +9700,72 @@ mod tests {
     }
 
     #[test]
+    fn attachment_paths_stay_inside_project_managed_storage() {
+        let root = std::env::temp_dir().join(format!(
+            "cindx-attachment-test-{}-{}",
+            std::process::id(),
+            current_time_millis()
+        ));
+        let attachment_dir = root.join(".cindx/attachments/session-a");
+        fs::create_dir_all(&attachment_dir).expect("attachment directory should exist");
+        let attachment = attachment_dir.join("image.png");
+        fs::write(&attachment, b"png").expect("attachment should write");
+        let outside = root.join("outside.png");
+        fs::write(&outside, b"png").expect("outside fixture should write");
+
+        assert_eq!(
+            validated_attachment_path(&root, &attachment.display().to_string())
+                .expect("managed attachment should validate"),
+            fs::canonicalize(&attachment).expect("attachment should resolve")
+        );
+        assert!(validated_attachment_path(&root, &outside.display().to_string()).is_err());
+        assert_eq!(safe_attachment_name("../nested/screen.png"), "screen.png");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn computer_screenshot_becomes_the_primary_visual_artifact() {
+        let root = std::env::temp_dir().join(format!(
+            "cindx-screenshot-test-{}-{}",
+            std::process::id(),
+            current_time_millis()
+        ));
+        fs::create_dir_all(root.join(".cindx/computer-actions"))
+            .expect("computer action directory should exist");
+        fs::write(root.join(".cindx/computer-actions/request.json"), b"{}")
+            .expect("request fixture should write");
+        fs::write(root.join(".cindx/computer-actions/screen.png"), b"png")
+            .expect("screenshot fixture should write");
+        let mut result = ToolResult::text(
+            agent_core::ToolCallId("computer-test".to_string()),
+            ToolOutcomeStatus::Succeeded,
+            "captured",
+            [
+                (
+                    "artifact_path".to_string(),
+                    ".cindx/computer-actions/request.json".to_string(),
+                ),
+                (
+                    "screenshot_path".to_string(),
+                    ".cindx/computer-actions/screen.png".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        materialize_tool_result_artifacts(&mut result, &root)
+            .expect("artifacts should materialize");
+
+        assert!(result
+            .metadata
+            .get("artifact_path")
+            .is_some_and(|path| path.ends_with("screen.png")));
+        assert_eq!(tool_result_image_paths(&result).len(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn runtime_status_exposes_expected_modes() {
         let status = runtime_status_for_root(workspace_root());
 
@@ -9212,9 +9928,10 @@ mod tests {
     fn adaptive_coordinator_parses_bounded_dependency_workflow() {
         let response = r#"```json
         {"steps":[
-          {"id":"independent-a","model":"planner-a","subtask":"Analyze one path","access":[]},
-          {"id":"independent-b","model":"reviewer-b","subtask":"Challenge assumptions","access":[]},
-          {"id":"final","model":"summary-c","subtask":"Synthesize guidance","access":["independent-a","independent-b"]}
+          {"id":"independent-a","role":"thinker","model":"planner-a","subtask":"Analyze one path","access":[]},
+          {"id":"independent-b","role":"worker","model":"reviewer-b","subtask":"Challenge assumptions","access":[]},
+          {"id":"verify","role":"verifier","model":"reviewer-b","subtask":"Verify both paths","access":["independent-a","independent-b"]},
+          {"id":"final","role":"synthesizer","model":"summary-c","subtask":"Synthesize guidance","access":["independent-a","independent-b","verify"]}
         ]}
         ```"#;
         let models = vec![
@@ -9226,22 +9943,28 @@ mod tests {
         let workflow =
             parse_adaptive_workflow(response, &models).expect("workflow should parse");
 
-        assert_eq!(workflow.steps.len(), 3);
+        assert_eq!(workflow.steps.len(), 4);
         assert_eq!(
-            workflow.steps[2].access,
-            vec!["independent-a".to_string(), "independent-b".to_string()]
+            workflow.steps[3].access,
+            vec![
+                "independent-a".to_string(),
+                "independent-b".to_string(),
+                "verify".to_string()
+            ]
         );
         assert_eq!(
             adaptive_workflow_layers(&workflow).expect("layers should build"),
-            vec![vec![0, 1], vec![2]]
+            vec![vec![0, 1], vec![2], vec![3]]
         );
     }
 
     #[test]
     fn adaptive_coordinator_rejects_models_outside_the_configured_pool() {
         let response = r#"{"steps":[
-          {"id":"first","model":"configured","subtask":"Analyze","access":[]},
-          {"id":"final","model":"unconfigured","subtask":"Synthesize","access":["first"]}
+          {"id":"first","role":"thinker","model":"configured","subtask":"Analyze","access":[]},
+          {"id":"second","role":"worker","model":"configured","subtask":"Challenge","access":[]},
+          {"id":"verify","role":"verifier","model":"configured","subtask":"Verify","access":["first","second"]},
+          {"id":"final","role":"synthesizer","model":"unconfigured","subtask":"Synthesize","access":["first","second","verify"]}
         ]}"#;
 
         let error = parse_adaptive_workflow(response, &["configured".to_string()])
