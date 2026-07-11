@@ -135,7 +135,7 @@ assert(
   "The macOS titlebar must hide its title and host the pane controls"
 );
 assert(
-  tauriConfig.app.windows.every((window) => window.trafficLightPosition?.y === 32) &&
+  tauriConfig.app.windows.every((window) => window.trafficLightPosition?.y === 23) &&
     styles.includes("--titlebar-height: 46px") &&
     styles.includes("--titlebar-content-center-y: calc(var(--titlebar-height) / 2)") &&
     styles.includes("grid-template-rows: var(--titlebar-height) minmax(0, 1fr)") &&
