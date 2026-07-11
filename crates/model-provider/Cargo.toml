@@ -6,4 +6,5 @@ license.workspace = true
 
 [dependencies]
 agent-core = { path = "../agent-core" }
+base64 = "0.22"
 serde_json = "1"

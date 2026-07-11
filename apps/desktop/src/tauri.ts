@@ -126,6 +126,28 @@ export type ProjectSessionState = {
   lastError: string | null;
 };
 
+export type AgentAttachment = {
+  id: string;
+  name: string;
+  path: string;
+  mimeType: string;
+  sizeBytes: number;
+};
+
+export type AttachmentUpload = {
+  name: string;
+  mimeType: string;
+  dataBase64: string;
+};
+
+export type ArtifactPreview = {
+  kind: "image" | "html" | "markdown" | "text" | "file";
+  mimeType: string;
+  content: string | null;
+  dataUrl: string | null;
+  sizeBytes: number;
+};
+
 export type TimelineEntry = {
   label: string;
   detail: string;
@@ -965,6 +987,30 @@ export async function createSession(
   }
 }
 
+export async function renameProject(
+  projectId: string,
+  name: string
+): Promise<ProjectSessionState> {
+  try {
+    return await invoke<ProjectSessionState>("rename_project", {
+      input: { projectId, name }
+    });
+  } catch {
+    const normalizedName = name.trim().replace(/[\n\r]/g, "");
+    if (!normalizedName) return browserProjectSessionState;
+    const now = Date.now();
+    browserProjectSessionState = {
+      ...browserProjectSessionState,
+      projects: browserProjectSessionState.projects.map((project) =>
+        project.id === projectId
+          ? { ...project, name: normalizedName, updatedAtMs: now }
+          : project
+      )
+    };
+    return browserProjectSessionState;
+  }
+}
+
 export async function forkSession(sessionId: string): Promise<ProjectSessionState> {
   try {
     return await invoke<ProjectSessionState>("fork_session", { input: { sessionId } });
@@ -1021,6 +1067,19 @@ export async function renameSession(
     };
     return browserProjectSessionState;
   }
+}
+
+export async function stageAgentAttachments(
+  sessionId: string,
+  files: AttachmentUpload[]
+): Promise<AgentAttachment[]> {
+  return invoke<AgentAttachment[]>("stage_agent_attachments", {
+    input: { sessionId, files }
+  });
+}
+
+export async function removeAgentAttachment(sessionId: string, path: string): Promise<void> {
+  await invoke<void>("remove_agent_attachment", { input: { sessionId, path } });
 }
 
 export async function archiveSession(sessionId: string): Promise<ProjectSessionState> {
@@ -1359,10 +1418,14 @@ function currentAgentTimeContext() {
   return `${localTime} (${timeZone}; UTC ${now.toISOString()})`;
 }
 
-export async function runAgentTask(prompt: string, sessionId: string): Promise<AgentState> {
+export async function runAgentTask(
+  prompt: string,
+  sessionId: string,
+  attachments: AgentAttachment[] = []
+): Promise<AgentState> {
   try {
     return await invoke<AgentState>("run_agent_task", {
-      input: { prompt, sessionId, currentTime: currentAgentTimeContext() }
+      input: { prompt, sessionId, currentTime: currentAgentTimeContext(), attachments }
     });
   } catch {
     const now = Date.now();
@@ -1855,6 +1918,10 @@ export async function subscribeToModelStream(
 
 export async function readArtifactImage(path: string): Promise<string> {
   return invoke<string>("read_artifact_image", { path });
+}
+
+export async function readArtifactPreview(path: string): Promise<ArtifactPreview> {
+  return invoke<ArtifactPreview>("read_artifact_preview", { path });
 }
 
 function createBrowserContextCheckpoint(path: string | null): ContextCheckpointView {

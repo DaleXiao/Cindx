@@ -1,6 +1,18 @@
-import { Check, CheckCheck, LoaderCircle, Play, Send, ShieldCheck, Square, X } from "lucide-react";
+import {
+  Check,
+  CheckCheck,
+  FileText,
+  Image,
+  LoaderCircle,
+  Play,
+  Plus,
+  Send,
+  ShieldCheck,
+  Square,
+  X
+} from "lucide-react";
 import { useEffect, useRef } from "react";
-import type { ToolApprovalView } from "../tauri";
+import type { AgentAttachment, ToolApprovalView } from "../tauri";
 
 type ComposerProps = {
   value: string;
@@ -11,8 +23,12 @@ type ComposerProps = {
   focusRequest: number;
   pendingApproval: ToolApprovalView | null;
   permissionBusy: boolean;
+  attachments: AgentAttachment[];
+  attachmentBusy: boolean;
   onChange: (value: string) => void;
   onSend: (prompt: string) => void;
+  onPickAttachments: (files: File[]) => void;
+  onRemoveAttachment: (attachment: AgentAttachment) => void;
   onCancel: () => void;
   onRetry: () => void;
   onResolvePermission: (
@@ -30,16 +46,22 @@ export function Composer({
   focusRequest,
   pendingApproval,
   permissionBusy,
+  attachments,
+  attachmentBusy,
   onChange,
   onSend,
+  onPickAttachments,
+  onRemoveAttachment,
   onCancel,
   onRetry,
   onResolvePermission
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const composingRef = useRef(false);
   const compositionJustEndedRef = useRef(false);
-  const canSend = !working && !canStop && !pendingApproval && Boolean(value.trim());
+  const canSend =
+    !working && !canStop && !pendingApproval && !attachmentBusy && Boolean(value.trim() || attachments.length);
   const retryMode = canRetry && !canSend && !working && !canStop && !pendingApproval;
 
   useEffect(() => {
@@ -51,7 +73,7 @@ export function Composer({
   function submit() {
     if (composingRef.current || compositionJustEndedRef.current) return;
     const prompt = value.trim();
-    if (!prompt || !canSend) return;
+    if (!canSend) return;
     onChange("");
     onSend(prompt);
   }
@@ -109,39 +131,92 @@ export function Composer({
             </div>
           </section>
         ) : (
-          <textarea
-            ref={textareaRef}
-            value={value}
-            onChange={(event) => onChange(event.target.value)}
-            onCompositionStart={() => {
-              composingRef.current = true;
-              compositionJustEndedRef.current = false;
-            }}
-            onCompositionEnd={(event) => {
-              composingRef.current = false;
-              compositionJustEndedRef.current = true;
-              onChange(event.currentTarget.value);
-              // WebKit can emit the candidate-selection Enter after compositionend.
-              window.setTimeout(() => {
-                compositionJustEndedRef.current = false;
-              }, 0);
-            }}
-            onKeyDown={(event) => {
-              const nativeEvent = event.nativeEvent;
-              const imeActive =
-                composingRef.current ||
-                compositionJustEndedRef.current ||
-                nativeEvent.isComposing ||
-                nativeEvent.keyCode === 229;
-              if (event.key !== "Enter" || event.shiftKey || imeActive) return;
-              event.preventDefault();
-              submit();
-            }}
-            disabled={working || canStop}
-            aria-keyshortcuts="Enter"
-            placeholder="Ask Cindx"
-            rows={1}
-          />
+          <div className="composer-input-shell">
+            {attachments.length > 0 && (
+              <div className="composer-attachments" aria-label="Attachments">
+                {attachments.map((attachment) => (
+                  <div className="composer-attachment" key={attachment.id} title={attachment.path}>
+                    {attachment.mimeType.startsWith("image/") ? (
+                      <Image aria-hidden="true" />
+                    ) : (
+                      <FileText aria-hidden="true" />
+                    )}
+                    <span>{attachment.name}</span>
+                    <button
+                      type="button"
+                      aria-label={`Remove ${attachment.name}`}
+                      title="Remove attachment"
+                      disabled={working || canStop || attachmentBusy}
+                      onClick={() => onRemoveAttachment(attachment)}
+                    >
+                      <X aria-hidden="true" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="composer-input-row">
+              <input
+                ref={fileInputRef}
+                className="composer-file-input"
+                type="file"
+                multiple
+                tabIndex={-1}
+                onChange={(event) => {
+                  const files = Array.from(event.currentTarget.files ?? []);
+                  event.currentTarget.value = "";
+                  if (files.length > 0) onPickAttachments(files);
+                }}
+              />
+              <button
+                className="composer-attach-button"
+                type="button"
+                aria-label="Attach files"
+                title="Attach files"
+                disabled={working || canStop || attachmentBusy || attachments.length >= 10}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                {attachmentBusy ? (
+                  <LoaderCircle className="composer-attach-loading" aria-hidden="true" />
+                ) : (
+                  <Plus aria-hidden="true" />
+                )}
+              </button>
+              <textarea
+                ref={textareaRef}
+                value={value}
+                onChange={(event) => onChange(event.target.value)}
+                onCompositionStart={() => {
+                  composingRef.current = true;
+                  compositionJustEndedRef.current = false;
+                }}
+                onCompositionEnd={(event) => {
+                  composingRef.current = false;
+                  compositionJustEndedRef.current = true;
+                  onChange(event.currentTarget.value);
+                  // WebKit can emit the candidate-selection Enter after compositionend.
+                  window.setTimeout(() => {
+                    compositionJustEndedRef.current = false;
+                  }, 0);
+                }}
+                onKeyDown={(event) => {
+                  const nativeEvent = event.nativeEvent;
+                  const imeActive =
+                    composingRef.current ||
+                    compositionJustEndedRef.current ||
+                    nativeEvent.isComposing ||
+                    nativeEvent.keyCode === 229;
+                  if (event.key !== "Enter" || event.shiftKey || imeActive) return;
+                  event.preventDefault();
+                  submit();
+                }}
+                disabled={working || canStop}
+                aria-keyshortcuts="Enter"
+                placeholder="Ask Cindx"
+                rows={1}
+              />
+            </div>
+          </div>
         )}
       </div>
       {!pendingApproval && (

@@ -42,6 +42,7 @@ import {
 } from "./components/SessionThread";
 import {
   AgentState,
+  AgentAttachment,
   AgentTraceState,
   AgentTraceStepView,
   answerWithRag,
@@ -89,6 +90,8 @@ import {
   resolvePermission,
   RuntimeStatus,
   retryAgentTask,
+  removeAgentAttachment,
+  renameProject,
   renameSession,
   restoreSession,
   runAgentTask,
@@ -109,6 +112,7 @@ import {
   selectProject,
   selectSession,
   SidecarState,
+  stageAgentAttachments,
   subscribeToModelStream
 } from "./tauri";
 
@@ -168,6 +172,15 @@ function isAutoSessionName(name: string) {
 function sessionTitleFromPrompt(prompt: string) {
   const compact = prompt.replace(/\s+/g, " ").trim();
   return [...compact].slice(0, 36).join("").trimEnd() || "New Session";
+}
+
+function fileDataBase64(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error(`Failed to read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
 }
 
 function latestTraceStep(turns: { steps: AgentTraceStepView[] }[]) {
@@ -269,6 +282,10 @@ export function App() {
   const [sidebarSearchOpen, setSidebarSearchOpen] = useState(false);
   const [sidebarQuery, setSidebarQuery] = useState("");
   const [composerDrafts, setComposerDrafts] = useState<Record<string, string>>({});
+  const [attachmentDrafts, setAttachmentDrafts] = useState<Record<string, AgentAttachment[]>>({});
+  const [attachmentBusySessionIds, setAttachmentBusySessionIds] = useState<Set<string>>(
+    () => new Set()
+  );
   const [composerFocusRequest, setComposerFocusRequest] = useState(0);
   const [streamAnswer, setStreamAnswer] = useState("");
   const [providerModels, setProviderModels] = useState<string[]>([]);
@@ -431,11 +448,62 @@ export function App() {
   }, [activeSession?.id]);
 
   const composerDraft = activeSession ? composerDrafts[activeSession.id] ?? "" : "";
+  const composerAttachments = activeSession ? attachmentDrafts[activeSession.id] ?? [] : [];
+  const attachmentBusy = activeSession
+    ? attachmentBusySessionIds.has(activeSession.id)
+    : false;
 
   function setActiveComposerDraft(value: string) {
     const sessionId = activeSessionIdRef.current ?? activeSession?.id;
     if (!sessionId) return;
     setComposerDrafts((current) => ({ ...current, [sessionId]: value }));
+  }
+
+  async function handlePickAttachments(files: File[]) {
+    const sessionId = activeSessionIdRef.current ?? activeSession?.id;
+    if (!sessionId || files.length === 0) return;
+    const existing = attachmentDrafts[sessionId] ?? [];
+    const available = Math.max(0, 10 - existing.length);
+    if (files.length > available) {
+      setComposerError("A message can include at most 10 attachments.");
+      return;
+    }
+    setAttachmentBusySessionIds((current) => new Set(current).add(sessionId));
+    setComposerError(null);
+    try {
+      const uploads = await Promise.all(
+        files.map(async (file) => ({
+          name: file.name,
+          mimeType: file.type || "application/octet-stream",
+          dataBase64: await fileDataBase64(file)
+        }))
+      );
+      const staged = await stageAgentAttachments(sessionId, uploads);
+      setAttachmentDrafts((current) => ({
+        ...current,
+        [sessionId]: [...(current[sessionId] ?? []), ...staged]
+      }));
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAttachmentBusySessionIds((current) => {
+        const next = new Set(current);
+        next.delete(sessionId);
+        return next;
+      });
+    }
+  }
+
+  function handleRemoveAttachment(attachment: AgentAttachment) {
+    const sessionId = activeSessionIdRef.current ?? activeSession?.id;
+    if (!sessionId) return;
+    setAttachmentDrafts((current) => ({
+      ...current,
+      [sessionId]: (current[sessionId] ?? []).filter((item) => item.id !== attachment.id)
+    }));
+    void removeAgentAttachment(sessionId, attachment.path).catch((error) => {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    });
   }
 
   const normalizedSidebarQuery = sidebarQuery.trim().toLowerCase();
@@ -782,6 +850,18 @@ export function App() {
     }
   }
 
+  async function handleRenameProject(projectId: string, name: string) {
+    setProjectSessionBusy(true);
+    setComposerError(null);
+    try {
+      await refreshWorkspaceAfterProjectSession(await renameProject(projectId, name));
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setProjectSessionBusy(false);
+    }
+  }
+
   async function handleArchiveSession(sessionId: string) {
     if (busySessionIds.has(sessionId) || sessionStatusOverrides[sessionId] === "Review") {
       setComposerError("Stop the running session before archiving it.");
@@ -944,11 +1024,21 @@ export function App() {
   async function handleSendPrompt(value: string) {
     const nextPrompt = value.trim();
     const sessionId = activeSession?.id;
-    if (!nextPrompt || !sessionId || busySessionIds.has(sessionId)) return;
+    const attachments = sessionId ? attachmentDrafts[sessionId] ?? [] : [];
+    if (
+      (!nextPrompt && attachments.length === 0) ||
+      !sessionId ||
+      busySessionIds.has(sessionId) ||
+      attachmentBusySessionIds.has(sessionId)
+    ) {
+      return;
+    }
+    const visiblePrompt =
+      nextPrompt || `Review attached ${attachments.map((attachment) => attachment.name).join(", ")}`;
     const automaticSessionTitle =
       activeSession &&
       isAutoSessionName(activeSession.name)
-        ? sessionTitleFromPrompt(nextPrompt)
+        ? sessionTitleFromPrompt(visiblePrompt)
         : null;
     const automaticSessionId = automaticSessionTitle ? activeSession?.id : null;
     if (automaticSessionTitle && automaticSessionId) {
@@ -967,12 +1057,13 @@ export function App() {
     }
     setStreamAnswer("");
     setComposerError(null);
+    setAttachmentDrafts((current) => ({ ...current, [sessionId]: [] }));
     markSessionBusy(sessionId, true);
     const submittedAt = Date.now();
     setAgentState((current) => {
       if (!current) return current;
       const contextTokensUsed =
-        current.contextTokensUsed + Math.ceil(nextPrompt.length / 4) + 6;
+        current.contextTokensUsed + Math.ceil(visiblePrompt.length / 4) + attachments.length * 64 + 6;
       return {
         ...current,
         sessionName: automaticSessionTitle ?? current.sessionName,
@@ -988,13 +1079,13 @@ export function App() {
         contextUsageEstimated: true,
         messages: [
           ...current.messages,
-          { role: "user", content: nextPrompt, timestampMs: submittedAt }
+          { role: "user", content: visiblePrompt, timestampMs: submittedAt }
         ]
       };
     });
     try {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      const next = await runAgentTask(nextPrompt, sessionId);
+      const next = await runAgentTask(nextPrompt, sessionId, attachments);
       updateSessionStatus(sessionId, next.status);
       if (activeSessionIdRef.current === sessionId) {
         setAgentState(next);
@@ -1004,6 +1095,10 @@ export function App() {
       setProjectSessionState(await getProjectSessionState());
       await refreshAgentTrace(true, sessionId);
     } catch (error) {
+      setAttachmentDrafts((current) => ({
+        ...current,
+        [sessionId]: current[sessionId]?.length ? current[sessionId] : attachments
+      }));
       if (activeSessionIdRef.current === sessionId) {
         setComposerError(error instanceof Error ? error.message : String(error));
         const restored = await getAgentState(sessionId);
@@ -1355,6 +1450,7 @@ export function App() {
         onProjectCreate={() => void handleCreateProject()}
         onSessionCreate={() => void handleCreateSession()}
         onProjectSelect={(projectId) => void handleSelectProject(projectId)}
+        onProjectRename={(projectId, name) => void handleRenameProject(projectId, name)}
         onSessionSelect={(sessionId) => void handleSelectSession(sessionId)}
         onSessionRename={(sessionId, name) => void handleRenameSession(sessionId, name)}
         onSessionFork={(sessionId) => void handleForkSession(sessionId)}
@@ -1391,8 +1487,12 @@ export function App() {
               focusRequest={composerFocusRequest}
               pendingApproval={agentApprovals[0] ?? null}
               permissionBusy={activeSessionBusy}
+              attachments={composerAttachments}
+              attachmentBusy={attachmentBusy}
               onChange={setActiveComposerDraft}
               onSend={(value) => void handleSendPrompt(value)}
+              onPickAttachments={(files) => void handlePickAttachments(files)}
+              onRemoveAttachment={handleRemoveAttachment}
               onCancel={() => void handleCancelAgentTask()}
               onRetry={() => void handleRetryAgentTask()}
               onResolvePermission={(requestId, decision) =>

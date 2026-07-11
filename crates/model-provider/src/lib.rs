@@ -1,5 +1,8 @@
 use agent_core::{Message, MessageRole, Metadata, ModelRole, ToolSpec};
+use base64::Engine;
+use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -439,7 +442,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         ProviderCapabilities {
             supports_streaming: true,
             supports_tools: true,
-            supports_vision: false,
+            supports_vision: true,
             supports_embeddings: true,
         }
     }
@@ -557,9 +560,9 @@ pub fn build_chat_request_json_with_tools(
                 )
             }
             _ => format!(
-                "{{\"role\":\"{}\",\"content\":\"{}\"}}",
+                "{{\"role\":\"{}\",\"content\":{}}}",
                 json_escape(message_role_to_str(&message.role)),
-                json_escape(&message.content)
+                message_content_json(message)
             ),
         })
         .collect::<Vec<_>>();
@@ -583,6 +586,62 @@ pub fn build_chat_request_json_with_tools(
         messages_json.join(","),
         tools_json
     ))
+}
+
+fn message_content_json(message: &Message) -> String {
+    let Some(paths) = message.metadata.get("image_paths") else {
+        return format!("\"{}\"", json_escape(&message.content));
+    };
+    let images = paths
+        .lines()
+        .filter_map(image_data_url)
+        .collect::<Vec<_>>();
+    if images.is_empty() {
+        return format!("\"{}\"", json_escape(&message.content));
+    }
+    let mut parts = vec![format!(
+        "{{\"type\":\"text\",\"text\":\"{}\"}}",
+        json_escape(&message.content)
+    )];
+    parts.extend(images.into_iter().map(|data_url| {
+        format!(
+            "{{\"type\":\"image_url\",\"image_url\":{{\"url\":\"{}\"}}}}",
+            json_escape(&data_url)
+        )
+    }));
+    format!("[{}]", parts.join(","))
+}
+
+fn image_data_url(value: &str) -> Option<String> {
+    let path = Path::new(value.trim());
+    if !path.is_absolute()
+        || !path
+            .components()
+            .any(|component| component.as_os_str() == ".cindx")
+    {
+        return None;
+    }
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > 24 * 1024 * 1024 {
+        return None;
+    }
+    let mime_type = match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "avif" => "image/avif",
+        "gif" => "image/gif",
+        "jpeg" | "jpg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        _ => return None,
+    };
+    let bytes = fs::read(path).ok()?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Some(format!("data:{mime_type};base64,{encoded}"))
 }
 
 pub fn parse_stream_line(line: &str) -> Result<Option<String>, ModelError> {
@@ -1166,6 +1225,36 @@ mod tests {
         assert!(body.contains("\"stream\":true"));
         assert!(body.contains("\"role\":\"user\""));
         assert!(body.contains("\"content\":\"hello\""));
+    }
+
+    #[test]
+    fn request_json_embeds_trusted_image_paths_as_vision_content() {
+        let root = std::env::temp_dir().join(format!(
+            "cindx-provider-vision-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let path = root.join(".cindx/vision.png");
+        fs::create_dir_all(path.parent().expect("fixture should have a parent"))
+            .expect("fixture directory should write");
+        fs::write(&path, [0x89, b'P', b'N', b'G']).expect("image fixture should write");
+        let body = build_chat_request_json(
+            "model-a",
+            &[Message {
+                role: MessageRole::User,
+                content: "Inspect this screenshot".to_string(),
+                metadata: [("image_paths".to_string(), path.display().to_string())]
+                    .into_iter()
+                    .collect(),
+            }],
+            false,
+        )
+        .expect("body should encode");
+        let _ = fs::remove_dir_all(root);
+
+        assert!(body.contains("\"type\":\"image_url\""));
+        assert!(body.contains("data:image/png;base64,"));
+        assert!(body.contains("Inspect this screenshot"));
     }
 
     #[test]

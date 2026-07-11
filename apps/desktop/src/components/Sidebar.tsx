@@ -36,6 +36,7 @@ type SidebarProps = {
   onProjectCreate: () => void;
   onSessionCreate: () => void;
   onProjectSelect: (projectId: string) => void;
+  onProjectRename: (projectId: string, name: string) => void;
   onSessionSelect: (sessionId: string) => void;
   onSessionRename: (sessionId: string, name: string) => void;
   onSessionFork: (sessionId: string) => void;
@@ -60,6 +61,7 @@ export function Sidebar({
   onProjectCreate,
   onSessionCreate,
   onProjectSelect,
+  onProjectRename,
   onSessionSelect,
   onSessionRename,
   onSessionFork,
@@ -70,12 +72,28 @@ export function Sidebar({
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(
     () => new Set()
   );
+  const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
+  const [projectRenameDraft, setProjectRenameDraft] = useState("");
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
 
   function cancelSessionRename() {
     setRenamingSessionId(null);
     setRenameDraft("");
+  }
+
+  function cancelProjectRename() {
+    setRenamingProjectId(null);
+    setProjectRenameDraft("");
+  }
+
+  function commitProjectRename(project: ProjectView) {
+    const name = projectRenameDraft.trim();
+    if (!name) return;
+    cancelProjectRename();
+    if (name !== project.name) {
+      onProjectRename(project.id, name);
+    }
   }
 
   function commitSessionRename(session: SessionView) {
@@ -127,6 +145,27 @@ export function Sidebar({
             if (window.confirm(`Delete “${session.name}”? This cannot be undone.`)) {
               onSessionDelete(session.id);
             }
+          }
+        }
+      ]
+    });
+    try {
+      await menu.popup(new LogicalPosition(x, y));
+    } finally {
+      await menu.close();
+    }
+  }
+
+  async function openProjectMenu(project: ProjectView, x: number, y: number) {
+    const menu = await Menu.new({
+      items: [
+        {
+          id: `rename-project-${project.id}`,
+          text: "Rename",
+          action: () => {
+            cancelSessionRename();
+            setProjectRenameDraft(project.name);
+            setRenamingProjectId(project.id);
           }
         }
       ]
@@ -245,6 +284,10 @@ export function Sidebar({
                     className={`project-row ${
                       project.active && activeView === "timeline" ? "active" : ""
                     }`}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      void openProjectMenu(project, event.clientX, event.clientY);
+                    }}
                   >
                     <button
                       className="project-disclosure"
@@ -257,17 +300,84 @@ export function Sidebar({
                     >
                       <DisclosureTriangle />
                     </button>
-                    <button
-                      className="nav-item project-item"
-                      onClick={() => onProjectSelect(project.id)}
-                      type="button"
-                      disabled={busy}
-                      title={project.root}
-                    >
-                      <span>
-                        <strong>{project.name}</strong>
-                      </span>
-                    </button>
+                    {renamingProjectId === project.id ? (
+                      <form
+                        className="project-rename-form"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          commitProjectRename(project);
+                        }}
+                        onBlur={(event) => {
+                          if (
+                            !event.relatedTarget ||
+                            !event.currentTarget.contains(event.relatedTarget as Node)
+                          ) {
+                            cancelProjectRename();
+                          }
+                        }}
+                      >
+                        <input
+                          autoFocus
+                          required
+                          value={projectRenameDraft}
+                          aria-label={`Rename ${project.name}`}
+                          onChange={(event) => setProjectRenameDraft(event.target.value)}
+                          onFocus={(event) => event.currentTarget.select()}
+                          onKeyDown={(event) => {
+                            if (event.key === "Escape") {
+                              event.preventDefault();
+                              cancelProjectRename();
+                            }
+                          }}
+                        />
+                        <button
+                          type="submit"
+                          aria-label="Save project name"
+                          title="Save"
+                          disabled={busy || !projectRenameDraft.trim()}
+                          onPointerDown={(event) => event.preventDefault()}
+                        >
+                          <Check aria-hidden="true" />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label="Cancel project rename"
+                          title="Cancel"
+                          onPointerDown={(event) => event.preventDefault()}
+                          onClick={cancelProjectRename}
+                        >
+                          <X aria-hidden="true" />
+                        </button>
+                      </form>
+                    ) : (
+                      <>
+                        <button
+                          className="nav-item project-item"
+                          onClick={() => onProjectSelect(project.id)}
+                          type="button"
+                          disabled={busy}
+                          title={project.root}
+                        >
+                          <span>
+                            <strong>{project.name}</strong>
+                          </span>
+                        </button>
+                        <button
+                          className="project-more"
+                          type="button"
+                          aria-label={`Project actions for ${project.name}`}
+                          title="Project actions"
+                          disabled={busy}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            const rect = event.currentTarget.getBoundingClientRect();
+                            void openProjectMenu(project, rect.right, rect.bottom);
+                          }}
+                        >
+                          <MoreHorizontal aria-hidden="true" />
+                        </button>
+                      </>
+                    )}
                   </div>
 
                   {expanded && (

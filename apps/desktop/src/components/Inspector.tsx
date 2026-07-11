@@ -10,17 +10,18 @@ import {
   ShieldCheck,
   TerminalSquare
 } from "lucide-react";
+import Markdown from "markdown-to-jsx";
 import {
   useEffect,
   useMemo,
-  useRef,
   useState,
   type PointerEvent as ReactPointerEvent
 } from "react";
-import { readArtifactImage } from "../tauri";
+import { readArtifactImage, readArtifactPreview } from "../tauri";
 import type {
   AgentState,
   AgentTraceStepView,
+  ArtifactPreview,
   BrowserObservationView,
   ContextCheckpointView,
   RagSourceView,
@@ -129,6 +130,50 @@ function ArtifactImage({ path }: { path: string }) {
   return <img src={source} alt={artifactName(path)} />;
 }
 
+function ArtifactPreviewPane({ path }: { path: string }) {
+  const [preview, setPreview] = useState<ArtifactPreview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setPreview(null);
+    setError(null);
+    void readArtifactPreview(path)
+      .then((next) => {
+        if (active) setPreview(next);
+      })
+      .catch((reason) => {
+        if (active) setError(reason instanceof Error ? reason.message : String(reason));
+      });
+    return () => {
+      active = false;
+    };
+  }, [path]);
+
+  if (error) return <div className="inspector-preview-message">{error}</div>;
+  if (!preview) return <div className="inspector-preview-message">Loading preview</div>;
+  if (preview.kind === "image" && preview.dataUrl) {
+    return <img className="inspector-preview-image" src={preview.dataUrl} alt={artifactName(path)} />;
+  }
+  if (preview.kind === "html" && preview.content != null) {
+    return (
+      <iframe
+        className="inspector-preview-frame"
+        title={`Preview ${artifactName(path)}`}
+        sandbox=""
+        srcDoc={preview.content}
+      />
+    );
+  }
+  if (preview.kind === "markdown" && preview.content != null) {
+    return <Markdown className="thread-markdown inspector-markdown-preview">{preview.content}</Markdown>;
+  }
+  if (preview.kind === "text" && preview.content != null) {
+    return <pre className="inspector-text-preview">{preview.content}</pre>;
+  }
+  return <div className="inspector-preview-message">Preview unavailable for this file type</div>;
+}
+
 export function Inspector({
   open,
   width,
@@ -152,7 +197,7 @@ export function Inspector({
   onReview
 }: InspectorProps) {
   const [debugOpen, setDebugOpen] = useState(false);
-  const previousTab = useRef(tab);
+  const [selectedOutputPath, setSelectedOutputPath] = useState<string | null>(null);
   const reviewTotal = reviewCounts.agent + reviewCounts.tool + reviewCounts.browser;
   const hasArtifacts = Boolean(ragAnswer || ragSources.length || browserObservations.length || toolResults.length);
   const hasContext = Boolean(
@@ -192,15 +237,15 @@ export function Inspector({
   }, [browserObservations, traceArtifacts, workspaceRoot]);
 
   useEffect(() => {
-    if (threadSelection || traceStep) setDebugOpen(true);
-  }, [threadSelection, traceStep]);
+    setSelectedOutputPath((current) =>
+      current && outputArtifacts.some((artifact) => artifact.path === current)
+        ? current
+        : outputArtifacts[0]?.path ?? null
+    );
+  }, [outputArtifacts]);
 
-  useEffect(() => {
-    if (previousTab.current !== tab) {
-      previousTab.current = tab;
-      setDebugOpen(true);
-    }
-  }, [tab]);
+  const selectedOutput =
+    outputArtifacts.find((artifact) => artifact.path === selectedOutputPath) ?? null;
 
   function beginResize(event: ReactPointerEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -256,47 +301,53 @@ export function Inspector({
               <span>Files and images created by the agent appear here.</span>
             </div>
           ) : (
-            <div className="inspector-output-list">
-              {outputArtifacts.map((artifact) => {
-                const imageArtifact = isImageArtifact(artifact.path);
-                return (
-                  <article
-                    className={`inspector-output ${imageArtifact ? "image" : "file"}`}
-                    key={`${artifact.id}-${artifact.path}`}
-                  >
-                    <div className={`inspector-output-preview ${imageArtifact ? "image" : "file"}`}>
-                      {imageArtifact ? (
-                        <ArtifactImage path={artifact.path} />
-                      ) : (
-                        <File aria-hidden="true" />
-                      )}
-                    </div>
-                    <div className="inspector-output-copy">
-                      <strong title={artifact.path}>{artifactName(artifact.path)}</strong>
-                      <span title={artifact.path}>{artifact.path}</span>
-                    </div>
-                    {imageArtifact && <Image className="inspector-output-kind" aria-label="Image" />}
-                  </article>
-                );
-              })}
-            </div>
+            <>
+              {selectedOutput && (
+                <section className="inspector-output-detail" aria-label="Output preview">
+                  <header title={selectedOutput.path}>
+                    <strong>{artifactName(selectedOutput.path)}</strong>
+                    <span>{selectedOutput.toolName}</span>
+                  </header>
+                  <div className="inspector-output-detail-body">
+                    <ArtifactPreviewPane path={selectedOutput.path} />
+                  </div>
+                </section>
+              )}
+              <div className="inspector-output-list">
+                {outputArtifacts.map((artifact) => {
+                  const imageArtifact = isImageArtifact(artifact.path);
+                  return (
+                    <button
+                      className={`inspector-output ${imageArtifact ? "image" : "file"}`}
+                      type="button"
+                      aria-pressed={selectedOutputPath === artifact.path}
+                      key={`${artifact.id}-${artifact.path}`}
+                      onClick={() => setSelectedOutputPath(artifact.path)}
+                    >
+                      <div className={`inspector-output-preview ${imageArtifact ? "image" : "file"}`}>
+                        {imageArtifact ? (
+                          <ArtifactImage path={artifact.path} />
+                        ) : (
+                          <File aria-hidden="true" />
+                        )}
+                      </div>
+                      <div className="inspector-output-copy">
+                        <strong title={artifact.path}>{artifactName(artifact.path)}</strong>
+                        <span title={artifact.path}>{artifact.path}</span>
+                      </div>
+                      {imageArtifact && <Image className="inspector-output-kind" aria-label="Image" />}
+                    </button>
+                  );
+                })}
+              </div>
+            </>
           )}
         </section>
+      </div>
 
-        <details
-          className="inspector-debug"
-          open={debugOpen}
-          onToggle={(event) => setDebugOpen(event.currentTarget.open)}
-        >
-          <summary>
-            <Bug aria-hidden="true" />
-            <span>
-              <strong>Debug</strong>
-              <small>Details, artifacts, and context</small>
-            </span>
-            <DisclosureTriangle />
-          </summary>
-          <div className="inspector-debug-body">
+      <section className="inspector-debug" data-open={debugOpen}>
+        {debugOpen && (
+          <div className="inspector-debug-body" id="inspector-debug-panel">
             <nav className="inspector-tabs" aria-label="Debug views" role="tablist">
               {(["details", "artifacts", "context"] as InspectorTab[]).map((item, index, tabs) => (
                 <button
@@ -563,8 +614,19 @@ export function Inspector({
           </div>
         )}
           </div>
-        </details>
-      </div>
+        )}
+        <button
+          className="inspector-debug-toggle"
+          type="button"
+          aria-expanded={debugOpen}
+          aria-controls="inspector-debug-panel"
+          onClick={() => setDebugOpen((current) => !current)}
+        >
+          <Bug aria-hidden="true" />
+          <strong>Debug</strong>
+          <DisclosureTriangle />
+        </button>
+      </section>
     </aside>
   );
 }

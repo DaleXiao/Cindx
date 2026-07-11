@@ -42,6 +42,7 @@ const unsignedReleaseBlock =
 const ciWorkflow = read(".github/workflows/ci.yml");
 const releaseVersionCheck = read("scripts/check-release-version.mjs");
 const toolsSource = read("crates/tools/src/lib.rs");
+const modelProviderSource = read("crates/model-provider/src/lib.rs");
 const ragSource = read("crates/agent-rag/src/lib.rs");
 const orchestratorSource = read("crates/orchestrator/src/lib.rs");
 const mainSource = read("apps/desktop/src/main.tsx");
@@ -402,6 +403,14 @@ assert(
     tauriBridge.includes('invoke<ProjectSessionState>("rename_session"'),
   "Session menu must provide inline editing through the persisted Tauri command"
 );
+assert(
+  sidebarSource.includes("onProjectRename") &&
+    sidebarSource.includes('className="project-rename-form"') &&
+    appSource.includes("handleRenameProject") &&
+    tauriBridge.includes('invoke<ProjectSessionState>("rename_project"') &&
+    rustLib.includes("fn rename_project("),
+  "Project menu must provide inline editing through the persisted Tauri command"
+);
 assert(sidebarSource.includes("onSessionFork"), "Session menu must expose fork");
 assert(sidebarSource.includes("onSessionArchive"), "Session menu must expose archive");
 assert(sidebarSource.includes("onSessionDelete"), "Session menu must expose delete");
@@ -458,9 +467,10 @@ assert(!styles.includes("artifact-sidebar"), "Legacy artifact sidebar styles mus
 assert(
   inspectorSource.includes("inspector-outputs") &&
     inspectorSource.includes("inspector-debug") &&
-    inspectorSource.includes("readArtifactImage") &&
+    inspectorSource.includes("readArtifactPreview") &&
+    inspectorSource.includes('sandbox=""') &&
     inspectorSource.includes("useState(false)"),
-  "Inspector must lead with output previews and keep debug reference views collapsed"
+  "Inspector must preview outputs and keep the bottom debug drawer collapsed"
 );
 assert(
   tauriBridge.includes('invoke<string>("read_artifact_image"') &&
@@ -522,7 +532,8 @@ assert(
   "Running one session must not disable navigation to other sessions"
 );
 assert(
-  tauriBridge.includes("runAgentTask(prompt: string, sessionId: string)") &&
+  tauriBridge.includes("export async function runAgentTask(") &&
+    tauriBridge.includes("sessionId: string") &&
     tauriBridge.includes("currentTime: currentAgentTimeContext()") &&
     rustLib.includes("project_session_metadata_for_session") &&
     rustLib.includes("event.metadata.get(\"session_id\")"),
@@ -686,7 +697,22 @@ assert(rustLib.includes("fn get_phase4_state("), "Phase 4 state command is missi
 assert(rustLib.includes("fn save_provider_config("), "Phase 4 provider config command is missing");
 assert(rustLib.includes("async fn list_provider_models("), "Provider model catalog command is missing");
 assert(rustLib.includes("async fn run_agent_task("), "Agent task must not block the IPC thread");
+assert(rustLib.includes("fn rename_project("), "Project rename command is missing");
 assert(rustLib.includes("fn rename_session("), "Session rename command is missing");
+assert(
+  composerSource.includes('aria-label="Attach files"') &&
+    tauriBridge.includes('invoke<AgentAttachment[]>("stage_agent_attachments"') &&
+    rustLib.includes("fn stage_agent_attachments(") &&
+    rustLib.includes("validated_attachment_path"),
+  "Composer attachments must be staged and validated inside the active project"
+);
+assert(
+    rustLib.includes("append_visual_reference_message") &&
+    rustLib.includes('"image_paths"') &&
+    modelProviderSource.includes("image_url") &&
+    modelProviderSource.includes("image_data_url"),
+  "Browser and computer screenshots must return to the model as visual references"
+);
 assert(rustLib.includes("fn fork_session("), "Session fork command is missing");
 assert(rustLib.includes("fn archive_session("), "Session archive command is missing");
 assert(rustLib.includes("fn restore_session("), "Session restore command is missing");
@@ -722,7 +748,8 @@ assert(
     rustLib.includes('"planner"') &&
     rustLib.includes('"reviewer"') &&
     rustLib.includes('"synthesizer"') &&
-    orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 5") &&
+    orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 7") &&
+    orchestratorSource.includes('"thinker" | "worker" | "verifier" | "synthesizer"') &&
     orchestratorSource.includes("adaptive_workflow_layers") &&
     orchestratorSource.includes("adaptive_worker_prompt") &&
     orchestratorSource.includes("must only access earlier steps"),
