@@ -109,6 +109,18 @@ assert(
   "Tauri frontendDist should point to Vite dist"
 );
 assert(
+  tauriConfig.app.security.csp?.["default-src"] === "'self'" &&
+    tauriConfig.app.security.csp?.["connect-src"] === "ipc: http://ipc.localhost" &&
+    tauriConfig.app.security.csp?.["img-src"]?.includes("data:") &&
+    tauriConfig.app.security.csp?.["object-src"] === "'none'",
+  "Production builds must enforce a restrictive Tauri CSP"
+);
+assert(
+  tauriConfig.app.security.devCsp?.["connect-src"]?.includes("ws://127.0.0.1:5173") &&
+    tauriConfig.app.security.devCsp?.["object-src"] === "'none'",
+  "Development CSP must keep Tauri IPC and Vite HMR available"
+);
+assert(
   tauriConfig.app.windows.some((window) => window.title === "Cindx"),
   "Tauri window title is missing"
 );

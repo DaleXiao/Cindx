@@ -672,6 +672,7 @@ impl Tool for ShellRunTool {
         let command = required_input(&input, "command")?;
         let cwd = input.get("cwd").cloned().unwrap_or_else(|| ".".to_string());
         let resolved_cwd = resolve_workspace_path(&self.workspace_root, &cwd)?;
+        let resolved_cwd = resolve_workspace_read_path(&self.workspace_root, &resolved_cwd)?;
         let output = Command::new("/bin/zsh")
             .arg("-lc")
             .arg(&command)
@@ -1492,7 +1493,36 @@ fn resolve_workspace_path(workspace_root: &Path, path: &str) -> Result<PathBuf, 
         }
     }
 
-    Ok(workspace_root.join(candidate))
+    let canonical_root = fs::canonicalize(workspace_root)
+        .map_err(|error| ToolError::new(format!("failed to resolve workspace: {error}")))?;
+    let resolved = workspace_root.join(candidate);
+    let mut existing_ancestor = resolved.as_path();
+    let canonical_ancestor = loop {
+        match fs::symlink_metadata(existing_ancestor) {
+            Ok(_) => {
+                break fs::canonicalize(existing_ancestor).map_err(|error| {
+                    ToolError::new(format!("failed to resolve workspace path: {error}"))
+                })?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                existing_ancestor = existing_ancestor
+                    .parent()
+                    .ok_or_else(|| ToolError::new("path escapes the workspace"))?;
+            }
+            Err(error) => {
+                return Err(ToolError::new(format!(
+                    "failed to inspect workspace path: {error}"
+                )));
+            }
+        }
+    };
+    if !canonical_ancestor.starts_with(&canonical_root) {
+        return Err(ToolError::new(
+            "path escapes the workspace through a symbolic link",
+        ));
+    }
+
+    Ok(resolved)
 }
 
 fn resolve_workspace_read_path(workspace_root: &Path, path: &Path) -> Result<PathBuf, ToolError> {
@@ -2661,5 +2691,39 @@ mod tests {
 
         assert!(error.message.contains("symbolic link"));
         let _ = fs::remove_file(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_writes_and_shell_cwds_through_symlinks_that_leave_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_workspace();
+        let outside = std::env::temp_dir().join(format!(
+            "cindx-tools-outside-dir-{}",
+            stable_hash(&format!("{:?}", std::time::SystemTime::now()))
+        ));
+        fs::create_dir_all(&outside).expect("outside directory should be created");
+        symlink(&outside, root.join("linked-dir")).expect("symlink should be created");
+
+        let writer = WriteFileTool::new(root.clone());
+        let write_error = writer
+            .execute(invocation(
+                "file.write",
+                encode_input(&[("path", "linked-dir/escaped.txt"), ("content", "outside")]),
+            ))
+            .expect_err("symlink write escape should fail");
+        let shell = ShellRunTool::new(root);
+        let shell_error = shell
+            .execute(invocation(
+                "shell.run",
+                encode_input(&[("command", "pwd"), ("cwd", "linked-dir")]),
+            ))
+            .expect_err("symlink cwd escape should fail");
+
+        assert!(write_error.message.contains("symbolic link"));
+        assert!(shell_error.message.contains("symbolic link"));
+        assert!(!outside.join("escaped.txt").exists());
+        let _ = fs::remove_dir_all(outside);
     }
 }
