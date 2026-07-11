@@ -459,6 +459,44 @@ pre {
   min-width: 0;
 }
 
+.project-row {
+  display: grid;
+  min-height: 38px;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+}
+
+.project-row:hover {
+  background: var(--surface-hover);
+}
+
+.project-row.active {
+  background: var(--surface-active);
+  border-color: #d8d8d8;
+}
+
+.project-disclosure {
+  display: grid;
+  width: 24px;
+  height: 36px;
+  padding: 0;
+  place-items: center;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+}
+
+.project-disclosure:hover {
+  color: var(--text);
+}
+
+.project-disclosure[aria-expanded="true"] .disclosure-triangle {
+  transform: rotate(180deg);
+}
+
 .nav-item {
   display: flex;
   width: 100%;
@@ -500,8 +538,15 @@ pre {
 }
 
 .project-item {
-  min-height: 38px;
-  border-radius: 8px;
+  min-height: 36px;
+  padding-left: 2px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.project-row .project-item:hover {
+  background: transparent;
 }
 
 .session-branch {

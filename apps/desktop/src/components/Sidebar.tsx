@@ -13,6 +13,7 @@ import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { Menu } from "@tauri-apps/api/menu";
 import { useState } from "react";
 import type { ProjectView, SessionView } from "../tauri";
+import { DisclosureTriangle } from "./DisclosureTriangle";
 
 const appIconUrl = new URL("../../src-tauri/icons/icon.png", import.meta.url).href;
 
@@ -66,6 +67,9 @@ export function Sidebar({
   onSessionDelete
 }: SidebarProps) {
   const activeProject = projects.find((project) => project.active) ?? null;
+  const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(
+    () => new Set()
+  );
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
 
@@ -81,6 +85,18 @@ export function Sidebar({
     if (name !== session.name) {
       onSessionRename(session.id, name);
     }
+  }
+
+  function handleProjectDisclosure(project: ProjectView, expanded: boolean) {
+    setCollapsedProjectIds((current) => {
+      const next = new Set(current);
+      if (expanded) next.add(project.id);
+      else next.delete(project.id);
+      return next;
+    });
+
+    if (expanded || !project.active) cancelSessionRename();
+    if (!project.active) onProjectSelect(project.id);
   }
 
   async function openSessionMenu(session: SessionView, x: number, y: number) {
@@ -220,24 +236,41 @@ export function Sidebar({
           {projects.length === 0 ? (
             <div className="nav-empty">No projects</div>
           ) : (
-            projects.map((project) => (
-              <div className="project-node" key={project.id}>
-                <button
-                  className={`nav-item project-item ${
-                    project.active && activeView === "timeline" ? "active" : ""
-                  }`}
-                  onClick={() => onProjectSelect(project.id)}
-                  type="button"
-                  disabled={busy}
-                  aria-expanded={project.active}
-                  title={project.root}
-                >
-                  <span>
-                    <strong>{project.name}</strong>
-                  </span>
-                </button>
+            projects.map((project) => {
+              const expanded = project.active && !collapsedProjectIds.has(project.id);
 
-                {project.active && (
+              return (
+                <div className="project-node" key={project.id}>
+                  <div
+                    className={`project-row ${
+                      project.active && activeView === "timeline" ? "active" : ""
+                    }`}
+                  >
+                    <button
+                      className="project-disclosure"
+                      type="button"
+                      disabled={busy}
+                      aria-label={`${expanded ? "Collapse" : "Expand"} sessions for ${project.name}`}
+                      aria-expanded={expanded}
+                      title={expanded ? "Collapse sessions" : "Expand sessions"}
+                      onClick={() => handleProjectDisclosure(project, expanded)}
+                    >
+                      <DisclosureTriangle />
+                    </button>
+                    <button
+                      className="nav-item project-item"
+                      onClick={() => onProjectSelect(project.id)}
+                      type="button"
+                      disabled={busy}
+                      title={project.root}
+                    >
+                      <span>
+                        <strong>{project.name}</strong>
+                      </span>
+                    </button>
+                  </div>
+
+                  {expanded && (
                   <div className="session-branch">
                     <div className="nav-heading-row session-heading">
                       <div className="nav-heading">Sessions</div>
@@ -353,9 +386,10 @@ export function Sidebar({
                       )}
                     </div>
                   </div>
-                )}
-              </div>
-            ))
+                  )}
+                </div>
+              );
+            })
           )}
         </div>
       </section>
