@@ -48,6 +48,7 @@ type InspectorProps = {
   open: boolean;
   width: number;
   tab: InspectorTab;
+  sessionId: string | null;
   threadSelection: SessionThreadSelection | null;
   traceStep: AgentTraceStepView | null;
   traceExportPath: string | null;
@@ -56,7 +57,7 @@ type InspectorProps = {
   ragSources: RagSourceView[];
   browserObservations: BrowserObservationView[];
   toolResults: ToolRunView[];
-  traceArtifacts: AgentTraceStepView[];
+  sessionTraceSteps: AgentTraceStepView[];
   workspaceRoot: string;
   agentStatus: AgentState["status"] | "idle";
   agentTurnCount: number;
@@ -111,6 +112,23 @@ function absoluteArtifactPath(workspaceRoot: string, path: string) {
   if (path.startsWith("/")) return path;
   if (!workspaceRoot) return path;
   return `${workspaceRoot.replace(/\/$/, "")}/${path.replace(/^\.\//, "")}`;
+}
+
+function sessionArtifactPaths(step: AgentTraceStepView) {
+  const paths = new Set<string>();
+  if (step.artifactPath) paths.add(step.artifactPath);
+
+  Object.entries(step.metadata).forEach(([key, path]) => {
+    const resultPath = key.startsWith("result_") && key.endsWith("_path");
+    const fileReference =
+      key === "result_path" && (step.toolName === "file.read" || step.toolName === "file.write");
+    const contextPath = key === "context_checkpoint_path" || key === "lancedb_export_path";
+    if ((resultPath && (key !== "result_path" || fileReference)) || contextPath) {
+      if (path.trim()) paths.add(path);
+    }
+  });
+
+  return [...paths];
 }
 
 function ArtifactImage({ path }: { path: string }) {
@@ -183,6 +201,7 @@ export function Inspector({
   open,
   width,
   tab,
+  sessionId,
   threadSelection,
   traceStep,
   traceExportPath,
@@ -191,7 +210,7 @@ export function Inspector({
   ragSources,
   browserObservations,
   toolResults,
-  traceArtifacts,
+  sessionTraceSteps,
   workspaceRoot,
   agentStatus,
   agentTurnCount,
@@ -221,49 +240,27 @@ export function Inspector({
       }
     };
 
-    ragSources.forEach((source) => {
-      addOutput({
-        id: `knowledge-${source.fileHash}`,
-        path: source.path,
-        toolName: "Knowledge reference",
-        status: "reference",
-        timestampMs: 0
-      });
-    });
-    contextCheckpoint?.artifacts.forEach((path, index) => {
-      addOutput({
-        id: `context-${index}-${path}`,
-        path,
-        toolName: "Context artifact",
-        status: "reference",
-        timestampMs: contextCheckpoint.latestEventMs
-      });
-    });
-    traceArtifacts.forEach((step) => {
-      if (!step.artifactPath || step.status === "failed") return;
-      addOutput({
-        id: step.id,
-        path: step.artifactPath,
-        toolName: step.toolName ?? step.label,
-        status: step.status,
-        timestampMs: step.finishedAtMs ?? step.startedAtMs
-      });
-    });
-    browserObservations.forEach((observation) => {
-      [observation.artifactPath, observation.textPath].forEach((path, index) => {
-        if (!path || observation.status === "failed") return;
+    sessionTraceSteps.forEach((step) => {
+      if (step.status === "failed") return;
+      sessionArtifactPaths(step).forEach((path, index) => {
         addOutput({
-          id: `${observation.invocationId}-${index}`,
+          id: `${step.id}-${index}`,
           path,
-          toolName: observation.toolName,
-          status: observation.status,
-          timestampMs: observation.timestampMs
+          toolName: step.toolName ?? step.label,
+          status: step.toolName === "file.read" ? "reference" : step.status,
+          timestampMs: step.finishedAtMs ?? step.startedAtMs
         });
       });
     });
 
     return [...outputs.values()].sort((left, right) => right.timestampMs - left.timestampMs);
-  }, [browserObservations, contextCheckpoint, ragSources, traceArtifacts, workspaceRoot]);
+  }, [sessionTraceSteps, workspaceRoot]);
+
+  useEffect(() => {
+    setSelectedOutputPath(null);
+    setOutputPreviewFullscreen(false);
+    setOutputActionError(null);
+  }, [sessionId]);
 
   useEffect(() => {
     if (

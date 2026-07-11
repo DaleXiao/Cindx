@@ -558,15 +558,23 @@ assert(
   inspectorSource.includes('aria-label={outputPreviewFullscreen ? "Exit full screen" : "Show full screen"}') &&
     inspectorSource.includes('aria-label="Open with default app"') &&
     inspectorSource.includes("createPortal(outputPreview, document.body)") &&
-    inspectorSource.includes("contextCheckpoint?.artifacts") &&
-    inspectorSource.includes("Knowledge reference") &&
+    inspectorSource.includes("sessionArtifactPaths") &&
+    inspectorSource.includes('key.startsWith("result_")') &&
+    inspectorSource.includes('step.toolName === "file.read"') &&
+    inspectorSource.includes("sessionTraceSteps.forEach") &&
+    inspectorSource.includes("}, [sessionId]);") &&
+    !inspectorSource.includes("contextCheckpoint?.artifacts.forEach") &&
+    !inspectorSource.includes("ragSources.forEach") &&
+    !inspectorSource.includes("browserObservations.forEach") &&
+    appSource.includes("agentTraceState?.sessionId === activeSession.id") &&
+    appSource.includes("sessionTraceSteps={activeSessionTraceSteps}") &&
     styles.includes('.inspector-output-detail[data-fullscreen="true"]') &&
     styles.includes("position: fixed;") &&
     styles.includes("z-index: 100;"),
-  "Output previews must support full screen, close, default-app open, and file references"
+  "Output previews must stay scoped to the active session and support file references"
 );
 assert(
-  /\.inspector-debug-body \{[\s\S]*?right: 2px;[\s\S]*?bottom: 44px;[\s\S]*?left: 2px;[\s\S]*?border-radius: 0;/.test(
+  /\.inspector-debug-body \{[\s\S]*?right: 2px;[\s\S]*?bottom: 44px;[\s\S]*?left: 2px;[\s\S]*?border-radius: 8px 8px 0 0;/.test(
     styles
   ) &&
     /\.inspector-debug \.disclosure-triangle \{[\s\S]*?transform: rotate\(0deg\);/.test(
@@ -575,7 +583,7 @@ assert(
     /\.inspector-debug\[data-open="true"\] \.disclosure-triangle \{[\s\S]*?transform: rotate\(180deg\);/.test(
       styles
     ),
-  "The debug drawer must attach to its bar with narrow insets and use up/down triangles"
+  "The debug drawer must attach to its bar with rounded top corners and use up/down triangles"
 );
 assert(
   tauriBridge.includes('invoke<string>("read_artifact_image"') &&
@@ -682,7 +690,8 @@ assert(
   appSource.includes('className="settings-sidebar"') &&
     appSource.includes('className="settings-detail"') &&
     !appSource.includes("settings-index") &&
-    styles.includes("grid-template-columns: 168px minmax(0, 760px)"),
+    styles.includes("grid-template-columns: 168px minmax(0, 760px)") &&
+    /\.settings-app-return \{[\s\S]*?top: -8px;/.test(styles),
   "Settings must use persistent left tabs and right-side details"
 );
 assert(
