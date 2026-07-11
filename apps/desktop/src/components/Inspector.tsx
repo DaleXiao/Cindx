@@ -3,21 +3,26 @@ import {
   Bug,
   Clock3,
   Database,
+  ExternalLink,
   File,
   FileText,
   Globe2,
   Image,
+  Maximize2,
+  Minimize2,
   ShieldCheck,
-  TerminalSquare
+  TerminalSquare,
+  X
 } from "lucide-react";
 import Markdown from "markdown-to-jsx";
+import { createPortal } from "react-dom";
 import {
   useEffect,
   useMemo,
   useState,
   type PointerEvent as ReactPointerEvent
 } from "react";
-import { readArtifactImage, readArtifactPreview } from "../tauri";
+import { openArtifact, readArtifactImage, readArtifactPreview } from "../tauri";
 import type {
   AgentState,
   AgentTraceStepView,
@@ -198,6 +203,9 @@ export function Inspector({
 }: InspectorProps) {
   const [debugOpen, setDebugOpen] = useState(false);
   const [selectedOutputPath, setSelectedOutputPath] = useState<string | null>(null);
+  const [outputPreviewFullscreen, setOutputPreviewFullscreen] = useState(false);
+  const [openingOutputPath, setOpeningOutputPath] = useState<string | null>(null);
+  const [outputActionError, setOutputActionError] = useState<string | null>(null);
   const reviewTotal = reviewCounts.agent + reviewCounts.tool + reviewCounts.browser;
   const hasArtifacts = Boolean(ragAnswer || ragSources.length || browserObservations.length || toolResults.length);
   const hasContext = Boolean(
@@ -207,9 +215,30 @@ export function Inspector({
     const outputs = new Map<string, OutputArtifact>();
     const addOutput = (artifact: OutputArtifact) => {
       const absolutePath = absoluteArtifactPath(workspaceRoot, artifact.path);
-      outputs.set(absolutePath, { ...artifact, path: absolutePath });
+      const current = outputs.get(absolutePath);
+      if (!current || artifact.timestampMs >= current.timestampMs) {
+        outputs.set(absolutePath, { ...artifact, path: absolutePath });
+      }
     };
 
+    ragSources.forEach((source) => {
+      addOutput({
+        id: `knowledge-${source.fileHash}`,
+        path: source.path,
+        toolName: "Knowledge reference",
+        status: "reference",
+        timestampMs: 0
+      });
+    });
+    contextCheckpoint?.artifacts.forEach((path, index) => {
+      addOutput({
+        id: `context-${index}-${path}`,
+        path,
+        toolName: "Context artifact",
+        status: "reference",
+        timestampMs: contextCheckpoint.latestEventMs
+      });
+    });
     traceArtifacts.forEach((step) => {
       if (!step.artifactPath || step.status === "failed") return;
       addOutput({
@@ -234,18 +263,66 @@ export function Inspector({
     });
 
     return [...outputs.values()].sort((left, right) => right.timestampMs - left.timestampMs);
-  }, [browserObservations, traceArtifacts, workspaceRoot]);
+  }, [browserObservations, contextCheckpoint, ragSources, traceArtifacts, workspaceRoot]);
 
   useEffect(() => {
-    setSelectedOutputPath((current) =>
-      current && outputArtifacts.some((artifact) => artifact.path === current)
-        ? current
-        : outputArtifacts[0]?.path ?? null
-    );
-  }, [outputArtifacts]);
+    if (
+      selectedOutputPath &&
+      !outputArtifacts.some((artifact) => artifact.path === selectedOutputPath)
+    ) {
+      setSelectedOutputPath(null);
+      setOutputPreviewFullscreen(false);
+      setOutputActionError(null);
+    }
+  }, [outputArtifacts, selectedOutputPath]);
+
+  useEffect(() => {
+    if (open) return;
+    setSelectedOutputPath(null);
+    setOutputPreviewFullscreen(false);
+    setOutputActionError(null);
+  }, [open]);
+
+  useEffect(() => {
+    if (!selectedOutputPath) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      if (outputPreviewFullscreen) setOutputPreviewFullscreen(false);
+      else setSelectedOutputPath(null);
+      setOutputActionError(null);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [outputPreviewFullscreen, selectedOutputPath]);
 
   const selectedOutput =
     outputArtifacts.find((artifact) => artifact.path === selectedOutputPath) ?? null;
+
+  function selectOutput(path: string) {
+    setSelectedOutputPath(path);
+    setOutputPreviewFullscreen(false);
+    setOutputActionError(null);
+  }
+
+  function closeOutputPreview() {
+    setSelectedOutputPath(null);
+    setOutputPreviewFullscreen(false);
+    setOutputActionError(null);
+  }
+
+  async function handleOpenOutput() {
+    if (!selectedOutput || openingOutputPath) return;
+    setOpeningOutputPath(selectedOutput.path);
+    setOutputActionError(null);
+    try {
+      await openArtifact(selectedOutput.path);
+    } catch (error) {
+      setOutputActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setOpeningOutputPath(null);
+    }
+  }
 
   function beginResize(event: ReactPointerEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -263,6 +340,63 @@ export function Inspector({
     window.addEventListener("pointermove", handleMove);
     window.addEventListener("pointerup", handleUp);
   }
+
+  const outputPreview = selectedOutput ? (
+    <section
+      className="inspector-output-detail"
+      aria-label="Output preview"
+      aria-modal={outputPreviewFullscreen || undefined}
+      data-fullscreen={outputPreviewFullscreen}
+      role={outputPreviewFullscreen ? "dialog" : undefined}
+    >
+      <header title={selectedOutput.path}>
+        <div className="inspector-output-detail-copy">
+          <strong>{artifactName(selectedOutput.path)}</strong>
+          <span>{selectedOutput.toolName}</span>
+        </div>
+        <div className="inspector-output-actions">
+          <button
+            className="icon-button quiet"
+            type="button"
+            aria-label={outputPreviewFullscreen ? "Exit full screen" : "Show full screen"}
+            title={outputPreviewFullscreen ? "Exit full screen" : "Show full screen"}
+            onClick={() => setOutputPreviewFullscreen((current) => !current)}
+          >
+            {outputPreviewFullscreen ? (
+              <Minimize2 aria-hidden="true" />
+            ) : (
+              <Maximize2 aria-hidden="true" />
+            )}
+          </button>
+          <button
+            className="icon-button quiet"
+            type="button"
+            aria-label="Open with default app"
+            title="Open with default app"
+            disabled={openingOutputPath === selectedOutput.path}
+            onClick={() => void handleOpenOutput()}
+          >
+            <ExternalLink aria-hidden="true" />
+          </button>
+          <button
+            className="icon-button quiet"
+            type="button"
+            aria-label="Close preview"
+            title="Close preview"
+            onClick={closeOutputPreview}
+          >
+            <X aria-hidden="true" />
+          </button>
+        </div>
+      </header>
+      <div className="inspector-output-action-error" role="alert">
+        {outputActionError}
+      </div>
+      <div className="inspector-output-detail-body">
+        <ArtifactPreviewPane path={selectedOutput.path} />
+      </div>
+    </section>
+  ) : null;
 
   return (
     <aside
@@ -288,7 +422,11 @@ export function Inspector({
       />
 
       <div className="inspector-scroll">
-        <section className="inspector-outputs" aria-label="Agent outputs">
+        <section
+          className="inspector-outputs"
+          aria-label="Agent outputs"
+          data-preview-open={Boolean(selectedOutput)}
+        >
           <header>
             <div>
               <File aria-hidden="true" />
@@ -300,19 +438,9 @@ export function Inspector({
             <div className="inspector-output-empty">
               <span>Files and images created by the agent appear here.</span>
             </div>
+          ) : selectedOutput ? (
+            outputPreviewFullscreen ? null : outputPreview
           ) : (
-            <>
-              {selectedOutput && (
-                <section className="inspector-output-detail" aria-label="Output preview">
-                  <header title={selectedOutput.path}>
-                    <strong>{artifactName(selectedOutput.path)}</strong>
-                    <span>{selectedOutput.toolName}</span>
-                  </header>
-                  <div className="inspector-output-detail-body">
-                    <ArtifactPreviewPane path={selectedOutput.path} />
-                  </div>
-                </section>
-              )}
               <div className="inspector-output-list">
                 {outputArtifacts.map((artifact) => {
                   const imageArtifact = isImageArtifact(artifact.path);
@@ -320,9 +448,9 @@ export function Inspector({
                     <button
                       className={`inspector-output ${imageArtifact ? "image" : "file"}`}
                       type="button"
-                      aria-pressed={selectedOutputPath === artifact.path}
+                      aria-label={`Preview ${artifactName(artifact.path)}`}
                       key={`${artifact.id}-${artifact.path}`}
-                      onClick={() => setSelectedOutputPath(artifact.path)}
+                      onClick={() => selectOutput(artifact.path)}
                     >
                       <div className={`inspector-output-preview ${imageArtifact ? "image" : "file"}`}>
                         {imageArtifact ? (
@@ -340,7 +468,6 @@ export function Inspector({
                   );
                 })}
               </div>
-            </>
           )}
         </section>
       </div>
@@ -627,6 +754,9 @@ export function Inspector({
           <DisclosureTriangle />
         </button>
       </section>
+      {outputPreviewFullscreen && outputPreview
+        ? createPortal(outputPreview, document.body)
+        : null}
     </aside>
   );
 }

@@ -198,10 +198,22 @@ assert(
     sessionThreadSource.includes('from "markdown-to-jsx"') &&
     sessionThreadSource.includes("disableParsingRawHTML: true") &&
     sessionThreadSource.includes("<AgentMarkdown content={item.message.content}") &&
-    sessionThreadSource.includes("<AgentMarkdown content={streamAnswer} streaming") &&
+    sessionThreadSource.includes("content={streamAnswer}") &&
+    sessionThreadSource.includes("streaming") &&
     styles.includes(".thread-markdown pre code") &&
     styles.includes(".thread-markdown table"),
   "Assistant messages must render safe Markdown in completed and streaming states"
+);
+assert(
+  sessionThreadSource.includes("openExternalUrl") &&
+    sessionThreadSource.includes("openArtifact") &&
+    sessionThreadSource.includes("artifactLinkTarget") &&
+    sessionThreadSource.includes("event.preventDefault()") &&
+    appSource.includes("onLinkOpenError={setComposerError}") &&
+    tauriBridge.includes('invoke<void>("open_external_url"') &&
+    rustLib.includes("fn open_external_url") &&
+    rustLib.includes('normalized.starts_with("https://")'),
+  "Chat file and web links must open through validated native default-app commands"
 );
 assert(!appSource.includes("Agent Output"), "Primary model output must not be duplicated in the inspector");
 assert(
@@ -538,8 +550,22 @@ assert(
     inspectorSource.includes("inspector-debug") &&
     inspectorSource.includes("readArtifactPreview") &&
     inspectorSource.includes('sandbox=""') &&
-    inspectorSource.includes("useState(false)"),
-  "Inspector must preview outputs and keep the bottom debug drawer collapsed"
+    inspectorSource.includes("useState(false)") &&
+    !inspectorSource.includes("outputArtifacts[0]?.path") &&
+    inspectorSource.includes("selectOutput(artifact.path)") &&
+    inspectorSource.includes('aria-label="Close preview"'),
+  "Inspector must default to an output file list, open previews on demand, and keep Debug collapsed"
+);
+assert(
+  inspectorSource.includes('aria-label={outputPreviewFullscreen ? "Exit full screen" : "Show full screen"}') &&
+    inspectorSource.includes('aria-label="Open with default app"') &&
+    inspectorSource.includes("createPortal(outputPreview, document.body)") &&
+    inspectorSource.includes("contextCheckpoint?.artifacts") &&
+    inspectorSource.includes("Knowledge reference") &&
+    styles.includes('.inspector-output-detail[data-fullscreen="true"]') &&
+    styles.includes("position: fixed;") &&
+    styles.includes("z-index: 100;"),
+  "Output previews must support full screen, close, default-app open, and file references"
 );
 assert(
   /\.inspector-debug-body \{[\s\S]*?right: 8px;[\s\S]*?left: 8px;[\s\S]*?border-radius: 8px;/.test(
@@ -553,6 +579,13 @@ assert(
     rustLib.includes("canonical_path.starts_with(&canonical_root)") &&
     rustLib.includes("24 * 1024 * 1024"),
   "Artifact image previews must stay inside the workspace and enforce a size limit"
+);
+assert(
+  tauriBridge.includes('invoke<void>("open_artifact"') &&
+    rustLib.includes("fn open_artifact") &&
+    rustLib.includes('std::process::Command::new("open")') &&
+    rustLib.includes("validated_workspace_artifact_path(&state, &path)"),
+  "Default-app artifact opening must reuse workspace path validation"
 );
 assert(!tauriBridge.includes("apiKeyPreview"), "Provider state must not expose API key suffixes");
 assert(appSource.includes("<ModelSelect"), "Provider models must use select controls");

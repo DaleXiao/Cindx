@@ -37,6 +37,7 @@ use orchestrator::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
 #[cfg(unix)]
@@ -4092,6 +4093,8 @@ pub fn run() {
             compact_context,
             read_artifact_image,
             read_artifact_preview,
+            open_artifact,
+            open_external_url,
             run_browser_tool,
             resolve_browser_permission
         ])
@@ -4331,6 +4334,59 @@ fn read_artifact_preview(
         data_url: None,
         size_bytes: metadata.len(),
     })
+}
+
+#[tauri::command]
+fn open_artifact(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
+    let canonical_path = validated_workspace_artifact_path(&state, &path)?;
+    open_with_default_app(canonical_path.as_os_str())
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let url = url.trim();
+    let normalized = url.to_ascii_lowercase();
+    if url.len() > 8192
+        || !(normalized.starts_with("https://")
+            || normalized.starts_with("http://")
+            || normalized.starts_with("mailto:"))
+    {
+        return Err("only http, https, and mailto links can be opened".to_string());
+    }
+    open_with_default_app(OsStr::new(url))
+}
+
+fn open_with_default_app(target: &OsStr) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("open");
+        command.arg(target);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("explorer.exe");
+        command.arg(target);
+        command
+    };
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(target);
+        command
+    };
+
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    {
+        command
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("failed to open with the default app: {error}"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        Err("opening artifacts is not supported on this platform".to_string())
+    }
 }
 
 fn validated_workspace_artifact_path(
