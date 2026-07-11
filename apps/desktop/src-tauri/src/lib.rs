@@ -30,8 +30,8 @@ use model_provider::{
     OpenAiCompatibleProvider, ModelProvider,
 };
 use orchestrator::{
-    default_plan, parse_policy, role_label, step_prompt, LearnedModelRouter, ModelCandidate,
-    OrchestrationPolicy, RoutingContext, RoutingDecision,
+    default_plan, parse_policy, role_label, step_prompt, ModelCandidate, OrchestrationPolicy,
+    RoutingContext, RoutingDecision, RuleBasedRouter,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -2057,12 +2057,25 @@ fn run_agent_task_blocking(
     if requested_policy != OrchestrationPolicy::AutoRouter {
         routing_context.user_policy_override = Some(requested_policy.clone());
     }
-    let routing_decision = LearnedModelRouter::train(&[]).route(&routing_context);
+    let routing_decision = RuleBasedRouter.route(&routing_context);
     let collaboration_policy = if requested_policy == OrchestrationPolicy::AutoRouter {
         routing_decision.policy.clone()
     } else {
         requested_policy.clone()
     };
+    run_context.insert(
+        "task_class".to_string(),
+        routing_context.task_class.label().to_string(),
+    );
+    run_context.insert(
+        "requested_policy".to_string(),
+        requested_policy.label().to_string(),
+    );
+    run_context.insert(
+        "collaboration_policy".to_string(),
+        collaboration_policy.label().to_string(),
+    );
+    run_context.insert("router_model".to_string(), routing_decision.model.clone());
     let session_id = run_context.get("session_id").map(String::as_str);
     let task_id = phase16_task_id();
     let mut history = {
@@ -2129,41 +2142,33 @@ fn run_agent_task_blocking(
         });
     }
 
-    let collaboration = if collaboration_policy != OrchestrationPolicy::Single {
-        let collaboration_id = unique_id("collab");
-        let planner_prompt = build_collaboration_planner_prompt(&prompt, &history);
-        let planner_output = run_collaboration_stage(
-            &state,
-            &config,
-            &task_id,
-            &run_context,
-            &collaboration_id,
-            "planner",
-            ModelRole::Planner,
-            &config.model_for_role(&ModelRole::Planner),
-            planner_prompt,
-        )
-        .unwrap_or_default();
-        if !planner_output.is_empty() {
+    let collaboration = prepare_agent_collaboration(
+        &state,
+        &config,
+        &task_id,
+        &run_context,
+        &collaboration_policy,
+        &prompt,
+        &history,
+    );
+    if let Some(collaboration) = collaboration.as_ref() {
+        if !collaboration.guidance.is_empty() {
             history.push(Message {
                 role: MessageRole::System,
-                content: format!("Planner guidance for the next user request:\n{planner_output}"),
+                content: format!(
+                    "Multi-model team guidance for the next user request:\n{}",
+                    collaboration.guidance
+                ),
                 metadata: [
                     ("internal".to_string(), "true".to_string()),
-                    ("collaboration_stage".to_string(), "planner".to_string()),
+                    ("collaboration_id".to_string(), collaboration.id.clone()),
+                    ("collaboration_stage".to_string(), "guidance".to_string()),
                 ]
                 .into_iter()
                 .collect(),
             });
         }
-        Some(AgentCollaboration {
-            id: collaboration_id,
-            policy: collaboration_policy.label().to_string(),
-            planner_output,
-        })
-    } else {
-        None
-    };
+    }
 
     let runtime = if history.is_empty() {
         start_agent_loop(task_id, prompt.clone(), AgentRuntimeConfig::default())
@@ -2244,7 +2249,7 @@ fn retry_agent_task(
     let session_id = run_context.get("session_id").map(String::as_str);
     let task_id = phase16_task_id();
     let prompt = {
-        let mut store = state
+        let store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
@@ -2252,14 +2257,42 @@ fn retry_agent_task(
             .list_by_task(&task_id)
             .map_err(|error| error.to_string())?;
         let active_events = active_agent_events_for_session(&events, session_id);
-        let prompt = latest_agent_prompt_from_active_events(&active_events)
-            .ok_or_else(|| "No previous agent prompt to retry".to_string())?;
+        latest_agent_prompt_from_active_events(&active_events)
+            .ok_or_else(|| "No previous agent prompt to retry".to_string())?
+    };
+    let requested_policy = parse_policy(&config.collaboration_policy)
+        .unwrap_or(OrchestrationPolicy::AutoRouter);
+    let mut routing_context =
+        RoutingContext::from_prompt(&prompt, model_candidates_for_config(&config));
+    if requested_policy != OrchestrationPolicy::AutoRouter {
+        routing_context.user_policy_override = Some(requested_policy.clone());
+    }
+    let routing_decision = RuleBasedRouter.route(&routing_context);
+    let collaboration_policy = if requested_policy == OrchestrationPolicy::AutoRouter {
+        routing_decision.policy.clone()
+    } else {
+        requested_policy.clone()
+    };
+    run_context.insert(
+        "task_class".to_string(),
+        routing_context.task_class.label().to_string(),
+    );
+    run_context.insert(
+        "requested_policy".to_string(),
+        requested_policy.label().to_string(),
+    );
+    run_context.insert(
+        "collaboration_policy".to_string(),
+        collaboration_policy.label().to_string(),
+    );
+    run_context.insert("router_model".to_string(), routing_decision.model);
+    {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
         let mut start_metadata = run_context.clone();
         start_metadata.insert("prompt".to_string(), prompt.clone());
-        start_metadata.insert(
-            "collaboration_policy".to_string(),
-            config.collaboration_policy.clone(),
-        );
         start_metadata.insert(
             "context_window_tokens".to_string(),
             config.context_window_tokens.to_string(),
@@ -2280,11 +2313,55 @@ fn retry_agent_task(
             run_context.clone(),
         )
             .map_err(|error| error.to_string())?;
-        prompt
-    };
+    }
 
-    let runtime = start_agent_loop(task_id, prompt.clone(), AgentRuntimeConfig::default());
-    continue_agent_loop(&state, &config, &root, runtime, prompt, run_context, None)
+    let mut history = Vec::new();
+    let collaboration = prepare_agent_collaboration(
+        &state,
+        &config,
+        &task_id,
+        &run_context,
+        &collaboration_policy,
+        &prompt,
+        &history,
+    );
+    if let Some(collaboration) = collaboration.as_ref() {
+        if !collaboration.guidance.is_empty() {
+            history.push(Message {
+                role: MessageRole::System,
+                content: format!(
+                    "Multi-model team guidance for the next user request:\n{}",
+                    collaboration.guidance
+                ),
+                metadata: [
+                    ("internal".to_string(), "true".to_string()),
+                    ("collaboration_id".to_string(), collaboration.id.clone()),
+                    ("collaboration_stage".to_string(), "guidance".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            });
+        }
+    }
+    let runtime = if history.is_empty() {
+        start_agent_loop(task_id, prompt.clone(), AgentRuntimeConfig::default())
+    } else {
+        start_agent_loop_with_history(
+            task_id,
+            prompt.clone(),
+            history,
+            AgentRuntimeConfig::default(),
+        )
+    };
+    continue_agent_loop(
+        &state,
+        &config,
+        &root,
+        runtime,
+        prompt,
+        run_context,
+        collaboration.as_ref(),
+    )
 }
 
 #[tauri::command]
@@ -2831,7 +2908,7 @@ fn run_orchestration(
     if requested_policy != OrchestrationPolicy::AutoRouter {
         routing_context.user_policy_override = Some(requested_policy.clone());
     }
-    let router = LearnedModelRouter::train(&[]);
+    let router = RuleBasedRouter;
     let routing_decision = router.route(&routing_context);
     let policy = if requested_policy == OrchestrationPolicy::AutoRouter {
         routing_decision.policy.clone()
@@ -4396,11 +4473,39 @@ fn trace_json_escape(value: &str) -> String {
 struct AgentCollaboration {
     id: String,
     policy: String,
-    planner_output: String,
+    guidance: String,
+    candidate_models: Vec<String>,
 }
 
-fn build_collaboration_planner_prompt(prompt: &str, history: &[Message]) -> String {
-    let recent_context = history
+#[derive(Debug)]
+struct CollaborationCandidateSpec {
+    stage: String,
+    model: String,
+    prompt: String,
+    request_id: String,
+}
+
+#[derive(Debug)]
+struct CollaborationCompletion {
+    content: Option<String>,
+    error: Option<String>,
+    latency_ms: u64,
+    usage: Metadata,
+}
+
+impl CollaborationCompletion {
+    fn failed(error: impl Into<String>) -> Self {
+        Self {
+            content: None,
+            error: Some(error.into()),
+            latency_ms: 0,
+            usage: Metadata::new(),
+        }
+    }
+}
+
+fn collaboration_recent_context(history: &[Message]) -> String {
+    history
         .iter()
         .rev()
         .take(8)
@@ -4413,7 +4518,11 @@ fn build_collaboration_planner_prompt(prompt: &str, history: &[Message]) -> Stri
             )
         })
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n")
+}
+
+fn build_collaboration_planner_prompt(prompt: &str, history: &[Message]) -> String {
+    let recent_context = collaboration_recent_context(history);
     format!(
         "You are the planning member of a multi-model Cindx team. Produce a concise, checkable execution plan for the executor. Identify assumptions, required evidence, tool needs, and likely failure modes. Do not answer the user directly.\n\nUser request:\n{}\n\nRecent session context:\n{}",
         prompt,
@@ -4423,6 +4532,70 @@ fn build_collaboration_planner_prompt(prompt: &str, history: &[Message]) -> Stri
             &recent_context
         }
     )
+}
+
+fn build_collaboration_candidate_prompt(
+    prompt: &str,
+    recent_context: &str,
+    candidate_index: usize,
+) -> String {
+    let perspective = match candidate_index % 3 {
+        0 => "Design the strongest execution strategy and identify the minimum decisive tool calls.",
+        1 => "Challenge likely assumptions, surface failure modes, and require evidence for important claims.",
+        _ => "Develop an independent alternative approach and compare its tradeoffs with the obvious path.",
+    };
+    format!(
+        "You are independent candidate {} in a multi-model Cindx deliberation. {} Produce a concise, checkable execution brief for a separate tool-using executor. Do not answer the user directly and do not assume what other candidates will propose.\n\nUser request:\n{}\n\nRecent session context:\n{}",
+        candidate_index + 1,
+        perspective,
+        prompt,
+        if recent_context.is_empty() {
+            "(none)"
+        } else {
+            recent_context
+        }
+    )
+}
+
+fn build_collaboration_arbiter_prompt(
+    prompt: &str,
+    candidates: &[(String, String)],
+) -> String {
+    let candidate_text = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, (model, output))| {
+            format!(
+                "Candidate {} ({model}):\n{}",
+                index + 1,
+                truncate_for_collaboration(output, 6_000)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    format!(
+        "You are the arbiter for a multi-model Cindx deliberation. Compare the independent candidate briefs, preserve useful disagreements, reject unsupported assumptions, and synthesize one concrete execution brief for the tool-using executor. Do not answer the user directly.\n\nUser request:\n{}\n\nIndependent candidates:\n{}",
+        prompt, candidate_text
+    )
+}
+
+fn collaboration_candidate_models(config: &ProviderConfig, candidates: usize) -> Vec<String> {
+    let mut models = Vec::new();
+    for role in [
+        ModelRole::Planner,
+        ModelRole::Reviewer,
+        ModelRole::Summarizer,
+        ModelRole::Executor,
+    ] {
+        let model = config.model_for_role(&role);
+        if !model.trim().is_empty() && !models.iter().any(|existing| existing == &model) {
+            models.push(model);
+        }
+        if models.len() >= candidates.max(1) {
+            break;
+        }
+    }
+    models
 }
 
 fn synthesize_agent_answer(
@@ -4447,12 +4620,12 @@ fn synthesize_agent_answer(
         .collect::<Vec<_>>()
         .join("\n\n");
     let review_prompt = format!(
-        "You are the independent reviewer in a multi-model Cindx team. Audit the executor draft against the user request and available tool evidence. Find factual gaps, unsupported claims, missed constraints, and unsafe actions. Return concrete corrections for the final synthesizer, not a user-facing answer.\n\nUser request:\n{}\n\nPlanner guidance:\n{}\n\nExecutor draft:\n{}\n\nTool evidence:\n{}",
+        "You are the independent reviewer in a multi-model Cindx team. Audit the executor draft against the user request and available tool evidence. Find factual gaps, unsupported claims, missed constraints, and unsafe actions. Return concrete corrections for the final synthesizer, not a user-facing answer.\n\nUser request:\n{}\n\nTeam guidance:\n{}\n\nExecutor draft:\n{}\n\nTool evidence:\n{}",
         prompt,
-        if collaboration.planner_output.is_empty() {
-            "(planner unavailable)"
+        if collaboration.guidance.is_empty() {
+            "(team deliberation unavailable)"
         } else {
-            &collaboration.planner_output
+            &collaboration.guidance
         },
         truncate_for_collaboration(executor_answer, 12_000),
         if evidence.is_empty() { "(none)" } else { &evidence }
@@ -4470,13 +4643,14 @@ fn synthesize_agent_answer(
     )
     .unwrap_or_else(|error| format!("Reviewer unavailable: {error}"));
     let synthesis_prompt = format!(
-        "You are the final synthesizer in a multi-model Cindx team. Produce the strongest possible final response to the user using the executor draft, reviewer corrections, planner intent, and tool evidence. Resolve disagreements using evidence. Do not mention the internal pipeline. Be precise, complete, and concise; never claim work that the evidence does not support.\n\nCollaboration policy: {}\n\nUser request:\n{}\n\nPlanner guidance:\n{}\n\nExecutor draft:\n{}\n\nReviewer corrections:\n{}\n\nTool evidence:\n{}",
+        "You are the final synthesizer in a multi-model Cindx team. Produce the strongest possible final response to the user using the executor draft, reviewer corrections, team guidance, and tool evidence. Resolve disagreements using evidence. Do not mention the internal pipeline. Be precise, complete, and concise; never claim work that the evidence does not support.\n\nCollaboration policy: {}\nCandidate models: {}\n\nUser request:\n{}\n\nTeam guidance:\n{}\n\nExecutor draft:\n{}\n\nReviewer corrections:\n{}\n\nTool evidence:\n{}",
         collaboration.policy,
+        collaboration.candidate_models.join(", "),
         prompt,
-        if collaboration.planner_output.is_empty() {
-            "(planner unavailable)"
+        if collaboration.guidance.is_empty() {
+            "(team deliberation unavailable)"
         } else {
-            &collaboration.planner_output
+            &collaboration.guidance
         },
         truncate_for_collaboration(executor_answer, 12_000),
         truncate_for_collaboration(&review, 8_000),
@@ -4502,58 +4676,63 @@ fn synthesize_agent_answer(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_collaboration_stage(
+fn record_collaboration_stage_started(
     state: &tauri::State<'_, AppState>,
-    config: &ProviderConfig,
     task_id: &TaskId,
     run_context: &Metadata,
     collaboration_id: &str,
     stage: &str,
-    role: ModelRole,
+    role: &ModelRole,
     model: &str,
-    prompt: String,
-) -> Result<String, String> {
-    let request_id = unique_id("collaboration-model");
-    let started_at_ms = current_time_millis();
-    {
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|error| format!("store lock poisoned: {error}"))?;
-        append_event(
-            &mut store,
-            task_id,
-            EventKind::ModelRequestStarted,
-            format!("Collaboration {stage} started"),
-            metadata_with_context(
-                [
-                    ("collaboration_id".to_string(), collaboration_id.to_string()),
-                    ("request_id".to_string(), request_id.clone()),
-                    ("stage".to_string(), stage.to_string()),
-                    ("role".to_string(), role_label(&role).to_string()),
-                    ("model".to_string(), model.to_string()),
-                ]
-                .into_iter()
-                .collect(),
-                run_context,
-            ),
-        )
-        .map_err(|error| error.to_string())?;
-    }
+    request_id: &str,
+) -> Result<(), String> {
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    append_event(
+        &mut store,
+        task_id,
+        EventKind::ModelRequestStarted,
+        format!("Collaboration {stage} started"),
+        metadata_with_context(
+            [
+                ("collaboration_id".to_string(), collaboration_id.to_string()),
+                ("request_id".to_string(), request_id.to_string()),
+                ("stage".to_string(), stage.to_string()),
+                ("role".to_string(), role_label(role).to_string()),
+                ("model".to_string(), model.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            run_context,
+        ),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
 
+fn complete_collaboration_model(
+    config: ProviderConfig,
+    role: ModelRole,
+    model: String,
+    system_prompt: String,
+    prompt: String,
+) -> CollaborationCompletion {
+    let started_at_ms = current_time_millis();
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
         base_url: config.base_url.clone(),
         api_key: config.api_key.clone(),
-        model: model.to_string(),
+        model,
         embedding_model: config.model_for_role(&ModelRole::Embedder),
         timeout_seconds: 180,
     });
     let response = provider.complete(ModelRequest {
-        role: role.clone(),
+        role,
         messages: vec![
             Message {
                 role: MessageRole::System,
-                content: agent_system_prompt_for_run(&config.agent_system_prompt, run_context),
+                content: system_prompt,
                 metadata: Metadata::new(),
             },
             Message {
@@ -4569,68 +4748,285 @@ fn run_collaboration_stage(
     let latency_ms = current_time_millis().saturating_sub(started_at_ms);
     match response {
         Ok(response) => {
-            let mut metadata = [
-                ("collaboration_id".to_string(), collaboration_id.to_string()),
-                ("request_id".to_string(), request_id),
-                ("stage".to_string(), stage.to_string()),
-                ("role".to_string(), role_label(&role).to_string()),
-                ("model".to_string(), model.to_string()),
-                ("latency_ms".to_string(), latency_ms.to_string()),
-                ("output".to_string(), response.message.content.clone()),
-                ("status".to_string(), "completed".to_string()),
-            ]
-            .into_iter()
-            .collect::<Metadata>();
+            let mut usage = Metadata::new();
             for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
                 if let Some(value) = response.metadata.get(key) {
-                    metadata.insert(key.to_string(), value.clone());
+                    usage.insert(key.to_string(), value.clone());
                 }
             }
-            let mut store = state
-                .store
-                .lock()
-                .map_err(|error| format!("store lock poisoned: {error}"))?;
-            append_event(
-                &mut store,
-                task_id,
-                EventKind::ModelRequestFinished,
-                format!("Collaboration {stage} finished"),
-                metadata_with_context(metadata, run_context),
-            )
-            .map_err(|error| error.to_string())?;
-            Ok(response.message.content)
+            CollaborationCompletion {
+                content: Some(response.message.content),
+                error: None,
+                latency_ms,
+                usage,
+            }
         }
-        Err(error) => {
-            let message = error.to_string();
-            let mut store = state
-                .store
-                .lock()
-                .map_err(|error| format!("store lock poisoned: {error}"))?;
-            append_event(
-                &mut store,
-                task_id,
-                EventKind::ModelRequestFinished,
-                format!("Collaboration {stage} unavailable"),
-                metadata_with_context(
-                    [
-                        ("collaboration_id".to_string(), collaboration_id.to_string()),
-                        ("request_id".to_string(), request_id),
-                        ("stage".to_string(), stage.to_string()),
-                        ("role".to_string(), role_label(&role).to_string()),
-                        ("model".to_string(), model.to_string()),
-                        ("latency_ms".to_string(), latency_ms.to_string()),
-                        ("status".to_string(), "degraded".to_string()),
-                        ("error".to_string(), message.clone()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    run_context,
-                ),
-            )
-            .map_err(|error| error.to_string())?;
-            Err(message)
+        Err(error) => CollaborationCompletion {
+            content: None,
+            error: Some(error.to_string()),
+            latency_ms,
+            usage: Metadata::new(),
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_collaboration_stage_finished(
+    state: &tauri::State<'_, AppState>,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    collaboration_id: &str,
+    stage: &str,
+    role: &ModelRole,
+    model: &str,
+    request_id: &str,
+    completion: &CollaborationCompletion,
+) -> Result<(), String> {
+    let mut metadata = [
+        ("collaboration_id".to_string(), collaboration_id.to_string()),
+        ("request_id".to_string(), request_id.to_string()),
+        ("stage".to_string(), stage.to_string()),
+        ("role".to_string(), role_label(role).to_string()),
+        ("model".to_string(), model.to_string()),
+        ("latency_ms".to_string(), completion.latency_ms.to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    let summary = if let Some(content) = completion.content.as_ref() {
+        metadata.insert("output".to_string(), content.clone());
+        metadata.insert("status".to_string(), "completed".to_string());
+        for (key, value) in &completion.usage {
+            metadata.insert(key.clone(), value.clone());
+        }
+        format!("Collaboration {stage} finished")
+    } else {
+        metadata.insert("status".to_string(), "degraded".to_string());
+        metadata.insert(
+            "error".to_string(),
+            completion
+                .error
+                .clone()
+                .unwrap_or_else(|| "unknown collaboration failure".to_string()),
+        );
+        format!("Collaboration {stage} unavailable")
+    };
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    append_event(
+        &mut store,
+        task_id,
+        EventKind::ModelRequestFinished,
+        summary,
+        metadata_with_context(metadata, run_context),
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_collaboration_stage(
+    state: &tauri::State<'_, AppState>,
+    config: &ProviderConfig,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    collaboration_id: &str,
+    stage: &str,
+    role: ModelRole,
+    model: &str,
+    prompt: String,
+) -> Result<String, String> {
+    let request_id = unique_id("collaboration-model");
+    record_collaboration_stage_started(
+        state,
+        task_id,
+        run_context,
+        collaboration_id,
+        stage,
+        &role,
+        model,
+        &request_id,
+    )?;
+    let completion = complete_collaboration_model(
+        config.clone(),
+        role.clone(),
+        model.to_string(),
+        agent_system_prompt_for_run(&config.agent_system_prompt, run_context),
+        prompt,
+    );
+    record_collaboration_stage_finished(
+        state,
+        task_id,
+        run_context,
+        collaboration_id,
+        stage,
+        &role,
+        model,
+        &request_id,
+        &completion,
+    )?;
+    completion.content.ok_or_else(|| {
+        completion
+            .error
+            .unwrap_or_else(|| "collaboration model returned no content".to_string())
+    })
+}
+
+fn run_collaboration_candidates(
+    state: &tauri::State<'_, AppState>,
+    config: &ProviderConfig,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    collaboration_id: &str,
+    prompt: &str,
+    history: &[Message],
+    models: &[String],
+) -> Result<String, String> {
+    let recent_context = collaboration_recent_context(history);
+    let specs = models
+        .iter()
+        .enumerate()
+        .map(|(index, model)| CollaborationCandidateSpec {
+            stage: format!("candidate_{}", index + 1),
+            model: model.clone(),
+            prompt: build_collaboration_candidate_prompt(prompt, &recent_context, index),
+            request_id: unique_id("collaboration-model"),
+        })
+        .collect::<Vec<_>>();
+    for spec in &specs {
+        record_collaboration_stage_started(
+            state,
+            task_id,
+            run_context,
+            collaboration_id,
+            &spec.stage,
+            &ModelRole::Planner,
+            &spec.model,
+            &spec.request_id,
+        )?;
+    }
+
+    let system_prompt = agent_system_prompt_for_run(&config.agent_system_prompt, run_context);
+    let handles = specs
+        .iter()
+        .map(|spec| {
+            let config = config.clone();
+            let model = spec.model.clone();
+            let prompt = spec.prompt.clone();
+            let system_prompt = system_prompt.clone();
+            std::thread::spawn(move || {
+                complete_collaboration_model(
+                    config,
+                    ModelRole::Planner,
+                    model,
+                    system_prompt,
+                    prompt,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let completions = handles
+        .into_iter()
+        .map(|handle| {
+            handle.join().unwrap_or_else(|_| {
+                CollaborationCompletion::failed("collaboration candidate worker panicked")
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut candidates = Vec::new();
+    for (spec, completion) in specs.iter().zip(&completions) {
+        record_collaboration_stage_finished(
+            state,
+            task_id,
+            run_context,
+            collaboration_id,
+            &spec.stage,
+            &ModelRole::Planner,
+            &spec.model,
+            &spec.request_id,
+            completion,
+        )?;
+        if let Some(content) = completion
+            .content
+            .as_ref()
+            .filter(|content| !content.trim().is_empty())
+        {
+            candidates.push((spec.model.clone(), content.clone()));
         }
     }
+
+    if candidates.is_empty() {
+        return Err("all collaboration candidates were unavailable".to_string());
+    }
+    if candidates.len() == 1 {
+        return Ok(candidates.remove(0).1);
+    }
+    run_collaboration_stage(
+        state,
+        config,
+        task_id,
+        run_context,
+        collaboration_id,
+        "arbiter",
+        ModelRole::Reviewer,
+        &config.model_for_role(&ModelRole::Reviewer),
+        build_collaboration_arbiter_prompt(prompt, &candidates),
+    )
+}
+
+fn prepare_agent_collaboration(
+    state: &tauri::State<'_, AppState>,
+    config: &ProviderConfig,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    policy: &OrchestrationPolicy,
+    prompt: &str,
+    history: &[Message],
+) -> Option<AgentCollaboration> {
+    if *policy == OrchestrationPolicy::Single {
+        return None;
+    }
+    let id = unique_id("collab");
+    let (guidance, candidate_models) = match policy {
+        OrchestrationPolicy::BestOfN { candidates } => {
+            let models = collaboration_candidate_models(config, *candidates);
+            let guidance = run_collaboration_candidates(
+                state,
+                config,
+                task_id,
+                run_context,
+                &id,
+                prompt,
+                history,
+                &models,
+            )
+            .unwrap_or_default();
+            (guidance, models)
+        }
+        _ => {
+            let model = config.model_for_role(&ModelRole::Planner);
+            let guidance = run_collaboration_stage(
+                state,
+                config,
+                task_id,
+                run_context,
+                &id,
+                "planner",
+                ModelRole::Planner,
+                &model,
+                build_collaboration_planner_prompt(prompt, history),
+            )
+            .unwrap_or_default();
+            (guidance, vec![model])
+        }
+    };
+    Some(AgentCollaboration {
+        id,
+        policy: policy.label().to_string(),
+        guidance,
+        candidate_models,
+    })
 }
 
 fn truncate_for_collaboration(value: &str, max_chars: usize) -> String {
@@ -4682,26 +5078,30 @@ fn continue_agent_loop(
                 return agent_state_for_session(&store, None, session_id)
                     .map_err(|error| error.to_string());
             }
+            let mut metadata = [
+                ("request_id".to_string(), request_id.clone()),
+                ("turn".to_string(), runtime.turn.to_string()),
+                (
+                    "model".to_string(),
+                    config.model_for_role(&ModelRole::Executor),
+                ),
+                ("tool_count".to_string(), tools.len().to_string()),
+                ("prompt".to_string(), prompt.clone()),
+            ]
+            .into_iter()
+            .collect::<Metadata>();
+            if let Some(collaboration) = collaboration {
+                metadata.insert("collaboration_id".to_string(), collaboration.id.clone());
+                metadata.insert("stage".to_string(), "executor".to_string());
+                metadata.insert("role".to_string(), "executor".to_string());
+                metadata.insert("policy".to_string(), collaboration.policy.clone());
+            }
             append_event(
                 &mut store,
                 &runtime.task_id,
                 EventKind::ModelRequestStarted,
                 "Agent model turn started",
-                metadata_with_context(
-                    [
-                        ("request_id".to_string(), request_id.clone()),
-                        ("turn".to_string(), runtime.turn.to_string()),
-                        (
-                            "model".to_string(),
-                            config.model_for_role(&ModelRole::Executor),
-                        ),
-                        ("tool_count".to_string(), tools.len().to_string()),
-                        ("prompt".to_string(), prompt.clone()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    &run_context,
-                ),
+                metadata_with_context(metadata, &run_context),
             )
             .map_err(|error| error.to_string())?;
         }
@@ -4753,6 +5153,12 @@ fn continue_agent_loop(
             }
             if let Some(raw_tool_calls_json) = response.raw_tool_calls_json.clone() {
                 metadata.insert("raw_tool_calls_json".to_string(), raw_tool_calls_json);
+            }
+            if let Some(collaboration) = collaboration {
+                metadata.insert("collaboration_id".to_string(), collaboration.id.clone());
+                metadata.insert("stage".to_string(), "executor".to_string());
+                metadata.insert("role".to_string(), "executor".to_string());
+                metadata.insert("policy".to_string(), collaboration.policy.clone());
             }
             append_event(
                 &mut store,
@@ -6686,7 +7092,7 @@ fn timeline_entry(event: Event, audits: &[PermissionAuditRecord]) -> TimelineEnt
     };
 
     TimelineEntry {
-        label: event_kind_label(&event.kind).to_string(),
+        label: timeline_event_label(&event),
         detail: redact_sensitive_text(&detail),
         kind: event_kind_ui_kind(&event.kind).to_string(),
         state: event_state(&event.kind, permission_is_pending).to_string(),
@@ -8102,6 +8508,33 @@ fn event_kind_label(kind: &EventKind) -> &'static str {
     }
 }
 
+fn timeline_event_label(event: &Event) -> String {
+    if matches!(
+        event.kind,
+        EventKind::ModelRequestStarted | EventKind::ModelRequestFinished
+    ) && event.metadata.contains_key("collaboration_id")
+    {
+        if let Some(stage) = event.metadata.get("stage") {
+            return collaboration_stage_display_label(stage);
+        }
+    }
+    event_kind_label(&event.kind).to_string()
+}
+
+fn collaboration_stage_display_label(stage: &str) -> String {
+    match stage {
+        "planner" => "Planner".to_string(),
+        "arbiter" => "Arbiter".to_string(),
+        "executor" => "Executor".to_string(),
+        "reviewer" => "Reviewer".to_string(),
+        "synthesizer" => "Synthesis".to_string(),
+        _ => stage
+            .strip_prefix("candidate_")
+            .map(|index| format!("Candidate {index}"))
+            .unwrap_or_else(|| "Model collaboration".to_string()),
+    }
+}
+
 fn event_kind_ui_kind(kind: &EventKind) -> &'static str {
     match kind {
         EventKind::ToolCallProposed | EventKind::ToolCallStarted | EventKind::ToolCallFinished => {
@@ -8458,6 +8891,49 @@ mod tests {
         assert_eq!(config.collaboration_policy, "auto_router");
         assert_eq!(config.context_window_tokens, 128_000);
         assert_eq!(config.agent_system_prompt, "Be concise.\nUse Chinese when asked.");
+    }
+
+    #[test]
+    fn ensemble_uses_distinct_role_models_in_stable_order() {
+        let config = ProviderConfig {
+            model: "default".to_string(),
+            planner_model: "planner-a".to_string(),
+            executor_model: "executor-b".to_string(),
+            reviewer_model: "reviewer-c".to_string(),
+            summarizer_model: "summary-d".to_string(),
+            ..ProviderConfig::default()
+        };
+
+        assert_eq!(
+            collaboration_candidate_models(&config, 3),
+            vec![
+                "planner-a".to_string(),
+                "reviewer-c".to_string(),
+                "summary-d".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn collaboration_stages_have_visible_timeline_labels() {
+        let event = Event {
+            id: EventId("candidate-event".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 1,
+            timestamp_ms: 1,
+            kind: EventKind::ModelRequestStarted,
+            summary: "Collaboration candidate_2 started".to_string(),
+            metadata: [
+                ("collaboration_id".to_string(), "collab-1".to_string()),
+                ("stage".to_string(), "candidate_2".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        assert_eq!(timeline_event_label(&event), "Candidate 2");
+        assert_eq!(collaboration_stage_display_label("arbiter"), "Arbiter");
+        assert_eq!(collaboration_stage_display_label("synthesizer"), "Synthesis");
     }
 
     #[test]

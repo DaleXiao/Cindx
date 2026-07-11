@@ -308,9 +308,10 @@ assert(
   sessionThreadSource.includes("groupThreadItems") &&
     sessionThreadSource.includes("containsToolActivity") &&
     sessionThreadSource.includes("thread-tool-chain") &&
+    sessionThreadSource.includes("Agent activity") &&
     sessionThreadSource.includes("<ToolChainItem") &&
     styles.includes(".thread-tool-chain-items"),
-  "A complete tool activity chain must default to one parent disclosure"
+  "A complete agent activity chain must default to one parent disclosure"
 );
 assert(
   disclosureTriangleSource.includes('import { Triangle } from "lucide-react"') &&
@@ -467,7 +468,10 @@ assert(
   appSource.includes("window-workspace-header") && !appSource.includes('className="topbar"'),
   "Session title, context usage, and runtime status must be integrated into the window titlebar"
 );
-assert(appSource.includes("Quality synthesis"), "Provider settings must expose collaboration quality mode");
+assert(
+  appSource.includes("Quality synthesis") && appSource.includes("Ensemble deliberation"),
+  "Provider settings must expose collaboration quality and ensemble modes"
+);
 assert(appSource.includes("Archived sessions"), "Settings must expose archived session recovery");
 assert(
   appSource.includes("<TriangleAlert size={14}") &&
@@ -686,10 +690,13 @@ assert(
 );
 assert(
   rustLib.includes("synthesize_agent_answer(") &&
+    rustLib.includes("run_collaboration_candidates(") &&
+    rustLib.includes("std::thread::spawn") &&
+    rustLib.includes('"arbiter"') &&
     rustLib.includes('"planner"') &&
     rustLib.includes('"reviewer"') &&
     rustLib.includes('"synthesizer"'),
-  "Primary agent must run the multi-model synthesis pipeline"
+  "Primary agent must run parallel multi-model deliberation and synthesis"
 );
 assert(
   rustLib.includes('"prompt_tokens"') && rustLib.includes("context_remaining_percent"),

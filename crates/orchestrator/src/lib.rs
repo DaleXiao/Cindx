@@ -183,11 +183,20 @@ impl RoutingContext {
             needs_tools: matches!(
                 task_class,
                 TaskClass::Coding | TaskClass::Browser | TaskClass::Computer
-            ) || contains_any(prompt, &["tool", "file", "shell", "run", "edit"]),
+            ) || contains_any(
+                prompt,
+                &["tool", "file", "shell", "run", "edit", "工具", "文件", "运行", "执行", "修改"],
+            ),
             needs_retrieval: matches!(task_class, TaskClass::Retrieval)
-                || contains_any(prompt, &["rag", "search", "retrieve", "source", "docs"]),
+                || contains_any(
+                    prompt,
+                    &["rag", "search", "retrieve", "source", "docs", "搜索", "检索", "来源", "文档"],
+                ),
             needs_vision: matches!(task_class, TaskClass::Computer)
-                || contains_any(prompt, &["screenshot", "screen", "visible", "ui"]),
+                || contains_any(
+                    prompt,
+                    &["screenshot", "screen", "visible", "ui", "截图", "屏幕", "界面", "可见"],
+                ),
             user_policy_override: None,
             model_candidates,
         }
@@ -487,18 +496,46 @@ impl RouteAccumulator {
 }
 
 pub fn classify_task(prompt: &str) -> TaskClass {
-    if contains_any(prompt, &["computer", "desktop", "screenshot", "screen", "click", "keyboard"]) {
+    if contains_any(
+        prompt,
+        &[
+            "computer", "desktop", "screenshot", "screen", "click", "keyboard", "电脑", "桌面",
+            "截图", "屏幕", "点击", "键盘",
+        ],
+    ) {
         TaskClass::Computer
-    } else if contains_any(prompt, &["browser", "webpage", "website", "scroll", "form"]) {
+    } else if contains_any(
+        prompt,
+        &[
+            "browser", "webpage", "website", "scroll", "form", "浏览器", "网页", "网站", "滚动",
+            "表单",
+        ],
+    ) {
         TaskClass::Browser
     } else if contains_any(
         prompt,
-        &["rag", "retrieve", "search", "source", "sources", "citation", "docs"],
+        &[
+            "rag", "retrieve", "search", "source", "sources", "citation", "docs", "检索", "搜索",
+            "来源", "引用", "文档", "资料",
+        ],
     ) {
         TaskClass::Retrieval
-    } else if contains_any(prompt, &["code", "rust", "typescript", "file", "test", "compile", "bug"]) {
+    } else if contains_any(
+        prompt,
+        &[
+            "code", "rust", "typescript", "file", "test", "compile", "bug", "代码", "编程", "文件",
+            "测试", "编译", "错误", "修复", "重构", "实现",
+        ],
+    ) {
         TaskClass::Coding
-    } else if contains_any(prompt, &["research", "compare", "investigate", "latest", "study"]) {
+    } else if contains_any(
+        prompt,
+        &[
+            "research", "compare", "investigate", "latest", "study", "collaboration", "multi-model",
+            "multiple models", "研究", "调研", "比较", "对比", "分析", "调查", "最新", "评估", "对标",
+            "协同", "多模型", "多个模型",
+        ],
+    ) {
         TaskClass::Research
     } else {
         TaskClass::General
@@ -672,6 +709,31 @@ mod tests {
         assert_eq!(decision.policy, OrchestrationPolicy::PlanExecuteReview);
         assert_eq!(decision.retrieval_mode, "graph_rag");
         assert!(decision.explanation.contains("class=retrieval"));
+    }
+
+    #[test]
+    fn chinese_collaboration_request_routes_to_real_ensemble() {
+        let context = RoutingContext::from_prompt(
+            "分析多个模型协同，并对标 Sakana Fugu Ultra",
+            candidates(),
+        );
+        let decision = RuleBasedRouter.route(&context);
+
+        assert_eq!(context.task_class, TaskClass::Research);
+        assert_eq!(
+            decision.policy,
+            OrchestrationPolicy::BestOfN { candidates: 3 }
+        );
+    }
+
+    #[test]
+    fn chinese_tool_request_is_not_misclassified_as_general_chat() {
+        let context = RoutingContext::from_prompt("修复代码并运行测试", candidates());
+        let decision = RuleBasedRouter.route(&context);
+
+        assert_eq!(context.task_class, TaskClass::Coding);
+        assert!(context.needs_tools);
+        assert_eq!(decision.policy, OrchestrationPolicy::PlanExecuteReview);
     }
 
     #[test]
