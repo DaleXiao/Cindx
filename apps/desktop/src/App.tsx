@@ -23,6 +23,7 @@ import {
   Save,
   Search,
   Send,
+  Settings,
   ShieldCheck,
   ShieldQuestion,
   TerminalSquare,
@@ -513,11 +514,12 @@ export function App() {
       (projectSessionState?.sessions ?? [])
         .filter((session) => {
           if (session.archived) return false;
-          if (activeProject && session.projectId !== activeProject.id) return false;
-          if (!normalizedSidebarQuery) return true;
-          return `${session.name} ${session.detail}`
-            .toLowerCase()
-            .includes(normalizedSidebarQuery);
+          if (normalizedSidebarQuery) {
+            return `${session.name} ${session.detail}`
+              .toLowerCase()
+              .includes(normalizedSidebarQuery);
+          }
+          return !activeProject || session.projectId === activeProject.id;
         })
         .map((session) =>
           busySessionIds.has(session.id)
@@ -547,11 +549,20 @@ export function App() {
     () =>
       (projectSessionState?.projects ?? []).filter((project) => {
         if (!normalizedSidebarQuery) return true;
-        return `${project.name} ${project.detail} ${project.root}`
+        const projectMatches = `${project.name} ${project.detail} ${project.root}`
           .toLowerCase()
           .includes(normalizedSidebarQuery);
+        const matchingSessionExists = (projectSessionState?.sessions ?? []).some(
+          (session) =>
+            !session.archived &&
+            session.projectId === project.id &&
+            `${session.name} ${session.detail}`
+              .toLowerCase()
+              .includes(normalizedSidebarQuery)
+        );
+        return projectMatches || matchingSessionExists;
       }),
-    [normalizedSidebarQuery, projectSessionState?.projects]
+    [normalizedSidebarQuery, projectSessionState?.projects, projectSessionState?.sessions]
   );
 
   const permissionRows = phase3?.permissions ?? [];
@@ -1505,6 +1516,16 @@ export function App() {
           </>
         ) : activeView === "trace" ? (
           <section className="trace-view" aria-label="Agent trace">
+            <nav className="workspace-page-navigation" aria-label="Trace navigation">
+              <button
+                className="workspace-return-button"
+                type="button"
+                onClick={showTimelineView}
+              >
+                <ArrowLeft aria-hidden="true" />
+                <span>Back to App</span>
+              </button>
+            </nav>
             <section className="trace-summary">
               <div>
                 <span>Status</span>
@@ -1596,8 +1617,19 @@ export function App() {
             data-active-group={settingsCategory ?? "index"}
             key={settingsCategory ?? "index"}
           >
-            {activeSettingsCategory && (
-              <nav className="settings-page-navigation" aria-label="Settings navigation">
+            <nav
+              className="workspace-page-navigation settings-page-navigation"
+              aria-label="Settings navigation"
+            >
+              <button
+                className="workspace-return-button"
+                type="button"
+                onClick={showTimelineView}
+              >
+                <ArrowLeft aria-hidden="true" />
+                <span>Back to App</span>
+              </button>
+              {activeSettingsCategory && (
                 <button
                   className="icon-button settings-back"
                   type="button"
@@ -1605,10 +1637,10 @@ export function App() {
                   title="Back to Settings"
                   onClick={() => setSettingsCategory(null)}
                 >
-                  <ArrowLeft aria-hidden="true" />
+                  <Settings aria-hidden="true" />
                 </button>
-              </nav>
-            )}
+              )}
+            </nav>
             {settingsCategory === null && (
               <nav className="settings-index" aria-label="Settings categories">
                 {settingsCategories.map((category) => (

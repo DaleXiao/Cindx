@@ -336,12 +336,6 @@ pre {
   margin-left: 2px;
 }
 
-.sidebar-actions {
-  display: grid;
-  grid-template-columns: repeat(2, 30px);
-  gap: 6px;
-}
-
 .icon-button {
   display: inline-grid;
   width: 30px;
@@ -795,6 +789,7 @@ pre {
 .sidebar-footer {
   display: flex;
   align-items: center;
+  gap: 6px;
 }
 
 .sidebar-settings {
@@ -2041,11 +2036,46 @@ textarea::placeholder {
 
 /* Trace */
 
+.workspace-page-navigation {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 18px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.workspace-return-button {
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  color: #454545;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.workspace-return-button:hover,
+.workspace-return-button:focus-visible {
+  color: var(--text);
+  background: var(--surface-active);
+}
+
+.workspace-return-button svg {
+  width: 14px;
+  height: 14px;
+}
+
 .trace-view {
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
 }
 
@@ -2248,9 +2278,8 @@ textarea::placeholder {
 }
 
 .settings-page-navigation {
-  display: flex;
-  align-items: center;
-  padding-top: 8px;
+  min-height: 44px;
+  padding: 8px 0;
 }
 
 .settings-page-navigation .settings-back {
