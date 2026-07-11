@@ -38,7 +38,8 @@ function sessionVisualState(status: string): SessionVisualState {
   return null;
 }
 
-function SessionStatusIndicator({ status }: { status: string }) {
+function SessionStatusIndicator({ status, active }: { status: string; active: boolean }) {
+  if (active) return null;
   const state = sessionVisualState(status);
   if (!state) return null;
 
@@ -539,11 +540,12 @@ export function Sidebar({
                                   type="button"
                                   disabled={busy}
                                 >
-                                  <span>
-                                    <strong>{session.name}</strong>
-                                  </span>
+                                  <span className="session-name">{session.name}</span>
                                 </button>
-                                <SessionStatusIndicator status={session.status} />
+                                <SessionStatusIndicator
+                                  status={session.status}
+                                  active={session.active}
+                                />
                                 <button
                                   className="session-more"
                                   type="button"

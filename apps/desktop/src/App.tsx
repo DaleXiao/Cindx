@@ -6,7 +6,6 @@ import {
   Bot,
   Cable,
   CheckCircle2,
-  ChevronRight,
   Clock3,
   Database,
   FileText,
@@ -218,16 +217,16 @@ function ModelSelect({
 }
 
 const settingsCategories = [
-  { id: "runtime", label: "Runtime", description: "Workspace and local services" },
-  { id: "sessions", label: "Sessions", description: "Archived session recovery" },
-  { id: "models", label: "Models", description: "Providers and orchestration" },
-  { id: "agent", label: "Agent", description: "System instructions and behavior" },
-  { id: "knowledge", label: "Knowledge", description: "Context, memory, and retrieval" },
-  { id: "tools", label: "Tools", description: "Browser and local tool controls" },
-  { id: "mcp", label: "MCP", description: "External tool servers and catalogs" },
-  { id: "skills", label: "Skills", description: "Reusable agent instructions and resources" },
-  { id: "permissions", label: "Permissions", description: "Approvals and review history" },
-  { id: "about", label: "About", description: "Version and application information" }
+  { id: "runtime", label: "Runtime" },
+  { id: "sessions", label: "Sessions" },
+  { id: "models", label: "Models" },
+  { id: "agent", label: "Agent" },
+  { id: "knowledge", label: "Knowledge" },
+  { id: "tools", label: "Tools" },
+  { id: "mcp", label: "MCP" },
+  { id: "skills", label: "Skills" },
+  { id: "permissions", label: "Permissions" },
+  { id: "about", label: "About" }
 ] as const;
 
 type SettingsCategory = (typeof settingsCategories)[number]["id"];
@@ -253,7 +252,7 @@ export function App() {
   const [workspaceViewBeforeSettings, setWorkspaceViewBeforeSettings] =
     useState<Exclude<WorkspaceView, "settings">>("timeline");
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [settingsCategory, setSettingsCategory] = useState<SettingsCategory | null>(null);
+  const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>("runtime");
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("details");
   const [inspectorOpen, setInspectorOpen] = useState(!compactDesktop);
   const [inspectorOpenBeforeSettings, setInspectorOpenBeforeSettings] = useState(!compactDesktop);
@@ -330,6 +329,7 @@ export function App() {
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(() => new Set());
   const [sessionStatusOverrides, setSessionStatusOverrides] = useState<Record<string, string>>({});
   const activeSessionIdRef = useRef<string | null>(null);
+  const trackedSessionTaskIdsRef = useRef<Set<string>>(new Set());
   const [composerError, setComposerError] = useState<string | null>(null);
   const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
   const [webSearchError, setWebSearchError] = useState<string | null>(null);
@@ -605,8 +605,6 @@ export function App() {
   const selectedTraceStep =
     traceSteps.find((step) => step.id === selectedTraceStepId) ??
     (traceSteps.length > 0 ? traceSteps[traceSteps.length - 1] : null);
-  const activeSettingsCategory =
-    settingsCategories.find((category) => category.id === settingsCategory) ?? null;
   const providerModelOptions = useMemo(() => {
     const configured = providerDraft
       ? [
@@ -640,11 +638,36 @@ export function App() {
     });
   }
 
+  function markSessionTaskStarted(sessionId: string) {
+    trackedSessionTaskIdsRef.current.add(sessionId);
+    setSessionStatusOverrides((current) => {
+      if (!current[sessionId]) return current;
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+  }
+
+  function acknowledgeSessionResult(sessionId: string) {
+    setSessionStatusOverrides((current) => {
+      if (!["Completed", "Blocked", "Attention"].includes(current[sessionId])) return current;
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+  }
+
   function updateSessionStatus(sessionId: string, status: AgentState["status"]) {
+    const tracked = trackedSessionTaskIdsRef.current.has(sessionId);
+    const isTerminal = ["completed", "failed", "cancelled", "idle"].includes(status);
+    if (isTerminal) trackedSessionTaskIdsRef.current.delete(sessionId);
+
     setSessionStatusOverrides((current) => {
       const next = { ...current };
-      if (status === "waiting_for_permission") next[sessionId] = "Review";
+      if (!tracked) delete next[sessionId];
+      else if (status === "waiting_for_permission") next[sessionId] = "Review";
       else if (status === "running") next[sessionId] = "Working";
+      else if (activeSessionIdRef.current === sessionId) delete next[sessionId];
       else if (status === "completed") next[sessionId] = "Completed";
       else if (status === "failed") next[sessionId] = "Blocked";
       else if (status === "cancelled") next[sessionId] = "Attention";
@@ -741,6 +764,8 @@ export function App() {
   }
 
   async function refreshWorkspaceAfterProjectSession(nextState: ProjectSessionState) {
+    activeSessionIdRef.current = nextState.activeSessionId;
+    acknowledgeSessionResult(nextState.activeSessionId);
     setProjectSessionState(nextState);
     setComposerError(nextState.lastError);
     const nextRuntime = await getRuntimeStatus();
@@ -783,7 +808,6 @@ export function App() {
         return;
       }
       setWorkspaceViewBeforeSettings(activeView);
-      setSettingsCategory(null);
       setInspectorOpenBeforeSettings(inspectorOpen);
       setActiveView("settings");
       setInspectorOpen(false);
@@ -1103,6 +1127,7 @@ export function App() {
     setStreamAnswer("");
     setComposerError(null);
     setAttachmentDrafts((current) => ({ ...current, [sessionId]: [] }));
+    markSessionTaskStarted(sessionId);
     markSessionBusy(sessionId, true);
     const submittedAt = Date.now();
     setAgentState((current) => {
@@ -1144,11 +1169,10 @@ export function App() {
         ...current,
         [sessionId]: current[sessionId]?.length ? current[sessionId] : attachments
       }));
+      updateSessionStatus(sessionId, "failed");
       if (activeSessionIdRef.current === sessionId) {
         setComposerError(error instanceof Error ? error.message : String(error));
-        const restored = await getAgentState(sessionId);
-        setAgentState(restored);
-        updateSessionStatus(sessionId, restored.status);
+        setAgentState(await getAgentState(sessionId));
       }
     } finally {
       markSessionBusy(sessionId, false);
@@ -1177,6 +1201,7 @@ export function App() {
     if (!sessionId || busySessionIds.has(sessionId)) return;
     setStreamAnswer("");
     setComposerError(null);
+    markSessionTaskStarted(sessionId);
     markSessionBusy(sessionId, true);
     try {
       const next = await retryAgentTask(sessionId);
@@ -1186,6 +1211,11 @@ export function App() {
         setComposerError(next.lastError);
       }
       await refreshAgentTrace(true, sessionId);
+    } catch (error) {
+      updateSessionStatus(sessionId, "failed");
+      if (activeSessionIdRef.current === sessionId) {
+        setComposerError(error instanceof Error ? error.message : String(error));
+      }
     } finally {
       markSessionBusy(sessionId, false);
     }
@@ -1370,6 +1400,7 @@ export function App() {
   ) {
     const sessionId = activeSession?.id;
     if (!sessionId || busySessionIds.has(sessionId)) return;
+    markSessionTaskStarted(sessionId);
     markSessionBusy(sessionId, true);
     setComposerError(null);
     setAgentState((current) =>
@@ -1394,11 +1425,10 @@ export function App() {
       }
       await refreshAgentTrace(true, sessionId);
     } catch (error) {
+      updateSessionStatus(sessionId, "failed");
       if (activeSessionIdRef.current === sessionId) {
         setComposerError(error instanceof Error ? error.message : String(error));
-        const restored = await getAgentState(sessionId);
-        setAgentState(restored);
-        updateSessionStatus(sessionId, restored.status);
+        setAgentState(await getAgentState(sessionId));
       }
     } finally {
       markSessionBusy(sessionId, false);
@@ -1677,54 +1707,34 @@ export function App() {
           <section
             className="settings-view"
             aria-label="Settings"
-            data-active-group={settingsCategory ?? "index"}
-            key={settingsCategory ?? "index"}
+            data-active-group={settingsCategory}
           >
-            <nav
-              className="workspace-page-navigation settings-page-navigation"
-              aria-label="Settings navigation"
-            >
+            <aside className="settings-sidebar" aria-label="Settings navigation">
               <button
-                className="workspace-return-button"
+                className="workspace-return-button settings-app-return"
                 type="button"
                 onClick={showTimelineView}
               >
                 <ArrowLeft aria-hidden="true" />
                 <span>Back to App</span>
               </button>
-              {activeSettingsCategory && (
-                <button
-                  className="icon-button settings-back"
-                  type="button"
-                  aria-label="Back to Settings"
-                  title="Back to Settings"
-                  onClick={() => setSettingsCategory(null)}
-                >
-                  <Settings aria-hidden="true" />
-                </button>
-              )}
-            </nav>
-            {settingsCategory === null && (
-              <nav className="settings-index" aria-label="Settings categories">
+              <nav className="settings-tabs" aria-label="Settings categories">
                 {settingsCategories.map((category) => (
                   <button
+                    className={settingsCategory === category.id ? "active" : ""}
                     type="button"
                     key={category.id}
+                    aria-current={settingsCategory === category.id ? "page" : undefined}
                     onClick={() => setSettingsCategory(category.id)}
                   >
-                    <span className="settings-index-icon">
-                      <SettingsCategoryIcon category={category.id} />
-                    </span>
-                    <span>
-                      <strong>{category.label}</strong>
-                      <small>{category.description}</small>
-                    </span>
-                    <ChevronRight aria-hidden="true" />
+                    <SettingsCategoryIcon category={category.id} />
+                    <span>{category.label}</span>
                   </button>
                 ))}
               </nav>
-            )}
+            </aside>
 
+            <div className="settings-detail">
             <section className="settings-section" data-settings-group="runtime">
               <div className="section-title">
                 <LayoutDashboard size={17} aria-hidden="true" />
@@ -2975,6 +2985,7 @@ export function App() {
                 </div>
               </dl>
             </section>
+            </div>
           </section>
         )}
       </section>
