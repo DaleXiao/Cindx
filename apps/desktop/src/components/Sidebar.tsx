@@ -1,14 +1,17 @@
 import {
   Activity,
+  Check,
   FolderOpen,
   LayoutDashboard,
   MoreHorizontal,
   Plus,
   Search,
-  Settings
+  Settings,
+  X
 } from "lucide-react";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { Menu } from "@tauri-apps/api/menu";
+import { useState } from "react";
 import type { ProjectView, SessionView } from "../tauri";
 
 const appIconUrl = new URL("../../src-tauri/icons/icon.png", import.meta.url).href;
@@ -63,6 +66,22 @@ export function Sidebar({
   onSessionDelete
 }: SidebarProps) {
   const activeProject = projects.find((project) => project.active) ?? null;
+  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+
+  function cancelSessionRename() {
+    setRenamingSessionId(null);
+    setRenameDraft("");
+  }
+
+  function commitSessionRename(session: SessionView) {
+    const name = renameDraft.trim();
+    if (!name) return;
+    cancelSessionRename();
+    if (name !== session.name) {
+      onSessionRename(session.id, name);
+    }
+  }
 
   async function openSessionMenu(session: SessionView, x: number, y: number) {
     const menu = await Menu.new({
@@ -71,10 +90,8 @@ export function Sidebar({
           id: `rename-${session.id}`,
           text: "Rename",
           action: () => {
-            const name = window.prompt("Rename session", session.name)?.trim();
-            if (name && name !== session.name) {
-              onSessionRename(session.id, name);
-            }
+            setRenameDraft(session.name);
+            setRenamingSessionId(session.id);
           }
         },
         {
@@ -249,32 +266,88 @@ export function Sidebar({
                               void openSessionMenu(session, event.clientX, event.clientY);
                             }}
                           >
-                            <button
-                              className={`nav-item session-item ${
-                                session.active && activeView === "timeline" ? "active" : ""
-                              }`}
-                              onClick={() => onSessionSelect(session.id)}
-                              type="button"
-                              disabled={busy}
-                            >
-                              <span>
-                                <strong>{session.name}</strong>
-                              </span>
-                            </button>
-                            <button
-                              className="session-more"
-                              type="button"
-                              aria-label={`Session actions for ${session.name}`}
-                              title="Session actions"
-                              disabled={busy}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                const rect = event.currentTarget.getBoundingClientRect();
-                                void openSessionMenu(session, rect.right, rect.bottom);
-                              }}
-                            >
-                              <MoreHorizontal aria-hidden="true" />
-                            </button>
+                            {renamingSessionId === session.id ? (
+                              <form
+                                className="session-rename-form"
+                                onSubmit={(event) => {
+                                  event.preventDefault();
+                                  commitSessionRename(session);
+                                }}
+                                onBlur={(event) => {
+                                  if (
+                                    !event.relatedTarget ||
+                                    !event.currentTarget.contains(event.relatedTarget as Node)
+                                  ) {
+                                    cancelSessionRename();
+                                  }
+                                }}
+                              >
+                                <input
+                                  className="session-rename-input"
+                                  autoFocus
+                                  required
+                                  value={renameDraft}
+                                  aria-label={`Rename ${session.name}`}
+                                  onChange={(event) => setRenameDraft(event.target.value)}
+                                  onFocus={(event) => event.currentTarget.select()}
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Escape") {
+                                      event.preventDefault();
+                                      cancelSessionRename();
+                                    }
+                                  }}
+                                />
+                                <button
+                                  className="session-rename-action"
+                                  type="submit"
+                                  aria-label="Save session name"
+                                  title="Save"
+                                  disabled={busy || !renameDraft.trim()}
+                                  onPointerDown={(event) => event.preventDefault()}
+                                >
+                                  <Check aria-hidden="true" />
+                                </button>
+                                <button
+                                  className="session-rename-action"
+                                  type="button"
+                                  aria-label="Cancel session rename"
+                                  title="Cancel"
+                                  onPointerDown={(event) => event.preventDefault()}
+                                  onClick={cancelSessionRename}
+                                >
+                                  <X aria-hidden="true" />
+                                </button>
+                              </form>
+                            ) : (
+                              <>
+                                <button
+                                  className={`nav-item session-item ${
+                                    session.active && activeView === "timeline" ? "active" : ""
+                                  }`}
+                                  onClick={() => onSessionSelect(session.id)}
+                                  type="button"
+                                  disabled={busy}
+                                >
+                                  <span>
+                                    <strong>{session.name}</strong>
+                                  </span>
+                                </button>
+                                <button
+                                  className="session-more"
+                                  type="button"
+                                  aria-label={`Session actions for ${session.name}`}
+                                  title="Session actions"
+                                  disabled={busy}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    const rect = event.currentTarget.getBoundingClientRect();
+                                    void openSessionMenu(session, rect.right, rect.bottom);
+                                  }}
+                                >
+                                  <MoreHorizontal aria-hidden="true" />
+                                </button>
+                              </>
+                            )}
                           </div>
                         ))
                       )}
