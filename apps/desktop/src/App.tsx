@@ -34,6 +34,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Inspector, type InspectorTab } from "./components/Inspector";
 import { Composer } from "./components/Composer";
+import { DisclosureTriangle } from "./components/DisclosureTriangle";
 import { Sidebar, type WorkspaceView } from "./components/Sidebar";
 import { TraceStatusIcon } from "./components/TraceStatusIcon";
 import {
@@ -2084,7 +2085,10 @@ export function App() {
                 <h2>Orchestration</h2>
               </div>
               <details className="advanced-settings">
-                <summary>Manual workflow test</summary>
+                <summary>
+                  <DisclosureTriangle />
+                  <span>Manual workflow test</span>
+                </summary>
                 <div className="tool-runner">
                 <label>
                   <span>Policy</span>
@@ -2158,7 +2162,10 @@ export function App() {
                 <span>{ragBusy ? "Working" : "Index workspace"}</span>
               </button>
               <details className="advanced-settings">
-                <summary>Test retrieval</summary>
+                <summary>
+                  <DisclosureTriangle />
+                  <span>Test retrieval</span>
+                </summary>
                 <div className="tool-runner">
                 <label>
                   <span>Question</span>
@@ -2212,7 +2219,10 @@ export function App() {
                 </div>
               </dl>
               <details className="advanced-settings">
-                <summary>Manual browser controls</summary>
+                <summary>
+                  <DisclosureTriangle />
+                  <span>Manual browser controls</span>
+                </summary>
                 <div className="tool-runner">
                 <label>
                   <span>URL or query</span>
@@ -2324,7 +2334,10 @@ export function App() {
                 </div>
               </dl>
               <details className="advanced-settings">
-                <summary>Manual tool runner</summary>
+                <summary>
+                  <DisclosureTriangle />
+                  <span>Manual tool runner</span>
+                </summary>
                 <div className="tool-runner">
                 <label>
                   <span>Tool</span>
@@ -2477,7 +2490,10 @@ export function App() {
                 )}
               </div>
               <details className="advanced-settings">
-                <summary>Add stdio server</summary>
+                <summary>
+                  <DisclosureTriangle />
+                  <span>Add stdio server</span>
+                </summary>
                 <div className="provider-form">
                   <div className="role-grid">
                     <label>

@@ -808,6 +808,7 @@ struct AgentTraceStepView {
 struct AgentTaskInput {
     prompt: String,
     session_id: String,
+    current_time: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2045,6 +2046,10 @@ fn run_agent_task_blocking(
     maybe_auto_name_session(&state, &session_id, &prompt)?;
     run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
     run_context.insert("agent_run_id".to_string(), unique_id("agent-run"));
+    run_context.insert(
+        "current_time".to_string(),
+        normalized_current_time_context(&input.current_time),
+    );
     let requested_policy = parse_policy(&config.collaboration_policy)
         .unwrap_or(OrchestrationPolicy::AutoRouter);
     let mut routing_context =
@@ -2326,6 +2331,16 @@ fn resolve_agent_permission_blocking(
         .get_permission_request(&request_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "permission request not found".to_string())?;
+    if matches!(&decision, PermissionDecision::AllowForSession)
+        && matches!(&request.risk, PermissionRisk::Destructive)
+    {
+        return agent_state_for_session(
+            &store,
+            Some("destructive permissions can only be allowed once".to_string()),
+            Some(&session_id),
+        )
+        .map_err(|error| error.to_string());
+    }
     if let Some(agent_run_id) = request.metadata.get("agent_run_id") {
         run_context.insert("agent_run_id".to_string(), agent_run_id.clone());
     }
@@ -2377,9 +2392,7 @@ fn resolve_agent_permission_blocking(
             )
             .map_err(|error| error.to_string())?
             .into_iter()
-            .filter(|pending| {
-                pending.action == request.action && pending.scope == request.scope
-            })
+            .filter(|pending| !matches!(&pending.risk, PermissionRisk::Destructive))
             .collect::<Vec<_>>()
         };
         for pending_request in pending {
@@ -3567,6 +3580,20 @@ pub fn run() {
             allow_exit: AtomicBool::new(false),
             quit_prompt_active: AtomicBool::new(false),
         })
+        .setup(|app| {
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(error) = window_vibrancy::apply_vibrancy(
+                    &window,
+                    window_vibrancy::NSVisualEffectMaterial::HeaderView,
+                    Some(window_vibrancy::NSVisualEffectState::FollowsWindowActiveState),
+                    None,
+                ) {
+                    append_startup_log(&format!("titlebar vibrancy unavailable: {error}"));
+                }
+            }
+            Ok(())
+        })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if !confirm_application_exit(window.app_handle()) {
@@ -4526,7 +4553,7 @@ fn run_collaboration_stage(
         messages: vec![
             Message {
                 role: MessageRole::System,
-                content: config.agent_system_prompt.clone(),
+                content: agent_system_prompt_for_run(&config.agent_system_prompt, run_context),
                 metadata: Metadata::new(),
             },
             Message {
@@ -4635,12 +4662,14 @@ fn continue_agent_loop(
     let tools = registry
         .exposure_plan(&prompt, config.context_window_tokens)
         .inline;
+    let agent_system_prompt =
+        agent_system_prompt_for_run(&config.agent_system_prompt, &run_context);
 
     loop {
         let request = model_request_for_turn_with_system_prompt(
             &runtime,
             &tools,
-            Some(&config.agent_system_prompt),
+            Some(&agent_system_prompt),
         );
         let request_id = unique_id("agent-model");
         let started_at_ms = current_time_millis();
@@ -5336,8 +5365,6 @@ fn agent_session_permission_granted(
     };
     Ok(store.list_permission_audits()?.iter().any(|audit| {
         audit.request.task_id == phase16_task_id()
-            && audit.request.action == request.action
-            && audit.request.scope == request.scope
             && audit.request.metadata.get("session_id").map(String::as_str) == Some(session_id)
             && audit
                 .resolution
@@ -8176,6 +8203,27 @@ fn normalized_agent_system_prompt(value: &str) -> String {
     }
 }
 
+fn normalized_current_time_context(value: &str) -> String {
+    let context = sanitize_config_value(value.trim())
+        .chars()
+        .take(256)
+        .collect::<String>();
+    if context.is_empty() {
+        format!("Unix time {} ms (UTC)", current_time_millis())
+    } else {
+        context
+    }
+}
+
+fn agent_system_prompt_for_run(base_prompt: &str, run_context: &Metadata) -> String {
+    let Some(current_time) = run_context.get("current_time") else {
+        return base_prompt.to_string();
+    };
+    format!(
+        "{base_prompt}\n\nRuntime context computed automatically at the start of this user turn:\nCurrent date and time: {current_time}\nTreat this time as authoritative for this turn."
+    )
+}
+
 fn config_hex_encode(value: &str) -> String {
     value
         .as_bytes()
@@ -8419,6 +8467,18 @@ mod tests {
 
         assert_eq!(config_hex_decode(&encoded).as_deref(), Some(prompt));
         assert!(config_hex_decode("not-hex").is_none());
+    }
+
+    #[test]
+    fn agent_system_prompt_includes_the_time_computed_for_the_user_turn() {
+        let context = [("current_time".to_string(), "2026-07-11 10:30 CST".to_string())]
+            .into_iter()
+            .collect();
+        let prompt = agent_system_prompt_for_run("Be concise.", &context);
+
+        assert!(prompt.starts_with("Be concise."));
+        assert!(prompt.contains("Current date and time: 2026-07-11 10:30 CST"));
+        assert!(prompt.contains("authoritative for this turn"));
     }
 
     #[test]
@@ -9082,7 +9142,7 @@ mod tests {
     }
 
     #[test]
-    fn session_permission_grant_is_reused_only_for_matching_scope() {
+    fn session_permission_grant_covers_non_destructive_requests_in_the_same_session() {
         let mut store = SqliteStore::in_memory().expect("store should open");
         let granted = PermissionRequest {
             id: PermissionRequestId("session-grant".to_string()),
@@ -9116,10 +9176,11 @@ mod tests {
             .expect("matching grant should load"));
         assert!(!agent_session_permission_granted(&store, &next, Some("session-b"))
             .expect("other session should load"));
+        next.action = "file.write".to_string();
         next.scope = "crates/tools".to_string();
-        assert!(!agent_session_permission_granted(&store, &next, Some("session-a"))
-            .expect("other scope should load"));
-        next.scope = ".".to_string();
+        next.risk = PermissionRisk::Write;
+        assert!(agent_session_permission_granted(&store, &next, Some("session-a"))
+            .expect("session grant should cover another non-destructive request"));
         next.risk = PermissionRisk::Destructive;
         assert!(!agent_session_permission_granted(&store, &next, Some("session-a"))
             .expect("destructive grant should not persist"));

@@ -23,6 +23,9 @@ const sessionThreadSource = read("apps/desktop/src/components/SessionThread.tsx"
 const composerSource = read("apps/desktop/src/components/Composer.tsx");
 const inspectorSource = read("apps/desktop/src/components/Inspector.tsx");
 const sidebarSource = read("apps/desktop/src/components/Sidebar.tsx");
+const disclosureTriangleSource = read(
+  "apps/desktop/src/components/DisclosureTriangle.tsx"
+);
 const traceStatusIconSource = read("apps/desktop/src/components/TraceStatusIcon.tsx");
 const styles = read("apps/desktop/src/styles.css");
 const tauriBridge = read("apps/desktop/src/tauri.ts");
@@ -230,8 +233,13 @@ assert(
   appSource.includes("window-toolbar-panel-left") &&
     appSource.includes("window-toolbar-panel-right") &&
     styles.includes("backdrop-filter: saturate(1.3) blur(18px)") &&
-    styles.includes("background: rgba(250, 250, 250, 0.76)"),
-  "Titlebar regions must use one restrained translucent material"
+    styles.includes("background: rgba(250, 250, 250, 0.62)") &&
+    tauriConfig.app.macOSPrivateApi === true &&
+    tauriConfig.app.windows.every((window) => window.transparent === true) &&
+    cargoToml.includes('window-vibrancy = "0.6.0"') &&
+    rustLib.includes("window_vibrancy::apply_vibrancy") &&
+    rustLib.includes("NSVisualEffectMaterial::HeaderView"),
+  "Titlebar must expose the native macOS material through a translucent web layer"
 );
 assert(composerSource.includes('event.key !== "Enter"'), "Composer must support Enter to send");
 assert(composerSource.includes("event.shiftKey"), "Composer must reserve Shift+Enter for a new line");
@@ -292,11 +300,23 @@ assert(
   "Assistant output must begin without a robot icon or Cindx label"
 );
 assert(
-  sessionThreadSource.includes("thread-event-disclosure") &&
-    sessionThreadSource.includes("thread-tool-message") &&
-    sessionThreadSource.includes('aria-label="Done"') &&
-    styles.includes(".thread-state-check"),
-  "Tool activity must default to compact disclosures and render done as a check"
+  sessionThreadSource.includes("groupThreadItems") &&
+    sessionThreadSource.includes("containsToolActivity") &&
+    sessionThreadSource.includes("thread-tool-chain") &&
+    sessionThreadSource.includes("<ToolChainItem") &&
+    styles.includes(".thread-tool-chain-items"),
+  "A complete tool activity chain must default to one parent disclosure"
+);
+assert(
+  disclosureTriangleSource.includes('import { Triangle } from "lucide-react"') &&
+    (sessionThreadSource.match(/<DisclosureTriangle/g)?.length ?? 0) >= 3 &&
+    (inspectorSource.match(/<DisclosureTriangle/g)?.length ?? 0) >= 2 &&
+    (appSource.match(/<DisclosureTriangle/g)?.length ?? 0) >= 5 &&
+    !sessionThreadSource.includes("ChevronRight") &&
+    !inspectorSource.includes("ChevronRight") &&
+    !styles.includes("advanced-settings summary::before") &&
+    styles.includes("details[open] > summary .disclosure-triangle"),
+  "Every disclosure indicator must use the shared equilateral triangle icon"
 );
 assert(
   sessionThreadSource.includes("thread-thinking") &&
@@ -451,8 +471,8 @@ assert(
 );
 assert(
   styles.includes(".advanced-settings summary::-webkit-details-marker") &&
-    styles.includes("border-left: 5px solid currentColor") &&
-    styles.includes(".advanced-settings[open] summary::before"),
+    appSource.includes("<DisclosureTriangle />") &&
+    styles.includes(".disclosure-triangle"),
   "Expandable settings must use a consistent equilateral disclosure marker"
 );
 assert(
@@ -472,10 +492,27 @@ assert(
 );
 assert(
   tauriBridge.includes("runAgentTask(prompt: string, sessionId: string)") &&
-    tauriBridge.includes("input: { prompt, sessionId }") &&
+    tauriBridge.includes("currentTime: currentAgentTimeContext()") &&
     rustLib.includes("project_session_metadata_for_session") &&
     rustLib.includes("event.metadata.get(\"session_id\")"),
   "Agent commands and event boundaries must remain isolated by session"
+);
+assert(
+  tauriBridge.includes("function currentAgentTimeContext()") &&
+    rustLib.includes("normalized_current_time_context") &&
+    rustLib.includes("agent_system_prompt_for_run") &&
+    rustLib.includes("Current date and time: {current_time}"),
+  "Every new agent turn must receive an automatically computed current time"
+);
+assert(
+  rustLib.includes(
+    "session_permission_grant_covers_non_destructive_requests_in_the_same_session"
+  ) &&
+    rustLib.includes(
+      ".filter(|pending| !matches!(&pending.risk, PermissionRisk::Destructive))"
+    ) &&
+    rustLib.includes("destructive permissions can only be allowed once"),
+  "Allow session must cover future non-destructive requests without covering destructive tools"
 );
 assert(
   rustLib.includes("execute_agent_tool_invocation") &&

@@ -1,8 +1,6 @@
 import {
   Activity,
   Bot,
-  Check,
-  ChevronRight,
   Copy,
   FileText,
   Pencil,
@@ -21,6 +19,8 @@ import {
 } from "react";
 import Markdown from "markdown-to-jsx";
 import type { AgentState, ChatMessageView, TimelineEntry } from "../tauri";
+import { DisclosureTriangle } from "./DisclosureTriangle";
+import { TraceStatusIcon } from "./TraceStatusIcon";
 
 export type SessionThreadSelection =
   | {
@@ -59,6 +59,19 @@ type MinimapMarker = {
   targetIndex: number;
 };
 
+type ThreadRow =
+  | {
+      type: "item";
+      item: SessionThreadSelection;
+      itemIndex: number;
+    }
+  | {
+      type: "tool-chain";
+      id: string;
+      items: SessionThreadSelection[];
+      itemIndex: number;
+    };
+
 const MIN_MINIMAP_MARKERS = 2;
 const MAX_MINIMAP_MARKERS = 32;
 const MINIMAP_MARKER_GAP = 14;
@@ -92,8 +105,149 @@ function toolMessageSummary(content: string) {
   const status = content.match(/^status=(.+)$/m)?.[1]?.trim();
   return {
     label: tool || "Tool output",
-    succeeded: status === "succeeded" || status === "completed"
+    status: status || "done"
   };
+}
+
+function toolMessageDetail(content: string) {
+  return (
+    content
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line && !/^(tool|status)=/i.test(line)) ?? "Tool output"
+  );
+}
+
+function isToolRequestPlaceholder(item: SessionThreadSelection) {
+  return (
+    item.type === "message" &&
+    item.message.role === "assistant" &&
+    item.message.content.trim().toLowerCase() === "tool request"
+  );
+}
+
+function isActivityCandidate(item: SessionThreadSelection) {
+  return (
+    item.type === "event" ||
+    (item.type === "message" && item.message.role === "tool") ||
+    isToolRequestPlaceholder(item)
+  );
+}
+
+function containsToolActivity(items: SessionThreadSelection[]) {
+  return items.some(
+    (item) =>
+      (item.type === "event" && ["tool", "permission"].includes(item.event.kind)) ||
+      (item.type === "message" && item.message.role === "tool")
+  );
+}
+
+function groupThreadItems(items: SessionThreadSelection[]): ThreadRow[] {
+  const rows: ThreadRow[] = [];
+  let index = 0;
+
+  while (index < items.length) {
+    if (!isActivityCandidate(items[index])) {
+      rows.push({ type: "item", item: items[index], itemIndex: index });
+      index += 1;
+      continue;
+    }
+
+    let end = index + 1;
+    while (end < items.length && isActivityCandidate(items[end])) end += 1;
+    const candidates = items.slice(index, end);
+    if (containsToolActivity(candidates)) {
+      rows.push({
+        type: "tool-chain",
+        id: `tool-chain-${candidates[0].id}`,
+        items: candidates,
+        itemIndex: index
+      });
+    } else {
+      candidates.forEach((item, offset) => {
+        rows.push({ type: "item", item, itemIndex: index + offset });
+      });
+    }
+    index = end;
+  }
+
+  return rows;
+}
+
+function threadItemTimestamp(item: SessionThreadSelection) {
+  return item.type === "event" ? item.event.timestampMs : item.message.timestampMs;
+}
+
+function toolChainStatus(items: SessionThreadSelection[]) {
+  const statuses = items.flatMap((item) => {
+    if (item.type === "event") return [item.event.state.toLowerCase()];
+    if (item.message.role === "tool") return [toolMessageSummary(item.message.content).status];
+    return [];
+  });
+  if (statuses.some((status) => ["failed", "error", "cancelled", "denied"].includes(status))) {
+    return "failed";
+  }
+  if (
+    statuses.length > 0 &&
+    statuses.every((status) => ["done", "completed", "succeeded"].includes(status))
+  ) {
+    return "done";
+  }
+  if (statuses.some((status) => ["pending", "waiting"].includes(status))) return "waiting";
+  return "running";
+}
+
+function ToolChainItem({
+  item,
+  selected,
+  onSelect
+}: {
+  item: SessionThreadSelection;
+  selected: boolean;
+  onSelect: (selection: SessionThreadSelection) => void;
+}) {
+  if (isToolRequestPlaceholder(item)) return null;
+
+  if (item.type === "event") {
+    return (
+      <button
+        className={`thread-tool-chain-item ${selected ? "selected" : ""}`}
+        type="button"
+        onClick={() => onSelect(item)}
+      >
+        <span className="thread-event-icon">
+          <EventIcon event={item.event} />
+        </span>
+        <span className="thread-tool-chain-copy">
+          <strong>{item.event.label}</strong>
+          <small>{item.event.detail}</small>
+        </span>
+        <span className="thread-event-meta">
+          <TraceStatusIcon status={item.event.state} />
+          <time>{formatThreadTime(item.event.timestampMs)}</time>
+        </span>
+      </button>
+    );
+  }
+
+  const summary = toolMessageSummary(item.message.content);
+  return (
+    <button
+      className={`thread-tool-chain-item ${selected ? "selected" : ""}`}
+      type="button"
+      onClick={() => onSelect(item)}
+    >
+      <TerminalSquare aria-hidden="true" />
+      <span className="thread-tool-chain-copy">
+        <strong>{summary.label}</strong>
+        <small>{toolMessageDetail(item.message.content)}</small>
+      </span>
+      <span className="thread-event-meta">
+        <TraceStatusIcon status={summary.status} />
+        <time>{formatThreadTime(item.message.timestampMs)}</time>
+      </span>
+    </button>
+  );
 }
 
 function MarkdownLink({
@@ -189,6 +343,7 @@ export function SessionThread({
       return leftTimestamp - rightTimestamp;
     });
   }, [messages, timeline]);
+  const threadRows = useMemo(() => groupThreadItems(items), [items]);
   const hasStreamAnswer = Boolean(streamAnswer);
   const minimapMarkers = useMemo<MinimapMarker[]>(() => {
     const markers: MinimapMarker[] = [];
@@ -432,9 +587,43 @@ export function SessionThread({
         aria-label="Session thread"
         ref={threadRef}
       >
-        {items.map((item, itemIndex) => {
+        {threadRows.map((row) => {
+          if (row.type === "tool-chain") {
+            const visibleItems = row.items.filter((item) => !isToolRequestPlaceholder(item));
+            const latestTimestamp = Math.max(...row.items.map(threadItemTimestamp));
+            return (
+              <details
+                className={`thread-tool-chain ${
+                  row.items.some((item) => item.id === selectedId) ? "selected" : ""
+                }`}
+                key={row.id}
+                data-minimap-id={row.id}
+                data-minimap-index={row.itemIndex}
+                data-minimap-kind="tool-chain"
+              >
+                <summary>
+                  <DisclosureTriangle />
+                  <TerminalSquare aria-hidden="true" />
+                  <strong>Tool activity</strong>
+                  <TraceStatusIcon status={toolChainStatus(row.items)} />
+                  <time>{formatThreadTime(latestTimestamp)}</time>
+                </summary>
+                <div className="thread-tool-chain-items">
+                  {visibleItems.map((item) => (
+                    <ToolChainItem
+                      item={item}
+                      selected={selectedId === item.id}
+                      onSelect={onSelect}
+                      key={item.id}
+                    />
+                  ))}
+                </div>
+              </details>
+            );
+          }
+
+          const { item, itemIndex } = row;
           if (item.type === "event") {
-            const isDone = item.event.state.toLowerCase() === "done";
             return (
               <details
                 className={`thread-event-disclosure ${selectedId === item.id ? "selected" : ""}`}
@@ -444,7 +633,7 @@ export function SessionThread({
                 data-minimap-kind="event"
               >
                 <summary onClick={() => onSelect(item)}>
-                  <ChevronRight className="thread-disclosure-chevron" aria-hidden="true" />
+                  <DisclosureTriangle />
                   <span className="thread-event-icon">
                     <EventIcon event={item.event} />
                   </span>
@@ -452,11 +641,7 @@ export function SessionThread({
                     <strong>{item.event.label}</strong>
                   </span>
                   <span className="thread-event-meta">
-                    {isDone ? (
-                      <Check className="thread-state-check" aria-label="Done" />
-                    ) : (
-                      <em>{item.event.state}</em>
-                    )}
+                    <TraceStatusIcon status={item.event.state} />
                     <time>{formatThreadTime(item.event.timestampMs)}</time>
                   </span>
                 </summary>
@@ -484,12 +669,10 @@ export function SessionThread({
                 data-minimap-kind={item.message.role}
               >
                 <summary onClick={() => onSelect(item)}>
-                  <ChevronRight className="thread-disclosure-chevron" aria-hidden="true" />
+                  <DisclosureTriangle />
                   <TerminalSquare aria-hidden="true" />
                   <strong>{summary.label}</strong>
-                  {summary.succeeded && (
-                    <Check className="thread-state-check" aria-label="Done" />
-                  )}
+                  <TraceStatusIcon status={summary.status} />
                   <time>{formatThreadTime(item.message.timestampMs)}</time>
                 </summary>
                 <button
