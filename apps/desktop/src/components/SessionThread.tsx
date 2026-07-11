@@ -75,10 +75,12 @@ type ThreadRow =
 const MIN_MINIMAP_MARKERS = 2;
 const MAX_MINIMAP_MARKERS = 32;
 const MINIMAP_MARKER_GAP = 14;
-const MINIMAP_MARKER_START = 8;
 
-function minimapMarkerPosition(index: number) {
-  return `${MINIMAP_MARKER_START + index * MINIMAP_MARKER_GAP}px`;
+function minimapMarkerPosition(index: number, markerCount: number) {
+  const centerIndex = Math.max(0, markerCount - 1) / 2;
+  const centerOffset = (index - centerIndex) * MINIMAP_MARKER_GAP;
+  if (centerOffset === 0) return "50%";
+  return `calc(50% ${centerOffset < 0 ? "-" : "+"} ${Math.abs(centerOffset)}px)`;
 }
 
 function formatThreadTime(timestampMs: number) {
@@ -454,7 +456,7 @@ export function SessionThread({
     if (!minimap || minimapMarkers.length === 0) return null;
     const bounds = minimap.getBoundingClientRect();
     const groupHeight = (minimapMarkers.length - 1) * MINIMAP_MARKER_GAP;
-    const groupStart = MINIMAP_MARKER_START;
+    const groupStart = (bounds.height - groupHeight) / 2;
     const localY = clientY - bounds.top;
     if (
       localY < groupStart - MINIMAP_MARKER_GAP / 2 ||
@@ -812,13 +814,15 @@ export function SessionThread({
                 }
                 data-edge-fade={index < 3 ? index : undefined}
                 key={marker.id}
-                style={{ top: minimapMarkerPosition(index) }}
+                style={{ top: minimapMarkerPosition(index, minimapMarkers.length) }}
               />
             );
           })}
           <span
             className="thread-minimap-position"
-            style={{ top: minimapMarkerPosition(minimapPositionIndex) }}
+            style={{
+              top: minimapMarkerPosition(minimapPositionIndex, minimapMarkers.length)
+            }}
           />
         </div>
         {previewMinimapIndex !== null && minimapMarkers[previewMinimapIndex] && (
@@ -827,7 +831,8 @@ export function SessionThread({
             role="tooltip"
             style={{
               top: `clamp(48px, ${minimapMarkerPosition(
-                previewMinimapIndex
+                previewMinimapIndex,
+                minimapMarkers.length
               )}, calc(100% - 48px))`
             }}
           >

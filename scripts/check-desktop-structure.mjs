@@ -268,14 +268,15 @@ assert(
 assert(
   sessionThreadSource.includes("minimapMarkerPosition") &&
     sessionThreadSource.includes("MINIMAP_MARKER_GAP = 14") &&
-    sessionThreadSource.includes("MINIMAP_MARKER_START = 8") &&
-    sessionThreadSource.includes("const groupStart = MINIMAP_MARKER_START") &&
+    sessionThreadSource.includes("Math.max(0, markerCount - 1) / 2") &&
+    sessionThreadSource.includes("const groupStart = (bounds.height - groupHeight) / 2") &&
+    sessionThreadSource.includes("minimapMarkerPosition(index, minimapMarkers.length)") &&
     sessionThreadSource.includes("MIN_MINIMAP_MARKERS = 2") &&
     sessionThreadSource.includes("data-edge-fade") &&
     sessionThreadSource.includes("data-wave-distance") &&
     sessionThreadSource.includes("thread-minimap-preview") &&
     sessionThreadSource.includes("}, 420)"),
-  "Minimap markers must be evenly spaced with a five-tick hover wave and delayed preview"
+  "Minimap markers must grow evenly from the vertical center with a five-tick hover wave and delayed preview"
 );
 assert(
   sessionThreadSource.includes("MAX_MINIMAP_MARKERS = 32") &&
