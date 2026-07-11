@@ -136,12 +136,11 @@ assert(
   "The macOS titlebar must hide its title and host the pane controls"
 );
 const titlebarHeight = 46;
-const macOSTrafficLightSize = 14;
-const centeredTrafficLightTop = (titlebarHeight - macOSTrafficLightSize) / 2;
+const titlebarCenterY = titlebarHeight / 2;
 
 assert(
   tauriConfig.app.windows.every(
-    (window) => window.trafficLightPosition?.y === centeredTrafficLightTop
+    (window) => window.trafficLightPosition?.y === titlebarCenterY
   ) &&
     styles.includes(`--titlebar-height: ${titlebarHeight}px`) &&
     styles.includes("--titlebar-control-size: 28px") &&
