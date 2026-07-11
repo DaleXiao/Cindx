@@ -148,7 +148,7 @@ assert(
 );
 const titlebarHeight = 46;
 const titlebarCenterY = titlebarHeight / 2;
-const macOSTrafficLightOpticalOffsetY = 2;
+const macOSTrafficLightOpticalOffsetY = -2;
 
 assert(
   tauriConfig.app.windows.every(
@@ -270,16 +270,14 @@ assert(
 assert(
   appSource.includes("window-toolbar-panel-left") &&
     appSource.includes("window-toolbar-panel-right") &&
-    styles.includes("backdrop-filter: saturate(1.3) blur(18px)") &&
-    styles.includes("background: rgba(250, 250, 250, 0.62)") &&
+    styles.includes("background: rgba(255, 255, 255, 0.96)") &&
+    !styles.includes("backdrop-filter") &&
     /\.window-toolbar-panel \{[\s\S]*?background: var\(--panel\);/.test(styles) &&
     tauriConfig.app.macOSPrivateApi === true &&
     tauriConfig.app.windows.every((window) => window.transparent === true) &&
     cargoToml.includes('features = ["macos-private-api"]') &&
-    cargoToml.includes('window-vibrancy = "0.6.0"') &&
-    rustLib.includes("window_vibrancy::apply_vibrancy") &&
-    rustLib.includes("NSVisualEffectMaterial::HeaderView"),
-  "Titlebar must keep glass in the workspace while matching side panes with opaque panel color"
+    !rustLib.includes("window_vibrancy::apply_vibrancy"),
+  "Titlebar must keep a clean translucent white workspace surface without glass blur"
 );
 assert(composerSource.includes('event.key !== "Enter"'), "Composer must support Enter to send");
 assert(composerSource.includes("event.shiftKey"), "Composer must reserve Shift+Enter for a new line");
@@ -568,10 +566,16 @@ assert(
   "Output previews must support full screen, close, default-app open, and file references"
 );
 assert(
-  /\.inspector-debug-body \{[\s\S]*?right: 8px;[\s\S]*?left: 8px;[\s\S]*?border-radius: 8px;/.test(
+  /\.inspector-debug-body \{[\s\S]*?right: 2px;[\s\S]*?bottom: 44px;[\s\S]*?left: 2px;[\s\S]*?border-radius: 0;/.test(
     styles
-  ),
-  "The floating debug drawer must keep subtle rounded side insets"
+  ) &&
+    /\.inspector-debug \.disclosure-triangle \{[\s\S]*?transform: rotate\(0deg\);/.test(
+      styles
+    ) &&
+    /\.inspector-debug\[data-open="true"\] \.disclosure-triangle \{[\s\S]*?transform: rotate\(180deg\);/.test(
+      styles
+    ),
+  "The debug drawer must attach to its bar with narrow insets and use up/down triangles"
 );
 assert(
   tauriBridge.includes('invoke<string>("read_artifact_image"') &&
