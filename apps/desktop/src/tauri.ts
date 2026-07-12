@@ -472,8 +472,10 @@ export type AgentTraceState = {
 export type ModelStreamDelta = {
   taskId: string;
   requestId: string;
+  sessionId: string | null;
   delta: string;
   done: boolean;
+  reset: boolean;
   error: string | null;
 };
 

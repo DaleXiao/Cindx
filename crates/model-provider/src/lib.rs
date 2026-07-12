@@ -1,9 +1,15 @@
 use agent_core::{Message, MessageRole, Metadata, ModelRole, ToolSpec};
 use base64::Engine;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
+
+pub const MODEL_REQUEST_CANCELLED: &str = "model request cancelled";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelCallMode {
@@ -217,6 +223,159 @@ fn execute_curl(
         .map_err(|error| ModelError::new(format!("failed to wait for curl: {error}")))
 }
 
+fn consume_streaming_child(
+    mut child: Child,
+    model: &str,
+    base_url: &str,
+    on_delta: &mut impl FnMut(&str),
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<ModelResponse, ModelError> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ModelError::new("curl stdout was not available"))?;
+    let (line_sender, line_receiver) = mpsc::channel();
+    let reader_handle = thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if line_sender.send(Ok(line)).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = line_sender.send(Err(format!("failed to read model stream: {error}")));
+                    break;
+                }
+            }
+        }
+    });
+    let mut raw_response = String::new();
+    let mut answer = String::new();
+    let mut streamed_tool_calls = BTreeMap::<usize, StreamingToolCall>::new();
+
+    loop {
+        if should_cancel() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ModelError::new(MODEL_REQUEST_CANCELLED));
+        }
+        match line_receiver.recv_timeout(Duration::from_millis(40)) {
+            Ok(Ok(line)) => {
+                raw_response.push_str(&line);
+                let event = match parse_stream_event(&line) {
+                    Ok(event) => event,
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(error);
+                    }
+                };
+                if let Some(event) = event {
+                    if let Some(delta) = event.content {
+                        answer.push_str(&delta);
+                        on_delta(&delta);
+                    }
+                    for delta in event.tool_calls {
+                        streamed_tool_calls
+                            .entry(delta.index)
+                            .or_default()
+                            .merge(delta);
+                    }
+                }
+            }
+            Ok(Err(error)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader_handle.join();
+                return Err(ModelError::new(error));
+            }
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let status = child
+        .wait()
+        .map_err(|error| ModelError::new(format!("failed to wait for curl: {error}")))?;
+    let _ = reader_handle.join();
+    let mut stderr = String::new();
+    if let Some(mut stream) = child.stderr.take() {
+        stream
+            .read_to_string(&mut stderr)
+            .map_err(|error| ModelError::new(format!("failed to read curl stderr: {error}")))?;
+    }
+
+    if !status.success() {
+        let provider_error = parse_provider_error(&raw_response)
+            .unwrap_or_else(|| stderr.trim().to_string())
+            .trim()
+            .to_string();
+        return Err(ModelError::new(if provider_error.is_empty() {
+            format!("model request failed with status {status}")
+        } else {
+            provider_error
+        }));
+    }
+
+    let mut metadata = Metadata::new();
+    metadata.insert("provider".to_string(), "openai-compatible".to_string());
+    metadata.insert("model".to_string(), model.to_string());
+    metadata.insert("base_url".to_string(), base_url.to_string());
+    metadata.insert("streamed".to_string(), "true".to_string());
+    let mut tool_calls = streamed_tool_calls
+        .into_iter()
+        .filter_map(|(index, call)| call.finish(index))
+        .collect::<Vec<_>>();
+    let mut raw_tool_calls_json = None;
+    if answer.is_empty() && tool_calls.is_empty() {
+        let fallback = parse_model_response(&raw_response)?;
+        answer = fallback.message.content;
+        tool_calls = fallback.tool_calls;
+        raw_tool_calls_json = fallback.raw_tool_calls_json;
+        for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+            if let Some(value) = fallback.metadata.get(key) {
+                metadata.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    metadata.insert("tool_calls".to_string(), tool_calls.len().to_string());
+    if raw_tool_calls_json.is_none() && !tool_calls.is_empty() {
+        raw_tool_calls_json = Some(
+            serde_json::to_string(
+                &tool_calls
+                    .iter()
+                    .map(|call| {
+                        serde_json::json!({
+                            "id": call.id,
+                            "type": "function",
+                            "function": {
+                                "name": call.name,
+                                "arguments": call.arguments_json,
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap_or_else(|_| "[]".to_string()),
+        );
+    }
+
+    Ok(ModelResponse {
+        message: Message {
+            role: MessageRole::Assistant,
+            content: answer,
+            metadata: metadata.clone(),
+        },
+        raw_tool_calls_json,
+        tool_calls,
+        metadata,
+    })
+}
+
 impl OpenAiCompatibleProvider {
     pub fn new(config: OpenAiCompatibleConfig) -> Self {
         Self { config }
@@ -248,7 +407,16 @@ impl OpenAiCompatibleProvider {
     pub fn complete_streaming(
         &self,
         request: ModelRequest,
+        on_delta: impl FnMut(&str),
+    ) -> Result<ModelResponse, ModelError> {
+        self.complete_streaming_cancellable(request, on_delta, || false)
+    }
+
+    pub fn complete_streaming_cancellable(
+        &self,
+        request: ModelRequest,
         mut on_delta: impl FnMut(&str),
+        mut should_cancel: impl FnMut() -> bool,
     ) -> Result<ModelResponse, ModelError> {
         if !self.config.is_ready() {
             return Err(ModelError::new("provider config is incomplete"));
@@ -261,75 +429,14 @@ impl OpenAiCompatibleProvider {
             &self.config.api_key,
             Some(&request_body),
         );
-        let mut child = spawn_curl(&curl_config, self.config.timeout_seconds, true)?;
-
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| ModelError::new("curl stdout was not available"))?;
-        let mut reader = BufReader::new(stdout);
-        let mut raw_response = String::new();
-        let mut answer = String::new();
-        let mut line = String::new();
-
-        loop {
-            line.clear();
-            let bytes = reader
-                .read_line(&mut line)
-                .map_err(|error| ModelError::new(format!("failed to read model stream: {error}")))?;
-            if bytes == 0 {
-                break;
-            }
-            raw_response.push_str(&line);
-
-            if let Some(delta) = parse_stream_line(&line)? {
-                answer.push_str(&delta);
-                on_delta(&delta);
-            }
-        }
-
-        let status = child
-            .wait()
-            .map_err(|error| ModelError::new(format!("failed to wait for curl: {error}")))?;
-        let mut stderr = String::new();
-        if let Some(mut stream) = child.stderr.take() {
-            stream
-                .read_to_string(&mut stderr)
-                .map_err(|error| ModelError::new(format!("failed to read curl stderr: {error}")))?;
-        }
-
-        if !status.success() {
-            let provider_error = parse_provider_error(&raw_response)
-                .unwrap_or_else(|| stderr.trim().to_string())
-                .trim()
-                .to_string();
-            return Err(ModelError::new(if provider_error.is_empty() {
-                format!("model request failed with status {status}")
-            } else {
-                provider_error
-            }));
-        }
-
-        if answer.is_empty() {
-            answer = parse_chat_response(&raw_response)?;
-        }
-
-        let mut metadata = Metadata::new();
-        metadata.insert("provider".to_string(), self.name().to_string());
-        metadata.insert("model".to_string(), self.config.model.clone());
-        metadata.insert("base_url".to_string(), self.config.base_url.clone());
-        metadata.insert("streamed".to_string(), "true".to_string());
-
-        Ok(ModelResponse {
-            message: Message {
-                role: MessageRole::Assistant,
-                content: answer,
-                metadata: metadata.clone(),
-            },
-            raw_tool_calls_json: None,
-            tool_calls: Vec::new(),
-            metadata,
-        })
+        let child = spawn_curl(&curl_config, self.config.timeout_seconds, true)?;
+        consume_streaming_child(
+            child,
+            &self.config.model,
+            &self.config.base_url,
+            &mut on_delta,
+            &mut should_cancel,
+        )
     }
 
     pub fn complete_once(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
@@ -644,7 +751,58 @@ fn image_data_url(value: &str) -> Option<String> {
     Some(format!("data:{mime_type};base64,{encoded}"))
 }
 
-pub fn parse_stream_line(line: &str) -> Result<Option<String>, ModelError> {
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct StreamingToolCall {
+    id: String,
+    name: String,
+    arguments_json: String,
+}
+
+impl StreamingToolCall {
+    fn merge(&mut self, delta: StreamingToolCallDelta) {
+        if let Some(id) = delta.id {
+            self.id.push_str(&id);
+        }
+        if let Some(name) = delta.name {
+            self.name.push_str(&name);
+        }
+        if let Some(arguments) = delta.arguments_json {
+            self.arguments_json.push_str(&arguments);
+        }
+    }
+
+    fn finish(self, index: usize) -> Option<ModelToolCall> {
+        (!self.name.trim().is_empty()).then(|| ModelToolCall {
+            id: if self.id.trim().is_empty() {
+                format!("call-{index}")
+            } else {
+                self.id
+            },
+            name: self.name,
+            arguments_json: if self.arguments_json.trim().is_empty() {
+                "{}".to_string()
+            } else {
+                self.arguments_json
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StreamingToolCallDelta {
+    index: usize,
+    id: Option<String>,
+    name: Option<String>,
+    arguments_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct StreamEvent {
+    content: Option<String>,
+    tool_calls: Vec<StreamingToolCallDelta>,
+}
+
+fn parse_stream_event(line: &str) -> Result<Option<StreamEvent>, ModelError> {
     let line = line.trim();
     if !line.starts_with("data:") {
         return Ok(None);
@@ -659,7 +817,48 @@ pub fn parse_stream_line(line: &str) -> Result<Option<String>, ModelError> {
         return Err(ModelError::new(message));
     }
 
-    Ok(extract_json_string_field_after(payload, "\"delta\"", "content"))
+    let value = serde_json::from_str::<serde_json::Value>(payload)
+        .map_err(|error| ModelError::new(format!("invalid model stream event: {error}")))?;
+    let Some(delta) = value.pointer("/choices/0/delta") else {
+        return Ok(Some(StreamEvent::default()));
+    };
+    let content = delta
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let tool_calls = delta
+        .get("tool_calls")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|call| StreamingToolCallDelta {
+            index: call
+                .get("index")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default() as usize,
+            id: call
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            name: call
+                .pointer("/function/name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            arguments_json: call
+                .pointer("/function/arguments")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+        })
+        .collect();
+
+    Ok(Some(StreamEvent {
+        content,
+        tool_calls,
+    }))
+}
+
+pub fn parse_stream_line(line: &str) -> Result<Option<String>, ModelError> {
+    Ok(parse_stream_event(line)?.and_then(|event| event.content))
 }
 
 pub fn parse_chat_response(text: &str) -> Result<String, ModelError> {
@@ -1157,6 +1356,7 @@ fn parse_json_string_at(text: &str, quote_index: usize) -> Result<String, ModelE
 mod tests {
     use super::*;
     use agent_core::{MessageRole, ToolRisk};
+    use std::time::Instant;
 
     #[test]
     fn chat_url_trims_base_url_slashes() {
@@ -1336,6 +1536,78 @@ mod tests {
 
         assert_eq!(delta.as_deref(), Some("hi"));
         assert_eq!(parse_stream_line("data: [DONE]").expect("done"), None);
+    }
+
+    #[test]
+    fn reconstructs_streaming_tool_call_deltas() {
+        let first = parse_stream_event(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"file_read","arguments":"{\"input\":\"path="}}]}}]}"#,
+        )
+        .expect("first event should parse")
+        .expect("first event should exist");
+        let second = parse_stream_event(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"README.md\"}"}}]}}]}"#,
+        )
+        .expect("second event should parse")
+        .expect("second event should exist");
+        let mut call = StreamingToolCall::default();
+        for delta in first.tool_calls.into_iter().chain(second.tool_calls) {
+            call.merge(delta);
+        }
+        let call = call.finish(0).expect("tool call should be complete");
+
+        assert_eq!(call.id, "call_1");
+        assert_eq!(call.name, "file_read");
+        assert_eq!(call.arguments_json, r#"{"input":"path=README.md"}"#);
+    }
+
+    #[test]
+    fn cancels_an_open_model_stream_without_waiting_for_timeout() {
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(r#"printf 'data: {"choices":[{"delta":{"content":"started"}}]}\n\n'; sleep 2"#)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("test stream process should start");
+        let started = Instant::now();
+        let mut output = String::new();
+        let result = consume_streaming_child(
+            child,
+            "test-model",
+            "http://example.test/v1",
+            &mut |delta| output.push_str(delta),
+            &mut || started.elapsed() >= Duration::from_millis(100),
+        );
+
+        assert_eq!(result.expect_err("stream should cancel").message, MODEL_REQUEST_CANCELLED);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(output, "started");
+    }
+
+    #[test]
+    fn streaming_reader_accepts_non_streaming_tool_call_fallback() {
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(
+                r#"printf '%s\n' '{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"file_read","arguments":"{\"input\":\"path=README.md\"}"}}]}}]}'"#,
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("test response process should start");
+        let response = consume_streaming_child(
+            child,
+            "test-model",
+            "http://example.test/v1",
+            &mut |_| {},
+            &mut || false,
+        )
+        .expect("fallback response should parse");
+
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "file_read");
+        assert!(response.raw_tool_calls_json.is_some());
     }
 
     #[test]

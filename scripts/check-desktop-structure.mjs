@@ -226,6 +226,23 @@ assert(
   "New assistant responses must arrive progressively without replaying animation on history"
 );
 assert(
+  modelProviderSource.includes("complete_streaming_cancellable") &&
+    modelProviderSource.includes("RecvTimeoutError::Timeout") &&
+    modelProviderSource.includes("streamed_tool_calls") &&
+    modelProviderSource.includes("MODEL_REQUEST_CANCELLED") &&
+    rustLib.includes("agent_run_cancellations") &&
+    rustLib.includes("request_agent_run_cancel") &&
+    rustLib.includes("emit_agent_stream_delta") &&
+    appSource.includes("payload.sessionId !== activeSessionIdRef.current") &&
+    appSource.includes("if (payload.reset)") &&
+    appSource.includes("streamBuffer += payload.delta") &&
+    appSource.includes("requestAnimationFrame(flushStreamBuffer)") &&
+    appSource.includes("markSessionBusy(sessionId, false)") &&
+    tauriBridge.includes("sessionId: string | null") &&
+    tauriBridge.includes("reset: boolean"),
+  "Agent output must stream by session and Stop must cancel the active provider request"
+);
+assert(
   sessionThreadSource.includes("openExternalUrl") &&
     sessionThreadSource.includes("openArtifact") &&
     sessionThreadSource.includes("artifactLinkTarget") &&
