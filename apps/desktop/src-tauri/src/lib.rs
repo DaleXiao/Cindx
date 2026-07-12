@@ -30,7 +30,7 @@ use agent_storage::{EventStore, PermissionAuditRecord, PermissionStore, SqliteSt
 use base64::Engine;
 use model_provider::{
     EmbeddingRequest, ModelCallMode, ModelRequest, OpenAiCompatibleConfig,
-    OpenAiCompatibleProvider, ModelProvider,
+    OpenAiCompatibleProvider, MODEL_REQUEST_CANCELLED,
 };
 use orchestrator::{
     adaptive_worker_prompt, adaptive_workflow_layers, default_plan, parse_policy, role_label,
@@ -47,7 +47,7 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 use tools::{ToolRegistry, WebSearchConfig};
@@ -75,6 +75,7 @@ struct AppState {
     project_session_config: Mutex<ProjectSessionConfig>,
     mcp_catalog: Mutex<McpCatalogService>,
     suspended_agent_runs: Mutex<BTreeMap<String, SuspendedAgentRun>>,
+    agent_run_cancellations: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
     allow_exit: AtomicBool,
     quit_prompt_active: AtomicBool,
 }
@@ -986,8 +987,10 @@ struct ProviderModelsState {
 struct ModelStreamDelta {
     task_id: String,
     request_id: String,
+    session_id: Option<String>,
     delta: String,
     done: bool,
+    reset: bool,
     error: Option<String>,
 }
 
@@ -2255,8 +2258,10 @@ fn send_model_prompt(
             ModelStreamDelta {
                 task_id: stream_task_id.clone(),
                 request_id: stream_request_id.clone(),
+                session_id: None,
                 delta: delta.to_string(),
                 done: false,
+                reset: false,
                 error: None,
             },
         );
@@ -2270,8 +2275,10 @@ fn send_model_prompt(
                 ModelStreamDelta {
                     task_id: task_id.0.clone(),
                     request_id: request_id.clone(),
+                    session_id: None,
                     delta: String::new(),
                     done: true,
+                    reset: false,
                     error: None,
                 },
             );
@@ -2316,8 +2323,10 @@ fn send_model_prompt(
                 ModelStreamDelta {
                     task_id: task_id.0.clone(),
                     request_id,
+                    session_id: None,
                     delta: String::new(),
                     done: true,
+                    reset: false,
                     error: Some(message.clone()),
                 },
             );
@@ -2377,6 +2386,103 @@ fn export_agent_trace_jsonl(
         .map_err(|error| error.to_string())
 }
 
+fn begin_agent_run_control(
+    state: &tauri::State<'_, AppState>,
+    session_id: &str,
+) -> Result<Arc<AtomicBool>, String> {
+    let control = Arc::new(AtomicBool::new(false));
+    let mut controls = state
+        .agent_run_cancellations
+        .lock()
+        .map_err(|error| format!("agent cancellation lock poisoned: {error}"))?;
+    if let Some(previous) = controls.insert(session_id.to_string(), control.clone()) {
+        previous.store(true, Ordering::SeqCst);
+    }
+    Ok(control)
+}
+
+fn active_agent_run_control(
+    state: &tauri::State<'_, AppState>,
+    session_id: Option<&str>,
+) -> Result<Option<Arc<AtomicBool>>, String> {
+    let Some(session_id) = session_id else {
+        return Ok(None);
+    };
+    Ok(state
+        .agent_run_cancellations
+        .lock()
+        .map_err(|error| format!("agent cancellation lock poisoned: {error}"))?
+        .get(session_id)
+        .cloned())
+}
+
+fn finish_agent_run_control(
+    state: &tauri::State<'_, AppState>,
+    session_id: &str,
+    control: &Arc<AtomicBool>,
+) -> Result<(), String> {
+    let mut controls = state
+        .agent_run_cancellations
+        .lock()
+        .map_err(|error| format!("agent cancellation lock poisoned: {error}"))?;
+    if controls
+        .get(session_id)
+        .is_some_and(|current| Arc::ptr_eq(current, control))
+    {
+        controls.remove(session_id);
+    }
+    Ok(())
+}
+
+fn request_agent_run_cancel(
+    state: &tauri::State<'_, AppState>,
+    session_id: &str,
+) -> Result<bool, String> {
+    if let Some(control) = active_agent_run_control(state, Some(session_id))? {
+        control.store(true, Ordering::SeqCst);
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn agent_run_was_cancelled(control: &Arc<AtomicBool>) -> bool {
+    control.load(Ordering::SeqCst)
+}
+
+fn cancelled_agent_state(
+    state: &tauri::State<'_, AppState>,
+    session_id: Option<&str>,
+) -> Result<AgentState, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    agent_state_for_session(&store, None, session_id).map_err(|error| error.to_string())
+}
+
+fn emit_agent_stream_delta(
+    app: &tauri::AppHandle,
+    request_id: &str,
+    session_id: Option<&str>,
+    delta: &str,
+    done: bool,
+    reset: bool,
+    error: Option<String>,
+) {
+    let _ = app.emit(
+        "model-stream-delta",
+        ModelStreamDelta {
+            task_id: PHASE16_TASK_ID.to_string(),
+            request_id: request_id.to_string(),
+            session_id: session_id.map(str::to_string),
+            delta: delta.to_string(),
+            done,
+            reset,
+            error,
+        },
+    );
+}
+
 #[tauri::command]
 async fn run_agent_task(
     app: tauri::AppHandle,
@@ -2384,7 +2490,7 @@ async fn run_agent_task(
 ) -> Result<AgentState, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        run_agent_task_blocking(state, input)
+        run_agent_task_blocking(&app, state, input)
     })
     .await
     .map_err(|error| format!("agent task failed to join: {error}"))?
@@ -2546,8 +2652,22 @@ fn add_attachment_metadata(metadata: &mut Metadata, attachments: &[AgentAttachme
 }
 
 fn run_agent_task_blocking(
+    app: &tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     input: AgentTaskInput,
+) -> Result<AgentState, String> {
+    let session_id = input.session_id.clone();
+    let cancellation = begin_agent_run_control(&state, &session_id)?;
+    let result = run_agent_task_blocking_inner(app, state.clone(), input, &cancellation);
+    finish_agent_run_control(&state, &session_id, &cancellation)?;
+    result
+}
+
+fn run_agent_task_blocking_inner(
+    app: &tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    input: AgentTaskInput,
+    cancellation: &Arc<AtomicBool>,
 ) -> Result<AgentState, String> {
     let user_prompt = input.prompt.trim().to_string();
     let session_id = input.session_id;
@@ -2750,6 +2870,10 @@ fn run_agent_task_blocking(
         }
     }
 
+    if agent_run_was_cancelled(cancellation) {
+        return cancelled_agent_state(&state, session_id);
+    }
+
     let collaboration = prepare_agent_collaboration(
         &state,
         &config,
@@ -2778,6 +2902,10 @@ fn run_agent_task_blocking(
         }
     }
 
+    if agent_run_was_cancelled(cancellation) {
+        return cancelled_agent_state(&state, session_id);
+    }
+
     let mut runtime = if history.is_empty() {
         start_agent_loop(task_id, prompt.clone(), AgentRuntimeConfig::default())
     } else {
@@ -2797,6 +2925,7 @@ fn run_agent_task_blocking(
         add_attachment_metadata(&mut message.metadata, &attachments);
     }
     continue_agent_loop(
+        app,
         &state,
         &config,
         &root,
@@ -2804,14 +2933,17 @@ fn run_agent_task_blocking(
         prompt,
         run_context,
         collaboration.as_ref(),
+        cancellation,
     )
 }
 
 #[tauri::command]
 fn cancel_agent_task(
-    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
     input: SessionActionInput,
 ) -> Result<AgentState, String> {
+    let state = app.state::<AppState>();
+    let active_run_cancelled = request_agent_run_cancel(&state, &input.session_id)?;
     clear_suspended_agent_run(&state, &input.session_id)?;
     let run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
     let session_id = run_context.get("session_id").map(String::as_str);
@@ -2821,7 +2953,7 @@ fn cancel_agent_task(
         .map_err(|error| format!("store lock poisoned: {error}"))?;
     let current = agent_state_for_session(&store, None, session_id)
         .map_err(|error| error.to_string())?;
-    if !current.can_cancel {
+    if !current.can_cancel && !active_run_cancelled {
         return Ok(current);
     }
 
@@ -2839,13 +2971,49 @@ fn cancel_agent_task(
     )
     .map_err(|error| error.to_string())?;
 
+    emit_agent_stream_delta(
+        &app,
+        "agent-cancelled",
+        Some(&input.session_id),
+        "",
+        true,
+        true,
+        None,
+    );
+
     agent_state_for_session(&store, None, session_id).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn retry_agent_task(
+async fn retry_agent_task(
+    app: tauri::AppHandle,
+    input: SessionActionInput,
+) -> Result<AgentState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        retry_agent_task_blocking(&app, state, input)
+    })
+    .await
+    .map_err(|error| format!("agent retry failed to join: {error}"))?
+}
+
+fn retry_agent_task_blocking(
+    app: &tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     input: SessionActionInput,
+) -> Result<AgentState, String> {
+    let session_id = input.session_id.clone();
+    let cancellation = begin_agent_run_control(&state, &session_id)?;
+    let result = retry_agent_task_blocking_inner(app, state.clone(), input, &cancellation);
+    finish_agent_run_control(&state, &session_id, &cancellation)?;
+    result
+}
+
+fn retry_agent_task_blocking_inner(
+    app: &tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    input: SessionActionInput,
+    cancellation: &Arc<AtomicBool>,
 ) -> Result<AgentState, String> {
     clear_suspended_agent_run(&state, &input.session_id)?;
     let mut run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
@@ -3047,6 +3215,9 @@ fn retry_agent_task(
             });
         }
     }
+    if agent_run_was_cancelled(cancellation) {
+        return cancelled_agent_state(&state, session_id.as_deref());
+    }
     let runtime = if history.is_empty() {
         start_agent_loop(task_id, prompt.clone(), AgentRuntimeConfig::default())
     } else {
@@ -3058,6 +3229,7 @@ fn retry_agent_task(
         )
     };
     continue_agent_loop(
+        app,
         &state,
         &config,
         &root,
@@ -3065,6 +3237,7 @@ fn retry_agent_task(
         prompt,
         run_context,
         collaboration.as_ref(),
+        cancellation,
     )
 }
 
@@ -3077,17 +3250,39 @@ async fn resolve_agent_permission(
 ) -> Result<AgentState, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        resolve_agent_permission_blocking(state, request_id, decision, session_id)
+        resolve_agent_permission_blocking(&app, state, request_id, decision, session_id)
     })
     .await
     .map_err(|error| format!("agent permission resume failed to join: {error}"))?
 }
 
 fn resolve_agent_permission_blocking(
+    app: &tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request_id: String,
     decision: String,
     session_id: String,
+) -> Result<AgentState, String> {
+    let cancellation = begin_agent_run_control(&state, &session_id)?;
+    let result = resolve_agent_permission_blocking_inner(
+        app,
+        state.clone(),
+        request_id,
+        decision,
+        session_id.clone(),
+        &cancellation,
+    );
+    finish_agent_run_control(&state, &session_id, &cancellation)?;
+    result
+}
+
+fn resolve_agent_permission_blocking_inner(
+    app: &tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+    decision: String,
+    session_id: String,
+    cancellation: &Arc<AtomicBool>,
 ) -> Result<AgentState, String> {
     let mut run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
     let root = run_context
@@ -3240,6 +3435,7 @@ fn resolve_agent_permission_blocking(
     if let Some(session_id) = session_id {
         if let Some(suspended) = take_suspended_agent_run(&state, session_id)? {
             return continue_agent_loop(
+                app,
                 &state,
                 &config,
                 &suspended.workspace_root,
@@ -3247,6 +3443,7 @@ fn resolve_agent_permission_blocking(
                 suspended.prompt,
                 suspended.run_context,
                 suspended.collaboration.as_ref(),
+                cancellation,
             );
         }
     }
@@ -3257,7 +3454,17 @@ fn resolve_agent_permission_blocking(
         transcript,
         AgentRuntimeConfig::default(),
     );
-    continue_agent_loop(&state, &config, &root, runtime, prompt, run_context, None)
+    continue_agent_loop(
+        app,
+        &state,
+        &config,
+        &root,
+        runtime,
+        prompt,
+        run_context,
+        None,
+        cancellation,
+    )
 }
 
 fn resolve_agent_permission_request(
@@ -4435,6 +4642,7 @@ pub fn run() {
             project_session_config: Mutex::new(project_session_config),
             mcp_catalog: Mutex::new(mcp_catalog),
             suspended_agent_runs: Mutex::new(BTreeMap::new()),
+            agent_run_cancellations: Mutex::new(BTreeMap::new()),
             allow_exit: AtomicBool::new(false),
             quit_prompt_active: AtomicBool::new(false),
         })
@@ -5743,6 +5951,7 @@ fn collaboration_candidate_models(config: &ProviderConfig, candidates: usize) ->
 }
 
 fn synthesize_agent_answer(
+    app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,
     runtime: &agent_runtime::AgentLoopState,
@@ -5750,6 +5959,7 @@ fn synthesize_agent_answer(
     executor_answer: &str,
     run_context: &Metadata,
     collaboration: &AgentCollaboration,
+    cancellation: &Arc<AtomicBool>,
 ) -> Result<String, String> {
     let evidence = runtime
         .messages
@@ -5786,6 +5996,9 @@ fn synthesize_agent_answer(
         review_prompt,
     )
     .unwrap_or_else(|error| format!("Reviewer unavailable: {error}"));
+    if agent_run_was_cancelled(cancellation) {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
     let synthesis_prompt = format!(
         "You are the final synthesizer in a multi-model Cindx team. Produce the strongest possible final response to the user using the executor draft, reviewer corrections, team guidance, and tool evidence. Resolve disagreements using evidence. Do not mention the internal pipeline. Be precise, complete, and concise; never claim work that the evidence does not support.\n\nCollaboration policy: {}\nWorker pool: {}\n\nUser request:\n{}\n\nTeam guidance:\n{}\n\nExecutor draft:\n{}\n\nReviewer corrections:\n{}\n\nTool evidence:\n{}",
         collaboration.policy,
@@ -5800,7 +6013,9 @@ fn synthesize_agent_answer(
         truncate_for_collaboration(&review, 8_000),
         if evidence.is_empty() { "(none)" } else { &evidence }
     );
-    let answer = run_collaboration_stage(
+    let stream_request_id = unique_id("agent-final-stream");
+    let session_id = run_context.get("session_id").map(String::as_str);
+    let answer = run_collaboration_stage_with_delta(
         state,
         config,
         &runtime.task_id,
@@ -5810,7 +6025,40 @@ fn synthesize_agent_answer(
         ModelRole::Summarizer,
         &config.model_for_role(&ModelRole::Summarizer),
         synthesis_prompt,
-    )?;
+        |delta| {
+            emit_agent_stream_delta(
+                app,
+                &stream_request_id,
+                session_id,
+                delta,
+                false,
+                false,
+                None,
+            );
+        },
+    );
+    if agent_run_was_cancelled(cancellation) {
+        emit_agent_stream_delta(
+            app,
+            &stream_request_id,
+            session_id,
+            "",
+            true,
+            true,
+            None,
+        );
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
+    let answer = answer?;
+    emit_agent_stream_delta(
+        app,
+        &stream_request_id,
+        session_id,
+        "",
+        true,
+        false,
+        None,
+    );
     let answer = answer.trim().to_string();
     if answer.is_empty() {
         Err("synthesizer returned an empty answer".to_string())
@@ -5858,12 +6106,14 @@ fn record_collaboration_stage_started(
     Ok(())
 }
 
-fn complete_collaboration_model(
+fn complete_collaboration_model_with_control(
     config: ProviderConfig,
     role: ModelRole,
     model: String,
     system_prompt: String,
     prompt: String,
+    cancellation: Option<Arc<AtomicBool>>,
+    mut on_delta: impl FnMut(&str),
 ) -> CollaborationCompletion {
     let started_at_ms = current_time_millis();
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
@@ -5873,24 +6123,32 @@ fn complete_collaboration_model(
         embedding_model: config.model_for_role(&ModelRole::Embedder),
         timeout_seconds: 180,
     });
-    let response = provider.complete(ModelRequest {
-        role,
-        messages: vec![
-            Message {
-                role: MessageRole::System,
-                content: system_prompt,
-                metadata: Metadata::new(),
-            },
-            Message {
-                role: MessageRole::User,
-                content: prompt,
-                metadata: Metadata::new(),
-            },
-        ],
-        tools: Vec::new(),
-        mode: ModelCallMode::NonStreaming,
-        metadata: Metadata::new(),
-    });
+    let response = provider.complete_streaming_cancellable(
+        ModelRequest {
+            role,
+            messages: vec![
+                Message {
+                    role: MessageRole::System,
+                    content: system_prompt,
+                    metadata: Metadata::new(),
+                },
+                Message {
+                    role: MessageRole::User,
+                    content: prompt,
+                    metadata: Metadata::new(),
+                },
+            ],
+            tools: Vec::new(),
+            mode: ModelCallMode::Streaming,
+            metadata: Metadata::new(),
+        },
+        |delta| on_delta(delta),
+        || {
+            cancellation
+                .as_ref()
+                .is_some_and(|control| agent_run_was_cancelled(control))
+        },
+    );
     let latency_ms = current_time_millis().saturating_sub(started_at_ms);
     match response {
         Ok(response) => {
@@ -5986,6 +6244,43 @@ fn run_collaboration_stage(
     model: &str,
     prompt: String,
 ) -> Result<String, String> {
+    run_collaboration_stage_with_delta(
+        state,
+        config,
+        task_id,
+        run_context,
+        collaboration_id,
+        stage,
+        role,
+        model,
+        prompt,
+        |_| {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_collaboration_stage_with_delta(
+    state: &tauri::State<'_, AppState>,
+    config: &ProviderConfig,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    collaboration_id: &str,
+    stage: &str,
+    role: ModelRole,
+    model: &str,
+    prompt: String,
+    on_delta: impl FnMut(&str),
+) -> Result<String, String> {
+    let cancellation = active_agent_run_control(
+        state,
+        run_context.get("session_id").map(String::as_str),
+    )?;
+    if cancellation
+        .as_ref()
+        .is_some_and(|control| agent_run_was_cancelled(control))
+    {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
     let request_id = unique_id("collaboration-model");
     record_collaboration_stage_started(
         state,
@@ -5998,12 +6293,14 @@ fn run_collaboration_stage(
         &request_id,
         &Metadata::new(),
     )?;
-    let completion = complete_collaboration_model(
+    let completion = complete_collaboration_model_with_control(
         config.clone(),
         role.clone(),
         model.to_string(),
         agent_system_prompt_for_run(&config.agent_system_prompt, run_context),
         prompt,
+        cancellation,
+        on_delta,
     );
     record_collaboration_stage_finished(
         state,
@@ -6098,6 +6395,10 @@ fn run_adaptive_collaboration(
             )?;
         }
 
+        let cancellation = active_agent_run_control(
+            state,
+            run_context.get("session_id").map(String::as_str),
+        )?;
         let handles = specs
             .iter()
             .map(|spec| {
@@ -6106,13 +6407,16 @@ fn run_adaptive_collaboration(
                 let role = adaptive_model_role(&spec.role);
                 let prompt = spec.prompt.clone();
                 let system_prompt = system_prompt.clone();
+                let cancellation = cancellation.clone();
                 std::thread::spawn(move || {
-                    complete_collaboration_model(
+                    complete_collaboration_model_with_control(
                         config,
                         role,
                         model,
                         system_prompt,
                         prompt,
+                        cancellation,
+                        |_| {},
                     )
                 })
             })
@@ -6125,6 +6429,13 @@ fn run_adaptive_collaboration(
                 })
             })
             .collect::<Vec<_>>();
+
+        if cancellation
+            .as_ref()
+            .is_some_and(|control| agent_run_was_cancelled(control))
+        {
+            return Err(MODEL_REQUEST_CANCELLED.to_string());
+        }
 
         for (spec, completion) in specs.iter().zip(&completions) {
             let metadata = adaptive_stage_metadata(spec);
@@ -6411,6 +6722,10 @@ fn run_collaboration_candidates(
     }
 
     let system_prompt = agent_system_prompt_for_run(&config.agent_system_prompt, run_context);
+    let cancellation = active_agent_run_control(
+        state,
+        run_context.get("session_id").map(String::as_str),
+    )?;
     let handles = specs
         .iter()
         .map(|spec| {
@@ -6418,13 +6733,16 @@ fn run_collaboration_candidates(
             let model = spec.model.clone();
             let prompt = spec.prompt.clone();
             let system_prompt = system_prompt.clone();
+            let cancellation = cancellation.clone();
             std::thread::spawn(move || {
-                complete_collaboration_model(
+                complete_collaboration_model_with_control(
                     config,
                     ModelRole::Planner,
                     model,
                     system_prompt,
                     prompt,
+                    cancellation,
+                    |_| {},
                 )
             })
         })
@@ -6437,6 +6755,12 @@ fn run_collaboration_candidates(
             })
         })
         .collect::<Vec<_>>();
+    if cancellation
+        .as_ref()
+        .is_some_and(|control| agent_run_was_cancelled(control))
+    {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
 
     let mut candidates = Vec::new();
     for (spec, completion) in specs.iter().zip(&completions) {
@@ -6574,6 +6898,7 @@ fn truncate_for_collaboration(value: &str, max_chars: usize) -> String {
 }
 
 fn continue_agent_loop(
+    app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,
     workspace_root: &Path,
@@ -6581,6 +6906,7 @@ fn continue_agent_loop(
     prompt: String,
     run_context: Metadata,
     collaboration: Option<&AgentCollaboration>,
+    cancellation: &Arc<AtomicBool>,
 ) -> Result<AgentState, String> {
     let session_id = run_context.get("session_id").map(String::as_str);
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
@@ -6642,9 +6968,40 @@ fn continue_agent_loop(
             .map_err(|error| error.to_string())?;
         }
 
-        let mut response = match provider.complete(request) {
+        let visible_stream = collaboration.is_none();
+        let mut streamed_output = false;
+        let mut response = match provider.complete_streaming_cancellable(
+            request,
+            |delta| {
+                if visible_stream && !delta.is_empty() {
+                    streamed_output = true;
+                    emit_agent_stream_delta(
+                        app,
+                        &request_id,
+                        session_id,
+                        delta,
+                        false,
+                        false,
+                        None,
+                    );
+                }
+            },
+            || agent_run_was_cancelled(cancellation),
+        ) {
             Ok(response) => response,
             Err(error) => {
+                if error.message == MODEL_REQUEST_CANCELLED || agent_run_was_cancelled(cancellation) {
+                    emit_agent_stream_delta(
+                        app,
+                        &request_id,
+                        session_id,
+                        "",
+                        true,
+                        true,
+                        None,
+                    );
+                    return cancelled_agent_state(state, session_id);
+                }
                 return agent_state_with_error_in_context(
                     state,
                     &run_context,
@@ -6668,6 +7025,18 @@ fn continue_agent_loop(
         let latency_ms = current_time_millis().saturating_sub(started_at_ms);
         let output_length = response.message.content.len();
         let tool_call_count = response.tool_calls.len();
+        if visible_stream && streamed_output && tool_call_count > 0 {
+            emit_agent_stream_delta(
+                app,
+                &request_id,
+                session_id,
+                "",
+                false,
+                true,
+                None,
+            );
+            streamed_output = false;
+        }
         {
             let mut store = state
                 .store
@@ -6678,7 +7047,7 @@ fn continue_agent_loop(
                     .map_err(|error| error.to_string());
             }
             let mut metadata = Metadata::new();
-            metadata.insert("request_id".to_string(), request_id);
+            metadata.insert("request_id".to_string(), request_id.clone());
             metadata.insert("latency_ms".to_string(), latency_ms.to_string());
             metadata.insert("output_length".to_string(), output_length.to_string());
             metadata.insert("tool_calls".to_string(), tool_call_count.to_string());
@@ -6727,7 +7096,8 @@ fn continue_agent_loop(
             AgentAdvance::Completed { answer } => {
                 clear_suspended_agent_run_for_context(state, &run_context)?;
                 let final_answer = if let Some(collaboration) = collaboration {
-                    synthesize_agent_answer(
+                    match synthesize_agent_answer(
+                        app,
                         state,
                         config,
                         &runtime,
@@ -6735,9 +7105,64 @@ fn continue_agent_loop(
                         &answer,
                         &run_context,
                         collaboration,
-                    )
-                    .unwrap_or_else(|_| answer.clone())
+                        cancellation,
+                    ) {
+                        Ok(answer) => answer,
+                        Err(_) if agent_run_was_cancelled(cancellation) => {
+                            return cancelled_agent_state(state, session_id);
+                        }
+                        Err(_) => {
+                            emit_agent_stream_delta(
+                                app,
+                                &request_id,
+                                session_id,
+                                "",
+                                false,
+                                true,
+                                None,
+                            );
+                            emit_agent_stream_delta(
+                                app,
+                                &request_id,
+                                session_id,
+                                &answer,
+                                false,
+                                false,
+                                None,
+                            );
+                            emit_agent_stream_delta(
+                                app,
+                                &request_id,
+                                session_id,
+                                "",
+                                true,
+                                false,
+                                None,
+                            );
+                            answer.clone()
+                        }
+                    }
                 } else {
+                    if !streamed_output && !answer.trim().is_empty() {
+                        emit_agent_stream_delta(
+                            app,
+                            &request_id,
+                            session_id,
+                            &answer,
+                            false,
+                            false,
+                            None,
+                        );
+                    }
+                    emit_agent_stream_delta(
+                        app,
+                        &request_id,
+                        session_id,
+                        "",
+                        true,
+                        false,
+                        None,
+                    );
                     answer.clone()
                 };
                 let mut store = state

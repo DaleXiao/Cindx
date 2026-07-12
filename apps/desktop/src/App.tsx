@@ -340,14 +340,41 @@ export function App() {
     let disposed = false;
     let deferredLoadTimer: number | null = null;
     let deferredIdleCallback: number | null = null;
+    let streamFrame: number | null = null;
+    let streamBuffer = "";
+    let streamSessionId: string | null = null;
     let unlisten = () => {};
 
+    const flushStreamBuffer = () => {
+      if (streamFrame !== null) window.cancelAnimationFrame(streamFrame);
+      streamFrame = null;
+      if (!streamBuffer) return;
+      const delta = streamBuffer;
+      streamBuffer = "";
+      if (streamSessionId && streamSessionId !== activeSessionIdRef.current) return;
+      setStreamAnswer((current) => `${current}${delta}`);
+    };
+
     subscribeToModelStream((payload) => {
+      if (payload.sessionId && payload.sessionId !== activeSessionIdRef.current) return;
+      streamSessionId = payload.sessionId;
+      if (payload.reset) {
+        streamBuffer = "";
+        if (streamFrame !== null) window.cancelAnimationFrame(streamFrame);
+        streamFrame = null;
+        setStreamAnswer("");
+      }
       if (payload.done) {
+        flushStreamBuffer();
         if (payload.error) setComposerError(payload.error);
         return;
       }
-      setStreamAnswer((current) => `${current}${payload.delta}`);
+      if (payload.delta) {
+        streamBuffer += payload.delta;
+        if (streamFrame === null) {
+          streamFrame = window.requestAnimationFrame(flushStreamBuffer);
+        }
+      }
     }).then((handler) => {
       if (disposed) handler();
       else unlisten = handler;
@@ -439,6 +466,7 @@ export function App() {
       disposed = true;
       if (deferredLoadTimer !== null) window.clearTimeout(deferredLoadTimer);
       if (deferredIdleCallback !== null) window.cancelIdleCallback(deferredIdleCallback);
+      if (streamFrame !== null) window.cancelAnimationFrame(streamFrame);
       unlisten();
     };
   }, []);
@@ -1238,10 +1266,12 @@ export function App() {
   async function handleCancelAgentTask() {
     const sessionId = activeSession?.id;
     if (!sessionId) return;
+    setStreamAnswer("");
     setComposerError(null);
     try {
       const next = await cancelAgentTask(sessionId);
       updateSessionStatus(sessionId, next.status);
+      markSessionBusy(sessionId, false);
       if (activeSessionIdRef.current === sessionId) {
         setAgentState(next);
         setComposerError(next.lastError);

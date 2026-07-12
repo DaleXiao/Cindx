@@ -448,6 +448,7 @@ export function SessionThread({
   const [threadFindQuery, setThreadFindQuery] = useState("");
   const [threadFindIndex, setThreadFindIndex] = useState(0);
   const [arrivingMessageId, setArrivingMessageId] = useState<string | null>(null);
+  const streamedAnswerRef = useRef(false);
   const knownMessageIdsRef = useRef<{ sessionId: string | null; ids: Set<string> }>({
     sessionId,
     ids: new Set(messages.map(threadMessageId))
@@ -459,10 +460,15 @@ export function SessionThread({
   });
 
   useLayoutEffect(() => {
+    if (streamAnswer) streamedAnswerRef.current = true;
+  }, [streamAnswer]);
+
+  useLayoutEffect(() => {
     const nextIds = new Set(messages.map(threadMessageId));
     const tracker = knownMessageIdsRef.current;
     if (tracker.sessionId !== sessionId) {
       knownMessageIdsRef.current = { sessionId, ids: nextIds };
+      streamedAnswerRef.current = false;
       setArrivingMessageId(null);
       return;
     }
@@ -470,7 +476,12 @@ export function SessionThread({
     let nextArrival: string | null = null;
     messages.forEach((message, index) => {
       const id = threadMessageId(message, index);
-      if (message.role === "assistant" && !tracker.ids.has(id)) nextArrival = id;
+      if (tracker.ids.has(id)) return;
+      if (message.role === "user") streamedAnswerRef.current = false;
+      if (message.role === "assistant") {
+        if (streamedAnswerRef.current) streamedAnswerRef.current = false;
+        else nextArrival = id;
+      }
     });
     tracker.ids = nextIds;
     if (nextArrival) setArrivingMessageId(nextArrival);
