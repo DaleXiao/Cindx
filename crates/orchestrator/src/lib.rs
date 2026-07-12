@@ -338,30 +338,58 @@ pub struct RoutingContext {
 
 impl RoutingContext {
     pub fn from_prompt(prompt: &str, model_candidates: Vec<ModelCandidate>) -> Self {
+        let capability_question = is_capability_question(prompt);
         let task_class = classify_task(prompt);
+        let coding_action = contains_any(
+            prompt,
+            &[
+                "fix", "modify", "edit", "refactor", "implement", "debug", "compile", "test",
+                "run", "修复", "修改", "重构", "实现", "调试", "编译", "测试", "运行", "执行",
+                "定位", "排查",
+            ],
+        );
+        let workspace_reference = contains_any(
+            prompt,
+            &[
+                "workspace", "repo", "repository", "project", "codebase", "this file",
+                "these files", "工作区", "仓库", "项目", "代码库", "这个文件", "这些文件",
+                "现有代码",
+            ],
+        );
+        let explicit_retrieval = contains_any(
+            prompt,
+            &[
+                "rag", "search", "retrieve", "source", "sources", "citation", "docs", "搜索",
+                "检索", "来源", "引用", "文档", "资料",
+            ],
+        );
         Self {
             task_class: task_class.clone(),
             prompt_length: prompt.chars().count(),
-            needs_tools: matches!(
-                task_class,
-                TaskClass::Coding | TaskClass::Browser | TaskClass::Computer
-            ) || contains_any(
-                prompt,
-                &["tool", "file", "shell", "run", "edit", "工具", "文件", "运行", "执行", "修改"],
-            ),
-            needs_retrieval: matches!(
-                task_class,
-                TaskClass::Coding | TaskClass::Research | TaskClass::Retrieval
-            )
-                || contains_any(
-                    prompt,
-                    &["rag", "search", "retrieve", "source", "docs", "搜索", "检索", "来源", "文档"],
-                ),
-            needs_vision: matches!(task_class, TaskClass::Computer)
-                || contains_any(
-                    prompt,
-                    &["screenshot", "screen", "visible", "ui", "截图", "屏幕", "界面", "可见"],
-                ),
+            needs_tools: !capability_question
+                && (matches!(task_class, TaskClass::Browser | TaskClass::Computer)
+                    || coding_action
+                    || contains_any(
+                        prompt,
+                        &[
+                            "tool", "file", "shell", "run", "edit", "工具", "文件", "运行",
+                            "执行", "修改",
+                        ],
+                    )),
+            needs_retrieval: !capability_question
+                && (matches!(task_class, TaskClass::Research | TaskClass::Retrieval)
+                    || explicit_retrieval
+                    || (workspace_reference
+                        && matches!(task_class, TaskClass::Coding))
+                    || (matches!(task_class, TaskClass::Coding) && coding_action)),
+            needs_vision: !capability_question
+                && (matches!(task_class, TaskClass::Computer)
+                    || contains_any(
+                        prompt,
+                        &[
+                            "screenshot", "screen", "visible", "ui", "截图", "屏幕", "界面", "可见",
+                        ],
+                    )),
             user_policy_override: None,
             model_candidates,
         }
@@ -435,6 +463,18 @@ pub struct RoutingEvaluationReport {
 #[derive(Debug, Clone, Default)]
 pub struct RuleBasedRouter;
 
+fn is_lightweight_direct(context: &RoutingContext) -> bool {
+    let length_limit = match context.task_class {
+        TaskClass::General => 400,
+        TaskClass::Coding => 240,
+        _ => return false,
+    };
+    context.prompt_length < length_limit
+        && !context.needs_tools
+        && !context.needs_retrieval
+        && !context.needs_vision
+}
+
 impl RuleBasedRouter {
     pub fn route(&self, context: &RoutingContext) -> RoutingDecision {
         if let Some(policy) = context
@@ -454,6 +494,10 @@ impl RuleBasedRouter {
                 OrchestrationPolicy::PlanExecuteReview,
                 "interactive tool use needs planning and review",
             ),
+            TaskClass::Coding if is_lightweight_direct(context) => (
+                OrchestrationPolicy::Single,
+                "short coding question does not need tools or workspace context",
+            ),
             TaskClass::Coding => (
                 OrchestrationPolicy::PlanExecuteReview,
                 "coding tasks benefit from plan-execute-review",
@@ -466,7 +510,7 @@ impl RuleBasedRouter {
                 OrchestrationPolicy::BestOfN { candidates: 3 },
                 "research tasks benefit from multiple candidate approaches",
             ),
-            TaskClass::General if context.prompt_length < 400 && !context.needs_tools => {
+            TaskClass::General if is_lightweight_direct(context) => {
                 (OrchestrationPolicy::Single, "short general prompt can run directly")
             }
             TaskClass::General => (
@@ -586,6 +630,9 @@ impl LearnedModelRouter {
         {
             return self.fallback.route(context);
         }
+        if is_lightweight_direct(context) {
+            return self.fallback.route(context);
+        }
         let Some(route) = self.routes.get(&context.task_class) else {
             return self.fallback.route(context);
         };
@@ -660,8 +707,69 @@ impl RouteAccumulator {
     }
 }
 
-pub fn classify_task(prompt: &str) -> TaskClass {
+fn is_capability_question(prompt: &str) -> bool {
+    let normalized = prompt.trim().to_ascii_lowercase();
+    if normalized.is_empty() || normalized.chars().count() > 80 {
+        return false;
+    }
     if contains_any(
+        &normalized,
+        &[
+            "fix", "modify", "edit", "refactor", "debug", "run", "test", "workspace",
+            "repo", "project", "修复", "修改", "重构", "调试", "运行", "测试", "工作区",
+            "仓库", "项目", "这个文件", "这些文件",
+        ],
+    ) {
+        return false;
+    }
+    let compact = normalized
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    let compact = compact.trim_end_matches(|character| {
+        matches!(character, '?' | '？' | '。' | '!' | '！')
+    });
+    if [
+        "你会不会",
+        "你能不能",
+        "你能否",
+        "你是否会",
+        "你是否能",
+        "你有什么本领",
+        "你能做什么",
+        "你会做什么",
+        "你擅长什么",
+    ]
+    .iter()
+    .any(|prefix| compact.starts_with(prefix))
+    {
+        return true;
+    }
+    if compact
+        .chars()
+        .last()
+        .is_some_and(|character| matches!(character, '吗' | '嘛' | '么'))
+        && ["你会", "你能", "你可以", "你擅长"]
+            .iter()
+            .any(|prefix| compact.starts_with(prefix))
+    {
+        return true;
+    }
+
+    let words = normalized.split_whitespace().collect::<Vec<_>>();
+    matches!(
+        normalized.trim_end_matches(|character| matches!(character, '?' | '!' | '.')),
+        "what can you do" | "what are you capable of" | "do you know how to code"
+    ) || (words.len() <= 8
+        && (normalized.starts_with("can you code")
+            || normalized.starts_with("can you write code")
+            || normalized.starts_with("are you able to code")))
+}
+
+pub fn classify_task(prompt: &str) -> TaskClass {
+    if is_capability_question(prompt) {
+        TaskClass::General
+    } else if contains_any(
         prompt,
         &[
             "computer", "desktop", "screenshot", "screen", "click", "keyboard", "电脑", "桌面",
@@ -1009,6 +1117,7 @@ mod tests {
         let decision = RuleBasedRouter.route(&context);
 
         assert_eq!(context.task_class, TaskClass::Research);
+        assert!(context.needs_retrieval);
         assert_eq!(
             decision.policy,
             OrchestrationPolicy::BestOfN { candidates: 3 }
@@ -1032,12 +1141,37 @@ mod tests {
 
     #[test]
     fn chinese_tool_request_is_not_misclassified_as_general_chat() {
-        let context = RoutingContext::from_prompt("修复代码并运行测试", candidates());
+        let context = RoutingContext::from_prompt("你能不能修复这个项目并运行测试", candidates());
         let decision = RuleBasedRouter.route(&context);
 
         assert_eq!(context.task_class, TaskClass::Coding);
         assert!(context.needs_tools);
+        assert!(context.needs_retrieval);
         assert_eq!(decision.policy, OrchestrationPolicy::PlanExecuteReview);
+    }
+
+    #[test]
+    fn coding_capability_question_stays_direct_without_retrieval() {
+        let context = RoutingContext::from_prompt("你会不会写代码", candidates());
+        let decision = RuleBasedRouter.route(&context);
+
+        assert_eq!(context.task_class, TaskClass::General);
+        assert!(!context.needs_tools);
+        assert!(!context.needs_retrieval);
+        assert!(!context.needs_vision);
+        assert_eq!(decision.policy, OrchestrationPolicy::Single);
+        assert_eq!(decision.retrieval_mode, "none");
+    }
+
+    #[test]
+    fn short_coding_explanation_does_not_require_workspace_context() {
+        let context = RoutingContext::from_prompt("解释一下 Rust 所有权代码", candidates());
+        let decision = RuleBasedRouter.route(&context);
+
+        assert_eq!(context.task_class, TaskClass::Coding);
+        assert!(!context.needs_tools);
+        assert!(!context.needs_retrieval);
+        assert_eq!(decision.policy, OrchestrationPolicy::Single);
     }
 
     #[test]
@@ -1083,6 +1217,26 @@ mod tests {
         assert_eq!(decision.policy, OrchestrationPolicy::BestOfN { candidates: 3 });
         assert_eq!(decision.model, "strong-vision");
         assert!(decision.explanation.contains("learned_policy=best_of_n"));
+    }
+
+    #[test]
+    fn learned_router_cannot_upgrade_a_lightweight_coding_question() {
+        let router = LearnedModelRouter::train(&[RoutingTelemetry {
+            task_class: TaskClass::Coding,
+            selected_policy: OrchestrationPolicy::PlanExecuteReview,
+            selected_model: "strong-vision".to_string(),
+            latency_ms: 10_000,
+            outcome: RoutingOutcome::Succeeded,
+            cost_proxy: 1_000,
+            tool_count: 4,
+            retrieval_count: 4,
+            user_override: false,
+        }]);
+        let context = RoutingContext::from_prompt("解释一下 Rust 所有权代码", candidates());
+        let decision = router.route(&context);
+
+        assert_eq!(decision.policy, OrchestrationPolicy::Single);
+        assert!(!decision.explanation.contains("learned_policy"));
     }
 
     #[test]
