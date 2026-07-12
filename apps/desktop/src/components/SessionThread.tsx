@@ -14,6 +14,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -68,6 +69,10 @@ type ThreadScrollMetrics = {
   scrollHeight: number;
   clientHeight: number;
 };
+
+function threadMessageId(message: ChatMessageView, index: number) {
+  return `message-${message.timestampMs}-${index}`;
+}
 
 type MinimapMarker = {
   id: string;
@@ -442,14 +447,46 @@ export function SessionThread({
   const [threadFindOpen, setThreadFindOpen] = useState(false);
   const [threadFindQuery, setThreadFindQuery] = useState("");
   const [threadFindIndex, setThreadFindIndex] = useState(0);
+  const [arrivingMessageId, setArrivingMessageId] = useState<string | null>(null);
+  const knownMessageIdsRef = useRef<{ sessionId: string | null; ids: Set<string> }>({
+    sessionId,
+    ids: new Set(messages.map(threadMessageId))
+  });
   const [scrollMetrics, setScrollMetrics] = useState<ThreadScrollMetrics>({
     scrollTop: 0,
     scrollHeight: 1,
     clientHeight: 1
   });
+
+  useLayoutEffect(() => {
+    const nextIds = new Set(messages.map(threadMessageId));
+    const tracker = knownMessageIdsRef.current;
+    if (tracker.sessionId !== sessionId) {
+      knownMessageIdsRef.current = { sessionId, ids: nextIds };
+      setArrivingMessageId(null);
+      return;
+    }
+
+    let nextArrival: string | null = null;
+    messages.forEach((message, index) => {
+      const id = threadMessageId(message, index);
+      if (message.role === "assistant" && !tracker.ids.has(id)) nextArrival = id;
+    });
+    tracker.ids = nextIds;
+    if (nextArrival) setArrivingMessageId(nextArrival);
+  }, [messages, sessionId]);
+
+  useEffect(() => {
+    if (!arrivingMessageId) return;
+    const timeout = window.setTimeout(() => {
+      setArrivingMessageId((current) => (current === arrivingMessageId ? null : current));
+    }, 720);
+    return () => window.clearTimeout(timeout);
+  }, [arrivingMessageId]);
+
   const items = useMemo<SessionThreadSelection[]>(() => {
     const messageItems = messages.map((message, index) => ({
-      id: `message-${message.timestampMs}-${index}`,
+      id: threadMessageId(message, index),
       type: "message" as const,
       message
     }));
@@ -906,6 +943,10 @@ export function SessionThread({
               } ${
                 threadFindMatches[threadFindIndex] === item.id
                   ? "thread-search-current"
+                  : ""
+              } ${
+                isAssistant && arrivingMessageId === item.id
+                  ? "thread-message-arriving"
                   : ""
               }`}
               key={item.id}
