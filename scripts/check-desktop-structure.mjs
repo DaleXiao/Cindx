@@ -253,6 +253,9 @@ assert(
 );
 assert(
   rustLib.includes("should_run_agent_knowledge_retrieval(&routing_context)") &&
+    orchestratorSource.includes("is_capability_question") &&
+    orchestratorSource.includes("is_lightweight_direct") &&
+    orchestratorSource.includes("learned_router_cannot_upgrade_a_lightweight_coding_question") &&
     rustLib.includes("index_graph_chunks_cancellable") &&
     rustLib.includes("upsert_all(extractions)") &&
     ragSource.includes("index_workspace_cancellable") &&

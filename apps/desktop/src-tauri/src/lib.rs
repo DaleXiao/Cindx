@@ -12683,9 +12683,11 @@ mod tests {
     #[test]
     fn simple_greeting_skips_workspace_knowledge_retrieval() {
         let greeting = RoutingContext::from_prompt("你好", Vec::new());
+        let capability_question = RoutingContext::from_prompt("你会不会写代码", Vec::new());
         let retrieval = RoutingContext::from_prompt("搜索项目文档里的 API 定义", Vec::new());
 
         assert!(!should_run_agent_knowledge_retrieval(&greeting));
+        assert!(!should_run_agent_knowledge_retrieval(&capability_question));
         assert!(should_run_agent_knowledge_retrieval(&retrieval));
     }
 
