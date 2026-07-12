@@ -331,6 +331,9 @@ export function App() {
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(() => new Set());
   const [sessionStatusOverrides, setSessionStatusOverrides] = useState<Record<string, string>>({});
   const activeSessionIdRef = useRef<string | null>(null);
+  const sessionSelectionRequestRef = useRef(0);
+  const sessionSelectionQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const sessionRefreshRequestRef = useRef(0);
   const trackedSessionTaskIdsRef = useRef<Set<string>>(new Set());
   const [composerError, setComposerError] = useState<string | null>(null);
   const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
@@ -796,31 +799,103 @@ export function App() {
   }
 
   async function refreshWorkspaceAfterProjectSession(nextState: ProjectSessionState) {
-    activeSessionIdRef.current = nextState.activeSessionId || null;
-    if (nextState.activeSessionId) acknowledgeSessionResult(nextState.activeSessionId);
+    const refreshRequest = ++sessionRefreshRequestRef.current;
+    const previousSessionId = activeSessionIdRef.current;
+    const sessionId = nextState.activeSessionId || null;
+    const nextProject = nextState.projects.find((project) => project.id === nextState.activeProjectId);
+    const nextWorkspaceRoot = nextProject?.root ?? "";
+    const currentWorkspaceRoot = runtime?.workspaceRoot ?? activeProject?.root ?? "";
+    const workspaceChanged = Boolean(
+      nextWorkspaceRoot && nextWorkspaceRoot !== currentWorkspaceRoot
+    );
+    const isCurrentRequest = () =>
+      sessionRefreshRequestRef.current === refreshRequest &&
+      activeSessionIdRef.current === sessionId;
+    const reportBackgroundError = (error: unknown) => {
+      if (!isCurrentRequest()) return;
+      setComposerError(error instanceof Error ? error.message : String(error));
+    };
+    const refreshWorkspaceScopedState = () => {
+      void getRuntimeStatus()
+        .then((nextRuntime) => {
+          if (!isCurrentRequest()) return;
+          setRuntime(nextRuntime);
+          setWorkspaceDraft(nextRuntime.workspaceRoot);
+        })
+        .catch(reportBackgroundError);
+      void getPhase5State()
+        .then((next) => {
+          if (isCurrentRequest()) setPhase5(next);
+        })
+        .catch(reportBackgroundError);
+      void getPhase7State()
+        .then((next) => {
+          if (isCurrentRequest()) setPhase7(next);
+        })
+        .catch(reportBackgroundError);
+      void getPhase8State()
+        .then((next) => {
+          if (isCurrentRequest()) setPhase8(next);
+        })
+        .catch(reportBackgroundError);
+    };
+
+    activeSessionIdRef.current = sessionId;
+    if (sessionId) acknowledgeSessionResult(sessionId);
     setProjectSessionState(nextState);
     setComposerError(nextState.lastError);
-    const nextRuntime = await getRuntimeStatus();
-    setRuntime(nextRuntime);
-    setWorkspaceDraft(nextRuntime.workspaceRoot);
-    setPhase5(await getPhase5State());
-    setPhase7(await getPhase7State());
-    setPhase8(await getPhase8State());
-    setContextState(await getContextState());
-    if (nextState.activeSessionId) {
-      const nextAgentState = await getAgentState(nextState.activeSessionId);
-      const nextTraceState = await getAgentTraceState(nextState.activeSessionId);
-      setAgentState(nextAgentState);
-      updateSessionStatus(nextState.activeSessionId, nextAgentState.status);
-      setAgentTraceState(nextTraceState);
-      setSelectedTraceStepId(latestTraceStep(nextTraceState.turns)?.id ?? null);
-    } else {
-      setAgentState(null);
-      setAgentTraceState(null);
-      setSelectedTraceStepId(null);
-    }
     setSelectedThreadItem(null);
     setStreamAnswer("");
+    if (nextWorkspaceRoot) {
+      setWorkspaceDraft(nextWorkspaceRoot);
+      setRuntime((current) =>
+        current ? { ...current, workspaceRoot: nextWorkspaceRoot } : current
+      );
+    }
+    if (previousSessionId !== sessionId) {
+      setAgentState(null);
+      setAgentTraceState(null);
+      setContextState(null);
+      setSelectedTraceStepId(null);
+    }
+    if (!sessionId) {
+      if (workspaceChanged) refreshWorkspaceScopedState();
+      return;
+    }
+
+    let nextAgentState: AgentState;
+    try {
+      nextAgentState = await getAgentState(sessionId);
+    } catch (error) {
+      reportBackgroundError(error);
+      return;
+    }
+    if (!isCurrentRequest()) return;
+    setAgentState(nextAgentState);
+    updateSessionStatus(sessionId, nextAgentState.status);
+
+    void getAgentTraceState(sessionId)
+      .then((nextTraceState) => {
+        if (!isCurrentRequest()) return;
+        setAgentTraceState(nextTraceState);
+        setSelectedTraceStepId(latestTraceStep(nextTraceState.turns)?.id ?? null);
+      })
+      .catch(reportBackgroundError);
+    void getContextState(sessionId)
+      .then((nextContextState) => {
+        if (isCurrentRequest()) setContextState(nextContextState);
+      })
+      .catch(reportBackgroundError);
+    if (workspaceChanged) refreshWorkspaceScopedState();
+  }
+
+  function enqueueProjectSessionSelection<Result>(operation: () => Promise<Result>) {
+    const queued = sessionSelectionQueueRef.current.then(operation, operation);
+    sessionSelectionQueueRef.current = queued.then(
+      () => undefined,
+      () => undefined
+    );
+    return queued;
   }
 
   function forgetDeletedSessions(sessionIds: string[]) {
@@ -905,10 +980,11 @@ export function App() {
   }
 
   async function handleSelectProject(projectId: string) {
+    sessionSelectionRequestRef.current += 1;
     setProjectSessionBusy(true);
     setComposerError(null);
     try {
-      const next = await selectProject(projectId);
+      const next = await enqueueProjectSessionSelection(() => selectProject(projectId));
       await refreshWorkspaceAfterProjectSession(next);
       showTimelineView();
     } catch (error) {
@@ -919,16 +995,44 @@ export function App() {
   }
 
   async function handleSelectSession(sessionId: string) {
-    setProjectSessionBusy(true);
+    if (sessionId === activeSessionIdRef.current) return;
+    const selectionRequest = ++sessionSelectionRequestRef.current;
+    activeSessionIdRef.current = sessionId;
+    acknowledgeSessionResult(sessionId);
     setComposerError(null);
+    setProjectSessionState((current) => {
+      if (!current) return current;
+      const target = current.sessions.find((session) => session.id === sessionId);
+      if (!target) return current;
+      return {
+        ...current,
+        activeProjectId: target.projectId,
+        activeSessionId: sessionId,
+        projects: current.projects.map((project) => ({
+          ...project,
+          active: project.id === target.projectId
+        })),
+        sessions: current.sessions.map((session) => ({
+          ...session,
+          active: session.id === sessionId
+        }))
+      };
+    });
+    setAgentState(null);
+    setAgentTraceState(null);
+    setContextState(null);
+    setSelectedTraceStepId(null);
+    setSelectedThreadItem(null);
+    setStreamAnswer("");
+    showTimelineView();
     try {
-      const next = await selectSession(sessionId);
+      const next = await enqueueProjectSessionSelection(() => selectSession(sessionId));
+      if (selectionRequest !== sessionSelectionRequestRef.current) return;
       await refreshWorkspaceAfterProjectSession(next);
-      showTimelineView();
     } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setProjectSessionBusy(false);
+      if (selectionRequest === sessionSelectionRequestRef.current) {
+        setComposerError(error instanceof Error ? error.message : String(error));
+      }
     }
   }
 

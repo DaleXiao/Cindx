@@ -56,6 +56,14 @@ const orchestratorSource = read("crates/orchestrator/src/lib.rs");
 const mainSource = read("apps/desktop/src/main.tsx");
 const html = read("apps/desktop/index.html");
 const viteConfig = read("apps/desktop/vite.config.ts");
+const sessionRefreshStart = appSource.indexOf(
+  "async function refreshWorkspaceAfterProjectSession"
+);
+const sessionRefreshEnd = appSource.indexOf(
+  "function forgetDeletedSessions",
+  sessionRefreshStart
+);
+const sessionRefreshBlock = appSource.slice(sessionRefreshStart, sessionRefreshEnd);
 
 assert(packageJson.name === "cindx-desktop", "desktop package name changed");
 assert(packageJson.scripts.dev.includes("vite"), "desktop dev script must run Vite");
@@ -252,6 +260,20 @@ assert(
     modelProviderSource.includes("embed_cancellable") &&
     graphSource.includes("pub fn upsert_all"),
   "Lightweight turns must skip retrieval and knowledge preparation must remain cancellable"
+);
+assert(
+  appSource.includes("sessionSelectionRequestRef") &&
+    appSource.includes("sessionSelectionQueueRef") &&
+    appSource.includes("sessionRefreshRequestRef") &&
+    appSource.includes("enqueueProjectSessionSelection") &&
+    appSource.includes("if (sessionId === activeSessionIdRef.current) return") &&
+    appSource.includes("getContextState(sessionId)") &&
+    appSource.includes("if (workspaceChanged) refreshWorkspaceScopedState()") &&
+    !sessionRefreshBlock.includes("setPhase7(await getPhase7State())") &&
+    tauriBridge.includes('invoke<ContextState>("get_context_state", {') &&
+    rustLib.includes("session_id: Option<String>") &&
+    rustLib.includes("project_session_metadata_for_session(&state, session_id.as_deref())"),
+  "Session switching must prioritize chat state and defer workspace-wide refreshes"
 );
 assert(
   sessionThreadSource.includes("openExternalUrl") &&
