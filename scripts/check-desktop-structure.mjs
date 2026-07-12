@@ -217,6 +217,15 @@ assert(
   "Assistant messages must render safe Markdown in completed and streaming states"
 );
 assert(
+  sessionThreadSource.includes("useLayoutEffect") &&
+    sessionThreadSource.includes("knownMessageIdsRef") &&
+    sessionThreadSource.includes("thread-message-arriving") &&
+    styles.includes("@keyframes thread-message-arrive") &&
+    styles.includes("@keyframes thread-markdown-block-arrive") &&
+    styles.includes(".thread-message-arriving .thread-markdown > *"),
+  "New assistant responses must arrive progressively without replaying animation on history"
+);
+assert(
   sessionThreadSource.includes("openExternalUrl") &&
     sessionThreadSource.includes("openArtifact") &&
     sessionThreadSource.includes("artifactLinkTarget") &&

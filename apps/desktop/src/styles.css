@@ -1281,6 +1281,67 @@ pre {
 
 .thread-message-streaming {
   border-bottom-style: dashed;
+  animation: thread-message-arrive 180ms var(--ease-out-quart) both;
+}
+
+.thread-message-arriving {
+  animation: thread-message-arrive 180ms var(--ease-out-quart) both;
+}
+
+.thread-message-arriving .thread-markdown > * {
+  animation: thread-markdown-block-arrive 220ms var(--ease-out-quart) both;
+}
+
+.thread-message-arriving .thread-markdown > :nth-child(2) {
+  animation-delay: 30ms;
+}
+
+.thread-message-arriving .thread-markdown > :nth-child(3) {
+  animation-delay: 60ms;
+}
+
+.thread-message-arriving .thread-markdown > :nth-child(4) {
+  animation-delay: 90ms;
+}
+
+.thread-message-arriving .thread-markdown > :nth-child(5) {
+  animation-delay: 120ms;
+}
+
+.thread-message-arriving .thread-markdown > :nth-child(6) {
+  animation-delay: 150ms;
+}
+
+.thread-message-arriving .thread-markdown > :nth-child(7) {
+  animation-delay: 180ms;
+}
+
+.thread-message-arriving .thread-markdown > :nth-child(n + 8) {
+  animation-delay: 210ms;
+}
+
+@keyframes thread-message-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes thread-markdown-block-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .thread-message-user {
@@ -1852,7 +1913,10 @@ details[open] > summary .disclosure-triangle {
   .composer-working-ring,
   .session-status-working svg,
   .session-status-attention > span,
-  .skills-refresh-turn {
+  .skills-refresh-turn,
+  .thread-message-streaming,
+  .thread-message-arriving,
+  .thread-message-arriving .thread-markdown > * {
     animation: none;
   }
 
