@@ -22,7 +22,7 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent
 } from "react";
-import { openArtifact, readArtifactImage, readArtifactPreview } from "../tauri";
+import { openArtifact, readArtifactPreview } from "../tauri";
 import type {
   AgentState,
   AgentTraceStepView,
@@ -96,16 +96,17 @@ type OutputArtifact = {
 };
 
 const IMAGE_EXTENSIONS = new Set(["avif", "bmp", "gif", "jpeg", "jpg", "png", "webp"]);
+const MARKDOWN_EXTENSIONS = new Set(["md", "mdown", "markdown"]);
+const HTML_EXTENSIONS = new Set(["htm", "html"]);
 
 function artifactName(path: string) {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? path;
 }
 
-function isImageArtifact(path: string) {
+function artifactExtension(path: string) {
   const parts = path.split(".");
-  const extension = parts[parts.length - 1]?.toLowerCase() ?? "";
-  return IMAGE_EXTENSIONS.has(extension);
+  return parts[parts.length - 1]?.toLowerCase() ?? "";
 }
 
 function absoluteArtifactPath(workspaceRoot: string, path: string) {
@@ -131,26 +132,12 @@ function sessionArtifactPaths(step: AgentTraceStepView) {
   return [...paths];
 }
 
-function ArtifactImage({ path }: { path: string }) {
-  const [source, setSource] = useState<string | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    setSource(null);
-    void readArtifactImage(path)
-      .then((dataUrl) => {
-        if (active) setSource(dataUrl);
-      })
-      .catch(() => {
-        if (active) setSource("");
-      });
-    return () => {
-      active = false;
-    };
-  }, [path]);
-
-  if (!source) return <Image aria-label={source === "" ? "Preview unavailable" : "Loading preview"} />;
-  return <img src={source} alt={artifactName(path)} />;
+function ArtifactTypeIcon({ path }: { path: string }) {
+  const extension = artifactExtension(path);
+  if (IMAGE_EXTENSIONS.has(extension)) return <Image aria-hidden="true" />;
+  if (MARKDOWN_EXTENSIONS.has(extension)) return <FileText aria-hidden="true" />;
+  if (HTML_EXTENSIONS.has(extension)) return <Globe2 aria-hidden="true" />;
+  return <File aria-hidden="true" />;
 }
 
 function ArtifactPreviewPane({ path }: { path: string }) {
@@ -440,27 +427,21 @@ export function Inspector({
           ) : (
               <div className="inspector-output-list">
                 {outputArtifacts.map((artifact) => {
-                  const imageArtifact = isImageArtifact(artifact.path);
                   return (
                     <button
-                      className={`inspector-output ${imageArtifact ? "image" : "file"}`}
+                      className="inspector-output"
                       type="button"
                       aria-label={`Preview ${artifactName(artifact.path)}`}
                       key={`${artifact.id}-${artifact.path}`}
                       onClick={() => selectOutput(artifact.path)}
                     >
-                      <div className={`inspector-output-preview ${imageArtifact ? "image" : "file"}`}>
-                        {imageArtifact ? (
-                          <ArtifactImage path={artifact.path} />
-                        ) : (
-                          <File aria-hidden="true" />
-                        )}
+                      <div className="inspector-output-preview">
+                        <ArtifactTypeIcon path={artifact.path} />
                       </div>
                       <div className="inspector-output-copy">
                         <strong title={artifact.path}>{artifactName(artifact.path)}</strong>
                         <span title={artifact.path}>{artifact.path}</span>
                       </div>
-                      {imageArtifact && <Image className="inspector-output-kind" aria-label="Image" />}
                     </button>
                   );
                 })}

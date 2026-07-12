@@ -349,7 +349,10 @@ impl RoutingContext {
                 prompt,
                 &["tool", "file", "shell", "run", "edit", "工具", "文件", "运行", "执行", "修改"],
             ),
-            needs_retrieval: matches!(task_class, TaskClass::Retrieval)
+            needs_retrieval: matches!(
+                task_class,
+                TaskClass::Coding | TaskClass::Research | TaskClass::Retrieval
+            )
                 || contains_any(
                     prompt,
                     &["rag", "search", "retrieve", "source", "docs", "搜索", "检索", "来源", "文档"],
@@ -487,7 +490,7 @@ impl RuleBasedRouter {
     ) -> RoutingDecision {
         let model = select_model(context, !matches!(policy, OrchestrationPolicy::Single));
         let retrieval_mode = if context.needs_retrieval {
-            "graph_rag".to_string()
+            "four_way_parallel".to_string()
         } else {
             "none".to_string()
         };
@@ -987,13 +990,13 @@ mod tests {
     }
 
     #[test]
-    fn rule_router_explains_retrieval_graph_rag_choice() {
+    fn rule_router_explains_four_way_retrieval_choice() {
         let context = RoutingContext::from_prompt("Search the docs with RAG and cite sources", candidates());
         let router = RuleBasedRouter;
         let decision = router.route(&context);
 
         assert_eq!(decision.policy, OrchestrationPolicy::PlanExecuteReview);
-        assert_eq!(decision.retrieval_mode, "graph_rag");
+        assert_eq!(decision.retrieval_mode, "four_way_parallel");
         assert!(decision.explanation.contains("class=retrieval"));
     }
 

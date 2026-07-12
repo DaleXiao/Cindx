@@ -7,17 +7,23 @@ import {
   Plus,
   Search,
   Settings,
+  Trash2,
   X
 } from "lucide-react";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { Menu } from "@tauri-apps/api/menu";
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import type { ProjectView, SessionView } from "../tauri";
 import { DisclosureTriangle } from "./DisclosureTriangle";
 
 const appIconUrl = new URL("../../src-tauri/icons/icon.png", import.meta.url).href;
 
 type SessionVisualState = "working" | "complete" | "attention" | null;
+
+type DeleteTarget =
+  | { kind: "project"; id: string; name: string }
+  | { kind: "session"; id: string; name: string };
 
 function sessionVisualState(status: string): SessionVisualState {
   const normalized = status.trim().toLowerCase();
@@ -86,6 +92,7 @@ type SidebarProps = {
   onSessionCreate: () => void;
   onProjectSelect: (projectId: string) => void;
   onProjectRename: (projectId: string, name: string) => void;
+  onProjectDelete: (projectId: string) => void;
   onSessionSelect: (sessionId: string) => void;
   onSessionRename: (sessionId: string, name: string) => void;
   onSessionFork: (sessionId: string) => void;
@@ -111,6 +118,7 @@ export function Sidebar({
   onSessionCreate,
   onProjectSelect,
   onProjectRename,
+  onProjectDelete,
   onSessionSelect,
   onSessionRename,
   onSessionFork,
@@ -125,6 +133,7 @@ export function Sidebar({
   const [projectRenameDraft, setProjectRenameDraft] = useState("");
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const searchActive = searchOpen && Boolean(searchQuery.trim());
 
   function finishSearchSelection() {
@@ -171,6 +180,20 @@ export function Sidebar({
     }
   }
 
+  function confirmDelete() {
+    if (!deleteTarget) return;
+    const target = deleteTarget;
+    setDeleteTarget(null);
+    if (target.kind === "project") {
+      cancelProjectRename();
+      cancelSessionRename();
+      onProjectDelete(target.id);
+    } else {
+      cancelSessionRename();
+      onSessionDelete(target.id);
+    }
+  }
+
   function handleProjectDisclosure(project: ProjectView, expanded: boolean) {
     setCollapsedProjectIds((current) => {
       const next = new Set(current);
@@ -206,12 +229,9 @@ export function Sidebar({
         },
         {
           id: `delete-${session.id}`,
-          text: "Delete",
-          action: () => {
-            if (window.confirm(`Delete “${session.name}”? This cannot be undone.`)) {
-              onSessionDelete(session.id);
-            }
-          }
+          text: "Delete Session",
+          action: () =>
+            setDeleteTarget({ kind: "session", id: session.id, name: session.name })
         }
       ]
     });
@@ -233,6 +253,12 @@ export function Sidebar({
             setProjectRenameDraft(project.name);
             setRenamingProjectId(project.id);
           }
+        },
+        {
+          id: `delete-project-${project.id}`,
+          text: "Delete Project",
+          action: () =>
+            setDeleteTarget({ kind: "project", id: project.id, name: project.name })
         }
       ]
     });
@@ -599,6 +625,48 @@ export function Sidebar({
           <Activity aria-hidden="true" />
         </button>
       </div>
+
+      {deleteTarget &&
+        createPortal(
+          <div
+            className="delete-confirmation-backdrop"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) setDeleteTarget(null);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") setDeleteTarget(null);
+            }}
+          >
+            <section
+              className="delete-confirmation-dialog"
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="delete-confirmation-title"
+              aria-describedby="delete-confirmation-description"
+            >
+              <Trash2 aria-hidden="true" />
+              <div className="delete-confirmation-copy">
+                <h2 id="delete-confirmation-title">
+                  Delete {deleteTarget.kind === "project" ? "project" : "session"}?
+                </h2>
+                <p id="delete-confirmation-description">
+                  {deleteTarget.kind === "project"
+                    ? `“${deleteTarget.name}” and all of its sessions will be permanently deleted. Original project files will not be deleted.`
+                    : `“${deleteTarget.name}” and its conversation history will be permanently deleted.`}
+                </p>
+              </div>
+              <div className="delete-confirmation-actions">
+                <button type="button" autoFocus onClick={() => setDeleteTarget(null)}>
+                  Cancel
+                </button>
+                <button type="button" className="danger" onClick={confirmDelete}>
+                  Delete
+                </button>
+              </div>
+            </section>
+          </div>,
+          document.body
+        )}
     </aside>
   );
 }

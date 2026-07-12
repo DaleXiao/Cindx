@@ -26,9 +26,13 @@ const sidebarSource = read("apps/desktop/src/components/Sidebar.tsx");
 const disclosureTriangleSource = read(
   "apps/desktop/src/components/DisclosureTriangle.tsx"
 );
+const knowledgeGraphSource = read(
+  "apps/desktop/src/components/KnowledgeGraph.tsx"
+);
 const traceStatusIconSource = read("apps/desktop/src/components/TraceStatusIcon.tsx");
 const styles = read("apps/desktop/src/styles.css");
 const tauriBridge = read("apps/desktop/src/tauri.ts");
+const localBuildScript = read("scripts/build-local-app.mjs");
 const rustLib = read("apps/desktop/src-tauri/src/lib.rs");
 const cargoToml = read("apps/desktop/src-tauri/Cargo.toml");
 const cargoLock = read("apps/desktop/src-tauri/Cargo.lock");
@@ -166,6 +170,15 @@ assert(
 assert(
   tauriConfig.bundle.icon.includes("icons/icon.icns"),
   "Tauri bundle must use the generated macOS app icon"
+);
+assert(
+  localBuildScript.includes("local-build-number") &&
+    localBuildScript.includes('path.join(os.homedir(), ".cargo", "bin")') &&
+    localBuildScript.includes('CINDX_STARTUP_PROBE: "1"') &&
+    localBuildScript.includes('"--identifier"') &&
+    localBuildScript.includes("restoreVersions()") &&
+    packageJson.scripts?.["build:app"] === "node ../../scripts/build-local-app.mjs",
+  "Local builds must auto-version, probe, sign, package, and restore source versions"
 );
 assert(
   tauriConfig.bundle.resources["../../../scripts/sidecars/browser-sidecar.js"] ===
@@ -486,7 +499,21 @@ assert(
 );
 assert(sidebarSource.includes("onSessionFork"), "Session menu must expose fork");
 assert(sidebarSource.includes("onSessionArchive"), "Session menu must expose archive");
-assert(sidebarSource.includes("onSessionDelete"), "Session menu must expose delete");
+assert(
+  sidebarSource.includes("onSessionDelete") &&
+    sidebarSource.includes("onProjectDelete") &&
+    sidebarSource.includes('text: "Delete Session"') &&
+    sidebarSource.includes('text: "Delete Project"') &&
+    sidebarSource.includes('role="alertdialog"') &&
+    sidebarSource.includes('aria-modal="true"') &&
+    !sidebarSource.includes("window.confirm") &&
+    styles.includes(".delete-confirmation-dialog") &&
+    appSource.includes("handleDeleteProject") &&
+    tauriBridge.includes('invoke<ProjectSessionState>("delete_project"') &&
+    rustLib.includes("fn delete_project(") &&
+    rustLib.includes("remove_project_from_config"),
+  "Project and session menus must use a persisted delete flow with confirmation"
+);
 assert(
   traceStatusIconSource.includes("CheckCircle2") &&
     traceStatusIconSource.includes("ShieldQuestion") &&
@@ -918,6 +945,31 @@ assert(
   "RAG indexing must exclude local credential files"
 );
 assert(
+  rustLib.includes("run_parallel_retrieval(") &&
+    rustLib.includes('timed_retrieval_channel("semantic_rag"') &&
+    rustLib.includes('timed_retrieval_channel("graph_recall"') &&
+    rustLib.includes('timed_retrieval_channel("graph_walk"') &&
+    rustLib.includes('timed_retrieval_channel("file_search"') &&
+    rustLib.includes("fuse_retrieval_channels") &&
+    rustLib.includes("prepare_agent_knowledge_context") &&
+    ragSource.includes("search_chunks_semantic") &&
+    ragSource.includes("search_chunks_literal"),
+  "Knowledge retrieval must run four independent channels, fuse results, and feed the agent"
+);
+assert(
+  appSource.includes("Graph Explorer") &&
+    knowledgeGraphSource.includes('aria-label="Workspace knowledge graph"') &&
+    knowledgeGraphSource.includes("graph.edges.filter"),
+  "Knowledge settings must expose an interactive graph explorer backed by graph state"
+);
+assert(
+  rustLib.includes("context_checkpoint_path_for_session") &&
+    rustLib.includes("prepare_session_history_context") &&
+    rustLib.includes("Session context restored for agent run") &&
+    rustLib.includes("event_matches_context"),
+  "Context checkpoints must be session-scoped and injected into later agent runs"
+);
+assert(
   rustLib.includes("synthesize_agent_answer(") &&
     rustLib.includes("run_adaptive_collaboration(") &&
     rustLib.includes("parse_adaptive_workflow(") &&
@@ -930,6 +982,9 @@ assert(
     rustLib.includes('"planner"') &&
     rustLib.includes('"reviewer"') &&
     rustLib.includes('"synthesizer"') &&
+    rustLib.includes("recover_adaptive_worker(") &&
+    rustLib.includes("quality_gate_adaptive_output(") &&
+    rustLib.includes("route_with_local_telemetry(") &&
     orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 7") &&
     orchestratorSource.includes('"thinker" | "worker" | "verifier" | "synthesizer"') &&
     orchestratorSource.includes("adaptive_workflow_layers") &&
