@@ -176,9 +176,10 @@ assert(
     localBuildScript.includes('path.join(os.homedir(), ".cargo", "bin")') &&
     localBuildScript.includes('CINDX_STARTUP_PROBE: "1"') &&
     localBuildScript.includes('"--identifier"') &&
+    localBuildScript.includes('const installApp = !args.has("--no-install")') &&
     localBuildScript.includes("restoreVersions()") &&
     packageJson.scripts?.["build:app"] === "node ../../scripts/build-local-app.mjs",
-  "Local builds must auto-version, probe, sign, package, and restore source versions"
+  "Local builds must auto-version, probe, sign, install, package, and restore source versions"
 );
 assert(
   tauriConfig.bundle.resources["../../../scripts/sidecars/browser-sidecar.js"] ===

@@ -10,7 +10,7 @@ const tauriRoot = path.join(desktopRoot, "src-tauri");
 const targetTriple = "aarch64-apple-darwin";
 const args = new Set(process.argv.slice(2));
 const skipTests = args.has("--skip-tests");
-const installApp = args.has("--install");
+const installApp = !args.has("--no-install");
 const versionPaths = [
   path.join(desktopRoot, "package.json"),
   path.join(desktopRoot, "package-lock.json"),
