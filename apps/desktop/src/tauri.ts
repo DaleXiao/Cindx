@@ -298,10 +298,49 @@ export type RagSourceView = {
   text: string;
 };
 
+export type RetrievalChannelView = {
+  name: string;
+  resultCount: number;
+  durationMs: number;
+  topSources: string[];
+  error: string | null;
+};
+
+export type RetrievalTraceView = {
+  query: string;
+  channels: RetrievalChannelView[];
+  selectedCount: number;
+  durationMs: number;
+};
+
+export type GraphNodeView = {
+  id: string;
+  kind: string;
+  label: string;
+  sourcePath: string;
+  focused: boolean;
+};
+
+export type GraphEdgeView = {
+  id: string;
+  from: string;
+  to: string;
+  kind: string;
+};
+
+export type GraphStateView = {
+  totalNodes: number;
+  totalEdges: number;
+  nodes: GraphNodeView[];
+  edges: GraphEdgeView[];
+};
+
 export type Phase7State = {
   timeline: TimelineEntry[];
   stats: RagStatsView;
   sources: RagSourceView[];
+  retrievalTrace: RetrievalTraceView | null;
+  graph: GraphStateView;
   answer: string | null;
   lastError: string | null;
 };
@@ -647,6 +686,13 @@ let browserPhase7State: Phase7State = {
     indexedAtMs: 0
   },
   sources: [],
+  retrievalTrace: null,
+  graph: {
+    totalNodes: 0,
+    totalEdges: 0,
+    nodes: [],
+    edges: []
+  },
   answer: null,
   lastError: null
 };
@@ -1049,6 +1095,37 @@ export async function renameProject(
           : project
       )
     };
+    return browserProjectSessionState;
+  }
+}
+
+export async function deleteProject(projectId: string): Promise<ProjectSessionState> {
+  try {
+    return await invoke<ProjectSessionState>("delete_project", { input: { projectId } });
+  } catch {
+    const projectIndex = browserProjectSessionState.projects.findIndex(
+      (project) => project.id === projectId
+    );
+    if (projectIndex < 0) return browserProjectSessionState;
+    const projects = browserProjectSessionState.projects.filter(
+      (project) => project.id !== projectId
+    );
+    const sessions = browserProjectSessionState.sessions.filter(
+      (session) => session.projectId !== projectId
+    );
+    const next = { ...browserProjectSessionState, projects, sessions };
+    if (browserProjectSessionState.activeProjectId !== projectId) {
+      browserProjectSessionState = withProjectSessionSelection(
+        next,
+        browserProjectSessionState.activeProjectId,
+        browserProjectSessionState.activeSessionId
+      );
+    } else if (projects.length === 0) {
+      browserProjectSessionState = withProjectSessionSelection(next, "", "");
+    } else {
+      const nextProject = projects[Math.min(projectIndex, projects.length - 1)];
+      browserProjectSessionState = ensureBrowserOpenSession(next, nextProject.id);
+    }
     return browserProjectSessionState;
   }
 }

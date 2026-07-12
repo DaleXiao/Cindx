@@ -34,6 +34,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { Inspector, type InspectorTab } from "./components/Inspector";
 import { Composer } from "./components/Composer";
 import { DisclosureTriangle } from "./components/DisclosureTriangle";
+import { KnowledgeGraph } from "./components/KnowledgeGraph";
 import { Sidebar, type WorkspaceView } from "./components/Sidebar";
 import { TraceStatusIcon } from "./components/TraceStatusIcon";
 import {
@@ -52,6 +53,7 @@ import {
   ContextState,
   createProject,
   createSession,
+  deleteProject,
   deleteSession,
   DESKTOP_VERSION,
   exportAgentTraceJsonl,
@@ -766,8 +768,8 @@ export function App() {
   }
 
   async function refreshWorkspaceAfterProjectSession(nextState: ProjectSessionState) {
-    activeSessionIdRef.current = nextState.activeSessionId;
-    acknowledgeSessionResult(nextState.activeSessionId);
+    activeSessionIdRef.current = nextState.activeSessionId || null;
+    if (nextState.activeSessionId) acknowledgeSessionResult(nextState.activeSessionId);
     setProjectSessionState(nextState);
     setComposerError(nextState.lastError);
     const nextRuntime = await getRuntimeStatus();
@@ -777,14 +779,38 @@ export function App() {
     setPhase7(await getPhase7State());
     setPhase8(await getPhase8State());
     setContextState(await getContextState());
-    const nextAgentState = await getAgentState(nextState.activeSessionId);
-    const nextTraceState = await getAgentTraceState(nextState.activeSessionId);
-    setAgentState(nextAgentState);
-    updateSessionStatus(nextState.activeSessionId, nextAgentState.status);
-    setAgentTraceState(nextTraceState);
-    setSelectedTraceStepId(latestTraceStep(nextTraceState.turns)?.id ?? null);
+    if (nextState.activeSessionId) {
+      const nextAgentState = await getAgentState(nextState.activeSessionId);
+      const nextTraceState = await getAgentTraceState(nextState.activeSessionId);
+      setAgentState(nextAgentState);
+      updateSessionStatus(nextState.activeSessionId, nextAgentState.status);
+      setAgentTraceState(nextTraceState);
+      setSelectedTraceStepId(latestTraceStep(nextTraceState.turns)?.id ?? null);
+    } else {
+      setAgentState(null);
+      setAgentTraceState(null);
+      setSelectedTraceStepId(null);
+    }
     setSelectedThreadItem(null);
     setStreamAnswer("");
+  }
+
+  function forgetDeletedSessions(sessionIds: string[]) {
+    if (sessionIds.length === 0) return;
+    const deleted = new Set(sessionIds);
+    const withoutDeletedKeys = <Value,>(current: Record<string, Value>) => {
+      const next = { ...current };
+      deleted.forEach((sessionId) => delete next[sessionId]);
+      return next;
+    };
+    setComposerDrafts(withoutDeletedKeys);
+    setAttachmentDrafts(withoutDeletedKeys);
+    setSessionStatusOverrides(withoutDeletedKeys);
+    setBusySessionIds((current) => new Set([...current].filter((id) => !deleted.has(id))));
+    setAttachmentBusySessionIds(
+      (current) => new Set([...current].filter((id) => !deleted.has(id)))
+    );
+    deleted.forEach((sessionId) => trackedSessionTaskIdsRef.current.delete(sessionId));
   }
 
   function showWorkspaceView(view: Exclude<WorkspaceView, "settings">) {
@@ -915,6 +941,32 @@ export function App() {
     }
   }
 
+  async function handleDeleteProject(projectId: string) {
+    const sessionIds = (projectSessionState?.sessions ?? [])
+      .filter((session) => session.projectId === projectId)
+      .map((session) => session.id);
+    if (
+      sessionIds.some(
+        (sessionId) =>
+          busySessionIds.has(sessionId) || sessionStatusOverrides[sessionId] === "Review"
+      )
+    ) {
+      setComposerError("Stop the running sessions before deleting this project.");
+      return;
+    }
+    setProjectSessionBusy(true);
+    setComposerError(null);
+    try {
+      const next = await deleteProject(projectId);
+      forgetDeletedSessions(sessionIds);
+      await refreshWorkspaceAfterProjectSession(next);
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setProjectSessionBusy(false);
+    }
+  }
+
   async function handleArchiveSession(sessionId: string) {
     if (busySessionIds.has(sessionId) || sessionStatusOverrides[sessionId] === "Review") {
       setComposerError("Stop the running session before archiving it.");
@@ -953,7 +1005,9 @@ export function App() {
     setProjectSessionBusy(true);
     setComposerError(null);
     try {
-      await refreshWorkspaceAfterProjectSession(await deleteSession(sessionId));
+      const next = await deleteSession(sessionId);
+      forgetDeletedSessions([sessionId]);
+      await refreshWorkspaceAfterProjectSession(next);
     } catch (error) {
       setComposerError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1559,6 +1613,7 @@ export function App() {
         onSessionCreate={() => void handleCreateSession()}
         onProjectSelect={(projectId) => void handleSelectProject(projectId)}
         onProjectRename={(projectId, name) => void handleRenameProject(projectId, name)}
+        onProjectDelete={(projectId) => void handleDeleteProject(projectId)}
         onSessionSelect={(sessionId) => void handleSelectSession(sessionId)}
         onSessionRename={(sessionId, name) => void handleRenameSession(sessionId, name)}
         onSessionFork={(sessionId) => void handleForkSession(sessionId)}
@@ -2383,7 +2438,7 @@ export function App() {
                   <span>Indexed</span>
                 </div>
                 <div>
-                  <strong>Graph + RAG</strong>
+                  <strong>4-way fusion</strong>
                   <span>Retrieval</span>
                 </div>
               </div>
@@ -2396,6 +2451,25 @@ export function App() {
                 <Database size={17} aria-hidden="true" />
                 <span>{ragBusy ? "Working" : "Index workspace"}</span>
               </button>
+              <details className="advanced-settings knowledge-graph-details">
+                <summary>
+                  <DisclosureTriangle />
+                  <strong>Graph Explorer</strong>
+                  <span>
+                    {phase7?.graph.totalNodes ?? 0} nodes · {phase7?.graph.totalEdges ?? 0} edges
+                  </span>
+                </summary>
+                <KnowledgeGraph
+                  graph={
+                    phase7?.graph ?? {
+                      totalNodes: 0,
+                      totalEdges: 0,
+                      nodes: [],
+                      edges: []
+                    }
+                  }
+                />
+              </details>
               <div className="tool-runner knowledge-query">
                 <label>
                   <span>Question</span>
@@ -2431,6 +2505,32 @@ export function App() {
                 <div className="settings-inline-error">
                   {knowledgeError || phase7?.lastError}
                 </div>
+              )}
+              {phase7?.retrievalTrace && (
+                <details className="advanced-settings retrieval-trace-details">
+                  <summary>
+                    <DisclosureTriangle />
+                    <strong>Retrieval trace</strong>
+                    <span>
+                      {phase7.retrievalTrace.selectedCount} selected · {phase7.retrievalTrace.durationMs} ms
+                    </span>
+                  </summary>
+                  <div className="retrieval-channel-list">
+                    {phase7.retrievalTrace.channels.map((channel) => (
+                      <div className="retrieval-channel-row" key={channel.name}>
+                        {channel.error ? (
+                          <XCircle size={14} aria-label="Failed" />
+                        ) : (
+                          <CheckCircle2 size={14} aria-label="Complete" />
+                        )}
+                        <strong>{channel.name.split("_").join(" ")}</strong>
+                        <span>{channel.resultCount} hits</span>
+                        <time>{channel.durationMs} ms</time>
+                        {channel.error && <small>{channel.error}</small>}
+                      </div>
+                    ))}
+                  </div>
+                </details>
               )}
               {phase7?.answer && (
                 <section className="knowledge-answer" aria-label="Knowledge answer">

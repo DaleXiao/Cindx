@@ -366,8 +366,69 @@ pub struct GraphRagSource {
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphRagTrace {
     pub seeds: Vec<GraphRagSource>,
+    pub direct: Vec<GraphRagSource>,
+    pub walked: Vec<GraphRagSource>,
     pub neighbors: Vec<GraphRagSource>,
     pub selected: Vec<GraphRagSource>,
+}
+
+pub fn graph_direct_recall(
+    query: &str,
+    chunks: &[RagChunk],
+    store: &dyn GraphStore,
+    limit: usize,
+) -> Vec<GraphRagSource> {
+    let mut paths = BTreeSet::new();
+    let normalized_query = query.to_lowercase();
+    for token in graph_tokens(query) {
+        for node in store.nodes_by_label(&token) {
+            paths.insert(node.provenance.source_path.clone());
+            if node.kind == GraphNodeKind::File {
+                paths.insert(node.label.clone());
+            }
+        }
+    }
+    for node in store.nodes() {
+        let label = node.label.to_lowercase();
+        if label.chars().count() >= 2 && normalized_query.contains(&label) {
+            paths.insert(node.provenance.source_path.clone());
+            if node.kind == GraphNodeKind::File {
+                paths.insert(node.label);
+            }
+        }
+    }
+    graph_sources_for_paths(paths, chunks, "graph_recall", 0.65, limit)
+}
+
+pub fn graph_walk_recall(
+    seed_results: &[RagSearchResult],
+    chunks: &[RagChunk],
+    store: &dyn GraphStore,
+    limit: usize,
+) -> Vec<GraphRagSource> {
+    let mut paths = BTreeSet::new();
+    for seed in seed_results {
+        let file_id = node_id(GraphNodeKind::File, &seed.chunk.path);
+        for neighbor in store.neighbors(&file_id, 24) {
+            if neighbor.kind == GraphNodeKind::File {
+                paths.insert(neighbor.label);
+            } else {
+                for related in store.neighbors(&neighbor.id, 24) {
+                    if related.kind == GraphNodeKind::File {
+                        paths.insert(related.label);
+                    }
+                }
+            }
+        }
+    }
+    let seed_ids = seed_results
+        .iter()
+        .map(|result| result.chunk.id.as_str())
+        .collect::<BTreeSet<_>>();
+    graph_sources_for_paths(paths, chunks, "graph_walk", 0.5, limit)
+        .into_iter()
+        .filter(|source| !seed_ids.contains(source.chunk.id.as_str()))
+        .collect()
 }
 
 pub fn graph_rag_walk(
@@ -383,46 +444,21 @@ pub fn graph_rag_walk(
         .map(|result| GraphRagSource {
             chunk: result.chunk.clone(),
             score: result.score,
-            reason: "vector_seed".to_string(),
+            reason: "semantic_rag".to_string(),
         })
         .collect::<Vec<_>>();
-    let mut neighbor_paths = BTreeSet::new();
-
-    for seed in &seeds {
-        let file_id = node_id(GraphNodeKind::File, &seed.chunk.path);
-        for neighbor in store.neighbors(&file_id, 24) {
-            if neighbor.kind == GraphNodeKind::File {
-                neighbor_paths.insert(neighbor.label);
-            } else {
-                for related in store.neighbors(&neighbor.id, 24) {
-                    if related.kind == GraphNodeKind::File {
-                        neighbor_paths.insert(related.label);
-                    }
-                }
-            }
-        }
-    }
-    for token in graph_tokens(query) {
-        for node in store.nodes_by_label(&token) {
-            for related in store.neighbors(&node.id, 24) {
-                if related.kind == GraphNodeKind::File {
-                    neighbor_paths.insert(related.label);
-                }
-            }
-        }
-    }
-
-    let mut neighbors = chunks
-        .iter()
-        .filter(|chunk| neighbor_paths.contains(&chunk.path))
-        .filter(|chunk| !seeds.iter().any(|seed| seed.chunk.id == chunk.id))
-        .map(|chunk| GraphRagSource {
-            chunk: chunk.clone(),
-            score: 0.42,
-            reason: "graph_neighbor".to_string(),
-        })
-        .collect::<Vec<_>>();
-    neighbors.sort_by(|left, right| left.chunk.path.cmp(&right.chunk.path));
+    let direct = graph_direct_recall(query, chunks, store, limit.saturating_mul(2));
+    let walked = graph_walk_recall(seed_results, chunks, store, limit.saturating_mul(2));
+    let mut neighbors = direct.clone();
+    neighbors.extend(walked.clone());
+    neighbors.sort_by(|left, right| {
+        left
+            .chunk
+            .id
+            .cmp(&right.chunk.id)
+            .then_with(|| right.score.partial_cmp(&left.score).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    neighbors.dedup_by(|left, right| left.chunk.id == right.chunk.id);
 
     let mut selected = seeds.clone();
     selected.extend(neighbors.clone());
@@ -437,9 +473,38 @@ pub fn graph_rag_walk(
 
     GraphRagTrace {
         seeds,
+        direct,
+        walked,
         neighbors,
         selected,
     }
+}
+
+fn graph_sources_for_paths(
+    paths: BTreeSet<String>,
+    chunks: &[RagChunk],
+    reason: &str,
+    score: f32,
+    limit: usize,
+) -> Vec<GraphRagSource> {
+    let mut sources = chunks
+        .iter()
+        .filter(|chunk| paths.contains(&chunk.path))
+        .map(|chunk| GraphRagSource {
+            chunk: chunk.clone(),
+            score,
+            reason: reason.to_string(),
+        })
+        .collect::<Vec<_>>();
+    sources.sort_by(|left, right| {
+        left
+            .chunk
+            .path
+            .cmp(&right.chunk.path)
+            .then_with(|| left.chunk.start_line.cmp(&right.chunk.start_line))
+    });
+    sources.truncate(limit.max(1));
+    sources
 }
 
 fn node(kind: GraphNodeKind, label: &str, provenance: GraphProvenance) -> GraphNode {
@@ -611,7 +676,9 @@ mod tests {
         );
 
         assert_eq!(trace.seeds.len(), 1);
+        assert!(!trace.direct.is_empty());
+        assert!(!trace.walked.is_empty());
         assert!(trace.neighbors.iter().any(|source| source.chunk.path == "docs/b.md"));
-        assert!(trace.selected.iter().any(|source| source.reason == "graph_neighbor"));
+        assert!(trace.walked.iter().any(|source| source.reason == "graph_walk"));
     }
 }

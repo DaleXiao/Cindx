@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const EMBEDDING_DIMS: usize = 64;
 const DEFAULT_MAX_FILE_BYTES: u64 = 512 * 1024;
+const DEFAULT_MAX_FILES: usize = 10_000;
 const DEFAULT_CHUNK_LINES: usize = 80;
 const DEFAULT_CHUNK_OVERLAP: usize = 8;
 
@@ -62,6 +63,7 @@ pub struct RagIndexStats {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexOptions {
     pub max_file_bytes: u64,
+    pub max_files: usize,
     pub chunk_lines: usize,
     pub chunk_overlap: usize,
 }
@@ -70,6 +72,7 @@ impl Default for IndexOptions {
     fn default() -> Self {
         Self {
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+            max_files: DEFAULT_MAX_FILES,
             chunk_lines: DEFAULT_CHUNK_LINES,
             chunk_overlap: DEFAULT_CHUNK_OVERLAP,
         }
@@ -139,6 +142,16 @@ impl FileRagAdapter {
 
     pub fn chunks(&self) -> &[RagChunk] {
         &self.index.chunks
+    }
+
+    pub fn embedding_profile(&self) -> Option<(&str, &str, usize)> {
+        self.index.chunks.first().map(|chunk| {
+            (
+                chunk.embedding_provider.as_str(),
+                chunk.embedding_model.as_str(),
+                chunk.embedding_dimensions,
+            )
+        })
     }
 }
 
@@ -226,7 +239,60 @@ pub fn index_workspace_with_embedder(
 }
 
 pub fn search_chunks(chunks: &[RagChunk], query: &str, limit: usize) -> Vec<RagSearchResult> {
-    search_chunks_with_embedding(chunks, query, &embed_text(query), limit)
+    search_chunks_with_embedding(chunks, query, &local_query_embedding(query), limit)
+}
+
+pub fn local_query_embedding(text: &str) -> Vec<f32> {
+    embed_text(text)
+}
+
+pub fn search_chunks_semantic(
+    chunks: &[RagChunk],
+    query_embedding: &[f32],
+    limit: usize,
+) -> Vec<RagSearchResult> {
+    let limit = limit.max(1).min(50);
+    let mut results = chunks
+        .iter()
+        .filter(|chunk| chunk.embedding_dimensions == query_embedding.len())
+        .cloned()
+        .map(|chunk| RagSearchResult {
+            score: cosine_similarity(query_embedding, &chunk.embedding),
+            chunk,
+        })
+        .filter(|result| result.score > 0.0)
+        .collect::<Vec<_>>();
+    sort_and_truncate_results(&mut results, limit);
+    results
+}
+
+pub fn search_chunks_literal(
+    chunks: &[RagChunk],
+    query: &str,
+    limit: usize,
+) -> Vec<RagSearchResult> {
+    let normalized_query = query.trim().to_lowercase();
+    if normalized_query.is_empty() {
+        return Vec::new();
+    }
+    let query_tokens = token_counts(&normalized_query);
+    let mut results = chunks
+        .iter()
+        .cloned()
+        .filter_map(|chunk| {
+            let normalized_text = chunk.text.to_lowercase();
+            let exact_matches = normalized_text.matches(&normalized_query).count();
+            let lexical_score = lexical_overlap(&query_tokens, &token_counts(&normalized_text));
+            let score = if exact_matches > 0 {
+                1.0 + (exact_matches.min(8) as f32 * 0.05)
+            } else {
+                lexical_score
+            };
+            (score > 0.0).then_some(RagSearchResult { chunk, score })
+        })
+        .collect::<Vec<_>>();
+    sort_and_truncate_results(&mut results, limit.max(1).min(50));
+    results
 }
 
 pub fn search_chunks_with_embedding(
@@ -241,7 +307,11 @@ pub fn search_chunks_with_embedding(
         .iter()
         .cloned()
         .map(|chunk| {
-            let vector_score = cosine_similarity(query_embedding, &chunk.embedding);
+            let vector_score = if query_embedding.len() == chunk.embedding_dimensions {
+                cosine_similarity(query_embedding, &chunk.embedding)
+            } else {
+                0.0
+            };
             let lexical_score = lexical_overlap(&query_tokens, &token_counts(&chunk.text));
             RagSearchResult {
                 chunk,
@@ -251,6 +321,11 @@ pub fn search_chunks_with_embedding(
         .filter(|result| result.score > 0.0)
         .collect::<Vec<_>>();
 
+    sort_and_truncate_results(&mut results, limit);
+    results
+}
+
+fn sort_and_truncate_results(results: &mut Vec<RagSearchResult>, limit: usize) {
     results.sort_by(|left, right| {
         right
             .score
@@ -260,7 +335,6 @@ pub fn search_chunks_with_embedding(
             .then_with(|| left.chunk.start_line.cmp(&right.chunk.start_line))
     });
     results.truncate(limit);
-    results
 }
 
 pub fn lancedb_records(index: &RagIndex) -> Vec<LanceDbRecord> {
@@ -359,35 +433,45 @@ fn collect_chunks(
     chunks: &mut Vec<RagChunk>,
     files_indexed: &mut usize,
 ) -> Result<(), RagError> {
-    let metadata = fs::metadata(current)
-        .map_err(|error| RagError::new(format!("failed to stat path: {error}")))?;
+    if *files_indexed >= options.max_files.max(1) {
+        return Ok(());
+    }
+    let metadata = match fs::metadata(current) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
+        Err(error) => return Err(RagError::new(format!("failed to stat path: {error}"))),
+    };
     if metadata.is_file() {
         index_file(workspace_root, current, &metadata, options, indexed_at_ms, chunks, files_indexed)?;
         return Ok(());
     }
 
-    let mut entries = fs::read_dir(current)
-        .map_err(|error| RagError::new(format!("failed to read directory: {error}")))?;
-    let mut entries = entries
-        .by_ref()
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| RagError::new(format!("failed to read directory entry: {error}")))?;
+    let entries = match fs::read_dir(current) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
+        Err(error) => return Err(RagError::new(format!("failed to read directory: {error}"))),
+    };
+    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
     entries.sort_by_key(|entry| entry.path());
 
     for entry in entries {
+        if *files_indexed >= options.max_files.max(1) {
+            break;
+        }
         let path = entry.path();
         let name = entry.file_name();
-        if should_skip_path(&name.to_string_lossy()) {
+        if should_skip_workspace_entry(workspace_root, current, &name.to_string_lossy()) {
             continue;
         }
-        let file_type = entry
-            .file_type()
-            .map_err(|error| RagError::new(format!("failed to read file type: {error}")))?;
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         if file_type.is_symlink() {
             continue;
         }
-        let metadata =
-            entry.metadata().map_err(|error| RagError::new(format!("failed to read metadata: {error}")))?;
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
         if metadata.is_dir() {
             collect_chunks(workspace_root, &path, options, indexed_at_ms, chunks, files_indexed)?;
         } else if metadata.is_file() {
@@ -407,6 +491,9 @@ fn index_file(
     chunks: &mut Vec<RagChunk>,
     files_indexed: &mut usize,
 ) -> Result<(), RagError> {
+    if *files_indexed >= options.max_files.max(1) {
+        return Ok(());
+    }
     if metadata.len() > options.max_file_bytes {
         return Ok(());
     }
@@ -499,6 +586,33 @@ fn should_skip_path(name: &str) -> bool {
             | "credentials.json"
             | "id_rsa"
             | "id_ed25519"
+        )
+}
+
+fn should_skip_workspace_entry(workspace_root: &Path, current: &Path, name: &str) -> bool {
+    if should_skip_path(name) {
+        return true;
+    }
+    let is_home_root = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .is_some_and(|home| home == workspace_root);
+    current == workspace_root
+        && is_home_root
+        && matches!(
+            name.to_ascii_lowercase().as_str(),
+            "library"
+                | "pictures"
+                | "movies"
+                | "music"
+                | "applications"
+                | ".trash"
+                | ".cargo"
+                | ".rustup"
+                | ".npm"
+                | ".bun"
+                | ".codex"
+                | ".cache"
+                | ".local"
         )
 }
 
@@ -929,6 +1043,57 @@ mod tests {
         assert!(!results.is_empty());
         assert_eq!(results[0].chunk.path, "b.md");
         assert!(results[0].score > 0.0);
+    }
+
+    #[test]
+    fn semantic_search_rejects_mismatched_vector_spaces() {
+        let root = temp_workspace();
+        fs::write(root.join("a.md"), "alpha").expect("file should write");
+        let mut embedder = FakeEmbedder {
+            vectors: vec![vec![1.0, 0.0, 0.0]],
+        };
+        let index = index_workspace_with_embedder(&root, IndexOptions::default(), &mut embedder)
+            .expect("index should build");
+
+        let results = search_chunks_semantic(&index.chunks, &[1.0, 0.0], 5);
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn literal_search_finds_exact_text_without_vector_match() {
+        let root = temp_workspace();
+        fs::write(root.join("a.md"), "unique-literal-needle and details")
+            .expect("file should write");
+        fs::write(root.join("b.md"), "unrelated text").expect("file should write");
+        let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+
+        let results = search_chunks_literal(&index.chunks, "unique-literal-needle", 5);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk.path, "a.md");
+        assert!(results[0].score >= 1.0);
+    }
+
+    #[test]
+    fn indexing_respects_max_files() {
+        let root = temp_workspace();
+        for name in ["a.md", "b.md", "c.md"] {
+            fs::write(root.join(name), format!("content for {name}"))
+                .expect("file should write");
+        }
+
+        let index = index_workspace(
+            &root,
+            IndexOptions {
+                max_files: 1,
+                ..IndexOptions::default()
+            },
+        )
+        .expect("index should build");
+
+        assert_eq!(index.stats.files_indexed, 1);
+        assert_eq!(index.chunks.len(), 1);
     }
 
     #[test]
