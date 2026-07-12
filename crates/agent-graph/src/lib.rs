@@ -153,6 +153,25 @@ impl FileGraphStore {
         Ok(store)
     }
 
+    pub fn upsert_all(
+        &mut self,
+        extractions: impl IntoIterator<Item = GraphExtraction>,
+    ) -> Result<(), GraphError> {
+        for extraction in extractions {
+            self.merge(extraction);
+        }
+        self.save()
+    }
+
+    fn merge(&mut self, extraction: GraphExtraction) {
+        for node in extraction.nodes {
+            self.nodes.insert(node.id.clone(), node);
+        }
+        for edge in extraction.edges {
+            self.edges.insert(edge.id.clone(), edge);
+        }
+    }
+
     fn load(&mut self) -> Result<(), GraphError> {
         let text = fs::read_to_string(&self.path)
             .map_err(|error| GraphError::new(format!("failed to read graph store: {error}")))?;
@@ -265,12 +284,7 @@ impl FileGraphStore {
 
 impl GraphStore for FileGraphStore {
     fn upsert(&mut self, extraction: GraphExtraction) -> Result<(), GraphError> {
-        for node in extraction.nodes {
-            self.nodes.insert(node.id.clone(), node);
-        }
-        for edge in extraction.edges {
-            self.edges.insert(edge.id.clone(), edge);
-        }
+        self.merge(extraction);
         self.save()
     }
 
@@ -641,6 +655,27 @@ mod tests {
 
         assert!(!loaded.nodes().is_empty());
         assert!(neighbors.iter().any(|node| node.label == "file.read" || node.label == "docs/b.md"));
+    }
+
+    #[test]
+    fn file_graph_store_persists_a_batch() {
+        let path = std::env::temp_dir().join(format!(
+            "agent-graph-batch-{}-{}.tsv",
+            std::process::id(),
+            current_time_millis()
+        ));
+        let mut store = FileGraphStore::open(&path).expect("store should open");
+        store
+            .upsert_all([
+                extract_graph_from_chunk(&chunk("docs/a.md", "Use file.read")),
+                extract_graph_from_chunk(&chunk("docs/b.md", "Use shell.run")),
+            ])
+            .expect("graph batch should save");
+
+        let loaded = FileGraphStore::open(&path).expect("store should reload");
+
+        assert!(loaded.nodes().iter().any(|node| node.label == "docs/a.md"));
+        assert!(loaded.nodes().iter().any(|node| node.label == "docs/b.md"));
     }
 
     #[test]

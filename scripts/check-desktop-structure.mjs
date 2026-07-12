@@ -51,6 +51,7 @@ const agentSkillsSource = read("crates/agent-skills/src/lib.rs");
 const builtinSkillCreator = read("crates/agent-skills/builtins/skill-creator/SKILL.md");
 const modelProviderSource = read("crates/model-provider/src/lib.rs");
 const ragSource = read("crates/agent-rag/src/lib.rs");
+const graphSource = read("crates/agent-graph/src/lib.rs");
 const orchestratorSource = read("crates/orchestrator/src/lib.rs");
 const mainSource = read("apps/desktop/src/main.tsx");
 const html = read("apps/desktop/index.html");
@@ -241,6 +242,16 @@ assert(
     tauriBridge.includes("sessionId: string | null") &&
     tauriBridge.includes("reset: boolean"),
   "Agent output must stream by session and Stop must cancel the active provider request"
+);
+assert(
+  rustLib.includes("should_run_agent_knowledge_retrieval(&routing_context)") &&
+    rustLib.includes("index_graph_chunks_cancellable") &&
+    rustLib.includes("upsert_all(extractions)") &&
+    ragSource.includes("index_workspace_cancellable") &&
+    ragSource.includes("RAG_INDEX_CANCELLED") &&
+    modelProviderSource.includes("embed_cancellable") &&
+    graphSource.includes("pub fn upsert_all"),
+  "Lightweight turns must skip retrieval and knowledge preparation must remain cancellable"
 );
 assert(
   sessionThreadSource.includes("openExternalUrl") &&

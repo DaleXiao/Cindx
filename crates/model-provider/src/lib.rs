@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
@@ -217,10 +217,76 @@ fn spawn_curl(
 fn execute_curl(
     config: &str,
     timeout_seconds: u64,
-) -> Result<std::process::Output, ModelError> {
-    spawn_curl(config, timeout_seconds, false)?
-        .wait_with_output()
-        .map_err(|error| ModelError::new(format!("failed to wait for curl: {error}")))
+) -> Result<Output, ModelError> {
+    execute_curl_cancellable(config, timeout_seconds, &mut || false)
+}
+
+fn execute_curl_cancellable(
+    config: &str,
+    timeout_seconds: u64,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<Output, ModelError> {
+    let child = spawn_curl(config, timeout_seconds, false)?;
+    consume_buffered_child(child, should_cancel)
+}
+
+fn consume_buffered_child(
+    mut child: Child,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<Output, ModelError> {
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ModelError::new("child stdout was not available"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| ModelError::new("child stderr was not available"))?;
+    let stdout_handle = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+            .map_err(|error| format!("failed to read child stdout: {error}"))
+    });
+    let stderr_handle = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+            .map_err(|error| format!("failed to read child stderr: {error}"))
+    });
+
+    let status = loop {
+        if should_cancel() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ModelError::new(MODEL_REQUEST_CANCELLED));
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => thread::sleep(Duration::from_millis(40)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ModelError::new(format!("failed to wait for child: {error}")));
+            }
+        }
+    };
+    let stdout = stdout_handle
+        .join()
+        .map_err(|_| ModelError::new("child stdout reader panicked"))?
+        .map_err(ModelError::new)?;
+    let stderr = stderr_handle
+        .join()
+        .map_err(|_| ModelError::new("child stderr reader panicked"))?
+        .map_err(ModelError::new)?;
+
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn consume_streaming_child(
@@ -472,6 +538,14 @@ impl OpenAiCompatibleProvider {
     }
 
     pub fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ModelError> {
+        self.embed_cancellable(request, || false)
+    }
+
+    pub fn embed_cancellable(
+        &self,
+        request: EmbeddingRequest,
+        mut should_cancel: impl FnMut() -> bool,
+    ) -> Result<EmbeddingResponse, ModelError> {
         if !self.config.embeddings_ready() {
             return Err(ModelError::new("embedding provider config is incomplete"));
         }
@@ -489,7 +563,11 @@ impl OpenAiCompatibleProvider {
             &self.config.api_key,
             Some(&request_body),
         );
-        let output = execute_curl(&curl_config, self.config.timeout_seconds)?;
+        let output = execute_curl_cancellable(
+            &curl_config,
+            self.config.timeout_seconds,
+            &mut should_cancel,
+        )?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         if !output.status.success() {
@@ -1583,6 +1661,27 @@ mod tests {
         assert_eq!(result.expect_err("stream should cancel").message, MODEL_REQUEST_CANCELLED);
         assert!(started.elapsed() < Duration::from_secs(1));
         assert_eq!(output, "started");
+    }
+
+    #[test]
+    fn cancels_a_buffered_model_request_without_waiting_for_timeout() {
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 2; printf done")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("test request process should start");
+        let started = Instant::now();
+        let result = consume_buffered_child(child, &mut || {
+            started.elapsed() >= Duration::from_millis(100)
+        });
+
+        assert_eq!(
+            result.expect_err("request should cancel").message,
+            MODEL_REQUEST_CANCELLED
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
