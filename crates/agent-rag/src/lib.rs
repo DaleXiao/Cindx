@@ -10,6 +10,8 @@ const DEFAULT_MAX_FILES: usize = 10_000;
 const DEFAULT_CHUNK_LINES: usize = 80;
 const DEFAULT_CHUNK_OVERLAP: usize = 8;
 
+pub const RAG_INDEX_CANCELLED: &str = "RAG indexing cancelled";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RagError {
     pub message: String,
@@ -176,6 +178,14 @@ pub fn index_workspace(
     workspace_root: impl AsRef<Path>,
     options: IndexOptions,
 ) -> Result<RagIndex, RagError> {
+    index_workspace_cancellable(workspace_root, options, || false)
+}
+
+pub fn index_workspace_cancellable(
+    workspace_root: impl AsRef<Path>,
+    options: IndexOptions,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<RagIndex, RagError> {
     let workspace_root = workspace_root.as_ref();
     let indexed_at_ms = current_time_millis();
     let mut chunks = Vec::new();
@@ -188,6 +198,7 @@ pub fn index_workspace(
         indexed_at_ms,
         &mut chunks,
         &mut files_indexed,
+        &mut should_cancel,
     )?;
 
     let stats = RagIndexStats {
@@ -432,7 +443,11 @@ fn collect_chunks(
     indexed_at_ms: u64,
     chunks: &mut Vec<RagChunk>,
     files_indexed: &mut usize,
+    should_cancel: &mut dyn FnMut() -> bool,
 ) -> Result<(), RagError> {
+    if should_cancel() {
+        return Err(RagError::new(RAG_INDEX_CANCELLED));
+    }
     if *files_indexed >= options.max_files.max(1) {
         return Ok(());
     }
@@ -442,7 +457,16 @@ fn collect_chunks(
         Err(error) => return Err(RagError::new(format!("failed to stat path: {error}"))),
     };
     if metadata.is_file() {
-        index_file(workspace_root, current, &metadata, options, indexed_at_ms, chunks, files_indexed)?;
+        index_file(
+            workspace_root,
+            current,
+            &metadata,
+            options,
+            indexed_at_ms,
+            chunks,
+            files_indexed,
+            should_cancel,
+        )?;
         return Ok(());
     }
 
@@ -455,6 +479,9 @@ fn collect_chunks(
     entries.sort_by_key(|entry| entry.path());
 
     for entry in entries {
+        if should_cancel() {
+            return Err(RagError::new(RAG_INDEX_CANCELLED));
+        }
         if *files_indexed >= options.max_files.max(1) {
             break;
         }
@@ -473,9 +500,26 @@ fn collect_chunks(
             continue;
         };
         if metadata.is_dir() {
-            collect_chunks(workspace_root, &path, options, indexed_at_ms, chunks, files_indexed)?;
+            collect_chunks(
+                workspace_root,
+                &path,
+                options,
+                indexed_at_ms,
+                chunks,
+                files_indexed,
+                should_cancel,
+            )?;
         } else if metadata.is_file() {
-            index_file(workspace_root, &path, &metadata, options, indexed_at_ms, chunks, files_indexed)?;
+            index_file(
+                workspace_root,
+                &path,
+                &metadata,
+                options,
+                indexed_at_ms,
+                chunks,
+                files_indexed,
+                should_cancel,
+            )?;
         }
     }
 
@@ -490,7 +534,11 @@ fn index_file(
     indexed_at_ms: u64,
     chunks: &mut Vec<RagChunk>,
     files_indexed: &mut usize,
+    should_cancel: &mut dyn FnMut() -> bool,
 ) -> Result<(), RagError> {
+    if should_cancel() {
+        return Err(RagError::new(RAG_INDEX_CANCELLED));
+    }
     if *files_indexed >= options.max_files.max(1) {
         return Ok(());
     }
@@ -958,6 +1006,22 @@ mod tests {
         assert_eq!(index.chunks[0].embedding_provider, "local");
         assert_eq!(index.chunks[0].embedding_dimensions, EMBEDDING_DIMS);
         assert!(!index.chunks[0].file_hash.is_empty());
+    }
+
+    #[test]
+    fn cancellable_index_stops_during_workspace_scan() {
+        let root = temp_workspace();
+        fs::write(root.join("one.md"), "one").expect("first file should write");
+        fs::write(root.join("two.md"), "two").expect("second file should write");
+        let mut checks = 0;
+
+        let error = index_workspace_cancellable(&root, IndexOptions::default(), || {
+            checks += 1;
+            checks >= 3
+        })
+        .expect_err("index should be cancelled");
+
+        assert_eq!(error.message, RAG_INDEX_CANCELLED);
     }
 
     #[test]

@@ -13,9 +13,9 @@ use agent_memory::{
 use agent_mcp::{McpCatalogService, McpServerConfig, McpTransportConfig};
 use agent_rag::{
     build_grounded_answer_prompt, export_lancedb_records_jsonl, index_workspace,
-    index_workspace_with_embedder, local_query_embedding, search_chunks_literal,
-    search_chunks_semantic, EmbeddingBatch, FileRagAdapter, IndexOptions, RagAdapter, RagChunk,
-    RagEmbedder, RagIndexStats, RagSearchResult,
+    index_workspace_cancellable, index_workspace_with_embedder, local_query_embedding,
+    search_chunks_literal, search_chunks_semantic, EmbeddingBatch, FileRagAdapter, IndexOptions,
+    RagAdapter, RagChunk, RagEmbedder, RagIndexStats, RagSearchResult, RAG_INDEX_CANCELLED,
 };
 use agent_skills::{SkillCatalog, SkillPreference, SkillRecord};
 use agent_runtime::{
@@ -2839,34 +2839,40 @@ fn run_agent_task_blocking_inner(
         });
     }
 
-    match prepare_agent_knowledge_context(
-        &state,
-        &config,
-        &task_id,
-        &run_context,
-        &root,
-        &prompt,
-    ) {
-        Ok(Some(knowledge_context)) => history.push(knowledge_context),
-        Ok(None) => {}
-        Err(error) => {
-            let mut store = state
-                .store
-                .lock()
-                .map_err(|lock_error| format!("store lock poisoned: {lock_error}"))?;
-            append_event(
-                &mut store,
-                &task_id,
-                EventKind::Error,
-                "Workspace knowledge retrieval unavailable",
-                metadata_with_context(
-                    [("error".to_string(), error)]
-                        .into_iter()
-                        .collect(),
-                    &run_context,
-                ),
-            )
-            .map_err(|store_error| store_error.to_string())?;
+    if should_run_agent_knowledge_retrieval(&routing_context) {
+        match prepare_agent_knowledge_context(
+            &state,
+            &config,
+            &task_id,
+            &run_context,
+            &root,
+            &prompt,
+            cancellation,
+        ) {
+            Ok(Some(knowledge_context)) => history.push(knowledge_context),
+            Ok(None) => {}
+            Err(error) if error == MODEL_REQUEST_CANCELLED => {
+                return cancelled_agent_state(&state, session_id);
+            }
+            Err(error) => {
+                let mut store = state
+                    .store
+                    .lock()
+                    .map_err(|lock_error| format!("store lock poisoned: {lock_error}"))?;
+                append_event(
+                    &mut store,
+                    &task_id,
+                    EventKind::Error,
+                    "Workspace knowledge retrieval unavailable",
+                    metadata_with_context(
+                        [("error".to_string(), error)]
+                            .into_iter()
+                            .collect(),
+                        &run_context,
+                    ),
+                )
+                .map_err(|store_error| store_error.to_string())?;
+            }
         }
     }
 
@@ -3158,34 +3164,40 @@ fn retry_agent_task_blocking_inner(
         history,
         config.context_window_tokens,
     )?;
-    match prepare_agent_knowledge_context(
-        &state,
-        &config,
-        &task_id,
-        &run_context,
-        &root,
-        &prompt,
-    ) {
-        Ok(Some(knowledge_context)) => history.push(knowledge_context),
-        Ok(None) => {}
-        Err(error) => {
-            let mut store = state
-                .store
-                .lock()
-                .map_err(|lock_error| format!("store lock poisoned: {lock_error}"))?;
-            append_event(
-                &mut store,
-                &task_id,
-                EventKind::Error,
-                "Workspace knowledge retrieval unavailable",
-                metadata_with_context(
-                    [("error".to_string(), error)]
-                        .into_iter()
-                        .collect(),
-                    &run_context,
-                ),
-            )
-            .map_err(|store_error| store_error.to_string())?;
+    if should_run_agent_knowledge_retrieval(&routing_context) {
+        match prepare_agent_knowledge_context(
+            &state,
+            &config,
+            &task_id,
+            &run_context,
+            &root,
+            &prompt,
+            cancellation,
+        ) {
+            Ok(Some(knowledge_context)) => history.push(knowledge_context),
+            Ok(None) => {}
+            Err(error) if error == MODEL_REQUEST_CANCELLED => {
+                return cancelled_agent_state(&state, session_id.as_deref());
+            }
+            Err(error) => {
+                let mut store = state
+                    .store
+                    .lock()
+                    .map_err(|lock_error| format!("store lock poisoned: {lock_error}"))?;
+                append_event(
+                    &mut store,
+                    &task_id,
+                    EventKind::Error,
+                    "Workspace knowledge retrieval unavailable",
+                    metadata_with_context(
+                        [("error".to_string(), error)]
+                            .into_iter()
+                            .collect(),
+                        &run_context,
+                    ),
+                )
+                .map_err(|store_error| store_error.to_string())?;
+            }
         }
     }
     let collaboration = prepare_agent_collaboration(
@@ -4047,6 +4059,7 @@ fn index_workspace_rag(state: tauri::State<'_, AppState>) -> Result<Phase7State,
     let (index, embedding_backend, embedding_model) = if config.is_ready() {
         let mut embedder = CloudRagEmbedder {
             config: config.clone(),
+            cancellation: None,
         };
         let index = index_workspace_with_embedder(&root, IndexOptions::default(), &mut embedder)
             .map_err(|error| error.to_string())?;
@@ -4123,13 +4136,15 @@ fn search_rag(
 
     let adapter = open_rag_adapter_for(&root)?;
     let config = clone_provider_config(&state)?;
+    let cancellation = Arc::new(AtomicBool::new(false));
     let retrieval = run_parallel_retrieval(
         &root,
         &adapter,
         &config,
         &query,
         input.limit.unwrap_or(6),
-    );
+        &cancellation,
+    )?;
     let focus_paths = retrieval
         .sources
         .iter()
@@ -4174,13 +4189,15 @@ fn answer_with_rag(
 
     let adapter = open_rag_adapter_for(&root)?;
     let config = clone_provider_config(&state)?;
+    let cancellation = Arc::new(AtomicBool::new(false));
     let retrieval = run_parallel_retrieval(
         &root,
         &adapter,
         &config,
         &query,
         input.limit.unwrap_or(6),
-    );
+        &cancellation,
+    )?;
     let selected_results = retrieval.results.clone();
     let sources = retrieval.sources.clone();
     let focus_paths = sources
@@ -9474,6 +9491,10 @@ struct ParallelRetrievalResult {
     trace: RetrievalTraceView,
 }
 
+fn should_run_agent_knowledge_retrieval(context: &RoutingContext) -> bool {
+    context.needs_retrieval
+}
+
 fn prepare_agent_knowledge_context(
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,
@@ -9481,10 +9502,22 @@ fn prepare_agent_knowledge_context(
     run_context: &Metadata,
     workspace_root: &Path,
     query: &str,
+    cancellation: &Arc<AtomicBool>,
 ) -> Result<Option<Message>, String> {
     let mut adapter = open_rag_adapter_for(workspace_root)?;
-    let auto_indexed = ensure_workspace_knowledge_index(workspace_root, &mut adapter)?;
-    let retrieval = run_parallel_retrieval(workspace_root, &adapter, config, query, 8);
+    let auto_indexed =
+        ensure_workspace_knowledge_index(workspace_root, &mut adapter, cancellation)?;
+    if agent_run_was_cancelled(cancellation) {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
+    let retrieval = run_parallel_retrieval(
+        workspace_root,
+        &adapter,
+        config,
+        query,
+        8,
+        cancellation,
+    )?;
 
     {
         let mut store = state
@@ -9581,17 +9614,36 @@ fn prepare_agent_knowledge_context(
 fn ensure_workspace_knowledge_index(
     workspace_root: &Path,
     adapter: &mut FileRagAdapter,
+    cancellation: &Arc<AtomicBool>,
 ) -> Result<Option<RagIndexStats>, String> {
+    if agent_run_was_cancelled(cancellation) {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
     if !adapter.chunks().is_empty() {
         if !graph_store_path_for(workspace_root).exists() {
-            index_graph_chunks(workspace_root, adapter.chunks())?;
+            index_graph_chunks_cancellable(workspace_root, adapter.chunks(), || {
+                agent_run_was_cancelled(cancellation)
+            })?;
         }
         return Ok(None);
     }
 
-    let index = index_workspace(workspace_root, IndexOptions::default())
-        .map_err(|error| error.to_string())?;
-    index_graph_chunks(workspace_root, &index.chunks)?;
+    let index = index_workspace_cancellable(workspace_root, IndexOptions::default(), || {
+        agent_run_was_cancelled(cancellation)
+    })
+    .map_err(|error| {
+        if error.message == RAG_INDEX_CANCELLED {
+            MODEL_REQUEST_CANCELLED.to_string()
+        } else {
+            error.to_string()
+        }
+    })?;
+    index_graph_chunks_cancellable(workspace_root, &index.chunks, || {
+        agent_run_was_cancelled(cancellation)
+    })?;
+    if agent_run_was_cancelled(cancellation) {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
     export_lancedb_records_jsonl(&index, lancedb_export_path_for(workspace_root))
         .map_err(|error| error.to_string())?;
     let stats = adapter
@@ -9606,7 +9658,11 @@ fn run_parallel_retrieval(
     config: &ProviderConfig,
     query: &str,
     limit: usize,
-) -> ParallelRetrievalResult {
+    cancellation: &Arc<AtomicBool>,
+) -> Result<ParallelRetrievalResult, String> {
+    if agent_run_was_cancelled(cancellation) {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
     let started_at = Instant::now();
     let limit = limit.max(1).min(24);
     let channel_limit = limit.saturating_mul(3).min(50);
@@ -9624,12 +9680,14 @@ fn run_parallel_retrieval(
     let semantic_chunks = chunks.clone();
     let semantic_query = query.to_string();
     let semantic_config = config.clone();
+    let semantic_cancellation = cancellation.clone();
     let semantic_handle = std::thread::spawn(move || {
         timed_retrieval_channel("semantic_rag", || {
             let embedding = query_embedding_for_chunks(
                 &semantic_config,
                 &semantic_chunks,
                 &semantic_query,
+                &semantic_cancellation,
             )?;
             Ok(search_chunks_semantic(
                 &semantic_chunks,
@@ -9699,6 +9757,9 @@ fn run_parallel_retrieval(
         joined_retrieval_channel("graph_walk", walk_handle),
         joined_retrieval_channel("file_search", literal_handle),
     ];
+    if agent_run_was_cancelled(cancellation) {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
     let (results, sources) = fuse_retrieval_channels(&channels, limit);
     let channel_views = channels
         .iter()
@@ -9715,7 +9776,7 @@ fn run_parallel_retrieval(
             error: channel.error.clone(),
         })
         .collect::<Vec<_>>();
-    ParallelRetrievalResult {
+    Ok(ParallelRetrievalResult {
         trace: RetrievalTraceView {
             query: query.to_string(),
             channels: channel_views,
@@ -9724,7 +9785,7 @@ fn run_parallel_retrieval(
         },
         results,
         sources,
-    }
+    })
 }
 
 fn timed_retrieval_channel(
@@ -9764,6 +9825,7 @@ fn query_embedding_for_chunks(
     config: &ProviderConfig,
     chunks: &[RagChunk],
     query: &str,
+    cancellation: &Arc<AtomicBool>,
 ) -> Result<Vec<f32>, String> {
     let Some(profile) = chunks.first() else {
         return Ok(local_query_embedding(query));
@@ -9783,6 +9845,7 @@ fn query_embedding_for_chunks(
     }
     let mut embedder = CloudRagEmbedder {
         config: config.clone(),
+        cancellation: Some(cancellation.clone()),
     };
     let mut batch = embedder
         .embed_texts(&[query.to_string()])
@@ -9983,6 +10046,7 @@ fn append_retrieval_event_for_task(
 
 struct CloudRagEmbedder {
     config: ProviderConfig,
+    cancellation: Option<Arc<AtomicBool>>,
 }
 
 impl RagEmbedder for CloudRagEmbedder {
@@ -9996,11 +10060,18 @@ impl RagEmbedder for CloudRagEmbedder {
             timeout_seconds: 180,
         });
         let response = provider
-            .embed(EmbeddingRequest {
-                input: texts.to_vec(),
-                dimensions: None,
-                metadata: Metadata::new(),
-            })
+            .embed_cancellable(
+                EmbeddingRequest {
+                    input: texts.to_vec(),
+                    dimensions: None,
+                    metadata: Metadata::new(),
+                },
+                || {
+                    self.cancellation
+                        .as_ref()
+                        .is_some_and(|control| agent_run_was_cancelled(control))
+                },
+            )
             .map_err(|error| agent_rag::RagError::new(error.to_string()))?;
 
         Ok(EmbeddingBatch {
@@ -11376,17 +11447,37 @@ fn open_rag_adapter_for(workspace_root: &Path) -> Result<FileRagAdapter, String>
 }
 
 fn index_graph_chunks(workspace_root: &Path, chunks: &[RagChunk]) -> Result<(usize, usize), String> {
+    index_graph_chunks_cancellable(workspace_root, chunks, || false)
+}
+
+fn index_graph_chunks_cancellable(
+    workspace_root: &Path,
+    chunks: &[RagChunk],
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<(usize, usize), String> {
     let graph_path = graph_store_path_for(workspace_root);
     if graph_path.exists() {
         fs::remove_file(&graph_path)
             .map_err(|error| format!("failed to reset graph store: {error}"))?;
     }
     let mut graph_store = FileGraphStore::open(&graph_path).map_err(|error| error.to_string())?;
+    let mut extractions = Vec::with_capacity(chunks.len());
     for chunk in chunks {
-        graph_store
-            .upsert(extract_graph_from_chunk(chunk))
-            .map_err(|error| error.to_string())?;
+        if should_cancel() {
+            drop(graph_store);
+            let _ = fs::remove_file(&graph_path);
+            return Err(MODEL_REQUEST_CANCELLED.to_string());
+        }
+        extractions.push(extract_graph_from_chunk(chunk));
     }
+    if should_cancel() {
+        drop(graph_store);
+        let _ = fs::remove_file(&graph_path);
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
+    graph_store
+        .upsert_all(extractions)
+        .map_err(|error| error.to_string())?;
 
     Ok((graph_store.nodes().len(), graph_store.edges().len()))
 }
@@ -12584,6 +12675,29 @@ mod tests {
         assert_eq!(telemetry[0].outcome, RoutingOutcome::Succeeded);
         assert_eq!(telemetry[0].cost_proxy, 120);
         assert_eq!(telemetry[0].retrieval_count, 1);
+    }
+
+    #[test]
+    fn simple_greeting_skips_workspace_knowledge_retrieval() {
+        let greeting = RoutingContext::from_prompt("你好", Vec::new());
+        let retrieval = RoutingContext::from_prompt("搜索项目文档里的 API 定义", Vec::new());
+
+        assert!(!should_run_agent_knowledge_retrieval(&greeting));
+        assert!(should_run_agent_knowledge_retrieval(&retrieval));
+    }
+
+    #[test]
+    fn graph_index_cancellation_removes_partial_cache() {
+        let root = temp_test_root("phase7-graph-cancel");
+        fs::create_dir_all(&root).expect("temp root should exist");
+        fs::write(root.join("a.md"), "graph source").expect("fixture should write");
+        let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+
+        let error = index_graph_chunks_cancellable(&root, &index.chunks, || true)
+            .expect_err("graph indexing should cancel");
+
+        assert_eq!(error, MODEL_REQUEST_CANCELLED);
+        assert!(!graph_store_path_for(&root).exists());
     }
 
     #[test]
