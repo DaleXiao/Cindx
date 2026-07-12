@@ -4341,8 +4341,11 @@ fn get_phase8_state(state: tauri::State<'_, AppState>) -> Result<Phase8State, St
 }
 
 #[tauri::command]
-fn get_context_state(state: tauri::State<'_, AppState>) -> Result<ContextState, String> {
-    let run_context = project_session_metadata_for_session(&state, None)?;
+fn get_context_state(
+    state: tauri::State<'_, AppState>,
+    session_id: Option<String>,
+) -> Result<ContextState, String> {
+    let run_context = project_session_metadata_for_session(&state, session_id.as_deref())?;
     let root = run_context
         .get("project_root")
         .map(PathBuf::from)

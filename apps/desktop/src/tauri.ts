@@ -1909,9 +1909,11 @@ export async function getPhase8State(): Promise<Phase8State> {
   }
 }
 
-export async function getContextState(): Promise<ContextState> {
+export async function getContextState(sessionId?: string): Promise<ContextState> {
   try {
-    return await invoke<ContextState>("get_context_state");
+    return await invoke<ContextState>("get_context_state", {
+      sessionId: sessionId ?? null
+    });
   } catch {
     return browserContextState;
   }
