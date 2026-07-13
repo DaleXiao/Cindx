@@ -1,6 +1,7 @@
 import {
   Activity,
   Bot,
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
   Copy,
@@ -12,6 +13,8 @@ import {
   X
 } from "lucide-react";
 import {
+  Children,
+  isValidElement,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -22,6 +25,7 @@ import {
   type ComponentPropsWithoutRef,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
   type RefObject
 } from "react";
 import Markdown from "markdown-to-jsx";
@@ -328,6 +332,10 @@ type MarkdownLinkProps = ComponentPropsWithoutRef<"a"> & {
   onOpenError?: (message: string) => void;
 };
 
+type MarkdownCodeBlockProps = ComponentPropsWithoutRef<"pre"> & {
+  onCopyCode?: (content: string) => void;
+};
+
 function externalLinkTarget(href: string) {
   if (/^(https?:|mailto:)/i.test(href)) return href;
   if (/^www\./i.test(href)) return `https://${href}`;
@@ -396,14 +404,56 @@ function MarkdownLink({
   );
 }
 
+function markdownNodeText(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(markdownNodeText).join("");
+  if (isValidElement<{ children?: ReactNode }>(node)) {
+    return markdownNodeText(node.props.children);
+  }
+  return "";
+}
+
+function MarkdownCodeBlock({ children, onCopyCode, ...props }: MarkdownCodeBlockProps) {
+  const codeElement = Children.toArray(children).find((child) =>
+    isValidElement<{ className?: string }>(child)
+  );
+  const codeClassName = isValidElement<{ className?: string }>(codeElement)
+    ? codeElement.props.className ?? ""
+    : "";
+  const language = codeClassName.match(/(?:language|lang)-([^\s]+)/)?.[1] ?? "code";
+  const code = markdownNodeText(children).replace(/\n$/, "");
+
+  return (
+    <div className="thread-code-block">
+      <header className="thread-code-block-header">
+        <span>{language}</span>
+        <button
+          type="button"
+          aria-label="Copy code"
+          title="Copy code"
+          onClick={(event) => {
+            event.stopPropagation();
+            onCopyCode?.(code);
+          }}
+        >
+          <Copy aria-hidden="true" />
+        </button>
+      </header>
+      <pre {...props}>{children}</pre>
+    </div>
+  );
+}
+
 const AgentMarkdown = memo(function AgentMarkdown({
   content,
   streaming = false,
-  onOpenError
+  onOpenError,
+  onCopyCode
 }: {
   content: string;
   streaming?: boolean;
   onOpenError: (message: string) => void;
+  onCopyCode: (content: string) => void;
 }) {
   return (
     <Markdown
@@ -419,6 +469,10 @@ const AgentMarkdown = memo(function AgentMarkdown({
           a: {
             component: MarkdownLink,
             props: { onOpenError }
+          },
+          pre: {
+            component: MarkdownCodeBlock,
+            props: { onCopyCode }
           }
         }
       }}
@@ -443,7 +497,13 @@ export function SessionThread({
   const threadFindInputRef = useRef<HTMLInputElement>(null);
   const minimapRef = useRef<HTMLDivElement>(null);
   const minimapPointerRef = useRef<number | null>(null);
+  const clipboardToastTimerRef = useRef<number | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [clipboardToast, setClipboardToast] = useState<{
+    id: number;
+    message: string;
+    failed: boolean;
+  } | null>(null);
   const [hoveredMinimapIndex, setHoveredMinimapIndex] = useState<number | null>(null);
   const [previewMinimapIndex, setPreviewMinimapIndex] = useState<number | null>(null);
   const [minimapDragging, setMinimapDragging] = useState(false);
@@ -497,6 +557,15 @@ export function SessionThread({
     }, 720);
     return () => window.clearTimeout(timeout);
   }, [arrivingMessageId]);
+
+  useEffect(
+    () => () => {
+      if (clipboardToastTimerRef.current !== null) {
+        window.clearTimeout(clipboardToastTimerRef.current);
+      }
+    },
+    []
+  );
 
   const items = useMemo<SessionThreadSelection[]>(() => {
     const messageItems = messages.map((message, index) => ({
@@ -792,14 +861,31 @@ export function SessionThread({
     syncScrollMetrics();
   }
 
-  async function copyMessage(id: string, content: string) {
+  function showClipboardToast(message: string, failed = false) {
+    if (clipboardToastTimerRef.current !== null) {
+      window.clearTimeout(clipboardToastTimerRef.current);
+    }
+    setClipboardToast({ id: Date.now(), message, failed });
+    clipboardToastTimerRef.current = window.setTimeout(() => {
+      setClipboardToast(null);
+      clipboardToastTimerRef.current = null;
+    }, 1600);
+  }
+
+  async function copyContent(content: string, messageId?: string) {
     try {
       await navigator.clipboard.writeText(content);
     } catch {
+      showClipboardToast("Could not copy to clipboard", true);
       return;
     }
-    setCopiedId(id);
-    window.setTimeout(() => setCopiedId((current) => (current === id ? null : current)), 1400);
+    showClipboardToast("Copied to clipboard");
+    if (!messageId) return;
+    setCopiedId(messageId);
+    window.setTimeout(
+      () => setCopiedId((current) => (current === messageId ? null : current)),
+      1400
+    );
   }
 
   if (items.length === 0 && !streamAnswer) {
@@ -968,8 +1054,8 @@ export function SessionThread({
               data-minimap-index={itemIndex}
               data-minimap-kind={item.message.role}
               data-thread-search-id={item.id}
-              role={isUser ? undefined : "button"}
-              tabIndex={0}
+              role={!isUser && !isAssistant ? "button" : undefined}
+              tabIndex={isUser ? undefined : 0}
               onClick={() => onSelect(item)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" || event.key === " ") {
@@ -988,7 +1074,11 @@ export function SessionThread({
                 </header>
               )}
               {isAssistant ? (
-                <AgentMarkdown content={item.message.content} onOpenError={onLinkOpenError} />
+                <AgentMarkdown
+                  content={item.message.content}
+                  onOpenError={onLinkOpenError}
+                  onCopyCode={(content) => void copyContent(content)}
+                />
               ) : (
                 <p>{item.message.content || "Tool request"}</p>
               )}
@@ -1006,7 +1096,7 @@ export function SessionThread({
                     title={copiedId === item.id ? "Copied" : "Copy"}
                     onClick={(event) => {
                       event.stopPropagation();
-                      void copyMessage(item.id, item.message.content);
+                      void copyContent(item.message.content, item.id);
                     }}
                   >
                     <Copy aria-hidden="true" />
@@ -1042,6 +1132,7 @@ export function SessionThread({
               content={streamAnswer}
               streaming
               onOpenError={onLinkOpenError}
+              onCopyCode={(content) => void copyContent(content)}
             />
           </article>
         )}
@@ -1120,6 +1211,23 @@ export function SessionThread({
           </aside>
         )}
       </div>
+      {clipboardToast && (
+        <div
+          className="clipboard-toast"
+          data-failed={clipboardToast.failed}
+          key={clipboardToast.id}
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          {clipboardToast.failed ? (
+            <X aria-hidden="true" />
+          ) : (
+            <CheckCircle2 aria-hidden="true" />
+          )}
+          <span>{clipboardToast.message}</span>
+        </div>
+      )}
     </div>
   );
 }

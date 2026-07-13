@@ -1586,6 +1586,65 @@ pre {
   overflow-wrap: normal;
 }
 
+.thread-code-block {
+  max-width: 100%;
+  margin: 10px 0 12px;
+  overflow: hidden;
+  background: #f6f6f6;
+  border: 0.5px solid #dedede;
+  border-radius: 8px;
+}
+
+.thread-code-block-header {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 5px 3px 11px;
+  color: #666666;
+  background: #f1f1f1;
+  border-bottom: 0.5px solid #dedede;
+}
+
+.thread-code-block-header > span {
+  overflow: hidden;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-code-block-header button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  padding: 0;
+  color: #777777;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  place-items: center;
+}
+
+.thread-code-block-header button:hover {
+  color: #222222;
+  background: #e5e5e5;
+}
+
+.thread-code-block-header button svg {
+  width: 12px;
+  height: 12px;
+}
+
+.thread-code-block pre {
+  margin: 0;
+  background: #f8f8f8;
+  border: 0;
+  border-radius: 0;
+}
+
 .thread-markdown table {
   display: block;
   width: 100%;
@@ -2884,7 +2943,8 @@ textarea::placeholder {
   font-size: 10px;
 }
 
-.settings-saved-toast {
+.settings-saved-toast,
+.clipboard-toast {
   position: fixed;
   z-index: 80;
   left: 50%;
@@ -2906,11 +2966,20 @@ textarea::placeholder {
   animation: settings-saved-toast-in 160ms var(--ease-out-quart);
 }
 
-.settings-saved-toast svg {
+.settings-saved-toast svg,
+.clipboard-toast svg {
   width: 15px;
   height: 15px;
   color: #2f9e64;
   stroke-width: 2.25;
+}
+
+.clipboard-toast {
+  bottom: 108px;
+}
+
+.clipboard-toast[data-failed="true"] svg {
+  color: #e05b5b;
 }
 
 @keyframes settings-saved-toast-in {
@@ -2926,7 +2995,8 @@ textarea::placeholder {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .settings-saved-toast {
+  .settings-saved-toast,
+  .clipboard-toast {
     animation: none;
   }
 }

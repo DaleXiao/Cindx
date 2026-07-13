@@ -224,12 +224,20 @@ assert(
   packageJson.dependencies["markdown-to-jsx"] &&
     sessionThreadSource.includes('from "markdown-to-jsx"') &&
     sessionThreadSource.includes("disableParsingRawHTML: true") &&
-    sessionThreadSource.includes("<AgentMarkdown content={item.message.content}") &&
+    sessionThreadSource.includes("content={item.message.content}") &&
     sessionThreadSource.includes("content={streamAnswer}") &&
     sessionThreadSource.includes("streaming") &&
+    sessionThreadSource.includes("function MarkdownCodeBlock") &&
+    sessionThreadSource.includes("component: MarkdownCodeBlock") &&
+    sessionThreadSource.includes('aria-label="Copy code"') &&
+    sessionThreadSource.includes('role={!isUser && !isAssistant ? "button" : undefined}') &&
+    sessionThreadSource.includes('showClipboardToast("Copied to clipboard")') &&
+    sessionThreadSource.includes("navigator.clipboard.writeText(content)") &&
     styles.includes(".thread-markdown pre code") &&
+    styles.includes(".thread-code-block-header") &&
+    styles.includes(".clipboard-toast") &&
     styles.includes(".thread-markdown table"),
-  "Assistant messages must render safe Markdown in completed and streaming states"
+  "Assistant messages must render safe Markdown with copyable code blocks and clipboard feedback"
 );
 assert(
   sessionThreadSource.includes("useLayoutEffect") &&
