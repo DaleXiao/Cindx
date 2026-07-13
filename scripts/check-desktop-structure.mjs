@@ -758,15 +758,15 @@ assert(
   "The trusted Claude Code Skill Creator must ship inside the Rust skill catalog"
 );
 assert(
-  appSource.includes("Local folder") &&
+  !appSource.includes("Local folder") &&
     appSource.includes(".skill package") &&
     appSource.includes("installSkillUrl") &&
-    rustLib.includes("install_skill_directory") &&
+    !rustLib.includes("install_skill_directory") &&
     rustLib.includes("install_skill_package") &&
     rustLib.includes("install_skill_url") &&
     agentSkillsSource.includes("install_skill_archive") &&
     agentSkillsSource.includes("enclosed_name"),
-  "Skills settings must install safe local, packaged, and HTTPS skills"
+  "Skills settings must install safe packaged and HTTPS skills"
 );
 assert(
   fs.existsSync(path.join(root, "apps/desktop/src/assets/fonts/Borel-Regular.ttf")) &&
