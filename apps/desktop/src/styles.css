@@ -1,3 +1,11 @@
+@font-face {
+  font-family: "Borel";
+  src: url("./assets/fonts/Borel-Regular.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
 :root {
   color: #181818;
   background: transparent;
@@ -133,6 +141,10 @@ pre {
   background: rgba(255, 255, 255, 0.96);
 }
 
+.app-shell[data-active-view="timeline"] .window-toolbar {
+  background: transparent;
+}
+
 .window-toolbar-panel {
   position: absolute;
   top: 0;
@@ -174,6 +186,12 @@ pre {
   pointer-events: none;
   background: transparent;
   box-shadow: inset 0 -1px 0 var(--border);
+}
+
+.app-shell[data-active-view="timeline"] .window-workspace-header {
+  background: rgba(255, 255, 255, 0.76);
+  -webkit-backdrop-filter: saturate(145%) blur(18px);
+  backdrop-filter: saturate(145%) blur(18px);
 }
 
 .app-shell[data-sidebar-open="false"] .window-workspace-header {
@@ -325,9 +343,11 @@ pre {
 
 .brand-name {
   color: #2563eb;
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1.15;
+  font-family: "Borel", cursive;
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1;
+  transform: translateY(2px);
 }
 
 .brand-search {
@@ -892,6 +912,23 @@ pre {
   min-height: 0;
   grid-template-rows: minmax(0, 1fr) auto;
   background: var(--bg);
+}
+
+.workspace[data-view="timeline"] {
+  grid-row: 1 / -1;
+}
+
+.workspace[data-view="timeline"] .session-thread {
+  padding-top: calc(var(--titlebar-height) + 22px);
+  scroll-padding-top: calc(var(--titlebar-height) + 18px);
+}
+
+.workspace[data-view="timeline"] .thread-find {
+  top: calc(var(--titlebar-height) + 10px);
+}
+
+.workspace[data-view="timeline"] .thread-minimap {
+  top: calc(var(--titlebar-height) + 16px);
 }
 
 .topbar-title {
@@ -2092,8 +2129,8 @@ textarea::placeholder {
 
 .send-button {
   color: #ffffff;
-  background: #222222;
-  border: 1px solid #222222;
+  background: #2563eb;
+  border: 1px solid #2563eb;
 }
 
 .composer-primary-button {
@@ -2219,7 +2256,9 @@ textarea::placeholder {
 }
 
 .send-button:hover {
-  background: #000000;
+  background: #2563eb;
+  border-color: #2563eb;
+  filter: brightness(0.9);
 }
 
 .secondary-button,
@@ -2243,13 +2282,41 @@ textarea::placeholder {
 }
 
 .composer-error {
+  display: flex;
   grid-column: 1 / -1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   padding: 7px 9px;
   color: #3f3f3f;
   background: #f4f4f4;
   border-left: 2px solid #777777;
   font-size: 11px;
   overflow-wrap: anywhere;
+}
+
+.composer-error button {
+  display: inline-flex;
+  min-height: 24px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  color: #333333;
+  background: #ffffff;
+  border: 1px solid #cfcfcf;
+  border-radius: 7px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.composer-error button:hover {
+  background: #eeeeee;
+}
+
+.composer-error button svg {
+  width: 11px;
+  height: 11px;
 }
 
 /* Trace */
@@ -2886,6 +2953,88 @@ textarea::placeholder {
   justify-content: space-between;
   color: var(--muted);
   font-size: 10px;
+}
+
+.skill-install {
+  display: grid;
+  gap: 9px;
+  padding: 4px 0 8px;
+}
+
+.skill-install-copy {
+  display: grid;
+  gap: 2px;
+}
+
+.skill-install-copy strong {
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.skill-install-copy span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.skill-install-input {
+  display: none;
+}
+
+.skill-install-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.skill-url-row {
+  display: grid;
+  min-height: 34px;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 0 4px 0 10px;
+  color: var(--muted);
+  background: #ffffff;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+}
+
+.skill-url-row > svg {
+  width: 13px;
+  height: 13px;
+}
+
+.skill-url-row input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  font-size: 10px;
+}
+
+.skill-url-row button {
+  height: 26px;
+  padding: 0 9px;
+  color: #ffffff;
+  background: #2563eb;
+  border: 0;
+  border-radius: 7px;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.skill-url-row button:hover:not(:disabled) {
+  background: #2563eb;
+  filter: brightness(0.9);
+}
+
+.skill-install-error {
+  color: #555555;
+  font-size: 10px;
+  overflow-wrap: anywhere;
 }
 
 .integration-list {

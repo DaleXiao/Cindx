@@ -8,11 +8,14 @@ import {
   CheckCircle2,
   Clock3,
   Database,
+  FolderOpen,
   FileText,
   Globe2,
   Info,
   KeyRound,
   LayoutDashboard,
+  Link2,
+  PackagePlus,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
@@ -72,6 +75,9 @@ import {
   getWebSearchConfig,
   getMcpState,
   getSkillState,
+  installSkillDirectory,
+  installSkillPackage,
+  installSkillUrl,
   indexWorkspaceRag,
   forkSession,
   listProviderModels,
@@ -320,6 +326,8 @@ export function App() {
   const [mcpBusy, setMcpBusy] = useState(false);
   const [skillBusy, setSkillBusy] = useState(false);
   const [skillRefreshTurn, setSkillRefreshTurn] = useState(0);
+  const [skillUrl, setSkillUrl] = useState("");
+  const [skillInstallError, setSkillInstallError] = useState<string | null>(null);
   const [mcpDraft, setMcpDraft] = useState({
     name: "",
     command: "",
@@ -335,11 +343,13 @@ export function App() {
   const sessionSelectionQueueRef = useRef<Promise<void>>(Promise.resolve());
   const sessionRefreshRequestRef = useRef(0);
   const trackedSessionTaskIdsRef = useRef<Set<string>>(new Set());
+  const skillFolderInputRef = useRef<HTMLInputElement>(null);
+  const skillPackageInputRef = useRef<HTMLInputElement>(null);
   const settingsToastTimerRef = useRef<number | null>(null);
   const [composerError, setComposerError] = useState<string | null>(null);
   const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
   const [webSearchError, setWebSearchError] = useState<string | null>(null);
-  const [settingsToast, setSettingsToast] = useState<{ id: number } | null>(null);
+  const [settingsToast, setSettingsToast] = useState<{ id: number; message: string } | null>(null);
 
   useEffect(
     () => () => {
@@ -354,14 +364,14 @@ export function App() {
     let disposed = false;
     let deferredLoadTimer: number | null = null;
     let deferredIdleCallback: number | null = null;
-    let streamFrame: number | null = null;
+    let streamFlushTimer: number | null = null;
     let streamBuffer = "";
     let streamSessionId: string | null = null;
     let unlisten = () => {};
 
     const flushStreamBuffer = () => {
-      if (streamFrame !== null) window.cancelAnimationFrame(streamFrame);
-      streamFrame = null;
+      if (streamFlushTimer !== null) window.clearTimeout(streamFlushTimer);
+      streamFlushTimer = null;
       if (!streamBuffer) return;
       const delta = streamBuffer;
       streamBuffer = "";
@@ -374,8 +384,8 @@ export function App() {
       streamSessionId = payload.sessionId;
       if (payload.reset) {
         streamBuffer = "";
-        if (streamFrame !== null) window.cancelAnimationFrame(streamFrame);
-        streamFrame = null;
+        if (streamFlushTimer !== null) window.clearTimeout(streamFlushTimer);
+        streamFlushTimer = null;
         setStreamAnswer("");
       }
       if (payload.done) {
@@ -385,8 +395,8 @@ export function App() {
       }
       if (payload.delta) {
         streamBuffer += payload.delta;
-        if (streamFrame === null) {
-          streamFrame = window.requestAnimationFrame(flushStreamBuffer);
+        if (streamFlushTimer === null) {
+          streamFlushTimer = window.setTimeout(flushStreamBuffer, 40);
         }
       }
     }).then((handler) => {
@@ -480,7 +490,7 @@ export function App() {
       disposed = true;
       if (deferredLoadTimer !== null) window.clearTimeout(deferredLoadTimer);
       if (deferredIdleCallback !== null) window.cancelIdleCallback(deferredIdleCallback);
-      if (streamFrame !== null) window.cancelAnimationFrame(streamFrame);
+      if (streamFlushTimer !== null) window.clearTimeout(streamFlushTimer);
       unlisten();
     };
   }, []);
@@ -759,11 +769,11 @@ export function App() {
     }
   }
 
-  function showSettingsSaved() {
+  function showSettingsSaved(message = "Saved") {
     if (settingsToastTimerRef.current !== null) {
       window.clearTimeout(settingsToastTimerRef.current);
     }
-    setSettingsToast({ id: Date.now() });
+    setSettingsToast({ id: Date.now(), message });
     settingsToastTimerRef.current = window.setTimeout(() => {
       setSettingsToast(null);
       settingsToastTimerRef.current = null;
@@ -1304,6 +1314,49 @@ export function App() {
     }
   }
 
+  async function runSkillInstall(request: () => Promise<SkillState>) {
+    setSkillBusy(true);
+    setSkillInstallError(null);
+    try {
+      setSkillState(await request());
+      showSettingsSaved("Skill installed");
+      return true;
+    } catch (error) {
+      setSkillInstallError(error instanceof Error ? error.message : String(error));
+      return false;
+    } finally {
+      setSkillBusy(false);
+    }
+  }
+
+  async function handleInstallSkillFolder(files: File[]) {
+    if (files.length === 0) return;
+    await runSkillInstall(async () =>
+      installSkillDirectory(
+        await Promise.all(
+          files.map(async (file) => ({
+            path: file.webkitRelativePath || file.name,
+            dataBase64: await fileDataBase64(file)
+          }))
+        )
+      )
+    );
+  }
+
+  async function handleInstallSkillPackage(file: File) {
+    if (!/\.(skill|zip)$/i.test(file.name)) {
+      setSkillInstallError("Choose a .skill or .zip package.");
+      return;
+    }
+    await runSkillInstall(async () => installSkillPackage(await fileDataBase64(file)));
+  }
+
+  async function handleInstallSkillUrl() {
+    const url = skillUrl.trim();
+    if (!url) return;
+    if (await runSkillInstall(() => installSkillUrl(url))) setSkillUrl("");
+  }
+
   async function handleSendPrompt(value: string) {
     const nextPrompt = value.trim();
     const sessionId = activeSession?.id;
@@ -1670,6 +1723,7 @@ export function App() {
   return (
     <main
       className="app-shell"
+      data-active-view={activeView}
       data-sidebar-open={sidebarOpen}
       data-inspector-open={inspectorOpen}
       style={{ "--inspector-width": `${inspectorWidth}px` } as CSSProperties}
@@ -1781,7 +1835,7 @@ export function App() {
         onSessionDelete={(sessionId) => void handleDeleteSession(sessionId)}
       />
 
-      <section className="workspace" aria-label="Agent workspace">
+      <section className="workspace" data-view={activeView} aria-label="Agent workspace">
         {activeView === "timeline" ? (
           <>
             <SessionThread
@@ -3155,6 +3209,79 @@ export function App() {
                 <BookOpen size={17} aria-hidden="true" />
                 <h2>Skills</h2>
               </div>
+              <div className="skill-install">
+                <div className="skill-install-copy">
+                  <strong>Add skill</strong>
+                  <span>Install into this project. New skills stay disabled until trusted.</span>
+                </div>
+                <input
+                  ref={skillFolderInputRef}
+                  className="skill-install-input"
+                  type="file"
+                  multiple
+                  {...{ webkitdirectory: "", directory: "" }}
+                  onChange={(event) => {
+                    const files = Array.from(event.currentTarget.files ?? []);
+                    event.currentTarget.value = "";
+                    void handleInstallSkillFolder(files);
+                  }}
+                />
+                <input
+                  ref={skillPackageInputRef}
+                  className="skill-install-input"
+                  type="file"
+                  accept=".skill,.zip,application/zip"
+                  onChange={(event) => {
+                    const file = event.currentTarget.files?.[0];
+                    event.currentTarget.value = "";
+                    if (file) void handleInstallSkillPackage(file);
+                  }}
+                />
+                <div className="skill-install-actions">
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    disabled={skillBusy}
+                    onClick={() => skillFolderInputRef.current?.click()}
+                  >
+                    <FolderOpen aria-hidden="true" />
+                    <span>Local folder</span>
+                  </button>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    disabled={skillBusy}
+                    onClick={() => skillPackageInputRef.current?.click()}
+                  >
+                    <PackagePlus aria-hidden="true" />
+                    <span>.skill package</span>
+                  </button>
+                </div>
+                <div className="skill-url-row">
+                  <Link2 aria-hidden="true" />
+                  <input
+                    value={skillUrl}
+                    inputMode="url"
+                    spellCheck={false}
+                    placeholder="https://example.com/my-skill.skill"
+                    aria-label="Skill package URL"
+                    onChange={(event) => setSkillUrl(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter") return;
+                      event.preventDefault();
+                      void handleInstallSkillUrl();
+                    }}
+                  />
+                  <button
+                    type="button"
+                    disabled={skillBusy || !skillUrl.trim()}
+                    onClick={() => void handleInstallSkillUrl()}
+                  >
+                    Add
+                  </button>
+                </div>
+                {skillInstallError && <p className="skill-install-error">{skillInstallError}</p>}
+              </div>
               <div className="settings-toolbar">
                 <span>{skillState?.skills.length ?? 0} discovered</span>
                 <button
@@ -3295,7 +3422,7 @@ export function App() {
           aria-atomic="true"
         >
           <CheckCircle2 aria-hidden="true" />
-          <span>Saved</span>
+          <span>{settingsToast.message}</span>
         </div>
       )}
     </main>

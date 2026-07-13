@@ -15,6 +15,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  memo,
   useMemo,
   useRef,
   useState,
@@ -99,6 +100,10 @@ type ThreadRow =
 const MIN_MINIMAP_MARKERS = 2;
 const MAX_MINIMAP_MARKERS = 32;
 const MINIMAP_MARKER_GAP = 14;
+const threadTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  hour: "2-digit",
+  minute: "2-digit"
+});
 
 function ThreadFind({
   open,
@@ -167,10 +172,7 @@ function minimapMarkerPosition(index: number, markerCount: number) {
 }
 
 function formatThreadTime(timestampMs: number) {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(timestampMs);
+  return threadTimeFormatter.format(timestampMs);
 }
 
 function EventIcon({ event }: { event: TimelineEntry }) {
@@ -393,7 +395,7 @@ function MarkdownLink({
   );
 }
 
-function AgentMarkdown({
+const AgentMarkdown = memo(function AgentMarkdown({
   content,
   streaming = false,
   onOpenError
@@ -423,7 +425,7 @@ function AgentMarkdown({
       {content || "Tool request"}
     </Markdown>
   );
-}
+});
 
 export function SessionThread({
   sessionId,

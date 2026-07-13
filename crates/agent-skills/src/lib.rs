@@ -6,14 +6,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{Cursor, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tools::{Tool, ToolError};
 
 const MAX_SKILL_INSTRUCTIONS: usize = 16_000;
 const MAX_SELECTED_SKILLS: usize = 2;
+const MAX_INSTALL_FILES: usize = 256;
+const MAX_INSTALL_FILE_BYTES: usize = 20 * 1024 * 1024;
+const MAX_INSTALL_TOTAL_BYTES: usize = 50 * 1024 * 1024;
 const BUILTIN_SKILL_CREATOR_ID: &str = "global:skill-creator";
 const BUILTIN_SKILL_CREATOR: &str = include_str!("../builtins/skill-creator/SKILL.md");
 
@@ -44,6 +49,12 @@ pub struct SkillRecord {
 pub struct SkillPreference {
     pub enabled: bool,
     pub trusted: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SkillInstallFile {
+    pub path: PathBuf,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -246,6 +257,201 @@ impl SkillCatalog {
             .take(limit)
             .map(|(_, skill)| skill)
             .collect()
+    }
+}
+
+pub fn install_skill_archive(
+    destination_root: &Path,
+    archive_bytes: &[u8],
+) -> Result<String, String> {
+    if archive_bytes.len() > MAX_INSTALL_TOTAL_BYTES {
+        return Err("skill package exceeds the 50 MB limit".to_string());
+    }
+    let mut archive = zip::ZipArchive::new(Cursor::new(archive_bytes))
+        .map_err(|error| format!("invalid .skill package: {error}"))?;
+    if archive.len() > MAX_INSTALL_FILES {
+        return Err(format!("skill package contains more than {MAX_INSTALL_FILES} entries"));
+    }
+
+    let mut files = Vec::new();
+    let mut total_bytes = 0usize;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("failed to read skill package: {error}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        if entry
+            .unix_mode()
+            .map(|mode| mode & 0o170000 == 0o120000)
+            .unwrap_or(false)
+        {
+            return Err("skill packages cannot contain symbolic links".to_string());
+        }
+        let path = entry
+            .enclosed_name()
+            .ok_or_else(|| "skill package contains an unsafe path".to_string())?
+            .to_path_buf();
+        if path.components().next().is_some_and(|component| component.as_os_str() == "__MACOSX") {
+            continue;
+        }
+        let declared_size = usize::try_from(entry.size())
+            .map_err(|_| "skill package entry is too large".to_string())?;
+        if declared_size > MAX_INSTALL_FILE_BYTES {
+            return Err(format!("{} exceeds the 20 MB file limit", path.display()));
+        }
+        total_bytes = total_bytes.saturating_add(declared_size);
+        if total_bytes > MAX_INSTALL_TOTAL_BYTES {
+            return Err("skill package expands beyond the 50 MB limit".to_string());
+        }
+        let mut bytes = Vec::with_capacity(declared_size);
+        entry
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("failed to extract {}: {error}", path.display()))?;
+        files.push(SkillInstallFile { path, bytes });
+    }
+    install_skill_files(destination_root, files)
+}
+
+pub fn install_skill_files(
+    destination_root: &Path,
+    files: Vec<SkillInstallFile>,
+) -> Result<String, String> {
+    if files.is_empty() {
+        return Err("the selected skill is empty".to_string());
+    }
+    if files.len() > MAX_INSTALL_FILES {
+        return Err(format!("a skill can contain at most {MAX_INSTALL_FILES} files"));
+    }
+
+    let mut normalized_files = Vec::with_capacity(files.len());
+    let mut total_bytes = 0usize;
+    for file in files {
+        let path = normalize_install_path(&file.path)?;
+        if file.bytes.len() > MAX_INSTALL_FILE_BYTES {
+            return Err(format!("{} exceeds the 20 MB file limit", path.display()));
+        }
+        total_bytes = total_bytes.saturating_add(file.bytes.len());
+        if total_bytes > MAX_INSTALL_TOTAL_BYTES {
+            return Err("skill files exceed the 50 MB limit".to_string());
+        }
+        normalized_files.push(SkillInstallFile {
+            path,
+            bytes: file.bytes,
+        });
+    }
+
+    let skill_files = normalized_files
+        .iter()
+        .filter(|file| file.path.file_name().is_some_and(|name| name == "SKILL.md"))
+        .collect::<Vec<_>>();
+    if skill_files.len() != 1 {
+        return Err("a skill must contain exactly one SKILL.md".to_string());
+    }
+    let source_root = skill_files[0]
+        .path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .to_path_buf();
+    let skill_text = std::str::from_utf8(&skill_files[0].bytes)
+        .map_err(|_| "SKILL.md must be valid UTF-8".to_string())?;
+    let metadata = parse_frontmatter(skill_text);
+    let name = metadata
+        .get("name")
+        .map(String::as_str)
+        .ok_or_else(|| "SKILL.md must declare a name".to_string())?;
+    validate_skill_name(name)?;
+    if metadata
+        .get("description")
+        .is_none_or(|description| description.trim().is_empty())
+    {
+        return Err("SKILL.md must declare a description".to_string());
+    }
+    if let Some(folder_name) = source_root.file_name().and_then(|value| value.to_str()) {
+        if folder_name != name {
+            return Err(format!(
+                "skill folder '{folder_name}' must match the SKILL.md name '{name}'"
+            ));
+        }
+    }
+
+    fs::create_dir_all(destination_root)
+        .map_err(|error| format!("failed to create skill directory: {error}"))?;
+    let target = destination_root.join(name);
+    if target.exists() {
+        return Err(format!("skill '{name}' is already installed"));
+    }
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let staging = destination_root.join(format!(".{name}-install-{nonce}"));
+    fs::create_dir(&staging)
+        .map_err(|error| format!("failed to prepare skill installation: {error}"))?;
+
+    let install_result = (|| {
+        for file in normalized_files {
+            let Ok(relative) = file.path.strip_prefix(&source_root) else {
+                continue;
+            };
+            if relative.as_os_str().is_empty() {
+                continue;
+            }
+            let path = staging.join(relative);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("failed to create skill directory: {error}"))?;
+            }
+            fs::write(&path, file.bytes)
+                .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+        }
+        if !staging.join("SKILL.md").is_file() {
+            return Err("skill installation did not produce SKILL.md".to_string());
+        }
+        fs::rename(&staging, &target)
+            .map_err(|error| format!("failed to finish skill installation: {error}"))?;
+        Ok(format!("project:{name}"))
+    })();
+    if install_result.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    install_result
+}
+
+fn normalize_install_path(path: &Path) -> Result<PathBuf, String> {
+    if path.as_os_str().is_empty() || path.to_string_lossy().contains('\\') {
+        return Err("skill contains an invalid path".to_string());
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => normalized.push(value),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(format!("unsafe skill path: {}", path.display()));
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return Err("skill contains an invalid path".to_string());
+    }
+    Ok(normalized)
+}
+
+fn validate_skill_name(name: &str) -> Result<(), String> {
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && !name.contains("--")
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if valid {
+        Ok(())
+    } else {
+        Err("skill name must use 1-64 lowercase letters, numbers, or single hyphens".to_string())
     }
 }
 
@@ -488,7 +694,6 @@ fn write_private_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String
     let mut file = options
         .open(path)
         .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
-    use std::io::Write;
     file.write_all(text.as_bytes())
         .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
     #[cfg(unix)]
@@ -583,5 +788,53 @@ mod tests {
             .unwrap()
             .contains("SKILL.md contract"));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn installs_skill_package_into_project_catalog() {
+        let root = test_root();
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        archive
+            .start_file(
+                "sample-skill/SKILL.md",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        archive
+            .write_all(
+                b"---\nname: sample-skill\ndescription: A sample skill for tests.\n---\nUse it.",
+            )
+            .unwrap();
+        archive
+            .start_file(
+                "sample-skill/references/guide.md",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        archive.write_all(b"Reference").unwrap();
+        let bytes = archive.finish().unwrap().into_inner();
+
+        let skill_id = install_skill_archive(&root, &bytes).unwrap();
+
+        assert_eq!(skill_id, "project:sample-skill");
+        assert!(root.join("sample-skill/SKILL.md").is_file());
+        assert!(root.join("sample-skill/references/guide.md").is_file());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_unsafe_skill_file_paths() {
+        let root = test_root();
+        let error = install_skill_files(
+            &root,
+            vec![SkillInstallFile {
+                path: PathBuf::from("../SKILL.md"),
+                bytes: b"---\nname: unsafe\ndescription: Unsafe.\n---".to_vec(),
+            }],
+        )
+        .unwrap_err();
+
+        assert!(error.contains("unsafe skill path"));
+        assert!(!root.exists());
     }
 }
