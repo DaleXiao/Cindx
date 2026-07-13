@@ -634,6 +634,86 @@ pub struct RoutingEvaluationReport {
     pub summary: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingEvalCase {
+    pub id: String,
+    pub context: RoutingContext,
+    pub expected_policy: OrchestrationPolicy,
+    pub expected_retrieval_mode: String,
+    pub expected_model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingBenchmarkReport {
+    pub cases: usize,
+    pub passed: usize,
+    pub over_orchestrated: usize,
+    pub under_orchestrated: usize,
+    pub failures: Vec<String>,
+}
+
+impl RoutingBenchmarkReport {
+    pub fn pass_rate(&self) -> f32 {
+        if self.cases == 0 {
+            1.0
+        } else {
+            self.passed as f32 / self.cases as f32
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OperationalEvaluationReport {
+    pub runs: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub user_rejected: usize,
+    pub success_rate: f32,
+    pub average_latency_ms: u64,
+    pub average_cost_proxy: u64,
+    pub average_tool_calls: f32,
+    pub average_retrievals: f32,
+    pub policy_counts: BTreeMap<String, usize>,
+    pub model_counts: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualityRubricScore {
+    pub correctness: u8,
+    pub evidence: u8,
+    pub completion: u8,
+    pub safety: u8,
+}
+
+impl QualityRubricScore {
+    pub fn validate(&self) -> Result<(), String> {
+        if [self.correctness, self.evidence, self.completion, self.safety]
+            .into_iter()
+            .all(|score| score <= 5)
+        {
+            Ok(())
+        } else {
+            Err("quality rubric dimensions must use a 0-5 score".to_string())
+        }
+    }
+
+    pub fn total(&self) -> u8 {
+        self.correctness
+            .saturating_add(self.evidence)
+            .saturating_add(self.completion)
+            .saturating_add(self.safety)
+    }
+
+    pub fn passes(&self) -> bool {
+        self.validate().is_ok()
+            && self.total() >= 15
+            && self.correctness >= 3
+            && self.evidence >= 3
+            && self.completion >= 3
+            && self.safety >= 3
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RuleBasedRouter;
 
@@ -1124,6 +1204,116 @@ pub fn evaluate_router_against_baseline(
             matches_baseline,
             differs
         ),
+    }
+}
+
+pub fn evaluate_routing_cases(cases: &[RoutingEvalCase]) -> RoutingBenchmarkReport {
+    let router = RuleBasedRouter;
+    let mut report = RoutingBenchmarkReport {
+        cases: cases.len(),
+        passed: 0,
+        over_orchestrated: 0,
+        under_orchestrated: 0,
+        failures: Vec::new(),
+    };
+    for case in cases {
+        let decision = router.route(&case.context);
+        let policy_matches = decision.policy == case.expected_policy;
+        let retrieval_matches = decision.retrieval_mode == case.expected_retrieval_mode;
+        let model_matches = case
+            .expected_model
+            .as_ref()
+            .map(|model| model == &decision.model)
+            .unwrap_or(true);
+        if policy_matches && retrieval_matches && model_matches {
+            report.passed += 1;
+            continue;
+        }
+
+        let actual_load = orchestration_load(&decision.policy);
+        let expected_load = orchestration_load(&case.expected_policy);
+        if actual_load > expected_load {
+            report.over_orchestrated += 1;
+        } else if actual_load < expected_load {
+            report.under_orchestrated += 1;
+        }
+        report.failures.push(format!(
+            "{} expected policy={} retrieval={} model={} but got policy={} retrieval={} model={}",
+            case.id,
+            case.expected_policy.label(),
+            case.expected_retrieval_mode,
+            case.expected_model.as_deref().unwrap_or("(any)"),
+            decision.policy.label(),
+            decision.retrieval_mode,
+            decision.model
+        ));
+    }
+    report
+}
+
+pub fn evaluate_routing_telemetry(
+    telemetry: &[RoutingTelemetry],
+) -> OperationalEvaluationReport {
+    let runs = telemetry.len();
+    let succeeded = telemetry
+        .iter()
+        .filter(|entry| entry.outcome == RoutingOutcome::Succeeded)
+        .count();
+    let failed = telemetry
+        .iter()
+        .filter(|entry| entry.outcome == RoutingOutcome::Failed)
+        .count();
+    let user_rejected = telemetry
+        .iter()
+        .filter(|entry| entry.outcome == RoutingOutcome::UserRejected)
+        .count();
+    let total_latency = telemetry
+        .iter()
+        .map(|entry| entry.latency_ms)
+        .sum::<u64>();
+    let total_cost = telemetry
+        .iter()
+        .map(|entry| entry.cost_proxy)
+        .sum::<u64>();
+    let total_tools = telemetry.iter().map(|entry| entry.tool_count).sum::<u64>();
+    let total_retrievals = telemetry
+        .iter()
+        .map(|entry| entry.retrieval_count)
+        .sum::<u64>();
+    let mut policy_counts = BTreeMap::new();
+    let mut model_counts = BTreeMap::new();
+    for entry in telemetry {
+        *policy_counts
+            .entry(entry.selected_policy.label().to_string())
+            .or_default() += 1;
+        *model_counts.entry(entry.selected_model.clone()).or_default() += 1;
+    }
+    let divisor = runs.max(1) as u64;
+    OperationalEvaluationReport {
+        runs,
+        succeeded,
+        failed,
+        user_rejected,
+        success_rate: if runs == 0 {
+            0.0
+        } else {
+            succeeded as f32 / runs as f32
+        },
+        average_latency_ms: total_latency / divisor,
+        average_cost_proxy: total_cost / divisor,
+        average_tool_calls: total_tools as f32 / divisor as f32,
+        average_retrievals: total_retrievals as f32 / divisor as f32,
+        policy_counts,
+        model_counts,
+    }
+}
+
+fn orchestration_load(policy: &OrchestrationPolicy) -> usize {
+    match policy {
+        OrchestrationPolicy::Single => 1,
+        OrchestrationPolicy::PlanExecuteReview => 2,
+        OrchestrationPolicy::BestOfN { candidates } => 2 + candidates,
+        OrchestrationPolicy::AutoRouter => 1,
     }
 }
 
@@ -1771,5 +1961,104 @@ mod tests {
         assert_eq!(report.router_policy_matches_baseline, 1);
         assert_eq!(report.router_policy_differs_from_baseline, 1);
         assert!(report.summary.contains("baseline single"));
+    }
+
+    #[test]
+    fn evaluation_lab_detects_over_and_under_orchestration() {
+        let cases = vec![
+            RoutingEvalCase {
+                id: "under".to_string(),
+                context: RoutingContext::from_prompt("hello", candidates()),
+                expected_policy: OrchestrationPolicy::BestOfN { candidates: 3 },
+                expected_retrieval_mode: "none".to_string(),
+                expected_model: None,
+            },
+            RoutingEvalCase {
+                id: "over".to_string(),
+                context: RoutingContext::from_prompt(
+                    "Use multiple models to reproduce Fugu Ultra",
+                    candidates(),
+                ),
+                expected_policy: OrchestrationPolicy::Single,
+                expected_retrieval_mode: "none".to_string(),
+                expected_model: None,
+            },
+        ];
+
+        let report = evaluate_routing_cases(&cases);
+
+        assert_eq!(report.cases, 2);
+        assert_eq!(report.passed, 0);
+        assert_eq!(report.over_orchestrated, 1);
+        assert_eq!(report.under_orchestrated, 1);
+        assert_eq!(report.failures.len(), 2);
+    }
+
+    #[test]
+    fn operational_evaluation_aggregates_trace_cost_and_outcomes() {
+        let telemetry = vec![
+            RoutingTelemetry {
+                task_class: TaskClass::Coding,
+                selected_policy: OrchestrationPolicy::Single,
+                selected_model: "fast-mini".to_string(),
+                latency_ms: 100,
+                outcome: RoutingOutcome::Succeeded,
+                cost_proxy: 20,
+                tool_count: 1,
+                retrieval_count: 0,
+                user_override: false,
+            },
+            RoutingTelemetry {
+                task_class: TaskClass::Research,
+                selected_policy: OrchestrationPolicy::BestOfN { candidates: 2 },
+                selected_model: "strong-vision".to_string(),
+                latency_ms: 500,
+                outcome: RoutingOutcome::Failed,
+                cost_proxy: 180,
+                tool_count: 3,
+                retrieval_count: 4,
+                user_override: false,
+            },
+        ];
+
+        let report = evaluate_routing_telemetry(&telemetry);
+
+        assert_eq!(report.runs, 2);
+        assert_eq!(report.succeeded, 1);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.success_rate, 0.5);
+        assert_eq!(report.average_latency_ms, 300);
+        assert_eq!(report.average_cost_proxy, 100);
+        assert_eq!(report.average_tool_calls, 2.0);
+        assert_eq!(report.average_retrievals, 2.0);
+        assert_eq!(report.policy_counts.get("single"), Some(&1));
+        assert_eq!(report.policy_counts.get("best_of_n"), Some(&1));
+    }
+
+    #[test]
+    fn quality_rubric_requires_balanced_evidence_and_safety() {
+        let strong = QualityRubricScore {
+            correctness: 4,
+            evidence: 4,
+            completion: 4,
+            safety: 4,
+        };
+        let unsupported = QualityRubricScore {
+            correctness: 5,
+            evidence: 2,
+            completion: 5,
+            safety: 5,
+        };
+
+        assert!(strong.passes());
+        assert!(!unsupported.passes());
+        assert!(QualityRubricScore {
+            correctness: 6,
+            evidence: 4,
+            completion: 4,
+            safety: 4,
+        }
+        .validate()
+        .is_err());
     }
 }
