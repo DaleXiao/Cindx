@@ -186,6 +186,8 @@ assert(
 );
 assert(
   localBuildScript.includes("local-build-number") &&
+    localBuildScript.includes('args.has("--ephemeral-target")') &&
+    localBuildScript.includes("CARGO_TARGET_DIR: targetRoot") &&
     localBuildScript.includes('path.join(os.homedir(), ".cargo", "bin")') &&
     localBuildScript.includes('CINDX_STARTUP_PROBE: "1"') &&
     localBuildScript.includes('"--identifier"') &&
@@ -504,12 +506,11 @@ assert(
 assert(
   sidebarSource.includes("sidebar-footer") &&
     sidebarSource.includes("sidebar-settings") &&
-    sidebarSource.includes("sidebar-trace") &&
-    sidebarSource.indexOf('aria-label="Settings"') <
-      sidebarSource.indexOf('aria-label="Agent trace"') &&
+    !sidebarSource.includes("sidebar-trace") &&
+    !sidebarSource.includes('aria-label="Agent trace"') &&
     !sidebarSource.includes("LayoutDashboard") &&
     !styles.includes(".sidebar-actions"),
-  "Settings and Agent Trace must share the sidebar footer without the old top session controls"
+  "Settings must remain the only sidebar footer destination"
 );
 assert(
   appSource.includes("matchingSessionExists") &&
@@ -521,13 +522,12 @@ assert(
   "Sidebar search must expose matching sessions across projects and navigate to a selected result"
 );
 assert(
-  (appSource.match(/<span>Back to App<\/span>/g)?.length ?? 0) === 2 &&
-    appSource.includes('className="workspace-page-navigation"') &&
+  (appSource.match(/<span>Back to App<\/span>/g)?.length ?? 0) === 1 &&
+    !appSource.includes('className="workspace-page-navigation"') &&
     appSource.includes('className="settings-sidebar"') &&
     appSource.includes('className="workspace-return-button settings-app-return"') &&
-    styles.includes(".workspace-return-button") &&
-    styles.includes("grid-template-rows: auto auto minmax(0, 1fr)"),
-  "Trace and Settings must each expose an in-page return to the app"
+    styles.includes(".workspace-return-button"),
+  "Settings must expose the only in-page return to the app"
 );
 assert(
   sidebarSource.includes('icons/icon.png') && sidebarSource.includes("appIconUrl"),
@@ -594,12 +594,26 @@ assert(
   traceStatusIconSource.includes("CheckCircle2") &&
     traceStatusIconSource.includes("ShieldQuestion") &&
     traceStatusIconSource.includes("XCircle") &&
-    appSource.includes('<TraceStatusIcon status={agentTraceState?.status ?? "idle"}') &&
-    appSource.includes("<TraceStatusIcon status={turn.status}") &&
-    appSource.includes("<TraceStatusIcon status={step.status}") &&
+    inspectorSource.includes('export type InspectorTab = "trace"') &&
+    inspectorSource.includes('(["trace", "details", "artifacts", "context"]') &&
+    inspectorSource.includes("sessionTraceSteps.map((step)") &&
+    inspectorSource.includes("onTraceExport") &&
+    styles.includes("grid-template-columns: repeat(4, minmax(0, 1fr));") &&
+    inspectorSource.includes("<TraceStatusIcon status={agentStatus}") &&
+    inspectorSource.includes("<TraceStatusIcon status={step.status}") &&
     inspectorSource.includes("<TraceStatusIcon status={traceStep.status}") &&
-    !appSource.includes("<em>{step.status}</em>"),
-  "Agent trace statuses must render as accessible SVG icons"
+    !appSource.includes('className="trace-view"') &&
+    !sidebarSource.includes('aria-label="Agent trace"'),
+  "Agent trace must live inside the Inspector Debug drawer and use accessible status icons"
+);
+assert(
+  sidebarSource.includes('aria-label="Create project"') &&
+    sidebarSource.includes('title="Create project"') &&
+    inspectorSource.includes('aria-label={`Preview ${artifactName(artifact.path)}`}') &&
+    inspectorSource.includes('title={`Preview ${artifactName(artifact.path)}`}') &&
+    composerSource.includes('aria-label={canStop ? "Stop agent" : "Send message"}') &&
+    composerSource.includes('title={canStop ? "Stop" : "Send"}'),
+  "Icon-only operations must expose accessible hover labels"
 );
 assert(
   sidebarSource.includes("Menu.new") &&

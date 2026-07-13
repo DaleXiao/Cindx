@@ -1,5 +1,4 @@
 import {
-  Activity,
   Check,
   FolderOpen,
   LoaderCircle,
@@ -72,7 +71,7 @@ function SessionStatusIndicator({ status, active }: { status: string; active: bo
   );
 }
 
-export type WorkspaceView = "timeline" | "trace" | "settings";
+export type WorkspaceView = "timeline" | "settings";
 
 type SidebarProps = {
   activeView: WorkspaceView;
@@ -338,6 +337,7 @@ export function Sidebar({
               type="button"
               className="icon-button"
               aria-label="Create project"
+              title="Create project"
               disabled={busy || !projectName.trim()}
               onClick={onProjectCreate}
             >
@@ -614,16 +614,6 @@ export function Sidebar({
           type="button"
         >
           <Settings aria-hidden="true" />
-        </button>
-        <button
-          className={`icon-button sidebar-trace ${activeView === "trace" ? "active" : ""}`}
-          aria-label="Agent trace"
-          aria-pressed={activeView === "trace"}
-          title="Agent trace"
-          onClick={() => onViewChange("trace")}
-          type="button"
-        >
-          <Activity aria-hidden="true" />
         </button>
       </div>
 

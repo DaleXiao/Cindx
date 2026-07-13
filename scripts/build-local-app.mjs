@@ -11,6 +11,10 @@ const targetTriple = "aarch64-apple-darwin";
 const args = new Set(process.argv.slice(2));
 const skipTests = args.has("--skip-tests");
 const installApp = !args.has("--no-install");
+const ephemeralTarget = args.has("--ephemeral-target");
+const targetRoot = ephemeralTarget
+  ? fs.mkdtempSync(path.join(os.tmpdir(), "cindx-build-target-"))
+  : path.join(tauriRoot, "target");
 const versionPaths = [
   path.join(desktopRoot, "package.json"),
   path.join(desktopRoot, "package-lock.json"),
@@ -30,6 +34,7 @@ const stableToolchainBin = path.join(
 );
 const buildEnv = {
   ...process.env,
+  CARGO_TARGET_DIR: targetRoot,
   PATH: [
     path.join(os.homedir(), ".cargo", "bin"),
     "/opt/homebrew/opt/rustup/bin",
@@ -108,8 +113,7 @@ const buildNumber = nextBuildNumber();
 const version = `0.0.${buildNumber}`;
 const counterPath = path.join(repoRoot, ".cindx", "local-build-number");
 const builtApp = path.join(
-  tauriRoot,
-  "target",
+  targetRoot,
   targetTriple,
   "release",
   "bundle",
@@ -186,4 +190,5 @@ try {
   process.stdout.write(`Local Cindx build ${version}\n${outputApp}\n${outputArchive}\n`);
 } finally {
   restoreVersions();
+  if (ephemeralTarget) fs.rmSync(targetRoot, { recursive: true, force: true });
 }

@@ -10,8 +10,10 @@ import {
   Image,
   Maximize2,
   Minimize2,
+  Save,
   ShieldCheck,
   TerminalSquare,
+  TriangleAlert,
   X
 } from "lucide-react";
 import Markdown from "markdown-to-jsx";
@@ -36,7 +38,7 @@ import type { SessionThreadSelection } from "./SessionThread";
 import { DisclosureTriangle } from "./DisclosureTriangle";
 import { TraceStatusIcon } from "./TraceStatusIcon";
 
-export type InspectorTab = "details" | "artifacts" | "context";
+export type InspectorTab = "trace" | "details" | "artifacts" | "context";
 
 type ReviewCounts = {
   agent: number;
@@ -64,6 +66,9 @@ type InspectorProps = {
   agentMaxTurns: number;
   reviewCounts: ReviewCounts;
   onTabChange: (tab: InspectorTab) => void;
+  onTraceStepSelect: (stepId: string) => void;
+  onTraceExport: () => void;
+  traceBusy: boolean;
   onWidthChange: (width: number) => void;
   onReview: () => void;
 };
@@ -140,6 +145,14 @@ function ArtifactTypeIcon({ path }: { path: string }) {
   return <File aria-hidden="true" />;
 }
 
+function TraceIcon({ step }: { step: AgentTraceStepView }) {
+  if (step.kind === "tool") return <TerminalSquare aria-hidden="true" />;
+  if (step.kind === "permission") return <ShieldCheck aria-hidden="true" />;
+  if (step.kind === "model") return <Activity aria-hidden="true" />;
+  if (step.kind === "error") return <TriangleAlert aria-hidden="true" />;
+  return <FileText aria-hidden="true" />;
+}
+
 function ArtifactPreviewPane({ path }: { path: string }) {
   const [preview, setPreview] = useState<ArtifactPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -204,6 +217,9 @@ export function Inspector({
   agentMaxTurns,
   reviewCounts,
   onTabChange,
+  onTraceStepSelect,
+  onTraceExport,
+  traceBusy,
   onWidthChange,
   onReview
 }: InspectorProps) {
@@ -217,6 +233,11 @@ export function Inspector({
   const hasContext = Boolean(
     contextCheckpoint && (contextCheckpoint.eventCount > 0 || contextCheckpoint.path)
   );
+  const traceTurnCount = new Set(sessionTraceSteps.map((step) => step.turnIndex)).size;
+  const traceToolCallCount = sessionTraceSteps.filter((step) => step.kind === "tool").length;
+  const tracePermissionCount = sessionTraceSteps.filter(
+    (step) => step.kind === "permission"
+  ).length;
   const outputArtifacts = useMemo(() => {
     const outputs = new Map<string, OutputArtifact>();
     const addOutput = (artifact: OutputArtifact) => {
@@ -432,6 +453,7 @@ export function Inspector({
                       className="inspector-output"
                       type="button"
                       aria-label={`Preview ${artifactName(artifact.path)}`}
+                      title={`Preview ${artifactName(artifact.path)}`}
                       key={`${artifact.id}-${artifact.path}`}
                       onClick={() => selectOutput(artifact.path)}
                     >
@@ -457,7 +479,7 @@ export function Inspector({
           aria-hidden={!debugOpen}
         >
           <nav className="inspector-tabs" aria-label="Debug views" role="tablist">
-              {(["details", "artifacts", "context"] as InspectorTab[]).map((item, index, tabs) => (
+              {(["trace", "details", "artifacts", "context"] as InspectorTab[]).map((item, index, tabs) => (
                 <button
                   className={`inspector-tab ${tab === item ? "active" : ""}`}
                   type="button"
@@ -478,10 +500,82 @@ export function Inspector({
                     buttons?.[nextIndex]?.focus();
                   }}
                 >
-                  {item === "details" ? "Details" : item === "artifacts" ? "Artifacts" : "Context"}
+                  {item === "trace"
+                    ? "Trace"
+                    : item === "details"
+                      ? "Details"
+                      : item === "artifacts"
+                        ? "Artifacts"
+                        : "Context"}
                 </button>
               ))}
           </nav>
+
+        {tab === "trace" && (
+          <div className="inspector-panel inspector-trace-panel" id="inspector-panel" role="tabpanel">
+            <section className="inspector-trace-summary">
+              <dl className="detail-list">
+                <div>
+                  <dt>Status</dt>
+                  <dd><TraceStatusIcon status={agentStatus} /></dd>
+                </div>
+                <div>
+                  <dt>Turns</dt>
+                  <dd>{traceTurnCount}</dd>
+                </div>
+                <div>
+                  <dt>Steps</dt>
+                  <dd>{sessionTraceSteps.length}</dd>
+                </div>
+                <div>
+                  <dt>Tools</dt>
+                  <dd>{traceToolCallCount}</dd>
+                </div>
+                <div>
+                  <dt>Permissions</dt>
+                  <dd>{tracePermissionCount}</dd>
+                </div>
+              </dl>
+              <button
+                className="secondary-button inspector-trace-export"
+                type="button"
+                disabled={traceBusy || !sessionId}
+                onClick={onTraceExport}
+              >
+                <Save aria-hidden="true" />
+                <span>{traceBusy ? "Exporting" : "Export JSONL"}</span>
+              </button>
+              {traceExportPath && <p className="inspector-path">{traceExportPath}</p>}
+            </section>
+            <section className="inspector-trace-list" aria-label="Agent trace steps">
+              {sessionTraceSteps.length === 0 ? (
+                <div className="inspector-empty">
+                  <Clock3 aria-hidden="true" />
+                  <span>No agent trace yet</span>
+                </div>
+              ) : (
+                sessionTraceSteps.map((step) => (
+                  <button
+                    className={`trace-step ${traceStep?.id === step.id ? "selected" : ""}`}
+                    type="button"
+                    key={step.id}
+                    onClick={() => onTraceStepSelect(step.id)}
+                  >
+                    <span className="trace-step-icon"><TraceIcon step={step} /></span>
+                    <span className="trace-step-body">
+                      <strong>{step.label}</strong>
+                      <small>{step.detail}</small>
+                    </span>
+                    <span className="trace-step-meta">
+                      <TraceStatusIcon status={step.status} />
+                      <small>{formatDuration(step.latencyMs)}</small>
+                    </span>
+                  </button>
+                ))
+              )}
+            </section>
+          </div>
+        )}
 
         {tab === "details" && (
           <div className="inspector-panel" id="inspector-panel" role="tabpanel">
@@ -725,8 +819,10 @@ export function Inspector({
         <button
           className="inspector-debug-toggle"
           type="button"
+          aria-label={debugOpen ? "Hide debug and trace" : "Show debug and trace"}
           aria-expanded={debugOpen}
           aria-controls="inspector-debug-panel"
+          title={debugOpen ? "Hide debug and trace" : "Show debug and trace"}
           onClick={() => setDebugOpen((current) => !current)}
         >
           <Bug aria-hidden="true" />
