@@ -4046,7 +4046,26 @@ textarea::placeholder {
   background: rgba(252, 252, 252, 0.98);
   border: 0.5px solid #e4e4e4;
   border-radius: 8px 8px 0 0;
-  box-shadow: 0 -12px 30px rgb(0 0 0 / 10%);
+  box-shadow: 0 -6px 18px rgb(0 0 0 / 7%);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(10px);
+  transition:
+    transform 160ms var(--ease-out-quart),
+    opacity 120ms ease-out,
+    visibility 0s linear 160ms;
+}
+
+.inspector-debug[data-open="true"] .inspector-debug-body {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(0);
+  transition:
+    transform 210ms var(--ease-out-quart),
+    opacity 150ms ease-out,
+    visibility 0s linear 0s;
 }
 
 .inspector-panel {
@@ -4339,5 +4358,9 @@ textarea::placeholder {
 
   .thread-minimap-preview {
     animation: none;
+  }
+
+  .inspector-debug-body {
+    transition: none;
   }
 }

@@ -451,9 +451,12 @@ export function Inspector({
       </div>
 
       <section className="inspector-debug" data-open={debugOpen}>
-        {debugOpen && (
-          <div className="inspector-debug-body" id="inspector-debug-panel">
-            <nav className="inspector-tabs" aria-label="Debug views" role="tablist">
+        <div
+          className="inspector-debug-body"
+          id="inspector-debug-panel"
+          aria-hidden={!debugOpen}
+        >
+          <nav className="inspector-tabs" aria-label="Debug views" role="tablist">
               {(["details", "artifacts", "context"] as InspectorTab[]).map((item, index, tabs) => (
                 <button
                   className={`inspector-tab ${tab === item ? "active" : ""}`}
@@ -478,7 +481,7 @@ export function Inspector({
                   {item === "details" ? "Details" : item === "artifacts" ? "Artifacts" : "Context"}
                 </button>
               ))}
-            </nav>
+          </nav>
 
         {tab === "details" && (
           <div className="inspector-panel" id="inspector-panel" role="tabpanel">
@@ -718,8 +721,7 @@ export function Inspector({
             )}
           </div>
         )}
-          </div>
-        )}
+        </div>
         <button
           className="inspector-debug-toggle"
           type="button"

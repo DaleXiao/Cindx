@@ -195,7 +195,7 @@ export function Composer({
               }}
               disabled={working || canStop}
               aria-keyshortcuts="Enter"
-              placeholder="Ask Cindx"
+              placeholder="Message Cindx"
               rows={3}
             />
             <div className="composer-toolbar">
