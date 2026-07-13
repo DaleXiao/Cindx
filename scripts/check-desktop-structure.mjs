@@ -365,6 +365,11 @@ assert(
 assert(composerSource.includes('event.key !== "Enter"'), "Composer must support Enter to send");
 assert(composerSource.includes("event.shiftKey"), "Composer must reserve Shift+Enter for a new line");
 assert(
+  composerSource.includes('if (working || canStop) return;') &&
+    !composerSource.includes('disabled={working || canStop}\n              aria-keyshortcuts="Enter"'),
+  "Composer must remain editable while the agent runs and require an explicit stop before sending"
+);
+assert(
   composerSource.includes("onCompositionStart") &&
     composerSource.includes("onCompositionEnd") &&
     composerSource.includes("compositionJustEndedRef") &&
