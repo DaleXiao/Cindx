@@ -343,6 +343,10 @@ pub struct RoutingContext {
     pub needs_vision: bool,
     pub high_stakes: bool,
     pub complexity_score: u8,
+    pub estimated_steps: u8,
+    pub parallelizable: bool,
+    pub verification_required: bool,
+    pub latency_sensitive: bool,
     pub user_policy_override: Option<OrchestrationPolicy>,
     pub model_candidates: Vec<ModelCandidate>,
 }
@@ -408,6 +412,33 @@ impl RoutingContext {
                 "架构", "策略", "根因", "深入", "全面", "多条路径",
             ],
         );
+        let parallelizable = !capability_question
+            && contains_any(
+                prompt,
+                &[
+                    "compare", "alternatives", "independent", "multiple options", "second opinion",
+                    "cross-check", "parallel", "sources", "citations", "比较", "对比", "多个方案",
+                    "independent analysis", "investigate", "root cause", "独立分析", "交叉验证",
+                    "并行", "多条路径", "来源", "引用", "根因", "排查",
+                ],
+            );
+        let multi_phase = !capability_question
+            && contains_any(
+                prompt,
+                &[
+                    " and then ", " then ", " after that ", "并且", "然后", "之后", "再运行",
+                    "再检查", "同时", "and run tests", "fix and test", "implement and test",
+                    "修改并", "修复并", "实现并", "排查并",
+                ],
+            );
+        let latency_sensitive = !capability_question
+            && contains_any(
+                prompt,
+                &[
+                    "quick", "quickly", "fast", "brief", "one sentence", "简单回答", "快速",
+                    "尽快", "一句话", "简短",
+                ],
+            );
         let needs_tools = !capability_question
             && (matches!(task_class, TaskClass::Browser | TaskClass::Computer)
                 || coding_action
@@ -432,7 +463,29 @@ impl RoutingContext {
                         "screenshot", "screen", "visible", "ui", "截图", "屏幕", "界面", "可见",
                     ],
                 ));
+        let verification_required = !capability_question
+            && (high_stakes
+                || coding_action
+                || explicit_retrieval
+                || contains_any(
+                    prompt,
+                    &[
+                        "verify", "review", "validate", "check", "proof", "验证", "审查", "复核",
+                        "检查", "证明",
+                    ],
+                ));
         let prompt_length = prompt.chars().count();
+        let estimated_steps = if capability_question {
+            1
+        } else {
+            (1u8
+                + u8::from(needs_tools)
+                + u8::from(needs_retrieval)
+                + u8::from(verification_required)
+                + u8::from(deep_analysis)
+                + u8::from(multi_phase))
+            .min(MAX_ADAPTIVE_WORKFLOW_STEPS as u8)
+        };
         let mut complexity_score = 0u8;
         if explicit_multi_model {
             complexity_score += 3;
@@ -448,9 +501,12 @@ impl RoutingContext {
         }
         if needs_tools && needs_retrieval {
             complexity_score += 1;
-            if deep_analysis {
-                complexity_score += 1;
-            }
+        }
+        if parallelizable && estimated_steps >= 4 {
+            complexity_score += 1;
+        }
+        if multi_phase {
+            complexity_score += 1;
         }
         if prompt_length >= 600 {
             complexity_score += 1;
@@ -464,6 +520,10 @@ impl RoutingContext {
             needs_vision,
             high_stakes: !capability_question && high_stakes,
             complexity_score: if capability_question { 0 } else { complexity_score },
+            estimated_steps,
+            parallelizable,
+            verification_required,
+            latency_sensitive,
             user_policy_override: None,
             model_candidates,
         }
@@ -547,16 +607,22 @@ fn is_lightweight_direct(context: &RoutingContext) -> bool {
         && !context.needs_tools
         && !context.needs_retrieval
         && !context.needs_vision
+        && !context.verification_required
+        && context.estimated_steps <= 2
 }
 
 fn requires_ultra(context: &RoutingContext) -> bool {
     context.needs_multi_model
-        || (!matches!(context.task_class, TaskClass::Browser | TaskClass::Computer)
-            && context.complexity_score >= 3)
+        || (!context.latency_sensitive
+            && !matches!(context.task_class, TaskClass::Browser | TaskClass::Computer)
+            && ((context.high_stakes && context.complexity_score >= 3)
+                || (context.parallelizable
+                    && context.complexity_score >= 4
+                    && context.estimated_steps >= 4)))
 }
 
 fn ultra_candidate_count(context: &RoutingContext) -> usize {
-    if context.needs_multi_model || context.high_stakes || context.complexity_score >= 5 {
+    if context.needs_multi_model || context.high_stakes || context.complexity_score >= 6 {
         3
     } else {
         2
@@ -630,11 +696,23 @@ impl RuleBasedRouter {
         policy: OrchestrationPolicy,
         reason: &str,
     ) -> RoutingDecision {
-        let model = select_model(context, !matches!(policy, OrchestrationPolicy::Single));
+        let preferred_role = preferred_model_role(context);
+        let model = select_model(
+            context,
+            &preferred_role,
+            !matches!(policy, OrchestrationPolicy::Single),
+        );
         let retrieval_mode = match (&context.task_class, context.needs_retrieval) {
             (_, false) => "none".to_string(),
             (TaskClass::Coding, true) => "semantic_literal_parallel".to_string(),
-            (_, true) => "four_way_parallel".to_string(),
+            (_, true)
+                if context.high_stakes
+                    || context.parallelizable
+                    || context.complexity_score >= 3 =>
+            {
+                "four_way_parallel".to_string()
+            }
+            (_, true) => "semantic_literal_parallel".to_string(),
         };
         let verifier_role = if matches!(
             policy,
@@ -661,6 +739,45 @@ impl RuleBasedRouter {
             "complexity_score".to_string(),
             context.complexity_score.to_string(),
         );
+        metadata.insert(
+            "estimated_steps".to_string(),
+            context.estimated_steps.to_string(),
+        );
+        metadata.insert(
+            "parallelizable".to_string(),
+            context.parallelizable.to_string(),
+        );
+        metadata.insert(
+            "verification_required".to_string(),
+            context.verification_required.to_string(),
+        );
+        metadata.insert(
+            "latency_sensitive".to_string(),
+            context.latency_sensitive.to_string(),
+        );
+        metadata.insert(
+            "selected_model_role".to_string(),
+            role_label(&preferred_role).to_string(),
+        );
+        metadata.insert(
+            "route_tier".to_string(),
+            match &policy {
+                OrchestrationPolicy::Single => "direct",
+                OrchestrationPolicy::PlanExecuteReview => "planned",
+                OrchestrationPolicy::BestOfN { .. } => "adaptive",
+                OrchestrationPolicy::AutoRouter => "auto",
+            }
+            .to_string(),
+        );
+        metadata.insert(
+            "collaboration_budget".to_string(),
+            match &policy {
+                OrchestrationPolicy::BestOfN { candidates } => *candidates,
+                _ => 1,
+            }
+            .to_string(),
+        );
+        metadata.insert("router".to_string(), "rule_based_v2".to_string());
 
         RoutingDecision {
             policy,
@@ -668,9 +785,13 @@ impl RuleBasedRouter {
             verifier_role,
             retrieval_mode,
             explanation: format!(
-                "class={} prompt_length={} reason={reason}",
+                "class={} complexity={} estimated_steps={} parallelizable={} verification={} latency_sensitive={} reason={reason}",
                 context.task_class.label(),
-                context.prompt_length
+                context.complexity_score,
+                context.estimated_steps,
+                context.parallelizable,
+                context.verification_required,
+                context.latency_sensitive,
             ),
             metadata,
         }
@@ -737,29 +858,41 @@ impl LearnedModelRouter {
         {
             return self.fallback.route(context);
         }
+        let baseline = self.fallback.route(context);
         if is_lightweight_direct(context) || requires_ultra(context) {
-            return self.fallback.route(context);
+            return baseline;
         }
         let Some(route) = self.routes.get(&context.task_class) else {
-            return self.fallback.route(context);
+            return baseline;
         };
-        if matches!(route.policy, OrchestrationPolicy::BestOfN { .. }) {
-            return self.fallback.route(context);
+        if route.policy.label() != baseline.policy.label()
+            || !context
+                .model_candidates
+                .iter()
+                .any(|candidate| candidate.name == route.model)
+        {
+            return baseline;
         }
-        let mut decision = self
-            .fallback
-            .decision(context, route.policy.clone(), "learned from successful local traces");
+        let mut decision = baseline;
         decision.model = route.model.clone();
         decision.explanation = format!(
-            "class={} learned_policy={} examples={} success_rate={:.2}",
+            "class={} policy={} learned_model={} examples={} success_rate={:.2}",
             context.task_class.label(),
             route.policy.label(),
+            route.model,
             route.examples,
             route.success_rate
         );
         decision
             .metadata
-            .insert("router".to_string(), "learned_table_v1".to_string());
+            .insert("router".to_string(), "learned_model_v2".to_string());
+        decision
+            .metadata
+            .insert("learned_examples".to_string(), route.examples.to_string());
+        decision.metadata.insert(
+            "learned_success_rate".to_string(),
+            format!("{:.3}", route.success_rate),
+        );
         decision
     }
 
@@ -954,7 +1087,23 @@ pub fn evaluate_router_against_baseline(
     }
 }
 
-fn select_model(context: &RoutingContext, prefer_strong: bool) -> String {
+fn preferred_model_role(context: &RoutingContext) -> ModelRole {
+    if context.high_stakes {
+        return ModelRole::Reviewer;
+    }
+    match context.task_class {
+        TaskClass::Research | TaskClass::Retrieval => ModelRole::Planner,
+        TaskClass::General | TaskClass::Coding | TaskClass::Browser | TaskClass::Computer => {
+            ModelRole::Executor
+        }
+    }
+}
+
+fn select_model(
+    context: &RoutingContext,
+    preferred_role: &ModelRole,
+    prefer_strong: bool,
+) -> String {
     let mut candidates = context
         .model_candidates
         .iter()
@@ -963,6 +1112,14 @@ fn select_model(context: &RoutingContext, prefer_strong: bool) -> String {
         .collect::<Vec<_>>();
     if candidates.is_empty() {
         candidates = context.model_candidates.iter().collect();
+    }
+    let role_candidates = candidates
+        .iter()
+        .copied()
+        .filter(|candidate| &candidate.role == preferred_role)
+        .collect::<Vec<_>>();
+    if !role_candidates.is_empty() {
+        candidates = role_candidates;
     }
     if candidates.is_empty() {
         return "executor".to_string();
@@ -1410,7 +1567,67 @@ mod tests {
 
         assert_eq!(decision.policy, OrchestrationPolicy::PlanExecuteReview);
         assert_eq!(decision.model, "strong-vision");
-        assert!(decision.explanation.contains("learned_policy=plan_execute_review"));
+        assert!(decision.explanation.contains("policy=plan_execute_review"));
+        assert!(decision.explanation.contains("learned_model=strong-vision"));
+        assert_eq!(
+            decision.metadata.get("router").map(String::as_str),
+            Some("learned_model_v2")
+        );
+    }
+
+    #[test]
+    fn latency_sensitive_complex_request_does_not_spawn_an_ensemble() {
+        let context = RoutingContext::from_prompt(
+            "Quickly compare implementation alternatives and check the project",
+            candidates(),
+        );
+        let decision = RuleBasedRouter.route(&context);
+
+        assert!(context.latency_sensitive);
+        assert!(context.parallelizable);
+        assert_ne!(decision.policy, OrchestrationPolicy::BestOfN { candidates: 2 });
+        assert_ne!(decision.policy, OrchestrationPolicy::BestOfN { candidates: 3 });
+    }
+
+    #[test]
+    fn auto_router_selects_models_by_task_role() {
+        let role_candidates = vec![
+            ModelCandidate {
+                name: "planner-model".to_string(),
+                role: ModelRole::Planner,
+                supports_tools: true,
+                supports_vision: true,
+                cost_tier: 3,
+                latency_tier: 2,
+            },
+            ModelCandidate {
+                name: "executor-model".to_string(),
+                role: ModelRole::Executor,
+                supports_tools: true,
+                supports_vision: true,
+                cost_tier: 2,
+                latency_tier: 1,
+            },
+            ModelCandidate {
+                name: "reviewer-model".to_string(),
+                role: ModelRole::Reviewer,
+                supports_tools: true,
+                supports_vision: true,
+                cost_tier: 4,
+                latency_tier: 3,
+            },
+        ];
+        let research = RoutingContext::from_prompt(
+            "Research and compare local agent architectures",
+            role_candidates.clone(),
+        );
+        let high_stakes = RoutingContext::from_prompt(
+            "Review a critical production migration strategy",
+            role_candidates,
+        );
+
+        assert_eq!(RuleBasedRouter.route(&research).model, "planner-model");
+        assert_eq!(RuleBasedRouter.route(&high_stakes).model, "reviewer-model");
     }
 
     #[test]

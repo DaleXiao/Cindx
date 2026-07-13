@@ -302,15 +302,14 @@ fn agent_model_for_effort(
     policy: &OrchestrationPolicy,
     routing_decision: &RoutingDecision,
 ) -> String {
-    let learned_model_selected = effort == AgentEffort::Auto
-        && routing_decision.metadata.get("router").map(String::as_str)
-            == Some("learned_table_v1");
-    if (effort == AgentEffort::Fast || learned_model_selected)
-        && !routing_decision.model.trim().is_empty()
-    {
-        routing_decision.model.clone()
-    } else {
-        config.model_for_agent_policy(policy)
+    match effort {
+        AgentEffort::Fast if !config.model.trim().is_empty() => config.model.clone(),
+        AgentEffort::Auto if !routing_decision.model.trim().is_empty() => {
+            routing_decision.model.clone()
+        }
+        AgentEffort::Fast | AgentEffort::Auto | AgentEffort::Pro => {
+            config.model_for_agent_policy(policy)
+        }
     }
 }
 
@@ -2941,7 +2940,7 @@ fn run_agent_task_blocking_inner(
             .metadata
             .get("router")
             .cloned()
-            .unwrap_or_else(|| "rule_based_v1".to_string()),
+            .unwrap_or_else(|| "rule_based_v2".to_string()),
     );
     let session_id = run_context.get("session_id").map(String::as_str);
     let task_id = phase16_task_id();
@@ -3294,7 +3293,7 @@ fn retry_agent_task_blocking_inner(
             .metadata
             .get("router")
             .cloned()
-            .unwrap_or_else(|| "rule_based_v1".to_string()),
+            .unwrap_or_else(|| "rule_based_v2".to_string()),
     );
     {
         let mut store = state
@@ -10645,6 +10644,7 @@ fn provider_config_state(config: &ProviderConfig) -> ProviderConfigState {
 
 fn model_candidates_for_config(config: &ProviderConfig) -> Vec<ModelCandidate> {
     [
+        (ModelRole::Executor, config.model.clone(), 1, 1),
         (ModelRole::Planner, config.model_for_role(&ModelRole::Planner), 3, 2),
         (ModelRole::Executor, config.model_for_role(&ModelRole::Executor), 2, 1),
         (ModelRole::Reviewer, config.model_for_role(&ModelRole::Reviewer), 2, 2),
@@ -10698,7 +10698,8 @@ fn route_with_local_telemetry(
         let mut decision = RuleBasedRouter.route(context);
         decision
             .metadata
-            .insert("router".to_string(), "rule_based_v1".to_string());
+            .entry("router".to_string())
+            .or_insert_with(|| "rule_based_v2".to_string());
         decision
     };
     Ok((decision, learned_examples))
@@ -12680,7 +12681,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_agent_uses_default_model_while_workflows_use_executor() {
+    fn effort_and_router_select_the_primary_model_without_collapsing_to_executor() {
         let config = ProviderConfig {
             model: "default-a".to_string(),
             executor_model: "executor-b".to_string(),
@@ -12713,13 +12714,26 @@ mod tests {
             agent_model_for_effort(&config, AgentEffort::Auto, &policy, &decision),
             "default-a"
         );
-        decision.model = "learned-c".to_string();
+        decision.model = "routed-c".to_string();
         decision
             .metadata
-            .insert("router".to_string(), "learned_table_v1".to_string());
+            .insert("router".to_string(), "rule_based_v2".to_string());
         assert_eq!(
             agent_model_for_effort(&config, AgentEffort::Auto, &policy, &decision),
-            "learned-c"
+            "routed-c"
+        );
+        assert_eq!(
+            agent_model_for_effort(&config, AgentEffort::Fast, &policy, &decision),
+            "default-a"
+        );
+        assert_eq!(
+            agent_model_for_effort(
+                &config,
+                AgentEffort::Pro,
+                &OrchestrationPolicy::BestOfN { candidates: 3 },
+                &decision,
+            ),
+            "executor-b"
         );
     }
 

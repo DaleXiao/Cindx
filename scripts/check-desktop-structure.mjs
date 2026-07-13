@@ -1120,12 +1120,22 @@ assert(
     orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 7") &&
     orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_AGENTS: usize = 3") &&
     orchestratorSource.includes("complexity_score") &&
+    orchestratorSource.includes("estimated_steps") &&
+    orchestratorSource.includes("parallelizable") &&
+    orchestratorSource.includes("verification_required") &&
+    orchestratorSource.includes("latency_sensitive") &&
+    orchestratorSource.includes('"rule_based_v2"') &&
+    orchestratorSource.includes('"learned_model_v2"') &&
+    orchestratorSource.includes('"collaboration_budget"') &&
     orchestratorSource.includes("high_stakes") &&
     orchestratorSource.includes('"thinker" | "worker" | "verifier" | "synthesizer"') &&
     orchestratorSource.includes("adaptive_workflow_layers") &&
     orchestratorSource.includes("adaptive_worker_prompt") &&
     orchestratorSource.includes("ordinary_research_uses_one_planned_execution_path") &&
+    orchestratorSource.includes("latency_sensitive_complex_request_does_not_spawn_an_ensemble") &&
+    orchestratorSource.includes("auto_router_selects_models_by_task_role") &&
     orchestratorSource.includes("learned_router_cannot_upgrade_ordinary_research_to_ultra") &&
+    rustLib.includes("AgentEffort::Auto if !routing_decision.model.trim().is_empty()") &&
     orchestratorSource.includes("must only access earlier steps"),
   "Primary agent must reserve bounded tool-capable adaptive workflows for Ultra-routed requests"
 );
