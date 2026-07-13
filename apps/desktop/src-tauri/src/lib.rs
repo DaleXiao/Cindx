@@ -40,9 +40,10 @@ use model_provider::{
 use orchestrator::{
     adaptive_worker_prompt, adaptive_workflow_layers, adaptive_workflow_step_budget, default_plan,
     parse_policy, role_label, step_prompt, validate_adaptive_workflow, AdaptiveWorkflow,
-    AdaptiveWorkflowStep, ModelCandidate, LearnedModelRouter, OrchestrationPolicy,
-    RoutingContext, RoutingDecision, RoutingOutcome, RoutingTelemetry, RuleBasedRouter, TaskClass,
-    MAX_ADAPTIVE_WORKFLOW_AGENTS, MAX_ADAPTIVE_WORKFLOW_STEPS,
+    AdaptiveWorkflowStep, LearnedModelRouter, ModelCandidate, OrchestrationPolicy, RoutingContext,
+    RoutingDecision, RoutingOutcome, RoutingTelemetry, RuleBasedRouter, TaskClass, WorkflowBudget,
+    WorkflowExecutionTelemetry, WorkflowPlanIr, WorkflowSearchTeacher, WorkflowTopologyPrior,
+    MAX_ADAPTIVE_WORKFLOW_AGENTS, MAX_ADAPTIVE_WORKFLOW_STEPS, WORKFLOW_IR_SCHEMA,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2934,6 +2935,10 @@ fn run_agent_task_blocking_inner(
         "task_class".to_string(),
         routing_context.task_class.label().to_string(),
     );
+    run_context.insert(
+        "routing_signature".to_string(),
+        routing_context.learning_signature(),
+    );
     run_context.insert("agent_effort".to_string(), effort.label().to_string());
     run_context.insert(
         "requested_policy".to_string(),
@@ -3287,6 +3292,10 @@ fn retry_agent_task_blocking_inner(
     run_context.insert(
         "task_class".to_string(),
         routing_context.task_class.label().to_string(),
+    );
+    run_context.insert(
+        "routing_signature".to_string(),
+        routing_context.learning_signature(),
     );
     run_context.insert("agent_effort".to_string(), effort.label().to_string());
     run_context.insert(
@@ -6059,6 +6068,7 @@ fn build_adaptive_coordinator_prompt(
     history: &[Message],
     models: &[String],
     agent_budget: usize,
+    prior: Option<&WorkflowTopologyPrior>,
 ) -> String {
     let agent_budget = agent_budget.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS);
     let step_budget = adaptive_workflow_step_budget(agent_budget);
@@ -6073,6 +6083,9 @@ fn build_adaptive_coordinator_prompt(
         2 => r#"{"steps":[{"id":"approach_a","role":"thinker","model":"exact model from pool","subtask":"analyze the strongest approach","access":[]},{"id":"approach_b","role":"worker","model":"exact model from pool","subtask":"independent alternative","access":[]},{"id":"synthesize","role":"synthesizer","model":"reuse an exact model from pool","subtask":"resolve both branches into a checkable execution brief","access":["approach_a","approach_b"]}]}"#,
         _ => r#"{"steps":[{"id":"approach_a","role":"thinker","model":"exact model from pool","subtask":"independent approach","access":[]},{"id":"approach_b","role":"worker","model":"exact model from pool","subtask":"independent alternative","access":[]},{"id":"verify","role":"verifier","model":"exact model from pool","subtask":"cross-check both reports and their evidence","access":["approach_a","approach_b"]},{"id":"synthesize","role":"synthesizer","model":"reuse an exact model from pool","subtask":"resolve disagreements into a checkable execution brief","access":["approach_a","approach_b","verify"]}]}"#,
     };
+    let prior_hint = prior
+        .map(WorkflowTopologyPrior::prompt_hint)
+        .unwrap_or_else(|| "(none - design from the current query)".to_string());
     format!(
         concat!(
             "You are the coordinator model for a Fugu-style Cindx workflow. Design a query-specific dependency graph instead of using a fixed planner/reviewer pipeline. Return only strict JSON with this schema:\n",
@@ -6090,6 +6103,7 @@ fn build_adaptive_coordinator_prompt(
             "- Use exact model strings from the worker pool. Do not include markdown fences or commentary.\n\n",
             "Configured role hints:\nPlanner: {planner}\nExecutor: {executor}\nReviewer: {reviewer}\nSynthesizer: {summarizer}\n\n",
             "Allowed worker pool:\n{worker_pool}\n\n",
+            "Historical execution prior:\n{prior_hint}\n\n",
             "User request:\n{prompt}\n\nRecent session memory:\n{recent_context}"
         ),
         schema_example = schema_example,
@@ -6100,6 +6114,7 @@ fn build_adaptive_coordinator_prompt(
         reviewer = config.model_for_role(&ModelRole::Reviewer),
         summarizer = config.model_for_role(&ModelRole::Summarizer),
         worker_pool = worker_pool,
+        prior_hint = prior_hint,
         prompt = prompt,
         recent_context = if recent_context.is_empty() {
             "(none)"
@@ -6193,6 +6208,7 @@ fn parse_adaptive_workflow(
 
 fn adaptive_stage_metadata(spec: &AdaptiveCollaborationSpec) -> Metadata {
     [
+        ("workflow_schema".to_string(), WORKFLOW_IR_SCHEMA.to_string()),
         ("workflow_step_id".to_string(), spec.step_id.clone()),
         ("workflow_role".to_string(), spec.role.clone()),
         (
@@ -6203,6 +6219,10 @@ fn adaptive_stage_metadata(spec: &AdaptiveCollaborationSpec) -> Metadata {
         (
             "subtask".to_string(),
             truncate_for_collaboration(&spec.subtask, 2_000),
+        ),
+        (
+            "tool_policy".to_string(),
+            "read_only_evidence".to_string(),
         ),
     ]
     .into_iter()
@@ -6936,7 +6956,9 @@ fn run_adaptive_collaboration(
     if models.is_empty() {
         return Err("adaptive collaboration has no configured worker models".to_string());
     }
+    let workflow_started_at_ms = current_time_millis();
     let coordinator_model = config.model_for_role(&ModelRole::Planner);
+    let prior = workflow_prior_for_run(state, run_context, models, agent_budget)?;
     let workflow_response = run_collaboration_stage(
         state,
         config,
@@ -6946,10 +6968,41 @@ fn run_adaptive_collaboration(
         "coordinator",
         ModelRole::Planner,
         &coordinator_model,
-        build_adaptive_coordinator_prompt(config, prompt, history, models, agent_budget),
+        build_adaptive_coordinator_prompt(
+            config,
+            prompt,
+            history,
+            models,
+            agent_budget,
+            prior.as_ref(),
+        ),
     )?;
     let workflow = parse_adaptive_workflow(&workflow_response, models, agent_budget)?;
     let layers = adaptive_workflow_layers(&workflow)?;
+    let layer_count = layers.len();
+    let workflow_plan = WorkflowPlanIr::from_adaptive(
+        collaboration_id,
+        prompt,
+        run_context
+            .get("agent_effort")
+            .cloned()
+            .unwrap_or_else(|| "auto".to_string()),
+        run_context
+            .get("collaboration_policy")
+            .cloned()
+            .unwrap_or_else(|| "best_of_n".to_string()),
+        coordinator_model.clone(),
+        &workflow,
+        WorkflowBudget {
+            max_steps: adaptive_workflow_step_budget(agent_budget),
+            max_models: agent_budget.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS),
+            max_model_turns_per_step: DEFAULT_COLLABORATION_WORKER_TURNS,
+            max_tool_calls_per_step: MAX_COLLABORATION_WORKER_TOOL_CALLS,
+            max_output_tokens_per_step: COLLABORATION_MAX_OUTPUT_TOKENS as usize,
+        },
+    );
+    workflow_plan.validate(models)?;
+    let workflow_ir = workflow_plan.to_json()?;
     {
         let workflow_summary = workflow
             .steps
@@ -6983,7 +7036,26 @@ fn run_adaptive_collaboration(
             metadata_with_context(
                 [
                     ("collaboration_id".to_string(), collaboration_id.to_string()),
-                    ("conductor_version".to_string(), "v2".to_string()),
+                    ("workflow_schema".to_string(), WORKFLOW_IR_SCHEMA.to_string()),
+                    ("workflow_ir".to_string(), workflow_ir),
+                    ("conductor_version".to_string(), "v3".to_string()),
+                    (
+                        "conductor_source".to_string(),
+                        if prior.is_some() {
+                            "search_teacher_v1"
+                        } else {
+                            "model_cold_start"
+                        }
+                        .to_string(),
+                    ),
+                    (
+                        "teacher_examples".to_string(),
+                        prior
+                            .as_ref()
+                            .map(|prior| prior.examples)
+                            .unwrap_or_default()
+                            .to_string(),
+                    ),
                     ("workflow_steps".to_string(), workflow.steps.len().to_string()),
                     ("workflow_layers".to_string(), layers.len().to_string()),
                     ("worker_models".to_string(), unique_models.to_string()),
@@ -7161,7 +7233,8 @@ fn run_adaptive_collaboration(
     let final_output = outputs
         .remove(&final_step.id)
         .ok_or_else(|| "adaptive workflow final output is missing".to_string())?;
-    Ok(quality_gate_adaptive_output(
+    let evidence_count = evidence_by_step.values().map(Vec::len).sum::<usize>();
+    let final_output = quality_gate_adaptive_output(
         state,
         config,
         task_id,
@@ -7169,7 +7242,41 @@ fn run_adaptive_collaboration(
         collaboration_id,
         prompt,
         &final_output,
-    ))
+    );
+    {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        append_event(
+            &mut store,
+            task_id,
+            EventKind::TaskStatusChanged,
+            "Collaboration workflow completed",
+            metadata_with_context(
+                [
+                    ("collaboration_id".to_string(), collaboration_id.to_string()),
+                    ("workflow_schema".to_string(), WORKFLOW_IR_SCHEMA.to_string()),
+                    ("status".to_string(), "completed".to_string()),
+                    ("fallback_used".to_string(), "false".to_string()),
+                    ("workflow_steps".to_string(), workflow_plan.steps.len().to_string()),
+                    ("workflow_layers".to_string(), layer_count.to_string()),
+                    ("evidence_count".to_string(), evidence_count.to_string()),
+                    (
+                        "latency_ms".to_string(),
+                        current_time_millis()
+                            .saturating_sub(workflow_started_at_ms)
+                            .to_string(),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                run_context,
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(final_output)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7558,7 +7665,30 @@ fn prepare_agent_collaboration(
             &models,
             agent_budget,
         )
-        .or_else(|_| {
+        .or_else(|error| {
+            if let Ok(mut store) = state.store.lock() {
+                let _ = append_event(
+                    &mut store,
+                    task_id,
+                    EventKind::TaskStatusChanged,
+                    "Collaboration workflow failed",
+                    metadata_with_context(
+                        [
+                            ("collaboration_id".to_string(), id.clone()),
+                            ("workflow_schema".to_string(), WORKFLOW_IR_SCHEMA.to_string()),
+                            ("status".to_string(), "failed".to_string()),
+                            ("fallback_used".to_string(), "true".to_string()),
+                            (
+                                "error".to_string(),
+                                truncate_for_collaboration(&error, 2_000),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        run_context,
+                    ),
+                );
+            }
             run_collaboration_candidates(
                 app,
                 state,
@@ -10966,11 +11096,11 @@ fn route_with_local_telemetry(
     let telemetry = routing_telemetry_from_events(&events);
     let router = LearnedModelRouter::train(&telemetry);
     let learned_examples = router
-        .learned_route(&context.task_class)
+        .learned_route_for_context(context)
         .map(|route| route.examples)
         .unwrap_or(0);
     let learned_model_available = router
-        .learned_route(&context.task_class)
+        .learned_route_for_context(context)
         .map(|route| {
             context
                 .model_candidates
@@ -11041,6 +11171,11 @@ fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTelemetry> {
                 .count() as u64;
             Some(RoutingTelemetry {
                 task_class,
+                context_signature: started
+                    .metadata
+                    .get("routing_signature")
+                    .cloned()
+                    .unwrap_or_default(),
                 selected_policy,
                 selected_model,
                 latency_ms: terminal.timestamp_ms.saturating_sub(started.timestamp_ms),
@@ -11056,6 +11191,99 @@ fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTelemetry> {
             })
         })
         .collect()
+}
+
+fn workflow_execution_telemetry_from_events(
+    events: &[Event],
+    allowed_models: &[String],
+) -> Vec<WorkflowExecutionTelemetry> {
+    let mut workflows = BTreeMap::<String, Vec<&Event>>::new();
+    for event in events {
+        if let Some(workflow_id) = event.metadata.get("collaboration_id") {
+            workflows.entry(workflow_id.clone()).or_default().push(event);
+        }
+    }
+
+    workflows
+        .into_values()
+        .filter_map(|mut workflow_events| {
+            workflow_events.sort_by_key(|event| event.sequence);
+            let planned = workflow_events.iter().find(|event| {
+                event.summary == "Collaboration workflow planned"
+                    && event.metadata.contains_key("workflow_ir")
+            })?;
+            let plan = WorkflowPlanIr::from_json(
+                planned.metadata.get("workflow_ir")?,
+                allowed_models,
+            )
+            .ok()?;
+            let terminal = workflow_events.iter().rev().find(|event| {
+                matches!(
+                    event.summary.as_str(),
+                    "Collaboration workflow completed" | "Collaboration workflow failed"
+                )
+            })?;
+            let task_class = parse_task_class_label(planned.metadata.get("task_class")?)?;
+            let quality_score = workflow_events
+                .iter()
+                .rev()
+                .find(|event| event.summary == "Collaboration quality gate evaluated")
+                .and_then(|event| event.metadata.get("quality_score"))
+                .and_then(|score| score.parse::<f32>().ok());
+            let total_tokens = workflow_events
+                .iter()
+                .filter(|event| event.kind == EventKind::ModelRequestFinished)
+                .filter_map(|event| event.metadata.get("total_tokens"))
+                .filter_map(|tokens| tokens.parse::<u64>().ok())
+                .sum();
+            let tool_calls = workflow_events
+                .iter()
+                .filter(|event| event.kind == EventKind::ToolCallFinished)
+                .count() as u64;
+            Some(WorkflowExecutionTelemetry {
+                task_class,
+                plan,
+                succeeded: terminal.summary == "Collaboration workflow completed",
+                quality_score,
+                latency_ms: terminal.timestamp_ms.saturating_sub(planned.timestamp_ms),
+                total_tokens,
+                tool_calls,
+                fallback_used: terminal
+                    .metadata
+                    .get("fallback_used")
+                    .is_some_and(|value| value == "true"),
+            })
+        })
+        .collect()
+}
+
+fn workflow_prior_for_run(
+    state: &tauri::State<'_, AppState>,
+    run_context: &Metadata,
+    allowed_models: &[String],
+    max_models: usize,
+) -> Result<Option<WorkflowTopologyPrior>, String> {
+    let events = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?
+        .list_by_task(&phase16_task_id())
+        .map_err(|error| error.to_string())?;
+    let telemetry = workflow_execution_telemetry_from_events(&events, allowed_models);
+    let teacher = WorkflowSearchTeacher::train(&telemetry);
+    let Some(task_class) = run_context
+        .get("task_class")
+        .and_then(|value| parse_task_class_label(value))
+    else {
+        return Ok(None);
+    };
+    let effort = run_context
+        .get("agent_effort")
+        .map(String::as_str)
+        .unwrap_or("auto");
+    Ok(teacher
+        .best_prior(&task_class, effort, allowed_models, max_models)
+        .cloned())
 }
 
 fn parse_task_class_label(value: &str) -> Option<TaskClass> {
@@ -11089,6 +11317,10 @@ fn append_router_decision_event(
     metadata.insert(
         "prompt_length".to_string(),
         context.prompt_length.to_string(),
+    );
+    metadata.insert(
+        "routing_signature".to_string(),
+        context.learning_signature(),
     );
     metadata.insert(
         "learned_examples".to_string(),
@@ -13669,6 +13901,125 @@ mod tests {
         assert_eq!(telemetry[0].outcome, RoutingOutcome::Succeeded);
         assert_eq!(telemetry[0].cost_proxy, 120);
         assert_eq!(telemetry[0].retrieval_count, 1);
+    }
+
+    #[test]
+    fn workflow_telemetry_restores_versioned_plan_and_quality() {
+        let models = vec!["planner".to_string(), "reviewer".to_string()];
+        let workflow = AdaptiveWorkflow {
+            steps: vec![
+                AdaptiveWorkflowStep {
+                    id: "first".to_string(),
+                    role: "thinker".to_string(),
+                    model: "planner".to_string(),
+                    subtask: "independent analysis".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "second".to_string(),
+                    role: "worker".to_string(),
+                    model: "reviewer".to_string(),
+                    subtask: "alternative analysis".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "final".to_string(),
+                    role: "synthesizer".to_string(),
+                    model: "planner".to_string(),
+                    subtask: "synthesize both branches".to_string(),
+                    access: vec!["first".to_string(), "second".to_string()],
+                },
+            ],
+        };
+        let plan = WorkflowPlanIr::from_adaptive(
+            "collab-1",
+            "Compare approaches",
+            "pro",
+            "best_of_n",
+            "planner",
+            &workflow,
+            WorkflowBudget {
+                max_steps: 3,
+                max_models: 2,
+                max_model_turns_per_step: 5,
+                max_tool_calls_per_step: 6,
+                max_output_tokens_per_step: 4_096,
+            },
+        );
+        let context = [
+            ("collaboration_id".to_string(), "collab-1".to_string()),
+            ("task_class".to_string(), "research".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        let events = vec![
+            Event {
+                id: EventId("planned".to_string()),
+                task_id: phase16_task_id(),
+                sequence: 1,
+                timestamp_ms: 100,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Collaboration workflow planned".to_string(),
+                metadata: metadata_with_context(
+                    [("workflow_ir".to_string(), plan.to_json().unwrap())]
+                        .into_iter()
+                        .collect(),
+                    &context,
+                ),
+            },
+            Event {
+                id: EventId("model".to_string()),
+                task_id: phase16_task_id(),
+                sequence: 2,
+                timestamp_ms: 200,
+                kind: EventKind::ModelRequestFinished,
+                summary: "Collaboration worker finished".to_string(),
+                metadata: metadata_with_context(
+                    [("total_tokens".to_string(), "640".to_string())]
+                        .into_iter()
+                        .collect(),
+                    &context,
+                ),
+            },
+            Event {
+                id: EventId("quality".to_string()),
+                task_id: phase16_task_id(),
+                sequence: 3,
+                timestamp_ms: 250,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Collaboration quality gate evaluated".to_string(),
+                metadata: metadata_with_context(
+                    [("quality_score".to_string(), "0.875".to_string())]
+                        .into_iter()
+                        .collect(),
+                    &context,
+                ),
+            },
+            Event {
+                id: EventId("completed".to_string()),
+                task_id: phase16_task_id(),
+                sequence: 4,
+                timestamp_ms: 500,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Collaboration workflow completed".to_string(),
+                metadata: metadata_with_context(
+                    [("fallback_used".to_string(), "false".to_string())]
+                        .into_iter()
+                        .collect(),
+                    &context,
+                ),
+            },
+        ];
+
+        let telemetry = workflow_execution_telemetry_from_events(&events, &models);
+
+        assert_eq!(telemetry.len(), 1);
+        assert_eq!(telemetry[0].plan.schema, WORKFLOW_IR_SCHEMA);
+        assert_eq!(telemetry[0].task_class, TaskClass::Research);
+        assert_eq!(telemetry[0].quality_score, Some(0.875));
+        assert_eq!(telemetry[0].latency_ms, 400);
+        assert_eq!(telemetry[0].total_tokens, 640);
+        assert!(telemetry[0].succeeded);
     }
 
     #[test]

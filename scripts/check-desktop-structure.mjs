@@ -1158,7 +1158,7 @@ assert(
     orchestratorSource.includes("verification_required") &&
     orchestratorSource.includes("latency_sensitive") &&
     orchestratorSource.includes('"rule_based_v2"') &&
-    orchestratorSource.includes('"learned_model_v2"') &&
+    orchestratorSource.includes('"learned_conductor_v1"') &&
     orchestratorSource.includes('"collaboration_budget"') &&
     orchestratorSource.includes("high_stakes") &&
     orchestratorSource.includes('"thinker" | "worker" | "verifier" | "synthesizer"') &&
@@ -1170,7 +1170,10 @@ assert(
     orchestratorSource.includes("learned_router_cannot_upgrade_ordinary_research_to_ultra") &&
     rustLib.includes("AgentEffort::Auto if !routing_decision.model.trim().is_empty()") &&
     orchestratorSource.includes("must only access earlier steps") &&
-    rustLib.includes('"conductor_version".to_string(), "v2".to_string()') &&
+    rustLib.includes('"conductor_version".to_string(), "v3".to_string()') &&
+    rustLib.includes('"workflow_ir".to_string()') &&
+    orchestratorSource.includes('WORKFLOW_IR_SCHEMA: &str = "cindx.workflow.v1"') &&
+    orchestratorSource.includes("WorkflowSearchTeacher") &&
     rustLib.includes("Collaboration workflow planned") &&
     rustLib.includes("Tool evidence ledger") &&
     rustLib.includes("collaboration_step_result(") &&
