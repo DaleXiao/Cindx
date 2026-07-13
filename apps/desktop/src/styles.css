@@ -2935,9 +2935,20 @@ textarea::placeholder {
 
 .system-prompt-meta {
   display: flex;
-  justify-content: flex-end;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
   color: var(--subtle);
   font-size: 9px;
+}
+
+.system-prompt-meta span:first-child {
+  max-width: 520px;
+  line-height: 1.45;
+}
+
+.system-prompt-meta span:last-child {
+  flex: 0 0 auto;
 }
 
 .model-catalog-row {

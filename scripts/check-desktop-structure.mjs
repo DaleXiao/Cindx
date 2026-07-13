@@ -52,6 +52,8 @@ const builtinSkillCreator = read("crates/agent-skills/builtins/skill-creator/SKI
 const modelProviderSource = read("crates/model-provider/src/lib.rs");
 const ragSource = read("crates/agent-rag/src/lib.rs");
 const graphSource = read("crates/agent-graph/src/lib.rs");
+const agentRuntimeSource = read("crates/agent-runtime/src/lib.rs");
+const coreAgentPrompt = read("crates/agent-runtime/src/core_prompt.txt");
 const orchestratorSource = read("crates/orchestrator/src/lib.rs");
 const mainSource = read("apps/desktop/src/main.tsx");
 const html = read("apps/desktop/index.html");
@@ -641,12 +643,17 @@ assert(
 );
 assert(
   appSource.includes('id: "agent"') &&
-    appSource.includes("Agent system prompt") &&
+    appSource.includes("Agent instructions") &&
+    appSource.includes("Custom instructions") &&
+    appSource.includes("cannot replace permission or") &&
     appSource.includes("providerDraft.agentSystemPrompt") &&
     tauriBridge.includes("agentSystemPrompt: string") &&
     rustLib.includes("agent_system_prompt_hex") &&
-    rustLib.includes("model_request_for_turn_with_system_prompt"),
-  "Settings must persist and apply an editable Agent system prompt"
+    rustLib.includes("model_request_for_turn_with_context") &&
+    agentRuntimeSource.includes("compose_base_agent_system_prompt") &&
+    coreAgentPrompt.includes("Cindx core contract") &&
+    coreAgentPrompt.includes("Verify the requested result with direct evidence"),
+  "Settings must persist lower-priority Agent instructions without replacing the core contract"
 );
 assert(!styles.includes("artifact-sidebar"), "Legacy artifact sidebar styles must be removed");
 assert(
@@ -857,7 +864,8 @@ assert(
 assert(
   tauriBridge.includes("function currentAgentTimeContext()") &&
     rustLib.includes("normalized_current_time_context") &&
-    rustLib.includes("agent_system_prompt_for_run") &&
+    rustLib.includes("agent_runtime_context_for_run") &&
+    rustLib.includes("collaboration_system_prompt_for_run") &&
     rustLib.includes("Current date and time: {current_time}"),
   "Every new agent turn must receive an automatically computed current time"
 );

@@ -23,11 +23,11 @@ use agent_skills::{
 };
 use agent_runtime::{
     advance_with_model_response, append_tool_observation,
-    model_request_for_turn_with_system_prompt, observation_from_tool_result,
+    compose_agent_system_prompt, model_request_for_turn_with_context,
+    observation_from_tool_result,
     record_tool_outcome, repeated_tool_failure_count,
     resume_agent_loop_from_messages, start_agent_loop, start_agent_loop_with_history,
-    tool_invocation_from_request, AgentAdvance, AgentRuntimeConfig, DEFAULT_AGENT_SYSTEM_PROMPT,
-    MAX_IDENTICAL_TOOL_FAILURES,
+    tool_invocation_from_request, AgentAdvance, AgentRuntimeConfig, MAX_IDENTICAL_TOOL_FAILURES,
 };
 use agent_storage::{EventStore, PermissionAuditRecord, PermissionStore, SqliteStore, StorageError};
 use base64::Engine;
@@ -67,6 +67,7 @@ const PHASE16_TASK_ID: &str = "phase-16-agent-loop";
 const MAX_ATTACHMENT_FILES: usize = 10;
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_ATTACHMENT_TOTAL_BYTES: usize = 50 * 1024 * 1024;
+const LEGACY_AGENT_SYSTEM_PROMPT: &str = "You are Cindx, a desktop-first assistant. Work carefully, be direct, and ask for clarification when the task is ambiguous.";
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -241,7 +242,7 @@ impl Default for ProviderConfig {
             embedding_model: "text-embedding-3-small".to_string(),
             collaboration_policy: "auto_router".to_string(),
             context_window_tokens: 128_000,
-            agent_system_prompt: DEFAULT_AGENT_SYSTEM_PROMPT.to_string(),
+            agent_system_prompt: String::new(),
         }
     }
 }
@@ -6525,7 +6526,7 @@ fn run_collaboration_stage_with_delta(
         config.clone(),
         role.clone(),
         model.to_string(),
-        agent_system_prompt_for_run(&config.agent_system_prompt, run_context),
+        collaboration_system_prompt_for_run(&config.agent_system_prompt, run_context),
         prompt,
         cancellation,
         on_delta,
@@ -6578,7 +6579,8 @@ fn run_adaptive_collaboration(
     let workflow = parse_adaptive_workflow(&workflow_response, models, agent_budget)?;
     let layers = adaptive_workflow_layers(&workflow)?;
     let shared_memory = collaboration_recent_context(history);
-    let system_prompt = agent_system_prompt_for_run(&config.agent_system_prompt, run_context);
+    let system_prompt =
+        collaboration_system_prompt_for_run(&config.agent_system_prompt, run_context);
     let mut outputs = BTreeMap::new();
 
     for layer in layers {
@@ -6950,7 +6952,8 @@ fn run_collaboration_candidates(
         )?;
     }
 
-    let system_prompt = agent_system_prompt_for_run(&config.agent_system_prompt, run_context);
+    let system_prompt =
+        collaboration_system_prompt_for_run(&config.agent_system_prompt, run_context);
     let cancellation = active_agent_run_control(
         state,
         run_context.get("session_id").map(String::as_str),
@@ -7141,14 +7144,14 @@ fn continue_agent_loop(
     let tools = registry
         .exposure_plan(&prompt, config.context_window_tokens)
         .inline;
-    let agent_system_prompt =
-        agent_system_prompt_for_run(&config.agent_system_prompt, &run_context);
+    let runtime_context = agent_runtime_context_for_run(&run_context);
 
     loop {
-        let request = model_request_for_turn_with_system_prompt(
+        let request = model_request_for_turn_with_context(
             &runtime,
             &tools,
-            Some(&agent_system_prompt),
+            Some(&config.agent_system_prompt),
+            runtime_context.as_deref(),
         );
         let request_id = unique_id("agent-model");
         let started_at_ms = current_time_millis();
@@ -10581,7 +10584,7 @@ fn apply_provider_config_input(config: &mut ProviderConfig, input: ProviderConfi
         _ => "auto_router".to_string(),
     };
     config.context_window_tokens = input.context_window_tokens.max(4_096);
-    config.agent_system_prompt = normalized_agent_system_prompt(&input.agent_system_prompt);
+    config.agent_system_prompt = normalized_agent_instructions(&input.agent_system_prompt);
     let api_key = normalized_config_value(&input.api_key);
     if !api_key.is_empty() {
         config.api_key = api_key;
@@ -10629,7 +10632,7 @@ fn load_provider_config() -> ProviderConfig {
             }
             "agent_system_prompt_hex" => {
                 if let Some(prompt) = config_hex_decode(value) {
-                    config.agent_system_prompt = normalized_agent_system_prompt(&prompt);
+                    config.agent_system_prompt = normalized_agent_instructions(&prompt);
                 }
             }
             _ => {}
@@ -12049,10 +12052,10 @@ fn normalized_config_value(value: &str) -> String {
     sanitize_config_value(value.trim())
 }
 
-fn normalized_agent_system_prompt(value: &str) -> String {
+fn normalized_agent_instructions(value: &str) -> String {
     let prompt = value.trim();
-    if prompt.is_empty() {
-        DEFAULT_AGENT_SYSTEM_PROMPT.to_string()
+    if prompt.is_empty() || prompt == LEGACY_AGENT_SYSTEM_PROMPT {
+        String::new()
     } else {
         prompt.chars().take(32_000).collect()
     }
@@ -12070,13 +12073,18 @@ fn normalized_current_time_context(value: &str) -> String {
     }
 }
 
-fn agent_system_prompt_for_run(base_prompt: &str, run_context: &Metadata) -> String {
-    let Some(current_time) = run_context.get("current_time") else {
-        return base_prompt.to_string();
-    };
-    format!(
-        "{base_prompt}\n\nRuntime context computed automatically at the start of this user turn:\nCurrent date and time: {current_time}\nTreat this time as authoritative for this turn."
-    )
+fn agent_runtime_context_for_run(run_context: &Metadata) -> Option<String> {
+    run_context.get("current_time").map(|current_time| {
+        format!("Current date and time: {current_time}\nTreat this time as authoritative for this turn.")
+    })
+}
+
+fn collaboration_system_prompt_for_run(
+    user_instructions: &str,
+    run_context: &Metadata,
+) -> String {
+    let runtime_context = agent_runtime_context_for_run(run_context);
+    compose_agent_system_prompt(Some(user_instructions), runtime_context.as_deref())
 }
 
 fn config_hex_encode(value: &str) -> String {
@@ -12558,15 +12566,39 @@ mod tests {
     }
 
     #[test]
-    fn agent_system_prompt_includes_the_time_computed_for_the_user_turn() {
+    fn agent_runtime_context_includes_the_time_computed_for_the_user_turn() {
         let context = [("current_time".to_string(), "2026-07-11 10:30 CST".to_string())]
             .into_iter()
             .collect();
-        let prompt = agent_system_prompt_for_run("Be concise.", &context);
+        let runtime_context =
+            agent_runtime_context_for_run(&context).expect("time context should exist");
 
-        assert!(prompt.starts_with("Be concise."));
+        assert!(runtime_context.contains("Current date and time: 2026-07-11 10:30 CST"));
+        assert!(runtime_context.contains("authoritative for this turn"));
+    }
+
+    #[test]
+    fn collaboration_prompt_keeps_core_user_instructions_and_runtime_context() {
+        let context = [("current_time".to_string(), "2026-07-11 10:30 CST".to_string())]
+            .into_iter()
+            .collect();
+        let prompt = collaboration_system_prompt_for_run("Answer in Chinese.", &context);
+
+        assert!(prompt.starts_with("You are Cindx"));
+        assert!(prompt.contains("<user_instructions>\nAnswer in Chinese."));
+        assert!(prompt.contains("<runtime_context>"));
         assert!(prompt.contains("Current date and time: 2026-07-11 10:30 CST"));
-        assert!(prompt.contains("authoritative for this turn"));
+    }
+
+    #[test]
+    fn legacy_default_prompt_migrates_to_empty_custom_instructions() {
+        assert!(ProviderConfig::default().agent_system_prompt.is_empty());
+        assert!(normalized_agent_instructions("").is_empty());
+        assert!(normalized_agent_instructions(LEGACY_AGENT_SYSTEM_PROMPT).is_empty());
+        assert_eq!(
+            normalized_agent_instructions("  Prefer concise answers.  "),
+            "Prefer concise answers."
+        );
     }
 
     #[test]
