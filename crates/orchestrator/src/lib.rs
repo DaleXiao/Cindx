@@ -131,6 +131,7 @@ pub fn default_plan(policy: OrchestrationPolicy) -> OrchestrationPlan {
 }
 
 pub const MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 7;
+pub const MAX_ADAPTIVE_WORKFLOW_AGENTS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdaptiveWorkflowStep {
@@ -161,6 +162,7 @@ pub fn validate_adaptive_workflow(
 
     let allowed_models = allowed_models.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let mut seen_ids = BTreeSet::new();
+    let mut selected_models = BTreeSet::new();
     for step in &workflow.steps {
         if step.id.trim().is_empty() {
             return Err("adaptive workflow step id is empty".to_string());
@@ -171,6 +173,7 @@ pub fn validate_adaptive_workflow(
         if !allowed_models.contains(step.model.as_str()) {
             return Err(format!("adaptive workflow selected an unknown model: {}", step.model));
         }
+        selected_models.insert(step.model.as_str());
         if step.subtask.trim().is_empty() {
             return Err(format!("adaptive workflow step {} has an empty subtask", step.id));
         }
@@ -200,6 +203,11 @@ pub fn validate_adaptive_workflow(
             }
         }
         seen_ids.insert(step.id.as_str());
+    }
+    if selected_models.len() > MAX_ADAPTIVE_WORKFLOW_AGENTS {
+        return Err(format!(
+            "adaptive workflow exceeds the {MAX_ADAPTIVE_WORKFLOW_AGENTS}-agent budget"
+        ));
     }
 
     if workflow.steps.len() > 1
@@ -333,6 +341,8 @@ pub struct RoutingContext {
     pub needs_retrieval: bool,
     pub needs_multi_model: bool,
     pub needs_vision: bool,
+    pub high_stakes: bool,
+    pub complexity_score: u8,
     pub user_policy_override: Option<OrchestrationPolicy>,
     pub model_candidates: Vec<ModelCandidate>,
 }
@@ -382,34 +392,78 @@ impl RoutingContext {
                 "模型团队",
             ],
         );
+        let high_stakes = contains_any(
+            prompt,
+            &[
+                "security", "legal", "medical", "financial", "production", "migration",
+                "critical", "high-stakes", "安全", "法律", "医疗", "财务", "生产", "迁移",
+                "高风险", "关键",
+            ],
+        );
+        let deep_analysis = contains_any(
+            prompt,
+            &[
+                "compare", "tradeoff", "trade-off", "architecture", "strategy", "root cause",
+                "investigate", "comprehensive", "alternatives", "方案", "比较", "对比", "权衡",
+                "架构", "策略", "根因", "深入", "全面", "多条路径",
+            ],
+        );
+        let needs_tools = !capability_question
+            && (matches!(task_class, TaskClass::Browser | TaskClass::Computer)
+                || coding_action
+                || contains_any(
+                    prompt,
+                    &[
+                        "tool", "file", "shell", "run", "edit", "工具", "文件", "运行", "执行",
+                        "修改",
+                    ],
+                ));
+        let needs_retrieval = !capability_question
+            && (matches!(task_class, TaskClass::Retrieval)
+                || explicit_retrieval
+                || (workspace_reference
+                    && matches!(task_class, TaskClass::Coding | TaskClass::Research))
+                || (matches!(task_class, TaskClass::Coding) && coding_action));
+        let needs_vision = !capability_question
+            && (matches!(task_class, TaskClass::Computer)
+                || contains_any(
+                    prompt,
+                    &[
+                        "screenshot", "screen", "visible", "ui", "截图", "屏幕", "界面", "可见",
+                    ],
+                ));
+        let prompt_length = prompt.chars().count();
+        let mut complexity_score = 0u8;
+        if explicit_multi_model {
+            complexity_score += 3;
+        }
+        if matches!(task_class, TaskClass::Research | TaskClass::Retrieval) {
+            complexity_score += 1;
+        }
+        if deep_analysis {
+            complexity_score += 1;
+        }
+        if high_stakes {
+            complexity_score += 1;
+        }
+        if needs_tools && needs_retrieval {
+            complexity_score += 1;
+            if deep_analysis {
+                complexity_score += 1;
+            }
+        }
+        if prompt_length >= 600 {
+            complexity_score += 1;
+        }
         Self {
             task_class: task_class.clone(),
-            prompt_length: prompt.chars().count(),
-            needs_tools: !capability_question
-                && (matches!(task_class, TaskClass::Browser | TaskClass::Computer)
-                    || coding_action
-                    || contains_any(
-                        prompt,
-                        &[
-                            "tool", "file", "shell", "run", "edit", "工具", "文件", "运行",
-                            "执行", "修改",
-                        ],
-                    )),
-            needs_retrieval: !capability_question
-                && (matches!(task_class, TaskClass::Retrieval)
-                    || explicit_retrieval
-                    || (workspace_reference
-                        && matches!(task_class, TaskClass::Coding | TaskClass::Research))
-                    || (matches!(task_class, TaskClass::Coding) && coding_action)),
+            prompt_length,
+            needs_tools,
+            needs_retrieval,
             needs_multi_model: !capability_question && explicit_multi_model,
-            needs_vision: !capability_question
-                && (matches!(task_class, TaskClass::Computer)
-                    || contains_any(
-                        prompt,
-                        &[
-                            "screenshot", "screen", "visible", "ui", "截图", "屏幕", "界面", "可见",
-                        ],
-                    )),
+            needs_vision,
+            high_stakes: !capability_question && high_stakes,
+            complexity_score: if capability_question { 0 } else { complexity_score },
             user_policy_override: None,
             model_candidates,
         }
@@ -496,8 +550,17 @@ fn is_lightweight_direct(context: &RoutingContext) -> bool {
 }
 
 fn requires_ultra(context: &RoutingContext) -> bool {
-    matches!(context.task_class, TaskClass::Research)
-        && (context.needs_multi_model || context.prompt_length >= 600)
+    context.needs_multi_model
+        || (!matches!(context.task_class, TaskClass::Browser | TaskClass::Computer)
+            && context.complexity_score >= 3)
+}
+
+fn ultra_candidate_count(context: &RoutingContext) -> usize {
+    if context.needs_multi_model || context.high_stakes || context.complexity_score >= 5 {
+        3
+    } else {
+        2
+    }
 }
 
 impl RuleBasedRouter {
@@ -511,6 +574,16 @@ impl RuleBasedRouter {
                 context,
                 policy.clone(),
                 "user override selected an explicit policy",
+            );
+        }
+
+        if requires_ultra(context) {
+            return self.decision(
+                context,
+                OrchestrationPolicy::BestOfN {
+                    candidates: ultra_candidate_count(context),
+                },
+                "request complexity benefits from bounded adaptive collaboration",
             );
         }
 
@@ -530,10 +603,6 @@ impl RuleBasedRouter {
             TaskClass::Retrieval => (
                 OrchestrationPolicy::PlanExecuteReview,
                 "retrieval tasks need grounded synthesis and review",
-            ),
-            TaskClass::Research if requires_ultra(context) => (
-                OrchestrationPolicy::BestOfN { candidates: 3 },
-                "explicit multi-model or long research request needs adaptive collaboration",
             ),
             TaskClass::Research => (
                 OrchestrationPolicy::PlanExecuteReview,
@@ -587,6 +656,11 @@ impl RuleBasedRouter {
             context.needs_multi_model.to_string(),
         );
         metadata.insert("needs_vision".to_string(), context.needs_vision.to_string());
+        metadata.insert("high_stakes".to_string(), context.high_stakes.to_string());
+        metadata.insert(
+            "complexity_score".to_string(),
+            context.complexity_score.to_string(),
+        );
 
         RoutingDecision {
             policy,
@@ -1134,6 +1208,51 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_workflow_rejects_more_than_three_models() {
+        let workflow = AdaptiveWorkflow {
+            steps: vec![
+                AdaptiveWorkflowStep {
+                    id: "one".to_string(),
+                    role: "thinker".to_string(),
+                    model: "model-a".to_string(),
+                    subtask: "First branch.".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "two".to_string(),
+                    role: "worker".to_string(),
+                    model: "model-b".to_string(),
+                    subtask: "Second branch.".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "three".to_string(),
+                    role: "verifier".to_string(),
+                    model: "model-c".to_string(),
+                    subtask: "Audit both branches.".to_string(),
+                    access: vec!["one".to_string(), "two".to_string()],
+                },
+                AdaptiveWorkflowStep {
+                    id: "final".to_string(),
+                    role: "synthesizer".to_string(),
+                    model: "model-d".to_string(),
+                    subtask: "Synthesize the result.".to_string(),
+                    access: vec!["one".to_string(), "two".to_string(), "three".to_string()],
+                },
+            ],
+        };
+        let models = ["model-a", "model-b", "model-c", "model-d"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+
+        let error = validate_adaptive_workflow(&workflow, &models)
+            .expect_err("four models should exceed the bounded agent budget");
+
+        assert!(error.contains("3-agent budget"));
+    }
+
+    #[test]
     fn rule_router_explains_four_way_retrieval_choice() {
         let context = RoutingContext::from_prompt("Search the docs with RAG and cite sources", candidates());
         let router = RuleBasedRouter;
@@ -1185,6 +1304,32 @@ mod tests {
         assert!(!context.needs_multi_model);
         assert!(!context.needs_retrieval);
         assert_eq!(decision.policy, OrchestrationPolicy::PlanExecuteReview);
+    }
+
+    #[test]
+    fn high_stakes_architecture_work_routes_to_three_experts() {
+        let context = RoutingContext::from_prompt(
+            "Compare production migration architectures, investigate root causes, and propose a safe strategy",
+            candidates(),
+        );
+        let decision = RuleBasedRouter.route(&context);
+
+        assert!(context.high_stakes);
+        assert!(context.complexity_score >= 3);
+        assert_eq!(decision.policy, OrchestrationPolicy::BestOfN { candidates: 3 });
+    }
+
+    #[test]
+    fn complex_non_critical_work_routes_to_two_experts() {
+        let context = RoutingContext::from_prompt(
+            "Investigate the root cause in this project, edit the files, and run tests",
+            candidates(),
+        );
+        let decision = RuleBasedRouter.route(&context);
+
+        assert!(!context.high_stakes);
+        assert!(context.complexity_score >= 3);
+        assert_eq!(decision.policy, OrchestrationPolicy::BestOfN { candidates: 2 });
     }
 
     #[test]

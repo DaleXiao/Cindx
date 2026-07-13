@@ -12,7 +12,7 @@ import {
   X
 } from "lucide-react";
 import { useEffect, useRef } from "react";
-import type { AgentAttachment, ToolApprovalView } from "../tauri";
+import type { AgentAttachment, AgentEffort, ToolApprovalView } from "../tauri";
 
 type ComposerProps = {
   value: string;
@@ -25,7 +25,9 @@ type ComposerProps = {
   permissionBusy: boolean;
   attachments: AgentAttachment[];
   attachmentBusy: boolean;
+  effort: AgentEffort;
   onChange: (value: string) => void;
+  onEffortChange: (effort: AgentEffort) => void;
   onSend: (prompt: string) => void;
   onPickAttachments: (files: File[]) => void;
   onRemoveAttachment: (attachment: AgentAttachment) => void;
@@ -48,7 +50,9 @@ export function Composer({
   permissionBusy,
   attachments,
   attachmentBusy,
+  effort,
   onChange,
+  onEffortChange,
   onSend,
   onPickAttachments,
   onRemoveAttachment,
@@ -63,6 +67,11 @@ export function Composer({
   const canSend =
     !working && !canStop && !pendingApproval && !attachmentBusy && Boolean(value.trim() || attachments.length);
   const canRetryError = canRetry && Boolean(error) && !working && !canStop && !pendingApproval;
+  const effortTitle = {
+    fast: "Single model with the lowest latency",
+    auto: "Route each request by complexity",
+    pro: "Adaptive collaboration with up to three models"
+  }[effort];
 
   useEffect(() => {
     if (focusRequest <= 0 || pendingApproval) return;
@@ -182,6 +191,18 @@ export function Composer({
                   <Plus aria-hidden="true" />
                 )}
               </button>
+              <select
+                className="composer-effort-select"
+                aria-label="Cindx effort"
+                title={effortTitle}
+                value={effort}
+                disabled={working || canStop}
+                onChange={(event) => onEffortChange(event.target.value as AgentEffort)}
+              >
+                <option value="fast">Cindx Fast</option>
+                <option value="auto">Cindx Auto</option>
+                <option value="pro">Cindx Pro</option>
+              </select>
               <textarea
                 ref={textareaRef}
                 value={value}
