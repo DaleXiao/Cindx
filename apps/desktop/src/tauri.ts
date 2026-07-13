@@ -105,11 +105,6 @@ export type SkillState = {
   lastError: string | null;
 };
 
-export type SkillInstallFileInput = {
-  path: string;
-  dataBase64: string;
-};
-
 export type ProjectView = {
   id: string;
   name: string;
@@ -924,12 +919,6 @@ export async function saveSkillPreference(
   return await invoke<SkillState>("save_skill_preference", {
     input: { skillId, enabled, trusted }
   });
-}
-
-export async function installSkillDirectory(
-  files: SkillInstallFileInput[]
-): Promise<SkillState> {
-  return await invoke<SkillState>("install_skill_directory", { input: { files } });
 }
 
 export async function installSkillPackage(dataBase64: string): Promise<SkillState> {

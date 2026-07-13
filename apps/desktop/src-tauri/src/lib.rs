@@ -18,9 +18,8 @@ use agent_rag::{
     RagAdapter, RagChunk, RagEmbedder, RagIndexStats, RagSearchResult, RAG_INDEX_CANCELLED,
 };
 use agent_skills::{
-    install_skill_archive as install_skill_archive_package,
-    install_skill_files as install_skill_file_set, SkillCatalog, SkillInstallFile,
-    SkillPreference, SkillRecord,
+    install_skill_archive as install_skill_archive_package, SkillCatalog, SkillPreference,
+    SkillRecord,
 };
 use agent_runtime::{
     advance_with_model_response, append_tool_observation,
@@ -165,19 +164,6 @@ struct SkillPreferenceInput {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SkillInstallFileInput {
-    path: String,
-    data_base64: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SkillDirectoryInstallInput {
-    files: Vec<SkillInstallFileInput>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct SkillPackageInstallInput {
     data_base64: String,
 }
@@ -244,6 +230,30 @@ impl ProviderConfig {
             model.clone()
         }
     }
+
+    fn model_for_agent_policy(&self, policy: &OrchestrationPolicy) -> String {
+        if *policy == OrchestrationPolicy::Single && !self.model.trim().is_empty() {
+            self.model.clone()
+        } else {
+            self.model_for_role(&ModelRole::Executor)
+        }
+    }
+}
+
+fn agent_model_for_run(config: &ProviderConfig, run_context: &Metadata) -> String {
+    if let Some(model) = run_context
+        .get("agent_model")
+        .filter(|model| !model.trim().is_empty())
+    {
+        return model.clone();
+    }
+    let policy = run_context
+        .get("collaboration_policy")
+        .and_then(|label| parse_policy(label));
+    policy
+        .as_ref()
+        .map(|policy| config.model_for_agent_policy(policy))
+        .unwrap_or_else(|| config.model_for_role(&ModelRole::Executor))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1276,23 +1286,6 @@ fn save_skill_preference(
         skills,
         last_error: None,
     })
-}
-
-#[tauri::command]
-fn install_skill_directory(
-    state: tauri::State<'_, AppState>,
-    input: SkillDirectoryInstallInput,
-) -> Result<SkillStateView, String> {
-    let root = active_workspace_root(&state)?;
-    let mut files = Vec::with_capacity(input.files.len());
-    for file in input.files {
-        files.push(SkillInstallFile {
-            path: PathBuf::from(file.path),
-            bytes: decode_data_url(&file.data_base64)?,
-        });
-    }
-    let skill_id = install_skill_file_set(&root.join(".cindx/skills"), files)?;
-    skill_state_after_install(&root, &skill_id)
 }
 
 #[tauri::command]
@@ -2870,6 +2863,10 @@ fn run_agent_task_blocking_inner(
         "collaboration_policy".to_string(),
         collaboration_policy.label().to_string(),
     );
+    run_context.insert(
+        "agent_model".to_string(),
+        config.model_for_agent_policy(&collaboration_policy),
+    );
     run_context.insert("router_model".to_string(), routing_decision.model.clone());
     run_context.insert("router_examples".to_string(), router_examples.to_string());
     run_context.insert(
@@ -3209,6 +3206,10 @@ fn retry_agent_task_blocking_inner(
         collaboration_policy.label().to_string(),
     );
     run_context.insert(
+        "agent_model".to_string(),
+        config.model_for_agent_policy(&collaboration_policy),
+    );
+    run_context.insert(
         "router_model".to_string(),
         routing_decision.model.clone(),
     );
@@ -3459,8 +3460,10 @@ fn resolve_agent_permission_blocking_inner(
         )
         .map_err(|error| error.to_string());
     }
-    if let Some(agent_run_id) = request.metadata.get("agent_run_id") {
-        run_context.insert("agent_run_id".to_string(), agent_run_id.clone());
+    for key in ["agent_run_id", "agent_model", "collaboration_policy"] {
+        if let Some(value) = request.metadata.get(key) {
+            run_context.insert(key.to_string(), value.clone());
+        }
     }
     let session_id = run_context.get("session_id").map(String::as_str);
 
@@ -4820,7 +4823,6 @@ pub fn run() {
             get_skill_state,
             refresh_skills,
             save_skill_preference,
-            install_skill_directory,
             install_skill_package,
             install_skill_url,
             get_project_session_state,
@@ -7038,10 +7040,11 @@ fn continue_agent_loop(
     cancellation: &Arc<AtomicBool>,
 ) -> Result<AgentState, String> {
     let session_id = run_context.get("session_id").map(String::as_str);
+    let agent_model = agent_model_for_run(config, &run_context);
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
         base_url: config.base_url.clone(),
         api_key: config.api_key.clone(),
-        model: config.model_for_role(&ModelRole::Executor),
+        model: agent_model.clone(),
         embedding_model: config.model_for_role(&ModelRole::Embedder),
         timeout_seconds: 180,
     });
@@ -7074,7 +7077,7 @@ fn continue_agent_loop(
                 ("turn".to_string(), runtime.turn.to_string()),
                 (
                     "model".to_string(),
-                    config.model_for_role(&ModelRole::Executor),
+                    agent_model.clone(),
                 ),
                 ("tool_count".to_string(), tools.len().to_string()),
                 ("prompt".to_string(), prompt.clone()),
@@ -10349,7 +10352,11 @@ fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTelemetry> {
             })?;
             let task_class = parse_task_class_label(started.metadata.get("task_class")?)?;
             let selected_policy = parse_policy(started.metadata.get("collaboration_policy")?)?;
-            let selected_model = started.metadata.get("router_model")?.clone();
+            let selected_model = started
+                .metadata
+                .get("agent_model")
+                .or_else(|| started.metadata.get("router_model"))?
+                .clone();
             let terminal = run_events.iter().rev().find(|event| {
                 matches!(
                     event.summary.as_str(),
@@ -10444,7 +10451,9 @@ fn orchestration_model_for_step(
     role: &ModelRole,
     routing_decision: &RoutingDecision,
 ) -> String {
-    if *role == ModelRole::Executor && !routing_decision.model.trim().is_empty() {
+    if *role == ModelRole::Executor && routing_decision.policy == OrchestrationPolicy::Single {
+        config.model_for_agent_policy(&routing_decision.policy)
+    } else if *role == ModelRole::Executor && !routing_decision.model.trim().is_empty() {
         routing_decision.model.clone()
     } else {
         config.model_for_role(role)
@@ -12293,6 +12302,32 @@ mod tests {
                 "summary-d".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn direct_agent_uses_default_model_while_workflows_use_executor() {
+        let config = ProviderConfig {
+            model: "default-a".to_string(),
+            executor_model: "executor-b".to_string(),
+            ..ProviderConfig::default()
+        };
+
+        assert_eq!(
+            config.model_for_agent_policy(&OrchestrationPolicy::Single),
+            "default-a"
+        );
+        assert_eq!(
+            config.model_for_agent_policy(&OrchestrationPolicy::PlanExecuteReview),
+            "executor-b"
+        );
+
+        let run_context = [
+            ("collaboration_policy".to_string(), "single".to_string()),
+            ("agent_model".to_string(), "routed-c".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(agent_model_for_run(&config, &run_context), "routed-c");
     }
 
     #[test]

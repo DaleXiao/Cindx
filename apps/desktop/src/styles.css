@@ -345,9 +345,11 @@ pre {
   color: #2563eb;
   font-family: "Borel", cursive;
   font-size: 16px;
+  font-style: italic;
   font-weight: 400;
+  font-synthesis: style;
   line-height: 1;
-  transform: translateY(2px);
+  transform: translateY(6px);
 }
 
 .brand-search {

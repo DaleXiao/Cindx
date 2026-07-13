@@ -8,7 +8,6 @@ import {
   CheckCircle2,
   Clock3,
   Database,
-  FolderOpen,
   FileText,
   Globe2,
   Info,
@@ -75,7 +74,6 @@ import {
   getWebSearchConfig,
   getMcpState,
   getSkillState,
-  installSkillDirectory,
   installSkillPackage,
   installSkillUrl,
   indexWorkspaceRag,
@@ -343,7 +341,6 @@ export function App() {
   const sessionSelectionQueueRef = useRef<Promise<void>>(Promise.resolve());
   const sessionRefreshRequestRef = useRef(0);
   const trackedSessionTaskIdsRef = useRef<Set<string>>(new Set());
-  const skillFolderInputRef = useRef<HTMLInputElement>(null);
   const skillPackageInputRef = useRef<HTMLInputElement>(null);
   const settingsToastTimerRef = useRef<number | null>(null);
   const [composerError, setComposerError] = useState<string | null>(null);
@@ -1329,23 +1326,9 @@ export function App() {
     }
   }
 
-  async function handleInstallSkillFolder(files: File[]) {
-    if (files.length === 0) return;
-    await runSkillInstall(async () =>
-      installSkillDirectory(
-        await Promise.all(
-          files.map(async (file) => ({
-            path: file.webkitRelativePath || file.name,
-            dataBase64: await fileDataBase64(file)
-          }))
-        )
-      )
-    );
-  }
-
   async function handleInstallSkillPackage(file: File) {
-    if (!/\.(skill|zip)$/i.test(file.name)) {
-      setSkillInstallError("Choose a .skill or .zip package.");
+    if (!/\.skill$/i.test(file.name)) {
+      setSkillInstallError("Choose a .skill package.");
       return;
     }
     await runSkillInstall(async () => installSkillPackage(await fileDataBase64(file)));
@@ -3215,22 +3198,10 @@ export function App() {
                   <span>Install into this project. New skills stay disabled until trusted.</span>
                 </div>
                 <input
-                  ref={skillFolderInputRef}
-                  className="skill-install-input"
-                  type="file"
-                  multiple
-                  {...{ webkitdirectory: "", directory: "" }}
-                  onChange={(event) => {
-                    const files = Array.from(event.currentTarget.files ?? []);
-                    event.currentTarget.value = "";
-                    void handleInstallSkillFolder(files);
-                  }}
-                />
-                <input
                   ref={skillPackageInputRef}
                   className="skill-install-input"
                   type="file"
-                  accept=".skill,.zip,application/zip"
+                  accept=".skill,application/zip"
                   onChange={(event) => {
                     const file = event.currentTarget.files?.[0];
                     event.currentTarget.value = "";
@@ -3238,15 +3209,6 @@ export function App() {
                   }}
                 />
                 <div className="skill-install-actions">
-                  <button
-                    className="secondary-button"
-                    type="button"
-                    disabled={skillBusy}
-                    onClick={() => skillFolderInputRef.current?.click()}
-                  >
-                    <FolderOpen aria-hidden="true" />
-                    <span>Local folder</span>
-                  </button>
                   <button
                     className="secondary-button"
                     type="button"
