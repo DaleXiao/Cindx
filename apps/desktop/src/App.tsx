@@ -38,7 +38,6 @@ import { Composer } from "./components/Composer";
 import { DisclosureTriangle } from "./components/DisclosureTriangle";
 import { KnowledgeGraph } from "./components/KnowledgeGraph";
 import { Sidebar, type WorkspaceView } from "./components/Sidebar";
-import { TraceStatusIcon } from "./components/TraceStatusIcon";
 import {
   SessionThread,
   type SessionThreadSelection
@@ -155,14 +154,6 @@ function providerDraftFromState(provider: ProviderConfigState): ProviderConfigIn
   };
 }
 
-function TraceIcon({ step }: { step: AgentTraceStepView }) {
-  if (step.kind === "tool") return <TerminalSquare aria-hidden="true" />;
-  if (step.kind === "permission") return <ShieldCheck aria-hidden="true" />;
-  if (step.kind === "model") return <Activity aria-hidden="true" />;
-  if (step.kind === "error") return <TriangleAlert aria-hidden="true" />;
-  return <FileText aria-hidden="true" />;
-}
-
 function formatTime(timestampMs: number | null) {
   if (!timestampMs) return "local";
   return new Intl.DateTimeFormat(undefined, {
@@ -170,12 +161,6 @@ function formatTime(timestampMs: number | null) {
     minute: "2-digit",
     second: "2-digit"
   }).format(timestampMs);
-}
-
-function formatDuration(durationMs: number | null) {
-  if (durationMs == null) return "live";
-  if (durationMs < 1000) return `${durationMs} ms`;
-  return `${(durationMs / 1000).toFixed(1)} s`;
 }
 
 function formatTokenCount(tokens: number) {
@@ -670,8 +655,7 @@ export function App() {
   const activeSessionTraceSteps =
     activeSession && agentTraceState?.sessionId === activeSession.id ? traceSteps : [];
   const selectedTraceStep =
-    traceSteps.find((step) => step.id === selectedTraceStepId) ??
-    (traceSteps.length > 0 ? traceSteps[traceSteps.length - 1] : null);
+    traceSteps.find((step) => step.id === selectedTraceStepId) ?? null;
   const providerModelOptions = useMemo(() => {
     const configured = providerDraft
       ? [
@@ -966,10 +950,7 @@ export function App() {
     const leavingSettings = activeView === "settings";
     setWorkspaceViewBeforeSettings(view);
     setActiveView(view);
-    if (view === "trace") {
-      setInspectorTab("details");
-      setInspectorOpen(true);
-    } else if (leavingSettings) {
+    if (leavingSettings) {
       setInspectorOpen(inspectorOpenBeforeSettings);
     }
   }
@@ -1708,7 +1689,7 @@ export function App() {
     try {
       const next = await exportAgentTraceJsonl(activeSession?.id);
       setAgentTraceState(next);
-      setInspectorTab("details");
+      setInspectorTab("trace");
       setInspectorOpen(true);
       const latestStep = latestTraceStep(next.turns);
       setSelectedTraceStepId((current) => current ?? latestStep?.id ?? null);
@@ -1733,18 +1714,7 @@ export function App() {
           <div className="window-workspace-header">
             <div className="topbar-title">
               <div>
-                <h1>
-                  {activeView === "trace"
-                    ? "Agent Trace"
-                    : activeSession?.name ?? "Session"}
-                </h1>
-                {activeView === "trace" && (
-                  <p title={runtime?.workspaceRoot ?? undefined}>
-                    {`Trace: ${agentTraceState?.traceId ?? "loading"} · ${
-                      agentTraceState?.sessionName ?? activeSession?.name ?? "session"
-                    }`}
-                  </p>
-                )}
+                <h1>{activeSession?.name ?? "Session"}</h1>
               </div>
             </div>
             <div className="topbar-actions">
@@ -1845,6 +1815,7 @@ export function App() {
               selectedId={selectedThreadItem?.id ?? null}
               onSelect={(selection) => {
                 setSelectedThreadItem(selection);
+                setSelectedTraceStepId(null);
                 setInspectorTab("details");
                 setInspectorOpen(true);
               }}
@@ -1879,102 +1850,6 @@ export function App() {
               }
             />
           </>
-        ) : activeView === "trace" ? (
-          <section className="trace-view" aria-label="Agent trace">
-            <nav className="workspace-page-navigation" aria-label="Trace navigation">
-              <button
-                className="workspace-return-button"
-                type="button"
-                onClick={showTimelineView}
-              >
-                <ArrowLeft aria-hidden="true" />
-                <span>Back to App</span>
-              </button>
-            </nav>
-            <section className="trace-summary">
-              <div>
-                <span>Status</span>
-                <TraceStatusIcon status={agentTraceState?.status ?? "idle"} />
-              </div>
-              <div>
-                <span>Turns</span>
-                <strong>{agentTraceState?.turnCount ?? 0}</strong>
-              </div>
-              <div>
-                <span>Steps</span>
-                <strong>{agentTraceState?.stepCount ?? 0}</strong>
-              </div>
-              <div>
-                <span>Tools</span>
-                <strong>{agentTraceState?.toolCallCount ?? 0}</strong>
-              </div>
-              <div>
-                <span>Permission waits</span>
-                <strong>{agentTraceState?.permissionWaitCount ?? 0}</strong>
-              </div>
-              <button
-                className="secondary-button"
-                type="button"
-                disabled={traceBusy}
-                onClick={handleExportAgentTrace}
-              >
-                <Save size={17} aria-hidden="true" />
-                <span>{traceBusy ? "Exporting" : "Export JSONL"}</span>
-              </button>
-            </section>
-
-            <section className="trace-turns" aria-label="Trace turns">
-              {traceTurns.length === 0 ? (
-                <div className="empty-audit">
-                  <Clock3 size={17} aria-hidden="true" />
-                  <span>No agent trace yet</span>
-                </div>
-              ) : (
-                traceTurns.map((turn) => (
-                  <article className="trace-turn" key={`${turn.index}-${turn.startedAtMs}`}>
-                    <div className="trace-turn-header">
-                      <div>
-                        <h2>{turn.label}</h2>
-                        <div className="trace-turn-meta">
-                          <TraceStatusIcon status={turn.status} />
-                          <span>{formatDuration(turn.durationMs)}</span>
-                        </div>
-                      </div>
-                      <em>{turn.steps.length} steps</em>
-                    </div>
-                    <div className="trace-step-list">
-                      {turn.steps.map((step) => (
-                        <button
-                          className={`trace-step ${
-                            selectedTraceStep?.id === step.id ? "selected" : ""
-                          }`}
-                          type="button"
-                          key={step.id}
-                          onClick={() => {
-                            setSelectedTraceStepId(step.id);
-                            setInspectorTab("details");
-                            setInspectorOpen(true);
-                          }}
-                        >
-                          <span className="trace-step-icon">
-                            <TraceIcon step={step} />
-                          </span>
-                          <span className="trace-step-body">
-                            <strong>{step.label}</strong>
-                            <small>{step.detail}</small>
-                          </span>
-                          <span className="trace-step-meta">
-                            <TraceStatusIcon status={step.status} />
-                            <small>{formatDuration(step.latencyMs)}</small>
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  </article>
-                ))
-              )}
-            </section>
-          </section>
         ) : (
           <section
             className="settings-view"
@@ -3369,7 +3244,7 @@ export function App() {
         tab={inspectorTab}
         sessionId={activeSession?.id ?? null}
         threadSelection={activeView === "timeline" ? selectedThreadItem : null}
-        traceStep={activeView === "trace" ? selectedTraceStep : null}
+        traceStep={selectedTraceStep}
         traceExportPath={agentTraceState?.exportPath ?? null}
         contextCheckpoint={contextCheckpoint}
         ragAnswer={phase7?.answer ?? null}
@@ -3387,6 +3262,14 @@ export function App() {
           browser: browserApprovals.length
         }}
         onTabChange={setInspectorTab}
+        onTraceStepSelect={(stepId) => {
+          setSelectedTraceStepId(stepId);
+          setSelectedThreadItem(null);
+          setInspectorTab("details");
+          setInspectorOpen(true);
+        }}
+        onTraceExport={() => void handleExportAgentTrace()}
+        traceBusy={traceBusy}
         onWidthChange={setInspectorWidth}
         onReview={() => {
           if (activeView !== "settings") setWorkspaceViewBeforeSettings(activeView);
