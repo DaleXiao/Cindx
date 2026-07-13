@@ -206,10 +206,11 @@ function toolMessageDetail(content: string) {
 }
 
 function isToolRequestPlaceholder(item: SessionThreadSelection) {
+  const content = item.type === "message" ? item.message.content.trim().toLowerCase() : "";
   return (
     item.type === "message" &&
     item.message.role === "assistant" &&
-    item.message.content.trim().toLowerCase() === "tool request"
+    (!content || content === "tool request")
   );
 }
 

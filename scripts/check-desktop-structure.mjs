@@ -427,6 +427,7 @@ assert(
 );
 assert(
   sessionThreadSource.includes("groupThreadItems") &&
+    sessionThreadSource.includes('!content || content === "tool request"') &&
     !sessionThreadSource.includes("containsToolActivity") &&
     sessionThreadSource.includes("while (end < items.length && isActivityCandidate(items[end]))") &&
     sessionThreadSource.includes("thread-tool-chain") &&
