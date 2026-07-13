@@ -2375,17 +2375,18 @@ export function App() {
             <section className="settings-section" data-settings-group="agent">
               <div className="section-title">
                 <Bot size={17} aria-hidden="true" />
-                <h2>Agent system prompt</h2>
+                <h2>Agent instructions</h2>
               </div>
               {providerDraft && (
                 <div className="provider-form">
                   <label className="system-prompt-field">
-                    <span>System prompt</span>
+                    <span>Custom instructions</span>
                     <textarea
                       value={providerDraft.agentSystemPrompt}
                       maxLength={32000}
-                      rows={12}
+                      rows={10}
                       spellCheck={false}
+                      placeholder="Add preferences for tone, workflow, or domain conventions."
                       onChange={(event) =>
                         setProviderDraft({
                           ...providerDraft,
@@ -2395,16 +2396,20 @@ export function App() {
                     />
                   </label>
                   <div className="system-prompt-meta">
+                    <span>
+                      Extends Cindx's protected core behavior; it cannot replace permission or
+                      verification rules.
+                    </span>
                     <span>{providerDraft.agentSystemPrompt.length.toLocaleString()} / 32,000</span>
                   </div>
                   <button
                     className="secondary-button"
                     type="button"
-                    disabled={providerBusy || !providerDraft.agentSystemPrompt.trim()}
+                    disabled={providerBusy}
                     onClick={handleSaveProviderConfig}
                   >
                     <Save size={17} aria-hidden="true" />
-                    <span>{providerBusy ? "Saving" : "Save prompt"}</span>
+                    <span>{providerBusy ? "Saving" : "Save instructions"}</span>
                   </button>
                 </div>
               )}
