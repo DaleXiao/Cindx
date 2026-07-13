@@ -734,8 +734,11 @@ assert(
   "Session title, context usage, and runtime status must be integrated into the window titlebar"
 );
 assert(
-  appSource.includes("Quality synthesis") && appSource.includes("Ensemble deliberation"),
-  "Provider settings must expose collaboration quality and ensemble modes"
+  appSource.includes("Default effort") &&
+    appSource.includes("Cindx Fast") &&
+    appSource.includes("Cindx Auto") &&
+    appSource.includes("Cindx Pro"),
+  "Provider settings must expose the three Cindx effort modes"
 );
 assert(appSource.includes("Archived sessions"), "Settings must expose archived session recovery");
 assert(
@@ -835,6 +838,19 @@ assert(
     rustLib.includes("project_session_metadata_for_session") &&
     rustLib.includes("event.metadata.get(\"session_id\")"),
   "Agent commands and event boundaries must remain isolated by session"
+);
+assert(
+  composerSource.includes('className="composer-effort-select"') &&
+    composerSource.includes('<option value="fast">Cindx Fast</option>') &&
+    composerSource.includes('<option value="auto">Cindx Auto</option>') &&
+    composerSource.includes('<option value="pro">Cindx Pro</option>') &&
+    appSource.includes('useState<AgentEffort>("auto")') &&
+    tauriBridge.includes('export type AgentEffort = "fast" | "auto" | "pro"') &&
+    tauriBridge.includes("currentTime: currentAgentTimeContext(), effort, attachments") &&
+    rustLib.includes("enum AgentEffort") &&
+    rustLib.includes('"agent_effort".to_string()') &&
+    rustLib.includes("agent_effort_from_active_events"),
+  "Composer effort must map Cindx Fast, Auto, and Pro through retries and traces"
 );
 assert(
   tauriBridge.includes("function currentAgentTimeContext()") &&
@@ -1088,6 +1104,9 @@ assert(
     rustLib.includes("let OrchestrationPolicy::BestOfN { candidates } = policy else") &&
     rustLib.includes("route_with_local_telemetry(") &&
     orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 7") &&
+    orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_AGENTS: usize = 3") &&
+    orchestratorSource.includes("complexity_score") &&
+    orchestratorSource.includes("high_stakes") &&
     orchestratorSource.includes('"thinker" | "worker" | "verifier" | "synthesizer"') &&
     orchestratorSource.includes("adaptive_workflow_layers") &&
     orchestratorSource.includes("adaptive_worker_prompt") &&

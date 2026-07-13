@@ -4,6 +4,8 @@ import desktopPackage from "../package.json";
 
 export const DESKTOP_VERSION = desktopPackage.version;
 
+export type AgentEffort = "fast" | "auto" | "pro";
+
 export type RuntimeStatus = {
   appVersion: string;
   kernelStatus: string;
@@ -1550,11 +1552,12 @@ function currentAgentTimeContext() {
 export async function runAgentTask(
   prompt: string,
   sessionId: string,
-  attachments: AgentAttachment[] = []
+  attachments: AgentAttachment[] = [],
+  effort: AgentEffort = "auto"
 ): Promise<AgentState> {
   try {
     return await invoke<AgentState>("run_agent_task", {
-      input: { prompt, sessionId, currentTime: currentAgentTimeContext(), attachments }
+      input: { prompt, sessionId, currentTime: currentAgentTimeContext(), effort, attachments }
     });
   } catch {
     const now = Date.now();

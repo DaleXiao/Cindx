@@ -46,6 +46,7 @@ import {
 import {
   AgentState,
   AgentAttachment,
+  AgentEffort,
   AgentTraceState,
   AgentTraceStepView,
   answerWithRag,
@@ -127,6 +128,17 @@ import {
 
 const appIconUrl = new URL("../src-tauri/icons/icon.png", import.meta.url).href;
 
+function agentEffortFromPolicy(policy: string): AgentEffort {
+  if (policy === "single") return "fast";
+  if (policy === "best_of_n") return "pro";
+  return "auto";
+}
+
+function normalizedEffortPolicy(policy: string) {
+  if (policy === "single" || policy === "best_of_n") return policy;
+  return "auto_router";
+}
+
 function providerDraftFromState(provider: ProviderConfigState): ProviderConfigInput {
   return {
     baseUrl: provider.baseUrl,
@@ -137,7 +149,7 @@ function providerDraftFromState(provider: ProviderConfigState): ProviderConfigIn
     reviewerModel: provider.reviewerModel,
     summarizerModel: provider.summarizerModel,
     embeddingModel: provider.embeddingModel,
-    collaborationPolicy: provider.collaborationPolicy,
+    collaborationPolicy: normalizedEffortPolicy(provider.collaborationPolicy),
     contextWindowTokens: provider.contextWindowTokens,
     agentSystemPrompt: provider.agentSystemPrompt
   };
@@ -292,6 +304,7 @@ export function App() {
   const [projectCreateOpen, setProjectCreateOpen] = useState(false);
   const [sidebarSearchOpen, setSidebarSearchOpen] = useState(false);
   const [sidebarQuery, setSidebarQuery] = useState("");
+  const [agentEffort, setAgentEffort] = useState<AgentEffort>("auto");
   const [composerDrafts, setComposerDrafts] = useState<Record<string, string>>({});
   const [attachmentDrafts, setAttachmentDrafts] = useState<Record<string, AgentAttachment[]>>({});
   const [attachmentBusySessionIds, setAttachmentBusySessionIds] = useState<Set<string>>(
@@ -444,6 +457,7 @@ export function App() {
       getPhase4State().then((state) => {
         setPhase4(state);
         setProviderDraft(providerDraftFromState(state.provider));
+        setAgentEffort(agentEffortFromPolicy(state.provider.collaborationPolicy));
         setComposerError(state.lastError);
       });
       getPhase5State().then((state) => {
@@ -785,6 +799,7 @@ export function App() {
       const next = await saveProviderConfig(providerDraft);
       setPhase4(next);
       setProviderDraft(providerDraftFromState(next.provider));
+      setAgentEffort(agentEffortFromPolicy(next.provider.collaborationPolicy));
       showSettingsSaved();
     } finally {
       setProviderBusy(false);
@@ -1405,7 +1420,7 @@ export function App() {
     });
     try {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      const next = await runAgentTask(nextPrompt, sessionId, attachments);
+      const next = await runAgentTask(nextPrompt, sessionId, attachments, agentEffort);
       updateSessionStatus(sessionId, next.status);
       if (activeSessionIdRef.current === sessionId) {
         setAgentState(next);
@@ -1851,7 +1866,9 @@ export function App() {
               permissionBusy={activeSessionBusy}
               attachments={composerAttachments}
               attachmentBusy={attachmentBusy}
+              effort={agentEffort}
               onChange={setActiveComposerDraft}
+              onEffortChange={setAgentEffort}
               onSend={(value) => void handleSendPrompt(value)}
               onPickAttachments={(files) => void handlePickAttachments(files)}
               onRemoveAttachment={handleRemoveAttachment}
@@ -2244,7 +2261,7 @@ export function App() {
                   )}
                   <div className="role-grid provider-meta-grid">
                     <label>
-                      <span>Collaboration</span>
+                      <span>Default effort</span>
                       <select
                         value={providerDraft.collaborationPolicy}
                         onChange={(event) =>
@@ -2254,10 +2271,9 @@ export function App() {
                           })
                         }
                       >
-                        <option value="auto_router">Adaptive</option>
-                        <option value="best_of_n">Ensemble deliberation</option>
-                        <option value="plan_execute_review">Quality synthesis</option>
-                        <option value="single">Single model</option>
+                        <option value="single">Cindx Fast</option>
+                        <option value="auto_router">Cindx Auto</option>
+                        <option value="best_of_n">Cindx Pro</option>
                       </select>
                     </label>
                     <label>

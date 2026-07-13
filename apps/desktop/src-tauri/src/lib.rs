@@ -39,7 +39,8 @@ use orchestrator::{
     adaptive_worker_prompt, adaptive_workflow_layers, default_plan, parse_policy, role_label,
     step_prompt, validate_adaptive_workflow, AdaptiveWorkflow, AdaptiveWorkflowStep, ModelCandidate,
     LearnedModelRouter, OrchestrationPolicy, RoutingContext, RoutingDecision, RoutingOutcome,
-    RoutingTelemetry, RuleBasedRouter, TaskClass, MAX_ADAPTIVE_WORKFLOW_STEPS,
+    RoutingTelemetry, RuleBasedRouter, TaskClass, MAX_ADAPTIVE_WORKFLOW_AGENTS,
+    MAX_ADAPTIVE_WORKFLOW_STEPS,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -189,6 +190,43 @@ struct ProviderConfig {
     agent_system_prompt: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentEffort {
+    Fast,
+    Auto,
+    Pro,
+}
+
+impl AgentEffort {
+    fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "fast" => Self::Fast,
+            "pro" => Self::Pro,
+            _ => Self::Auto,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Auto => "auto",
+            Self::Pro => "pro",
+        }
+    }
+
+    fn requested_policy(self) -> OrchestrationPolicy {
+        match self {
+            Self::Fast => OrchestrationPolicy::Single,
+            Self::Auto => OrchestrationPolicy::AutoRouter,
+            Self::Pro => OrchestrationPolicy::BestOfN { candidates: 3 },
+        }
+    }
+}
+
+fn default_agent_effort() -> String {
+    AgentEffort::Auto.label().to_string()
+}
+
 impl Default for ProviderConfig {
     fn default() -> Self {
         let model = "gpt-4.1-mini".to_string();
@@ -254,6 +292,24 @@ fn agent_model_for_run(config: &ProviderConfig, run_context: &Metadata) -> Strin
         .as_ref()
         .map(|policy| config.model_for_agent_policy(policy))
         .unwrap_or_else(|| config.model_for_role(&ModelRole::Executor))
+}
+
+fn agent_model_for_effort(
+    config: &ProviderConfig,
+    effort: AgentEffort,
+    policy: &OrchestrationPolicy,
+    routing_decision: &RoutingDecision,
+) -> String {
+    let learned_model_selected = effort == AgentEffort::Auto
+        && routing_decision.metadata.get("router").map(String::as_str)
+            == Some("learned_table_v1");
+    if (effort == AgentEffort::Fast || learned_model_selected)
+        && !routing_decision.model.trim().is_empty()
+    {
+        routing_decision.model.clone()
+    } else {
+        config.model_for_agent_policy(policy)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -979,6 +1035,8 @@ struct AgentTaskInput {
     prompt: String,
     session_id: String,
     current_time: String,
+    #[serde(default = "default_agent_effort")]
+    effort: String,
     #[serde(default)]
     attachments: Vec<AgentAttachmentView>,
 }
@@ -2788,6 +2846,7 @@ fn run_agent_task_blocking_inner(
     input: AgentTaskInput,
     cancellation: &Arc<AtomicBool>,
 ) -> Result<AgentState, String> {
+    let effort = AgentEffort::parse(&input.effort);
     let user_prompt = input.prompt.trim().to_string();
     let session_id = input.session_id;
     clear_suspended_agent_run(&state, &session_id)?;
@@ -2837,8 +2896,7 @@ fn run_agent_task_blocking_inner(
         "current_time".to_string(),
         normalized_current_time_context(&input.current_time),
     );
-    let requested_policy = parse_policy(&config.collaboration_policy)
-        .unwrap_or(OrchestrationPolicy::AutoRouter);
+    let requested_policy = effort.requested_policy();
     let mut routing_context =
         RoutingContext::from_prompt(&prompt, model_candidates_for_config(&config));
     if requested_policy != OrchestrationPolicy::AutoRouter {
@@ -2855,6 +2913,7 @@ fn run_agent_task_blocking_inner(
         "task_class".to_string(),
         routing_context.task_class.label().to_string(),
     );
+    run_context.insert("agent_effort".to_string(), effort.label().to_string());
     run_context.insert(
         "requested_policy".to_string(),
         requested_policy.label().to_string(),
@@ -2865,7 +2924,12 @@ fn run_agent_task_blocking_inner(
     );
     run_context.insert(
         "agent_model".to_string(),
-        config.model_for_agent_policy(&collaboration_policy),
+        agent_model_for_effort(
+            &config,
+            effort,
+            &collaboration_policy,
+            &routing_decision,
+        ),
     );
     run_context.insert("router_model".to_string(), routing_decision.model.clone());
     run_context.insert("router_examples".to_string(), router_examples.to_string());
@@ -3167,7 +3231,7 @@ fn retry_agent_task_blocking_inner(
         .unwrap_or(active_workspace_root(&state)?);
     let session_id = run_context.get("session_id").cloned();
     let task_id = phase16_task_id();
-    let prompt = {
+    let (prompt, effort) = {
         let store = state
             .store
             .lock()
@@ -3176,11 +3240,11 @@ fn retry_agent_task_blocking_inner(
             .list_by_task(&task_id)
             .map_err(|error| error.to_string())?;
         let active_events = active_agent_events_for_session(&events, session_id.as_deref());
-        latest_agent_prompt_from_active_events(&active_events)
-            .ok_or_else(|| "No previous agent prompt to retry".to_string())?
+        let prompt = latest_agent_prompt_from_active_events(&active_events)
+            .ok_or_else(|| "No previous agent prompt to retry".to_string())?;
+        (prompt, agent_effort_from_active_events(&active_events))
     };
-    let requested_policy = parse_policy(&config.collaboration_policy)
-        .unwrap_or(OrchestrationPolicy::AutoRouter);
+    let requested_policy = effort.requested_policy();
     let mut routing_context =
         RoutingContext::from_prompt(&prompt, model_candidates_for_config(&config));
     if requested_policy != OrchestrationPolicy::AutoRouter {
@@ -3197,6 +3261,7 @@ fn retry_agent_task_blocking_inner(
         "task_class".to_string(),
         routing_context.task_class.label().to_string(),
     );
+    run_context.insert("agent_effort".to_string(), effort.label().to_string());
     run_context.insert(
         "requested_policy".to_string(),
         requested_policy.label().to_string(),
@@ -3207,7 +3272,12 @@ fn retry_agent_task_blocking_inner(
     );
     run_context.insert(
         "agent_model".to_string(),
-        config.model_for_agent_policy(&collaboration_policy),
+        agent_model_for_effort(
+            &config,
+            effort,
+            &collaboration_policy,
+            &routing_decision,
+        ),
     );
     run_context.insert(
         "router_model".to_string(),
@@ -3460,7 +3530,13 @@ fn resolve_agent_permission_blocking_inner(
         )
         .map_err(|error| error.to_string());
     }
-    for key in ["agent_run_id", "agent_model", "collaboration_policy"] {
+    for key in [
+        "agent_run_id",
+        "agent_effort",
+        "agent_model",
+        "requested_policy",
+        "collaboration_policy",
+    ] {
         if let Some(value) = request.metadata.get(key) {
             run_context.insert(key.to_string(), value.clone());
         }
@@ -5938,32 +6014,39 @@ fn build_adaptive_coordinator_prompt(
     prompt: &str,
     history: &[Message],
     models: &[String],
+    agent_budget: usize,
 ) -> String {
+    let agent_budget = agent_budget.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS);
     let recent_context = collaboration_recent_context(history);
     let worker_pool = models
         .iter()
         .map(|model| format!("- {model}"))
         .collect::<Vec<_>>()
         .join("\n");
+    let schema_example = match agent_budget {
+        1 => r#"{"steps":[{"id":"synthesize","role":"synthesizer","model":"exact model from pool","subtask":"produce a checkable execution brief","access":[]}]}"#,
+        2 => r#"{"steps":[{"id":"approach","role":"thinker","model":"exact model from pool","subtask":"analyze the strongest approach","access":[]},{"id":"synthesize","role":"synthesizer","model":"exact model from pool","subtask":"synthesize a checkable execution brief","access":["approach"]}]}"#,
+        _ => r#"{"steps":[{"id":"approach_a","role":"thinker","model":"exact model from pool","subtask":"independent approach","access":[]},{"id":"approach_b","role":"worker","model":"exact model from pool","subtask":"independent alternative","access":[]},{"id":"synthesize","role":"synthesizer","model":"exact model from pool","subtask":"resolve disagreements into a checkable execution brief","access":["approach_a","approach_b"]}]}"#,
+    };
     format!(
         concat!(
             "You are the coordinator model for a Fugu-style Cindx workflow. Design a query-specific dependency graph instead of using a fixed planner/reviewer pipeline. Return only strict JSON with this schema:\n",
-            "{{\"steps\":[{{\"id\":\"approach_a\",\"role\":\"thinker\",\"model\":\"exact model from pool\",\"subtask\":\"independent approach\",\"access\":[]}},{{\"id\":\"approach_b\",\"role\":\"worker\",\"model\":\"exact model from pool\",\"subtask\":\"independent alternative\",\"access\":[]}},{{\"id\":\"verify\",\"role\":\"verifier\",\"model\":\"exact model from pool\",\"subtask\":\"audit evidence and disagreements\",\"access\":[\"approach_a\",\"approach_b\"]}},{{\"id\":\"synthesize\",\"role\":\"synthesizer\",\"model\":\"exact model from pool\",\"subtask\":\"synthesize a checkable execution brief\",\"access\":[\"approach_a\",\"approach_b\",\"verify\"]}}]}}\n\n",
+            "{schema_example}\n\n",
             "Rules:\n",
-            "- Use between 4 and {max_steps} steps; this is quality-first Ultra mode.\n",
+            "- Use between 1 and {agent_budget} expert steps, including the final synthesizer. Choose the smallest useful graph.\n",
             "- role must be exactly thinker, worker, verifier, or synthesizer.\n",
             "- Preserve the listed order: access may reference only earlier step ids.\n",
-            "- Start with at least two independent thinker/worker branches so they run in parallel.\n",
-            "- Include at least one verifier after those branches; it must explicitly audit evidence and disagreements.\n",
+            "- When using three steps, start with two independent thinker/worker branches so they run in parallel.\n",
             "- Choose models by likely task fit; a model may be used more than once, including the coordinator model itself.\n",
             "- Keep workers isolated: include an earlier result only when it is necessary and listed in access.\n",
-            "- The final step must use role synthesizer, access at least two prior branches, and produce one concrete execution brief for a separate tool-using executor.\n",
+            "- The final step must use role synthesizer, access prior branches when present, and produce one concrete execution brief for a separate tool-using executor.\n",
             "- Use exact model strings from the worker pool. Do not include markdown fences or commentary.\n\n",
             "Configured role hints:\nPlanner: {planner}\nExecutor: {executor}\nReviewer: {reviewer}\nSynthesizer: {summarizer}\n\n",
             "Allowed worker pool:\n{worker_pool}\n\n",
             "User request:\n{prompt}\n\nRecent session memory:\n{recent_context}"
         ),
-        max_steps = MAX_ADAPTIVE_WORKFLOW_STEPS,
+        schema_example = schema_example,
+        agent_budget = agent_budget,
         planner = config.model_for_role(&ModelRole::Planner),
         executor = config.model_for_role(&ModelRole::Executor),
         reviewer = config.model_for_role(&ModelRole::Reviewer),
@@ -5981,7 +6064,9 @@ fn build_adaptive_coordinator_prompt(
 fn parse_adaptive_workflow(
     response: &str,
     allowed_models: &[String],
+    agent_budget: usize,
 ) -> Result<AdaptiveWorkflow, String> {
+    let agent_budget = agent_budget.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS);
     let start = response
         .find('{')
         .ok_or_else(|| "coordinator did not return a JSON object".to_string())?;
@@ -6022,11 +6107,10 @@ fn parse_adaptive_workflow(
             })
             .collect(),
     };
-    if workflow.steps.len() < 4 {
-        return Err("Ultra collaboration requires at least four adaptive steps".to_string());
-    }
-    if !workflow.steps.iter().any(|step| step.role == "verifier") {
-        return Err("Ultra collaboration requires at least one verifier".to_string());
+    if workflow.steps.len() > agent_budget {
+        return Err(format!(
+            "Ultra collaboration exceeds the {agent_budget}-agent request budget"
+        ));
     }
     let independent_branches = workflow
         .steps
@@ -6034,13 +6118,13 @@ fn parse_adaptive_workflow(
         .take(workflow.steps.len().saturating_sub(1))
         .filter(|step| step.access.is_empty() && matches!(step.role.as_str(), "thinker" | "worker"))
         .count();
-    if independent_branches < 2 {
+    if workflow.steps.len() >= 3 && independent_branches < 2 {
         return Err("Ultra collaboration requires at least two independent branches".to_string());
     }
     if workflow
         .steps
         .last()
-        .is_some_and(|step| step.access.len() < 2)
+        .is_some_and(|step| workflow.steps.len() >= 3 && step.access.len() < 2)
     {
         return Err("Ultra collaboration synthesis must access at least two prior branches".to_string());
     }
@@ -6474,6 +6558,7 @@ fn run_adaptive_collaboration(
     prompt: &str,
     history: &[Message],
     models: &[String],
+    agent_budget: usize,
 ) -> Result<String, String> {
     if models.is_empty() {
         return Err("adaptive collaboration has no configured worker models".to_string());
@@ -6488,9 +6573,9 @@ fn run_adaptive_collaboration(
         "coordinator",
         ModelRole::Planner,
         &coordinator_model,
-        build_adaptive_coordinator_prompt(config, prompt, history, models),
+        build_adaptive_coordinator_prompt(config, prompt, history, models, agent_budget),
     )?;
-    let workflow = parse_adaptive_workflow(&workflow_response, models)?;
+    let workflow = parse_adaptive_workflow(&workflow_response, models, agent_budget)?;
     let layers = adaptive_workflow_layers(&workflow)?;
     let shared_memory = collaboration_recent_context(history);
     let system_prompt = agent_system_prompt_for_run(&config.agent_system_prompt, run_context);
@@ -6962,9 +7047,12 @@ fn prepare_agent_collaboration(
     };
     let id = unique_id("collab");
     let models = collaboration_candidate_models(config, MAX_ADAPTIVE_WORKFLOW_STEPS);
+    let agent_budget = (*candidates)
+        .clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS)
+        .min(models.len().max(1));
     let fallback_models = models
         .iter()
-        .take((*candidates).max(1))
+        .take(agent_budget)
         .cloned()
         .collect::<Vec<_>>();
     let guidance = run_adaptive_collaboration(
@@ -6976,6 +7064,7 @@ fn prepare_agent_collaboration(
         prompt,
         history,
         &models,
+        agent_budget,
     )
     .or_else(|_| {
         run_collaboration_candidates(
@@ -8104,6 +8193,15 @@ fn latest_agent_prompt_from_active_events(active_events: &[Event]) -> Option<Str
                 })
                 .and_then(|event| event.metadata.get("prompt").cloned())
         })
+}
+
+fn agent_effort_from_active_events(active_events: &[Event]) -> AgentEffort {
+    active_events
+        .iter()
+        .find(|event| is_agent_run_start_event(event))
+        .and_then(|event| event.metadata.get("agent_effort"))
+        .map(|effort| AgentEffort::parse(effort))
+        .unwrap_or(AgentEffort::Auto)
 }
 
 fn agent_transcript_from_active_events(events: &[Event]) -> Vec<Message> {
@@ -12328,6 +12426,56 @@ mod tests {
         .into_iter()
         .collect();
         assert_eq!(agent_model_for_run(&config, &run_context), "routed-c");
+
+        let policy = OrchestrationPolicy::Single;
+        let mut decision = RuleBasedRouter.route(&RoutingContext::from_prompt(
+            "hello",
+            model_candidates_for_config(&config),
+        ));
+        assert_eq!(
+            agent_model_for_effort(&config, AgentEffort::Auto, &policy, &decision),
+            "default-a"
+        );
+        decision.model = "learned-c".to_string();
+        decision
+            .metadata
+            .insert("router".to_string(), "learned_table_v1".to_string());
+        assert_eq!(
+            agent_model_for_effort(&config, AgentEffort::Auto, &policy, &decision),
+            "learned-c"
+        );
+    }
+
+    #[test]
+    fn agent_effort_maps_to_bounded_policies() {
+        assert_eq!(AgentEffort::parse("fast").requested_policy(), OrchestrationPolicy::Single);
+        assert_eq!(
+            AgentEffort::parse("auto").requested_policy(),
+            OrchestrationPolicy::AutoRouter
+        );
+        assert_eq!(
+            AgentEffort::parse("pro").requested_policy(),
+            OrchestrationPolicy::BestOfN { candidates: 3 }
+        );
+        assert_eq!(AgentEffort::parse("unknown"), AgentEffort::Auto);
+    }
+
+    #[test]
+    fn retry_recovers_effort_from_the_active_run() {
+        let event = Event {
+            id: EventId("run-start".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 1,
+            timestamp_ms: 1,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Agent task started".to_string(),
+            metadata: [("agent_effort".to_string(), "pro".to_string())]
+                .into_iter()
+                .collect(),
+        };
+
+        assert_eq!(agent_effort_from_active_events(&[event]), AgentEffort::Pro);
+        assert_eq!(agent_effort_from_active_events(&[]), AgentEffort::Auto);
     }
 
     #[test]
@@ -12336,8 +12484,7 @@ mod tests {
         {"steps":[
           {"id":"independent-a","role":"thinker","model":"planner-a","subtask":"Analyze one path","access":[]},
           {"id":"independent-b","role":"worker","model":"reviewer-b","subtask":"Challenge assumptions","access":[]},
-          {"id":"verify","role":"verifier","model":"reviewer-b","subtask":"Verify both paths","access":["independent-a","independent-b"]},
-          {"id":"final","role":"synthesizer","model":"summary-c","subtask":"Synthesize guidance","access":["independent-a","independent-b","verify"]}
+          {"id":"final","role":"synthesizer","model":"summary-c","subtask":"Synthesize guidance","access":["independent-a","independent-b"]}
         ]}
         ```"#;
         let models = vec![
@@ -12347,20 +12494,19 @@ mod tests {
         ];
 
         let workflow =
-            parse_adaptive_workflow(response, &models).expect("workflow should parse");
+            parse_adaptive_workflow(response, &models, 3).expect("workflow should parse");
 
-        assert_eq!(workflow.steps.len(), 4);
+        assert_eq!(workflow.steps.len(), 3);
         assert_eq!(
-            workflow.steps[3].access,
+            workflow.steps[2].access,
             vec![
                 "independent-a".to_string(),
-                "independent-b".to_string(),
-                "verify".to_string()
+                "independent-b".to_string()
             ]
         );
         assert_eq!(
             adaptive_workflow_layers(&workflow).expect("layers should build"),
-            vec![vec![0, 1], vec![2], vec![3]]
+            vec![vec![0, 1], vec![2]]
         );
     }
 
@@ -12369,11 +12515,10 @@ mod tests {
         let response = r#"{"steps":[
           {"id":"first","role":"thinker","model":"configured","subtask":"Analyze","access":[]},
           {"id":"second","role":"worker","model":"configured","subtask":"Challenge","access":[]},
-          {"id":"verify","role":"verifier","model":"configured","subtask":"Verify","access":["first","second"]},
-          {"id":"final","role":"synthesizer","model":"unconfigured","subtask":"Synthesize","access":["first","second","verify"]}
+          {"id":"final","role":"synthesizer","model":"unconfigured","subtask":"Synthesize","access":["first","second"]}
         ]}"#;
 
-        let error = parse_adaptive_workflow(response, &["configured".to_string()])
+        let error = parse_adaptive_workflow(response, &["configured".to_string()], 3)
             .expect_err("unknown model should be rejected");
 
         assert!(error.contains("unknown model"));
