@@ -1100,6 +1100,10 @@ assert(
     rustLib.includes("run_adaptive_collaboration(") &&
     rustLib.includes("parse_adaptive_workflow(") &&
     rustLib.includes("run_collaboration_candidates(") &&
+    rustLib.includes("complete_collaboration_worker_with_tools(") &&
+    rustLib.includes('"isolated_evidence_v1"') &&
+    agentRuntimeSource.includes("evidence_worker_tools") &&
+    agentRuntimeSource.includes("DEFAULT_COLLABORATION_WORKER_TURNS") &&
     rustLib.includes("std::thread::spawn") &&
     rustLib.includes('"coordinator"') &&
     rustLib.includes('format!("worker_{}", step_index + 1)') &&
@@ -1123,7 +1127,7 @@ assert(
     orchestratorSource.includes("ordinary_research_uses_one_planned_execution_path") &&
     orchestratorSource.includes("learned_router_cannot_upgrade_ordinary_research_to_ultra") &&
     orchestratorSource.includes("must only access earlier steps"),
-  "Primary agent must reserve bounded adaptive multi-model workflows for Ultra-routed requests"
+  "Primary agent must reserve bounded tool-capable adaptive workflows for Ultra-routed requests"
 );
 assert(
   rustLib.includes('"prompt_tokens"') && rustLib.includes("context_remaining_percent"),

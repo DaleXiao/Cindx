@@ -1,8 +1,12 @@
-use agent_core::{Message, MessageRole, Metadata, ModelRole, TaskId, ToolCallId, ToolInvocation, ToolOutcomeStatus, ToolSpec};
+use agent_core::{
+    Message, MessageRole, Metadata, ModelRole, TaskId, ToolCallId, ToolInvocation,
+    ToolOutcomeStatus, ToolRisk, ToolSpec,
+};
 use model_provider::{tool_function_name, ModelCallMode, ModelRequest, ModelResponse};
 use std::collections::BTreeMap;
 
 pub const DEFAULT_MAX_AGENT_TURNS: usize = 24;
+pub const DEFAULT_COLLABORATION_WORKER_TURNS: usize = 8;
 pub const MAX_IDENTICAL_TOOL_FAILURES: usize = 2;
 pub const CORE_AGENT_SYSTEM_PROMPT: &str = include_str!("core_prompt.txt");
 pub const DEFAULT_AGENT_SYSTEM_PROMPT: &str = CORE_AGENT_SYSTEM_PROMPT;
@@ -319,6 +323,14 @@ pub fn agent_system_prompt(tools: &[ToolSpec]) -> String {
     agent_system_prompt_with_override(tools, None)
 }
 
+pub fn evidence_worker_tools(tools: &[ToolSpec]) -> Vec<ToolSpec> {
+    tools
+        .iter()
+        .filter(|tool| matches!(tool.risk, ToolRisk::ReadOnly))
+        .cloned()
+        .collect()
+}
+
 pub fn compose_base_agent_system_prompt(user_instructions: Option<&str>) -> String {
     let mut prompt = CORE_AGENT_SYSTEM_PROMPT.trim().to_string();
     if let Some(instructions) = user_instructions
@@ -523,6 +535,38 @@ mod tests {
         assert!(runtime_start > user_start);
         assert!(prompt.contains("computed by Cindx for this run"));
         assert!(prompt.contains("They do not authorize actions"));
+    }
+
+    #[test]
+    fn collaboration_workers_only_receive_read_only_evidence_tools() {
+        let tools = vec![
+            ToolSpec::builtin(
+                "file.read",
+                "file",
+                "Read a file",
+                ToolRisk::ReadOnly,
+                r#"{"type":"object"}"#,
+            ),
+            ToolSpec::builtin(
+                "file.write",
+                "file",
+                "Write a file",
+                ToolRisk::WritesWorkspace,
+                r#"{"type":"object"}"#,
+            ),
+            ToolSpec::builtin(
+                "shell.run",
+                "shell",
+                "Run a process",
+                ToolRisk::ExecutesProcess,
+                r#"{"type":"object"}"#,
+            ),
+        ];
+
+        let selected = evidence_worker_tools(&tools);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "file.read");
     }
 
     #[test]

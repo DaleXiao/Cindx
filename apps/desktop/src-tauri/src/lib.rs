@@ -23,11 +23,12 @@ use agent_skills::{
 };
 use agent_runtime::{
     advance_with_model_response, append_tool_observation,
-    compose_agent_system_prompt, model_request_for_turn_with_context,
+    compose_agent_system_prompt, evidence_worker_tools, model_request_for_turn_with_context,
     observation_from_tool_result,
     record_tool_outcome, repeated_tool_failure_count,
     resume_agent_loop_from_messages, start_agent_loop, start_agent_loop_with_history,
-    tool_invocation_from_request, AgentAdvance, AgentRuntimeConfig, MAX_IDENTICAL_TOOL_FAILURES,
+    tool_invocation_from_request, AgentAdvance, AgentRuntimeConfig,
+    DEFAULT_COLLABORATION_WORKER_TURNS, MAX_IDENTICAL_TOOL_FAILURES,
 };
 use agent_storage::{EventStore, PermissionAuditRecord, PermissionStore, SqliteStore, StorageError};
 use base64::Engine;
@@ -3071,9 +3072,11 @@ fn run_agent_task_blocking_inner(
 
     append_single_model_policy_guidance(&mut history, &collaboration_policy);
     let collaboration = prepare_agent_collaboration(
+        &app,
         &state,
         &config,
         &task_id,
+        &root,
         &run_context,
         &collaboration_policy,
         &prompt,
@@ -3403,9 +3406,11 @@ fn retry_agent_task_blocking_inner(
     }
     append_single_model_policy_guidance(&mut history, &collaboration_policy);
     let collaboration = prepare_agent_collaboration(
+        app,
         &state,
         &config,
         &task_id,
+        &root,
         &run_context,
         &collaboration_policy,
         &prompt,
@@ -5976,7 +5981,7 @@ fn build_collaboration_candidate_prompt(
         _ => "Develop an independent alternative approach and compare its tradeoffs with the obvious path.",
     };
     format!(
-        "You are independent candidate {} in a multi-model Cindx deliberation. {} Produce a concise, checkable execution brief for a separate tool-using executor. Do not answer the user directly and do not assume what other candidates will propose.\n\nUser request:\n{}\n\nRecent session context:\n{}",
+        "You are independent candidate {} in a multi-model Cindx deliberation. {} Use exposed read-only evidence tools when local facts matter. Produce a concise, checkable execution brief for a separate tool-using executor. Do not answer the user directly and do not assume what other candidates will propose.\n\nUser request:\n{}\n\nRecent session context:\n{}",
         candidate_index + 1,
         perspective,
         prompt,
@@ -6404,6 +6409,246 @@ fn complete_collaboration_model_with_control(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn complete_collaboration_worker_with_tools(
+    app: tauri::AppHandle,
+    config: ProviderConfig,
+    task_id: TaskId,
+    workspace_root: PathBuf,
+    run_context: Metadata,
+    collaboration_id: String,
+    stage: String,
+    role: ModelRole,
+    model: String,
+    prompt: String,
+    cancellation: Option<Arc<AtomicBool>>,
+) -> CollaborationCompletion {
+    let started_at_ms = current_time_millis();
+    let state = app.state::<AppState>();
+    let registry = match tool_registry_for_state(&state, &workspace_root) {
+        Ok(registry) => registry,
+        Err(error) => return CollaborationCompletion::failed(error),
+    };
+    let tools = evidence_worker_tools(
+        &registry
+            .exposure_plan(&prompt, config.context_window_tokens)
+            .inline,
+    );
+    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+        base_url: config.base_url.clone(),
+        api_key: config.api_key.clone(),
+        model,
+        embedding_model: config.model_for_role(&ModelRole::Embedder),
+        timeout_seconds: 180,
+    });
+    let mut runtime = start_agent_loop(
+        task_id,
+        prompt.clone(),
+        AgentRuntimeConfig {
+            max_turns: DEFAULT_COLLABORATION_WORKER_TURNS,
+        },
+    );
+    let mut trusted_context = agent_runtime_context_for_run(&run_context).unwrap_or_default();
+    if !trusted_context.is_empty() {
+        trusted_context.push('\n');
+    }
+    trusted_context.push_str(&format!(
+        "Collaboration: {collaboration_id}\nWorker stage: {stage}\nWorker role: {}\nThis worker has an isolated transcript and may use only exposed read-only evidence tools. Return concrete evidence and conclusions for downstream workers; do not claim workspace changes.",
+        role_label(&role)
+    ));
+    let mut worker_context = run_context.clone();
+    worker_context.insert("collaboration_id".to_string(), collaboration_id);
+    worker_context.insert("stage".to_string(), stage);
+    worker_context.insert("role".to_string(), role_label(&role).to_string());
+    worker_context.insert("worker_runtime".to_string(), "isolated_evidence_v1".to_string());
+    let mut usage = Metadata::new();
+    let mut tool_call_count = 0usize;
+
+    loop {
+        if cancellation
+            .as_ref()
+            .is_some_and(|control| agent_run_was_cancelled(control))
+        {
+            return CollaborationCompletion {
+                content: None,
+                error: Some(MODEL_REQUEST_CANCELLED.to_string()),
+                latency_ms: current_time_millis().saturating_sub(started_at_ms),
+                usage,
+            };
+        }
+
+        let mut request = model_request_for_turn_with_context(
+            &runtime,
+            &tools,
+            Some(&config.agent_system_prompt),
+            Some(&trusted_context),
+        );
+        request.role = role.clone();
+        request
+            .metadata
+            .insert("collaboration_worker".to_string(), "true".to_string());
+        let response = match provider.complete_streaming_cancellable(
+            request,
+            |_| {},
+            || {
+                cancellation
+                    .as_ref()
+                    .is_some_and(|control| agent_run_was_cancelled(control))
+            },
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                return CollaborationCompletion {
+                    content: None,
+                    error: Some(error.to_string()),
+                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
+                    usage,
+                }
+            }
+        };
+        for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+            let previous = usage
+                .get(key)
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or_default();
+            let additional = response
+                .metadata
+                .get(key)
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or_default();
+            usage.insert(key.to_string(), previous.saturating_add(additional).to_string());
+        }
+
+        match advance_with_model_response(&mut runtime, response, &tools) {
+            AgentAdvance::Completed { answer } => {
+                usage.insert("worker_turns".to_string(), runtime.turn.to_string());
+                usage.insert("worker_tool_calls".to_string(), tool_call_count.to_string());
+                usage.insert("worker_tool_count".to_string(), tools.len().to_string());
+                usage.insert(
+                    "worker_runtime".to_string(),
+                    "isolated_evidence_v1".to_string(),
+                );
+                return CollaborationCompletion {
+                    content: Some(answer),
+                    error: None,
+                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
+                    usage,
+                };
+            }
+            AgentAdvance::Failed { message } => {
+                return CollaborationCompletion {
+                    content: None,
+                    error: Some(message),
+                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
+                    usage,
+                }
+            }
+            AgentAdvance::ToolCalls { calls } => {
+                for call in calls {
+                    tool_call_count += 1;
+                    let mut invocation = tool_invocation_from_request(&runtime.task_id, &call);
+                    invocation.proposed_by_model = "collaboration-worker".to_string();
+                    invocation
+                        .metadata
+                        .insert("collaboration_worker".to_string(), "true".to_string());
+                    {
+                        let mut store = match state.store.lock() {
+                            Ok(store) => store,
+                            Err(error) => {
+                                return CollaborationCompletion::failed(format!(
+                                    "store lock poisoned: {error}"
+                                ))
+                            }
+                        };
+                        if let Err(error) =
+                            append_tool_proposed_event(&mut store, &invocation, Some(&worker_context))
+                        {
+                            return CollaborationCompletion::failed(error.to_string());
+                        }
+                    }
+
+                    let rejection = if repeated_tool_failure_count(
+                        &runtime,
+                        &call.tool_name,
+                        &call.input,
+                    ) >= MAX_IDENTICAL_TOOL_FAILURES
+                    {
+                        Some("Cindx blocked this identical worker tool call after repeated failures. Change the arguments or use a different approach.")
+                    } else if !tools.iter().any(|tool| tool.name == call.tool_name) {
+                        Some("This tool is not exposed to the collaboration worker. Return the proposed action to the main executor instead.")
+                    } else {
+                        None
+                    };
+                    let observation = if let Some(reason) = rejection {
+                        record_tool_outcome(
+                            &mut runtime,
+                            &call.tool_name,
+                            &call.input,
+                            &ToolOutcomeStatus::Failed,
+                        );
+                        let observation =
+                            observation_from_tool_result(&call.tool_name, "failed", reason);
+                        let mut store = match state.store.lock() {
+                            Ok(store) => store,
+                            Err(error) => {
+                                return CollaborationCompletion::failed(format!(
+                                    "store lock poisoned: {error}"
+                                ))
+                            }
+                        };
+                        if let Err(error) = append_tool_finished_event(
+                            &mut store,
+                            &runtime.task_id,
+                            &call.call_id.0,
+                            &call.tool_name,
+                            "failed",
+                            &observation,
+                            [("failure_code".to_string(), "worker_tool_not_allowed".to_string())]
+                                .into_iter()
+                                .collect(),
+                            Some(&worker_context),
+                        ) {
+                            return CollaborationCompletion::failed(error.to_string());
+                        }
+                        observation
+                    } else {
+                        match execute_agent_tool_invocation(
+                            &state,
+                            invocation,
+                            &workspace_root,
+                            &worker_context,
+                        ) {
+                            Ok(result) => {
+                                record_tool_outcome(
+                                    &mut runtime,
+                                    &call.tool_name,
+                                    &call.input,
+                                    &result.status,
+                                );
+                                observation_from_agent_tool_result(&call.tool_name, &result)
+                            }
+                            Err(error) => {
+                                record_tool_outcome(
+                                    &mut runtime,
+                                    &call.tool_name,
+                                    &call.input,
+                                    &ToolOutcomeStatus::Failed,
+                                );
+                                observation_from_tool_result(
+                                    &call.tool_name,
+                                    "failed",
+                                    &error,
+                                )
+                            }
+                        }
+                    };
+                    append_tool_observation(&mut runtime, call.call_id, &observation);
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn record_collaboration_stage_finished(
     state: &tauri::State<'_, AppState>,
     task_id: &TaskId,
@@ -6551,9 +6796,11 @@ fn run_collaboration_stage_with_delta(
 }
 
 fn run_adaptive_collaboration(
+    app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,
     task_id: &TaskId,
+    workspace_root: &Path,
     run_context: &Metadata,
     collaboration_id: &str,
     prompt: &str,
@@ -6579,8 +6826,6 @@ fn run_adaptive_collaboration(
     let workflow = parse_adaptive_workflow(&workflow_response, models, agent_budget)?;
     let layers = adaptive_workflow_layers(&workflow)?;
     let shared_memory = collaboration_recent_context(history);
-    let system_prompt =
-        collaboration_system_prompt_for_run(&config.agent_system_prompt, run_context);
     let mut outputs = BTreeMap::new();
 
     for layer in layers {
@@ -6633,21 +6878,30 @@ fn run_adaptive_collaboration(
         let handles = specs
             .iter()
             .map(|spec| {
+                let app = app.clone();
                 let config = config.clone();
+                let task_id = task_id.clone();
+                let workspace_root = workspace_root.to_path_buf();
+                let run_context = run_context.clone();
+                let collaboration_id = collaboration_id.to_string();
+                let stage = spec.stage.clone();
                 let model = spec.model.clone();
                 let role = adaptive_model_role(&spec.role);
                 let prompt = spec.prompt.clone();
-                let system_prompt = system_prompt.clone();
                 let cancellation = cancellation.clone();
                 std::thread::spawn(move || {
-                    complete_collaboration_model_with_control(
+                    complete_collaboration_worker_with_tools(
+                        app,
                         config,
+                        task_id,
+                        workspace_root,
+                        run_context,
+                        collaboration_id,
+                        stage,
                         role,
                         model,
-                        system_prompt,
                         prompt,
                         cancellation,
-                        |_| {},
                     )
                 })
             })
@@ -6918,9 +7172,11 @@ fn parse_collaboration_quality(response: &str) -> Result<CollaborationQualityPay
 }
 
 fn run_collaboration_candidates(
+    app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,
     task_id: &TaskId,
+    workspace_root: &Path,
     run_context: &Metadata,
     collaboration_id: &str,
     prompt: &str,
@@ -6952,8 +7208,6 @@ fn run_collaboration_candidates(
         )?;
     }
 
-    let system_prompt =
-        collaboration_system_prompt_for_run(&config.agent_system_prompt, run_context);
     let cancellation = active_agent_run_control(
         state,
         run_context.get("session_id").map(String::as_str),
@@ -6961,20 +7215,29 @@ fn run_collaboration_candidates(
     let handles = specs
         .iter()
         .map(|spec| {
+            let app = app.clone();
             let config = config.clone();
+            let task_id = task_id.clone();
+            let workspace_root = workspace_root.to_path_buf();
+            let run_context = run_context.clone();
+            let collaboration_id = collaboration_id.to_string();
+            let stage = spec.stage.clone();
             let model = spec.model.clone();
             let prompt = spec.prompt.clone();
-            let system_prompt = system_prompt.clone();
             let cancellation = cancellation.clone();
             std::thread::spawn(move || {
-                complete_collaboration_model_with_control(
+                complete_collaboration_worker_with_tools(
+                    app,
                     config,
+                    task_id,
+                    workspace_root,
+                    run_context,
+                    collaboration_id,
+                    stage,
                     ModelRole::Planner,
                     model,
-                    system_prompt,
                     prompt,
                     cancellation,
-                    |_| {},
                 )
             })
         })
@@ -7037,9 +7300,11 @@ fn run_collaboration_candidates(
 }
 
 fn prepare_agent_collaboration(
+    app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,
     task_id: &TaskId,
+    workspace_root: &Path,
     run_context: &Metadata,
     policy: &OrchestrationPolicy,
     prompt: &str,
@@ -7059,9 +7324,11 @@ fn prepare_agent_collaboration(
         .cloned()
         .collect::<Vec<_>>();
     let guidance = run_adaptive_collaboration(
+        app,
         state,
         config,
         task_id,
+        workspace_root,
         run_context,
         &id,
         prompt,
@@ -7071,9 +7338,11 @@ fn prepare_agent_collaboration(
     )
     .or_else(|_| {
         run_collaboration_candidates(
+            app,
             state,
             config,
             task_id,
+            workspace_root,
             run_context,
             &id,
             prompt,
