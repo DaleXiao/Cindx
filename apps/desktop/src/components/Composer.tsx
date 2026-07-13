@@ -1,6 +1,7 @@
 import {
   Check,
   CheckCheck,
+  ChevronDown,
   FileText,
   Image,
   LoaderCircle,
@@ -164,7 +165,40 @@ export function Composer({
                 ))}
               </div>
             )}
-            <div className="composer-input-row">
+            <textarea
+              ref={textareaRef}
+              value={value}
+              onChange={(event) => onChange(event.target.value)}
+              onCompositionStart={() => {
+                composingRef.current = true;
+                compositionJustEndedRef.current = false;
+              }}
+              onCompositionEnd={(event) => {
+                composingRef.current = false;
+                compositionJustEndedRef.current = true;
+                onChange(event.currentTarget.value);
+                // WebKit can emit the candidate-selection Enter after compositionend.
+                window.setTimeout(() => {
+                  compositionJustEndedRef.current = false;
+                }, 0);
+              }}
+              onKeyDown={(event) => {
+                const nativeEvent = event.nativeEvent;
+                const imeActive =
+                  composingRef.current ||
+                  compositionJustEndedRef.current ||
+                  nativeEvent.isComposing ||
+                  nativeEvent.keyCode === 229;
+                if (event.key !== "Enter" || event.shiftKey || imeActive) return;
+                event.preventDefault();
+                submit();
+              }}
+              disabled={working || canStop}
+              aria-keyshortcuts="Enter"
+              placeholder="Ask Cindx"
+              rows={3}
+            />
+            <div className="composer-toolbar">
               <input
                 ref={fileInputRef}
                 className="composer-file-input"
@@ -191,76 +225,46 @@ export function Composer({
                   <Plus aria-hidden="true" />
                 )}
               </button>
-              <select
-                className="composer-effort-select"
-                aria-label="Cindx effort"
-                title={effortTitle}
-                value={effort}
-                disabled={working || canStop}
-                onChange={(event) => onEffortChange(event.target.value as AgentEffort)}
-              >
-                <option value="fast">Cindx Fast</option>
-                <option value="auto">Cindx Auto</option>
-                <option value="pro">Cindx Pro</option>
-              </select>
-              <textarea
-                ref={textareaRef}
-                value={value}
-                onChange={(event) => onChange(event.target.value)}
-                onCompositionStart={() => {
-                  composingRef.current = true;
-                  compositionJustEndedRef.current = false;
-                }}
-                onCompositionEnd={(event) => {
-                  composingRef.current = false;
-                  compositionJustEndedRef.current = true;
-                  onChange(event.currentTarget.value);
-                  // WebKit can emit the candidate-selection Enter after compositionend.
-                  window.setTimeout(() => {
-                    compositionJustEndedRef.current = false;
-                  }, 0);
-                }}
-                onKeyDown={(event) => {
-                  const nativeEvent = event.nativeEvent;
-                  const imeActive =
-                    composingRef.current ||
-                    compositionJustEndedRef.current ||
-                    nativeEvent.isComposing ||
-                    nativeEvent.keyCode === 229;
-                  if (event.key !== "Enter" || event.shiftKey || imeActive) return;
-                  event.preventDefault();
-                  submit();
-                }}
-                disabled={working || canStop}
-                aria-keyshortcuts="Enter"
-                placeholder="Ask Cindx"
-                rows={1}
-              />
+              <div className="composer-toolbar-actions">
+                <div className="composer-effort-control">
+                  <select
+                    className="composer-effort-select"
+                    aria-label="Cindx effort"
+                    title={effortTitle}
+                    value={effort}
+                    disabled={working || canStop}
+                    onChange={(event) => onEffortChange(event.target.value as AgentEffort)}
+                  >
+                    <option value="fast">Cindx Fast</option>
+                    <option value="auto">Cindx Auto</option>
+                    <option value="pro">Cindx Pro</option>
+                  </select>
+                  <ChevronDown aria-hidden="true" />
+                </div>
+                <button
+                  type={canStop ? "button" : "submit"}
+                  className={`send-button composer-primary-button ${canStop ? "stop" : ""}`}
+                  aria-label={canStop ? "Stop agent" : "Send message"}
+                  title={canStop ? "Stop" : "Send"}
+                  disabled={canStop ? false : !canSend}
+                  onClick={canStop ? onCancel : undefined}
+                >
+                  {canStop ? (
+                    <span className="composer-stop-icon" data-working={working}>
+                      {working && (
+                        <LoaderCircle className="composer-working-ring" aria-hidden="true" />
+                      )}
+                      <Square className="composer-stop-square" aria-hidden="true" />
+                    </span>
+                  ) : (
+                    <Send aria-hidden="true" />
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         )}
       </div>
-      {!pendingApproval && (
-        <div className="composer-actions">
-          <button
-            type={canStop ? "button" : "submit"}
-            className={`send-button composer-primary-button ${canStop ? "stop" : ""}`}
-            aria-label={canStop ? "Stop agent" : "Send message"}
-            title={canStop ? "Stop" : "Send"}
-            disabled={canStop ? false : !canSend}
-            onClick={canStop ? onCancel : undefined}
-          >
-            {canStop ? (
-              <span className="composer-stop-icon" data-working={working}>
-                {working && <LoaderCircle className="composer-working-ring" aria-hidden="true" />}
-                <Square className="composer-stop-square" aria-hidden="true" />
-              </span>
-            ) : (
-              <Send aria-hidden="true" />
-            )}
-          </button>
-        </div>
-      )}
       {error && (
         <div className="composer-error">
           <span>{error}</span>

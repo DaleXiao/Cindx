@@ -470,10 +470,12 @@ assert(
   "Send and stop must share the primary control while retry remains an explicit error action"
 );
 assert(
-  styles.includes("width: 48px;") &&
-    styles.includes("height: 48px;") &&
-    styles.includes("border-radius: 14px;"),
-  "The primary composer control must use the larger aligned shape"
+  composerSource.includes('className="composer-toolbar"') &&
+    composerSource.includes('className="composer-toolbar-actions"') &&
+    styles.includes("width: 38px;") &&
+    styles.includes("height: 38px;") &&
+    styles.includes("border-radius: 50%;"),
+  "Composer controls must share a bottom toolbar with a circular primary action"
 );
 assert(sidebarSource.includes("session-branch"), "Sessions must be nested below the active project");
 assert(
