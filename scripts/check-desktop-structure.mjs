@@ -608,6 +608,15 @@ assert(
   "Settings must expose an About page with the packaged runtime version"
 );
 assert(
+  appSource.includes('className="settings-saved-toast"') &&
+    appSource.includes("showSettingsSaved();") &&
+    (appSource.match(/showSettingsSaved\(\);/g)?.length ?? 0) === 4 &&
+    appSource.includes("<CheckCircle2 aria-hidden=\"true\" />") &&
+    styles.includes(".settings-saved-toast") &&
+    styles.includes("color: #2f9e64;"),
+  "Every explicit Settings save must show one green SVG Saved toast"
+);
+assert(
   appSource.includes("<dt>Created by</dt>") && appSource.includes("<dd>Dale, 2026</dd>"),
   "About must show the project credit instead of a generic platform label"
 );
@@ -1013,11 +1022,13 @@ assert(
     rustLib.includes('timed_retrieval_channel("graph_recall"') &&
     rustLib.includes('timed_retrieval_channel("graph_walk"') &&
     rustLib.includes('timed_retrieval_channel("file_search"') &&
+    rustLib.includes('retrieval_mode == "four_way_parallel"') &&
+    rustLib.includes("coding_retrieval_mode_skips_graph_channels") &&
     rustLib.includes("fuse_retrieval_channels") &&
     rustLib.includes("prepare_agent_knowledge_context") &&
     ragSource.includes("search_chunks_semantic") &&
     ragSource.includes("search_chunks_literal"),
-  "Knowledge retrieval must run four independent channels, fuse results, and feed the agent"
+  "Knowledge retrieval must select two or four channels, fuse results, and feed the agent"
 );
 assert(
   appSource.includes("Graph Explorer") &&
@@ -1047,13 +1058,17 @@ assert(
     rustLib.includes('"synthesizer"') &&
     rustLib.includes("recover_adaptive_worker(") &&
     rustLib.includes("quality_gate_adaptive_output(") &&
+    rustLib.includes("append_single_model_policy_guidance(") &&
+    rustLib.includes("let OrchestrationPolicy::BestOfN { candidates } = policy else") &&
     rustLib.includes("route_with_local_telemetry(") &&
     orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 7") &&
     orchestratorSource.includes('"thinker" | "worker" | "verifier" | "synthesizer"') &&
     orchestratorSource.includes("adaptive_workflow_layers") &&
     orchestratorSource.includes("adaptive_worker_prompt") &&
+    orchestratorSource.includes("ordinary_research_uses_one_planned_execution_path") &&
+    orchestratorSource.includes("learned_router_cannot_upgrade_ordinary_research_to_ultra") &&
     orchestratorSource.includes("must only access earlier steps"),
-  "Primary agent must run bounded, dependency-aware multi-model workflows with isolated context and fallback synthesis"
+  "Primary agent must reserve bounded adaptive multi-model workflows for Ultra-routed requests"
 );
 assert(
   rustLib.includes('"prompt_tokens"') && rustLib.includes("context_remaining_percent"),

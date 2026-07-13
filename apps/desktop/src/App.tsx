@@ -335,9 +335,20 @@ export function App() {
   const sessionSelectionQueueRef = useRef<Promise<void>>(Promise.resolve());
   const sessionRefreshRequestRef = useRef(0);
   const trackedSessionTaskIdsRef = useRef<Set<string>>(new Set());
+  const settingsToastTimerRef = useRef<number | null>(null);
   const [composerError, setComposerError] = useState<string | null>(null);
   const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
   const [webSearchError, setWebSearchError] = useState<string | null>(null);
+  const [settingsToast, setSettingsToast] = useState<{ id: number } | null>(null);
+
+  useEffect(
+    () => () => {
+      if (settingsToastTimerRef.current !== null) {
+        window.clearTimeout(settingsToastTimerRef.current);
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     let disposed = false;
@@ -748,6 +759,17 @@ export function App() {
     }
   }
 
+  function showSettingsSaved() {
+    if (settingsToastTimerRef.current !== null) {
+      window.clearTimeout(settingsToastTimerRef.current);
+    }
+    setSettingsToast({ id: Date.now() });
+    settingsToastTimerRef.current = window.setTimeout(() => {
+      setSettingsToast(null);
+      settingsToastTimerRef.current = null;
+    }, 1800);
+  }
+
   async function handleSaveProviderConfig() {
     if (!providerDraft) return;
     setProviderBusy(true);
@@ -756,6 +778,7 @@ export function App() {
       const next = await saveProviderConfig(providerDraft);
       setPhase4(next);
       setProviderDraft(providerDraftFromState(next.provider));
+      showSettingsSaved();
     } finally {
       setProviderBusy(false);
     }
@@ -791,6 +814,7 @@ export function App() {
       setPhase7(await getPhase7State());
       setPhase8(await getPhase8State());
       setContextState(await getContextState());
+      showSettingsSaved();
     } catch (error) {
       setComposerError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1159,6 +1183,7 @@ export function App() {
         autoConfigure: next.autoConfigure
       });
       setComposerError(next.lastError);
+      showSettingsSaved();
     } finally {
       setSidecarBusy(false);
     }
@@ -1172,6 +1197,7 @@ export function App() {
       const next = await saveWebSearchConfig(webSearchDraft);
       setWebSearchConfig(next);
       setWebSearchDraft({ endpoint: next.endpoint, apiKey: "" });
+      showSettingsSaved();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setWebSearchError(message);
@@ -3260,6 +3286,18 @@ export function App() {
           setInspectorOpen(false);
         }}
       />
+      {settingsToast && (
+        <div
+          className="settings-saved-toast"
+          key={settingsToast.id}
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          <CheckCircle2 aria-hidden="true" />
+          <span>Saved</span>
+        </div>
+      )}
     </main>
   );
 }
