@@ -190,10 +190,10 @@ export function Composer({
                   nativeEvent.isComposing ||
                   nativeEvent.keyCode === 229;
                 if (event.key !== "Enter" || event.shiftKey || imeActive) return;
+                if (working || canStop) return;
                 event.preventDefault();
                 submit();
               }}
-              disabled={working || canStop}
               aria-keyshortcuts="Enter"
               placeholder="Message Cindx"
               rows={3}
