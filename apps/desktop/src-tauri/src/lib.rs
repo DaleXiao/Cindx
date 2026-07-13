@@ -17,7 +17,11 @@ use agent_rag::{
     search_chunks_literal, search_chunks_semantic, EmbeddingBatch, FileRagAdapter, IndexOptions,
     RagAdapter, RagChunk, RagEmbedder, RagIndexStats, RagSearchResult, RAG_INDEX_CANCELLED,
 };
-use agent_skills::{SkillCatalog, SkillPreference, SkillRecord};
+use agent_skills::{
+    install_skill_archive as install_skill_archive_package,
+    install_skill_files as install_skill_file_set, SkillCatalog, SkillInstallFile,
+    SkillPreference, SkillRecord,
+};
 use agent_runtime::{
     advance_with_model_response, append_tool_observation,
     model_request_for_turn_with_system_prompt, observation_from_tool_result,
@@ -157,6 +161,31 @@ struct SkillPreferenceInput {
     skill_id: String,
     enabled: bool,
     trusted: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillInstallFileInput {
+    path: String,
+    data_base64: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillDirectoryInstallInput {
+    files: Vec<SkillInstallFileInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillPackageInstallInput {
+    data_base64: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillUrlInstallInput {
+    url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1241,6 +1270,103 @@ fn save_skill_preference(
         SkillPreference {
             enabled: input.enabled,
             trusted: input.trusted,
+        },
+    )?;
+    Ok(SkillStateView {
+        skills,
+        last_error: None,
+    })
+}
+
+#[tauri::command]
+fn install_skill_directory(
+    state: tauri::State<'_, AppState>,
+    input: SkillDirectoryInstallInput,
+) -> Result<SkillStateView, String> {
+    let root = active_workspace_root(&state)?;
+    let mut files = Vec::with_capacity(input.files.len());
+    for file in input.files {
+        files.push(SkillInstallFile {
+            path: PathBuf::from(file.path),
+            bytes: decode_data_url(&file.data_base64)?,
+        });
+    }
+    let skill_id = install_skill_file_set(&root.join(".cindx/skills"), files)?;
+    skill_state_after_install(&root, &skill_id)
+}
+
+#[tauri::command]
+fn install_skill_package(
+    state: tauri::State<'_, AppState>,
+    input: SkillPackageInstallInput,
+) -> Result<SkillStateView, String> {
+    let root = active_workspace_root(&state)?;
+    let bytes = decode_data_url(&input.data_base64)?;
+    let skill_id = install_skill_archive_package(&root.join(".cindx/skills"), &bytes)?;
+    skill_state_after_install(&root, &skill_id)
+}
+
+#[tauri::command]
+fn install_skill_url(
+    state: tauri::State<'_, AppState>,
+    input: SkillUrlInstallInput,
+) -> Result<SkillStateView, String> {
+    let url = input.url.trim();
+    if !url.starts_with("https://") {
+        return Err("skill URL must use HTTPS".to_string());
+    }
+    let output = std::process::Command::new("/usr/bin/curl")
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--max-time",
+            "30",
+            "--max-filesize",
+            "52428800",
+            url,
+        ])
+        .output()
+        .map_err(|error| format!("failed to download skill: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            "skill download failed".to_string()
+        } else {
+            format!("skill download failed: {detail}")
+        });
+    }
+    let root = active_workspace_root(&state)?;
+    let skill_id = install_skill_archive_package(&root.join(".cindx/skills"), &output.stdout)?;
+    skill_state_after_install(&root, &skill_id)
+}
+
+fn decode_data_url(value: &str) -> Result<Vec<u8>, String> {
+    let encoded = value
+        .split_once(',')
+        .map(|(_, data)| data)
+        .unwrap_or(value);
+    if encoded.len() > 70 * 1024 * 1024 {
+        return Err("skill data exceeds the 50 MB limit".to_string());
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| format!("skill data is not valid base64: {error}"))
+}
+
+fn skill_state_after_install(root: &Path, skill_id: &str) -> Result<SkillStateView, String> {
+    let catalog = skill_catalog_for_root(root);
+    catalog.refresh()?;
+    let skills = catalog.set_preference(
+        skill_id,
+        SkillPreference {
+            enabled: false,
+            trusted: false,
         },
     )?;
     Ok(SkillStateView {
@@ -4694,6 +4820,9 @@ pub fn run() {
             get_skill_state,
             refresh_skills,
             save_skill_preference,
+            install_skill_directory,
+            install_skill_package,
+            install_skill_url,
             get_project_session_state,
             create_project,
             create_session,

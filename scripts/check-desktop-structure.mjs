@@ -245,7 +245,7 @@ assert(
     appSource.includes("payload.sessionId !== activeSessionIdRef.current") &&
     appSource.includes("if (payload.reset)") &&
     appSource.includes("streamBuffer += payload.delta") &&
-    appSource.includes("requestAnimationFrame(flushStreamBuffer)") &&
+    appSource.includes("window.setTimeout(flushStreamBuffer, 40)") &&
     appSource.includes("markSessionBusy(sessionId, false)") &&
     tauriBridge.includes("sessionId: string | null") &&
     tauriBridge.includes("reset: boolean"),
@@ -344,14 +344,17 @@ assert(
 assert(
   appSource.includes("window-toolbar-panel-left") &&
     appSource.includes("window-toolbar-panel-right") &&
+    appSource.includes("data-active-view={activeView}") &&
+    appSource.includes("data-view={activeView}") &&
     styles.includes("background: rgba(255, 255, 255, 0.96)") &&
-    !styles.includes("backdrop-filter") &&
+    styles.includes('.workspace[data-view="timeline"]') &&
+    styles.includes("backdrop-filter: saturate(145%) blur(18px)") &&
     /\.window-toolbar-panel \{[\s\S]*?background: var\(--panel\);/.test(styles) &&
     tauriConfig.app.macOSPrivateApi === true &&
     tauriConfig.app.windows.every((window) => window.transparent === true) &&
     cargoToml.includes('features = ["macos-private-api"]') &&
     !rustLib.includes("window_vibrancy::apply_vibrancy"),
-  "Titlebar must keep a clean translucent white workspace surface without glass blur"
+  "Timeline content must scroll beneath the translucent titlebar glass surface"
 );
 assert(composerSource.includes('event.key !== "Enter"'), "Composer must support Enter to send");
 assert(composerSource.includes("event.shiftKey"), "Composer must reserve Shift+Enter for a new line");
@@ -458,9 +461,12 @@ assert(
 );
 assert(
   composerSource.includes("composer-stop-icon") &&
-    composerSource.includes("retryMode") &&
+    composerSource.includes("canRetryError") &&
+    composerSource.includes("RotateCcw") &&
+    composerSource.includes("Send") &&
+    !composerSource.includes("retryMode") &&
     !composerSource.includes("agent-control-button"),
-  "Send, stop, and retry must share one primary composer control"
+  "Send and stop must share the primary control while retry remains an explicit error action"
 );
 assert(
   styles.includes("width: 48px;") &&
@@ -750,6 +756,25 @@ assert(
     builtinSkillCreator.includes("name: Claude Code Skill Creator") &&
     builtinSkillCreator.includes("SKILL.md contract"),
   "The trusted Claude Code Skill Creator must ship inside the Rust skill catalog"
+);
+assert(
+  appSource.includes("Local folder") &&
+    appSource.includes(".skill package") &&
+    appSource.includes("installSkillUrl") &&
+    rustLib.includes("install_skill_directory") &&
+    rustLib.includes("install_skill_package") &&
+    rustLib.includes("install_skill_url") &&
+    agentSkillsSource.includes("install_skill_archive") &&
+    agentSkillsSource.includes("enclosed_name"),
+  "Skills settings must install safe local, packaged, and HTTPS skills"
+);
+assert(
+  fs.existsSync(path.join(root, "apps/desktop/src/assets/fonts/Borel-Regular.ttf")) &&
+    fs.existsSync(path.join(root, "apps/desktop/src/assets/fonts/Borel-OFL.txt")) &&
+    styles.includes('font-family: "Borel", cursive') &&
+    styles.includes("background: #2563eb") &&
+    composerSource.includes("Send"),
+  "Cindx branding and the send action must retain their bundled type and blue accent"
 );
 assert(
   appSource.includes("Knowledge sources") &&

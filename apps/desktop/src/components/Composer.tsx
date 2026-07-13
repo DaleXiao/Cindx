@@ -4,8 +4,8 @@ import {
   FileText,
   Image,
   LoaderCircle,
-  Play,
   Plus,
+  RotateCcw,
   Send,
   ShieldCheck,
   Square,
@@ -62,7 +62,7 @@ export function Composer({
   const compositionJustEndedRef = useRef(false);
   const canSend =
     !working && !canStop && !pendingApproval && !attachmentBusy && Boolean(value.trim() || attachments.length);
-  const retryMode = canRetry && !canSend && !working && !canStop && !pendingApproval;
+  const canRetryError = canRetry && Boolean(error) && !working && !canStop && !pendingApproval;
 
   useEffect(() => {
     if (focusRequest <= 0 || pendingApproval) return;
@@ -222,27 +222,35 @@ export function Composer({
       {!pendingApproval && (
         <div className="composer-actions">
           <button
-            type={canStop || retryMode ? "button" : "submit"}
+            type={canStop ? "button" : "submit"}
             className={`send-button composer-primary-button ${canStop ? "stop" : ""}`}
-            aria-label={canStop ? "Stop agent" : retryMode ? "Retry agent task" : "Send message"}
-            title={canStop ? "Stop" : retryMode ? "Retry" : "Send"}
-            disabled={canStop || retryMode ? false : !canSend}
-            onClick={canStop ? onCancel : retryMode ? onRetry : undefined}
+            aria-label={canStop ? "Stop agent" : "Send message"}
+            title={canStop ? "Stop" : "Send"}
+            disabled={canStop ? false : !canSend}
+            onClick={canStop ? onCancel : undefined}
           >
             {canStop ? (
               <span className="composer-stop-icon" data-working={working}>
                 {working && <LoaderCircle className="composer-working-ring" aria-hidden="true" />}
                 <Square className="composer-stop-square" aria-hidden="true" />
               </span>
-            ) : retryMode ? (
-              <Play aria-hidden="true" />
             ) : (
               <Send aria-hidden="true" />
             )}
           </button>
         </div>
       )}
-      {error && <div className="composer-error">{error}</div>}
+      {error && (
+        <div className="composer-error">
+          <span>{error}</span>
+          {canRetryError && (
+            <button type="button" onClick={onRetry}>
+              <RotateCcw aria-hidden="true" />
+              <span>Retry</span>
+            </button>
+          )}
+        </div>
+      )}
     </form>
   );
 }
