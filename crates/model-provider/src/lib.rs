@@ -7,9 +7,10 @@ use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const MODEL_REQUEST_CANCELLED: &str = "model request cancelled";
+const STREAMING_HARD_TIMEOUT_MULTIPLIER: u64 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelCallMode {
@@ -184,6 +185,12 @@ fn curl_command(timeout_seconds: u64, no_buffer: bool) -> Command {
     command
 }
 
+fn streaming_hard_timeout_seconds(idle_timeout_seconds: u64) -> u64 {
+    idle_timeout_seconds
+        .max(1)
+        .saturating_mul(STREAMING_HARD_TIMEOUT_MULTIPLIER)
+}
+
 fn spawn_curl(
     config: &str,
     timeout_seconds: u64,
@@ -293,6 +300,7 @@ fn consume_streaming_child(
     mut child: Child,
     model: &str,
     base_url: &str,
+    idle_timeout: Duration,
     on_delta: &mut impl FnMut(&str),
     should_cancel: &mut impl FnMut() -> bool,
 ) -> Result<ModelResponse, ModelError> {
@@ -322,6 +330,12 @@ fn consume_streaming_child(
     let mut raw_response = String::new();
     let mut answer = String::new();
     let mut streamed_tool_calls = BTreeMap::<usize, StreamingToolCall>::new();
+    let idle_timeout = if idle_timeout.is_zero() {
+        Duration::from_secs(1)
+    } else {
+        idle_timeout
+    };
+    let mut last_activity = Instant::now();
 
     loop {
         if should_cancel() {
@@ -331,6 +345,7 @@ fn consume_streaming_child(
         }
         match line_receiver.recv_timeout(Duration::from_millis(40)) {
             Ok(Ok(line)) => {
+                last_activity = Instant::now();
                 raw_response.push_str(&line);
                 let event = match parse_stream_event(&line) {
                     Ok(event) => event,
@@ -359,7 +374,17 @@ fn consume_streaming_child(
                 let _ = reader_handle.join();
                 return Err(ModelError::new(error));
             }
-            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Timeout) => {
+                if last_activity.elapsed() >= idle_timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = reader_handle.join();
+                    return Err(ModelError::new(format!(
+                        "model stream timed out after {} seconds without receiving data",
+                        idle_timeout.as_secs()
+                    )));
+                }
+            }
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
@@ -488,18 +513,33 @@ impl OpenAiCompatibleProvider {
             return Err(ModelError::new("provider config is incomplete"));
         }
 
-        let request_body =
-            build_chat_request_json_with_tools(&self.config.model, &request.messages, true, &request.tools)?;
+        let max_output_tokens = request
+            .metadata
+            .get("max_output_tokens")
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0);
+        let request_body = build_chat_request_json_with_tools_and_output_limit(
+            &self.config.model,
+            &request.messages,
+            true,
+            &request.tools,
+            max_output_tokens,
+        )?;
         let curl_config = curl_request_config(
             &self.config.chat_completions_url(),
             &self.config.api_key,
             Some(&request_body),
         );
-        let child = spawn_curl(&curl_config, self.config.timeout_seconds, true)?;
+        let child = spawn_curl(
+            &curl_config,
+            streaming_hard_timeout_seconds(self.config.timeout_seconds),
+            true,
+        )?;
         consume_streaming_child(
             child,
             &self.config.model,
             &self.config.base_url,
+            Duration::from_secs(self.config.timeout_seconds.max(1)),
             &mut on_delta,
             &mut should_cancel,
         )
@@ -510,11 +550,17 @@ impl OpenAiCompatibleProvider {
             return Err(ModelError::new("provider config is incomplete"));
         }
 
-        let request_body = build_chat_request_json_with_tools(
+        let max_output_tokens = request
+            .metadata
+            .get("max_output_tokens")
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0);
+        let request_body = build_chat_request_json_with_tools_and_output_limit(
             &self.config.model,
             &request.messages,
             false,
             &request.tools,
+            max_output_tokens,
         )?;
         let curl_config = curl_request_config(
             &self.config.chat_completions_url(),
@@ -715,6 +761,16 @@ pub fn build_chat_request_json_with_tools(
     stream: bool,
     tools: &[ToolSpec],
 ) -> Result<String, ModelError> {
+    build_chat_request_json_with_tools_and_output_limit(model, messages, stream, tools, None)
+}
+
+fn build_chat_request_json_with_tools_and_output_limit(
+    model: &str,
+    messages: &[Message],
+    stream: bool,
+    tools: &[ToolSpec],
+    max_output_tokens: Option<u64>,
+) -> Result<String, ModelError> {
     let messages_json = messages
         .iter()
         .map(|message| match message.role {
@@ -763,12 +819,17 @@ pub fn build_chat_request_json_with_tools(
                 .join(",")
         )
     };
+    let output_limit_json = max_output_tokens
+        .filter(|value| *value > 0)
+        .map(|value| format!(",\"max_tokens\":{value}"))
+        .unwrap_or_default();
 
     Ok(format!(
-        "{{\"model\":\"{}\",\"stream\":{},\"messages\":[{}]{}}}",
+        "{{\"model\":\"{}\",\"stream\":{},\"messages\":[{}]{}{}}}",
         json_escape(model),
         if stream { "true" } else { "false" },
         messages_json.join(","),
+        output_limit_json,
         tools_json
     ))
 }
@@ -1477,6 +1538,12 @@ mod tests {
     }
 
     #[test]
+    fn streaming_uses_idle_timeout_with_a_larger_hard_ceiling() {
+        assert_eq!(streaming_hard_timeout_seconds(180), 720);
+        assert_eq!(streaming_hard_timeout_seconds(0), 4);
+    }
+
+    #[test]
     fn parses_sorted_unique_model_list() {
         let models = parse_model_list_response(
             r#"{"object":"list","data":[{"id":"model-b"},{"id":"model-a"},{"id":"model-b"}]}"#,
@@ -1503,6 +1570,25 @@ mod tests {
         assert!(body.contains("\"stream\":true"));
         assert!(body.contains("\"role\":\"user\""));
         assert!(body.contains("\"content\":\"hello\""));
+    }
+
+    #[test]
+    fn request_json_includes_configured_output_limit() {
+        let body = build_chat_request_json_with_tools_and_output_limit(
+            "model-a",
+            &[Message {
+                role: MessageRole::User,
+                content: "hello".to_string(),
+                metadata: Metadata::new(),
+            }],
+            true,
+            &[],
+            Some(4096),
+        )
+        .expect("body should encode");
+
+        let value: serde_json::Value = serde_json::from_str(&body).expect("valid request JSON");
+        assert_eq!(value["max_tokens"], 4096);
     }
 
     #[test]
@@ -1654,6 +1740,7 @@ mod tests {
             child,
             "test-model",
             "http://example.test/v1",
+            Duration::from_secs(10),
             &mut |delta| output.push_str(delta),
             &mut || started.elapsed() >= Duration::from_millis(100),
         );
@@ -1661,6 +1748,63 @@ mod tests {
         assert_eq!(result.expect_err("stream should cancel").message, MODEL_REQUEST_CANCELLED);
         assert!(started.elapsed() < Duration::from_secs(1));
         assert_eq!(output, "started");
+    }
+
+    #[test]
+    fn stops_a_stream_after_the_idle_timeout() {
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 2")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("test stream process should start");
+        let started = Instant::now();
+        let result = consume_streaming_child(
+            child,
+            "test-model",
+            "http://example.test/v1",
+            Duration::from_millis(100),
+            &mut |_| {},
+            &mut || false,
+        );
+
+        assert!(result
+            .expect_err("stream should time out")
+            .message
+            .contains("without receiving data"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn stream_activity_refreshes_the_idle_timeout() {
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(concat!(
+                "printf 'data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\\n'; ",
+                "sleep 0.1; ",
+                "printf 'data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\\n'; ",
+                "sleep 0.1; ",
+                "printf 'data: {\"choices\":[{\"delta\":{\"content\":\"c\"}}]}\\n'; ",
+                "sleep 0.1"
+            ))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("test stream process should start");
+        let mut output = String::new();
+        let response = consume_streaming_child(
+            child,
+            "test-model",
+            "http://example.test/v1",
+            Duration::from_millis(250),
+            &mut |delta| output.push_str(delta),
+            &mut || false,
+        )
+        .expect("active stream should complete");
+
+        assert_eq!(output, "abc");
+        assert_eq!(response.message.content, "abc");
     }
 
     #[test]
@@ -1699,6 +1843,7 @@ mod tests {
             child,
             "test-model",
             "http://example.test/v1",
+            Duration::from_secs(10),
             &mut |_| {},
             &mut || false,
         )

@@ -28,7 +28,8 @@ use agent_runtime::{
     record_tool_outcome, repeated_tool_failure_count,
     resume_agent_loop_from_messages, start_agent_loop, start_agent_loop_with_history,
     tool_invocation_from_request, AgentAdvance, AgentRuntimeConfig,
-    DEFAULT_COLLABORATION_WORKER_TURNS, MAX_IDENTICAL_TOOL_FAILURES,
+    DEFAULT_COLLABORATION_WORKER_TURNS, MAX_COLLABORATION_WORKER_TOOL_CALLS,
+    MAX_IDENTICAL_TOOL_FAILURES,
 };
 use agent_storage::{EventStore, PermissionAuditRecord, PermissionStore, SqliteStore, StorageError};
 use base64::Engine;
@@ -68,6 +69,8 @@ const PHASE16_TASK_ID: &str = "phase-16-agent-loop";
 const MAX_ATTACHMENT_FILES: usize = 10;
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_ATTACHMENT_TOTAL_BYTES: usize = 50 * 1024 * 1024;
+const AGENT_MAX_OUTPUT_TOKENS: u64 = 32_768;
+const COLLABORATION_MAX_OUTPUT_TOKENS: u64 = 4_096;
 const LEGACY_AGENT_SYSTEM_PROMPT: &str = "You are Cindx, a desktop-first assistant. Work carefully, be direct, and ask for clarification when the task is ambiguous.";
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -222,6 +225,23 @@ impl AgentEffort {
             Self::Auto => OrchestrationPolicy::AutoRouter,
             Self::Pro => OrchestrationPolicy::BestOfN { candidates: 3 },
         }
+    }
+}
+
+fn collaboration_profile(effort: AgentEffort, context: &RoutingContext) -> &'static str {
+    if effort == AgentEffort::Pro
+        && context.complexity_score <= 1
+        && context.estimated_steps <= 2
+        && !context.needs_multi_model
+        && !context.needs_retrieval
+        && !context.needs_vision
+        && !context.high_stakes
+        && !context.parallelizable
+        && !context.verification_required
+    {
+        "bounded"
+    } else {
+        "adaptive"
     }
 }
 
@@ -2924,6 +2944,10 @@ fn run_agent_task_blocking_inner(
         collaboration_policy.label().to_string(),
     );
     run_context.insert(
+        "collaboration_profile".to_string(),
+        collaboration_profile(effort, &routing_context).to_string(),
+    );
+    run_context.insert(
         "agent_model".to_string(),
         agent_model_for_effort(
             &config,
@@ -3272,6 +3296,10 @@ fn retry_agent_task_blocking_inner(
     run_context.insert(
         "collaboration_policy".to_string(),
         collaboration_policy.label().to_string(),
+    );
+    run_context.insert(
+        "collaboration_profile".to_string(),
+        collaboration_profile(effort, &routing_context).to_string(),
     );
     run_context.insert(
         "agent_model".to_string(),
@@ -6399,7 +6427,12 @@ fn complete_collaboration_model_with_control(
             ],
             tools: Vec::new(),
             mode: ModelCallMode::Streaming,
-            metadata: Metadata::new(),
+            metadata: [(
+                "max_output_tokens".to_string(),
+                COLLABORATION_MAX_OUTPUT_TOKENS.to_string(),
+            )]
+            .into_iter()
+            .collect(),
         },
         |delta| on_delta(delta),
         || {
@@ -6447,19 +6480,24 @@ fn complete_collaboration_worker_with_tools(
     role: ModelRole,
     model: String,
     prompt: String,
+    allow_tools: bool,
     cancellation: Option<Arc<AtomicBool>>,
 ) -> CollaborationCompletion {
     let started_at_ms = current_time_millis();
     let state = app.state::<AppState>();
-    let registry = match tool_registry_for_state(&state, &workspace_root) {
-        Ok(registry) => registry,
-        Err(error) => return CollaborationCompletion::failed(error),
+    let tools = if allow_tools {
+        let registry = match tool_registry_for_state(&state, &workspace_root) {
+            Ok(registry) => registry,
+            Err(error) => return CollaborationCompletion::failed(error),
+        };
+        evidence_worker_tools(
+            &registry
+                .exposure_plan(&prompt, config.context_window_tokens)
+                .inline,
+        )
+    } else {
+        Vec::new()
     };
-    let tools = evidence_worker_tools(
-        &registry
-            .exposure_plan(&prompt, config.context_window_tokens)
-            .inline,
-    );
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
         base_url: config.base_url.clone(),
         api_key: config.api_key.clone(),
@@ -6479,8 +6517,13 @@ fn complete_collaboration_worker_with_tools(
         trusted_context.push('\n');
     }
     trusted_context.push_str(&format!(
-        "Collaboration: {collaboration_id}\nWorker stage: {stage}\nWorker role: {}\nThis worker has an isolated transcript and may use only exposed read-only evidence tools. Return concrete evidence and conclusions for downstream workers; do not claim workspace changes.",
-        role_label(&role)
+        "Collaboration: {collaboration_id}\nWorker stage: {stage}\nWorker role: {}\n{} Return concise conclusions for downstream workers; do not claim workspace changes.",
+        role_label(&role),
+        if allow_tools {
+            "This worker has an isolated transcript and may use only exposed read-only evidence tools."
+        } else {
+            "This is a bounded worker with no tools. Reason only from the supplied request and recent context, then finish in one response."
+        }
     ));
     let mut worker_context = run_context.clone();
     let evidence_source = stage.clone();
@@ -6516,6 +6559,10 @@ fn complete_collaboration_worker_with_tools(
         request
             .metadata
             .insert("collaboration_worker".to_string(), "true".to_string());
+        request.metadata.insert(
+            "max_output_tokens".to_string(),
+            COLLABORATION_MAX_OUTPUT_TOKENS.to_string(),
+        );
         let response = match provider.complete_streaming_cancellable(
             request,
             |_| {},
@@ -6600,7 +6647,10 @@ fn complete_collaboration_worker_with_tools(
                         }
                     }
 
-                    let rejection = if repeated_tool_failure_count(
+                    let budget_exhausted = tool_call_count > MAX_COLLABORATION_WORKER_TOOL_CALLS;
+                    let rejection = if budget_exhausted {
+                        Some("This collaboration worker exhausted its evidence-tool budget. Stop searching and return the best concise brief from existing evidence.")
+                    } else if repeated_tool_failure_count(
                         &runtime,
                         &call.tool_name,
                         &call.input,
@@ -6636,6 +6686,11 @@ fn complete_collaboration_worker_with_tools(
                                 ))
                             }
                         };
+                        let failure_code = if budget_exhausted {
+                            "worker_tool_budget_exhausted"
+                        } else {
+                            "worker_tool_not_allowed"
+                        };
                         if let Err(error) = append_tool_finished_event(
                             &mut store,
                             &runtime.task_id,
@@ -6643,7 +6698,7 @@ fn complete_collaboration_worker_with_tools(
                             &call.tool_name,
                             "failed",
                             &observation,
-                            [("failure_code".to_string(), "worker_tool_not_allowed".to_string())]
+                            [("failure_code".to_string(), failure_code.to_string())]
                                 .into_iter()
                                 .collect(),
                             Some(&worker_context),
@@ -7025,6 +7080,7 @@ fn run_adaptive_collaboration(
                         role,
                         model,
                         prompt,
+                        true,
                         cancellation,
                     )
                 })
@@ -7320,6 +7376,7 @@ fn run_collaboration_candidates(
     prompt: &str,
     history: &[Message],
     models: &[String],
+    allow_tools: bool,
 ) -> Result<String, String> {
     let recent_context = collaboration_recent_context(history);
     let specs = models
@@ -7362,6 +7419,7 @@ fn run_collaboration_candidates(
             let stage = spec.stage.clone();
             let model = spec.model.clone();
             let prompt = spec.prompt.clone();
+            let allow_tools = allow_tools;
             let cancellation = cancellation.clone();
             std::thread::spawn(move || {
                 complete_collaboration_worker_with_tools(
@@ -7375,6 +7433,7 @@ fn run_collaboration_candidates(
                     ModelRole::Planner,
                     model,
                     prompt,
+                    allow_tools,
                     cancellation,
                 )
             })
@@ -7469,20 +7528,9 @@ fn prepare_agent_collaboration(
         .take(agent_budget)
         .cloned()
         .collect::<Vec<_>>();
-    let guidance = run_adaptive_collaboration(
-        app,
-        state,
-        config,
-        task_id,
-        workspace_root,
-        run_context,
-        &id,
-        prompt,
-        history,
-        &models,
-        agent_budget,
-    )
-    .or_else(|_| {
+    let bounded = run_context.get("collaboration_profile").map(String::as_str)
+        == Some("bounded");
+    let guidance = if bounded {
         run_collaboration_candidates(
             app,
             state,
@@ -7494,8 +7542,38 @@ fn prepare_agent_collaboration(
             prompt,
             history,
             &fallback_models,
+            false,
         )
-    })
+    } else {
+        run_adaptive_collaboration(
+            app,
+            state,
+            config,
+            task_id,
+            workspace_root,
+            run_context,
+            &id,
+            prompt,
+            history,
+            &models,
+            agent_budget,
+        )
+        .or_else(|_| {
+            run_collaboration_candidates(
+                app,
+                state,
+                config,
+                task_id,
+                workspace_root,
+                run_context,
+                &id,
+                prompt,
+                history,
+                &fallback_models,
+                true,
+            )
+        })
+    }
     .unwrap_or_default();
     Some(AgentCollaboration {
         id,
@@ -7619,11 +7697,15 @@ fn continue_agent_loop(
     let runtime_context = agent_runtime_context_for_run(&run_context);
 
     loop {
-        let request = model_request_for_turn_with_context(
+        let mut request = model_request_for_turn_with_context(
             &runtime,
             &tools,
             Some(&config.agent_system_prompt),
             runtime_context.as_deref(),
+        );
+        request.metadata.insert(
+            "max_output_tokens".to_string(),
+            AGENT_MAX_OUTPUT_TOKENS.to_string(),
         );
         let request_id = unique_id("agent-model");
         let started_at_ms = current_time_millis();
@@ -12953,6 +13035,17 @@ mod tests {
             OrchestrationPolicy::BestOfN { candidates: 3 }
         );
         assert_eq!(AgentEffort::parse("unknown"), AgentEffort::Auto);
+    }
+
+    #[test]
+    fn pro_uses_bounded_collaboration_for_simple_requests_only() {
+        let mut context = RoutingContext::from_prompt("重新来一次", Vec::new());
+
+        assert_eq!(collaboration_profile(AgentEffort::Pro, &context), "bounded");
+        assert_eq!(collaboration_profile(AgentEffort::Auto, &context), "adaptive");
+
+        context.needs_multi_model = true;
+        assert_eq!(collaboration_profile(AgentEffort::Pro, &context), "adaptive");
     }
 
     #[test]
