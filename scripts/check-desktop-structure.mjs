@@ -1117,8 +1117,10 @@ assert(
     rustLib.includes("append_single_model_policy_guidance(") &&
     rustLib.includes("let OrchestrationPolicy::BestOfN { candidates } = policy else") &&
     rustLib.includes("route_with_local_telemetry(") &&
-    orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 7") &&
+    orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 5") &&
     orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_AGENTS: usize = 3") &&
+    orchestratorSource.includes("adaptive_workflow_step_budget") &&
+    orchestratorSource.includes("the final adaptive workflow must incorporate every branch") &&
     orchestratorSource.includes("complexity_score") &&
     orchestratorSource.includes("estimated_steps") &&
     orchestratorSource.includes("parallelizable") &&
@@ -1136,7 +1138,14 @@ assert(
     orchestratorSource.includes("auto_router_selects_models_by_task_role") &&
     orchestratorSource.includes("learned_router_cannot_upgrade_ordinary_research_to_ultra") &&
     rustLib.includes("AgentEffort::Auto if !routing_decision.model.trim().is_empty()") &&
-    orchestratorSource.includes("must only access earlier steps"),
+    orchestratorSource.includes("must only access earlier steps") &&
+    rustLib.includes('"conductor_version".to_string(), "v2".to_string()') &&
+    rustLib.includes("Collaboration workflow planned") &&
+    rustLib.includes("Tool evidence ledger") &&
+    rustLib.includes("collaboration_step_result(") &&
+    rustLib.includes('"evidence_count"') &&
+    rustLib.includes("adaptive_coordinator_accepts_five_steps_with_three_reused_models") &&
+    rustLib.includes("conductor_result_separates_worker_claims_from_tool_evidence"),
   "Primary agent must reserve bounded tool-capable adaptive workflows for Ultra-routed requests"
 );
 assert(

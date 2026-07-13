@@ -130,8 +130,16 @@ pub fn default_plan(policy: OrchestrationPolicy) -> OrchestrationPlan {
     }
 }
 
-pub const MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 7;
+pub const MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 5;
 pub const MAX_ADAPTIVE_WORKFLOW_AGENTS: usize = 3;
+
+pub fn adaptive_workflow_step_budget(agent_budget: usize) -> usize {
+    match agent_budget.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS) {
+        1 => 1,
+        2 => 3,
+        _ => MAX_ADAPTIVE_WORKFLOW_STEPS,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdaptiveWorkflowStep {
@@ -224,6 +232,38 @@ pub fn validate_adaptive_workflow(
         .is_some_and(|step| step.role != "synthesizer")
     {
         return Err("the final adaptive workflow step must use the synthesizer role".to_string());
+    }
+
+    let indexes = workflow
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| (step.id.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut included = BTreeSet::new();
+    let mut pending = vec![workflow.steps.len() - 1];
+    while let Some(index) = pending.pop() {
+        if !included.insert(index) {
+            continue;
+        }
+        for dependency in &workflow.steps[index].access {
+            if let Some(dependency_index) = indexes.get(dependency.as_str()) {
+                pending.push(*dependency_index);
+            }
+        }
+    }
+    if included.len() != workflow.steps.len() {
+        let omitted = workflow
+            .steps
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !included.contains(index))
+            .map(|(_, step)| step.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "the final adaptive workflow must incorporate every branch: {omitted}"
+        ));
     }
 
     adaptive_workflow_layers(workflow)?;
@@ -1285,6 +1325,52 @@ mod tests {
             adaptive_workflow_layers(&workflow).expect("layers should build"),
             vec![vec![0, 1], vec![2], vec![3]]
         );
+    }
+
+    #[test]
+    fn fugu_step_budget_reuses_a_bounded_worker_pool() {
+        assert_eq!(adaptive_workflow_step_budget(1), 1);
+        assert_eq!(adaptive_workflow_step_budget(2), 3);
+        assert_eq!(adaptive_workflow_step_budget(3), 5);
+        assert_eq!(adaptive_workflow_step_budget(99), 5);
+    }
+
+    #[test]
+    fn adaptive_workflow_rejects_a_branch_omitted_from_synthesis() {
+        let workflow = AdaptiveWorkflow {
+            steps: vec![
+                AdaptiveWorkflowStep {
+                    id: "included".to_string(),
+                    role: "thinker".to_string(),
+                    model: "fast-mini".to_string(),
+                    subtask: "Included branch".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "orphaned".to_string(),
+                    role: "worker".to_string(),
+                    model: "strong-vision".to_string(),
+                    subtask: "Contradicting branch".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "final".to_string(),
+                    role: "synthesizer".to_string(),
+                    model: "fast-mini".to_string(),
+                    subtask: "Synthesize".to_string(),
+                    access: vec!["included".to_string()],
+                },
+            ],
+        };
+
+        let error = validate_adaptive_workflow(
+            &workflow,
+            &["fast-mini".to_string(), "strong-vision".to_string()],
+        )
+        .expect_err("orphaned branch should be rejected");
+
+        assert!(error.contains("incorporate every branch"));
+        assert!(error.contains("orphaned"));
     }
 
     #[test]
