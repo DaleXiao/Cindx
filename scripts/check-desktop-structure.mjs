@@ -55,6 +55,8 @@ const graphSource = read("crates/agent-graph/src/lib.rs");
 const agentRuntimeSource = read("crates/agent-runtime/src/lib.rs");
 const coreAgentPrompt = read("crates/agent-runtime/src/core_prompt.txt");
 const orchestratorSource = read("crates/orchestrator/src/lib.rs");
+const evaluationLabSource = read("crates/orchestrator/examples/evaluation_lab.rs");
+const agentEvaluationDoc = read("docs/AGENT_EVALUATION.md");
 const mainSource = read("apps/desktop/src/main.tsx");
 const html = read("apps/desktop/index.html");
 const viteConfig = read("apps/desktop/vite.config.ts");
@@ -1147,6 +1149,18 @@ assert(
     rustLib.includes("adaptive_coordinator_accepts_five_steps_with_three_reused_models") &&
     rustLib.includes("conductor_result_separates_worker_claims_from_tool_evidence"),
   "Primary agent must reserve bounded tool-capable adaptive workflows for Ultra-routed requests"
+);
+assert(
+  orchestratorSource.includes("evaluate_routing_cases") &&
+    orchestratorSource.includes("evaluate_routing_telemetry") &&
+    orchestratorSource.includes("QualityRubricScore") &&
+    evaluationLabSource.includes("Cindx routing evaluation") &&
+    evaluationLabSource.includes("over_orchestrated") &&
+    evaluationLabSource.includes("under_orchestrated") &&
+    agentEvaluationDoc.includes("Deterministic Routing Gate") &&
+    agentEvaluationDoc.includes("Operational Trace Report") &&
+    ciWorkflow.includes("cargo run --locked -p orchestrator --example evaluation_lab"),
+  "CI must run the offline routing lab and retain trace and quality evaluation guidance"
 );
 assert(
   rustLib.includes('"prompt_tokens"') && rustLib.includes("context_remaining_percent"),
