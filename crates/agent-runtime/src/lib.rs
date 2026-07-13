@@ -6,7 +6,8 @@ use model_provider::{tool_function_name, ModelCallMode, ModelRequest, ModelRespo
 use std::collections::BTreeMap;
 
 pub const DEFAULT_MAX_AGENT_TURNS: usize = 24;
-pub const DEFAULT_COLLABORATION_WORKER_TURNS: usize = 8;
+pub const DEFAULT_COLLABORATION_WORKER_TURNS: usize = 5;
+pub const MAX_COLLABORATION_WORKER_TOOL_CALLS: usize = 6;
 pub const MAX_IDENTICAL_TOOL_FAILURES: usize = 2;
 pub const CORE_AGENT_SYSTEM_PROMPT: &str = include_str!("core_prompt.txt");
 pub const DEFAULT_AGENT_SYSTEM_PROMPT: &str = CORE_AGENT_SYSTEM_PROMPT;
@@ -427,6 +428,8 @@ mod tests {
     #[test]
     fn default_turn_budget_supports_multi_step_agent_runs() {
         assert_eq!(AgentRuntimeConfig::default().max_turns, 24);
+        assert_eq!(DEFAULT_COLLABORATION_WORKER_TURNS, 5);
+        assert_eq!(MAX_COLLABORATION_WORKER_TOOL_CALLS, 6);
     }
 
     #[test]
