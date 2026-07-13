@@ -331,6 +331,7 @@ pub struct RoutingContext {
     pub prompt_length: usize,
     pub needs_tools: bool,
     pub needs_retrieval: bool,
+    pub needs_multi_model: bool,
     pub needs_vision: bool,
     pub user_policy_override: Option<OrchestrationPolicy>,
     pub model_candidates: Vec<ModelCandidate>,
@@ -363,6 +364,24 @@ impl RoutingContext {
                 "检索", "来源", "引用", "文档", "资料",
             ],
         );
+        let explicit_multi_model = contains_any(
+            prompt,
+            &[
+                "fugu",
+                "multi-model",
+                "multi model",
+                "multiple models",
+                "ensemble",
+                "orchestration",
+                "agent team",
+                "协同",
+                "协作",
+                "多模型",
+                "多个模型",
+                "多智能体",
+                "模型团队",
+            ],
+        );
         Self {
             task_class: task_class.clone(),
             prompt_length: prompt.chars().count(),
@@ -377,11 +396,12 @@ impl RoutingContext {
                         ],
                     )),
             needs_retrieval: !capability_question
-                && (matches!(task_class, TaskClass::Research | TaskClass::Retrieval)
+                && (matches!(task_class, TaskClass::Retrieval)
                     || explicit_retrieval
                     || (workspace_reference
-                        && matches!(task_class, TaskClass::Coding))
+                        && matches!(task_class, TaskClass::Coding | TaskClass::Research))
                     || (matches!(task_class, TaskClass::Coding) && coding_action)),
+            needs_multi_model: !capability_question && explicit_multi_model,
             needs_vision: !capability_question
                 && (matches!(task_class, TaskClass::Computer)
                     || contains_any(
@@ -475,6 +495,11 @@ fn is_lightweight_direct(context: &RoutingContext) -> bool {
         && !context.needs_vision
 }
 
+fn requires_ultra(context: &RoutingContext) -> bool {
+    matches!(context.task_class, TaskClass::Research)
+        && (context.needs_multi_model || context.prompt_length >= 600)
+}
+
 impl RuleBasedRouter {
     pub fn route(&self, context: &RoutingContext) -> RoutingDecision {
         if let Some(policy) = context
@@ -506,9 +531,13 @@ impl RuleBasedRouter {
                 OrchestrationPolicy::PlanExecuteReview,
                 "retrieval tasks need grounded synthesis and review",
             ),
-            TaskClass::Research => (
+            TaskClass::Research if requires_ultra(context) => (
                 OrchestrationPolicy::BestOfN { candidates: 3 },
-                "research tasks benefit from multiple candidate approaches",
+                "explicit multi-model or long research request needs adaptive collaboration",
+            ),
+            TaskClass::Research => (
+                OrchestrationPolicy::PlanExecuteReview,
+                "ordinary research needs one planned execution path",
             ),
             TaskClass::General if is_lightweight_direct(context) => {
                 (OrchestrationPolicy::Single, "short general prompt can run directly")
@@ -533,10 +562,10 @@ impl RuleBasedRouter {
         reason: &str,
     ) -> RoutingDecision {
         let model = select_model(context, !matches!(policy, OrchestrationPolicy::Single));
-        let retrieval_mode = if context.needs_retrieval {
-            "four_way_parallel".to_string()
-        } else {
-            "none".to_string()
+        let retrieval_mode = match (&context.task_class, context.needs_retrieval) {
+            (_, false) => "none".to_string(),
+            (TaskClass::Coding, true) => "semantic_literal_parallel".to_string(),
+            (_, true) => "four_way_parallel".to_string(),
         };
         let verifier_role = if matches!(
             policy,
@@ -552,6 +581,10 @@ impl RuleBasedRouter {
         metadata.insert(
             "needs_retrieval".to_string(),
             context.needs_retrieval.to_string(),
+        );
+        metadata.insert(
+            "needs_multi_model".to_string(),
+            context.needs_multi_model.to_string(),
         );
         metadata.insert("needs_vision".to_string(), context.needs_vision.to_string());
 
@@ -630,12 +663,15 @@ impl LearnedModelRouter {
         {
             return self.fallback.route(context);
         }
-        if is_lightweight_direct(context) {
+        if is_lightweight_direct(context) || requires_ultra(context) {
             return self.fallback.route(context);
         }
         let Some(route) = self.routes.get(&context.task_class) else {
             return self.fallback.route(context);
         };
+        if matches!(route.policy, OrchestrationPolicy::BestOfN { .. }) {
+            return self.fallback.route(context);
+        }
         let mut decision = self
             .fallback
             .decision(context, route.policy.clone(), "learned from successful local traces");
@@ -1117,7 +1153,7 @@ mod tests {
         let decision = RuleBasedRouter.route(&context);
 
         assert_eq!(context.task_class, TaskClass::Research);
-        assert!(context.needs_retrieval);
+        assert!(context.needs_multi_model);
         assert_eq!(
             decision.policy,
             OrchestrationPolicy::BestOfN { candidates: 3 }
@@ -1133,10 +1169,22 @@ mod tests {
         let decision = RuleBasedRouter.route(&context);
 
         assert_eq!(context.task_class, TaskClass::Research);
+        assert!(context.needs_multi_model);
         assert_eq!(
             decision.policy,
             OrchestrationPolicy::BestOfN { candidates: 3 }
         );
+    }
+
+    #[test]
+    fn ordinary_research_uses_one_planned_execution_path() {
+        let context = RoutingContext::from_prompt("比较两个产品路线的优缺点", candidates());
+        let decision = RuleBasedRouter.route(&context);
+
+        assert_eq!(context.task_class, TaskClass::Research);
+        assert!(!context.needs_multi_model);
+        assert!(!context.needs_retrieval);
+        assert_eq!(decision.policy, OrchestrationPolicy::PlanExecuteReview);
     }
 
     #[test]
@@ -1148,6 +1196,7 @@ mod tests {
         assert!(context.needs_tools);
         assert!(context.needs_retrieval);
         assert_eq!(decision.policy, OrchestrationPolicy::PlanExecuteReview);
+        assert_eq!(decision.retrieval_mode, "semantic_literal_parallel");
     }
 
     #[test]
@@ -1189,7 +1238,7 @@ mod tests {
         let telemetry = vec![
             RoutingTelemetry {
                 task_class: TaskClass::Research,
-                selected_policy: OrchestrationPolicy::BestOfN { candidates: 3 },
+                selected_policy: OrchestrationPolicy::PlanExecuteReview,
                 selected_model: "strong-vision".to_string(),
                 latency_ms: 900,
                 outcome: RoutingOutcome::Succeeded,
@@ -1214,9 +1263,9 @@ mod tests {
         let context = RoutingContext::from_prompt("Research and compare local agent routers", candidates());
         let decision = router.route(&context);
 
-        assert_eq!(decision.policy, OrchestrationPolicy::BestOfN { candidates: 3 });
+        assert_eq!(decision.policy, OrchestrationPolicy::PlanExecuteReview);
         assert_eq!(decision.model, "strong-vision");
-        assert!(decision.explanation.contains("learned_policy=best_of_n"));
+        assert!(decision.explanation.contains("learned_policy=plan_execute_review"));
     }
 
     #[test]
@@ -1236,6 +1285,26 @@ mod tests {
         let decision = router.route(&context);
 
         assert_eq!(decision.policy, OrchestrationPolicy::Single);
+        assert!(!decision.explanation.contains("learned_policy"));
+    }
+
+    #[test]
+    fn learned_router_cannot_upgrade_ordinary_research_to_ultra() {
+        let router = LearnedModelRouter::train(&[RoutingTelemetry {
+            task_class: TaskClass::Research,
+            selected_policy: OrchestrationPolicy::BestOfN { candidates: 3 },
+            selected_model: "strong-vision".to_string(),
+            latency_ms: 30_000,
+            outcome: RoutingOutcome::Succeeded,
+            cost_proxy: 4_000,
+            tool_count: 0,
+            retrieval_count: 4,
+            user_override: false,
+        }]);
+        let context = RoutingContext::from_prompt("比较两个产品路线的优缺点", candidates());
+        let decision = router.route(&context);
+
+        assert_eq!(decision.policy, OrchestrationPolicy::PlanExecuteReview);
         assert!(!decision.explanation.contains("learned_policy"));
     }
 

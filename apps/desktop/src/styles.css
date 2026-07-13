@@ -2832,6 +2832,53 @@ textarea::placeholder {
   font-size: 10px;
 }
 
+.settings-saved-toast {
+  position: fixed;
+  z-index: 80;
+  left: 50%;
+  bottom: 24px;
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 11px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+  font-size: 11px;
+  font-weight: 650;
+  pointer-events: none;
+  transform: translateX(-50%);
+  animation: settings-saved-toast-in 160ms var(--ease-out-quart);
+}
+
+.settings-saved-toast svg {
+  width: 15px;
+  height: 15px;
+  color: #2f9e64;
+  stroke-width: 2.25;
+}
+
+@keyframes settings-saved-toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 5px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-saved-toast {
+    animation: none;
+  }
+}
+
 .settings-toolbar {
   display: flex;
   min-height: 30px;
