@@ -2214,7 +2214,16 @@ textarea::placeholder {
 }
 
 .composer-primary-button.stop:hover {
-  background: #f3f3f3;
+  color: #ffffff;
+  background: #e05b5b;
+  border-color: #e05b5b;
+  filter: none;
+}
+
+.composer-primary-button.stop:hover .composer-working-ring,
+.composer-primary-button.stop:hover .composer-stop-square {
+  color: #ffffff;
+  stroke: #ffffff;
 }
 
 .composer-stop-icon {

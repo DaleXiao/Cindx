@@ -480,7 +480,9 @@ assert(
     composerSource.includes('className="composer-toolbar-actions"') &&
     styles.includes("width: 38px;") &&
     styles.includes("height: 38px;") &&
-    styles.includes("border-radius: 50%;"),
+    styles.includes("border-radius: 50%;") &&
+    /\.composer-primary-button\.stop:hover \{[\s\S]*?background: #e05b5b;[\s\S]*?filter: none;/.test(styles) &&
+    styles.includes('.composer-primary-button.stop:hover .composer-working-ring'),
   "Composer controls must share a bottom toolbar with a circular primary action"
 );
 assert(sidebarSource.includes("session-branch"), "Sessions must be nested below the active project");
