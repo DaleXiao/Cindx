@@ -276,7 +276,7 @@ pub fn adaptive_worker_prompt(
         _ => "Produce concrete work for the assigned subtask and report evidence and uncertainty.",
     };
     let mut prompt = format!(
-        "You are isolated {} {} in a Cindx adaptive multi-model workflow. {} Complete only the assigned subtask. Do not assume you can see other agents unless their output is explicitly included below. Return concrete findings for a later agent, not a user-facing answer.\n\nUser request:\n{}\n\nAssigned subtask:\n{}\n\nShared memory from earlier user turns:\n{}",
+        "You are isolated {} {} in a Cindx adaptive multi-model workflow. {} Complete only the assigned subtask. Do not assume you can see other agents unless their output is explicitly included below. Use exposed read-only evidence tools when the subtask depends on workspace facts. Return concrete findings for a later agent, not a user-facing answer.\n\nUser request:\n{}\n\nAssigned subtask:\n{}\n\nShared memory from earlier user turns:\n{}",
         step.role,
         step.id,
         role_instruction,
