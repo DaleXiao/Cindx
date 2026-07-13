@@ -1,4 +1,5 @@
 use agent_core::{Metadata, ModelRole};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +133,7 @@ pub fn default_plan(policy: OrchestrationPolicy) -> OrchestrationPlan {
 
 pub const MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 5;
 pub const MAX_ADAPTIVE_WORKFLOW_AGENTS: usize = 3;
+pub const WORKFLOW_IR_SCHEMA: &str = "cindx.workflow.v1";
 
 pub fn adaptive_workflow_step_budget(agent_budget: usize) -> usize {
     match agent_budget.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS) {
@@ -153,6 +155,148 @@ pub struct AdaptiveWorkflowStep {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdaptiveWorkflow {
     pub steps: Vec<AdaptiveWorkflowStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowToolPolicy {
+    None,
+    ReadOnlyEvidence,
+}
+
+impl WorkflowToolPolicy {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ReadOnlyEvidence => "read_only_evidence",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowBudget {
+    pub max_steps: usize,
+    pub max_models: usize,
+    pub max_model_turns_per_step: usize,
+    pub max_tool_calls_per_step: usize,
+    pub max_output_tokens_per_step: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowPlanStep {
+    pub id: String,
+    pub role: String,
+    pub model: String,
+    pub subtask: String,
+    pub access: Vec<String>,
+    pub tool_policy: WorkflowToolPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowPlanIr {
+    pub schema: String,
+    pub workflow_id: String,
+    pub objective: String,
+    pub effort: String,
+    pub policy: String,
+    pub coordinator_model: String,
+    pub steps: Vec<WorkflowPlanStep>,
+    pub budget: WorkflowBudget,
+}
+
+impl WorkflowPlanIr {
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_adaptive(
+        workflow_id: impl Into<String>,
+        objective: impl Into<String>,
+        effort: impl Into<String>,
+        policy: impl Into<String>,
+        coordinator_model: impl Into<String>,
+        workflow: &AdaptiveWorkflow,
+        budget: WorkflowBudget,
+    ) -> Self {
+        Self {
+            schema: WORKFLOW_IR_SCHEMA.to_string(),
+            workflow_id: workflow_id.into(),
+            objective: objective.into(),
+            effort: effort.into(),
+            policy: policy.into(),
+            coordinator_model: coordinator_model.into(),
+            steps: workflow.steps.iter().map(|step| WorkflowPlanStep {
+                id: step.id.clone(),
+                role: step.role.clone(),
+                model: step.model.clone(),
+                subtask: step.subtask.clone(),
+                access: step.access.clone(),
+                tool_policy: WorkflowToolPolicy::ReadOnlyEvidence,
+            }).collect(),
+            budget,
+        }
+    }
+
+    pub fn adaptive_workflow(&self) -> AdaptiveWorkflow {
+        AdaptiveWorkflow {
+            steps: self.steps.iter().map(|step| AdaptiveWorkflowStep {
+                id: step.id.clone(),
+                role: step.role.clone(),
+                model: step.model.clone(),
+                subtask: step.subtask.clone(),
+                access: step.access.clone(),
+            }).collect(),
+        }
+    }
+
+    pub fn validate(&self, allowed_models: &[String]) -> Result<(), String> {
+        if self.schema != WORKFLOW_IR_SCHEMA {
+            return Err(format!("unsupported workflow schema: {}", self.schema));
+        }
+        if self.workflow_id.trim().is_empty() {
+            return Err("workflow id is empty".to_string());
+        }
+        if self.objective.trim().is_empty() {
+            return Err("workflow objective is empty".to_string());
+        }
+        if self.effort.trim().is_empty()
+            || self.policy.trim().is_empty()
+            || self.coordinator_model.trim().is_empty()
+        {
+            return Err("workflow routing metadata is incomplete".to_string());
+        }
+        if self.budget.max_steps == 0
+            || self.budget.max_steps > MAX_ADAPTIVE_WORKFLOW_STEPS
+            || self.budget.max_models == 0
+            || self.budget.max_models > MAX_ADAPTIVE_WORKFLOW_AGENTS
+            || self.budget.max_model_turns_per_step == 0
+            || self.budget.max_output_tokens_per_step == 0
+        {
+            return Err("workflow budget is invalid".to_string());
+        }
+        if self.steps.len() > self.budget.max_steps {
+            return Err("workflow exceeds its declared step budget".to_string());
+        }
+        let selected_models = self.steps.iter().map(|step| step.model.as_str()).collect::<BTreeSet<_>>();
+        if selected_models.len() > self.budget.max_models {
+            return Err("workflow exceeds its declared model budget".to_string());
+        }
+        if self.steps.iter().any(|step| {
+            step.tool_policy == WorkflowToolPolicy::ReadOnlyEvidence
+                && self.budget.max_tool_calls_per_step == 0
+        }) {
+            return Err("workflow enables evidence tools with a zero tool budget".to_string());
+        }
+        validate_adaptive_workflow(&self.adaptive_workflow(), allowed_models)
+    }
+
+    pub fn to_json(&self) -> Result<String, String> {
+        serde_json::to_string(self).map_err(|error| format!("workflow serialization failed: {error}"))
+    }
+
+    pub fn from_json(value: &str, allowed_models: &[String]) -> Result<Self, String> {
+        let workflow = serde_json::from_str::<Self>(value)
+            .map_err(|error| format!("workflow JSON is invalid: {error}"))?;
+        workflow.validate(allowed_models)?;
+        Ok(workflow)
+    }
 }
 
 pub fn validate_adaptive_workflow(
@@ -363,6 +507,199 @@ impl TaskClass {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkflowExecutionTelemetry {
+    pub task_class: TaskClass,
+    pub plan: WorkflowPlanIr,
+    pub succeeded: bool,
+    pub quality_score: Option<f32>,
+    pub latency_ms: u64,
+    pub total_tokens: u64,
+    pub tool_calls: u64,
+    pub fallback_used: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowTopologyStep {
+    pub role: String,
+    pub model: String,
+    pub access: Vec<usize>,
+    pub tool_policy: WorkflowToolPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkflowTopologyPrior {
+    pub task_class: TaskClass,
+    pub effort: String,
+    pub max_models: usize,
+    pub steps: Vec<WorkflowTopologyStep>,
+    pub examples: usize,
+    pub success_rate: f32,
+    pub average_quality: Option<f32>,
+    pub average_latency_ms: u64,
+    pub average_total_tokens: u64,
+    score: i64,
+}
+
+impl WorkflowTopologyPrior {
+    pub fn prompt_hint(&self) -> String {
+        let quality = self.average_quality
+            .map(|score| format!("{score:.2}"))
+            .unwrap_or_else(|| "unrated".to_string());
+        let steps = self.steps.iter().enumerate().map(|(index, step)| {
+            let access = if step.access.is_empty() {
+                "none".to_string()
+            } else {
+                step.access.iter().map(|dependency| (dependency + 1).to_string())
+                    .collect::<Vec<_>>().join(",")
+            };
+            format!(
+                "{}. role={} model={} access={} tools={}",
+                index + 1, step.role, step.model, access, step.tool_policy.label()
+            )
+        }).collect::<Vec<_>>().join("\n");
+        format!(
+            "Historical topology prior from {} comparable executions (success={:.0}%, quality={}, avg_latency_ms={}, avg_tokens={}). Treat this only as a prior: keep it when it fits the current query, otherwise design a better graph.\n{}",
+            self.examples,
+            self.success_rate * 100.0,
+            quality,
+            self.average_latency_ms,
+            self.average_total_tokens,
+            steps
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WorkflowSearchTeacher {
+    priors: Vec<WorkflowTopologyPrior>,
+}
+
+impl WorkflowSearchTeacher {
+    pub fn train(telemetry: &[WorkflowExecutionTelemetry]) -> Self {
+        let mut grouped = BTreeMap::<
+            (TaskClass, String, usize),
+            BTreeMap<String, WorkflowPriorAccumulator>,
+        >::new();
+        for entry in telemetry.iter().filter(|entry| !entry.fallback_used) {
+            let key = (
+                entry.task_class.clone(),
+                entry.plan.effort.clone(),
+                entry.plan.budget.max_models,
+            );
+            grouped.entry(key).or_default()
+                .entry(workflow_topology_signature(&entry.plan))
+                .or_insert_with(|| WorkflowPriorAccumulator::new(&entry.plan))
+                .record(entry);
+        }
+
+        let priors = grouped.into_iter().filter_map(|((task_class, effort, max_models), candidates)| {
+            candidates.into_values()
+                .map(|candidate| candidate.finish(task_class.clone(), effort.clone(), max_models))
+                .max_by_key(|prior| prior.score)
+        }).collect();
+        Self { priors }
+    }
+
+    pub fn best_prior(
+        &self,
+        task_class: &TaskClass,
+        effort: &str,
+        allowed_models: &[String],
+        max_models: usize,
+    ) -> Option<&WorkflowTopologyPrior> {
+        let allowed = allowed_models.iter().map(String::as_str).collect::<BTreeSet<_>>();
+        self.priors.iter().filter(|prior| {
+            &prior.task_class == task_class
+                && prior.effort == effort
+                && prior.max_models <= max_models
+                && prior.examples >= 2
+                && prior.success_rate >= 0.6
+                && prior.steps.iter().all(|step| allowed.contains(step.model.as_str()))
+        }).max_by_key(|prior| prior.score)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WorkflowPriorAccumulator {
+    plan: WorkflowPlanIr,
+    examples: usize,
+    successes: usize,
+    quality_total: f32,
+    quality_examples: usize,
+    latency_ms: u64,
+    total_tokens: u64,
+    tool_calls: u64,
+}
+
+impl WorkflowPriorAccumulator {
+    fn new(plan: &WorkflowPlanIr) -> Self {
+        Self {
+            plan: plan.clone(), examples: 0, successes: 0, quality_total: 0.0,
+            quality_examples: 0, latency_ms: 0, total_tokens: 0, tool_calls: 0,
+        }
+    }
+
+    fn record(&mut self, telemetry: &WorkflowExecutionTelemetry) {
+        self.examples += 1;
+        self.successes += usize::from(telemetry.succeeded);
+        if let Some(score) = telemetry.quality_score {
+            self.quality_total += score.clamp(0.0, 1.0);
+            self.quality_examples += 1;
+        }
+        self.latency_ms = self.latency_ms.saturating_add(telemetry.latency_ms);
+        self.total_tokens = self.total_tokens.saturating_add(telemetry.total_tokens);
+        self.tool_calls = self.tool_calls.saturating_add(telemetry.tool_calls);
+    }
+
+    fn finish(self, task_class: TaskClass, effort: String, max_models: usize) -> WorkflowTopologyPrior {
+        let divisor = self.examples.max(1) as u64;
+        let success_rate = self.successes as f32 / self.examples.max(1) as f32;
+        let average_quality = (self.quality_examples > 0)
+            .then(|| self.quality_total / self.quality_examples as f32);
+        let average_latency_ms = self.latency_ms / divisor;
+        let average_total_tokens = self.total_tokens / divisor;
+        let quality = average_quality.unwrap_or(success_rate);
+        let score = (success_rate * 10_000.0) as i64
+            + (quality * 5_000.0) as i64
+            - average_latency_ms as i64 / 100
+            - average_total_tokens as i64 / 20
+            - (self.tool_calls as f32 / self.examples.max(1) as f32 * 25.0) as i64;
+        WorkflowTopologyPrior {
+            task_class, effort, max_models,
+            steps: normalized_topology_steps(&self.plan),
+            examples: self.examples, success_rate, average_quality,
+            average_latency_ms, average_total_tokens, score,
+        }
+    }
+}
+
+fn normalized_topology_steps(plan: &WorkflowPlanIr) -> Vec<WorkflowTopologyStep> {
+    let indexes = plan.steps.iter().enumerate()
+        .map(|(index, step)| (step.id.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    plan.steps.iter().map(|step| WorkflowTopologyStep {
+        role: step.role.clone(),
+        model: step.model.clone(),
+        access: step.access.iter()
+            .filter_map(|dependency| indexes.get(dependency.as_str()).copied())
+            .collect(),
+        tool_policy: step.tool_policy.clone(),
+    }).collect()
+}
+
+fn workflow_topology_signature(plan: &WorkflowPlanIr) -> String {
+    normalized_topology_steps(plan).into_iter().map(|step| {
+        format!(
+            "{}:{}:[{}]:{}",
+            step.role,
+            step.model,
+            step.access.iter().map(usize::to_string).collect::<Vec<_>>().join(","),
+            step.tool_policy.label()
+        )
+    }).collect::<Vec<_>>().join("|")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelCandidate {
     pub name: String,
@@ -568,6 +905,22 @@ impl RoutingContext {
             model_candidates,
         }
     }
+
+    pub fn learning_signature(&self) -> String {
+        format!(
+            "{}:tools={}:retrieval={}:vision={}:high_stakes={}:complexity={}:steps={}:parallel={}:verify={}:latency={}",
+            self.task_class.label(),
+            u8::from(self.needs_tools),
+            u8::from(self.needs_retrieval),
+            u8::from(self.needs_vision),
+            u8::from(self.high_stakes),
+            (self.complexity_score / 2).min(3),
+            self.estimated_steps.min(5),
+            u8::from(self.parallelizable),
+            u8::from(self.verification_required),
+            u8::from(self.latency_sensitive),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -604,6 +957,7 @@ impl RoutingOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutingTelemetry {
     pub task_class: TaskClass,
+    pub context_signature: String,
     pub selected_policy: OrchestrationPolicy,
     pub selected_model: String,
     pub latency_ms: u64,
@@ -920,13 +1274,13 @@ impl RuleBasedRouter {
 
 #[derive(Debug, Clone)]
 pub struct LearnedModelRouter {
-    routes: BTreeMap<TaskClass, LearnedRoute>,
+    routes: BTreeMap<String, LearnedRoute>,
     fallback: RuleBasedRouter,
 }
 
 impl LearnedModelRouter {
     pub fn train(telemetry: &[RoutingTelemetry]) -> Self {
-        let mut grouped: BTreeMap<TaskClass, BTreeMap<(String, String), RouteAccumulator>> =
+        let mut grouped: BTreeMap<String, BTreeMap<(String, String), RouteAccumulator>> =
             BTreeMap::new();
         for entry in telemetry.iter().filter(|entry| !entry.user_override) {
             let key = (
@@ -934,7 +1288,11 @@ impl LearnedModelRouter {
                 entry.selected_model.clone(),
             );
             grouped
-                .entry(entry.task_class.clone())
+                .entry(if entry.context_signature.trim().is_empty() {
+                    entry.task_class.label().to_string()
+                } else {
+                    entry.context_signature.clone()
+                })
                 .or_default()
                 .entry(key)
                 .or_default()
@@ -942,16 +1300,16 @@ impl LearnedModelRouter {
         }
 
         let mut routes = BTreeMap::new();
-        for (task_class, candidates) in grouped {
+        for (context_signature, candidates) in grouped {
             if let Some(((policy_label, model), accumulator)) = candidates
                 .into_iter()
                 .max_by(|(_, left), (_, right)| left.score().cmp(&right.score()))
             {
                 if let Some(policy) = parse_policy(&policy_label) {
                     routes.insert(
-                        task_class.clone(),
+                        context_signature,
                         LearnedRoute {
-                            task_class,
+                            task_class: accumulator.task_class.clone().unwrap_or(TaskClass::General),
                             policy,
                             model,
                             examples: accumulator.examples,
@@ -982,10 +1340,14 @@ impl LearnedModelRouter {
         if is_lightweight_direct(context) || requires_ultra(context) {
             return baseline;
         }
-        let Some(route) = self.routes.get(&context.task_class) else {
+        let Some(route) = self
+            .routes
+            .get(&context.learning_signature())
+            .or_else(|| self.routes.get(context.task_class.label()))
+        else {
             return baseline;
         };
-        if route.policy.label() != baseline.policy.label()
+        if !learned_policy_allowed(context, &route.policy)
             || !context
                 .model_candidates
                 .iter()
@@ -993,10 +1355,14 @@ impl LearnedModelRouter {
         {
             return baseline;
         }
-        let mut decision = baseline;
+        let mut decision = self.fallback.decision(
+            context,
+            route.policy.clone(),
+            "historical executions selected a better policy and model for this context",
+        );
         decision.model = route.model.clone();
         decision.explanation = format!(
-            "class={} policy={} learned_model={} examples={} success_rate={:.2}",
+            "class={} learned_policy={} learned_model={} examples={} success_rate={:.2}",
             context.task_class.label(),
             route.policy.label(),
             route.model,
@@ -1005,7 +1371,7 @@ impl LearnedModelRouter {
         );
         decision
             .metadata
-            .insert("router".to_string(), "learned_model_v2".to_string());
+            .insert("router".to_string(), "learned_conductor_v1".to_string());
         decision
             .metadata
             .insert("learned_examples".to_string(), route.examples.to_string());
@@ -1017,12 +1383,22 @@ impl LearnedModelRouter {
     }
 
     pub fn learned_route(&self, task_class: &TaskClass) -> Option<&LearnedRoute> {
-        self.routes.get(task_class)
+        self.routes
+            .values()
+            .filter(|route| &route.task_class == task_class)
+            .max_by_key(|route| route.examples)
+    }
+
+    pub fn learned_route_for_context(&self, context: &RoutingContext) -> Option<&LearnedRoute> {
+        self.routes
+            .get(&context.learning_signature())
+            .or_else(|| self.routes.get(context.task_class.label()))
     }
 }
 
 #[derive(Debug, Clone, Default)]
 struct RouteAccumulator {
+    task_class: Option<TaskClass>,
     examples: usize,
     successes: usize,
     latency_ms: u64,
@@ -1031,6 +1407,7 @@ struct RouteAccumulator {
 
 impl RouteAccumulator {
     fn record(&mut self, telemetry: &RoutingTelemetry) {
+        self.task_class = Some(telemetry.task_class.clone());
         self.examples += 1;
         if telemetry.outcome.is_success() {
             self.successes += 1;
@@ -1067,6 +1444,29 @@ impl RouteAccumulator {
         (self.successes as i64 * 10_000)
             - (self.average_cost_proxy() as i64)
             - (self.average_latency_ms() as i64 / 100)
+    }
+}
+
+fn learned_policy_allowed(context: &RoutingContext, policy: &OrchestrationPolicy) -> bool {
+    if is_lightweight_direct(context) {
+        return *policy == OrchestrationPolicy::Single;
+    }
+    if requires_ultra(context) {
+        return matches!(policy, OrchestrationPolicy::BestOfN { .. });
+    }
+    match policy {
+        OrchestrationPolicy::Single => {
+            !context.needs_tools
+                && !context.needs_retrieval
+                && !context.needs_vision
+                && !context.high_stakes
+                && !context.verification_required
+        }
+        OrchestrationPolicy::BestOfN { .. } => {
+            !context.latency_sensitive && context.parallelizable && context.complexity_score >= 3
+        }
+        OrchestrationPolicy::PlanExecuteReview => true,
+        OrchestrationPolicy::AutoRouter => false,
     }
 }
 
@@ -1413,6 +1813,135 @@ mod tests {
                 latency_tier: 3,
             },
         ]
+    }
+
+    fn workflow_plan(workflow_id: &str, with_verifier: bool) -> WorkflowPlanIr {
+        let mut steps = vec![
+            AdaptiveWorkflowStep {
+                id: "approach_a".to_string(),
+                role: "thinker".to_string(),
+                model: "planner".to_string(),
+                subtask: "develop the primary approach".to_string(),
+                access: Vec::new(),
+            },
+            AdaptiveWorkflowStep {
+                id: "approach_b".to_string(),
+                role: "worker".to_string(),
+                model: "reviewer".to_string(),
+                subtask: "develop an independent alternative".to_string(),
+                access: Vec::new(),
+            },
+        ];
+        if with_verifier {
+            steps.push(AdaptiveWorkflowStep {
+                id: "verify".to_string(),
+                role: "verifier".to_string(),
+                model: "reviewer".to_string(),
+                subtask: "cross-check both approaches".to_string(),
+                access: vec!["approach_a".to_string(), "approach_b".to_string()],
+            });
+        }
+        steps.push(AdaptiveWorkflowStep {
+            id: "synthesize".to_string(),
+            role: "synthesizer".to_string(),
+            model: "planner".to_string(),
+            subtask: "produce one execution brief".to_string(),
+            access: if with_verifier {
+                vec!["approach_a".to_string(), "approach_b".to_string(), "verify".to_string()]
+            } else {
+                vec!["approach_a".to_string(), "approach_b".to_string()]
+            },
+        });
+        WorkflowPlanIr::from_adaptive(
+            workflow_id,
+            "Compare two implementation strategies",
+            "pro",
+            "best_of_n",
+            "planner",
+            &AdaptiveWorkflow { steps },
+            WorkflowBudget {
+                max_steps: 5,
+                max_models: 2,
+                max_model_turns_per_step: 5,
+                max_tool_calls_per_step: 6,
+                max_output_tokens_per_step: 4_096,
+            },
+        )
+    }
+
+    #[test]
+    fn workflow_ir_round_trips_and_enforces_declared_budgets() {
+        let allowed_models = vec!["planner".to_string(), "reviewer".to_string()];
+        let plan = workflow_plan("workflow-1", false);
+        plan.validate(&allowed_models).expect("workflow should be valid");
+
+        let json = plan.to_json().expect("workflow should serialize");
+        assert_eq!(WorkflowPlanIr::from_json(&json, &allowed_models).unwrap(), plan);
+
+        let mut invalid = plan;
+        invalid.budget.max_steps = 2;
+        assert_eq!(
+            invalid.validate(&allowed_models),
+            Err("workflow exceeds its declared step budget".to_string())
+        );
+    }
+
+    #[test]
+    fn search_teacher_prefers_reliable_efficient_topology() {
+        let allowed_models = vec!["planner".to_string(), "reviewer".to_string()];
+        let fast_plan = workflow_plan("fast-1", false);
+        let slow_plan = workflow_plan("slow-1", true);
+        let telemetry = vec![
+            WorkflowExecutionTelemetry {
+                task_class: TaskClass::Research,
+                plan: fast_plan.clone(),
+                succeeded: true,
+                quality_score: Some(0.92),
+                latency_ms: 4_000,
+                total_tokens: 4_000,
+                tool_calls: 2,
+                fallback_used: false,
+            },
+            WorkflowExecutionTelemetry {
+                task_class: TaskClass::Research,
+                plan: fast_plan,
+                succeeded: true,
+                quality_score: Some(0.88),
+                latency_ms: 5_000,
+                total_tokens: 5_000,
+                tool_calls: 2,
+                fallback_used: false,
+            },
+            WorkflowExecutionTelemetry {
+                task_class: TaskClass::Research,
+                plan: slow_plan.clone(),
+                succeeded: false,
+                quality_score: Some(0.30),
+                latency_ms: 80_000,
+                total_tokens: 20_000,
+                tool_calls: 8,
+                fallback_used: false,
+            },
+            WorkflowExecutionTelemetry {
+                task_class: TaskClass::Research,
+                plan: slow_plan,
+                succeeded: true,
+                quality_score: Some(0.45),
+                latency_ms: 70_000,
+                total_tokens: 18_000,
+                tool_calls: 7,
+                fallback_used: false,
+            },
+        ];
+
+        let teacher = WorkflowSearchTeacher::train(&telemetry);
+        let prior = teacher
+            .best_prior(&TaskClass::Research, "pro", &allowed_models, 2)
+            .expect("a stable prior should be available");
+        assert_eq!(prior.steps.len(), 3);
+        assert_eq!(prior.examples, 2);
+        assert_eq!(prior.success_rate, 1.0);
+        assert!(prior.prompt_hint().contains("Treat this only as a prior"));
     }
 
     #[test]
@@ -1813,9 +2342,15 @@ mod tests {
 
     #[test]
     fn learned_router_uses_successful_trace_table() {
+        let context = RoutingContext::from_prompt(
+            "Research and compare local agent routers",
+            candidates(),
+        );
+        let context_signature = context.learning_signature();
         let telemetry = vec![
             RoutingTelemetry {
                 task_class: TaskClass::Research,
+                context_signature: context_signature.clone(),
                 selected_policy: OrchestrationPolicy::PlanExecuteReview,
                 selected_model: "strong-vision".to_string(),
                 latency_ms: 900,
@@ -1827,6 +2362,7 @@ mod tests {
             },
             RoutingTelemetry {
                 task_class: TaskClass::Research,
+                context_signature,
                 selected_policy: OrchestrationPolicy::Single,
                 selected_model: "fast-mini".to_string(),
                 latency_ms: 200,
@@ -1838,7 +2374,6 @@ mod tests {
             },
         ];
         let router = LearnedModelRouter::train(&telemetry);
-        let context = RoutingContext::from_prompt("Research and compare local agent routers", candidates());
         let decision = router.route(&context);
 
         assert_eq!(decision.policy, OrchestrationPolicy::PlanExecuteReview);
@@ -1847,8 +2382,32 @@ mod tests {
         assert!(decision.explanation.contains("learned_model=strong-vision"));
         assert_eq!(
             decision.metadata.get("router").map(String::as_str),
-            Some("learned_model_v2")
+            Some("learned_conductor_v1")
         );
+    }
+
+    #[test]
+    fn learned_router_can_downshift_a_matching_context_without_tools() {
+        let prompt = "Discuss this topic clearly and summarize the important distinctions. ".repeat(10);
+        let context = RoutingContext::from_prompt(&prompt, candidates());
+        assert_eq!(RuleBasedRouter.route(&context).policy, OrchestrationPolicy::PlanExecuteReview);
+        let telemetry = (0..3).map(|_| RoutingTelemetry {
+            task_class: TaskClass::General,
+            context_signature: context.learning_signature(),
+            selected_policy: OrchestrationPolicy::Single,
+            selected_model: "fast-mini".to_string(),
+            latency_ms: 250,
+            outcome: RoutingOutcome::Succeeded,
+            cost_proxy: 80,
+            tool_count: 0,
+            retrieval_count: 0,
+            user_override: false,
+        }).collect::<Vec<_>>();
+
+        let decision = LearnedModelRouter::train(&telemetry).route(&context);
+        assert_eq!(decision.policy, OrchestrationPolicy::Single);
+        assert_eq!(decision.model, "fast-mini");
+        assert!(decision.explanation.contains("learned_policy=single"));
     }
 
     #[test]
@@ -1908,8 +2467,10 @@ mod tests {
 
     #[test]
     fn learned_router_cannot_upgrade_a_lightweight_coding_question() {
+        let context = RoutingContext::from_prompt("解释一下 Rust 所有权代码", candidates());
         let router = LearnedModelRouter::train(&[RoutingTelemetry {
             task_class: TaskClass::Coding,
+            context_signature: context.learning_signature(),
             selected_policy: OrchestrationPolicy::PlanExecuteReview,
             selected_model: "strong-vision".to_string(),
             latency_ms: 10_000,
@@ -1919,7 +2480,6 @@ mod tests {
             retrieval_count: 4,
             user_override: false,
         }]);
-        let context = RoutingContext::from_prompt("解释一下 Rust 所有权代码", candidates());
         let decision = router.route(&context);
 
         assert_eq!(decision.policy, OrchestrationPolicy::Single);
@@ -1928,8 +2488,10 @@ mod tests {
 
     #[test]
     fn learned_router_cannot_upgrade_ordinary_research_to_ultra() {
+        let context = RoutingContext::from_prompt("比较两个产品路线的优缺点", candidates());
         let router = LearnedModelRouter::train(&[RoutingTelemetry {
             task_class: TaskClass::Research,
+            context_signature: context.learning_signature(),
             selected_policy: OrchestrationPolicy::BestOfN { candidates: 3 },
             selected_model: "strong-vision".to_string(),
             latency_ms: 30_000,
@@ -1939,7 +2501,6 @@ mod tests {
             retrieval_count: 4,
             user_override: false,
         }]);
-        let context = RoutingContext::from_prompt("比较两个产品路线的优缺点", candidates());
         let decision = router.route(&context);
 
         assert_eq!(decision.policy, OrchestrationPolicy::PlanExecuteReview);
@@ -1999,6 +2560,7 @@ mod tests {
         let telemetry = vec![
             RoutingTelemetry {
                 task_class: TaskClass::Coding,
+                context_signature: "coding".to_string(),
                 selected_policy: OrchestrationPolicy::Single,
                 selected_model: "fast-mini".to_string(),
                 latency_ms: 100,
@@ -2010,6 +2572,7 @@ mod tests {
             },
             RoutingTelemetry {
                 task_class: TaskClass::Research,
+                context_signature: "research".to_string(),
                 selected_policy: OrchestrationPolicy::BestOfN { candidates: 2 },
                 selected_model: "strong-vision".to_string(),
                 latency_ms: 500,
