@@ -1990,8 +1990,8 @@ details[open] > summary .disclosure-triangle {
   flex-direction: column;
   overflow: hidden;
   background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: 16px;
+  border: 0.5px solid #dedede;
+  border-radius: 20px;
   box-shadow: 0 0 12px rgba(0, 0, 0, 0.055), 0 3px 8px rgba(0, 0, 0, 0.035);
 }
 
