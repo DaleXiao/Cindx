@@ -661,7 +661,10 @@ pre {
   border-radius: 7px;
 }
 
-.session-name {
+.session-item > .session-name {
+  display: block;
+  width: 100%;
+  min-width: 0;
   overflow: hidden;
   font-size: 12px;
   font-weight: 400;
@@ -735,6 +738,15 @@ pre {
   transform: translateY(-50%);
 }
 
+.session-more::before {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  content: "";
+  background: transparent;
+  border-radius: 7px;
+}
+
 .session-status {
   position: absolute;
   top: 50%;
@@ -784,10 +796,15 @@ pre {
 .session-more:hover,
 .session-more.active {
   color: var(--text);
+}
+
+.session-more:hover::before,
+.session-more.active::before {
   background: #dedede;
 }
 
 .session-more svg {
+  position: relative;
   width: 14px;
   height: 14px;
 }

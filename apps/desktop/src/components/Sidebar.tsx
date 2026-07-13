@@ -565,6 +565,7 @@ export function Sidebar({
                                   onClick={() => selectSessionResult(session.id)}
                                   type="button"
                                   disabled={busy}
+                                  title={session.name}
                                 >
                                   <span className="session-name">{session.name}</span>
                                 </button>
