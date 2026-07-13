@@ -1968,9 +1968,9 @@ details[open] > summary .disclosure-triangle {
 
 .composer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 6px;
   padding: 12px 18px;
   background: var(--surface);
 }
@@ -1984,18 +1984,30 @@ details[open] > summary .disclosure-triangle {
 }
 
 .composer-input-shell {
+  display: flex;
   min-width: 0;
+  min-height: 120px;
+  flex-direction: column;
   overflow: hidden;
   background: var(--surface);
   border: 1px solid var(--border-strong);
-  border-radius: 12px;
+  border-radius: 16px;
 }
 
-.composer-input-row {
-  display: grid;
-  min-width: 0;
-  grid-template-columns: 42px auto minmax(0, 1fr);
-  align-items: center;
+.composer-toolbar {
+  display: flex;
+  min-height: 44px;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: auto;
+  padding: 3px 8px 8px;
+}
+
+.composer-toolbar-actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .composer-file-input {
@@ -2004,14 +2016,13 @@ details[open] > summary .disclosure-triangle {
 
 .composer-attach-button {
   display: grid;
-  width: 32px;
-  height: 32px;
-  margin-left: 7px;
+  width: 34px;
+  height: 34px;
   padding: 0;
   color: #555555;
   background: transparent;
   border: 0;
-  border-radius: 8px;
+  border-radius: 50%;
   place-items: center;
 }
 
@@ -2030,27 +2041,45 @@ details[open] > summary .disclosure-triangle {
   animation: spin 0.9s linear infinite;
 }
 
-.composer-effort-select {
-  width: 94px;
-  height: 28px;
-  margin-right: 4px;
-  padding: 0 6px;
+.composer-effort-control {
+  position: relative;
+  width: 104px;
+  height: 34px;
+  overflow: hidden;
   color: #454545;
   background: #f3f3f3;
+  border-radius: 17px;
+}
+
+.composer-effort-select {
+  width: 100%;
+  height: 100%;
+  padding: 0 28px 0 12px;
+  appearance: none;
+  color: inherit;
+  background: transparent;
   border: 0;
-  border-radius: 8px;
-  outline: 0;
+  border-radius: inherit;
+  outline-offset: -2px;
   font-size: 10px;
   font-weight: 600;
 }
 
-.composer-effort-select:hover:not(:disabled),
-.composer-effort-select:focus-visible {
+.composer-effort-control > svg {
+  position: absolute;
+  top: 11px;
+  right: 10px;
+  width: 12px;
+  height: 12px;
+  pointer-events: none;
+}
+
+.composer-effort-control:hover {
   color: var(--text);
   background: #eaeaea;
 }
 
-.composer-effort-select:disabled {
+.composer-effort-control:has(.composer-effort-select:disabled) {
   opacity: 0.55;
 }
 
@@ -2111,11 +2140,11 @@ details[open] > summary .disclosure-triangle {
 .composer textarea {
   display: block;
   width: 100%;
-  height: 48px;
-  min-height: 48px;
+  height: 76px;
+  min-height: 76px;
   max-height: 180px;
-  padding: 13px 12px 13px 8px;
-  resize: vertical;
+  padding: 15px 14px 6px;
+  resize: none;
   background: var(--surface);
   border: 0;
   border-radius: 0;
@@ -2127,16 +2156,6 @@ details[open] > summary .disclosure-triangle {
 input::placeholder,
 textarea::placeholder {
   color: #9a9a9a;
-}
-
-.composer-actions {
-  display: flex;
-  min-width: 48px;
-  flex-direction: column;
-  align-items: stretch;
-  align-self: end;
-  height: 48px;
-  gap: 6px;
 }
 
 .send-button,
@@ -2160,11 +2179,11 @@ textarea::placeholder {
 }
 
 .composer-primary-button {
-  width: 48px;
-  height: 48px;
-  min-height: 48px;
+  width: 38px;
+  height: 38px;
+  min-height: 38px;
   padding: 0;
-  border-radius: 14px;
+  border-radius: 50%;
 }
 
 .composer-primary-button.stop {
