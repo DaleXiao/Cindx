@@ -433,11 +433,13 @@ export function Inspector({
           data-preview-open={Boolean(selectedOutput)}
         >
           <header>
-            <div>
+            <div className="inspector-output-heading">
               <File aria-hidden="true" />
               <h2>Outputs</h2>
+              {outputArtifacts.length > 0 && (
+                <span className="inspector-output-count">{outputArtifacts.length}</span>
+              )}
             </div>
-            {outputArtifacts.length > 0 && <span>{outputArtifacts.length}</span>}
           </header>
           {outputArtifacts.length === 0 ? (
             <div className="inspector-output-empty">
