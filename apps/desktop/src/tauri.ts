@@ -189,6 +189,7 @@ export type Phase3State = {
 export type ProviderConfigState = {
   baseUrl: string;
   model: string;
+  conductorModel: string;
   plannerModel: string;
   executorModel: string;
   reviewerModel: string;
@@ -204,6 +205,7 @@ export type ProviderConfigInput = {
   baseUrl: string;
   apiKey: string;
   model: string;
+  conductorModel: string;
   plannerModel: string;
   executorModel: string;
   reviewerModel: string;
@@ -549,6 +551,7 @@ let browserPhase4State: Phase4State = {
   provider: {
     baseUrl: "https://api.openai.com/v1",
     model: "gpt-4.1-mini",
+    conductorModel: "gpt-4.1-mini",
     plannerModel: "gpt-4.1-mini",
     executorModel: "gpt-4.1-mini",
     reviewerModel: "gpt-4.1-mini",
@@ -1434,6 +1437,7 @@ export async function saveProviderConfig(input: ProviderConfigInput): Promise<Ph
       provider: {
         baseUrl: input.baseUrl,
         model: input.model,
+        conductorModel: input.conductorModel || input.plannerModel || input.model,
         plannerModel: input.plannerModel || input.model,
         executorModel: input.executorModel || input.model,
         reviewerModel: input.reviewerModel || input.model,

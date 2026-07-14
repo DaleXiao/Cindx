@@ -143,6 +143,7 @@ function providerDraftFromState(provider: ProviderConfigState): ProviderConfigIn
     baseUrl: provider.baseUrl,
     apiKey: "",
     model: provider.model,
+    conductorModel: provider.conductorModel,
     plannerModel: provider.plannerModel,
     executorModel: provider.executorModel,
     reviewerModel: provider.reviewerModel,
@@ -660,6 +661,7 @@ export function App() {
     const configured = providerDraft
       ? [
           providerDraft.model,
+          providerDraft.conductorModel,
           providerDraft.plannerModel,
           providerDraft.executorModel,
           providerDraft.reviewerModel,
@@ -2178,6 +2180,7 @@ export function App() {
                       setProviderDraft({
                         ...providerDraft,
                         model,
+                        conductorModel: model,
                         plannerModel: model,
                         executorModel: model,
                         reviewerModel: model,
@@ -2187,6 +2190,14 @@ export function App() {
                     }
                   />
                   <div className="role-grid">
+                    <ModelSelect
+                      label="Conductor"
+                      value={providerDraft.conductorModel}
+                      options={providerModelOptions}
+                      onChange={(conductorModel) =>
+                        setProviderDraft({ ...providerDraft, conductorModel })
+                      }
+                    />
                     <ModelSelect
                       label="Planner"
                       value={providerDraft.plannerModel}
@@ -2231,7 +2242,7 @@ export function App() {
                   <dl className="settings-facts">
                     <div>
                       <dt>Team</dt>
-                      <dd>{collaborationModelCount} unique models across 4 roles</dd>
+                      <dd>{collaborationModelCount} unique models across 4 worker roles</dd>
                     </div>
                   </dl>
                   <button

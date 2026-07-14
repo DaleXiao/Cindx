@@ -39,11 +39,12 @@ use model_provider::{
 };
 use orchestrator::{
     adaptive_worker_prompt, adaptive_workflow_layers, adaptive_workflow_step_budget, default_plan,
-    parse_policy, role_label, step_prompt, validate_adaptive_workflow, AdaptiveWorkflow,
-    AdaptiveWorkflowStep, LearnedModelRouter, ModelCandidate, OrchestrationPolicy, RoutingContext,
-    RoutingDecision, RoutingOutcome, RoutingTelemetry, RuleBasedRouter, TaskClass, WorkflowBudget,
-    WorkflowExecutionTelemetry, WorkflowPlanIr, WorkflowSearchTeacher, WorkflowTopologyPrior,
-    MAX_ADAPTIVE_WORKFLOW_AGENTS, MAX_ADAPTIVE_WORKFLOW_STEPS, WORKFLOW_IR_SCHEMA,
+    parse_policy, role_label, step_prompt, ConductorHarness, ConductorRequest, ConductorRoleHints,
+    LearnedModelRouter, ModelCandidate, OrchestrationPolicy,
+    RoutingContext, RoutingDecision, RoutingOutcome, RoutingTelemetry, RuleBasedRouter, TaskClass,
+    WorkflowBudget, WorkflowExecutionTelemetry, WorkflowPlanIr, WorkflowSearchTeacher,
+    WorkflowTopologyPrior, CONDUCTOR_MAX_ATTEMPTS, MAX_ADAPTIVE_WORKFLOW_AGENTS,
+    MAX_ADAPTIVE_WORKFLOW_STEPS, WORKFLOW_IR_SCHEMA,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -186,6 +187,7 @@ struct ProviderConfig {
     base_url: String,
     api_key: String,
     model: String,
+    conductor_model: String,
     planner_model: String,
     executor_model: String,
     reviewer_model: String,
@@ -257,6 +259,7 @@ impl Default for ProviderConfig {
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: String::new(),
             model: model.clone(),
+            conductor_model: model.clone(),
             planner_model: model.clone(),
             executor_model: model.clone(),
             reviewer_model: model.clone(),
@@ -289,6 +292,14 @@ impl ProviderConfig {
             self.model.clone()
         } else {
             model.clone()
+        }
+    }
+
+    fn model_for_conductor(&self) -> String {
+        if self.conductor_model.trim().is_empty() {
+            self.model_for_role(&ModelRole::Planner)
+        } else {
+            self.conductor_model.clone()
         }
     }
 
@@ -720,6 +731,7 @@ struct Phase3State {
 struct ProviderConfigState {
     base_url: String,
     model: String,
+    conductor_model: String,
     planner_model: String,
     executor_model: String,
     reviewer_model: String,
@@ -1076,6 +1088,7 @@ struct ProviderConfigInput {
     base_url: String,
     api_key: String,
     model: String,
+    conductor_model: String,
     planner_model: String,
     executor_model: String,
     reviewer_model: String,
@@ -5919,22 +5932,6 @@ struct AgentCollaboration {
 }
 
 #[derive(Debug, Deserialize)]
-struct AdaptiveWorkflowPayload {
-    steps: Vec<AdaptiveWorkflowStepPayload>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AdaptiveWorkflowStepPayload {
-    id: String,
-    #[serde(default)]
-    role: Option<String>,
-    model: String,
-    subtask: String,
-    #[serde(default, alias = "access_list", alias = "accessList")]
-    access: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct CollaborationQualityPayload {
     pass: bool,
     score: f32,
@@ -6060,150 +6057,6 @@ fn build_collaboration_arbiter_prompt(
         "You are the arbiter for a multi-model Cindx deliberation. Compare the independent candidate briefs, preserve useful disagreements, reject unsupported assumptions, and synthesize one concrete execution brief for the tool-using executor. Treat worker reports as proposals and give greater weight to entries in their tool evidence ledgers. Do not answer the user directly.\n\nUser request:\n{}\n\nIndependent candidates:\n{}",
         prompt, candidate_text
     )
-}
-
-fn build_adaptive_coordinator_prompt(
-    config: &ProviderConfig,
-    prompt: &str,
-    history: &[Message],
-    models: &[String],
-    agent_budget: usize,
-    prior: Option<&WorkflowTopologyPrior>,
-) -> String {
-    let agent_budget = agent_budget.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS);
-    let step_budget = adaptive_workflow_step_budget(agent_budget);
-    let recent_context = collaboration_recent_context(history);
-    let worker_pool = models
-        .iter()
-        .map(|model| format!("- {model}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let schema_example = match agent_budget {
-        1 => r#"{"steps":[{"id":"synthesize","role":"synthesizer","model":"exact model from pool","subtask":"produce a checkable execution brief","access":[]}]}"#,
-        2 => r#"{"steps":[{"id":"approach_a","role":"thinker","model":"exact model from pool","subtask":"analyze the strongest approach","access":[]},{"id":"approach_b","role":"worker","model":"exact model from pool","subtask":"independent alternative","access":[]},{"id":"synthesize","role":"synthesizer","model":"reuse an exact model from pool","subtask":"resolve both branches into a checkable execution brief","access":["approach_a","approach_b"]}]}"#,
-        _ => r#"{"steps":[{"id":"approach_a","role":"thinker","model":"exact model from pool","subtask":"independent approach","access":[]},{"id":"approach_b","role":"worker","model":"exact model from pool","subtask":"independent alternative","access":[]},{"id":"verify","role":"verifier","model":"exact model from pool","subtask":"cross-check both reports and their evidence","access":["approach_a","approach_b"]},{"id":"synthesize","role":"synthesizer","model":"reuse an exact model from pool","subtask":"resolve disagreements into a checkable execution brief","access":["approach_a","approach_b","verify"]}]}"#,
-    };
-    let prior_hint = prior
-        .map(WorkflowTopologyPrior::prompt_hint)
-        .unwrap_or_else(|| "(none - design from the current query)".to_string());
-    format!(
-        concat!(
-            "You are the coordinator model for a Fugu-style Cindx workflow. Design a query-specific dependency graph instead of using a fixed planner/reviewer pipeline. Return only strict JSON with this schema:\n",
-            "{schema_example}\n\n",
-            "Rules:\n",
-            "- Use between 1 and {step_budget} workflow steps, including the final synthesizer. Choose the smallest useful graph.\n",
-            "- Use no more than {agent_budget} distinct worker models; reuse a model for later verification or synthesis when useful.\n",
-            "- role must be exactly thinker, worker, verifier, or synthesizer.\n",
-            "- Preserve the listed order: access may reference only earlier step ids.\n",
-            "- When more than one worker is allowed, start with two independent thinker/worker branches so they run in parallel.\n",
-            "- Choose models by likely task fit; a model may be used more than once, including the coordinator model itself.\n",
-            "- Keep workers isolated: include an earlier result only when it is necessary and listed in access.\n",
-            "- Every branch must have a dependency path into the final synthesizer; do not drop dissenting or failed branches.\n",
-            "- The final step must use role synthesizer and produce one evidence-aware execution brief for a separate tool-using executor.\n",
-            "- Use exact model strings from the worker pool. Do not include markdown fences or commentary.\n\n",
-            "Configured role hints:\nPlanner: {planner}\nExecutor: {executor}\nReviewer: {reviewer}\nSynthesizer: {summarizer}\n\n",
-            "Allowed worker pool:\n{worker_pool}\n\n",
-            "Historical execution prior:\n{prior_hint}\n\n",
-            "User request:\n{prompt}\n\nRecent session memory:\n{recent_context}"
-        ),
-        schema_example = schema_example,
-        agent_budget = agent_budget,
-        step_budget = step_budget,
-        planner = config.model_for_role(&ModelRole::Planner),
-        executor = config.model_for_role(&ModelRole::Executor),
-        reviewer = config.model_for_role(&ModelRole::Reviewer),
-        summarizer = config.model_for_role(&ModelRole::Summarizer),
-        worker_pool = worker_pool,
-        prior_hint = prior_hint,
-        prompt = prompt,
-        recent_context = if recent_context.is_empty() {
-            "(none)"
-        } else {
-            &recent_context
-        }
-    )
-}
-
-fn parse_adaptive_workflow(
-    response: &str,
-    allowed_models: &[String],
-    agent_budget: usize,
-) -> Result<AdaptiveWorkflow, String> {
-    let agent_budget = agent_budget.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS);
-    let step_budget = adaptive_workflow_step_budget(agent_budget);
-    let start = response
-        .find('{')
-        .ok_or_else(|| "coordinator did not return a JSON object".to_string())?;
-    let end = response
-        .rfind('}')
-        .filter(|end| *end >= start)
-        .ok_or_else(|| "coordinator returned incomplete JSON".to_string())?;
-    let payload = serde_json::from_str::<AdaptiveWorkflowPayload>(&response[start..=end])
-        .map_err(|error| format!("coordinator workflow JSON is invalid: {error}"))?;
-    let step_count = payload.steps.len();
-    let workflow = AdaptiveWorkflow {
-        steps: payload
-            .steps
-            .into_iter()
-            .enumerate()
-            .map(|(index, step)| {
-                let access = step
-                    .access
-                    .into_iter()
-                    .map(|dependency| dependency.trim().to_string())
-                    .collect::<Vec<_>>();
-                let role = step.role.unwrap_or_else(|| {
-                    if index + 1 == step_count {
-                        "synthesizer".to_string()
-                    } else if access.is_empty() {
-                        "thinker".to_string()
-                    } else {
-                        "worker".to_string()
-                    }
-                });
-                AdaptiveWorkflowStep {
-                    id: step.id.trim().to_string(),
-                    role: role.trim().to_ascii_lowercase(),
-                    model: step.model.trim().to_string(),
-                    subtask: step.subtask.trim().to_string(),
-                    access,
-                }
-            })
-            .collect(),
-    };
-    if workflow.steps.len() > step_budget {
-        return Err(format!(
-            "Ultra collaboration exceeds the {step_budget}-step workflow budget"
-        ));
-    }
-    let selected_models = workflow
-        .steps
-        .iter()
-        .map(|step| step.model.as_str())
-        .collect::<BTreeSet<_>>();
-    if selected_models.len() > agent_budget {
-        return Err(format!(
-            "Ultra collaboration exceeds the {agent_budget}-agent worker budget"
-        ));
-    }
-    validate_adaptive_workflow(&workflow, allowed_models)?;
-    let independent_branches = workflow
-        .steps
-        .iter()
-        .take(workflow.steps.len().saturating_sub(1))
-        .filter(|step| step.access.is_empty() && matches!(step.role.as_str(), "thinker" | "worker"))
-        .count();
-    if agent_budget >= 2 && independent_branches < 2 {
-        return Err("Ultra collaboration requires at least two independent branches".to_string());
-    }
-    if workflow
-        .steps
-        .last()
-        .is_some_and(|step| agent_budget >= 2 && step.access.len() < 2)
-    {
-        return Err("Ultra collaboration synthesis must access at least two prior branches".to_string());
-    }
-    Ok(workflow)
 }
 
 fn adaptive_stage_metadata(spec: &AdaptiveCollaborationSpec) -> Metadata {
@@ -6957,51 +6810,95 @@ fn run_adaptive_collaboration(
         return Err("adaptive collaboration has no configured worker models".to_string());
     }
     let workflow_started_at_ms = current_time_millis();
-    let coordinator_model = config.model_for_role(&ModelRole::Planner);
+    let conductor_model = config.model_for_conductor();
     let prior = workflow_prior_for_run(state, run_context, models, agent_budget)?;
-    let workflow_response = run_collaboration_stage(
-        state,
-        config,
-        task_id,
-        run_context,
-        collaboration_id,
-        "coordinator",
-        ModelRole::Planner,
-        &coordinator_model,
-        build_adaptive_coordinator_prompt(
-            config,
-            prompt,
-            history,
-            models,
-            agent_budget,
-            prior.as_ref(),
-        ),
-    )?;
-    let workflow = parse_adaptive_workflow(&workflow_response, models, agent_budget)?;
-    let layers = adaptive_workflow_layers(&workflow)?;
-    let layer_count = layers.len();
-    let workflow_plan = WorkflowPlanIr::from_adaptive(
-        collaboration_id,
-        prompt,
-        run_context
+    let harness = ConductorHarness::new(ConductorRequest {
+        workflow_id: collaboration_id.to_string(),
+        objective: prompt.to_string(),
+        recent_context: collaboration_recent_context(history),
+        effort: run_context
             .get("agent_effort")
             .cloned()
             .unwrap_or_else(|| "auto".to_string()),
-        run_context
+        policy: run_context
             .get("collaboration_policy")
             .cloned()
             .unwrap_or_else(|| "best_of_n".to_string()),
-        coordinator_model.clone(),
-        &workflow,
-        WorkflowBudget {
+        conductor_model: conductor_model.clone(),
+        worker_models: models.to_vec(),
+        role_hints: ConductorRoleHints {
+            planner: config.model_for_role(&ModelRole::Planner),
+            executor: config.model_for_role(&ModelRole::Executor),
+            reviewer: config.model_for_role(&ModelRole::Reviewer),
+            synthesizer: config.model_for_role(&ModelRole::Summarizer),
+        },
+        budget: WorkflowBudget {
             max_steps: adaptive_workflow_step_budget(agent_budget),
             max_models: agent_budget.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS),
             max_model_turns_per_step: DEFAULT_COLLABORATION_WORKER_TURNS,
             max_tool_calls_per_step: MAX_COLLABORATION_WORKER_TOOL_CALLS,
             max_output_tokens_per_step: COLLABORATION_MAX_OUTPUT_TOKENS as usize,
         },
-    );
-    workflow_plan.validate(models)?;
+        prior_hint: prior.as_ref().map(WorkflowTopologyPrior::prompt_hint),
+    });
+    let mut conductor_response = run_collaboration_stage(
+        state,
+        config,
+        task_id,
+        run_context,
+        collaboration_id,
+        "conductor_plan",
+        ModelRole::Planner,
+        &conductor_model,
+        harness.planning_prompt(),
+    )?;
+    let mut conductor_attempts = 1usize;
+    let workflow_plan = loop {
+        match harness.parse_plan(&conductor_response) {
+            Ok(plan) => break plan,
+            Err(error) if conductor_attempts < CONDUCTOR_MAX_ATTEMPTS => {
+                if let Ok(mut store) = state.store.lock() {
+                    let _ = append_event(
+                        &mut store,
+                        task_id,
+                        EventKind::TaskStatusChanged,
+                        "Conductor workflow rejected",
+                        metadata_with_context(
+                            [
+                                ("collaboration_id".to_string(), collaboration_id.to_string()),
+                                ("attempt".to_string(), conductor_attempts.to_string()),
+                                (
+                                    "validation_error".to_string(),
+                                    truncate_for_collaboration(&error, 2_000),
+                                ),
+                            ]
+                            .into_iter()
+                            .collect(),
+                            run_context,
+                        ),
+                    );
+                }
+                conductor_response = run_collaboration_stage(
+                    state,
+                    config,
+                    task_id,
+                    run_context,
+                    collaboration_id,
+                    "conductor_repair",
+                    ModelRole::Planner,
+                    &conductor_model,
+                    harness.repair_prompt(&conductor_response, &error),
+                )?;
+                conductor_attempts += 1;
+            }
+            Err(error) => return Err(format!(
+                "Conductor failed to produce a valid workflow after {conductor_attempts} attempts: {error}"
+            )),
+        }
+    };
+    let workflow = workflow_plan.adaptive_workflow();
+    let layers = adaptive_workflow_layers(&workflow)?;
+    let layer_count = layers.len();
     let workflow_ir = workflow_plan.to_json()?;
     {
         let workflow_summary = workflow
@@ -7038,7 +6935,12 @@ fn run_adaptive_collaboration(
                     ("collaboration_id".to_string(), collaboration_id.to_string()),
                     ("workflow_schema".to_string(), WORKFLOW_IR_SCHEMA.to_string()),
                     ("workflow_ir".to_string(), workflow_ir),
-                    ("conductor_version".to_string(), "v3".to_string()),
+                    ("conductor_version".to_string(), "agent_v1".to_string()),
+                    ("conductor_model".to_string(), conductor_model.clone()),
+                    (
+                        "conductor_attempts".to_string(),
+                        conductor_attempts.to_string(),
+                    ),
                     (
                         "conductor_source".to_string(),
                         if prior.is_some() {
@@ -7330,7 +7232,7 @@ fn recover_adaptive_worker(
         .map_err(|error| error.to_string())?;
     }
 
-    let coordinator_model = config.model_for_role(&ModelRole::Planner);
+    let conductor_model = config.model_for_conductor();
     let recovery_instruction = run_collaboration_stage(
         state,
         config,
@@ -7339,7 +7241,7 @@ fn recover_adaptive_worker(
         collaboration_id,
         &format!("replanner_{}", spec.step_index + 1),
         ModelRole::Planner,
-        &coordinator_model,
+        &conductor_model,
         format!(
             "A worker in an adaptive multi-model DAG failed. Produce a concise recovery instruction for a replacement worker. Preserve the original subtask and constraints, account for the failure, and do not answer the user directly.\n\nUser request:\n{}\n\nFailed step: {} ({})\nOriginal subtask:\n{}\nFailure:\n{}",
             user_prompt,
@@ -11046,6 +10948,7 @@ fn provider_config_state(config: &ProviderConfig) -> ProviderConfigState {
     ProviderConfigState {
         base_url: config.base_url.clone(),
         model: config.model.clone(),
+        conductor_model: config.model_for_conductor(),
         planner_model: config.planner_model.clone(),
         executor_model: config.executor_model.clone(),
         reviewer_model: config.reviewer_model.clone(),
@@ -11360,6 +11263,7 @@ fn clone_provider_config(state: &tauri::State<'_, AppState>) -> Result<ProviderC
 fn apply_provider_config_input(config: &mut ProviderConfig, input: ProviderConfigInput) {
     config.base_url = normalized_config_value(&input.base_url);
     config.model = normalized_config_value(&input.model);
+    config.conductor_model = normalized_config_value(&input.conductor_model);
     config.planner_model = normalized_config_value(&input.planner_model);
     config.executor_model = normalized_config_value(&input.executor_model);
     config.reviewer_model = normalized_config_value(&input.reviewer_model);
@@ -11381,6 +11285,9 @@ fn apply_provider_config_input(config: &mut ProviderConfig, input: ProviderConfi
     if config.planner_model.is_empty() {
         config.planner_model = config.model.clone();
     }
+    if config.conductor_model.is_empty() {
+        config.conductor_model = config.planner_model.clone();
+    }
     if config.executor_model.is_empty() {
         config.executor_model = config.model.clone();
     }
@@ -11396,11 +11303,15 @@ fn apply_provider_config_input(config: &mut ProviderConfig, input: ProviderConfi
 }
 
 fn load_provider_config() -> ProviderConfig {
-    let mut config = ProviderConfig::default();
     let Ok(text) = fs::read_to_string(provider_config_path()) else {
-        return config;
+        return ProviderConfig::default();
     };
+    provider_config_from_text(&text)
+}
 
+fn provider_config_from_text(text: &str) -> ProviderConfig {
+    let mut config = ProviderConfig::default();
+    let mut conductor_model_loaded = false;
     for line in text.lines() {
         let Some((key, value)) = line.split_once('=') else {
             continue;
@@ -11409,6 +11320,10 @@ fn load_provider_config() -> ProviderConfig {
             "base_url" => config.base_url = value.to_string(),
             "api_key" => config.api_key = value.to_string(),
             "model" => config.model = value.to_string(),
+            "conductor_model" => {
+                config.conductor_model = value.to_string();
+                conductor_model_loaded = true;
+            }
             "planner_model" => config.planner_model = value.to_string(),
             "executor_model" => config.executor_model = value.to_string(),
             "reviewer_model" => config.reviewer_model = value.to_string(),
@@ -11427,6 +11342,9 @@ fn load_provider_config() -> ProviderConfig {
         }
     }
 
+    if !conductor_model_loaded || config.conductor_model.trim().is_empty() {
+        config.conductor_model = config.model_for_role(&ModelRole::Planner);
+    }
     config
 }
 
@@ -11443,10 +11361,11 @@ fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<(), std::io::
     let mut file = options.open(&path)?;
     file.write_all(
         format!(
-            "base_url={}\napi_key={}\nmodel={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nembedding_model={}\ncollaboration_policy={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\n",
+            "base_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nembedding_model={}\ncollaboration_policy={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\n",
             sanitize_config_value(&config.base_url),
             sanitize_config_value(&config.api_key),
             sanitize_config_value(&config.model),
+            sanitize_config_value(&config.model_for_conductor()),
             sanitize_config_value(&config.planner_model),
             sanitize_config_value(&config.executor_model),
             sanitize_config_value(&config.reviewer_model),
@@ -12730,7 +12649,9 @@ fn timeline_event_label(event: &Event) -> String {
 
 fn collaboration_stage_display_label(stage: &str) -> String {
     match stage {
-        "coordinator" => "Coordinator".to_string(),
+        "coordinator" => "Conductor".to_string(),
+        "conductor_plan" => "Conductor".to_string(),
+        "conductor_repair" => "Conductor repair".to_string(),
         "planner" => "Planner".to_string(),
         "arbiter" => "Arbiter".to_string(),
         "executor" => "Executor".to_string(),
@@ -12954,7 +12875,34 @@ fn truncate_for_timeline(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orchestrator::{AdaptiveWorkflow, AdaptiveWorkflowStep};
     use tools::encode_input;
+
+    fn test_conductor_harness(models: Vec<String>, agent_budget: usize) -> ConductorHarness {
+        ConductorHarness::new(ConductorRequest {
+            workflow_id: "test-workflow".to_string(),
+            objective: "Test the conductor".to_string(),
+            recent_context: String::new(),
+            effort: "pro".to_string(),
+            policy: "best_of_n".to_string(),
+            conductor_model: "conductor-model".to_string(),
+            worker_models: models,
+            role_hints: ConductorRoleHints {
+                planner: "planner-a".to_string(),
+                executor: "planner-a".to_string(),
+                reviewer: "reviewer-b".to_string(),
+                synthesizer: "summary-c".to_string(),
+            },
+            budget: WorkflowBudget {
+                max_steps: adaptive_workflow_step_budget(agent_budget),
+                max_models: agent_budget,
+                max_model_turns_per_step: DEFAULT_COLLABORATION_WORKER_TURNS,
+                max_tool_calls_per_step: MAX_COLLABORATION_WORKER_TOOL_CALLS,
+                max_output_tokens_per_step: COLLABORATION_MAX_OUTPUT_TOKENS as usize,
+            },
+            prior_hint: None,
+        })
+    }
 
     #[test]
     fn installed_app_data_is_user_scoped_and_overrideable() {
@@ -13159,6 +13107,7 @@ mod tests {
                 base_url: "https://example.test/v1".to_string(),
                 api_key: "".to_string(),
                 model: "model-a".to_string(),
+                conductor_model: "".to_string(),
                 planner_model: "".to_string(),
                 executor_model: "".to_string(),
                 reviewer_model: "".to_string(),
@@ -13171,6 +13120,7 @@ mod tests {
         );
 
         assert_eq!(config.api_key, "existing");
+        assert_eq!(config.model_for_conductor(), "model-a");
         assert_eq!(config.executor_model, "model-a");
         assert_eq!(config.collaboration_policy, "auto_router");
         assert_eq!(config.context_window_tokens, 128_000);
@@ -13178,9 +13128,23 @@ mod tests {
     }
 
     #[test]
+    fn legacy_provider_config_inherits_conductor_from_planner() {
+        let migrated = provider_config_from_text(
+            "model=default-a\nplanner_model=planner-b\nexecutor_model=executor-c\n",
+        );
+        assert_eq!(migrated.model_for_conductor(), "planner-b");
+
+        let explicit = provider_config_from_text(
+            "model=default-a\nconductor_model=conductor-z\nplanner_model=planner-b\n",
+        );
+        assert_eq!(explicit.model_for_conductor(), "conductor-z");
+    }
+
+    #[test]
     fn ensemble_uses_distinct_role_models_in_stable_order() {
         let config = ProviderConfig {
             model: "default".to_string(),
+            conductor_model: "conductor-z".to_string(),
             planner_model: "planner-a".to_string(),
             executor_model: "executor-b".to_string(),
             reviewer_model: "reviewer-c".to_string(),
@@ -13196,6 +13160,9 @@ mod tests {
                 "summary-d".to_string()
             ]
         );
+        assert_eq!(config.model_for_conductor(), "conductor-z");
+        assert!(!collaboration_candidate_models(&config, 5)
+            .contains(&"conductor-z".to_string()));
     }
 
     #[test]
@@ -13313,8 +13280,10 @@ mod tests {
             "summary-c".to_string(),
         ];
 
-        let workflow =
-            parse_adaptive_workflow(response, &models, 3).expect("workflow should parse");
+        let workflow = test_conductor_harness(models, 3)
+            .parse_plan(response)
+            .expect("workflow should parse")
+            .adaptive_workflow();
 
         assert_eq!(workflow.steps.len(), 3);
         assert_eq!(
@@ -13338,7 +13307,8 @@ mod tests {
           {"id":"final","role":"synthesizer","model":"unconfigured","subtask":"Synthesize","access":["first","second"]}
         ]}"#;
 
-        let error = parse_adaptive_workflow(response, &["configured".to_string()], 3)
+        let error = test_conductor_harness(vec!["configured".to_string()], 3)
+            .parse_plan(response)
             .expect_err("unknown model should be rejected");
 
         assert!(error.contains("unknown model"));
@@ -13359,8 +13329,10 @@ mod tests {
             "summary-c".to_string(),
         ];
 
-        let workflow =
-            parse_adaptive_workflow(response, &models, 3).expect("five-step plan should parse");
+        let workflow = test_conductor_harness(models, 3)
+            .parse_plan(response)
+            .expect("five-step plan should parse")
+            .adaptive_workflow();
 
         assert_eq!(workflow.steps.len(), 5);
         assert_eq!(
@@ -13442,7 +13414,12 @@ mod tests {
         };
 
         assert_eq!(timeline_event_label(&event), "Candidate 2");
-        assert_eq!(collaboration_stage_display_label("coordinator"), "Coordinator");
+        assert_eq!(collaboration_stage_display_label("coordinator"), "Conductor");
+        assert_eq!(collaboration_stage_display_label("conductor_plan"), "Conductor");
+        assert_eq!(
+            collaboration_stage_display_label("conductor_repair"),
+            "Conductor repair"
+        );
         assert_eq!(collaboration_stage_display_label("worker_3"), "Worker 3");
         assert_eq!(collaboration_stage_display_label("arbiter"), "Arbiter");
         assert_eq!(collaboration_stage_display_label("synthesizer"), "Synthesis");

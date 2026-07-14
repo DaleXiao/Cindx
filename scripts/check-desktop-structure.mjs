@@ -747,6 +747,14 @@ assert(!tauriBridge.includes("apiKeyPreview"), "Provider state must not expose A
 assert(appSource.includes("<ModelSelect"), "Provider models must use select controls");
 assert(appSource.includes("listProviderModels"), "Provider settings must load the remote model catalog");
 assert(
+  appSource.includes('label="Conductor"') &&
+    appSource.includes("providerDraft.conductorModel") &&
+    tauriBridge.includes("conductorModel: string") &&
+    rustLib.includes("conductor_model: String") &&
+    rustLib.includes("model_for_conductor"),
+  "Models settings must persist and use a dedicated Conductor model"
+);
+assert(
   appSource.includes("context-usage") &&
     /\.topbar-actions \{[\s\S]*?gap: 12px;/.test(styles) &&
     /\.context-usage \{[\s\S]*?width: 132px;/.test(styles) &&
@@ -1129,14 +1137,18 @@ assert(
 assert(
   rustLib.includes("synthesize_agent_answer(") &&
     rustLib.includes("run_adaptive_collaboration(") &&
-    rustLib.includes("parse_adaptive_workflow(") &&
+    orchestratorSource.includes("pub struct ConductorHarness") &&
+    orchestratorSource.includes("pub fn planning_prompt(&self)") &&
+    orchestratorSource.includes("pub fn repair_prompt(") &&
+    orchestratorSource.includes("pub fn parse_plan(") &&
+    rustLib.includes("CONDUCTOR_MAX_ATTEMPTS") &&
     rustLib.includes("run_collaboration_candidates(") &&
     rustLib.includes("complete_collaboration_worker_with_tools(") &&
     rustLib.includes('"isolated_evidence_v1"') &&
     agentRuntimeSource.includes("evidence_worker_tools") &&
     agentRuntimeSource.includes("DEFAULT_COLLABORATION_WORKER_TURNS") &&
     rustLib.includes("std::thread::spawn") &&
-    rustLib.includes('"coordinator"') &&
+    rustLib.includes('"conductor_plan"') &&
     rustLib.includes('format!("worker_{}", step_index + 1)') &&
     rustLib.includes('("access_list".to_string(), spec.access.join(","))') &&
     rustLib.includes('"arbiter"') &&
@@ -1170,7 +1182,7 @@ assert(
     orchestratorSource.includes("learned_router_cannot_upgrade_ordinary_research_to_ultra") &&
     rustLib.includes("AgentEffort::Auto if !routing_decision.model.trim().is_empty()") &&
     orchestratorSource.includes("must only access earlier steps") &&
-    rustLib.includes('"conductor_version".to_string(), "v3".to_string()') &&
+    rustLib.includes('"conductor_version".to_string(), "agent_v1".to_string()') &&
     rustLib.includes('"workflow_ir".to_string()') &&
     orchestratorSource.includes('WORKFLOW_IR_SCHEMA: &str = "cindx.workflow.v1"') &&
     orchestratorSource.includes("WorkflowSearchTeacher") &&
