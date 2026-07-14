@@ -4048,6 +4048,7 @@ textarea::placeholder {
   width: 9px;
   height: 9px;
   color: #999999;
+  transform: rotate(0deg);
 }
 
 .inspector-debug[data-open="true"] .disclosure-triangle {
