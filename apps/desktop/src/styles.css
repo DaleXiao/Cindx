@@ -1761,10 +1761,8 @@ pre {
 
 .thread-thinking > span,
 .thread-thinking > time {
-  display: inline-flex;
-  height: 16px;
-  align-items: center;
-  line-height: 16px;
+  display: block;
+  line-height: 1;
 }
 
 .thread-thinking > span {
