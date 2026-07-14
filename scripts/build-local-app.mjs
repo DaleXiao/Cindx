@@ -130,6 +130,7 @@ try {
   run(process.execPath, [path.join(repoRoot, "scripts", "check-desktop-layout.mjs")]);
   run("rustup", ["target", "add", targetTriple]);
   if (!skipTests) {
+    run(process.execPath, [path.join(repoRoot, "scripts", "test-browser-sidecar.mjs")]);
     run("cargo", ["test", "--workspace", "--locked"]);
     run("cargo", ["test", "--manifest-path", path.join(tauriRoot, "Cargo.toml"), "--locked"]);
   }

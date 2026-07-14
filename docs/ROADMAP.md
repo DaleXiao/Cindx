@@ -475,3 +475,34 @@ Exit criteria:
 
 - No old product identity remains in source-controlled files.
 - All checks pass and the macOS bundle is generated as `Cindx.app`.
+
+## Phase 22: Browser Control v2
+
+- Replace the browser shim with a real reusable Chromium controller.
+- Use CDP for browser sessions, tabs, target ids, and event telemetry.
+- Use Playwright for semantic locators, frames, auto-waiting, downloads, and
+  screenshots.
+- Return browser traces and output files through the existing tool artifact
+  contract.
+- Enforce permission review, cancellation, timeouts, workspace path
+  containment, and trace redaction.
+
+Exit criteria:
+
+- One browser session survives separate tool invocations and supports multiple
+  tabs and frames.
+- Semantic click/type actions, download capture, screenshot capture, and text
+  extraction pass against a real browser fixture.
+- The bundled app contains the browser controller and pinned Playwright client.
+- Computer Use remains an independent native/accessibility channel.
+
+Status:
+
+- Added the `cindx.browser-control.v2` request, response, and trace protocols.
+- Added a dedicated Chromium profile connected through CDP and controlled by
+  Playwright locators and waits.
+- Added `browser.tabs` and `browser.select_tab` beside the existing browser
+  tools.
+- Added structured traces, artifacts, cooperative cancellation, hard timeouts,
+  and workspace-constrained paths.
+- Added a real Chromium integration fixture to local checks, builds, and CI.
