@@ -134,6 +134,7 @@ pub fn default_plan(policy: OrchestrationPolicy) -> OrchestrationPlan {
 pub const MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 5;
 pub const MAX_ADAPTIVE_WORKFLOW_AGENTS: usize = 3;
 pub const WORKFLOW_IR_SCHEMA: &str = "cindx.workflow.v1";
+pub const CONDUCTOR_MAX_ATTEMPTS: usize = 2;
 
 pub fn adaptive_workflow_step_budget(agent_budget: usize) -> usize {
     match agent_budget.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS) {
@@ -297,6 +298,206 @@ impl WorkflowPlanIr {
         workflow.validate(allowed_models)?;
         Ok(workflow)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConductorRoleHints {
+    pub planner: String,
+    pub executor: String,
+    pub reviewer: String,
+    pub synthesizer: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConductorRequest {
+    pub workflow_id: String,
+    pub objective: String,
+    pub recent_context: String,
+    pub effort: String,
+    pub policy: String,
+    pub conductor_model: String,
+    pub worker_models: Vec<String>,
+    pub role_hints: ConductorRoleHints,
+    pub budget: WorkflowBudget,
+    pub prior_hint: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConductorHarness {
+    request: ConductorRequest,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConductorWorkflowPayload {
+    steps: Vec<ConductorWorkflowStepPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConductorWorkflowStepPayload {
+    id: String,
+    #[serde(default)]
+    role: Option<String>,
+    model: String,
+    subtask: String,
+    #[serde(default, alias = "access_list", alias = "accessList")]
+    access: Vec<String>,
+}
+
+impl ConductorHarness {
+    pub fn new(request: ConductorRequest) -> Self {
+        Self { request }
+    }
+
+    pub fn request(&self) -> &ConductorRequest {
+        &self.request
+    }
+
+    pub fn planning_prompt(&self) -> String {
+        let request = &self.request;
+        let worker_pool = request.worker_models.iter()
+            .map(|model| format!("- {model}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let prior_hint = request.prior_hint.as_deref()
+            .unwrap_or("(none - design from the current query)");
+        format!(
+            concat!(
+                "You are the Conductor Agent for a Fugu-style Cindx workflow. Design a query-specific dependency graph instead of answering the user. Return only strict JSON matching this example:\n",
+                "{schema_example}\n\n",
+                "Harness constraints:\n",
+                "- Use between 1 and {max_steps} workflow steps, including the final synthesizer. Choose the smallest useful graph.\n",
+                "- Use no more than {max_models} distinct worker models.\n",
+                "- role must be exactly thinker, worker, verifier, or synthesizer.\n",
+                "- Preserve listed order: access may reference only earlier step ids.\n",
+                "- With two or more workers, begin with two independent thinker/worker branches.\n",
+                "- Keep workers isolated and expose an earlier result only through access.\n",
+                "- Every branch must reach the final synthesizer; retain dissenting or failed branches.\n",
+                "- Use exact model strings from the worker pool. The Conductor model is not implicitly a worker.\n",
+                "- Do not include markdown fences, commentary, tool calls, or a user-facing answer.\n\n",
+                "Configured worker role hints:\nPlanner: {planner}\nExecutor: {executor}\nReviewer: {reviewer}\nSynthesizer: {synthesizer}\n\n",
+                "Allowed worker pool:\n{worker_pool}\n\n",
+                "Historical execution prior:\n{prior_hint}\n\n",
+                "User request:\n{objective}\n\nRecent session memory:\n{recent_context}"
+            ),
+            schema_example = conductor_schema_example(request.budget.max_models),
+            max_steps = request.budget.max_steps,
+            max_models = request.budget.max_models,
+            planner = request.role_hints.planner,
+            executor = request.role_hints.executor,
+            reviewer = request.role_hints.reviewer,
+            synthesizer = request.role_hints.synthesizer,
+            worker_pool = worker_pool,
+            prior_hint = prior_hint,
+            objective = request.objective,
+            recent_context = if request.recent_context.trim().is_empty() {
+                "(none)"
+            } else {
+                &request.recent_context
+            },
+        )
+    }
+
+    pub fn repair_prompt(&self, invalid_response: &str, validation_error: &str) -> String {
+        format!(
+            "Your previous WorkflowPlan was rejected by the deterministic Cindx Harness. Correct only the workflow structure and return strict JSON with no commentary.\n\nValidation error:\n{}\n\nRejected response:\n{}\n\nOriginal planning request:\n{}",
+            validation_error,
+            truncate_conductor_text(invalid_response, 6_000),
+            self.planning_prompt()
+        )
+    }
+
+    pub fn parse_plan(&self, response: &str) -> Result<WorkflowPlanIr, String> {
+        let start = response.find('{')
+            .ok_or_else(|| "conductor did not return a JSON object".to_string())?;
+        let end = response.rfind('}')
+            .filter(|end| *end >= start)
+            .ok_or_else(|| "conductor returned incomplete JSON".to_string())?;
+        let payload = serde_json::from_str::<ConductorWorkflowPayload>(&response[start..=end])
+            .map_err(|error| format!("conductor workflow JSON is invalid: {error}"))?;
+        let step_count = payload.steps.len();
+        let workflow = AdaptiveWorkflow {
+            steps: payload.steps.into_iter().enumerate().map(|(index, step)| {
+                let access = step.access.into_iter()
+                    .map(|dependency| dependency.trim().to_string())
+                    .collect::<Vec<_>>();
+                let role = step.role.unwrap_or_else(|| {
+                    if index + 1 == step_count {
+                        "synthesizer".to_string()
+                    } else if access.is_empty() {
+                        "thinker".to_string()
+                    } else {
+                        "worker".to_string()
+                    }
+                });
+                AdaptiveWorkflowStep {
+                    id: step.id.trim().to_string(),
+                    role: role.trim().to_ascii_lowercase(),
+                    model: step.model.trim().to_string(),
+                    subtask: step.subtask.trim().to_string(),
+                    access,
+                }
+            }).collect(),
+        };
+        self.validate_shape(&workflow)?;
+        let plan = WorkflowPlanIr::from_adaptive(
+            self.request.workflow_id.clone(),
+            self.request.objective.clone(),
+            self.request.effort.clone(),
+            self.request.policy.clone(),
+            self.request.conductor_model.clone(),
+            &workflow,
+            self.request.budget.clone(),
+        );
+        plan.validate(&self.request.worker_models)?;
+        Ok(plan)
+    }
+
+    fn validate_shape(&self, workflow: &AdaptiveWorkflow) -> Result<(), String> {
+        if workflow.steps.len() > self.request.budget.max_steps {
+            return Err(format!(
+                "conductor workflow exceeds the {}-step budget",
+                self.request.budget.max_steps
+            ));
+        }
+        let selected_models = workflow.steps.iter()
+            .map(|step| step.model.as_str())
+            .collect::<BTreeSet<_>>();
+        if selected_models.len() > self.request.budget.max_models {
+            return Err(format!(
+                "conductor workflow exceeds the {}-model budget",
+                self.request.budget.max_models
+            ));
+        }
+        let independent_branches = workflow.steps.iter()
+            .take(workflow.steps.len().saturating_sub(1))
+            .filter(|step| step.access.is_empty() && matches!(step.role.as_str(), "thinker" | "worker"))
+            .count();
+        if self.request.budget.max_models >= 2 && independent_branches < 2 {
+            return Err("conductor workflow requires at least two independent branches".to_string());
+        }
+        if workflow.steps.last().is_some_and(|step| {
+            self.request.budget.max_models >= 2 && step.access.len() < 2
+        }) {
+            return Err("conductor synthesis must access at least two prior branches".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn conductor_schema_example(max_models: usize) -> &'static str {
+    match max_models {
+        0 | 1 => r#"{"steps":[{"id":"synthesize","role":"synthesizer","model":"exact model from pool","subtask":"produce a checkable execution brief","access":[]}]}"#,
+        2 => r#"{"steps":[{"id":"approach_a","role":"thinker","model":"exact model from pool","subtask":"analyze the strongest approach","access":[]},{"id":"approach_b","role":"worker","model":"exact model from pool","subtask":"develop an independent alternative","access":[]},{"id":"synthesize","role":"synthesizer","model":"reuse an exact model from pool","subtask":"resolve both branches","access":["approach_a","approach_b"]}]}"#,
+        _ => r#"{"steps":[{"id":"approach_a","role":"thinker","model":"exact model from pool","subtask":"independent approach","access":[]},{"id":"approach_b","role":"worker","model":"exact model from pool","subtask":"independent alternative","access":[]},{"id":"verify","role":"verifier","model":"exact model from pool","subtask":"cross-check both reports","access":["approach_a","approach_b"]},{"id":"synthesize","role":"synthesizer","model":"reuse an exact model from pool","subtask":"resolve disagreements","access":["approach_a","approach_b","verify"]}]}"#,
+    }
+}
+
+fn truncate_conductor_text(value: &str, max_chars: usize) -> String {
+    let mut output = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        output.push_str("\n[truncated]");
+    }
+    output
 }
 
 pub fn validate_adaptive_workflow(
@@ -1869,6 +2070,32 @@ mod tests {
         )
     }
 
+    fn conductor_request() -> ConductorRequest {
+        ConductorRequest {
+            workflow_id: "workflow-conductor".to_string(),
+            objective: "Compare implementation strategies".to_string(),
+            recent_context: "The workspace uses Rust.".to_string(),
+            effort: "pro".to_string(),
+            policy: "best_of_n".to_string(),
+            conductor_model: "conductor-only".to_string(),
+            worker_models: vec!["planner".to_string(), "reviewer".to_string()],
+            role_hints: ConductorRoleHints {
+                planner: "planner".to_string(),
+                executor: "planner".to_string(),
+                reviewer: "reviewer".to_string(),
+                synthesizer: "planner".to_string(),
+            },
+            budget: WorkflowBudget {
+                max_steps: 3,
+                max_models: 2,
+                max_model_turns_per_step: 5,
+                max_tool_calls_per_step: 6,
+                max_output_tokens_per_step: 4_096,
+            },
+            prior_hint: Some("Prefer two independent branches.".to_string()),
+        }
+    }
+
     #[test]
     fn workflow_ir_round_trips_and_enforces_declared_budgets() {
         let allowed_models = vec!["planner".to_string(), "reviewer".to_string()];
@@ -1942,6 +2169,34 @@ mod tests {
         assert_eq!(prior.examples, 2);
         assert_eq!(prior.success_rate, 1.0);
         assert!(prior.prompt_hint().contains("Treat this only as a prior"));
+    }
+
+    #[test]
+    fn conductor_harness_builds_context_and_parses_a_valid_plan() {
+        let harness = ConductorHarness::new(conductor_request());
+        let prompt = harness.planning_prompt();
+        assert!(prompt.contains("Allowed worker pool:\n- planner\n- reviewer"));
+        assert!(prompt.contains("Prefer two independent branches"));
+        assert!(!prompt.contains("conductor-only"));
+
+        let plan = harness.parse_plan(
+            r#"{"steps":[{"id":"a","role":"thinker","model":"planner","subtask":"primary","access":[]},{"id":"b","role":"worker","model":"reviewer","subtask":"alternative","access":[]},{"id":"final","role":"synthesizer","model":"planner","subtask":"merge","access":["a","b"]}]}"#,
+        ).expect("plan should parse");
+        assert_eq!(plan.coordinator_model, "conductor-only");
+        assert_eq!(plan.steps.len(), 3);
+        assert_eq!(plan.schema, WORKFLOW_IR_SCHEMA);
+    }
+
+    #[test]
+    fn conductor_harness_produces_a_bounded_repair_request() {
+        let harness = ConductorHarness::new(conductor_request());
+        let invalid = r#"{"steps":[{"id":"final","role":"synthesizer","model":"planner","subtask":"merge","access":[]}]}"#;
+        let error = harness.parse_plan(invalid).expect_err("one branch should fail");
+        let repair = harness.repair_prompt(invalid, &error);
+
+        assert!(error.contains("two independent branches"));
+        assert!(repair.contains("deterministic Cindx Harness"));
+        assert!(repair.contains(&error));
     }
 
     #[test]
