@@ -179,6 +179,66 @@ function formatThreadTime(timestampMs: number) {
   return threadTimeFormatter.format(timestampMs);
 }
 
+function formatRunElapsed(elapsedMs: number) {
+  const seconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+function activeRunProgress(timeline: TimelineEntry[]) {
+  let startIndex = -1;
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const event = timeline[index];
+    if (event.label === "Status" && /agent task started/i.test(event.detail)) {
+      startIndex = index;
+      break;
+    }
+  }
+  const runEvents = startIndex >= 0 ? timeline.slice(startIndex) : timeline;
+  const latest = [...runEvents]
+    .reverse()
+    .find((event) => event.label !== "Message" && !/agent router selected/i.test(event.detail));
+  const startedAtMs = startIndex >= 0 ? timeline[startIndex].timestampMs : latest?.timestampMs;
+  if (!latest || !startedAtMs) {
+    return { label: "Thinking", detail: "Cindx is working", startedAtMs: Date.now() };
+  }
+
+  let label = "Thinking";
+  if (latest.label === "Tool started") {
+    label = latest.detail.replace(/^Executing\s+/i, "Running ");
+  } else if (latest.label === "Tool proposed") {
+    label = "Preparing tool call";
+  } else if (latest.label === "Tool finished") {
+    label = "Processing tool result";
+  } else if (latest.label === "Permission requested") {
+    label = "Waiting for approval";
+  } else if (latest.label === "Permission resolved") {
+    label = "Resuming after approval";
+  } else if (/^Candidate \d+$/.test(latest.label)) {
+    const started = runEvents.filter(
+      (event) => /^Candidate \d+$/.test(event.label) && /started/i.test(event.detail)
+    ).length;
+    const finished = runEvents.filter(
+      (event) => /^Candidate \d+$/.test(event.label) && /finished/i.test(event.detail)
+    ).length;
+    label = `Exploring approaches ${Math.min(finished, started)}/${Math.max(1, started)}`;
+  } else if (latest.label === "Conductor" || latest.label === "Planner") {
+    label = "Planning work";
+  } else if (latest.label === "Arbiter") {
+    label = "Selecting approach";
+  } else if (latest.label === "Executor" || latest.label === "Model started") {
+    label = "Executing plan";
+  } else if (latest.label === "Reviewer") {
+    label = "Reviewing result";
+  } else if (latest.label === "Synthesis") {
+    label = "Writing final response";
+  }
+
+  return { label, detail: latest.detail, startedAtMs };
+}
+
 function EventIcon({ event }: { event: TimelineEntry }) {
   if (event.kind === "tool") return <TerminalSquare aria-hidden="true" />;
   if (event.kind === "permission") return <ShieldCheck aria-hidden="true" />;
@@ -511,6 +571,7 @@ export function SessionThread({
   const [threadFindQuery, setThreadFindQuery] = useState("");
   const [threadFindIndex, setThreadFindIndex] = useState(0);
   const [arrivingMessageId, setArrivingMessageId] = useState<string | null>(null);
+  const [progressNowMs, setProgressNowMs] = useState(() => Date.now());
   const streamedAnswerRef = useRef(false);
   const knownMessageIdsRef = useRef<{ sessionId: string | null; ids: Set<string> }>({
     sessionId,
@@ -558,6 +619,13 @@ export function SessionThread({
     return () => window.clearTimeout(timeout);
   }, [arrivingMessageId]);
 
+  useEffect(() => {
+    if (status !== "running") return;
+    setProgressNowMs(Date.now());
+    const interval = window.setInterval(() => setProgressNowMs(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [status]);
+
   useEffect(
     () => () => {
       if (clipboardToastTimerRef.current !== null) {
@@ -602,6 +670,8 @@ export function SessionThread({
       .map((item) => item.id);
   }, [items, threadFindQuery]);
   const threadRows = useMemo(() => groupThreadItems(items), [items]);
+  const runProgress = useMemo(() => activeRunProgress(timeline), [timeline]);
+  const runElapsed = formatRunElapsed(progressNowMs - runProgress.startedAtMs);
   const hasStreamAnswer = Boolean(streamAnswer);
   const minimapMarkers = useMemo<MinimapMarker[]>(() => {
     const markers: MinimapMarker[] = [];
@@ -1126,7 +1196,8 @@ export function SessionThread({
             data-minimap-kind="streaming"
           >
             <div className="thread-thinking thread-streaming-status" role="status">
-              <span>Thinking</span>
+              <span title={runProgress.detail}>{runProgress.label}</span>
+              <time>{runElapsed}</time>
             </div>
             <AgentMarkdown
               content={streamAnswer}
@@ -1139,7 +1210,8 @@ export function SessionThread({
 
         {!streamAnswer && status === "running" && (
           <div className="thread-thinking thread-running" role="status">
-            <span>Thinking</span>
+            <span title={runProgress.detail}>{runProgress.label}</span>
+            <time>{runElapsed}</time>
           </div>
         )}
         <span className="thread-scroll-anchor" aria-hidden="true" />

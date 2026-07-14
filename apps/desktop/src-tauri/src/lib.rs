@@ -4899,6 +4899,9 @@ pub fn run() {
     if let Err(error) = redact_persisted_events(&mut store) {
         eprintln!("failed to redact persisted Cindx history: {error}");
     }
+    if let Err(error) = reconcile_interrupted_agent_runs(&mut store) {
+        append_startup_log(&format!("interrupted run recovery failed: {error}"));
+    }
     let provider_config = load_provider_config();
     let mcp_catalog = McpCatalogService::load(mcp_config_path(), mcp_catalog_cache_path());
     let mut workspace_config = load_workspace_config();
@@ -8359,6 +8362,13 @@ fn agent_state_for_session(
     let task_id = phase16_task_id();
     let events = store.list_by_task(&task_id)?;
     let active_events = active_agent_events_for_session(&events, session_id);
+    let last_error = last_error.or_else(|| {
+        active_events.iter().rev().find_map(|event| {
+            matches!(event.kind, EventKind::Error)
+                .then(|| event.metadata.get("error").cloned())
+                .flatten()
+        })
+    });
     let thread_events = session_id
         .map(|session_id| agent_session_events(&events, session_id))
         .unwrap_or_else(|| active_events.clone());
@@ -8785,6 +8795,54 @@ fn agent_task_is_cancelled(
         .find(|event| matches!(event.kind, EventKind::TaskStatusChanged))
         .map(|event| event.summary == "Agent task cancelled")
         .unwrap_or(false))
+}
+
+fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Result<usize, StorageError> {
+    let events = store.list_by_task(&phase16_task_id())?;
+    let mut active_runs = BTreeMap::<String, Metadata>::new();
+
+    for event in events {
+        let session_key = event
+            .metadata
+            .get("session_id")
+            .cloned()
+            .unwrap_or_else(|| "__default__".to_string());
+        if is_agent_run_start_event(&event) {
+            active_runs.insert(session_key, event.metadata.clone());
+            continue;
+        }
+        let terminal = matches!(event.kind, EventKind::Error)
+            || matches!(
+                event.summary.as_str(),
+                "Agent task completed" | "Agent task cancelled" | "Agent task failed"
+            );
+        if terminal {
+            active_runs.remove(&session_key);
+        }
+    }
+
+    let recovered = active_runs.len();
+    for (_, run_context) in active_runs {
+        append_event(
+            store,
+            &phase16_task_id(),
+            EventKind::Error,
+            "Agent task failed",
+            metadata_with_context(
+                [
+                    (
+                        "error".to_string(),
+                        "Cindx closed before this run finished. Retry to continue.".to_string(),
+                    ),
+                    ("failure_code".to_string(), "run_interrupted".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                &run_context,
+            ),
+        )?;
+    }
+    Ok(recovered)
 }
 
 fn agent_session_permission_granted(
@@ -14620,6 +14678,61 @@ mod tests {
             .expect("alpha cancellation should load"));
         assert!(!agent_task_is_cancelled(&store, Some("session-b"))
             .expect("beta cancellation should load"));
+    }
+
+    #[test]
+    fn startup_recovery_fails_only_unfinished_agent_runs() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        for (session_id, run_id) in [("session-a", "run-a"), ("session-b", "run-b")] {
+            append_event(
+                &mut store,
+                &phase16_task_id(),
+                EventKind::TaskStatusChanged,
+                "Agent task started",
+                [
+                    ("session_id".to_string(), session_id.to_string()),
+                    ("agent_run_id".to_string(), run_id.to_string()),
+                    ("prompt".to_string(), "finish the task".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            )
+            .expect("run start should append");
+        }
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task completed",
+            [
+                ("session_id".to_string(), "session-a".to_string()),
+                ("agent_run_id".to_string(), "run-a".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        )
+        .expect("completion should append");
+
+        assert_eq!(
+            reconcile_interrupted_agent_runs(&mut store).expect("recovery should succeed"),
+            1
+        );
+        let completed = agent_state_for_session(&store, None, Some("session-a"))
+            .expect("completed state should load");
+        let interrupted = agent_state_for_session(&store, None, Some("session-b"))
+            .expect("interrupted state should load");
+
+        assert_eq!(completed.status, "completed");
+        assert_eq!(interrupted.status, "failed");
+        assert!(interrupted.can_retry);
+        assert!(interrupted
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("closed before this run finished")));
+        assert_eq!(
+            reconcile_interrupted_agent_runs(&mut store).expect("recovery should be idempotent"),
+            0
+        );
     }
 
     #[test]
