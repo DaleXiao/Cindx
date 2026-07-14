@@ -826,8 +826,8 @@ export function Inspector({
           onClick={() => setDebugOpen((current) => !current)}
         >
           <Bug aria-hidden="true" />
-          <strong>Debug</strong>
           <DisclosureTriangle />
+          <strong>Debug</strong>
         </button>
       </section>
       {outputPreviewFullscreen && outputPreview
