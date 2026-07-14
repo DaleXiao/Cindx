@@ -409,6 +409,9 @@ export type AgentState = {
   contextWindowTokens: number;
   contextRemainingPercent: number;
   contextUsageEstimated: boolean;
+  runBudgetMs: number;
+  runModelCallBudget: number;
+  runToolCallBudget: number;
   canCancel: boolean;
   canRetry: boolean;
   timeline: TimelineEntry[];
@@ -731,6 +734,9 @@ let browserAgentState: AgentState = {
   contextWindowTokens: 128000,
   contextRemainingPercent: 100,
   contextUsageEstimated: true,
+  runBudgetMs: 0,
+  runModelCallBudget: 0,
+  runToolCallBudget: 0,
   canCancel: false,
   canRetry: false,
   timeline: [],

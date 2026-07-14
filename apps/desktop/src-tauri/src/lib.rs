@@ -58,7 +58,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
-use tools::{ToolRegistry, WebSearchConfig};
+use tools::{ToolExecutionControl, ToolRegistry, WebSearchConfig};
+
+mod run_control;
+
+use run_control::{AgentRunControl, RunControlSnapshot};
 
 const PHASE3_TASK_ID: &str = "phase-3-demo";
 const PHASE4_TASK_ID: &str = "phase-4-demo";
@@ -92,7 +96,7 @@ struct AppState {
     project_session_config: Mutex<ProjectSessionConfig>,
     mcp_catalog: Mutex<McpCatalogService>,
     suspended_agent_runs: Mutex<BTreeMap<String, SuspendedAgentRun>>,
-    agent_run_cancellations: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
+    agent_run_controls: Mutex<BTreeMap<String, Arc<AgentRunControl>>>,
     allow_exit: AtomicBool,
     quit_prompt_active: AtomicBool,
 }
@@ -104,6 +108,7 @@ struct SuspendedAgentRun {
     run_context: Metadata,
     workspace_root: PathBuf,
     collaboration: Option<AgentCollaboration>,
+    run_control: RunControlSnapshot,
 }
 
 #[derive(Debug, Clone)]
@@ -999,6 +1004,9 @@ struct AgentState {
     context_window_tokens: u64,
     context_remaining_percent: f64,
     context_usage_estimated: bool,
+    run_budget_ms: u64,
+    run_model_call_budget: usize,
+    run_tool_call_budget: usize,
     can_cancel: bool,
     can_retry: bool,
     timeline: Vec<TimelineEntry>,
@@ -2604,17 +2612,23 @@ fn export_agent_trace_jsonl(
         .map_err(|error| error.to_string())
 }
 
-fn begin_agent_run_control(
+fn begin_agent_run_control_for_effort(
     state: &tauri::State<'_, AppState>,
     session_id: &str,
-) -> Result<Arc<AtomicBool>, String> {
-    let control = Arc::new(AtomicBool::new(false));
+    effort: &str,
+    snapshot: Option<RunControlSnapshot>,
+) -> Result<Arc<AgentRunControl>, String> {
+    let control = Arc::new(
+        snapshot
+            .map(AgentRunControl::from_snapshot)
+            .unwrap_or_else(|| AgentRunControl::new(effort)),
+    );
     let mut controls = state
-        .agent_run_cancellations
+        .agent_run_controls
         .lock()
-        .map_err(|error| format!("agent cancellation lock poisoned: {error}"))?;
+        .map_err(|error| format!("agent run control lock poisoned: {error}"))?;
     if let Some(previous) = controls.insert(session_id.to_string(), control.clone()) {
-        previous.store(true, Ordering::SeqCst);
+        previous.request_cancel();
     }
     Ok(control)
 }
@@ -2622,14 +2636,14 @@ fn begin_agent_run_control(
 fn active_agent_run_control(
     state: &tauri::State<'_, AppState>,
     session_id: Option<&str>,
-) -> Result<Option<Arc<AtomicBool>>, String> {
+) -> Result<Option<Arc<AgentRunControl>>, String> {
     let Some(session_id) = session_id else {
         return Ok(None);
     };
     Ok(state
-        .agent_run_cancellations
+        .agent_run_controls
         .lock()
-        .map_err(|error| format!("agent cancellation lock poisoned: {error}"))?
+        .map_err(|error| format!("agent run control lock poisoned: {error}"))?
         .get(session_id)
         .cloned())
 }
@@ -2637,12 +2651,12 @@ fn active_agent_run_control(
 fn finish_agent_run_control(
     state: &tauri::State<'_, AppState>,
     session_id: &str,
-    control: &Arc<AtomicBool>,
+    control: &Arc<AgentRunControl>,
 ) -> Result<(), String> {
     let mut controls = state
-        .agent_run_cancellations
+        .agent_run_controls
         .lock()
-        .map_err(|error| format!("agent cancellation lock poisoned: {error}"))?;
+        .map_err(|error| format!("agent run control lock poisoned: {error}"))?;
     if controls
         .get(session_id)
         .is_some_and(|current| Arc::ptr_eq(current, control))
@@ -2657,20 +2671,168 @@ fn request_agent_run_cancel(
     session_id: &str,
 ) -> Result<bool, String> {
     if let Some(control) = active_agent_run_control(state, Some(session_id))? {
-        control.store(true, Ordering::SeqCst);
+        control.request_cancel();
         return Ok(true);
     }
     Ok(false)
 }
 
-fn agent_run_was_cancelled(control: &Arc<AtomicBool>) -> bool {
-    control.load(Ordering::SeqCst)
+fn agent_run_should_stop(control: &Arc<AgentRunControl>) -> bool {
+    control.should_stop()
+}
+
+fn add_agent_run_budget_metadata(metadata: &mut Metadata, control: &AgentRunControl) {
+    let budget = control.budget();
+    metadata.insert(
+        "run_budget_ms".to_string(),
+        budget.max_duration.as_millis().to_string(),
+    );
+    metadata.insert(
+        "run_model_call_budget".to_string(),
+        budget.max_model_calls.to_string(),
+    );
+    metadata.insert(
+        "run_tool_call_budget".to_string(),
+        budget.max_tool_calls.to_string(),
+    );
+    metadata.insert(
+        "run_no_progress_ms".to_string(),
+        budget.no_progress_timeout.as_millis().to_string(),
+    );
+}
+
+fn append_agent_progress_event(
+    state: &tauri::State<'_, AppState>,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    summary: &str,
+) -> Result<(), String> {
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    append_event(
+        &mut store,
+        task_id,
+        EventKind::TaskStatusChanged,
+        summary,
+        run_context.clone(),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn cancelled_agent_state(
     state: &tauri::State<'_, AppState>,
     session_id: Option<&str>,
 ) -> Result<AgentState, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    agent_state_for_session(&store, None, session_id).map_err(|error| error.to_string())
+}
+
+fn finish_agent_run_for_control_stop(
+    app: &tauri::AppHandle,
+    state: &tauri::State<'_, AppState>,
+    run_context: &Metadata,
+    control: &Arc<AgentRunControl>,
+) -> Result<AgentState, String> {
+    let Some(reason) = control.stop_reason() else {
+        return Err("agent run stopped without a reason".to_string());
+    };
+    let session_id = run_context.get("session_id").map(String::as_str);
+    if reason.is_user_cancelled() {
+        return cancelled_agent_state(state, session_id);
+    }
+
+    clear_suspended_agent_run_for_context(state, run_context)?;
+    let partial = control.partial_output();
+    let answer = if partial.trim().is_empty() {
+        format!(
+            "Cindx stopped this run because its safety budget was reached ({}). No verified partial result was available. Retry to continue with a fresh run budget.",
+            reason.code()
+        )
+    } else {
+        format!(
+            "Cindx stopped this run because its safety budget was reached ({}). Here is the latest intermediate result; verify it before relying on unfinished work:\n\n{}",
+            reason.code(),
+            partial.trim()
+        )
+    };
+    let progress = control.progress();
+    let mut metadata = metadata_with_context(
+        [
+            ("partial".to_string(), "true".to_string()),
+            ("stop_reason".to_string(), reason.code().to_string()),
+            (
+                "elapsed_ms".to_string(),
+                progress.elapsed.as_millis().to_string(),
+            ),
+            ("model_calls".to_string(), progress.model_calls.to_string()),
+            ("tool_calls".to_string(), progress.tool_calls.to_string()),
+            ("last_stage".to_string(), progress.stage.clone()),
+            ("last_detail".to_string(), progress.detail.clone()),
+        ]
+        .into_iter()
+        .collect(),
+        run_context,
+    );
+    metadata.insert("model".to_string(), "run-control".to_string());
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    append_message_event_with_metadata(
+        &mut store,
+        &phase16_task_id(),
+        MessageRole::Assistant,
+        &answer,
+        metadata,
+    )
+    .map_err(|error| error.to_string())?;
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task completed",
+        metadata_with_context(
+            [
+                ("completion".to_string(), "partial".to_string()),
+                ("stop_reason".to_string(), reason.code().to_string()),
+                (
+                    "elapsed_ms".to_string(),
+                    progress.elapsed.as_millis().to_string(),
+                ),
+                ("last_stage".to_string(), progress.stage),
+                ("last_detail".to_string(), progress.detail),
+            ]
+            .into_iter()
+            .collect(),
+            run_context,
+        ),
+    )
+    .map_err(|error| error.to_string())?;
+    drop(store);
+    emit_agent_stream_delta(
+        app,
+        "agent-budget-stop",
+        session_id,
+        &answer,
+        false,
+        true,
+        None,
+    );
+    emit_agent_stream_delta(
+        app,
+        "agent-budget-stop",
+        session_id,
+        "",
+        true,
+        false,
+        None,
+    );
     let store = state
         .store
         .lock()
@@ -2875,7 +3037,13 @@ fn run_agent_task_blocking(
     input: AgentTaskInput,
 ) -> Result<AgentState, String> {
     let session_id = input.session_id.clone();
-    let cancellation = begin_agent_run_control(&state, &session_id)?;
+    let effort = AgentEffort::parse(&input.effort);
+    let cancellation = begin_agent_run_control_for_effort(
+        &state,
+        &session_id,
+        effort.label(),
+        None,
+    )?;
     let result = run_agent_task_blocking_inner(app, state.clone(), input, &cancellation);
     finish_agent_run_control(&state, &session_id, &cancellation)?;
     result
@@ -2885,7 +3053,7 @@ fn run_agent_task_blocking_inner(
     app: &tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     input: AgentTaskInput,
-    cancellation: &Arc<AtomicBool>,
+    cancellation: &Arc<AgentRunControl>,
 ) -> Result<AgentState, String> {
     let effort = AgentEffort::parse(&input.effort);
     let user_prompt = input.prompt.trim().to_string();
@@ -2959,6 +3127,7 @@ fn run_agent_task_blocking_inner(
         routing_context.learning_signature(),
     );
     run_context.insert("agent_effort".to_string(), effort.label().to_string());
+    add_agent_run_budget_metadata(&mut run_context, cancellation);
     run_context.insert(
         "requested_policy".to_string(),
         requested_policy.label().to_string(),
@@ -3076,6 +3245,13 @@ fn run_agent_task_blocking_inner(
     }
 
     if should_run_agent_knowledge_retrieval(&routing_context) {
+        cancellation.mark_progress("retrieval", "Preparing workspace knowledge");
+        append_agent_progress_event(
+            &state,
+            &task_id,
+            &run_context,
+            "Preparing workspace knowledge",
+        )?;
         match prepare_agent_knowledge_context(
             &state,
             &config,
@@ -3089,7 +3265,7 @@ fn run_agent_task_blocking_inner(
             Ok(Some(knowledge_context)) => history.push(knowledge_context),
             Ok(None) => {}
             Err(error) if error == MODEL_REQUEST_CANCELLED => {
-                return cancelled_agent_state(&state, session_id);
+                return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
             }
             Err(error) => {
                 let mut store = state
@@ -3113,12 +3289,19 @@ fn run_agent_task_blocking_inner(
         }
     }
 
-    if agent_run_was_cancelled(cancellation) {
-        return cancelled_agent_state(&state, session_id);
+    if agent_run_should_stop(cancellation) {
+        return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
     }
 
+    cancellation.mark_progress("orchestration", "Preparing execution strategy");
+    append_agent_progress_event(
+        &state,
+        &task_id,
+        &run_context,
+        "Preparing execution strategy",
+    )?;
     append_single_model_policy_guidance(&mut history, &collaboration_policy);
-    let collaboration = prepare_agent_collaboration(
+    let collaboration = match prepare_agent_collaboration(
         &app,
         &state,
         &config,
@@ -3128,7 +3311,19 @@ fn run_agent_task_blocking_inner(
         &collaboration_policy,
         &prompt,
         &history,
-    );
+    ) {
+        Ok(collaboration) => collaboration,
+        Err(_) if agent_run_should_stop(cancellation) => {
+            return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
+        }
+        Err(error) => {
+            return agent_state_with_error_in_context(
+                &state,
+                &run_context,
+                format!("Collaboration failed: {error}"),
+            );
+        }
+    };
     if let Some(collaboration) = collaboration.as_ref() {
         if !collaboration.guidance.is_empty() {
             history.push(Message {
@@ -3148,10 +3343,12 @@ fn run_agent_task_blocking_inner(
         }
     }
 
-    if agent_run_was_cancelled(cancellation) {
-        return cancelled_agent_state(&state, session_id);
+    if agent_run_should_stop(cancellation) {
+        return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
     }
 
+    cancellation.mark_progress("executor", "Starting execution");
+    append_agent_progress_event(&state, &task_id, &run_context, "Starting execution")?;
     let mut runtime = if history.is_empty() {
         start_agent_loop(task_id, prompt.clone(), AgentRuntimeConfig::default())
     } else {
@@ -3249,7 +3446,23 @@ fn retry_agent_task_blocking(
     input: SessionActionInput,
 ) -> Result<AgentState, String> {
     let session_id = input.session_id.clone();
-    let cancellation = begin_agent_run_control(&state, &session_id)?;
+    let effort = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let events = store
+            .list_by_task(&phase16_task_id())
+            .map_err(|error| error.to_string())?;
+        let active_events = active_agent_events_for_session(&events, Some(&session_id));
+        agent_effort_from_active_events(&active_events)
+    };
+    let cancellation = begin_agent_run_control_for_effort(
+        &state,
+        &session_id,
+        effort.label(),
+        None,
+    )?;
     let result = retry_agent_task_blocking_inner(app, state.clone(), input, &cancellation);
     finish_agent_run_control(&state, &session_id, &cancellation)?;
     result
@@ -3259,7 +3472,7 @@ fn retry_agent_task_blocking_inner(
     app: &tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     input: SessionActionInput,
-    cancellation: &Arc<AtomicBool>,
+    cancellation: &Arc<AgentRunControl>,
 ) -> Result<AgentState, String> {
     clear_suspended_agent_run(&state, &input.session_id)?;
     let mut run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
@@ -3317,6 +3530,7 @@ fn retry_agent_task_blocking_inner(
         routing_context.learning_signature(),
     );
     run_context.insert("agent_effort".to_string(), effort.label().to_string());
+    add_agent_run_budget_metadata(&mut run_context, cancellation);
     run_context.insert(
         "requested_policy".to_string(),
         requested_policy.label().to_string(),
@@ -3423,6 +3637,13 @@ fn retry_agent_task_blocking_inner(
         config.context_window_tokens,
     )?;
     if should_run_agent_knowledge_retrieval(&routing_context) {
+        cancellation.mark_progress("retrieval", "Preparing workspace knowledge");
+        append_agent_progress_event(
+            &state,
+            &task_id,
+            &run_context,
+            "Preparing workspace knowledge",
+        )?;
         match prepare_agent_knowledge_context(
             &state,
             &config,
@@ -3436,7 +3657,7 @@ fn retry_agent_task_blocking_inner(
             Ok(Some(knowledge_context)) => history.push(knowledge_context),
             Ok(None) => {}
             Err(error) if error == MODEL_REQUEST_CANCELLED => {
-                return cancelled_agent_state(&state, session_id.as_deref());
+                return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
             }
             Err(error) => {
                 let mut store = state
@@ -3459,8 +3680,15 @@ fn retry_agent_task_blocking_inner(
             }
         }
     }
+    cancellation.mark_progress("orchestration", "Preparing execution strategy");
+    append_agent_progress_event(
+        &state,
+        &task_id,
+        &run_context,
+        "Preparing execution strategy",
+    )?;
     append_single_model_policy_guidance(&mut history, &collaboration_policy);
-    let collaboration = prepare_agent_collaboration(
+    let collaboration = match prepare_agent_collaboration(
         app,
         &state,
         &config,
@@ -3470,7 +3698,19 @@ fn retry_agent_task_blocking_inner(
         &collaboration_policy,
         &prompt,
         &history,
-    );
+    ) {
+        Ok(collaboration) => collaboration,
+        Err(_) if agent_run_should_stop(cancellation) => {
+            return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
+        }
+        Err(error) => {
+            return agent_state_with_error_in_context(
+                &state,
+                &run_context,
+                format!("Collaboration failed: {error}"),
+            );
+        }
+    };
     if let Some(collaboration) = collaboration.as_ref() {
         if !collaboration.guidance.is_empty() {
             history.push(Message {
@@ -3489,9 +3729,11 @@ fn retry_agent_task_blocking_inner(
             });
         }
     }
-    if agent_run_was_cancelled(cancellation) {
-        return cancelled_agent_state(&state, session_id.as_deref());
+    if agent_run_should_stop(cancellation) {
+        return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
     }
+    cancellation.mark_progress("executor", "Starting execution");
+    append_agent_progress_event(&state, &task_id, &run_context, "Starting execution")?;
     let runtime = if history.is_empty() {
         start_agent_loop(task_id, prompt.clone(), AgentRuntimeConfig::default())
     } else {
@@ -3537,7 +3779,13 @@ fn resolve_agent_permission_blocking(
     decision: String,
     session_id: String,
 ) -> Result<AgentState, String> {
-    let cancellation = begin_agent_run_control(&state, &session_id)?;
+    let snapshot = suspended_agent_run_control_snapshot(&state, &session_id)?;
+    let cancellation = begin_agent_run_control_for_effort(
+        &state,
+        &session_id,
+        AgentEffort::Auto.label(),
+        snapshot,
+    )?;
     let result = resolve_agent_permission_blocking_inner(
         app,
         state.clone(),
@@ -3556,7 +3804,7 @@ fn resolve_agent_permission_blocking_inner(
     request_id: String,
     decision: String,
     session_id: String,
-    cancellation: &Arc<AtomicBool>,
+    cancellation: &Arc<AgentRunControl>,
 ) -> Result<AgentState, String> {
     let mut run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
     let root = run_context
@@ -4406,7 +4654,7 @@ fn search_rag(
 
     let adapter = open_rag_adapter_for(&root)?;
     let config = clone_provider_config(&state)?;
-    let cancellation = Arc::new(AtomicBool::new(false));
+    let cancellation = Arc::new(AgentRunControl::new("auto"));
     let retrieval = run_parallel_retrieval(
         &root,
         &adapter,
@@ -4460,7 +4708,7 @@ fn answer_with_rag(
 
     let adapter = open_rag_adapter_for(&root)?;
     let config = clone_provider_config(&state)?;
-    let cancellation = Arc::new(AtomicBool::new(false));
+    let cancellation = Arc::new(AgentRunControl::new("auto"));
     let retrieval = run_parallel_retrieval(
         &root,
         &adapter,
@@ -4940,7 +5188,7 @@ pub fn run() {
             project_session_config: Mutex::new(project_session_config),
             mcp_catalog: Mutex::new(mcp_catalog),
             suspended_agent_runs: Mutex::new(BTreeMap::new()),
-            agent_run_cancellations: Mutex::new(BTreeMap::new()),
+            agent_run_controls: Mutex::new(BTreeMap::new()),
             allow_exit: AtomicBool::new(false),
             quit_prompt_active: AtomicBool::new(false),
         })
@@ -6134,7 +6382,7 @@ fn synthesize_agent_answer(
     executor_answer: &str,
     run_context: &Metadata,
     collaboration: &AgentCollaboration,
-    cancellation: &Arc<AtomicBool>,
+    cancellation: &Arc<AgentRunControl>,
 ) -> Result<String, String> {
     let evidence = runtime
         .messages
@@ -6171,7 +6419,7 @@ fn synthesize_agent_answer(
         review_prompt,
     )
     .unwrap_or_else(|error| format!("Reviewer unavailable: {error}"));
-    if agent_run_was_cancelled(cancellation) {
+    if agent_run_should_stop(cancellation) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
     let synthesis_prompt = format!(
@@ -6212,7 +6460,7 @@ fn synthesize_agent_answer(
             );
         },
     );
-    if agent_run_was_cancelled(cancellation) {
+    if agent_run_should_stop(cancellation) {
         emit_agent_stream_delta(
             app,
             &stream_request_id,
@@ -6287,17 +6535,31 @@ fn complete_collaboration_model_with_control(
     model: String,
     system_prompt: String,
     prompt: String,
-    cancellation: Option<Arc<AtomicBool>>,
+    cancellation: Option<Arc<AgentRunControl>>,
     mut on_delta: impl FnMut(&str),
 ) -> CollaborationCompletion {
     let started_at_ms = current_time_millis();
+    let role_name = role_label(&role).to_string();
+    if let Some(control) = cancellation.as_ref() {
+        if let Err(reason) = control.begin_model_call(&role_name) {
+            return CollaborationCompletion::failed(format!(
+                "Run stopped before model call: {}",
+                reason.code()
+            ));
+        }
+    }
+    let timeout_seconds = cancellation
+        .as_ref()
+        .map(|control| control.timeout_seconds(180))
+        .unwrap_or(180);
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
         base_url: config.base_url.clone(),
         api_key: config.api_key.clone(),
         model,
         embedding_model: config.model_for_role(&ModelRole::Embedder),
-        timeout_seconds: 180,
+        timeout_seconds,
     });
+    let mut partial_output = String::new();
     let response = provider.complete_streaming_cancellable(
         ModelRequest {
             role,
@@ -6322,11 +6584,20 @@ fn complete_collaboration_model_with_control(
             .into_iter()
             .collect(),
         },
-        |delta| on_delta(delta),
+        |delta| {
+            if !delta.is_empty() {
+                partial_output.push_str(delta);
+            }
+            if let Some(control) = cancellation.as_ref() {
+                control.mark_progress("model_stream", &role_name);
+                control.record_partial_output(&partial_output);
+            }
+            on_delta(delta);
+        },
         || {
             cancellation
                 .as_ref()
-                .is_some_and(|control| agent_run_was_cancelled(control))
+                .is_some_and(|control| agent_run_should_stop(control))
         },
     );
     let latency_ms = current_time_millis().saturating_sub(started_at_ms);
@@ -6337,6 +6608,9 @@ fn complete_collaboration_model_with_control(
                 if let Some(value) = response.metadata.get(key) {
                     usage.insert(key.to_string(), value.clone());
                 }
+            }
+            if let Some(control) = cancellation.as_ref() {
+                control.record_partial_output(&response.message.content);
             }
             CollaborationCompletion {
                 content: Some(response.message.content),
@@ -6369,7 +6643,7 @@ fn complete_collaboration_worker_with_tools(
     model: String,
     prompt: String,
     allow_tools: bool,
-    cancellation: Option<Arc<AtomicBool>>,
+    cancellation: Option<Arc<AgentRunControl>>,
 ) -> CollaborationCompletion {
     let started_at_ms = current_time_millis();
     let state = app.state::<AppState>();
@@ -6386,12 +6660,16 @@ fn complete_collaboration_worker_with_tools(
     } else {
         Vec::new()
     };
+    let timeout_seconds = cancellation
+        .as_ref()
+        .map(|control| control.timeout_seconds(180))
+        .unwrap_or(180);
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
         base_url: config.base_url.clone(),
         api_key: config.api_key.clone(),
         model,
         embedding_model: config.model_for_role(&ModelRole::Embedder),
-        timeout_seconds: 180,
+        timeout_seconds,
     });
     let mut runtime = start_agent_loop(
         task_id,
@@ -6416,7 +6694,7 @@ fn complete_collaboration_worker_with_tools(
     let mut worker_context = run_context.clone();
     let evidence_source = stage.clone();
     worker_context.insert("collaboration_id".to_string(), collaboration_id);
-    worker_context.insert("stage".to_string(), stage);
+    worker_context.insert("stage".to_string(), stage.clone());
     worker_context.insert("role".to_string(), role_label(&role).to_string());
     worker_context.insert("worker_runtime".to_string(), "isolated_evidence_v1".to_string());
     let mut usage = Metadata::new();
@@ -6426,7 +6704,7 @@ fn complete_collaboration_worker_with_tools(
     loop {
         if cancellation
             .as_ref()
-            .is_some_and(|control| agent_run_was_cancelled(control))
+            .is_some_and(|control| agent_run_should_stop(control))
         {
             return CollaborationCompletion {
                 content: None,
@@ -6435,6 +6713,18 @@ fn complete_collaboration_worker_with_tools(
                 usage,
                 evidence,
             };
+        }
+
+        if let Some(control) = cancellation.as_ref() {
+            if let Err(reason) = control.begin_model_call(&stage) {
+                return CollaborationCompletion {
+                    content: None,
+                    error: Some(format!("Run stopped before worker model call: {}", reason.code())),
+                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
+                    usage,
+                    evidence,
+                };
+            }
         }
 
         let mut request = model_request_for_turn_with_context(
@@ -6451,13 +6741,22 @@ fn complete_collaboration_worker_with_tools(
             "max_output_tokens".to_string(),
             COLLABORATION_MAX_OUTPUT_TOKENS.to_string(),
         );
+        let mut partial_output = String::new();
         let response = match provider.complete_streaming_cancellable(
             request,
-            |_| {},
+            |delta| {
+                if !delta.is_empty() {
+                    partial_output.push_str(delta);
+                }
+                if let Some(control) = cancellation.as_ref() {
+                    control.mark_progress("model_stream", &stage);
+                    control.record_partial_output(&partial_output);
+                }
+            },
             || {
                 cancellation
                     .as_ref()
-                    .is_some_and(|control| agent_run_was_cancelled(control))
+                    .is_some_and(|control| agent_run_should_stop(control))
             },
         ) {
             Ok(response) => response,
@@ -6486,6 +6785,9 @@ fn complete_collaboration_worker_with_tools(
 
         match advance_with_model_response(&mut runtime, response, &tools) {
             AgentAdvance::Completed { answer } => {
+                if let Some(control) = cancellation.as_ref() {
+                    control.record_partial_output(&answer);
+                }
                 usage.insert("worker_turns".to_string(), runtime.turn.to_string());
                 usage.insert("worker_tool_calls".to_string(), tool_call_count.to_string());
                 usage.insert("worker_tool_count".to_string(), tools.len().to_string());
@@ -6764,7 +7066,7 @@ fn run_collaboration_stage_with_delta(
     )?;
     if cancellation
         .as_ref()
-        .is_some_and(|control| agent_run_was_cancelled(control))
+        .is_some_and(|control| agent_run_should_stop(control))
     {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
@@ -6996,7 +7298,39 @@ fn run_adaptive_collaboration(
     let mut outputs = BTreeMap::new();
     let mut evidence_by_step = BTreeMap::<String, Vec<CollaborationEvidence>>::new();
 
-    for layer in layers {
+    for (layer_index, layer) in layers.into_iter().enumerate() {
+        if let Some(control) = active_agent_run_control(
+            state,
+            run_context.get("session_id").map(String::as_str),
+        )? {
+            control.mark_progress(
+                "collaboration",
+                &format!("Layer {}/{}", layer_index + 1, layer_count),
+            );
+        }
+        {
+            let mut store = state
+                .store
+                .lock()
+                .map_err(|error| format!("store lock poisoned: {error}"))?;
+            append_event(
+                &mut store,
+                task_id,
+                EventKind::TaskStatusChanged,
+                format!("Collaboration layer {}/{} started", layer_index + 1, layer_count),
+                metadata_with_context(
+                    [
+                        ("collaboration_id".to_string(), collaboration_id.to_string()),
+                        ("layer".to_string(), (layer_index + 1).to_string()),
+                        ("layer_count".to_string(), layer_count.to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    run_context,
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        }
         let specs = layer
             .into_iter()
             .map(|step_index| {
@@ -7086,7 +7420,7 @@ fn run_adaptive_collaboration(
 
         if cancellation
             .as_ref()
-            .is_some_and(|control| agent_run_was_cancelled(control))
+            .is_some_and(|control| agent_run_should_stop(control))
         {
             return Err(MODEL_REQUEST_CANCELLED.to_string());
         }
@@ -7473,7 +7807,7 @@ fn run_collaboration_candidates(
         .collect::<Vec<_>>();
     if cancellation
         .as_ref()
-        .is_some_and(|control| agent_run_was_cancelled(control))
+        .is_some_and(|control| agent_run_should_stop(control))
     {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
@@ -7538,9 +7872,9 @@ fn prepare_agent_collaboration(
     policy: &OrchestrationPolicy,
     prompt: &str,
     history: &[Message],
-) -> Option<AgentCollaboration> {
+) -> Result<Option<AgentCollaboration>, String> {
     let OrchestrationPolicy::BestOfN { candidates } = policy else {
-        return None;
+        return Ok(None);
     };
     let id = unique_id("collab");
     let models = collaboration_candidate_models(config, MAX_ADAPTIVE_WORKFLOW_STEPS);
@@ -7554,7 +7888,7 @@ fn prepare_agent_collaboration(
         .collect::<Vec<_>>();
     let bounded = run_context.get("collaboration_profile").map(String::as_str)
         == Some("bounded");
-    let guidance = if bounded {
+    let guidance_result = if bounded {
         run_collaboration_candidates(
             app,
             state,
@@ -7583,6 +7917,16 @@ fn prepare_agent_collaboration(
             agent_budget,
         )
         .or_else(|error| {
+            let control = active_agent_run_control(
+                state,
+                run_context.get("session_id").map(String::as_str),
+            )?;
+            if control.as_ref().is_some_and(|control| control.should_stop()) {
+                return Err(error);
+            }
+            let fallback_allowed = !control
+                .as_ref()
+                .is_some_and(|control| control.progress().remaining.as_secs() < 90);
             if let Ok(mut store) = state.store.lock() {
                 let _ = append_event(
                     &mut store,
@@ -7594,7 +7938,10 @@ fn prepare_agent_collaboration(
                             ("collaboration_id".to_string(), id.clone()),
                             ("workflow_schema".to_string(), WORKFLOW_IR_SCHEMA.to_string()),
                             ("status".to_string(), "failed".to_string()),
-                            ("fallback_used".to_string(), "true".to_string()),
+                            (
+                                "fallback_used".to_string(),
+                                fallback_allowed.to_string(),
+                            ),
                             (
                                 "error".to_string(),
                                 truncate_for_collaboration(&error, 2_000),
@@ -7605,6 +7952,11 @@ fn prepare_agent_collaboration(
                         run_context,
                     ),
                 );
+            }
+            if !fallback_allowed {
+                return Err(format!(
+                    "{error}; adaptive fallback skipped because less than 90 seconds remain"
+                ));
             }
             run_collaboration_candidates(
                 app,
@@ -7620,14 +7972,14 @@ fn prepare_agent_collaboration(
                 true,
             )
         })
-    }
-    .unwrap_or_default();
-    Some(AgentCollaboration {
+    };
+    let guidance = guidance_result?;
+    Ok(Some(AgentCollaboration {
         id,
         policy: policy.label().to_string(),
         guidance,
         candidate_models: models,
-    })
+    }))
 }
 
 fn append_single_model_policy_guidance(
@@ -7726,7 +8078,7 @@ fn continue_agent_loop(
     prompt: String,
     run_context: Metadata,
     collaboration: Option<&AgentCollaboration>,
-    cancellation: &Arc<AtomicBool>,
+    cancellation: &Arc<AgentRunControl>,
 ) -> Result<AgentState, String> {
     let session_id = run_context.get("session_id").map(String::as_str);
     let agent_model = agent_model_for_run(config, &run_context);
@@ -7735,7 +8087,7 @@ fn continue_agent_loop(
         api_key: config.api_key.clone(),
         model: agent_model.clone(),
         embedding_model: config.model_for_role(&ModelRole::Embedder),
-        timeout_seconds: 180,
+        timeout_seconds: cancellation.timeout_seconds(180),
     });
     let registry = tool_registry_for_state(state, workspace_root)?;
     let tools = registry
@@ -7744,6 +8096,9 @@ fn continue_agent_loop(
     let runtime_context = agent_runtime_context_for_run(&run_context);
 
     loop {
+        if cancellation.begin_model_call("executor").is_err() {
+            return finish_agent_run_for_control_stop(app, state, &run_context, cancellation);
+        }
         let mut request = model_request_for_turn_with_context(
             &runtime,
             &tools,
@@ -7795,9 +8150,15 @@ fn continue_agent_loop(
 
         let visible_stream = collaboration.is_none();
         let mut streamed_output = false;
+        let mut partial_stream = String::new();
         let mut response = match provider.complete_streaming_cancellable(
             request,
             |delta| {
+                if !delta.is_empty() {
+                    partial_stream.push_str(delta);
+                    cancellation.mark_progress("model_stream", "executor");
+                    cancellation.record_partial_output(&partial_stream);
+                }
                 if visible_stream && !delta.is_empty() {
                     streamed_output = true;
                     emit_agent_stream_delta(
@@ -7811,11 +8172,11 @@ fn continue_agent_loop(
                     );
                 }
             },
-            || agent_run_was_cancelled(cancellation),
+            || agent_run_should_stop(cancellation),
         ) {
             Ok(response) => response,
             Err(error) => {
-                if error.message == MODEL_REQUEST_CANCELLED || agent_run_was_cancelled(cancellation) {
+                if error.message == MODEL_REQUEST_CANCELLED || agent_run_should_stop(cancellation) {
                     emit_agent_stream_delta(
                         app,
                         &request_id,
@@ -7825,7 +8186,12 @@ fn continue_agent_loop(
                         true,
                         None,
                     );
-                    return cancelled_agent_state(state, session_id);
+                    return finish_agent_run_for_control_stop(
+                        app,
+                        state,
+                        &run_context,
+                        cancellation,
+                    );
                 }
                 return agent_state_with_error_in_context(
                     state,
@@ -7834,6 +8200,9 @@ fn continue_agent_loop(
                 );
             }
         };
+        if !response.message.content.trim().is_empty() {
+            cancellation.record_partial_output(&response.message.content);
+        }
         let should_synthesize = collaboration.is_some()
             && response.tool_calls.is_empty()
             && !response.message.content.trim().is_empty();
@@ -7933,8 +8302,13 @@ fn continue_agent_loop(
                         cancellation,
                     ) {
                         Ok(answer) => answer,
-                        Err(_) if agent_run_was_cancelled(cancellation) => {
-                            return cancelled_agent_state(state, session_id);
+                        Err(_) if agent_run_should_stop(cancellation) => {
+                            return finish_agent_run_for_control_stop(
+                                app,
+                                state,
+                                &run_context,
+                                cancellation,
+                            );
                         }
                         Err(_) => {
                             emit_agent_stream_delta(
@@ -8044,6 +8418,14 @@ fn continue_agent_loop(
             AgentAdvance::ToolCalls { calls } => {
                 let mut waiting_for_permission = false;
                 for call in calls {
+                    if agent_run_should_stop(cancellation) {
+                        return finish_agent_run_for_control_stop(
+                            app,
+                            state,
+                            &run_context,
+                            cancellation,
+                        );
+                    }
                     let invocation = tool_invocation_from_request(&runtime.task_id, &call);
                     let mut store = state
                         .store
@@ -8238,6 +8620,15 @@ fn continue_agent_loop(
                         &run_context,
                     )
                     .map_err(|error| error.to_string())?;
+                    drop(store);
+                    if agent_run_should_stop(cancellation) {
+                        return finish_agent_run_for_control_stop(
+                            app,
+                            state,
+                            &run_context,
+                            cancellation,
+                        );
+                    }
                 }
                 if waiting_for_permission {
                     let mut store = state
@@ -8260,6 +8651,7 @@ fn continue_agent_loop(
                             run_context: run_context.clone(),
                             workspace_root: workspace_root.to_path_buf(),
                             collaboration: collaboration.cloned(),
+                            run_control: cancellation.snapshot(),
                         },
                     )?;
                     return agent_state_for_session(&store, None, session_id)
@@ -8294,6 +8686,18 @@ fn take_suspended_agent_run(
         .lock()
         .map_err(|error| format!("suspended agent runs lock poisoned: {error}"))?
         .remove(session_id))
+}
+
+fn suspended_agent_run_control_snapshot(
+    state: &tauri::State<'_, AppState>,
+    session_id: &str,
+) -> Result<Option<RunControlSnapshot>, String> {
+    Ok(state
+        .suspended_agent_runs
+        .lock()
+        .map_err(|error| format!("suspended agent runs lock poisoned: {error}"))?
+        .get(session_id)
+        .map(|run| run.run_control.clone()))
 }
 
 fn clear_suspended_agent_run(
@@ -8342,6 +8746,9 @@ fn append_observations_to_suspended_run(
             &resolved.tool_name,
             &resolved.image_paths,
         );
+    }
+    if let Some(control) = active_agent_run_control(state, Some(session_id))? {
+        suspended.run_control = control.snapshot();
     }
     remember_suspended_agent_run(state, suspended)
 }
@@ -8475,6 +8882,19 @@ fn agent_state_for_session(
                 && event.summary == "Agent model turn finished"
         })
         .count();
+    let run_start = active_events.iter().find(|event| is_agent_run_start_event(event));
+    let run_budget_ms = run_start
+        .and_then(|event| event.metadata.get("run_budget_ms"))
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_default();
+    let run_model_call_budget = run_start
+        .and_then(|event| event.metadata.get("run_model_call_budget"))
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_default();
+    let run_tool_call_budget = run_start
+        .and_then(|event| event.metadata.get("run_tool_call_budget"))
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_default();
     let can_cancel = matches!(status.as_str(), "running" | "waiting_for_permission");
     let can_retry = matches!(status.as_str(), "completed" | "failed" | "cancelled")
         && latest_agent_prompt_from_active_events(&active_events).is_some();
@@ -8493,6 +8913,9 @@ fn agent_state_for_session(
         context_window_tokens,
         context_remaining_percent,
         context_usage_estimated,
+        run_budget_ms,
+        run_model_call_budget,
+        run_tool_call_budget,
         can_cancel,
         can_retry,
         timeline,
@@ -9597,9 +10020,37 @@ fn execute_agent_tool_invocation(
         .map_err(|error| error.to_string())?;
     }
 
+    let run_control = active_agent_run_control(
+        state,
+        run_context.get("session_id").map(String::as_str),
+    )?;
+    let scope = run_context
+        .get("stage")
+        .or_else(|| run_context.get("collaboration_stage"))
+        .map(String::as_str)
+        .unwrap_or("executor");
+    let budget_stop = run_control.as_ref().and_then(|control| {
+        control
+            .begin_tool_call(scope, &tool_name, &invocation.input_json)
+            .err()
+    });
+    let tool_control = ToolExecutionControl::new({
+        let run_control = run_control.clone();
+        move || run_control.as_ref().is_some_and(|control| control.should_stop())
+    });
     let registry = tool_registry_for_state(state, workspace_root)?;
-    let mut result = match registry.get(&tool_name) {
-        Some(tool) => match tool.execute(invocation) {
+    let mut result = if let Some(reason) = budget_stop {
+        ToolResult::text(
+            invocation.id,
+            ToolOutcomeStatus::Cancelled,
+            format!("Tool execution stopped: {}.", reason.code()),
+            [("stop_reason".to_string(), reason.code().to_string())]
+                .into_iter()
+                .collect(),
+        )
+    } else {
+        match registry.get(&tool_name) {
+        Some(tool) => match tool.execute_with_control(invocation, &tool_control) {
             Ok(result) => result,
             Err(error) => ToolResult::failed(
                 agent_core::ToolCallId(tool_call_id.clone()),
@@ -9610,7 +10061,14 @@ fn execute_agent_tool_invocation(
             agent_core::ToolCallId(tool_call_id.clone()),
             "unknown tool",
         ),
+        }
     };
+    if let Some(control) = run_control.as_ref() {
+        control.mark_progress("tool_result", &tool_name);
+        if matches!(result.status, ToolOutcomeStatus::Succeeded) {
+            control.record_partial_output(&result.output);
+        }
+    }
     materialize_tool_result_artifacts(&mut result, workspace_root)?;
 
     let mut store = state
@@ -10478,12 +10936,12 @@ fn prepare_agent_knowledge_context(
     workspace_root: &Path,
     query: &str,
     retrieval_mode: &str,
-    cancellation: &Arc<AtomicBool>,
+    cancellation: &Arc<AgentRunControl>,
 ) -> Result<Option<Message>, String> {
     let mut adapter = open_rag_adapter_for(workspace_root)?;
     let auto_indexed =
         ensure_workspace_knowledge_index(workspace_root, &mut adapter, cancellation)?;
-    if agent_run_was_cancelled(cancellation) {
+    if agent_run_should_stop(cancellation) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
     let retrieval = run_parallel_retrieval(
@@ -10589,22 +11047,22 @@ fn prepare_agent_knowledge_context(
 fn ensure_workspace_knowledge_index(
     workspace_root: &Path,
     adapter: &mut FileRagAdapter,
-    cancellation: &Arc<AtomicBool>,
+    cancellation: &Arc<AgentRunControl>,
 ) -> Result<Option<RagIndexStats>, String> {
-    if agent_run_was_cancelled(cancellation) {
+    if agent_run_should_stop(cancellation) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
     if !adapter.chunks().is_empty() {
         if !graph_store_path_for(workspace_root).exists() {
             index_graph_chunks_cancellable(workspace_root, adapter.chunks(), || {
-                agent_run_was_cancelled(cancellation)
+                agent_run_should_stop(cancellation)
             })?;
         }
         return Ok(None);
     }
 
     let index = index_workspace_cancellable(workspace_root, IndexOptions::default(), || {
-        agent_run_was_cancelled(cancellation)
+        agent_run_should_stop(cancellation)
     })
     .map_err(|error| {
         if error.message == RAG_INDEX_CANCELLED {
@@ -10614,9 +11072,9 @@ fn ensure_workspace_knowledge_index(
         }
     })?;
     index_graph_chunks_cancellable(workspace_root, &index.chunks, || {
-        agent_run_was_cancelled(cancellation)
+        agent_run_should_stop(cancellation)
     })?;
-    if agent_run_was_cancelled(cancellation) {
+    if agent_run_should_stop(cancellation) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
     export_lancedb_records_jsonl(&index, lancedb_export_path_for(workspace_root))
@@ -10634,9 +11092,9 @@ fn run_parallel_retrieval(
     query: &str,
     limit: usize,
     retrieval_mode: &str,
-    cancellation: &Arc<AtomicBool>,
+    cancellation: &Arc<AgentRunControl>,
 ) -> Result<ParallelRetrievalResult, String> {
-    if agent_run_was_cancelled(cancellation) {
+    if agent_run_should_stop(cancellation) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
     let started_at = Instant::now();
@@ -10742,7 +11200,7 @@ fn run_parallel_retrieval(
         channels.push(joined_retrieval_channel("graph_walk", handle));
     }
     channels.push(joined_retrieval_channel("file_search", literal_handle));
-    if agent_run_was_cancelled(cancellation) {
+    if agent_run_should_stop(cancellation) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
     let (results, sources) = fuse_retrieval_channels(&channels, limit);
@@ -10810,7 +11268,7 @@ fn query_embedding_for_chunks(
     config: &ProviderConfig,
     chunks: &[RagChunk],
     query: &str,
-    cancellation: &Arc<AtomicBool>,
+    cancellation: &Arc<AgentRunControl>,
 ) -> Result<Vec<f32>, String> {
     let Some(profile) = chunks.first() else {
         return Ok(local_query_embedding(query));
@@ -11031,18 +11489,32 @@ fn append_retrieval_event_for_task(
 
 struct CloudRagEmbedder {
     config: ProviderConfig,
-    cancellation: Option<Arc<AtomicBool>>,
+    cancellation: Option<Arc<AgentRunControl>>,
 }
 
 impl RagEmbedder for CloudRagEmbedder {
     fn embed_texts(&mut self, texts: &[String]) -> Result<EmbeddingBatch, agent_rag::RagError> {
+        if let Some(control) = self.cancellation.as_ref() {
+            control
+                .begin_model_call("embedding")
+                .map_err(|reason| {
+                    agent_rag::RagError::new(format!(
+                        "Run stopped before embedding call: {}",
+                        reason.code()
+                    ))
+                })?;
+        }
         let model = self.config.model_for_role(&ModelRole::Embedder);
         let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
             base_url: self.config.base_url.clone(),
             api_key: self.config.api_key.clone(),
             model: self.config.model_for_role(&ModelRole::Executor),
             embedding_model: model.clone(),
-            timeout_seconds: 180,
+            timeout_seconds: self
+                .cancellation
+                .as_ref()
+                .map(|control| control.timeout_seconds(180))
+                .unwrap_or(180),
         });
         let response = provider
             .embed_cancellable(
@@ -11054,10 +11526,13 @@ impl RagEmbedder for CloudRagEmbedder {
                 || {
                     self.cancellation
                         .as_ref()
-                        .is_some_and(|control| agent_run_was_cancelled(control))
+                        .is_some_and(|control| agent_run_should_stop(control))
                 },
             )
             .map_err(|error| agent_rag::RagError::new(error.to_string()))?;
+        if let Some(control) = self.cancellation.as_ref() {
+            control.mark_progress("embedding", &format!("Embedded {} items", texts.len()));
+        }
 
         Ok(EmbeddingBatch {
             provider: response
@@ -14237,7 +14712,7 @@ mod tests {
             FileRagAdapter::open(root.join(".cindx").join("rag-index.tsv"))
                 .expect("adapter should open");
         adapter.replace_all(index).expect("index should persist");
-        let cancellation = Arc::new(AtomicBool::new(false));
+        let cancellation = Arc::new(AgentRunControl::new("auto"));
 
         let retrieval = run_parallel_retrieval(
             &root,
