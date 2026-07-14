@@ -7,8 +7,8 @@ use agent_graph::{
     extract_graph_from_chunk, graph_direct_recall, graph_walk_recall, FileGraphStore, GraphStore,
 };
 use agent_memory::{
-    build_restore_context_pack, build_session_checkpoint_at, CheckpointOptions, RestoreContextPack,
-    SessionCheckpoint,
+    build_restore_context_pack, build_session_checkpoint_at, conversation_memory_to_markdown,
+    CheckpointOptions, RestoreContextPack, SessionCheckpoint,
 };
 use agent_mcp::{McpCatalogService, McpServerConfig, McpTransportConfig};
 use agent_rag::{
@@ -73,6 +73,12 @@ const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_ATTACHMENT_TOTAL_BYTES: usize = 50 * 1024 * 1024;
 const AGENT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 const COLLABORATION_MAX_OUTPUT_TOKENS: u64 = 4_096;
+const CONTEXT_COMPACTION_TRIGGER_PERCENT: u64 = 65;
+const CONTEXT_RECENT_TARGET_PERCENT: u64 = 28;
+const CONTEXT_RECENT_MAX_TOKENS: u64 = 48_000;
+const CONTEXT_RECENT_MAX_MESSAGES: usize = 32;
+const CONTEXT_RESTORE_MAX_CHARS: usize = 32_000;
+const CONTEXT_MEMORY_MAX_ITEMS: usize = 12;
 const LEGACY_AGENT_SYSTEM_PROMPT: &str = "You are Cindx, a desktop-first assistant. Work carefully, be direct, and ask for clarification when the task is ambiguous.";
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -4641,7 +4647,10 @@ fn compact_context(state: tauri::State<'_, AppState>) -> Result<ContextState, St
         CheckpointOptions::default(),
         current_time_millis(),
     );
-    let pack = build_restore_context_pack(checkpoint);
+    let mut pack = build_restore_context_pack(checkpoint);
+    let messages = events.iter().filter_map(message_from_event).collect::<Vec<_>>();
+    pack.text
+        .push_str(&conversation_memory_to_markdown(&messages, CONTEXT_MEMORY_MAX_ITEMS));
     let checkpoint_path = write_context_checkpoint(
         &root,
         run_context.get("session_id").map(String::as_str),
@@ -5661,6 +5670,9 @@ fn live_context_checkpoint_view(
         current_time_millis(),
     );
     let mut pack = build_restore_context_pack(checkpoint);
+    let messages = events.iter().filter_map(message_from_event).collect::<Vec<_>>();
+    pack.text
+        .push_str(&conversation_memory_to_markdown(&messages, CONTEXT_MEMORY_MAX_ITEMS));
     let checkpoint_path = context_checkpoint_path_for_session(
         workspace_root,
         run_context.get("session_id").map(String::as_str),
@@ -8481,14 +8493,104 @@ fn agent_state_for_session(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionCompactionPlan {
+    estimated_history_tokens: u64,
+    estimated_request_tokens: u64,
+    recent_start: usize,
+    recent_tokens: u64,
+    should_compact: bool,
+}
+
+fn estimate_message_tokens(message: &Message) -> u64 {
+    let content_tokens = (message.content.len() as u64 + 3) / 4;
+    let tool_call_tokens = message
+        .metadata
+        .get("raw_tool_calls_json")
+        .map(|value| (value.len() as u64 + 3) / 4)
+        .unwrap_or(0);
+    content_tokens
+        .saturating_add(tool_call_tokens)
+        .saturating_add(6)
+}
+
 fn estimate_context_tokens(messages: &[Message]) -> u64 {
-    let text_tokens = messages
+    if messages.is_empty() {
+        return 0;
+    }
+    512_u64.saturating_add(messages.iter().map(estimate_message_tokens).sum::<u64>())
+}
+
+fn context_prompt_reserve(context_window_tokens: u64) -> u64 {
+    let context_window_tokens = context_window_tokens.max(1);
+    (context_window_tokens / 8)
+        .clamp(2_048, 16_384)
+        .min(context_window_tokens / 4)
+}
+
+fn is_user_turn_start(message: &Message) -> bool {
+    matches!(message.role, MessageRole::User)
+        && message.metadata.get("kind").map(String::as_str) != Some("tool_observation")
+}
+
+fn recent_history_start(history: &[Message], token_budget: u64) -> (usize, u64) {
+    if history.is_empty() {
+        return (0, 0);
+    }
+    let mut start = history.len();
+    let mut selected = 0usize;
+    let mut tokens = 0_u64;
+    while start > 0 && selected < CONTEXT_RECENT_MAX_MESSAGES {
+        let message_tokens = estimate_message_tokens(&history[start - 1]);
+        if selected > 0 && tokens.saturating_add(message_tokens) > token_budget {
+            break;
+        }
+        start -= 1;
+        selected += 1;
+        tokens = tokens.saturating_add(message_tokens);
+    }
+    if start > 0 && !is_user_turn_start(&history[start]) {
+        if let Some(offset) = history[start..].iter().position(is_user_turn_start) {
+            start += offset;
+        } else if let Some(previous_turn) = history[..start].iter().rposition(is_user_turn_start) {
+            start = previous_turn;
+        }
+    }
+    if start == history.len() {
+        start = history.len() - 1;
+    }
+    let tokens = history[start..]
         .iter()
-        .map(|message| (message.content.chars().count() as u64 + 3) / 4)
-        .sum::<u64>();
-    768_u64
-        .saturating_add(text_tokens)
-        .saturating_add(messages.len() as u64 * 6)
+        .map(estimate_message_tokens)
+        .sum();
+    (start, tokens)
+}
+
+fn session_compaction_plan(
+    history: &[Message],
+    context_window_tokens: u64,
+) -> SessionCompactionPlan {
+    let context_window_tokens = context_window_tokens.max(1);
+    let estimated_history_tokens = estimate_context_tokens(history);
+    let estimated_request_tokens = estimated_history_tokens
+        .saturating_add(context_prompt_reserve(context_window_tokens));
+    let should_compact = estimated_request_tokens
+        >= context_window_tokens.saturating_mul(CONTEXT_COMPACTION_TRIGGER_PERCENT) / 100
+        || history.len() > 80;
+    let recent_floor = 8_000.min(context_window_tokens / 2).max(1);
+    let recent_budget = (context_window_tokens
+        .saturating_mul(CONTEXT_RECENT_TARGET_PERCENT)
+        / 100)
+        .min(CONTEXT_RECENT_MAX_TOKENS)
+        .max(recent_floor);
+    let (recent_start, recent_tokens) = recent_history_start(history, recent_budget);
+    SessionCompactionPlan {
+        estimated_history_tokens,
+        estimated_request_tokens,
+        recent_start,
+        recent_tokens,
+        should_compact,
+    }
 }
 
 fn prepare_session_history_context(
@@ -8505,15 +8607,17 @@ fn prepare_session_history_context(
         workspace_root,
         run_context.get("session_id").map(String::as_str),
     );
-    let original_tokens = estimate_context_tokens(&history);
-    let should_auto_compact = original_tokens
-        >= context_window_tokens.max(1).saturating_mul(65) / 100
-        || history.len() > 80;
-    if !should_auto_compact && !checkpoint_path.exists() {
+    let plan = session_compaction_plan(&history, context_window_tokens);
+    if !plan.should_compact && !checkpoint_path.exists() {
         return Ok(history);
     }
+    if plan.recent_start == 0 {
+        return Ok(history);
+    }
+    let older_messages = &history[..plan.recent_start];
+    let recent_messages = history[plan.recent_start..].to_vec();
 
-    let restore_text = if should_auto_compact {
+    let restore_text = if plan.should_compact {
         let mut store = state
             .store
             .lock()
@@ -8524,7 +8628,11 @@ fn prepare_session_history_context(
             CheckpointOptions::default(),
             current_time_millis(),
         );
-        let pack = build_restore_context_pack(checkpoint);
+        let mut pack = build_restore_context_pack(checkpoint);
+        pack.text.push_str(&conversation_memory_to_markdown(
+            older_messages,
+            CONTEXT_MEMORY_MAX_ITEMS,
+        ));
         let path = write_context_checkpoint(
             workspace_root,
             run_context.get("session_id").map(String::as_str),
@@ -8542,7 +8650,20 @@ fn prepare_session_history_context(
                         "context_checkpoint_path".to_string(),
                         path.display().to_string(),
                     ),
-                    ("original_tokens".to_string(), original_tokens.to_string()),
+                    ("compaction_version".to_string(), "hybrid_v2".to_string()),
+                    ("original_messages".to_string(), history.len().to_string()),
+                    (
+                        "retained_messages".to_string(),
+                        recent_messages.len().to_string(),
+                    ),
+                    (
+                        "original_tokens".to_string(),
+                        plan.estimated_history_tokens.to_string(),
+                    ),
+                    (
+                        "estimated_request_tokens".to_string(),
+                        plan.estimated_request_tokens.to_string(),
+                    ),
                     (
                         "context_window_tokens".to_string(),
                         context_window_tokens.to_string(),
@@ -8563,32 +8684,18 @@ fn prepare_session_history_context(
         return Ok(history);
     }
 
-    let recent_budget = (context_window_tokens.max(1) / 5).clamp(8_000, 64_000);
-    let mut recent_reversed = Vec::new();
-    let mut recent_tokens = 0_u64;
-    for message in history.iter().rev() {
-        let message_tokens = estimate_context_tokens(std::slice::from_ref(message));
-        if recent_reversed.len() >= 24
-            || (!recent_reversed.is_empty()
-                && recent_tokens.saturating_add(message_tokens) > recent_budget)
-        {
-            break;
-        }
-        recent_tokens = recent_tokens.saturating_add(message_tokens);
-        recent_reversed.push(message.clone());
-    }
-    recent_reversed.reverse();
-    let retained_messages = recent_reversed.len();
+    let retained_messages = recent_messages.len();
     let mut compacted = Vec::with_capacity(retained_messages + 1);
     compacted.push(Message {
         role: MessageRole::System,
         content: format!(
-            "Recovered memory for this project and session. Use it as a compact summary of older context, then prioritize the recent verbatim messages that follow.\n\n{}",
-            truncate_for_collaboration(&restore_text, 24_000)
+            "Recovered memory for this project and session. Preserve historical user requirements, but treat prior assistant and tool statements as memory that may need verification. Prioritize the recent verbatim messages that follow.\n\n{}",
+            truncate_for_collaboration(&restore_text, CONTEXT_RESTORE_MAX_CHARS)
         ),
         metadata: [
             ("internal".to_string(), "true".to_string()),
             ("kind".to_string(), "context_restore_pack".to_string()),
+            ("compaction_version".to_string(), "hybrid_v2".to_string()),
             (
                 "context_checkpoint_path".to_string(),
                 checkpoint_path.display().to_string(),
@@ -8597,7 +8704,7 @@ fn prepare_session_history_context(
         .into_iter()
         .collect(),
     });
-    compacted.extend(recent_reversed);
+    compacted.extend(recent_messages);
 
     let mut store = state
         .store
@@ -8615,7 +8722,15 @@ fn prepare_session_history_context(
                     "retained_messages".to_string(),
                     retained_messages.to_string(),
                 ),
-                ("original_tokens".to_string(), original_tokens.to_string()),
+                (
+                    "original_tokens".to_string(),
+                    plan.estimated_history_tokens.to_string(),
+                ),
+                (
+                    "retained_tokens".to_string(),
+                    plan.recent_tokens.to_string(),
+                ),
+                ("compaction_version".to_string(), "hybrid_v2".to_string()),
                 (
                     "context_checkpoint_path".to_string(),
                     checkpoint_path.display().to_string(),
@@ -12902,6 +13017,49 @@ mod tests {
             },
             prior_hint: None,
         })
+    }
+
+    fn test_message(role: MessageRole, content: impl Into<String>) -> Message {
+        Message {
+            role,
+            content: content.into(),
+            metadata: Metadata::new(),
+        }
+    }
+
+    #[test]
+    fn context_estimate_accounts_for_multibyte_text_and_prompt_reserve() {
+        let ascii = test_message(MessageRole::User, "abcdefgh");
+        let chinese = test_message(MessageRole::User, "你好世界你好世界");
+        assert!(estimate_message_tokens(&chinese) > estimate_message_tokens(&ascii));
+
+        let large_history = vec![test_message(MessageRole::User, "a".repeat(220_000))];
+        let plan = session_compaction_plan(&large_history, 100_000);
+        assert!(plan.should_compact);
+        assert!(plan.estimated_request_tokens > plan.estimated_history_tokens);
+    }
+
+    #[test]
+    fn recent_context_starts_on_a_complete_user_turn() {
+        let history = vec![
+            test_message(MessageRole::User, "old request"),
+            test_message(MessageRole::Assistant, "old answer"),
+            test_message(MessageRole::Tool, "old tool evidence"),
+            test_message(MessageRole::User, "latest request"),
+            test_message(MessageRole::Assistant, "latest answer"),
+        ];
+        let budget = estimate_message_tokens(&history[3]) + estimate_message_tokens(&history[4]);
+        let (start, tokens) = recent_history_start(&history, budget);
+
+        assert_eq!(start, 3);
+        assert!(is_user_turn_start(&history[start]));
+        assert_eq!(tokens, budget);
+
+        let (narrow_start, _) = recent_history_start(
+            &history,
+            estimate_message_tokens(history.last().expect("latest message")),
+        );
+        assert_eq!(narrow_start, 3);
     }
 
     #[test]

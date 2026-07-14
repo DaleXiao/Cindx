@@ -25,8 +25,15 @@
   --muted: #707070;
   --subtle: #989898;
   --ink: #202020;
-  --radius: 6px;
-  --icon-radius: 9px;
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 20px;
+  --radius-pill: 999px;
+  --radius-round: 50%;
+  --radius: var(--radius-sm);
+  --icon-radius: var(--radius-md);
   --titlebar-height: 46px;
   --titlebar-control-size: 28px;
   --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
@@ -444,7 +451,7 @@ pre {
   color: var(--muted);
   background: transparent;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
 }
 
 .nav-add-button:hover,
@@ -481,7 +488,7 @@ pre {
   align-items: center;
   background: transparent;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
 }
 
 .project-row:hover {
@@ -574,7 +581,7 @@ pre {
   color: var(--muted);
   background: transparent;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   opacity: 0;
   place-items: center;
   transform: translateY(-50%);
@@ -611,7 +618,7 @@ pre {
   padding: 0 6px;
   background: var(--surface);
   border: 1px solid var(--border-strong);
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   font-size: 12px;
 }
 
@@ -623,7 +630,7 @@ pre {
   color: var(--muted);
   background: transparent;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   place-items: center;
 }
 
@@ -658,7 +665,7 @@ pre {
   min-height: 30px;
   padding-right: 58px;
   padding-block: 3px;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
 }
 
 .session-item > .session-name {
@@ -706,7 +713,7 @@ pre {
   color: var(--muted);
   background: transparent;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   place-items: center;
 }
 
@@ -744,7 +751,7 @@ pre {
   height: 22px;
   content: "";
   background: transparent;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
 }
 
 .session-status {
@@ -769,7 +776,7 @@ pre {
 .session-status > span {
   width: 7px;
   height: 7px;
-  border-radius: 50%;
+  border-radius: var(--radius-round);
 }
 
 .session-status-complete > span {
@@ -860,7 +867,7 @@ pre {
   padding: 18px;
   background: #ffffff;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   box-shadow: 0 16px 44px rgb(0 0 0 / 18%);
 }
 
@@ -903,7 +910,7 @@ pre {
   padding: 0 12px;
   background: #ffffff;
   border: 1px solid var(--border-strong);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 
 .delete-confirmation-actions button:hover {
@@ -1014,17 +1021,17 @@ pre {
   appearance: none;
   background: #e5e5e5;
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 
 .context-usage progress::-webkit-progress-bar {
   background: #e5e5e5;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 
 .context-usage progress::-webkit-progress-value {
   background: #9fe3b0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 
 .runtime-pill {
@@ -1073,7 +1080,7 @@ pre {
   color: var(--muted);
   background: rgba(250, 250, 250, 0.98);
   border: 1px solid var(--border-strong);
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   box-shadow: 0 8px 22px rgb(0 0 0 / 10%);
 }
 
@@ -1108,7 +1115,7 @@ pre {
   color: var(--muted);
   background: transparent;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   place-items: center;
 }
 
@@ -1176,7 +1183,7 @@ pre {
   position: absolute;
   inset: -4px 0 -4px -2px;
   border: 1px solid #d8d8d8;
-  border-radius: 5px;
+  border-radius: var(--radius-xs);
   content: "";
 }
 
@@ -1256,7 +1263,7 @@ pre {
   color: var(--text);
   background: var(--surface);
   border: 1px solid #d8d8d8;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   box-shadow: 0 10px 28px #00000014;
   pointer-events: none;
   transform: translateY(-50%);
@@ -1417,7 +1424,7 @@ pre {
   padding: 11px 14px;
   background: #f1fff4;
   border: 1px solid #d8f0dd;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
 }
 
 .thread-message-user.selected p {
@@ -1561,7 +1568,7 @@ pre {
   font-size: 0.92em;
   background: #f1f1f1;
   border: 1px solid #e4e4e4;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 
 .thread-markdown pre {
@@ -1572,7 +1579,7 @@ pre {
   color: #202020;
   background: #f6f6f6;
   border: 1px solid #dedede;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 
 .thread-markdown pre code {
@@ -1592,7 +1599,7 @@ pre {
   overflow: hidden;
   background: #f6f6f6;
   border: 0.5px solid #dedede;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
 }
 
 .thread-code-block-header {
@@ -1624,7 +1631,7 @@ pre {
   color: #777777;
   background: transparent;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   place-items: center;
 }
 
@@ -1682,7 +1689,7 @@ pre {
   max-height: 420px;
   margin: 10px 0;
   object-fit: contain;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 
 .thread-markdown hr {
@@ -1768,7 +1775,7 @@ pre {
   align-self: center;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 9px;
+  border-radius: var(--radius-md);
 }
 
 .thread-event-disclosure:hover,
@@ -1805,7 +1812,7 @@ pre {
 .thread-event-disclosure > summary:focus-visible,
 .thread-tool-message > summary:focus-visible,
 .thread-tool-chain > summary:focus-visible {
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   box-shadow: inset 0 0 0 1px #bdbdbd;
 }
 
@@ -1938,7 +1945,7 @@ details[open] > summary .disclosure-triangle {
   text-align: left;
   background: transparent;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
 }
 
 .thread-tool-chain-item:hover,
@@ -2067,7 +2074,7 @@ details[open] > summary .disclosure-triangle {
   overflow: hidden;
   background: var(--surface);
   border: 0.5px solid #dedede;
-  border-radius: 20px;
+  border-radius: var(--radius-xl);
   box-shadow: 0 0 12px rgba(0, 0, 0, 0.055), 0 3px 8px rgba(0, 0, 0, 0.035);
 }
 
@@ -2099,7 +2106,7 @@ details[open] > summary .disclosure-triangle {
   color: #555555;
   background: #f3f3f3;
   border: 0;
-  border-radius: 50%;
+  border-radius: var(--radius-round);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
   place-items: center;
 }
@@ -2126,7 +2133,7 @@ details[open] > summary .disclosure-triangle {
   overflow: hidden;
   color: #454545;
   background: #f3f3f3;
-  border-radius: 19px;
+  border-radius: var(--radius-pill);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
@@ -2183,7 +2190,7 @@ details[open] > summary .disclosure-triangle {
   color: #444444;
   background: #f2f2f2;
   border: 1px solid #dddddd;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
 }
 
 .composer-attachment > svg,
@@ -2262,7 +2269,7 @@ textarea::placeholder {
   height: 38px;
   min-height: 38px;
   padding: 0;
-  border-radius: 50%;
+  border-radius: var(--radius-round);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
@@ -2317,7 +2324,7 @@ textarea::placeholder {
   padding: 10px 11px;
   background: #fafafa;
   border: 1px solid var(--border-strong);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
 }
 
 .composer-permission > svg {
@@ -2439,7 +2446,7 @@ textarea::placeholder {
   color: #333333;
   background: #ffffff;
   border: 1px solid #cfcfcf;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   font-size: 10px;
   font-weight: 600;
 }
@@ -2464,7 +2471,7 @@ textarea::placeholder {
   color: #454545;
   background: transparent;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   font-size: 11px;
   font-weight: 650;
 }
@@ -2542,7 +2549,7 @@ textarea::placeholder {
   place-items: center;
   color: #555555;
   background: #eeeeee;
-  border-radius: 5px;
+  border-radius: var(--radius-xs);
 }
 
 .trace-step-icon svg {
@@ -2629,7 +2636,7 @@ textarea::placeholder {
   text-align: left;
   background: transparent;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
 }
 
 .settings-tabs > button:hover,
@@ -2723,7 +2730,7 @@ textarea::placeholder {
 .about-app img {
   width: 44px;
   height: 44px;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
 }
 
 .about-app > div {
@@ -2957,7 +2964,7 @@ textarea::placeholder {
   color: var(--text);
   background: rgba(255, 255, 255, 0.98);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
   font-size: 11px;
   font-weight: 650;
@@ -3051,7 +3058,7 @@ textarea::placeholder {
   color: var(--muted);
   background: #ffffff;
   border: 1px solid var(--border-strong);
-  border-radius: 9px;
+  border-radius: var(--radius-md);
 }
 
 .skill-url-row > svg {
@@ -3076,7 +3083,7 @@ textarea::placeholder {
   color: #ffffff;
   background: #2563eb;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   font-size: 10px;
   font-weight: 650;
 }
@@ -3106,7 +3113,7 @@ textarea::placeholder {
   padding: 10px 12px;
   background: #fafafa;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
 }
 
 .integration-main {
@@ -3267,7 +3274,7 @@ textarea::placeholder {
   min-height: 240px;
   background: #fafafa;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 
 .knowledge-graph-canvas svg {
@@ -3319,7 +3326,7 @@ textarea::placeholder {
 .knowledge-graph-legend i {
   width: 7px;
   height: 7px;
-  border-radius: 50%;
+  border-radius: var(--radius-round);
 }
 
 .knowledge-graph-selection {
@@ -3355,7 +3362,7 @@ textarea::placeholder {
   color: var(--muted);
   background: #fafafa;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 10px;
   place-items: center;
 }
@@ -3783,7 +3790,7 @@ textarea::placeholder {
   text-align: left;
   background: #fafafa;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   box-shadow:
     0 1px 2px rgb(0 0 0 / 5%),
     inset 0 0 0 0.5px #e7e7e7;
@@ -3805,7 +3812,7 @@ textarea::placeholder {
   color: #777777;
   background: #f4f4f4;
   border: 0.5px solid #dddddd;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   place-items: center;
 }
 
@@ -3847,7 +3854,7 @@ textarea::placeholder {
   overflow: hidden;
   background: #ffffff;
   border: 1px solid #dddddd;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
 }
 
 .inspector-output-detail > header {
@@ -4001,12 +4008,11 @@ textarea::placeholder {
 }
 
 .inspector-debug-toggle {
-  display: grid;
+  display: flex;
   width: 100%;
   min-height: 44px;
-  grid-template-columns: 14px minmax(0, 1fr) 12px;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   padding: 8px 14px;
   color: var(--text);
   text-align: left;
@@ -4033,9 +4039,7 @@ textarea::placeholder {
 .inspector-debug .disclosure-triangle {
   width: 9px;
   height: 9px;
-  justify-self: end;
   color: #999999;
-  transform: rotate(0deg);
 }
 
 .inspector-debug[data-open="true"] .disclosure-triangle {
@@ -4051,7 +4055,7 @@ textarea::placeholder {
   overflow: auto;
   background: rgba(252, 252, 252, 0.98);
   border: 0.5px solid #e4e4e4;
-  border-radius: 8px 8px 0 0;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
   box-shadow: 0 -6px 18px rgb(0 0 0 / 7%);
   opacity: 0;
   visibility: hidden;

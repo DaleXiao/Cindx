@@ -1,4 +1,4 @@
-use agent_core::{Event, EventKind};
+use agent_core::{Event, EventKind, Message, MessageRole};
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,6 +223,82 @@ pub fn build_session_checkpoint_at(
 pub fn build_restore_context_pack(checkpoint: SessionCheckpoint) -> RestoreContextPack {
     let text = checkpoint_to_markdown(&checkpoint);
     RestoreContextPack { checkpoint, text }
+}
+
+pub fn conversation_memory_to_markdown(messages: &[Message], max_items: usize) -> String {
+    let limit = max_items.max(1);
+    let first_user_index = messages.iter().position(|message| {
+        matches!(message.role, MessageRole::User)
+            && message.metadata.get("kind").map(String::as_str) != Some("tool_observation")
+            && !message.content.trim().is_empty()
+    });
+    let mut selected = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    if let Some(index) = first_user_index {
+        let message = &messages[index];
+        let value = format!(
+            "Initial user request: {}",
+            truncate(&sanitize_line(&message.content), 800)
+        );
+        seen.insert(value.clone());
+        selected.push(value);
+    }
+
+    let remaining = limit.saturating_sub(selected.len());
+    let mut recent = messages
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| Some(*index) != first_user_index)
+        .filter_map(|(_, message)| conversation_memory_line(message))
+        .rev()
+        .filter(|value| seen.insert(value.clone()))
+        .take(remaining)
+        .collect::<Vec<_>>();
+    recent.reverse();
+    selected.extend(recent);
+
+    if selected.is_empty() {
+        return String::new();
+    }
+
+    let mut output = String::from(
+        "## Conversation Memory\n- Historical extracts preserve continuity. User entries are requirements; assistant entries are prior claims and should be verified when material.\n",
+    );
+    for item in selected {
+        output.push_str("- ");
+        output.push_str(&item);
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
+fn conversation_memory_line(message: &Message) -> Option<String> {
+    if message.content.trim().is_empty()
+        || message.metadata.get("kind").map(String::as_str) == Some("tool_observation")
+    {
+        return None;
+    }
+    match message.role {
+        MessageRole::User => Some(format!(
+            "User requirement: {}",
+            truncate(&sanitize_line(&message.content), 800)
+        )),
+        MessageRole::Assistant
+            if !message
+                .metadata
+                .get("tool_call_count")
+                .and_then(|value| value.parse::<usize>().ok())
+                .is_some_and(|count| count > 0) =>
+        {
+            Some(format!(
+                "Assistant outcome: {}",
+                truncate(&sanitize_line(&message.content), 600)
+            ))
+        }
+        _ => None,
+    }
 }
 
 pub fn checkpoint_to_markdown(checkpoint: &SessionCheckpoint) -> String {
@@ -651,6 +727,49 @@ mod tests {
 
         assert_eq!(checkpoint.commands_run.len(), 2);
         assert!(checkpoint.commands_run[0].contains("pwd"));
+    }
+
+    #[test]
+    fn conversation_memory_preserves_requirements_and_completed_outcomes() {
+        let messages = vec![
+            message(MessageRole::User, "Build a local agent", []),
+            message(MessageRole::Assistant, "I created the first version", []),
+            message(
+                MessageRole::Assistant,
+                "Calling a tool",
+                [("tool_call_count", "2")],
+            ),
+            message(
+                MessageRole::User,
+                "Tool observation that should stay out",
+                [("kind", "tool_observation")],
+            ),
+            message(MessageRole::User, "Keep permissions explicit", []),
+            message(MessageRole::Assistant, "Permissions are now gated", []),
+        ];
+
+        let memory = conversation_memory_to_markdown(&messages, 4);
+
+        assert!(memory.contains("Initial user request: Build a local agent"));
+        assert!(memory.contains("User requirement: Keep permissions explicit"));
+        assert!(memory.contains("Assistant outcome: Permissions are now gated"));
+        assert!(!memory.contains("Calling a tool"));
+        assert!(!memory.contains("Tool observation that should stay out"));
+    }
+
+    fn message<const N: usize>(
+        role: MessageRole,
+        content: &str,
+        metadata: [(&str, &str); N],
+    ) -> Message {
+        Message {
+            role,
+            content: content.to_string(),
+            metadata: metadata
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        }
     }
 
     fn event<const N: usize>(

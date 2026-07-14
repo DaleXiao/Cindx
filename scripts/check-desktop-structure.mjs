@@ -52,6 +52,7 @@ const builtinSkillCreator = read("crates/agent-skills/builtins/skill-creator/SKI
 const modelProviderSource = read("crates/model-provider/src/lib.rs");
 const ragSource = read("crates/agent-rag/src/lib.rs");
 const graphSource = read("crates/agent-graph/src/lib.rs");
+const agentMemorySource = read("crates/agent-memory/src/lib.rs");
 const agentRuntimeSource = read("crates/agent-runtime/src/lib.rs");
 const coreAgentPrompt = read("crates/agent-runtime/src/core_prompt.txt");
 const orchestratorSource = read("crates/orchestrator/src/lib.rs");
@@ -352,7 +353,14 @@ assert(
   "Pane transitions must be subtle and respect reduced-motion preferences"
 );
 assert(
-  styles.includes("--icon-radius: 9px") && styles.includes("window-toolbar::before"),
+  styles.includes("--radius-xs: 4px") &&
+    styles.includes("--radius-sm: 6px") &&
+    styles.includes("--radius-md: 8px") &&
+    styles.includes("--radius-lg: 12px") &&
+    styles.includes("--radius-xl: 20px") &&
+    styles.includes("--radius-pill: 999px") &&
+    styles.includes("--icon-radius: var(--radius-md)") &&
+    styles.includes("window-toolbar::before"),
   "Icon feedback and full-height pane dividers must retain their polished geometry"
 );
 assert(
@@ -493,7 +501,7 @@ assert(
     composerSource.includes('className="composer-toolbar-actions"') &&
     styles.includes("width: 38px;") &&
     styles.includes("height: 38px;") &&
-    styles.includes("border-radius: 50%;") &&
+    styles.includes("border-radius: var(--radius-round);") &&
     /\.composer-primary-button\.stop:hover \{[\s\S]*?background: #e05b5b;[\s\S]*?filter: none;/.test(styles) &&
     styles.includes('.composer-primary-button.stop:hover .composer-working-ring'),
   "Composer controls must share a bottom toolbar with a circular primary action"
@@ -511,9 +519,9 @@ assert(
 assert(
   styles.includes(".project-item") &&
     styles.includes(".session-item") &&
-    /\.project-row \{[\s\S]*?border: 0;[\s\S]*?border-radius: 7px;/.test(styles) &&
+    /\.project-row \{[\s\S]*?border: 0;[\s\S]*?border-radius: var\(--radius-md\);/.test(styles) &&
     /\.session-branch \{[\s\S]*?border-left: 0;/.test(styles) &&
-    /\.session-item \{[\s\S]*?min-height: 30px;[\s\S]*?border-radius: 7px;/.test(styles) &&
+    /\.session-item \{[\s\S]*?min-height: 30px;[\s\S]*?border-radius: var\(--radius-md\);/.test(styles) &&
     styles.includes(".settings-section {") &&
     styles.includes(".archived-session-row + .archived-session-row"),
   "Project and session rows must stay compact, borderless, and hierarchy-line free"
@@ -718,16 +726,14 @@ assert(
   "Output previews must stay scoped to the active session and support file references"
 );
 assert(
-  /\.inspector-debug-body \{[\s\S]*?right: 2px;[\s\S]*?bottom: 44px;[\s\S]*?left: 2px;[\s\S]*?border-radius: 8px 8px 0 0;/.test(
+  /\.inspector-debug-body \{[\s\S]*?right: 2px;[\s\S]*?bottom: 44px;[\s\S]*?left: 2px;[\s\S]*?border-radius: var\(--radius-md\) var\(--radius-md\) 0 0;/.test(
     styles
   ) &&
-    /\.inspector-debug \.disclosure-triangle \{[\s\S]*?transform: rotate\(0deg\);/.test(
-      styles
-    ) &&
     /\.inspector-debug\[data-open="true"\] \.disclosure-triangle \{[\s\S]*?transform: rotate\(180deg\);/.test(
       styles
-    ),
-  "The debug drawer must attach to its bar with rounded top corners and use up/down triangles"
+    ) &&
+    /<Bug[^>]*\/>\s*<DisclosureTriangle \/>\s*<strong>Debug<\/strong>/.test(inspectorSource),
+  "The debug drawer must attach to its bar and group its icon, triangle, and label"
 );
 assert(
   tauriBridge.includes('invoke<string>("read_artifact_image"') &&
@@ -758,7 +764,7 @@ assert(
   appSource.includes("context-usage") &&
     /\.topbar-actions \{[\s\S]*?gap: 12px;/.test(styles) &&
     /\.context-usage \{[\s\S]*?width: 132px;/.test(styles) &&
-    /\.context-usage progress \{[\s\S]*?width: 124px;[\s\S]*?height: 2px;[\s\S]*?border-radius: 999px;/.test(
+    /\.context-usage progress \{[\s\S]*?width: 124px;[\s\S]*?height: 2px;[\s\S]*?border-radius: var\(--radius-pill\);/.test(
       styles
     ),
   "Topbar must expose compact rounded context usage with breathing room before runtime state"
@@ -1130,9 +1136,13 @@ assert(
 assert(
   rustLib.includes("context_checkpoint_path_for_session") &&
     rustLib.includes("prepare_session_history_context") &&
+    rustLib.includes("SessionCompactionPlan") &&
+    rustLib.includes('"hybrid_v2"') &&
+    rustLib.includes("recent_history_start") &&
+    agentMemorySource.includes("conversation_memory_to_markdown") &&
     rustLib.includes("Session context restored for agent run") &&
     rustLib.includes("event_matches_context"),
-  "Context checkpoints must be session-scoped and injected into later agent runs"
+  "Context compaction must preserve session-scoped operational and conversational memory"
 );
 assert(
   rustLib.includes("synthesize_agent_answer(") &&
