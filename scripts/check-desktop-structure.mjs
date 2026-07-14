@@ -57,6 +57,9 @@ const agentMemorySource = read("crates/agent-memory/src/lib.rs");
 const agentRuntimeSource = read("crates/agent-runtime/src/lib.rs");
 const coreAgentPrompt = read("crates/agent-runtime/src/core_prompt.txt");
 const orchestratorSource = read("crates/orchestrator/src/lib.rs");
+const benchmarkSource = read("crates/orchestrator/src/benchmark.rs");
+const benchmarkSuite = JSON.parse(read("benchmarks/agent/core-v1.json"));
+const benchmarkBaseline = JSON.parse(read("benchmarks/agent/core-v1-baseline.json"));
 const evaluationLabSource = read("crates/orchestrator/examples/evaluation_lab.rs");
 const agentEvaluationDoc = read("docs/AGENT_EVALUATION.md");
 const mainSource = read("apps/desktop/src/main.tsx");
@@ -1212,13 +1215,19 @@ assert(
   orchestratorSource.includes("evaluate_routing_cases") &&
     orchestratorSource.includes("evaluate_routing_telemetry") &&
     orchestratorSource.includes("QualityRubricScore") &&
-    evaluationLabSource.includes("Cindx routing evaluation") &&
-    evaluationLabSource.includes("over_orchestrated") &&
-    evaluationLabSource.includes("under_orchestrated") &&
-    agentEvaluationDoc.includes("Deterministic Routing Gate") &&
-    agentEvaluationDoc.includes("Operational Trace Report") &&
-    ciWorkflow.includes("cargo run --locked -p orchestrator --example evaluation_lab"),
-  "CI must run the offline routing lab and retain trace and quality evaluation guidance"
+    benchmarkSource.includes('AGENT_BENCHMARK_SCHEMA: &str = "cindx.agent-benchmark.v1"') &&
+    benchmarkSource.includes("AgentBenchmarkObservation") &&
+    benchmarkSource.includes("observed_mode_thresholds") &&
+    benchmarkSuite.cases.length >= 50 &&
+    benchmarkSuite.cases.length <= 100 &&
+    benchmarkBaseline.minimum_auto_contract_pass_rate === 1 &&
+    evaluationLabSource.includes("Cindx agent benchmark") &&
+    evaluationLabSource.includes("quality=not_observed") &&
+    agentEvaluationDoc.includes("Versioned Contract Suite") &&
+    agentEvaluationDoc.includes("Real Run Observations") &&
+    ciWorkflow.includes("--report target/agent-benchmark-report.json") &&
+    ciWorkflow.includes("Upload agent benchmark report"),
+  "CI must run the versioned offline benchmark and retain auditable quality guidance"
 );
 assert(
   rustLib.includes('"prompt_tokens"') && rustLib.includes("context_remaining_percent"),

@@ -2,6 +2,10 @@ use agent_core::{Metadata, ModelRole};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod benchmark;
+
+pub use benchmark::*;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrchestrationPolicy {
     Single,
@@ -1006,7 +1010,8 @@ impl RoutingContext {
                 &[
                     " and then ", " then ", " after that ", "并且", "然后", "之后", "再运行",
                     "再检查", "同时", "and run tests", "fix and test", "implement and test",
-                    "修改并", "修复并", "实现并", "排查并",
+                    "修改并", "修复并", "实现并", "排查并", "并运行", "并测试", "并检查",
+                    "并验证",
                 ],
             );
         let latency_sensitive = !capability_question
@@ -1232,7 +1237,7 @@ pub struct OperationalEvaluationReport {
     pub model_counts: BTreeMap<String, usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QualityRubricScore {
     pub correctness: u8,
     pub evidence: u8,
@@ -1760,8 +1765,10 @@ pub fn classify_task(prompt: &str) -> TaskClass {
     } else if contains_any(
         prompt,
         &[
-            "code", "rust", "typescript", "file", "test", "compile", "bug", "代码", "编程", "文件",
-            "测试", "编译", "错误", "修复", "重构", "实现",
+            "code", "codebase", "rust", "typescript", "file", "files", "test", "tests",
+            "compile", "build", "bug", "implement", "modify", "edit", "refactor", "debug",
+            "function", "parser", "代码", "编程", "文件", "测试", "编译", "错误", "修复",
+            "修改", "调试", "重构", "实现",
         ],
     ) {
         TaskClass::Coding
@@ -2777,6 +2784,36 @@ mod tests {
         assert_eq!(report.router_policy_matches_baseline, 1);
         assert_eq!(report.router_policy_differs_from_baseline, 1);
         assert!(report.summary.contains("baseline single"));
+    }
+
+    #[test]
+    fn english_workspace_actions_are_classified_as_coding() {
+        for prompt in [
+            "Implement a parser in this project and run tests.",
+            "Edit these files to add pagination and check the result.",
+            "Implement this function in the existing codebase.",
+        ] {
+            let context = RoutingContext::from_prompt(prompt, candidates());
+            assert_eq!(context.task_class, TaskClass::Coding, "{prompt}");
+            assert!(context.needs_tools, "{prompt}");
+            assert!(context.needs_retrieval, "{prompt}");
+        }
+    }
+
+    #[test]
+    fn chinese_multi_phase_root_cause_work_routes_to_two_experts() {
+        let context = RoutingContext::from_prompt(
+            "排查这个项目的根因，修改文件并运行测试。",
+            candidates(),
+        );
+        let decision = RuleBasedRouter.route(&context);
+
+        assert_eq!(context.task_class, TaskClass::Coding);
+        assert_eq!(
+            decision.policy,
+            OrchestrationPolicy::BestOfN { candidates: 2 }
+        );
+        assert_eq!(decision.retrieval_mode, "semantic_literal_parallel");
     }
 
     #[test]

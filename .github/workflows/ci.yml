@@ -2,6 +2,10 @@ name: CI
 
 on:
   workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -42,8 +46,17 @@ jobs:
       - name: Test Rust workspace
         run: cargo test --workspace --locked
 
-      - name: Evaluate agent routing
-        run: cargo run --locked -p orchestrator --example evaluation_lab
+      - name: Evaluate agent harness
+        run: cargo run --locked -p orchestrator --example evaluation_lab -- --report target/agent-benchmark-report.json
+
+      - name: Upload agent benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cindx-agent-benchmark-${{ github.sha }}
+          path: target/agent-benchmark-report.json
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Test Tauri bridge
         run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
