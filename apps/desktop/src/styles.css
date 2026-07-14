@@ -2474,6 +2474,28 @@ textarea::placeholder {
   height: 11px;
 }
 
+.composer-error-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.composer-error .composer-error-dismiss {
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  border-color: transparent;
+}
+
+.composer-error .composer-error-dismiss:hover {
+  color: #111111;
+  background: #e8e8e8;
+}
+
 /* Trace */
 
 .workspace-return-button {

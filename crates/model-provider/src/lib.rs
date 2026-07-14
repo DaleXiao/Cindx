@@ -3,14 +3,18 @@ use base64::Engine;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    mpsc::{self, RecvTimeoutError},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
 pub const MODEL_REQUEST_CANCELLED: &str = "model request cancelled";
 const STREAMING_HARD_TIMEOUT_MULTIPLIER: u64 = 4;
+static CURL_REQUEST_BODY_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelCallMode {
@@ -153,22 +157,75 @@ fn curl_config_escape(value: &str) -> String {
     escaped
 }
 
-fn curl_request_config(url: &str, api_key: &str, request_body: Option<&str>) -> String {
+fn curl_request_config(url: &str, api_key: &str, request_body_path: Option<&Path>) -> String {
     let authorization = format!("Authorization: Bearer {api_key}");
     let mut config = format!(
         "url = \"{}\"\nheader = \"{}\"\n",
         curl_config_escape(url),
         curl_config_escape(&authorization)
     );
-    if let Some(request_body) = request_body {
+    if let Some(request_body_path) = request_body_path {
         config.push_str("request = \"POST\"\n");
         config.push_str("header = \"Content-Type: application/json\"\n");
         config.push_str(&format!(
-            "data-binary = \"{}\"\n",
-            curl_config_escape(request_body)
+            "data-binary = \"@{}\"\n",
+            curl_config_escape(&request_body_path.to_string_lossy())
         ));
     }
     config
+}
+
+struct SensitiveRequestBody {
+    path: PathBuf,
+}
+
+impl SensitiveRequestBody {
+    fn write(contents: &str) -> Result<Self, ModelError> {
+        let temp_dir = std::env::temp_dir();
+        for _ in 0..32 {
+            let id = CURL_REQUEST_BODY_ID.fetch_add(1, Ordering::Relaxed);
+            let path = temp_dir.join(format!(
+                "cindx-model-request-{}-{id}.json",
+                std::process::id()
+            ));
+            let mut options = fs::OpenOptions::new();
+            options.create_new(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            match options.open(&path) {
+                Ok(mut file) => {
+                    file.write_all(contents.as_bytes()).map_err(|error| {
+                        let _ = fs::remove_file(&path);
+                        ModelError::new(format!("failed to stage model request: {error}"))
+                    })?;
+                    return Ok(Self { path });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(ModelError::new(format!(
+                        "failed to stage model request: {error}"
+                    )))
+                }
+            }
+        }
+        Err(ModelError::new(
+            "failed to allocate a private model request file",
+        ))
+    }
+}
+
+impl Drop for SensitiveRequestBody {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+struct CurlProcess {
+    child: Child,
+    _request_body: Option<SensitiveRequestBody>,
 }
 
 fn curl_command(timeout_seconds: u64, no_buffer: bool) -> Command {
@@ -192,10 +249,20 @@ fn streaming_hard_timeout_seconds(idle_timeout_seconds: u64) -> u64 {
 }
 
 fn spawn_curl(
-    config: &str,
+    url: &str,
+    api_key: &str,
+    request_body: Option<&str>,
     timeout_seconds: u64,
     no_buffer: bool,
-) -> Result<Child, ModelError> {
+) -> Result<CurlProcess, ModelError> {
+    let request_body = request_body
+        .map(SensitiveRequestBody::write)
+        .transpose()?;
+    let config = curl_request_config(
+        url,
+        api_key,
+        request_body.as_ref().map(|body| body.path.as_path()),
+    );
     let mut child = curl_command(timeout_seconds, no_buffer)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -213,39 +280,60 @@ fn spawn_curl(
                 .map_err(|error| ModelError::new(format!("failed to configure curl: {error}")))
         });
     if let Err(error) = write_result {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
+        let output = child.wait_with_output().map_err(|wait_error| {
+            ModelError::new(format!("{error}; failed to read curl failure: {wait_error}"))
+        })?;
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(ModelError::new(if stderr.is_empty() {
+            error.message
+        } else {
+            format!("curl rejected the request before upload: {stderr}")
+        }));
     }
 
-    Ok(child)
+    Ok(CurlProcess {
+        child,
+        _request_body: request_body,
+    })
 }
 
 fn execute_curl(
-    config: &str,
+    url: &str,
+    api_key: &str,
+    request_body: Option<&str>,
     timeout_seconds: u64,
 ) -> Result<Output, ModelError> {
-    execute_curl_cancellable(config, timeout_seconds, &mut || false)
+    execute_curl_cancellable(
+        url,
+        api_key,
+        request_body,
+        timeout_seconds,
+        &mut || false,
+    )
 }
 
 fn execute_curl_cancellable(
-    config: &str,
+    url: &str,
+    api_key: &str,
+    request_body: Option<&str>,
     timeout_seconds: u64,
     should_cancel: &mut impl FnMut() -> bool,
 ) -> Result<Output, ModelError> {
-    let child = spawn_curl(config, timeout_seconds, false)?;
-    consume_buffered_child(child, should_cancel)
+    let process = spawn_curl(url, api_key, request_body, timeout_seconds, false)?;
+    consume_buffered_child(process, should_cancel)
 }
 
 fn consume_buffered_child(
-    mut child: Child,
+    mut process: CurlProcess,
     should_cancel: &mut impl FnMut() -> bool,
 ) -> Result<Output, ModelError> {
-    let mut stdout = child
+    let mut stdout = process
+        .child
         .stdout
         .take()
         .ok_or_else(|| ModelError::new("child stdout was not available"))?;
-    let mut stderr = child
+    let mut stderr = process
+        .child
         .stderr
         .take()
         .ok_or_else(|| ModelError::new("child stderr was not available"))?;
@@ -266,16 +354,16 @@ fn consume_buffered_child(
 
     let status = loop {
         if should_cancel() {
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = process.child.kill();
+            let _ = process.child.wait();
             return Err(ModelError::new(MODEL_REQUEST_CANCELLED));
         }
-        match child.try_wait() {
+        match process.child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => thread::sleep(Duration::from_millis(40)),
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                let _ = process.child.kill();
+                let _ = process.child.wait();
                 return Err(ModelError::new(format!("failed to wait for child: {error}")));
             }
         }
@@ -297,14 +385,15 @@ fn consume_buffered_child(
 }
 
 fn consume_streaming_child(
-    mut child: Child,
+    mut process: CurlProcess,
     model: &str,
     base_url: &str,
     idle_timeout: Duration,
     on_delta: &mut impl FnMut(&str),
     should_cancel: &mut impl FnMut() -> bool,
 ) -> Result<ModelResponse, ModelError> {
-    let stdout = child
+    let stdout = process
+        .child
         .stdout
         .take()
         .ok_or_else(|| ModelError::new("curl stdout was not available"))?;
@@ -339,8 +428,8 @@ fn consume_streaming_child(
 
     loop {
         if should_cancel() {
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = process.child.kill();
+            let _ = process.child.wait();
             return Err(ModelError::new(MODEL_REQUEST_CANCELLED));
         }
         match line_receiver.recv_timeout(Duration::from_millis(40)) {
@@ -350,8 +439,8 @@ fn consume_streaming_child(
                 let event = match parse_stream_event(&line) {
                     Ok(event) => event,
                     Err(error) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        let _ = process.child.kill();
+                        let _ = process.child.wait();
                         return Err(error);
                     }
                 };
@@ -369,15 +458,15 @@ fn consume_streaming_child(
                 }
             }
             Ok(Err(error)) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                let _ = process.child.kill();
+                let _ = process.child.wait();
                 let _ = reader_handle.join();
                 return Err(ModelError::new(error));
             }
             Err(RecvTimeoutError::Timeout) => {
                 if last_activity.elapsed() >= idle_timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    let _ = process.child.kill();
+                    let _ = process.child.wait();
                     let _ = reader_handle.join();
                     return Err(ModelError::new(format!(
                         "model stream timed out after {} seconds without receiving data",
@@ -389,12 +478,13 @@ fn consume_streaming_child(
         }
     }
 
-    let status = child
+    let status = process
+        .child
         .wait()
         .map_err(|error| ModelError::new(format!("failed to wait for curl: {error}")))?;
     let _ = reader_handle.join();
     let mut stderr = String::new();
-    if let Some(mut stream) = child.stderr.take() {
+    if let Some(mut stream) = process.child.stderr.take() {
         stream
             .read_to_string(&mut stderr)
             .map_err(|error| ModelError::new(format!("failed to read curl stderr: {error}")))?;
@@ -477,9 +567,12 @@ impl OpenAiCompatibleProvider {
             return Err(ModelError::new("provider base URL and API key are required"));
         }
 
-        let curl_config =
-            curl_request_config(&self.config.models_url(), &self.config.api_key, None);
-        let output = execute_curl(&curl_config, self.config.timeout_seconds)?;
+        let output = execute_curl(
+            &self.config.models_url(),
+            &self.config.api_key,
+            None,
+            self.config.timeout_seconds,
+        )?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         if !output.status.success() {
@@ -525,18 +618,15 @@ impl OpenAiCompatibleProvider {
             &request.tools,
             max_output_tokens,
         )?;
-        let curl_config = curl_request_config(
+        let process = spawn_curl(
             &self.config.chat_completions_url(),
             &self.config.api_key,
             Some(&request_body),
-        );
-        let child = spawn_curl(
-            &curl_config,
             streaming_hard_timeout_seconds(self.config.timeout_seconds),
             true,
         )?;
         consume_streaming_child(
-            child,
+            process,
             &self.config.model,
             &self.config.base_url,
             Duration::from_secs(self.config.timeout_seconds.max(1)),
@@ -562,12 +652,12 @@ impl OpenAiCompatibleProvider {
             &request.tools,
             max_output_tokens,
         )?;
-        let curl_config = curl_request_config(
+        let output = execute_curl(
             &self.config.chat_completions_url(),
             &self.config.api_key,
             Some(&request_body),
-        );
-        let output = execute_curl(&curl_config, self.config.timeout_seconds)?;
+            self.config.timeout_seconds,
+        )?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         if !output.status.success() {
@@ -604,13 +694,10 @@ impl OpenAiCompatibleProvider {
             &request.input,
             request.dimensions,
         )?;
-        let curl_config = curl_request_config(
+        let output = execute_curl_cancellable(
             &self.config.embeddings_url(),
             &self.config.api_key,
             Some(&request_body),
-        );
-        let output = execute_curl_cancellable(
-            &curl_config,
             self.config.timeout_seconds,
             &mut should_cancel,
         )?;
@@ -1497,6 +1584,13 @@ mod tests {
     use agent_core::{MessageRole, ToolRisk};
     use std::time::Instant;
 
+    fn test_curl_process(child: Child) -> CurlProcess {
+        CurlProcess {
+            child,
+            _request_body: None,
+        }
+    }
+
     #[test]
     fn chat_url_trims_base_url_slashes() {
         let config = OpenAiCompatibleConfig {
@@ -1516,11 +1610,15 @@ mod tests {
     }
 
     #[test]
-    fn curl_receives_credentials_and_request_body_over_stdin() {
+    fn curl_keeps_credentials_off_arguments_and_large_bodies_off_config_stdin() {
+        let request_text = format!("{{\"prompt\":\"{}\"}}", "x".repeat(2_000_000));
+        let request_body = SensitiveRequestBody::write(&request_text)
+            .expect("request body should be staged privately");
+        let request_path = request_body.path.clone();
         let config = curl_request_config(
             "https://example.test/v1/chat/completions",
             "test-secret",
-            Some("{\"prompt\":\"hello\\nworld\"}"),
+            Some(&request_path),
         );
         let command = curl_command(10, true);
         let arguments = command
@@ -1530,11 +1628,33 @@ mod tests {
 
         assert!(config.contains("Authorization: Bearer test-secret"));
         assert!(config.contains("data-binary"));
+        assert!(config.len() < 2_048);
+        assert!(!config.contains(&"x".repeat(1_000)));
+        assert_eq!(
+            fs::metadata(&request_path)
+                .expect("request file should exist")
+                .len(),
+            request_text.len() as u64
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&request_path)
+                    .expect("request file should exist")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
         assert!(arguments.iter().any(|argument| argument == "--config"));
         assert!(arguments.iter().any(|argument| argument == "-"));
         assert!(!arguments.iter().any(|argument| argument.contains("test-secret")));
-        assert!(!arguments.iter().any(|argument| argument.contains("hello")));
+        assert!(!arguments.iter().any(|argument| argument.contains("prompt")));
         assert_eq!(curl_config_escape("a\"b\\c\n"), "a\\\"b\\\\c\\n");
+        drop(request_body);
+        assert!(!request_path.exists());
     }
 
     #[test]
@@ -1737,7 +1857,7 @@ mod tests {
         let started = Instant::now();
         let mut output = String::new();
         let result = consume_streaming_child(
-            child,
+            test_curl_process(child),
             "test-model",
             "http://example.test/v1",
             Duration::from_secs(10),
@@ -1761,7 +1881,7 @@ mod tests {
             .expect("test stream process should start");
         let started = Instant::now();
         let result = consume_streaming_child(
-            child,
+            test_curl_process(child),
             "test-model",
             "http://example.test/v1",
             Duration::from_millis(100),
@@ -1794,7 +1914,7 @@ mod tests {
             .expect("test stream process should start");
         let mut output = String::new();
         let response = consume_streaming_child(
-            child,
+            test_curl_process(child),
             "test-model",
             "http://example.test/v1",
             Duration::from_millis(250),
@@ -1817,7 +1937,7 @@ mod tests {
             .spawn()
             .expect("test request process should start");
         let started = Instant::now();
-        let result = consume_buffered_child(child, &mut || {
+        let result = consume_buffered_child(test_curl_process(child), &mut || {
             started.elapsed() >= Duration::from_millis(100)
         });
 
@@ -1840,7 +1960,7 @@ mod tests {
             .spawn()
             .expect("test response process should start");
         let response = consume_streaming_child(
-            child,
+            test_curl_process(child),
             "test-model",
             "http://example.test/v1",
             Duration::from_secs(10),

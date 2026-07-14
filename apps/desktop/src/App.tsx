@@ -1892,6 +1892,7 @@ export function App() {
               onRemoveAttachment={handleRemoveAttachment}
               onCancel={() => void handleCancelAgentTask()}
               onRetry={() => void handleRetryAgentTask()}
+              onDismissError={() => setComposerError(null)}
               onResolvePermission={(requestId, decision) =>
                 void handleResolveAgentPermission(requestId, decision)
               }
