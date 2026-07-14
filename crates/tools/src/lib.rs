@@ -34,12 +34,56 @@ impl std::fmt::Display for ToolError {
 
 impl std::error::Error for ToolError {}
 
+#[derive(Clone)]
+pub struct ToolExecutionControl {
+    should_cancel: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+
+impl ToolExecutionControl {
+    pub fn new(should_cancel: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        Self { should_cancel: Arc::new(should_cancel) }
+    }
+
+    pub fn never_cancelled() -> Self {
+        Self::new(|| false)
+    }
+
+    pub fn should_cancel(&self) -> bool {
+        (self.should_cancel)()
+    }
+}
+
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
 
     fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest>;
 
     fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError>;
+
+    fn execute_with_control(
+        &self,
+        invocation: ToolInvocation,
+        control: &ToolExecutionControl,
+    ) -> Result<ToolResult, ToolError> {
+        if control.should_cancel() {
+            return Ok(ToolResult::text(
+                invocation.id,
+                ToolOutcomeStatus::Cancelled,
+                "Tool execution cancelled before it started.",
+                Metadata::new(),
+            ));
+        }
+        let result = self.execute(invocation)?;
+        if control.should_cancel() {
+            return Ok(ToolResult::text(
+                result.invocation_id,
+                ToolOutcomeStatus::Cancelled,
+                "Tool execution cancelled.",
+                Metadata::new(),
+            ));
+        }
+        Ok(result)
+    }
 }
 
 #[derive(Clone)]
@@ -650,6 +694,7 @@ struct ShellCommandOutput {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     timed_out: bool,
+    cancelled: bool,
 }
 
 #[cfg(unix)]
@@ -677,6 +722,7 @@ fn run_shell_command(
     command: &str,
     cwd: &Path,
     timeout_seconds: u64,
+    control: &ToolExecutionControl,
 ) -> Result<ShellCommandOutput, ToolError> {
     let mut process = Command::new("/bin/zsh");
     process
@@ -707,8 +753,19 @@ fn run_shell_command(
     let stderr_reader = thread::spawn(move || read_process_stream(stderr));
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
     let mut timed_out = false;
+    let mut cancelled = false;
 
     let status = loop {
+        if control.should_cancel() {
+            cancelled = true;
+            terminate_process_group(process_id, 15);
+            thread::sleep(Duration::from_millis(120));
+            terminate_process_group(process_id, 9);
+            let _ = child.kill();
+            break child.wait().map_err(|error| {
+                ToolError::new(format!("failed to stop cancelled shell command: {error}"))
+            })?;
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => thread::sleep(SHELL_POLL_INTERVAL),
@@ -743,6 +800,7 @@ fn run_shell_command(
         stdout: stdout_reader.join().unwrap_or_default(),
         stderr: stderr_reader.join().unwrap_or_default(),
         timed_out,
+        cancelled,
     })
 }
 
@@ -788,6 +846,22 @@ impl Tool for ShellRunTool {
     }
 
     fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
+        self.execute_with_control(invocation, &ToolExecutionControl::never_cancelled())
+    }
+
+    fn execute_with_control(
+        &self,
+        invocation: ToolInvocation,
+        control: &ToolExecutionControl,
+    ) -> Result<ToolResult, ToolError> {
+        if control.should_cancel() {
+            return Ok(ToolResult::text(
+                invocation.id,
+                ToolOutcomeStatus::Cancelled,
+                "Shell command cancelled before it started.",
+                Metadata::new(),
+            ));
+        }
         let input = parse_input(&invocation.input_json);
         let command = required_input(&input, "command")?;
         let cwd = input.get("cwd").cloned().unwrap_or_else(|| ".".to_string());
@@ -804,7 +878,7 @@ impl Tool for ShellRunTool {
         }
         let resolved_cwd = resolve_workspace_path(&self.workspace_root, &cwd)?;
         let resolved_cwd = resolve_workspace_read_path(&self.workspace_root, &resolved_cwd)?;
-        let output = run_shell_command(&command, &resolved_cwd, timeout_seconds)?;
+        let output = run_shell_command(&command, &resolved_cwd, timeout_seconds, control)?;
 
         let mut combined = String::new();
         combined.push_str(&String::from_utf8_lossy(&output.stdout));
@@ -821,6 +895,11 @@ impl Tool for ShellRunTool {
             combined.push_str(&format!(
                 "Command timed out after {timeout_seconds} seconds. Background processes were stopped."
             ));
+        } else if output.cancelled {
+            if !combined.is_empty() && !combined.ends_with('\n') {
+                combined.push('\n');
+            }
+            combined.push_str("Command cancelled. The process group was stopped.");
         }
 
         let mut metadata = Metadata::new();
@@ -828,6 +907,7 @@ impl Tool for ShellRunTool {
         metadata.insert("cwd".to_string(), cwd);
         metadata.insert("timeout_seconds".to_string(), timeout_seconds.to_string());
         metadata.insert("timed_out".to_string(), output.timed_out.to_string());
+        metadata.insert("cancelled".to_string(), output.cancelled.to_string());
         metadata.insert(
             "exit_code".to_string(),
             output
@@ -839,7 +919,9 @@ impl Tool for ShellRunTool {
 
         Ok(tool_result(
             invocation.id,
-            if output.status.success() && !output.timed_out {
+            if output.cancelled {
+                ToolOutcomeStatus::Cancelled
+            } else if output.status.success() && !output.timed_out {
                 ToolOutcomeStatus::Succeeded
             } else {
                 ToolOutcomeStatus::Failed
@@ -2483,6 +2565,7 @@ fn stable_hash(value: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -2717,6 +2800,34 @@ mod tests {
         assert!(result.output.contains("timed out after 1 seconds"));
         assert_eq!(result.metadata.get("timed_out").map(String::as_str), Some("true"));
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_cancellation_stops_the_process_group_promptly() {
+        let shell = ShellRunTool::new(temp_workspace());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancellation = Arc::clone(&cancelled);
+        let control = ToolExecutionControl::new(move || cancellation.load(Ordering::SeqCst));
+        let trigger = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(120));
+            cancelled.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let result = shell
+            .execute_with_control(
+                invocation(
+                    "shell.run",
+                    encode_input(&[("command", "sleep 30"), ("timeout_seconds", "30")]),
+                ),
+                &control,
+            )
+            .expect("cancellation should be returned as a tool result");
+        trigger.join().expect("cancellation trigger should finish");
+
+        assert_eq!(result.status, ToolOutcomeStatus::Cancelled);
+        assert_eq!(result.metadata.get("cancelled").map(String::as_str), Some("true"));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

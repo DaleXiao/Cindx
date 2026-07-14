@@ -6,17 +6,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tools::{Tool, ToolError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tools::{Tool, ToolError, ToolExecutionControl};
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -134,6 +134,69 @@ enum McpClientConnection {
     Http(McpHttpClient),
 }
 
+fn wait_for_child_with_control(
+    mut child: Child,
+    timeout: Duration,
+    control: Option<&ToolExecutionControl>,
+) -> Result<Output, McpError> {
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| McpError::new("MCP HTTP stdout is unavailable"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| McpError::new("MCP HTTP stderr is unavailable"))?;
+    let stdout_reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        let _ = stdout.read_to_end(&mut output);
+        output
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        let _ = stderr.read_to_end(&mut output);
+        output
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if control.is_some_and(ToolExecutionControl::should_cancel) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(McpError::new("MCP HTTP request cancelled"));
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(40)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(McpError::new(format!(
+                    "MCP HTTP request timed out after {} ms",
+                    timeout.as_millis()
+                )));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(McpError::new(format!(
+                    "failed to inspect MCP HTTP request: {error}"
+                )));
+            }
+        }
+    };
+    Ok(Output {
+        status,
+        stdout: stdout_reader.join().unwrap_or_default(),
+        stderr: stderr_reader.join().unwrap_or_default(),
+    })
+}
+
 impl McpStdioClient {
     fn connect(config: &McpServerConfig) -> Result<Self, McpError> {
         let McpTransportConfig::Stdio { command, args, env } = &config.transport else {
@@ -248,16 +311,35 @@ impl McpStdioClient {
     }
 
     fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, McpError> {
-        self.request(
+        self.call_tool_with_control(name, arguments, None)
+    }
+
+    fn call_tool_with_control(
+        &self,
+        name: &str,
+        arguments: Value,
+        control: Option<&ToolExecutionControl>,
+    ) -> Result<Value, McpError> {
+        self.request_with_control(
             "tools/call",
             json!({
                 "name": name,
                 "arguments": arguments,
             }),
+            control,
         )
     }
 
     fn request(&self, method: &str, params: Value) -> Result<Value, McpError> {
+        self.request_with_control(method, params, None)
+    }
+
+    fn request_with_control(
+        &self,
+        method: &str,
+        params: Value,
+        control: Option<&ToolExecutionControl>,
+    ) -> Result<Value, McpError> {
         if !self.shared.alive.load(Ordering::SeqCst) {
             return Err(McpError::new("MCP server connection is closed"));
         }
@@ -279,17 +361,38 @@ impl McpStdioClient {
             }
             return Err(error);
         }
-        match receiver.recv_timeout(self.timeout) {
-            Ok(result) => result,
-            Err(_) => {
+        let deadline = Instant::now() + self.timeout;
+        loop {
+            if control.is_some_and(ToolExecutionControl::should_cancel) {
+                if let Ok(mut pending) = self.shared.pending.lock() {
+                    pending.remove(&id);
+                }
+                let _ = self.notify(
+                    "notifications/cancelled",
+                    json!({ "requestId": id, "reason": "Cindx run cancelled" }),
+                );
+                return Err(McpError::new("MCP request cancelled"));
+            }
+            let now = Instant::now();
+            if now >= deadline {
                 if let Ok(mut pending) = self.shared.pending.lock() {
                     pending.remove(&id);
                 }
                 self.close();
-                Err(McpError::new(format!(
+                return Err(McpError::new(format!(
                     "MCP request {method} timed out after {} ms",
                     self.timeout.as_millis()
-                )))
+                )));
+            }
+            let wait = deadline
+                .saturating_duration_since(now)
+                .min(Duration::from_millis(40));
+            match receiver.recv_timeout(wait) {
+                Ok(result) => return result,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(McpError::new("MCP response channel closed"));
+                }
             }
         }
     }
@@ -381,17 +484,37 @@ impl McpHttpClient {
     }
 
     fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, McpError> {
-        self.request(
+        self.call_tool_with_control(name, arguments, None)
+    }
+
+    fn call_tool_with_control(
+        &self,
+        name: &str,
+        arguments: Value,
+        control: Option<&ToolExecutionControl>,
+    ) -> Result<Value, McpError> {
+        self.request_with_control(
             "tools/call",
             json!({ "name": name, "arguments": arguments }),
+            control,
         )
     }
 
     fn request(&self, method: &str, params: Value) -> Result<Value, McpError> {
+        self.request_with_control(method, params, None)
+    }
+
+    fn request_with_control(
+        &self,
+        method: &str,
+        params: Value,
+        control: Option<&ToolExecutionControl>,
+    ) -> Result<Value, McpError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.post(
+        self.post_with_control(
             json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
             Some(id),
+            control,
         )?
         .ok_or_else(|| McpError::new(format!("MCP HTTP request {method} returned no response")))
     }
@@ -405,6 +528,15 @@ impl McpHttpClient {
     }
 
     fn post(&self, payload: Value, request_id: Option<u64>) -> Result<Option<Value>, McpError> {
+        self.post_with_control(payload, request_id, None)
+    }
+
+    fn post_with_control(
+        &self,
+        payload: Value,
+        request_id: Option<u64>,
+        control: Option<&ToolExecutionControl>,
+    ) -> Result<Option<Value>, McpError> {
         let mut header_lines = vec![
             "Accept: application/json, text/event-stream".to_string(),
             "Content-Type: application/json".to_string(),
@@ -463,9 +595,7 @@ impl McpHttpClient {
                 )));
             }
         }
-        let output = child
-            .wait_with_output()
-            .map_err(|error| McpError::new(format!("failed to wait for MCP HTTP request: {error}")));
+        let output = wait_for_child_with_control(child, self.timeout, control);
         let _ = fs::remove_file(&header_path);
         let output = output?;
         if !output.status.success() {
@@ -533,6 +663,18 @@ impl McpClientConnection {
         match self {
             Self::Stdio(client) => client.call_tool(name, arguments),
             Self::Http(client) => client.call_tool(name, arguments),
+        }
+    }
+
+    fn call_tool_with_control(
+        &self,
+        name: &str,
+        arguments: Value,
+        control: &ToolExecutionControl,
+    ) -> Result<Value, McpError> {
+        match self {
+            Self::Stdio(client) => client.call_tool_with_control(name, arguments, Some(control)),
+            Self::Http(client) => client.call_tool_with_control(name, arguments, Some(control)),
         }
     }
 }
@@ -833,6 +975,31 @@ struct McpRemoteTool {
     runtime: Arc<McpRuntime>,
 }
 
+impl McpRemoteTool {
+    fn execute_remote(
+        &self,
+        invocation: ToolInvocation,
+        control: Option<&ToolExecutionControl>,
+    ) -> Result<ToolResult, ToolError> {
+        let arguments = serde_json::from_str::<Value>(&invocation.input_json)
+            .map_err(|error| ToolError::new(format!("invalid MCP tool arguments: {error}")))?;
+        if !arguments.is_object() {
+            return Err(ToolError::new("MCP tool arguments must be a JSON object"));
+        }
+        let result = self
+            .runtime
+            .client(&self.server)
+            .and_then(|client| match control {
+                Some(control) => {
+                    client.call_tool_with_control(&self.descriptor.name, arguments, control)
+                }
+                None => client.call_tool(&self.descriptor.name, arguments),
+            })
+            .map_err(|error| ToolError::new(error.message))?;
+        Ok(mcp_tool_result(invocation, &self.server, &self.descriptor, result))
+    }
+}
+
 impl Tool for McpRemoteTool {
     fn spec(&self) -> ToolSpec {
         let mut spec = ToolSpec::new(
@@ -885,17 +1052,15 @@ impl Tool for McpRemoteTool {
     }
 
     fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
-        let arguments = serde_json::from_str::<Value>(&invocation.input_json)
-            .map_err(|error| ToolError::new(format!("invalid MCP tool arguments: {error}")))?;
-        if !arguments.is_object() {
-            return Err(ToolError::new("MCP tool arguments must be a JSON object"));
-        }
-        let result = self
-            .runtime
-            .client(&self.server)
-            .and_then(|client| client.call_tool(&self.descriptor.name, arguments))
-            .map_err(|error| ToolError::new(error.message))?;
-        Ok(mcp_tool_result(invocation, &self.server, &self.descriptor, result))
+        self.execute_remote(invocation, None)
+    }
+
+    fn execute_with_control(
+        &self,
+        invocation: ToolInvocation,
+        control: &ToolExecutionControl,
+    ) -> Result<ToolResult, ToolError> {
+        self.execute_remote(invocation, Some(control))
     }
 }
 
@@ -1096,6 +1261,32 @@ fn default_timeout_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn controlled_child_wait_cancels_promptly() {
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exec sleep 30")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("test process should start");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancellation = Arc::clone(&cancelled);
+        let control = ToolExecutionControl::new(move || cancellation.load(Ordering::SeqCst));
+        let trigger = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(120));
+            cancelled.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let error = wait_for_child_with_control(child, Duration::from_secs(30), Some(&control))
+            .expect_err("controlled process should cancel");
+        trigger.join().expect("cancellation trigger should finish");
+
+        assert!(error.message.contains("cancelled"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
 
     #[test]
     fn creates_stable_mcp_wire_names() {

@@ -133,6 +133,12 @@ function agentEffortFromPolicy(policy: string): AgentEffort {
   return "auto";
 }
 
+function runBudgetForEffort(effort: AgentEffort) {
+  if (effort === "fast") return { durationMs: 3 * 60_000, modelCalls: 6, toolCalls: 12 };
+  if (effort === "pro") return { durationMs: 15 * 60_000, modelCalls: 40, toolCalls: 72 };
+  return { durationMs: 8 * 60_000, modelCalls: 18, toolCalls: 36 };
+}
+
 function normalizedEffortPolicy(policy: string) {
   if (policy === "single" || policy === "best_of_n") return policy;
   return "auto_router";
@@ -507,10 +513,41 @@ export function App() {
     () => projectSessionState?.sessions.find((session) => session.active) ?? null,
     [projectSessionState?.sessions]
   );
+  const activeSessionBusy = Boolean(activeSession && busySessionIds.has(activeSession.id));
 
   useEffect(() => {
     activeSessionIdRef.current = activeSession?.id ?? null;
   }, [activeSession?.id]);
+
+  useEffect(() => {
+    const sessionId = activeSession?.id;
+    if (!sessionId || !activeSessionBusy) return;
+    let disposed = false;
+    let inFlight = false;
+    const refresh = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const next = await getAgentState(sessionId);
+        if (!disposed && activeSessionIdRef.current === sessionId) {
+          setAgentState(next);
+          updateSessionStatus(sessionId, next.status);
+        }
+      } catch (error) {
+        if (!disposed) {
+          setComposerError(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        inFlight = false;
+      }
+    };
+    void refresh();
+    const interval = window.setInterval(() => void refresh(), 1000);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [activeSession?.id, activeSessionBusy]);
 
   const composerDraft = activeSession ? composerDrafts[activeSession.id] ?? "" : "";
   const composerAttachments = activeSession ? attachmentDrafts[activeSession.id] ?? [] : [];
@@ -647,7 +684,6 @@ export function App() {
   const ragSources = phase7?.sources ?? [];
   const browserObservations = phase8?.observations ?? [];
   const contextCheckpoint = contextState?.checkpoint ?? null;
-  const activeSessionBusy = Boolean(activeSession && busySessionIds.has(activeSession.id));
   const agentCanCancel = Boolean(agentState?.canCancel || activeSessionBusy);
   const agentCanRetry = Boolean(agentState?.canRetry);
   const agentWorking = Boolean(activeSessionBusy || agentState?.status === "running");
@@ -1378,6 +1414,7 @@ export function App() {
     markSessionTaskStarted(sessionId);
     markSessionBusy(sessionId, true);
     const submittedAt = Date.now();
+    const runBudget = runBudgetForEffort(agentEffort);
     setAgentState((current) => {
       if (!current) return current;
       const contextTokensUsed =
@@ -1388,6 +1425,9 @@ export function App() {
         status: "running",
         canCancel: true,
         canRetry: false,
+        runBudgetMs: runBudget.durationMs,
+        runModelCallBudget: runBudget.modelCalls,
+        runToolCallBudget: runBudget.toolCalls,
         transcriptMessages: current.transcriptMessages + 1,
         contextTokensUsed,
         contextRemainingPercent: Math.max(
@@ -1814,6 +1854,7 @@ export function App() {
               timeline={agentState?.timeline ?? []}
               streamAnswer={streamAnswer}
               status={agentState?.status ?? "idle"}
+              runBudgetMs={agentState?.runBudgetMs ?? 0}
               selectedId={selectedThreadItem?.id ?? null}
               onSelect={(selection) => {
                 setSelectedThreadItem(selection);

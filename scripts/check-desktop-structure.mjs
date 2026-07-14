@@ -34,6 +34,7 @@ const styles = read("apps/desktop/src/styles.css");
 const tauriBridge = read("apps/desktop/src/tauri.ts");
 const localBuildScript = read("scripts/build-local-app.mjs");
 const rustLib = read("apps/desktop/src-tauri/src/lib.rs");
+const runControlSource = read("apps/desktop/src-tauri/src/run_control.rs");
 const cargoToml = read("apps/desktop/src-tauri/Cargo.toml");
 const cargoLock = read("apps/desktop/src-tauri/Cargo.lock");
 const runTauriSource = read("scripts/run-tauri.mjs");
@@ -254,7 +255,10 @@ assert(
     modelProviderSource.includes("RecvTimeoutError::Timeout") &&
     modelProviderSource.includes("streamed_tool_calls") &&
     modelProviderSource.includes("MODEL_REQUEST_CANCELLED") &&
-    rustLib.includes("agent_run_cancellations") &&
+    rustLib.includes("agent_run_controls") &&
+    rustLib.includes("agent_run_should_stop") &&
+    runControlSource.includes("struct AgentRunControl") &&
+    runControlSource.includes("DeadlineExceeded") &&
     rustLib.includes("request_agent_run_cancel") &&
     rustLib.includes("emit_agent_stream_delta") &&
     appSource.includes("payload.sessionId !== activeSessionIdRef.current") &&

@@ -52,6 +52,7 @@ type SessionThreadProps = {
   timeline: TimelineEntry[];
   streamAnswer: string;
   status: AgentState["status"] | "idle";
+  runBudgetMs: number;
   selectedId: string | null;
   onSelect: (selection: SessionThreadSelection) => void;
   onEditMessage: (content: string) => void;
@@ -216,6 +217,12 @@ function activeRunProgress(timeline: TimelineEntry[]) {
     label = "Waiting for approval";
   } else if (latest.label === "Permission resolved") {
     label = "Resuming after approval";
+  } else if (/preparing workspace knowledge/i.test(latest.detail)) {
+    label = "Searching workspace knowledge";
+  } else if (/preparing execution strategy/i.test(latest.detail)) {
+    label = "Planning work";
+  } else if (/starting execution/i.test(latest.detail)) {
+    label = "Executing plan";
   } else if (/^Candidate \d+$/.test(latest.label)) {
     const started = runEvents.filter(
       (event) => /^Candidate \d+$/.test(event.label) && /started/i.test(event.detail)
@@ -226,6 +233,9 @@ function activeRunProgress(timeline: TimelineEntry[]) {
     label = `Exploring approaches ${Math.min(finished, started)}/${Math.max(1, started)}`;
   } else if (latest.label === "Conductor" || latest.label === "Planner") {
     label = "Planning work";
+  } else if (/collaboration layer \d+\/\d+ started/i.test(latest.detail)) {
+    const progress = latest.detail.match(/layer (\d+\/\d+)/i)?.[1];
+    label = progress ? `Coordinating models ${progress}` : "Coordinating models";
   } else if (latest.label === "Arbiter") {
     label = "Selecting approach";
   } else if (latest.label === "Executor" || latest.label === "Model started") {
@@ -548,6 +558,7 @@ export function SessionThread({
   timeline,
   streamAnswer,
   status,
+  runBudgetMs,
   selectedId,
   onSelect,
   onEditMessage,
@@ -672,6 +683,7 @@ export function SessionThread({
   const threadRows = useMemo(() => groupThreadItems(items), [items]);
   const runProgress = useMemo(() => activeRunProgress(timeline), [timeline]);
   const runElapsed = formatRunElapsed(progressNowMs - runProgress.startedAtMs);
+  const runTime = runBudgetMs > 0 ? `${runElapsed} / ${formatRunElapsed(runBudgetMs)}` : runElapsed;
   const hasStreamAnswer = Boolean(streamAnswer);
   const minimapMarkers = useMemo<MinimapMarker[]>(() => {
     const markers: MinimapMarker[] = [];
@@ -1197,7 +1209,7 @@ export function SessionThread({
           >
             <div className="thread-thinking thread-streaming-status" role="status">
               <span title={runProgress.detail}>{runProgress.label}</span>
-              <time>{runElapsed}</time>
+              <time>{runTime}</time>
             </div>
             <AgentMarkdown
               content={streamAnswer}
@@ -1211,7 +1223,7 @@ export function SessionThread({
         {!streamAnswer && status === "running" && (
           <div className="thread-thinking thread-running" role="status">
             <span title={runProgress.detail}>{runProgress.label}</span>
-            <time>{runElapsed}</time>
+            <time>{runTime}</time>
           </div>
         )}
         <span className="thread-scroll-anchor" aria-hidden="true" />
