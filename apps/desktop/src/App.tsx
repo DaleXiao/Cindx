@@ -72,6 +72,7 @@ import {
   getRuntimeStatus,
   getSidecarState,
   getWebSearchConfig,
+  generateSessionTitle,
   getMcpState,
   getSkillState,
   installSkillPackage,
@@ -1374,6 +1375,32 @@ export function App() {
     if (await runSkillInstall(() => installSkillUrl(url))) setSkillUrl("");
   }
 
+  async function refineAutomaticSessionTitle(sessionId: string, prompt: string) {
+    const nextState = await generateSessionTitle(sessionId, prompt);
+    const renamedSession = nextState.sessions.find((session) => session.id === sessionId);
+    if (!renamedSession) return;
+    setProjectSessionState((current) => {
+      if (!current) return nextState;
+      return {
+        ...current,
+        sessions: current.sessions.map((session) =>
+          session.id === sessionId
+            ? {
+                ...session,
+                name: renamedSession.name,
+                updatedAtMs: renamedSession.updatedAtMs
+              }
+            : session
+        )
+      };
+    });
+    setAgentState((current) =>
+      current?.sessionId === sessionId
+        ? { ...current, sessionName: renamedSession.name }
+        : current
+    );
+  }
+
   async function handleSendPrompt(value: string) {
     const nextPrompt = value.trim();
     const sessionId = activeSession?.id;
@@ -1443,6 +1470,9 @@ export function App() {
     });
     try {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      if (automaticSessionId) {
+        void refineAutomaticSessionTitle(automaticSessionId, visiblePrompt);
+      }
       const next = await runAgentTask(nextPrompt, sessionId, attachments, agentEffort);
       updateSessionStatus(sessionId, next.status);
       if (activeSessionIdRef.current === sessionId) {

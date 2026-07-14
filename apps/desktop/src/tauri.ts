@@ -1225,6 +1225,19 @@ export async function renameSession(
   }
 }
 
+export async function generateSessionTitle(
+  sessionId: string,
+  prompt: string
+): Promise<ProjectSessionState> {
+  try {
+    return await invoke<ProjectSessionState>("generate_session_title", {
+      input: { sessionId, prompt }
+    });
+  } catch {
+    return await getProjectSessionState();
+  }
+}
+
 export async function stageAgentAttachments(
   sessionId: string,
   files: AttachmentUpload[]
