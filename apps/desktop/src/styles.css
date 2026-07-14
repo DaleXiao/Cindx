@@ -1754,6 +1754,7 @@ pre {
 .thread-streaming-status {
   display: flex;
   align-items: center;
+  gap: 7px;
   margin-bottom: 7px;
   font-size: 10px;
 }
@@ -1766,6 +1767,12 @@ pre {
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   animation: thinking-sheen 1.8s ease-in-out infinite;
+}
+
+.thread-thinking > time {
+  color: var(--subtle);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
 }
 
 .thread-event-disclosure,
@@ -1996,6 +2003,7 @@ details[open] > summary .disclosure-triangle {
   width: min(100%, 760px);
   align-self: center;
   align-items: center;
+  gap: 7px;
   padding: 6px 2px;
   font-size: 11px;
 }

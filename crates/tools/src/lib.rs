@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_core::{
     Metadata, PermissionRequest, PermissionRequestId, PermissionRisk, TaskId, ToolCallId,
@@ -639,6 +641,111 @@ pub struct ShellRunTool {
     workspace_root: PathBuf,
 }
 
+const DEFAULT_SHELL_TIMEOUT_SECONDS: u64 = 120;
+const MAX_SHELL_TIMEOUT_SECONDS: u64 = 600;
+const SHELL_POLL_INTERVAL: Duration = Duration::from_millis(40);
+
+struct ShellCommandOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    timed_out: bool,
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn kill(pid: i32, signal: i32) -> i32;
+}
+
+#[cfg(unix)]
+fn terminate_process_group(process_id: u32, signal: i32) {
+    unsafe {
+        let _ = kill(-(process_id as i32), signal);
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_process_group(_process_id: u32, _signal: i32) {}
+
+fn read_process_stream(mut stream: impl Read) -> Vec<u8> {
+    let mut output = Vec::new();
+    let _ = stream.read_to_end(&mut output);
+    output
+}
+
+fn run_shell_command(
+    command: &str,
+    cwd: &Path,
+    timeout_seconds: u64,
+) -> Result<ShellCommandOutput, ToolError> {
+    let mut process = Command::new("/bin/zsh");
+    process
+        .arg("-lc")
+        .arg(command)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        process.process_group(0);
+    }
+
+    let mut child = process
+        .spawn()
+        .map_err(|error| ToolError::new(format!("failed to run shell command: {error}")))?;
+    let process_id = child.id();
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ToolError::new("failed to capture shell stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| ToolError::new("failed to capture shell stderr"))?;
+    let stdout_reader = thread::spawn(move || read_process_stream(stdout));
+    let stderr_reader = thread::spawn(move || read_process_stream(stderr));
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    let mut timed_out = false;
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(SHELL_POLL_INTERVAL),
+            Ok(None) => {
+                timed_out = true;
+                terminate_process_group(process_id, 15);
+                thread::sleep(Duration::from_millis(120));
+                terminate_process_group(process_id, 9);
+                let _ = child.kill();
+                break child.wait().map_err(|error| {
+                    ToolError::new(format!("failed to stop timed out shell command: {error}"))
+                })?;
+            }
+            Err(error) => {
+                terminate_process_group(process_id, 9);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ToolError::new(format!(
+                    "failed to inspect shell command: {error}"
+                )));
+            }
+        }
+    };
+
+    // A completed shell may leave background descendants holding the output pipes open.
+    terminate_process_group(process_id, 15);
+    thread::sleep(Duration::from_millis(40));
+    terminate_process_group(process_id, 9);
+
+    Ok(ShellCommandOutput {
+        status,
+        stdout: stdout_reader.join().unwrap_or_default(),
+        stderr: stderr_reader.join().unwrap_or_default(),
+        timed_out,
+    })
+}
+
 impl ShellRunTool {
     pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
         Self {
@@ -651,9 +758,9 @@ impl Tool for ShellRunTool {
     fn spec(&self) -> ToolSpec {
         builtin_tool_spec(
             "shell.run",
-            "Run a shell command in the workspace.",
+            "Run a bounded foreground shell command in the workspace. Background processes are terminated when the command finishes.",
             ToolRisk::ExecutesProcess,
-            "command=<shell command>\ncwd=<optional workspace-relative path>",
+            "command=<shell command>\ncwd=<optional workspace-relative path>\ntimeout_seconds=<optional 1-600, default 120>",
         )
     }
 
@@ -684,14 +791,20 @@ impl Tool for ShellRunTool {
         let input = parse_input(&invocation.input_json);
         let command = required_input(&input, "command")?;
         let cwd = input.get("cwd").cloned().unwrap_or_else(|| ".".to_string());
+        let timeout_seconds = match input.get("timeout_seconds") {
+            Some(value) => value.parse::<u64>().map_err(|_| {
+                ToolError::new("timeout_seconds must be an integer between 1 and 600")
+            })?,
+            None => DEFAULT_SHELL_TIMEOUT_SECONDS,
+        };
+        if !(1..=MAX_SHELL_TIMEOUT_SECONDS).contains(&timeout_seconds) {
+            return Err(ToolError::new(
+                "timeout_seconds must be an integer between 1 and 600",
+            ));
+        }
         let resolved_cwd = resolve_workspace_path(&self.workspace_root, &cwd)?;
         let resolved_cwd = resolve_workspace_read_path(&self.workspace_root, &resolved_cwd)?;
-        let output = Command::new("/bin/zsh")
-            .arg("-lc")
-            .arg(&command)
-            .current_dir(&resolved_cwd)
-            .output()
-            .map_err(|error| ToolError::new(format!("failed to run shell command: {error}")))?;
+        let output = run_shell_command(&command, &resolved_cwd, timeout_seconds)?;
 
         let mut combined = String::new();
         combined.push_str(&String::from_utf8_lossy(&output.stdout));
@@ -701,10 +814,20 @@ impl Tool for ShellRunTool {
             }
             combined.push_str(&String::from_utf8_lossy(&output.stderr));
         }
+        if output.timed_out {
+            if !combined.is_empty() && !combined.ends_with('\n') {
+                combined.push('\n');
+            }
+            combined.push_str(&format!(
+                "Command timed out after {timeout_seconds} seconds. Background processes were stopped."
+            ));
+        }
 
         let mut metadata = Metadata::new();
         metadata.insert("command".to_string(), command);
         metadata.insert("cwd".to_string(), cwd);
+        metadata.insert("timeout_seconds".to_string(), timeout_seconds.to_string());
+        metadata.insert("timed_out".to_string(), output.timed_out.to_string());
         metadata.insert(
             "exit_code".to_string(),
             output
@@ -716,7 +839,7 @@ impl Tool for ShellRunTool {
 
         Ok(tool_result(
             invocation.id,
-            if output.status.success() {
+            if output.status.success() && !output.timed_out {
                 ToolOutcomeStatus::Succeeded
             } else {
                 ToolOutcomeStatus::Failed
@@ -2553,6 +2676,47 @@ mod tests {
                 .risk,
             PermissionRisk::Execute
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_stops_background_processes_after_command_completion() {
+        let shell = ShellRunTool::new(temp_workspace());
+        let started = Instant::now();
+        let result = shell
+            .execute(invocation(
+                "shell.run",
+                encode_input(&[
+                    ("command", "sleep 30 & echo started"),
+                    ("timeout_seconds", "5"),
+                ]),
+            ))
+            .expect("background command should finish");
+
+        assert_eq!(result.status, ToolOutcomeStatus::Succeeded);
+        assert!(result.output.contains("started"));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_times_out_and_reports_the_bound() {
+        let shell = ShellRunTool::new(temp_workspace());
+        let started = Instant::now();
+        let result = shell
+            .execute(invocation(
+                "shell.run",
+                encode_input(&[
+                    ("command", "sleep 30"),
+                    ("timeout_seconds", "1"),
+                ]),
+            ))
+            .expect("timeout should be returned as a tool result");
+
+        assert_eq!(result.status, ToolOutcomeStatus::Failed);
+        assert!(result.output.contains("timed out after 1 seconds"));
+        assert_eq!(result.metadata.get("timed_out").map(String::as_str), Some("true"));
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[test]
