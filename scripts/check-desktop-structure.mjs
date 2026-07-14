@@ -896,8 +896,13 @@ assert(
   "Settings must use persistent left tabs and right-side details"
 );
 assert(
-  rustLib.includes("maybe_auto_name_session") && appSource.includes("sessionTitleFromPrompt"),
-  "New sessions must be named from their first prompt"
+  rustLib.includes("maybe_auto_name_session") &&
+    rustLib.includes("semantic_session_title") &&
+    rustLib.includes("can_apply_generated_session_title") &&
+    appSource.includes("sessionTitleFromPrompt") &&
+    appSource.includes("refineAutomaticSessionTitle") &&
+    tauriBridge.includes('invoke<ProjectSessionState>("generate_session_title"'),
+  "New sessions must receive a non-blocking semantic title without overwriting manual names"
 );
 assert(
   appSource.includes("busy={projectSessionBusy}") &&
