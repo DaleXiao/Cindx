@@ -64,7 +64,8 @@
     ],
     "resources": {
       "../../../scripts/sidecars/browser-sidecar.js": "sidecars/browser-sidecar.js",
-      "../../../scripts/sidecars/computer-sidecar.js": "sidecars/computer-sidecar.js"
+      "../../../scripts/sidecars/computer-sidecar.js": "sidecars/computer-sidecar.js",
+      "../node_modules/playwright-core": "sidecars/node_modules/playwright-core"
     }
   }
 }

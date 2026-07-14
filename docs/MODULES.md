@@ -1,6 +1,8 @@
 # Modules
 
 The tool and harness architecture is specified in [TOOL_HARNESS_SPEC.md](./TOOL_HARNESS_SPEC.md).
+Browser session and interaction boundaries are specified in
+[BROWSER_CONTROL.md](./BROWSER_CONTROL.md).
 
 ## apps/desktop
 
@@ -140,7 +142,7 @@ Initial tools:
 - shell run
 - web search
 - URL fetch
-- browser open/text/capture/action tools
+- browser open/text/capture/action/tab tools
 - computer screenshot/action tools
 
 ## Sidecars
@@ -149,14 +151,12 @@ Sidecars are small local controller processes behind explicit JSON protocols.
 
 Current sidecars:
 
-- Bundled Node/macOS browser shim for browser action requests.
+- Bundled Node browser controller using CDP sessions and Playwright semantics.
 - Bundled Node/macOS computer shim for screenshot/click/type/key requests.
 
 Planned sidecars:
 
 - LanceDB RAG sidecar behind the existing RAG adapter contract.
-- Playwright browser controller behind the existing browser JSON action
-  contract.
 - Swift/Rust computer-use helper behind the existing computer JSON action
   contract.
 

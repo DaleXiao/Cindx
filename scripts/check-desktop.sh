@@ -11,5 +11,6 @@ if [ ! -d "apps/desktop/node_modules" ]; then
   exit 1
 fi
 
+node scripts/test-browser-sidecar.mjs
 (cd apps/desktop && npm run build)
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml

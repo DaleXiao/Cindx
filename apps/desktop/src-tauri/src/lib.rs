@@ -2272,6 +2272,8 @@ fn runtime_status_for_root(root: PathBuf) -> RuntimeStatus {
             "browser.click".to_string(),
             "browser.type".to_string(),
             "browser.scroll".to_string(),
+            "browser.tabs".to_string(),
+            "browser.select_tab".to_string(),
             "computer.screenshot".to_string(),
             "computer.click".to_string(),
             "computer.type".to_string(),
@@ -4944,13 +4946,14 @@ fn run_browser_tool(
     }
 
     let task_id = phase8_task_id();
+    let run_context = project_session_metadata_for_session(&state, None)?;
     let invocation = ToolInvocation {
         id: agent_core::ToolCallId(unique_id("browser")),
         task_id: task_id.clone(),
         tool_name: tool_name.clone(),
         input_json: input.input,
         proposed_by_model: "local-user".to_string(),
-        metadata: Metadata::new(),
+        metadata: run_context,
     };
     let registry = tool_registry_for_state(&state, &root)?;
     let Some(tool) = registry.get(&tool_name) else {
@@ -5014,6 +5017,7 @@ fn resolve_browser_permission(
     decision: String,
 ) -> Result<Phase8State, String> {
     let root = active_workspace_root(&state)?;
+    let run_context = project_session_metadata_for_session(&state, None)?;
     let registry = tool_registry_for_state(&state, &root)?;
     let decision = parse_permission_decision(&decision).map_err(|error| error.to_string())?;
     let request_id = PermissionRequestId(request_id);
@@ -5081,7 +5085,7 @@ fn resolve_browser_permission(
                 .cloned()
                 .unwrap_or_default(),
             proposed_by_model: "local-user".to_string(),
-            metadata: Metadata::new(),
+            metadata: run_context,
         };
         execute_tool_invocation(&mut store, invocation, &root, Some(&registry))
             .map_err(|error| error.to_string())?;
@@ -9990,10 +9994,16 @@ fn execute_tool_invocation(
 
 fn execute_agent_tool_invocation(
     state: &tauri::State<'_, AppState>,
-    invocation: ToolInvocation,
+    mut invocation: ToolInvocation,
     workspace_root: &Path,
     run_context: &Metadata,
 ) -> Result<ToolResult, String> {
+    for (key, value) in run_context {
+        invocation
+            .metadata
+            .entry(key.clone())
+            .or_insert_with(|| value.clone());
+    }
     let task_id = invocation.task_id.clone();
     let tool_call_id = invocation.id.0.clone();
     let tool_name = invocation.tool_name.clone();
@@ -11589,6 +11599,8 @@ fn is_phase8_tool(tool_name: &str) -> bool {
             | "browser.click"
             | "browser.type"
             | "browser.scroll"
+            | "browser.tabs"
+            | "browser.select_tab"
     )
 }
 

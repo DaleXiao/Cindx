@@ -33,6 +33,8 @@ const traceStatusIconSource = read("apps/desktop/src/components/TraceStatusIcon.
 const styles = read("apps/desktop/src/styles.css");
 const tauriBridge = read("apps/desktop/src/tauri.ts");
 const localBuildScript = read("scripts/build-local-app.mjs");
+const browserSidecarSource = read("scripts/sidecars/browser-sidecar.js");
+const browserIntegrationTest = read("scripts/test-browser-sidecar.mjs");
 const rustLib = read("apps/desktop/src-tauri/src/lib.rs");
 const runControlSource = read("apps/desktop/src-tauri/src/run_control.rs");
 const cargoToml = read("apps/desktop/src-tauri/Cargo.toml");
@@ -62,6 +64,7 @@ const benchmarkSuite = JSON.parse(read("benchmarks/agent/core-v1.json"));
 const benchmarkBaseline = JSON.parse(read("benchmarks/agent/core-v1-baseline.json"));
 const evaluationLabSource = read("crates/orchestrator/examples/evaluation_lab.rs");
 const agentEvaluationDoc = read("docs/AGENT_EVALUATION.md");
+const browserControlDoc = read("docs/BROWSER_CONTROL.md");
 const mainSource = read("apps/desktop/src/main.tsx");
 const html = read("apps/desktop/index.html");
 const viteConfig = read("apps/desktop/vite.config.ts");
@@ -126,6 +129,10 @@ assert(
 );
 assert(packageJson.dependencies.react, "React dependency is missing");
 assert(packageJson.dependencies["@tauri-apps/api"], "Tauri API dependency is missing");
+assert(
+  packageJson.dependencies["playwright-core"] === "1.61.1",
+  "Browser Control must pin playwright-core for reproducible sidecar behavior"
+);
 assert(packageJson.devDependencies["@tauri-apps/cli"], "Tauri CLI dependency is missing");
 
 assert(tauriConfig.productName === "Cindx", "Tauri product name changed");
@@ -145,6 +152,11 @@ assert(
 assert(
   tauriConfig.build.frontendDist === "../dist",
   "Tauri frontendDist should point to Vite dist"
+);
+assert(
+  tauriConfig.bundle.resources?.["../node_modules/playwright-core"] ===
+    "sidecars/node_modules/playwright-core",
+  "The app bundle must include playwright-core beside the browser sidecar"
 );
 assert(
   tauriConfig.app.security.csp?.["default-src"] === "'self'" &&
@@ -978,6 +990,11 @@ assert(appSource.includes("Index workspace"), "App must render the Phase 7 RAG i
 assert(appSource.includes("answerWithRag"), "App must render the Phase 7 RAG answer flow");
 assert(appSource.includes("Search web"), "App must render the Phase 8 web search action");
 assert(appSource.includes("runBrowserTool"), "App must render the Phase 8 browser flow");
+assert(
+  appSource.includes('handleRunBrowserTool("browser.tabs")') &&
+    appSource.includes('handleRunBrowserTool("browser.select_tab")'),
+  "Browser settings must expose tab listing and selection"
+);
 assert(appSource.includes("getRuntimeStatus"), "App must call the runtime bridge");
 assert(appSource.includes("Request review"), "App must render the Phase 3 mock review action");
 
@@ -1300,8 +1317,27 @@ assert(
   "Rust bridge must connect the Phase 7 RAG runtime"
 );
 assert(
-  rustLib.includes("browser.capture") && rustLib.includes("phase8_state"),
-  "Rust bridge must connect the Phase 8 browser runtime"
+  rustLib.includes("browser.capture") &&
+    rustLib.includes("browser.tabs") &&
+    rustLib.includes("browser.select_tab") &&
+    rustLib.includes("phase8_state") &&
+    toolsSource.includes("BROWSER_CONTROL_REQUEST_SCHEMA") &&
+    toolsSource.includes("run_json_sidecar_controlled"),
+  "Rust bridge must connect the cancellable Browser Control v2 runtime"
+);
+assert(
+  browserSidecarSource.includes('const REQUEST_SCHEMA = "cindx.browser-control.v2"') &&
+    browserSidecarSource.includes("chromium.connectOverCDP") &&
+    browserSidecarSource.includes("context.newCDPSession") &&
+    browserSidecarSource.includes("getByRole") &&
+    browserSidecarSource.includes("waitForEvent(\"download\"") &&
+    browserSidecarSource.includes("ariaSnapshot") &&
+    browserIntegrationTest.includes("browser sidecar integration ok") &&
+    browserIntegrationTest.includes('invoke("select_tab"') &&
+    browserControlDoc.includes("CDP owns browser process discovery") &&
+    ciWorkflow.includes("Test Browser Control v2") &&
+    localBuildScript.includes("test-browser-sidecar.mjs"),
+  "Browser Control v2 must combine CDP transport, Playwright semantics, and a real-browser gate"
 );
 
 console.log("desktop structure ok");

@@ -1645,10 +1645,14 @@ export function App() {
 
   async function handleRunBrowserTool(toolName: string) {
     const value = browserUrl.trim();
-    if (!value) return;
+    if (!value && toolName !== "browser.tabs" && toolName !== "browser.select_tab") return;
     let input = `url=${value}\noutput_dir=.cindx/browser-captures`;
     if (toolName === "web.search") {
       input = `query=${value}`;
+    } else if (toolName === "browser.tabs") {
+      input = "";
+    } else if (toolName === "browser.select_tab") {
+      input = `tab_id=${browserTarget.trim()}`;
     } else if (toolName === "browser.click") {
       input = `url=${value}\nselector=${browserTarget.trim() || "body"}\noutput_dir=.cindx/browser-actions`;
     } else if (toolName === "browser.type") {
@@ -2807,7 +2811,7 @@ export function App() {
                   />
                 </label>
                 <label>
-                  <span>Target</span>
+                  <span>Target or tab ID</span>
                   <input
                     value={browserTarget}
                     onChange={(event) => setBrowserTarget(event.target.value)}
@@ -2884,6 +2888,24 @@ export function App() {
                     <Activity size={17} aria-hidden="true" />
                     <span>Scroll</span>
                   </button>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    disabled={browserBusy}
+                    onClick={() => handleRunBrowserTool("browser.tabs")}
+                  >
+                    <LayoutDashboard size={17} aria-hidden="true" />
+                    <span>List tabs</span>
+                  </button>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    disabled={browserBusy || !browserTarget.trim()}
+                    onClick={() => handleRunBrowserTool("browser.select_tab")}
+                  >
+                    <PanelRightOpen size={17} aria-hidden="true" />
+                    <span>Select tab</span>
+                  </button>
                 </div>
                 </div>
               </details>
@@ -2938,6 +2960,9 @@ export function App() {
                         setToolInput("url=https://example.com\nselector=body\ntext=hello\noutput_dir=.cindx/browser-actions");
                       if (nextTool === "browser.scroll")
                         setToolInput("url=https://example.com\ndelta_y=600\noutput_dir=.cindx/browser-actions");
+                      if (nextTool === "browser.tabs") setToolInput("");
+                      if (nextTool === "browser.select_tab")
+                        setToolInput("tab_id=<copy from browser.tabs>");
                       if (nextTool === "computer.screenshot")
                         setToolInput("redaction=manual\noutput_dir=.cindx/computer-actions");
                       if (nextTool === "computer.click")

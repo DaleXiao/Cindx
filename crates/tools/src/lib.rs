@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_core::{
     Metadata, PermissionRequest, PermissionRequestId, PermissionRisk, TaskId, ToolCallId,
-    ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
+    ToolArtifact, ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,12 +126,14 @@ impl ToolRegistry {
         registry.register(Box::new(WriteFileTool::new(workspace_root.clone())));
         registry.register(Box::new(ShellRunTool::new(workspace_root.clone())));
         registry.register(Box::new(WebSearchTool::new(web_search_config)));
-        registry.register(Box::new(BrowserOpenTool));
-        registry.register(Box::new(BrowserExtractTextTool));
-        registry.register(Box::new(BrowserCaptureTool::new(workspace_root.clone())));
-        registry.register(Box::new(BrowserActionTool::click(workspace_root.clone())));
-        registry.register(Box::new(BrowserActionTool::type_text(workspace_root.clone())));
-        registry.register(Box::new(BrowserActionTool::scroll(workspace_root.clone())));
+        registry.register(Box::new(BrowserTool::open(workspace_root.clone())));
+        registry.register(Box::new(BrowserTool::extract_text(workspace_root.clone())));
+        registry.register(Box::new(BrowserTool::capture(workspace_root.clone())));
+        registry.register(Box::new(BrowserTool::click(workspace_root.clone())));
+        registry.register(Box::new(BrowserTool::type_text(workspace_root.clone())));
+        registry.register(Box::new(BrowserTool::scroll(workspace_root.clone())));
+        registry.register(Box::new(BrowserTool::tabs(workspace_root.clone())));
+        registry.register(Box::new(BrowserTool::select_tab(workspace_root.clone())));
         registry.register(Box::new(ComputerTool::screenshot(workspace_root.clone())));
         registry.register(Box::new(ComputerTool::click(workspace_root.clone())));
         registry.register(Box::new(ComputerTool::type_text(workspace_root.clone())));
@@ -1015,224 +1017,86 @@ impl Tool for WebSearchTool {
     }
 }
 
-pub struct BrowserOpenTool;
-
-impl Tool for BrowserOpenTool {
-    fn spec(&self) -> ToolSpec {
-        builtin_tool_spec(
-            "browser.open",
-            "Open a URL in the system browser.",
-            ToolRisk::UsesNetwork,
-            "url=<http-or-https-url>",
-        )
-    }
-
-    fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
-        browser_permission_request(invocation, "browser.open", "Open a URL in the system browser.")
-    }
-
-    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
-        let input = parse_input(&invocation.input_json);
-        let url = required_url(&input)?;
-        let output = Command::new("/usr/bin/open")
-            .arg(&url)
-            .output()
-            .map_err(|error| ToolError::new(format!("failed to open browser: {error}")))?;
-        let mut metadata = Metadata::new();
-        metadata.insert("url".to_string(), url.clone());
-        metadata.insert(
-            "exit_code".to_string(),
-            output
-                .status
-                .code()
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "signal".to_string()),
-        );
-
-        Ok(tool_result(
-            invocation.id,
-            if output.status.success() {
-                ToolOutcomeStatus::Succeeded
-            } else {
-                ToolOutcomeStatus::Failed
-            },
-            if output.status.success() {
-                format!("opened {url}")
-            } else {
-                String::from_utf8_lossy(&output.stderr).to_string()
-            },
-            metadata,
-        ))
-    }
-}
-
-pub struct BrowserExtractTextTool;
-
-impl Tool for BrowserExtractTextTool {
-    fn spec(&self) -> ToolSpec {
-        builtin_tool_spec(
-            "browser.extract_text",
-            "Fetch a webpage and extract readable text.",
-            ToolRisk::UsesNetwork,
-            "url=<http-or-https-url>",
-        )
-    }
-
-    fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
-        browser_permission_request(invocation, "browser.extract_text", "Fetch and read a webpage.")
-    }
-
-    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
-        let input = parse_input(&invocation.input_json);
-        let url = required_url(&input)?;
-        let html = fetch_url(&url)?;
-        let text = html_to_text(&html);
-        let output = truncate_chars(&text, 12_000);
-        let mut metadata = Metadata::new();
-        metadata.insert("url".to_string(), url);
-        metadata.insert("chars".to_string(), output.chars().count().to_string());
-
-        Ok(tool_result(
-            invocation.id,
-            ToolOutcomeStatus::Succeeded,
-            output,
-            metadata,
-        ))
-    }
-}
-
-pub struct BrowserCaptureTool {
-    workspace_root: PathBuf,
-}
-
-impl BrowserCaptureTool {
-    pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
-        Self {
-            workspace_root: workspace_root.into(),
-        }
-    }
-}
-
-impl Tool for BrowserCaptureTool {
-    fn spec(&self) -> ToolSpec {
-        builtin_tool_spec(
-            "browser.capture",
-            "Capture a webpage screenshot when Playwright is available, with HTML/text fallback.",
-            ToolRisk::UsesNetwork,
-            "url=<http-or-https-url>\noutput_dir=<optional workspace-relative directory>",
-        )
-    }
-
-    fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
-        browser_permission_request(
-            invocation,
-            "browser.capture",
-            "Capture a webpage observation artifact.",
-        )
-    }
-
-    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
-        let input = parse_input(&invocation.input_json);
-        let url = required_url(&input)?;
-        let output_dir = input
-            .get("output_dir")
-            .cloned()
-            .unwrap_or_else(|| ".cindx/browser-captures".to_string());
-        let resolved_dir = resolve_workspace_path(&self.workspace_root, &output_dir)?;
-        fs::create_dir_all(&resolved_dir)
-            .map_err(|error| ToolError::new(format!("failed to create capture directory: {error}")))?;
-
-        let capture_id = format!("capture-{}-{}", current_time_millis(), stable_hash(&url));
-        let screenshot_relative = format!("{output_dir}/{capture_id}.png");
-        let screenshot_path = resolve_workspace_path(&self.workspace_root, &screenshot_relative)?;
-        let mut capture_kind = "html_snapshot".to_string();
-        let mut artifact_relative = format!("{output_dir}/{capture_id}.html");
-
-        if let Some(playwright) = find_playwright(&self.workspace_root) {
-            let screenshot = Command::new(playwright)
-                .arg("screenshot")
-                .arg("--full-page")
-                .arg(&url)
-                .arg(&screenshot_path)
-                .output();
-            if matches!(screenshot, Ok(output) if output.status.success()) {
-                capture_kind = "screenshot".to_string();
-                artifact_relative = screenshot_relative;
-            }
-        }
-
-        let html = fetch_url(&url)?;
-        let text = html_to_text(&html);
-        if capture_kind == "html_snapshot" {
-            let html_path = resolve_workspace_path(&self.workspace_root, &artifact_relative)?;
-            fs::write(&html_path, html.as_bytes())
-                .map_err(|error| ToolError::new(format!("failed to write HTML snapshot: {error}")))?;
-        }
-        let text_relative = format!("{output_dir}/{capture_id}.txt");
-        let text_path = resolve_workspace_path(&self.workspace_root, &text_relative)?;
-        fs::write(&text_path, text.as_bytes())
-            .map_err(|error| ToolError::new(format!("failed to write text snapshot: {error}")))?;
-
-        let mut metadata = Metadata::new();
-        metadata.insert("url".to_string(), url);
-        metadata.insert("capture_kind".to_string(), capture_kind.clone());
-        metadata.insert("artifact_path".to_string(), artifact_relative.clone());
-        metadata.insert("text_path".to_string(), text_relative.clone());
-
-        Ok(tool_result(
-            invocation.id,
-            ToolOutcomeStatus::Succeeded,
-            format!(
-                "{capture_kind}\nartifact={artifact_relative}\ntext={text_relative}\n\n{}",
-                truncate_chars(&text, 4_000)
-            ),
-            metadata,
-        ))
-    }
-}
+const BROWSER_CONTROL_REQUEST_SCHEMA: &str = "cindx.browser-control.v2";
+const BROWSER_CONTROL_RESPONSE_SCHEMA: &str = "cindx.browser-control-result.v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BrowserActionKind {
+enum BrowserToolKind {
+    Open,
+    ExtractText,
+    Capture,
     Click,
     TypeText,
     Scroll,
+    Tabs,
+    SelectTab,
 }
 
-impl BrowserActionKind {
+impl BrowserToolKind {
     fn tool_name(self) -> &'static str {
         match self {
+            Self::Open => "browser.open",
+            Self::ExtractText => "browser.extract_text",
+            Self::Capture => "browser.capture",
             Self::Click => "browser.click",
             Self::TypeText => "browser.type",
             Self::Scroll => "browser.scroll",
+            Self::Tabs => "browser.tabs",
+            Self::SelectTab => "browser.select_tab",
         }
     }
 
     fn action(self) -> &'static str {
         match self {
+            Self::Open => "open",
+            Self::ExtractText => "extract_text",
+            Self::Capture => "capture",
             Self::Click => "click",
             Self::TypeText => "type",
             Self::Scroll => "scroll",
+            Self::Tabs => "tabs",
+            Self::SelectTab => "select_tab",
         }
     }
 
     fn description(self) -> &'static str {
         match self {
-            Self::Click => "Click a selector or screen coordinate through the browser sidecar.",
-            Self::TypeText => "Type text into a browser target through the browser sidecar.",
-            Self::Scroll => "Scroll the current browser page through the browser sidecar.",
+            Self::Open => "Open a URL in a reusable CDP browser session.",
+            Self::ExtractText => {
+                "Read dynamic page text and an accessibility snapshot from the current browser session."
+            }
+            Self::Capture => "Capture screenshot and text artifacts from the current browser session.",
+            Self::Click => "Click a semantic target, CSS selector, or coordinate with Playwright auto-waiting.",
+            Self::TypeText => "Fill a semantic browser target with text through Playwright.",
+            Self::Scroll => "Scroll the current page or a selected scroll container.",
+            Self::Tabs => "List tabs in the reusable browser session.",
+            Self::SelectTab => "Select and focus one tab by its CDP target id.",
         }
     }
 
     fn schema(self) -> &'static str {
         match self {
+            Self::Open => {
+                "url=<http-or-https-url>\nnew_tab=<optional true|false>\nwait_until=<optional load|domcontentloaded|networkidle|commit>\ntimeout_ms=<optional milliseconds>\nsession_id=<optional browser session>\nheadless=<optional true|false>"
+            }
+            Self::ExtractText => {
+                "url=<optional http-or-https-url>\ntab_id=<optional CDP target id>\nframe=<optional frame name or URL fragment>\nselector=<optional CSS selector>\nrole=<optional accessible role>\nname=<optional accessible name>\nlabel=<optional form label>\nplaceholder=<optional placeholder>\ntext_target=<optional visible target text>\ntimeout_ms=<optional milliseconds>\nsession_id=<optional browser session>\noutput_dir=<optional workspace-relative directory>"
+            }
+            Self::Capture => {
+                "url=<optional http-or-https-url>\ntab_id=<optional CDP target id>\nfull_page=<optional true|false>\ntimeout_ms=<optional milliseconds>\nsession_id=<optional browser session>\noutput_dir=<optional workspace-relative directory>"
+            }
             Self::Click => {
-                "url=<optional http-or-https-url>\nselector=<css selector or accessible target>\nx=<optional coordinate>\ny=<optional coordinate>\noutput_dir=<optional workspace-relative directory>"
+                "tab_id=<optional CDP target id>\nframe=<optional frame name or URL fragment>\nselector=<optional CSS selector>\nrole=<optional accessible role>\nname=<optional accessible name>\nlabel=<optional form label>\ntext_target=<optional visible target text>\nexact=<optional true|false>\nx=<optional coordinate>\ny=<optional coordinate>\ndownload=<optional true|false>\nwait_for=<optional CSS selector visible after click>\ntimeout_ms=<optional milliseconds>\nsession_id=<optional browser session>\noutput_dir=<optional workspace-relative directory>"
             }
             Self::TypeText => {
-                "url=<optional http-or-https-url>\nselector=<css selector or accessible target>\ntext=<text to type>\noutput_dir=<optional workspace-relative directory>"
+                "text=<text to enter>\ntab_id=<optional CDP target id>\nframe=<optional frame name or URL fragment>\nselector=<optional CSS selector>\nrole=<optional accessible role>\nname=<optional accessible name>\nlabel=<optional form label>\nplaceholder=<optional placeholder>\ntext_target=<optional visible target text>\nexact=<optional true|false>\nappend=<optional true|false>\npress_enter=<optional true|false>\ntimeout_ms=<optional milliseconds>\nsession_id=<optional browser session>"
             }
             Self::Scroll => {
-                "url=<optional http-or-https-url>\ndelta_x=<optional pixels>\ndelta_y=<optional pixels, default 600>\noutput_dir=<optional workspace-relative directory>"
+                "tab_id=<optional CDP target id>\nframe=<optional frame name or URL fragment>\nselector=<optional CSS selector>\ndelta_x=<optional pixels>\ndelta_y=<optional pixels, default 600>\ntimeout_ms=<optional milliseconds>\nsession_id=<optional browser session>"
+            }
+            Self::Tabs => "session_id=<optional browser session>\nheadless=<optional true|false>",
+            Self::SelectTab => {
+                "tab_id=<CDP target id>\nsession_id=<optional browser session>"
             }
         }
     }
@@ -1240,55 +1104,238 @@ impl BrowserActionKind {
     fn risk(self) -> ToolRisk {
         match self {
             Self::TypeText => ToolRisk::SensitiveContext,
-            Self::Click | Self::Scroll => ToolRisk::UsesNetwork,
+            _ => ToolRisk::UsesNetwork,
         }
     }
 
     fn permission_risk(self) -> PermissionRisk {
         match self {
             Self::TypeText => PermissionRisk::Sensitive,
-            Self::Click | Self::Scroll => PermissionRisk::Network,
+            _ => PermissionRisk::Network,
         }
     }
 
     fn permission_reason(self) -> &'static str {
         match self {
+            Self::Open => "Navigate a reusable browser session.",
+            Self::ExtractText => "Read the current browser page.",
+            Self::Capture => "Capture the current browser page.",
             Self::Click => "Click inside a browser session.",
             Self::TypeText => "Enter potentially sensitive text into a browser session.",
             Self::Scroll => "Scroll inside a browser session.",
+            Self::Tabs => "Inspect open browser tabs.",
+            Self::SelectTab => "Focus an open browser tab.",
         }
     }
 }
 
-pub struct BrowserActionTool {
+pub struct BrowserTool {
     workspace_root: PathBuf,
-    kind: BrowserActionKind,
+    kind: BrowserToolKind,
 }
 
-impl BrowserActionTool {
-    fn click(workspace_root: impl Into<PathBuf>) -> Self {
+impl BrowserTool {
+    fn new(workspace_root: impl Into<PathBuf>, kind: BrowserToolKind) -> Self {
         Self {
             workspace_root: workspace_root.into(),
-            kind: BrowserActionKind::Click,
+            kind,
         }
+    }
+
+    fn open(workspace_root: impl Into<PathBuf>) -> Self {
+        Self::new(workspace_root, BrowserToolKind::Open)
+    }
+
+    fn extract_text(workspace_root: impl Into<PathBuf>) -> Self {
+        Self::new(workspace_root, BrowserToolKind::ExtractText)
+    }
+
+    fn capture(workspace_root: impl Into<PathBuf>) -> Self {
+        Self::new(workspace_root, BrowserToolKind::Capture)
+    }
+
+    fn click(workspace_root: impl Into<PathBuf>) -> Self {
+        Self::new(workspace_root, BrowserToolKind::Click)
     }
 
     fn type_text(workspace_root: impl Into<PathBuf>) -> Self {
-        Self {
-            workspace_root: workspace_root.into(),
-            kind: BrowserActionKind::TypeText,
-        }
+        Self::new(workspace_root, BrowserToolKind::TypeText)
     }
 
     fn scroll(workspace_root: impl Into<PathBuf>) -> Self {
-        Self {
-            workspace_root: workspace_root.into(),
-            kind: BrowserActionKind::Scroll,
+        Self::new(workspace_root, BrowserToolKind::Scroll)
+    }
+
+    fn tabs(workspace_root: impl Into<PathBuf>) -> Self {
+        Self::new(workspace_root, BrowserToolKind::Tabs)
+    }
+
+    fn select_tab(workspace_root: impl Into<PathBuf>) -> Self {
+        Self::new(workspace_root, BrowserToolKind::SelectTab)
+    }
+
+    fn execute_inner(
+        &self,
+        invocation: ToolInvocation,
+        control: &ToolExecutionControl,
+    ) -> Result<ToolResult, ToolError> {
+        let input = parse_input(&invocation.input_json);
+        validate_browser_input(self.kind, &input)?;
+        if let Some(url) = input.get("url").filter(|value| !value.trim().is_empty()) {
+            required_url(&[("url".to_string(), url.clone())].into_iter().collect())?;
         }
+
+        let output_dir = input
+            .get("output_dir")
+            .cloned()
+            .unwrap_or_else(|| ".cindx/browser-artifacts".to_string());
+        let resolved_output_dir = resolve_workspace_path(&self.workspace_root, &output_dir)?;
+        fs::create_dir_all(&resolved_output_dir).map_err(|error| {
+            ToolError::new(format!("failed to create browser artifact directory: {error}"))
+        })?;
+        let session_id = input
+            .get("session_id")
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| invocation.metadata.get("session_id"))
+            .cloned()
+            .unwrap_or_else(|| invocation.task_id.0.clone());
+        let session_key = browser_session_key(&session_id);
+        let session_relative = format!(".cindx/browser-sessions/{session_key}");
+        let session_dir = resolve_workspace_path(&self.workspace_root, &session_relative)?;
+        fs::create_dir_all(&session_dir).map_err(|error| {
+            ToolError::new(format!("failed to create browser session directory: {error}"))
+        })?;
+
+        let action_id = format!(
+            "browser-{}-{}",
+            current_time_millis(),
+            stable_hash(&format!("{}:{}", self.kind.action(), invocation.input_json))
+        );
+        let request_path = resolved_output_dir.join(format!(".{action_id}-request.json"));
+        let request_json = browser_request_json(
+            &action_id,
+            self.kind,
+            &session_id,
+            &session_dir,
+            &resolved_output_dir,
+            &input,
+        )?;
+        write_private_file(&request_path, request_json.as_bytes())?;
+        let timeout_ms = input
+            .get("timeout_ms")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(30_000)
+            .clamp(1_000, 120_000);
+        let sidecar = run_json_sidecar_controlled(
+            "CINDX_BROWSER_SIDECAR",
+            &request_path,
+            control,
+            Duration::from_millis(timeout_ms.saturating_add(10_000)),
+        );
+        let _ = fs::remove_file(&request_path);
+        let sidecar = sidecar?;
+        if sidecar.cancelled {
+            return Ok(ToolResult::text(
+                invocation.id,
+                ToolOutcomeStatus::Cancelled,
+                "Browser action cancelled.",
+                [
+                    ("action".to_string(), self.kind.action().to_string()),
+                    ("session_id".to_string(), session_id),
+                ]
+                .into_iter()
+                .collect(),
+            ));
+        }
+        if sidecar.timed_out {
+            return Err(ToolError::new(format!(
+                "browser sidecar exceeded {} ms",
+                timeout_ms.saturating_add(10_000)
+            )));
+        }
+
+        let response: serde_json::Value = serde_json::from_str(&sidecar.stdout)
+            .map_err(|error| ToolError::new(format!("invalid browser sidecar response: {error}")))?;
+        if response.get("schema").and_then(serde_json::Value::as_str)
+            != Some(BROWSER_CONTROL_RESPONSE_SCHEMA)
+        {
+            return Err(ToolError::new("browser sidecar returned an unsupported schema"));
+        }
+        let output = response
+            .get("output")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("browser action completed")
+            .to_string();
+        if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(ToolError::new(output));
+        }
+
+        let mut metadata = Metadata::new();
+        metadata.insert("action".to_string(), self.kind.action().to_string());
+        metadata.insert("controller".to_string(), "cdp_playwright".to_string());
+        metadata.insert("session_id".to_string(), session_id);
+        metadata.insert("session_path".to_string(), session_relative);
+        if let Some(page) = response.get("page") {
+            for (source, target) in [("id", "tab_id"), ("url", "url"), ("title", "title")] {
+                if let Some(value) = page.get(source).and_then(serde_json::Value::as_str) {
+                    metadata.insert(target.to_string(), value.to_string());
+                }
+            }
+        }
+        if let Some(duration) = response.get("duration_ms").and_then(serde_json::Value::as_u64) {
+            metadata.insert("duration_ms".to_string(), duration.to_string());
+        }
+        if let Some(trace_path) = response
+            .get("trace_path")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|path| workspace_relative_path(&self.workspace_root, path))
+        {
+            metadata.insert("trace_path".to_string(), trace_path);
+        }
+
+        let artifacts = response
+            .get("artifacts")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|artifact| {
+                let path = artifact.get("path")?.as_str()?;
+                Some(ToolArtifact {
+                    path: workspace_relative_path(&self.workspace_root, path)?,
+                    mime_type: artifact
+                        .get("mime_type")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    title: artifact
+                        .get("title")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                })
+            })
+            .collect::<Vec<_>>();
+        if let Some(artifact) = artifacts.first() {
+            metadata.insert("artifact_path".to_string(), artifact.path.clone());
+        }
+        if let Some(text) = artifacts
+            .iter()
+            .find(|artifact| artifact.mime_type.as_deref() == Some("text/plain"))
+        {
+            metadata.insert("text_path".to_string(), text.path.clone());
+        }
+
+        let mut result = ToolResult::text(
+            invocation.id,
+            ToolOutcomeStatus::Succeeded,
+            output,
+            metadata,
+        );
+        result.structured_output_json = Some(sidecar.stdout);
+        result.artifacts = artifacts;
+        Ok(result)
     }
 }
 
-impl Tool for BrowserActionTool {
+impl Tool for BrowserTool {
     fn spec(&self) -> ToolSpec {
         builtin_tool_spec(
             self.kind.tool_name(),
@@ -1300,13 +1347,12 @@ impl Tool for BrowserActionTool {
 
     fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
         let input = parse_input(&invocation.input_json);
-        let scope = browser_action_scope(self.kind, &input);
         Some(permission_request(
             &invocation.task_id,
             self.kind.permission_risk(),
             self.kind.tool_name(),
             self.kind.permission_reason(),
-            &scope,
+            &browser_scope(self.kind, &input),
             [
                 ("tool_call_id".to_string(), invocation.id.0.clone()),
                 ("tool_name".to_string(), invocation.tool_name.clone()),
@@ -1318,61 +1364,15 @@ impl Tool for BrowserActionTool {
     }
 
     fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
-        let input = parse_input(&invocation.input_json);
-        validate_browser_action_input(self.kind, &input)?;
-        if let Some(url) = input.get("url").filter(|value| !value.trim().is_empty()) {
-            required_url(&[("url".to_string(), url.clone())].into_iter().collect())?;
-        }
+        self.execute_inner(invocation, &ToolExecutionControl::never_cancelled())
+    }
 
-        let output_dir = input
-            .get("output_dir")
-            .cloned()
-            .unwrap_or_else(|| ".cindx/browser-actions".to_string());
-        let resolved_dir = resolve_workspace_path(&self.workspace_root, &output_dir)?;
-        fs::create_dir_all(&resolved_dir)
-            .map_err(|error| ToolError::new(format!("failed to create browser action directory: {error}")))?;
-
-        let action_id = format!(
-            "browser-{}-{}",
-            current_time_millis(),
-            stable_hash(&invocation.input_json)
-        );
-        let request_relative = format!("{output_dir}/{action_id}.json");
-        let request_path = resolve_workspace_path(&self.workspace_root, &request_relative)?;
-        let request_json = browser_action_request_json(&action_id, self.kind, &input);
-        fs::write(&request_path, request_json.as_bytes())
-            .map_err(|error| ToolError::new(format!("failed to write browser action request: {error}")))?;
-
-        let sidecar_output = run_json_sidecar("CINDX_BROWSER_SIDECAR", &request_path)?;
-        let controller = if sidecar_output.is_some() {
-            "sidecar"
-        } else {
-            "artifact"
-        };
-        let mut metadata = Metadata::new();
-        metadata.insert("action".to_string(), self.kind.action().to_string());
-        metadata.insert("artifact_path".to_string(), request_relative.clone());
-        metadata.insert("controller".to_string(), controller.to_string());
-        if let Some(url) = input.get("url") {
-            metadata.insert("url".to_string(), url.clone());
-        }
-        if let Some(selector) = input.get("selector") {
-            metadata.insert("selector".to_string(), selector.clone());
-        }
-
-        let output = sidecar_output.unwrap_or_else(|| {
-            format!(
-                "browser action queued for sidecar\ncontroller=artifact\naction={}\nrequest={request_relative}",
-                self.kind.action()
-            )
-        });
-
-        Ok(tool_result(
-            invocation.id,
-            ToolOutcomeStatus::Succeeded,
-            output,
-            metadata,
-        ))
+    fn execute_with_control(
+        &self,
+        invocation: ToolInvocation,
+        control: &ToolExecutionControl,
+    ) -> Result<ToolResult, ToolError> {
+        self.execute_inner(invocation, control)
     }
 }
 
@@ -1619,8 +1619,11 @@ fn object_schema_from_fields(fields: &str) -> String {
             continue;
         }
         let value_type = match name {
-            "destructive" => "boolean",
-            "x" | "y" | "delta_x" | "delta_y" | "limit" | "max_results" => "integer",
+            "destructive" | "new_tab" | "headless" | "full_page" | "exact" | "download"
+            | "append" | "press_enter" => "boolean",
+            "x" | "y" | "delta_x" | "delta_y" | "limit" | "max_results" | "timeout_ms" => {
+                "integer"
+            }
             _ => "string",
         };
         properties.insert(
@@ -1905,41 +1908,21 @@ fn search_file(
     Ok(())
 }
 
-fn browser_permission_request(
-    invocation: &ToolInvocation,
-    action: &str,
-    reason: &str,
-) -> Option<PermissionRequest> {
-    let input = parse_input(&invocation.input_json);
-    let url = input
-        .get("url")
-        .cloned()
-        .unwrap_or_else(|| "<missing url>".to_string());
-    Some(permission_request(
-        &invocation.task_id,
-        PermissionRisk::Network,
-        action,
-        reason,
-        &url,
-        [
-            ("tool_call_id".to_string(), invocation.id.0.clone()),
-            ("tool_name".to_string(), invocation.tool_name.clone()),
-        ]
-        .into_iter()
-        .collect(),
-    ))
-}
-
-fn browser_action_scope(kind: BrowserActionKind, input: &BTreeMap<String, String>) -> String {
+fn browser_scope(kind: BrowserToolKind, input: &BTreeMap<String, String>) -> String {
     let url = input
         .get("url")
         .filter(|value| !value.trim().is_empty())
         .cloned()
         .unwrap_or_else(|| "current browser page".to_string());
     let target = input
-        .get("selector")
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
+        .iter()
+        .find(|(key, value)| {
+            matches!(
+                key.as_str(),
+                "selector" | "role" | "label" | "placeholder" | "text_target" | "tab_id"
+            ) && !value.trim().is_empty()
+        })
+        .map(|(key, value)| format!("{key}={value}"))
         .or_else(|| {
             let x = input.get("x")?;
             let y = input.get("y")?;
@@ -1950,13 +1933,14 @@ fn browser_action_scope(kind: BrowserActionKind, input: &BTreeMap<String, String
     format!("{} on {url} at {target}", kind.action())
 }
 
-fn validate_browser_action_input(
-    kind: BrowserActionKind,
+fn validate_browser_input(
+    kind: BrowserToolKind,
     input: &BTreeMap<String, String>,
 ) -> Result<(), ToolError> {
     match kind {
-        BrowserActionKind::Click => {
-            if input.get("selector").is_some_and(|value| !value.trim().is_empty()) {
+        BrowserToolKind::Open => required_input(input, "url").map(|_| ()),
+        BrowserToolKind::Click => {
+            if has_browser_target(input) {
                 return Ok(());
             }
             if input.get("x").is_some_and(|value| !value.trim().is_empty())
@@ -1966,20 +1950,25 @@ fn validate_browser_action_input(
             }
             Err(ToolError::new("browser.click requires selector or x/y"))
         }
-        BrowserActionKind::TypeText => {
+        BrowserToolKind::TypeText => {
             required_input(input, "text")?;
-            if input.get("selector").is_some_and(|value| !value.trim().is_empty()) {
+            if has_browser_target(input) {
                 return Ok(());
             }
-            if input.get("x").is_some_and(|value| !value.trim().is_empty())
-                && input.get("y").is_some_and(|value| !value.trim().is_empty())
-            {
-                return Ok(());
-            }
-            Err(ToolError::new("browser.type requires selector or x/y"))
+            Err(ToolError::new("browser.type requires a semantic target or selector"))
         }
-        BrowserActionKind::Scroll => Ok(()),
+        BrowserToolKind::SelectTab => required_input(input, "tab_id").map(|_| ()),
+        BrowserToolKind::ExtractText
+        | BrowserToolKind::Capture
+        | BrowserToolKind::Scroll
+        | BrowserToolKind::Tabs => Ok(()),
     }
+}
+
+fn has_browser_target(input: &BTreeMap<String, String>) -> bool {
+    ["selector", "role", "label", "placeholder", "text_target"]
+        .iter()
+        .any(|key| input.get(*key).is_some_and(|value| !value.trim().is_empty()))
 }
 
 fn input_is_true(input: &BTreeMap<String, String>, key: &str) -> bool {
@@ -1994,34 +1983,112 @@ fn input_is_true(input: &BTreeMap<String, String>, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn browser_action_request_json(
+fn browser_request_json(
     action_id: &str,
-    kind: BrowserActionKind,
+    kind: BrowserToolKind,
+    session_id: &str,
+    session_dir: &Path,
+    output_dir: &Path,
     input: &BTreeMap<String, String>,
-) -> String {
-    let mut fields = vec![
-        json_field("id", action_id),
-        json_field("namespace", "browser"),
-        json_field("action", kind.action()),
-    ];
+) -> Result<String, ToolError> {
+    let mut request = serde_json::Map::from_iter([
+        (
+            "schema".to_string(),
+            serde_json::Value::String(BROWSER_CONTROL_REQUEST_SCHEMA.to_string()),
+        ),
+        ("id".to_string(), serde_json::Value::String(action_id.to_string())),
+        (
+            "action".to_string(),
+            serde_json::Value::String(kind.action().to_string()),
+        ),
+        (
+            "session_id".to_string(),
+            serde_json::Value::String(session_id.to_string()),
+        ),
+        (
+            "session_dir".to_string(),
+            serde_json::Value::String(session_dir.display().to_string()),
+        ),
+        (
+            "output_dir".to_string(),
+            serde_json::Value::String(output_dir.display().to_string()),
+        ),
+    ]);
     for key in [
         "url",
+        "new_tab",
+        "wait_until",
+        "tab_id",
+        "frame",
         "selector",
+        "role",
+        "name",
+        "label",
+        "placeholder",
+        "text_target",
+        "exact",
         "text",
+        "append",
+        "press_enter",
         "x",
         "y",
         "delta_x",
         "delta_y",
+        "download",
+        "wait_for",
+        "full_page",
+        "timeout_ms",
+        "headless",
     ] {
         if let Some(value) = input.get(key).filter(|value| !value.trim().is_empty()) {
-            fields.push(json_field(key, value));
+            request.insert(key.to_string(), serde_json::Value::String(value.clone()));
         }
     }
-    if kind == BrowserActionKind::Scroll && !input.contains_key("delta_y") {
-        fields.push(json_field("delta_y", "600"));
+    if kind == BrowserToolKind::Scroll && !input.contains_key("delta_y") {
+        request.insert(
+            "delta_y".to_string(),
+            serde_json::Value::String("600".to_string()),
+        );
     }
 
-    format!("{{{}}}\n", fields.join(","))
+    serde_json::to_string(&request)
+        .map(|json| format!("{json}\n"))
+        .map_err(|error| ToolError::new(format!("failed to encode browser request: {error}")))
+}
+
+fn browser_session_key(session_id: &str) -> String {
+    let slug = session_id
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+        .take(40)
+        .collect::<String>();
+    format!(
+        "{}-{:x}",
+        if slug.is_empty() { "session" } else { &slug },
+        stable_hash(session_id)
+    )
+}
+
+fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), ToolError> {
+    fs::write(path, contents)
+        .map_err(|error| ToolError::new(format!("failed to write browser request: {error}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+            ToolError::new(format!("failed to protect browser request: {error}"))
+        })?;
+    }
+    Ok(())
+}
+
+fn workspace_relative_path(workspace_root: &Path, artifact_path: &str) -> Option<String> {
+    let canonical_root = fs::canonicalize(workspace_root).ok()?;
+    let canonical_artifact = fs::canonicalize(artifact_path).ok()?;
+    canonical_artifact
+        .strip_prefix(canonical_root)
+        .ok()
+        .map(|path| path.display().to_string())
 }
 
 fn computer_permission_reason(kind: ComputerActionKind, destructive: bool) -> &'static str {
@@ -2446,16 +2513,6 @@ fn trim_lines(value: &str, max_lines: usize) -> String {
         .join("\n")
 }
 
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_string();
-    }
-
-    let mut truncated = value.chars().take(max_chars).collect::<String>();
-    truncated.push_str("...");
-    truncated
-}
-
 fn url_encode(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.bytes() {
@@ -2525,25 +2582,74 @@ fn run_json_sidecar(env_key: &str, request_path: &Path) -> Result<Option<String>
     }))
 }
 
-fn find_playwright(workspace_root: &Path) -> Option<PathBuf> {
-    if let Ok(path) = env::var("CINDX_PLAYWRIGHT") {
-        let candidate = PathBuf::from(path);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
+struct ControlledSidecarOutput {
+    stdout: String,
+    cancelled: bool,
+    timed_out: bool,
+}
 
-    [
-        workspace_root.join("node_modules").join(".bin").join("playwright"),
-        workspace_root
-            .join("apps")
-            .join("desktop")
-            .join("node_modules")
-            .join(".bin")
-            .join("playwright"),
-    ]
-    .into_iter()
-    .find(|candidate| candidate.exists())
+fn run_json_sidecar_controlled(
+    env_key: &str,
+    request_path: &Path,
+    control: &ToolExecutionControl,
+    hard_timeout: Duration,
+) -> Result<ControlledSidecarOutput, ToolError> {
+    let sidecar = env::var(env_key)
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| ToolError::new(format!("{env_key} is not configured")))?;
+    let sidecar_path = PathBuf::from(&sidecar);
+    if !sidecar_path.is_file() {
+        return Err(ToolError::new(format!("browser sidecar does not exist: {sidecar}")));
+    }
+    let mut command = if sidecar_path.extension().and_then(|extension| extension.to_str())
+        == Some("js")
+    {
+        let mut command = Command::new(env::var("CINDX_NODE").unwrap_or_else(|_| "node".to_string()));
+        command.arg(&sidecar_path);
+        command
+    } else {
+        Command::new(&sidecar_path)
+    };
+    let mut child = command
+        .arg(request_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| ToolError::new(format!("failed to start browser sidecar: {error}")))?;
+    let started = Instant::now();
+    let (cancelled, timed_out) = loop {
+        if control.should_cancel() {
+            let _ = child.kill();
+            break (true, false);
+        }
+        if started.elapsed() >= hard_timeout {
+            let _ = child.kill();
+            break (false, true);
+        }
+        if child
+            .try_wait()
+            .map_err(|error| ToolError::new(format!("failed to poll browser sidecar: {error}")))?
+            .is_some()
+        {
+            break (false, false);
+        }
+        thread::sleep(Duration::from_millis(40));
+    };
+    let output = child
+        .wait_with_output()
+        .map_err(|error| ToolError::new(format!("failed to collect browser sidecar: {error}")))?;
+    if !cancelled && !timed_out && !output.status.success() {
+        return Err(ToolError::new(format!(
+            "browser sidecar failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(ControlledSidecarOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        cancelled,
+        timed_out,
+    })
 }
 
 fn current_time_millis() -> u64 {
@@ -2628,10 +2734,14 @@ mod tests {
         assert!(specs.iter().any(|spec| spec.name == "file.write"));
         assert!(specs.iter().any(|spec| spec.name == "shell.run"));
         assert!(specs.iter().any(|spec| spec.name == "web.search"));
+        assert!(specs.iter().any(|spec| spec.name == "browser.open"));
+        assert!(specs.iter().any(|spec| spec.name == "browser.extract_text"));
         assert!(specs.iter().any(|spec| spec.name == "browser.capture"));
         assert!(specs.iter().any(|spec| spec.name == "browser.click"));
         assert!(specs.iter().any(|spec| spec.name == "browser.type"));
         assert!(specs.iter().any(|spec| spec.name == "browser.scroll"));
+        assert!(specs.iter().any(|spec| spec.name == "browser.tabs"));
+        assert!(specs.iter().any(|spec| spec.name == "browser.select_tab"));
         assert!(specs.iter().any(|spec| spec.name == "computer.screenshot"));
         assert!(specs.iter().any(|spec| spec.name == "computer.click"));
         assert!(specs.iter().any(|spec| spec.name == "computer.type"));
@@ -2833,8 +2943,8 @@ mod tests {
     #[test]
     fn network_and_browser_tools_request_permission() {
         let web = WebSearchTool::default();
-        let browser = BrowserExtractTextTool;
-        let browser_type = BrowserActionTool::type_text(temp_workspace());
+        let browser = BrowserTool::extract_text(temp_workspace());
+        let browser_type = BrowserTool::type_text(temp_workspace());
         let computer_screenshot = ComputerTool::screenshot(temp_workspace());
         let computer_key = ComputerTool::key(temp_workspace());
 
@@ -2887,32 +2997,20 @@ mod tests {
     }
 
     #[test]
-    fn browser_action_writes_sidecar_request_artifact() {
+    fn browser_control_requires_a_configured_sidecar() {
         let _guard = ENV_LOCK.lock().expect("env lock should be available");
         env::remove_var("CINDX_BROWSER_SIDECAR");
         let root = temp_workspace();
-        let tool = BrowserActionTool::click(root.clone());
+        let tool = BrowserTool::click(root);
 
-        let result = tool
+        let error = tool
             .execute(invocation(
                 "browser.click",
-                encode_input(&[
-                    ("url", "https://example.com"),
-                    ("selector", "button.primary"),
-                    ("output_dir", ".cindx/browser-actions"),
-                ]),
+                encode_input(&[("selector", "button.primary")]),
             ))
-            .expect("browser action should be recorded");
-        let artifact = result
-            .metadata
-            .get("artifact_path")
-            .expect("artifact should be recorded");
-        let request = fs::read_to_string(root.join(artifact)).expect("request should exist");
+            .expect_err("browser action must not pretend it ran without a controller");
 
-        assert_eq!(result.metadata.get("controller").map(String::as_str), Some("artifact"));
-        assert!(request.contains("\"namespace\":\"browser\""));
-        assert!(request.contains("\"action\":\"click\""));
-        assert!(request.contains("button.primary"));
+        assert!(error.message.contains("CINDX_BROWSER_SIDECAR is not configured"));
     }
 
     #[test]
@@ -2920,9 +3018,22 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock should be available");
         let root = temp_workspace();
         let sidecar = root.join("browser-sidecar-test.sh");
+        let trace = root.join("browser-trace.json");
+        fs::write(&trace, "{}\n").expect("trace should write");
         fs::write(
             &sidecar,
-            "#!/bin/sh\nprintf 'sidecar-test-ok request=%s\\n' \"$1\"\n",
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+                serde_json::json!({
+                    "schema": BROWSER_CONTROL_RESPONSE_SCHEMA,
+                    "ok": true,
+                    "output": "sidecar-test-ok",
+                    "controller": "cdp_playwright",
+                    "artifacts": [],
+                    "trace_path": trace.display().to_string(),
+                    "duration_ms": 1
+                })
+            ),
         )
         .expect("sidecar should write");
         #[cfg(unix)]
@@ -2932,7 +3043,7 @@ mod tests {
                 .expect("sidecar should be executable");
         }
         env::set_var("CINDX_BROWSER_SIDECAR", &sidecar);
-        let tool = BrowserActionTool::click(root);
+        let tool = BrowserTool::click(root);
 
         let result = tool
             .execute(invocation(
@@ -2941,8 +3052,90 @@ mod tests {
             ))
             .expect("browser sidecar should execute");
 
-        assert_eq!(result.metadata.get("controller").map(String::as_str), Some("sidecar"));
+        assert_eq!(
+            result.metadata.get("controller").map(String::as_str),
+            Some("cdp_playwright")
+        );
         assert!(result.output.contains("sidecar-test-ok"));
+        assert!(result.metadata.contains_key("trace_path"));
+        env::remove_var("CINDX_BROWSER_SIDECAR");
+    }
+
+    #[test]
+    fn browser_request_preserves_session_tab_frame_and_semantic_target() {
+        let root = temp_workspace();
+        let session_dir = root.join("session");
+        let output_dir = root.join("artifacts");
+        let input = parse_input(&encode_input(&[
+            ("tab_id", "target-1"),
+            ("frame", "child"),
+            ("role", "button"),
+            ("name", "Continue"),
+            ("wait_for", "#complete"),
+            ("timeout_ms", "9000"),
+        ]));
+
+        let request = browser_request_json(
+            "browser-test",
+            BrowserToolKind::Click,
+            "session-alpha",
+            &session_dir,
+            &output_dir,
+            &input,
+        )
+        .expect("browser request should encode");
+        let request: serde_json::Value =
+            serde_json::from_str(&request).expect("browser request should be JSON");
+
+        assert_eq!(request["schema"], BROWSER_CONTROL_REQUEST_SCHEMA);
+        assert_eq!(request["action"], "click");
+        assert_eq!(request["session_id"], "session-alpha");
+        assert_eq!(request["tab_id"], "target-1");
+        assert_eq!(request["frame"], "child");
+        assert_eq!(request["role"], "button");
+        assert_eq!(request["name"], "Continue");
+        assert_eq!(request["wait_for"], "#complete");
+        assert_eq!(request["timeout_ms"], "9000");
+        assert_eq!(request["session_dir"], session_dir.display().to_string());
+        assert_eq!(request["output_dir"], output_dir.display().to_string());
+    }
+
+    #[test]
+    fn browser_sidecar_execution_is_cancellable() {
+        let _guard = ENV_LOCK.lock().expect("env lock should be available");
+        let root = temp_workspace();
+        let sidecar = root.join("browser-sidecar-slow.sh");
+        fs::write(&sidecar, "#!/bin/sh\nsleep 30\n").expect("sidecar should write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o700))
+                .expect("sidecar should be executable");
+        }
+        env::set_var("CINDX_BROWSER_SIDECAR", &sidecar);
+        let tool = BrowserTool::click(root);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancellation = Arc::clone(&cancelled);
+        let control = ToolExecutionControl::new(move || cancellation.load(Ordering::SeqCst));
+        let trigger = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(120));
+            cancelled.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+
+        let result = tool
+            .execute_with_control(
+                invocation(
+                    "browser.click",
+                    encode_input(&[("selector", "button.primary")]),
+                ),
+                &control,
+            )
+            .expect("browser cancellation should return a tool result");
+        trigger.join().expect("cancellation trigger should finish");
+
+        assert_eq!(result.status, ToolOutcomeStatus::Cancelled);
+        assert!(started.elapsed() < Duration::from_secs(2));
         env::remove_var("CINDX_BROWSER_SIDECAR");
     }
 

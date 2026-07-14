@@ -612,13 +612,13 @@ let browserPhase5State: Phase5State = {
     },
     {
       name: "browser.open",
-      description: "Open a URL in the system browser.",
+      description: "Open a URL in a reusable CDP browser session.",
       risk: "uses_network",
       inputSchema: "url=https://example.com"
     },
     {
       name: "browser.extract_text",
-      description: "Fetch a webpage and extract readable text.",
+      description: "Read dynamic page text and its accessibility snapshot.",
       risk: "uses_network",
       inputSchema: "url=https://example.com"
     },
@@ -645,6 +645,18 @@ let browserPhase5State: Phase5State = {
       description: "Scroll the current browser page.",
       risk: "uses_network",
       inputSchema: "delta_y=600"
+    },
+    {
+      name: "browser.tabs",
+      description: "List tabs in the reusable browser session.",
+      risk: "uses_network",
+      inputSchema: ""
+    },
+    {
+      name: "browser.select_tab",
+      description: "Select a tab by its CDP target id.",
+      risk: "uses_network",
+      inputSchema: "tab_id=<target-id>"
     },
     {
       name: "computer.screenshot",
@@ -797,6 +809,8 @@ export async function getRuntimeStatus(): Promise<RuntimeStatus> {
         "browser.click",
         "browser.type",
         "browser.scroll",
+        "browser.tabs",
+        "browser.select_tab",
         "computer.screenshot",
         "computer.click",
         "computer.type",
@@ -833,6 +847,8 @@ export async function saveWorkspaceRoot(path: string): Promise<RuntimeStatus> {
         "browser.click",
         "browser.type",
         "browser.scroll",
+        "browser.tabs",
+        "browser.select_tab",
         "computer.screenshot",
         "computer.click",
         "computer.type",

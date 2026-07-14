@@ -43,6 +43,9 @@ jobs:
       - name: Stamp build version
         run: node scripts/stamp-build-version.mjs "$GITHUB_RUN_NUMBER"
 
+      - name: Test Browser Control v2
+        run: node scripts/test-browser-sidecar.mjs
+
       - name: Test Rust workspace
         run: cargo test --workspace --locked
 
