@@ -510,10 +510,12 @@ assert(
   composerSource.includes("composer-stop-icon") &&
     composerSource.includes("canRetryError") &&
     composerSource.includes("RotateCcw") &&
+    composerSource.includes('aria-label="Dismiss error"') &&
+    composerSource.includes("onDismissError") &&
     composerSource.includes("Send") &&
     !composerSource.includes("retryMode") &&
     !composerSource.includes("agent-control-button"),
-  "Send and stop must share the primary control while retry remains an explicit error action"
+  "Send and stop must share the primary control while errors expose retry and dismiss actions"
 );
 assert(
   composerSource.includes('className="composer-toolbar"') &&

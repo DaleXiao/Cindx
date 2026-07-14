@@ -34,6 +34,7 @@ type ComposerProps = {
   onRemoveAttachment: (attachment: AgentAttachment) => void;
   onCancel: () => void;
   onRetry: () => void;
+  onDismissError: () => void;
   onResolvePermission: (
     requestId: string,
     decision: "allow_once" | "allow_for_session" | "deny"
@@ -59,6 +60,7 @@ export function Composer({
   onRemoveAttachment,
   onCancel,
   onRetry,
+  onDismissError,
   onResolvePermission
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -268,12 +270,23 @@ export function Composer({
       {error && (
         <div className="composer-error">
           <span>{error}</span>
-          {canRetryError && (
-            <button type="button" onClick={onRetry}>
-              <RotateCcw aria-hidden="true" />
-              <span>Retry</span>
+          <div className="composer-error-actions">
+            {canRetryError && (
+              <button type="button" onClick={onRetry}>
+                <RotateCcw aria-hidden="true" />
+                <span>Retry</span>
+              </button>
+            )}
+            <button
+              className="composer-error-dismiss"
+              type="button"
+              aria-label="Dismiss error"
+              title="Dismiss"
+              onClick={onDismissError}
+            >
+              <X aria-hidden="true" />
             </button>
-          )}
+          </div>
         </div>
       )}
     </form>
