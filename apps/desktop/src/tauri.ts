@@ -409,6 +409,7 @@ export type AgentState = {
   contextWindowTokens: number;
   contextRemainingPercent: number;
   contextUsageEstimated: boolean;
+  runStartedAtMs: number;
   runBudgetMs: number;
   runModelCallBudget: number;
   runToolCallBudget: number;
@@ -746,6 +747,7 @@ let browserAgentState: AgentState = {
   contextWindowTokens: 128000,
   contextRemainingPercent: 100,
   contextUsageEstimated: true,
+  runStartedAtMs: 0,
   runBudgetMs: 0,
   runModelCallBudget: 0,
   runToolCallBudget: 0,

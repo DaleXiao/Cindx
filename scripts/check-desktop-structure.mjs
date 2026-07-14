@@ -234,6 +234,15 @@ assert(viteConfig.includes('base: "./"'), "Vite should emit relative asset paths
 assert(mainSource.includes("<App />"), "React entrypoint must render App");
 assert(appSource.includes("<SessionThread"), "App must render the session thread");
 assert(
+  rustLib.includes("run_started_at_ms") &&
+    appSource.includes("runStartedAtMs={agentState?.runStartedAtMs ?? 0}") &&
+    sessionThreadSource.includes("activeRunProgress(timeline, runStartedAtMs)") &&
+    sessionThreadSource.includes("Elapsed since this request was sent") &&
+    sessionThreadSource.includes("`${runElapsed} elapsed`") &&
+    !sessionThreadSource.includes("runBudgetMs > 0"),
+  "Running status must use the current request start time and label elapsed wall time clearly"
+);
+assert(
   sessionThreadSource.includes('aria-label="Session thread"'),
   "Session thread must expose its semantic region"
 );

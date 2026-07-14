@@ -1011,6 +1011,7 @@ struct AgentState {
     context_window_tokens: u64,
     context_remaining_percent: f64,
     context_usage_estimated: bool,
+    run_started_at_ms: u64,
     run_budget_ms: u64,
     run_model_call_budget: usize,
     run_tool_call_budget: usize,
@@ -9100,6 +9101,7 @@ fn agent_state_for_session(
         })
         .count();
     let run_start = active_events.iter().find(|event| is_agent_run_start_event(event));
+    let run_started_at_ms = run_start.map(|event| event.timestamp_ms).unwrap_or_default();
     let run_budget_ms = run_start
         .and_then(|event| event.metadata.get("run_budget_ms"))
         .and_then(|value| value.parse::<u64>().ok())
@@ -9130,6 +9132,7 @@ fn agent_state_for_session(
         context_window_tokens,
         context_remaining_percent,
         context_usage_estimated,
+        run_started_at_ms,
         run_budget_ms,
         run_model_call_budget,
         run_tool_call_budget,
@@ -15208,6 +15211,7 @@ mod tests {
         );
 
         let state = agent_state(&store, None).expect("agent state should load");
+        assert!(state.run_started_at_ms > 0);
         assert_eq!(state.messages.len(), 3);
         assert_eq!(state.messages[0].role, "user");
         assert_eq!(state.messages[2].role, "tool");

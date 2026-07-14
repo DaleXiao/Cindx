@@ -1462,6 +1462,7 @@ export function App() {
           ((current.contextWindowTokens - contextTokensUsed) / current.contextWindowTokens) * 100
         ),
         contextUsageEstimated: true,
+        runStartedAtMs: submittedAt,
         messages: [
           ...current.messages,
           { role: "user", content: visiblePrompt, timestampMs: submittedAt }
@@ -1888,7 +1889,7 @@ export function App() {
               timeline={agentState?.timeline ?? []}
               streamAnswer={streamAnswer}
               status={agentState?.status ?? "idle"}
-              runBudgetMs={agentState?.runBudgetMs ?? 0}
+              runStartedAtMs={agentState?.runStartedAtMs ?? 0}
               selectedId={selectedThreadItem?.id ?? null}
               onSelect={(selection) => {
                 setSelectedThreadItem(selection);
