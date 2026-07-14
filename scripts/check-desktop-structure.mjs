@@ -368,6 +368,12 @@ assert(
   "Settings must toggle back to the previous workspace view"
 );
 assert(
+  /function handleSelectSession\(sessionId: string\) \{\s*showTimelineView\(\);\s*if \(sessionId === activeSessionIdRef\.current\) return;/.test(
+    appSource
+  ),
+  "Selecting any sidebar session must leave Settings, including the active session"
+);
+assert(
   appSource.includes("PanelLeftClose") &&
     appSource.includes("PanelLeftOpen") &&
     appSource.includes("PanelRightClose") &&
@@ -405,6 +411,16 @@ assert(
     cargoToml.includes('features = ["macos-private-api"]') &&
     !rustLib.includes("window_vibrancy::apply_vibrancy"),
   "Timeline content must scroll beneath the translucent titlebar glass surface"
+);
+assert(
+  /\.app-shell\[data-active-view="settings"\] \{[\s\S]*?transition: none;/.test(styles) &&
+    /\.app-shell\[data-active-view="settings"\] \.window-toolbar \{[\s\S]*?background: var\(--bg\);/.test(
+      styles
+    ) &&
+    /\.settings-view \{[\s\S]*?overflow-y: scroll;[\s\S]*?scrollbar-gutter: stable;/.test(
+      styles
+    ),
+  "Settings must use a uniform titlebar background and reserve a stable scroll gutter"
 );
 assert(composerSource.includes('event.key !== "Enter"'), "Composer must support Enter to send");
 assert(composerSource.includes("event.shiftKey"), "Composer must reserve Shift+Enter for a new line");

@@ -1061,6 +1061,7 @@ export function App() {
   }
 
   async function handleSelectSession(sessionId: string) {
+    showTimelineView();
     if (sessionId === activeSessionIdRef.current) return;
     const selectionRequest = ++sessionSelectionRequestRef.current;
     activeSessionIdRef.current = sessionId;
@@ -1090,7 +1091,6 @@ export function App() {
     setSelectedTraceStepId(null);
     setSelectedThreadItem(null);
     setStreamAnswer("");
-    showTimelineView();
     try {
       const next = await enqueueProjectSessionSelection(() => selectSession(sessionId));
       if (selectionRequest !== sessionSelectionRequestRef.current) return;

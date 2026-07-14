@@ -152,6 +152,14 @@ pre {
   background: transparent;
 }
 
+.app-shell[data-active-view="settings"] {
+  transition: none;
+}
+
+.app-shell[data-active-view="settings"] .window-toolbar {
+  background: var(--bg);
+}
+
 .window-toolbar-panel {
   position: absolute;
   top: 0;
@@ -2635,7 +2643,9 @@ textarea::placeholder {
   justify-content: center;
   gap: 28px;
   padding: 20px 24px 32px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
   background: var(--bg);
 }
 
