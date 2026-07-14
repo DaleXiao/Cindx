@@ -52,7 +52,7 @@ type SessionThreadProps = {
   timeline: TimelineEntry[];
   streamAnswer: string;
   status: AgentState["status"] | "idle";
-  runBudgetMs: number;
+  runStartedAtMs: number;
   selectedId: string | null;
   onSelect: (selection: SessionThreadSelection) => void;
   onEditMessage: (content: string) => void;
@@ -188,7 +188,7 @@ function formatRunElapsed(elapsedMs: number) {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
-function activeRunProgress(timeline: TimelineEntry[]) {
+function activeRunProgress(timeline: TimelineEntry[], runStartedAtMs: number) {
   let startIndex = -1;
   for (let index = timeline.length - 1; index >= 0; index -= 1) {
     const event = timeline[index];
@@ -197,13 +197,14 @@ function activeRunProgress(timeline: TimelineEntry[]) {
       break;
     }
   }
-  const runEvents = startIndex >= 0 ? timeline.slice(startIndex) : timeline;
+  const timelineStartedAtMs = startIndex >= 0 ? timeline[startIndex].timestampMs : 0;
+  const startedAtMs = runStartedAtMs || timelineStartedAtMs || Date.now();
+  const runEvents = timeline.filter((event) => event.timestampMs >= startedAtMs);
   const latest = [...runEvents]
     .reverse()
     .find((event) => event.label !== "Message" && !/agent router selected/i.test(event.detail));
-  const startedAtMs = startIndex >= 0 ? timeline[startIndex].timestampMs : latest?.timestampMs;
-  if (!latest || !startedAtMs) {
-    return { label: "Thinking", detail: "Cindx is working", startedAtMs: Date.now() };
+  if (!latest) {
+    return { label: "Thinking", detail: "Cindx is working", startedAtMs };
   }
 
   let label = "Thinking";
@@ -558,7 +559,7 @@ export function SessionThread({
   timeline,
   streamAnswer,
   status,
-  runBudgetMs,
+  runStartedAtMs,
   selectedId,
   onSelect,
   onEditMessage,
@@ -681,9 +682,12 @@ export function SessionThread({
       .map((item) => item.id);
   }, [items, threadFindQuery]);
   const threadRows = useMemo(() => groupThreadItems(items), [items]);
-  const runProgress = useMemo(() => activeRunProgress(timeline), [timeline]);
+  const runProgress = useMemo(
+    () => activeRunProgress(timeline, runStartedAtMs),
+    [runStartedAtMs, timeline]
+  );
   const runElapsed = formatRunElapsed(progressNowMs - runProgress.startedAtMs);
-  const runTime = runBudgetMs > 0 ? `${runElapsed} / ${formatRunElapsed(runBudgetMs)}` : runElapsed;
+  const runTime = `${runElapsed} elapsed`;
   const hasStreamAnswer = Boolean(streamAnswer);
   const minimapMarkers = useMemo<MinimapMarker[]>(() => {
     const markers: MinimapMarker[] = [];
@@ -1209,7 +1213,7 @@ export function SessionThread({
           >
             <div className="thread-thinking thread-streaming-status" role="status">
               <span title={runProgress.detail}>{runProgress.label}</span>
-              <time>{runTime}</time>
+              <time title="Elapsed since this request was sent">{runTime}</time>
             </div>
             <AgentMarkdown
               content={streamAnswer}
@@ -1223,7 +1227,7 @@ export function SessionThread({
         {!streamAnswer && status === "running" && (
           <div className="thread-thinking thread-running" role="status">
             <span title={runProgress.detail}>{runProgress.label}</span>
-            <time>{runTime}</time>
+            <time title="Elapsed since this request was sent">{runTime}</time>
           </div>
         )}
         <span className="thread-scroll-anchor" aria-hidden="true" />
