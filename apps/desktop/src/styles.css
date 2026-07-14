@@ -1759,6 +1759,14 @@ pre {
   font-size: 10px;
 }
 
+.thread-thinking > span,
+.thread-thinking > time {
+  display: inline-flex;
+  height: 16px;
+  align-items: center;
+  line-height: 16px;
+}
+
 .thread-thinking > span {
   color: var(--muted);
   background: linear-gradient(105deg, #777777 36%, #d8d8d8 49%, #777777 62%);
