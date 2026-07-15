@@ -455,7 +455,7 @@ assert(
 );
 assert(
   sessionThreadSource.includes("minimapMarkerPosition") &&
-    sessionThreadSource.includes("MINIMAP_MARKER_GAP = 14") &&
+    sessionThreadSource.includes("MINIMAP_MARKER_GAP = 12") &&
     sessionThreadSource.includes("Math.max(0, markerCount - 1) / 2") &&
     sessionThreadSource.includes("const groupStart = (bounds.height - groupHeight) / 2") &&
     sessionThreadSource.includes("minimapMarkerPosition(index, minimapMarkers.length)") &&
