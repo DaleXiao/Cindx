@@ -1113,6 +1113,18 @@ assert(appSource.includes("Permissions"), "App must render permission UI");
 assert(appSource.includes("Orchestration"), "App must render orchestration UI");
 assert(appSource.includes("Provider"), "App must render provider UI");
 assert(appSource.includes("Save workspace"), "App must render workspace save action");
+assert(
+  appSource.includes("handlePickWorkspace") &&
+    appSource.includes("workspace-folder-selector") &&
+    appSource.includes("pickWorkspaceFolder"),
+  "Workspace settings must use the native folder selector"
+);
+assert(
+  sidebarSource.includes("Folders") &&
+    sidebarSource.includes("nav-heading-with-icon") &&
+    styles.includes(".nav-heading-with-icon"),
+  "Projects heading must render an aligned SVG icon"
+);
 assert(appSource.includes("Save provider"), "App must render provider save action");
 assert(appSource.includes("Run tool"), "App must render the Phase 5 tool runner");
 assert(appSource.includes("Run workflow"), "App must render the Phase 6 workflow runner");
@@ -1135,6 +1147,10 @@ assert(
 assert(
   tauriBridge.includes('invoke<RuntimeStatus>("save_workspace_root"'),
   "Frontend bridge must invoke save_workspace_root"
+);
+assert(
+  tauriBridge.includes('invoke<string | null>("pick_workspace_folder"'),
+  "Frontend bridge must invoke pick_workspace_folder"
 );
 assert(
   tauriBridge.includes('invoke<Phase3State>("get_phase3_state")'),
@@ -1219,6 +1235,10 @@ assert(
 assert(rustLib.includes("#[tauri::command]"), "Rust bridge must expose a Tauri command");
 assert(rustLib.includes("fn get_runtime_status("), "Rust bridge command is missing");
 assert(rustLib.includes("fn save_workspace_root("), "Workspace save command is missing");
+assert(
+  rustLib.includes("fn pick_workspace_folder(") && rustLib.includes("NSOpenPanel"),
+  "Native workspace folder picker command is missing"
+);
 assert(rustLib.includes("fn get_phase3_state("), "Phase 3 state command is missing");
 assert(
   rustLib.includes("fn request_mock_permission("),

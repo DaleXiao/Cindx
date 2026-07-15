@@ -10,6 +10,7 @@ import {
   Clock3,
   Database,
   FileText,
+  FolderOpen,
   Globe2,
   Info,
   KeyRound,
@@ -116,6 +117,7 @@ import {
   runBrowserTool,
   runTool,
   runOrchestration,
+  pickWorkspaceFolder,
   saveProviderConfig,
   saveSidecarConfig,
   saveWebSearchConfig,
@@ -438,6 +440,7 @@ export function App() {
   const [browserText, setBrowserText] = useState("hello");
   const [permissionBusy, setPermissionBusy] = useState(false);
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  const [workspacePickerBusy, setWorkspacePickerBusy] = useState(false);
   const [providerBusy, setProviderBusy] = useState(false);
   const [toolBusy, setToolBusy] = useState(false);
   const [orchestrationBusy, setOrchestrationBusy] = useState(false);
@@ -1023,6 +1026,20 @@ export function App() {
       setComposerError(error instanceof Error ? error.message : String(error));
     } finally {
       setWorkspaceBusy(false);
+    }
+  }
+
+  async function handlePickWorkspace() {
+    if (workspacePickerBusy) return;
+    setWorkspacePickerBusy(true);
+    setComposerError(null);
+    try {
+      const nextPath = await pickWorkspaceFolder(workspaceDraft.trim() || undefined);
+      if (nextPath) setWorkspaceDraft(nextPath);
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWorkspacePickerBusy(false);
     }
   }
 
@@ -2195,17 +2212,24 @@ export function App() {
                 <h2>Workspace</h2>
               </div>
               <div className="provider-form">
-                <label>
-                  <span>Path</span>
-                  <input
-                    value={workspaceDraft}
-                    onChange={(event) => setWorkspaceDraft(event.target.value)}
-                  />
-                </label>
+                <div className="workspace-folder-field">
+                  <span>Folder</span>
+                  <button
+                    className="workspace-folder-selector"
+                    type="button"
+                    disabled={workspaceBusy || workspacePickerBusy}
+                    aria-label="Choose workspace folder"
+                    title={workspaceDraft || "Choose workspace folder"}
+                    onClick={handlePickWorkspace}
+                  >
+                    <span>{workspaceDraft || "Choose workspace folder"}</span>
+                    <FolderOpen size={16} aria-hidden="true" />
+                  </button>
+                </div>
                 <button
                   className="secondary-button"
                   type="button"
-                  disabled={workspaceBusy || !workspaceDraft.trim()}
+                  disabled={workspaceBusy || workspacePickerBusy || !workspaceDraft.trim()}
                   onClick={handleSaveWorkspace}
                 >
                   <Save size={17} aria-hidden="true" />
