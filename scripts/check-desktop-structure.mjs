@@ -337,6 +337,13 @@ assert(
   inspectorSource.includes('"details", "artifacts", "context"'),
   "Inspector must expose Details, Artifacts, and Context"
 );
+assert(
+  inspectorSource.includes('className="inspector-debug-session"') &&
+    inspectorSource.includes('aria-label="Copy session ID"') &&
+    inspectorSource.includes("navigator.clipboard.writeText(sessionId)") &&
+    styles.includes(".inspector-debug-session"),
+  "Debug must expose the active session ID with a clipboard action"
+);
 assert(inspectorSource.includes("inspector-resize-handle"), "Inspector must remain resizable");
 assert(
   !inspectorSource.includes("<strong>Inspector</strong>") &&
