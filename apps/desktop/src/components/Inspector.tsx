@@ -51,6 +51,7 @@ type ReviewCounts = {
 
 type InspectorProps = {
   open: boolean;
+  showDebug: boolean;
   width: number;
   tab: InspectorTab;
   sessionId: string | null;
@@ -73,6 +74,7 @@ type InspectorProps = {
   onTraceExport: () => void;
   traceBusy: boolean;
   onWidthChange: (width: number) => void;
+  onOutputCreated: () => void;
   onReview: () => void;
 };
 
@@ -202,6 +204,7 @@ function ArtifactPreviewPane({ path }: { path: string }) {
 
 export function Inspector({
   open,
+  showDebug,
   width,
   tab,
   sessionId,
@@ -224,6 +227,7 @@ export function Inspector({
   onTraceExport,
   traceBusy,
   onWidthChange,
+  onOutputCreated,
   onReview
 }: InspectorProps) {
   const [debugOpen, setDebugOpen] = useState(false);
@@ -235,6 +239,7 @@ export function Inspector({
     "idle" | "copied" | "failed"
   >("idle");
   const sessionCopyTimerRef = useRef<number | null>(null);
+  const outputSignaturesBySessionRef = useRef<Map<string, Set<string>>>(new Map());
   const reviewTotal = reviewCounts.agent + reviewCounts.tool + reviewCounts.browser;
   const hasArtifacts = Boolean(ragAnswer || ragSources.length || browserObservations.length || toolResults.length);
   const hasContext = Boolean(
@@ -270,6 +275,23 @@ export function Inspector({
 
     return [...outputs.values()].sort((left, right) => right.timestampMs - left.timestampMs);
   }, [sessionTraceSteps, workspaceRoot]);
+
+  useEffect(() => {
+    if (!sessionId) return;
+    const signatures = new Set(
+      outputArtifacts.map((artifact) => `${artifact.path}:${artifact.timestampMs}`)
+    );
+    const previous = outputSignaturesBySessionRef.current.get(sessionId);
+    outputSignaturesBySessionRef.current.set(sessionId, signatures);
+    if (!previous) return;
+    if ([...signatures].some((signature) => !previous.has(signature))) {
+      onOutputCreated();
+    }
+  }, [onOutputCreated, outputArtifacts, sessionId]);
+
+  useEffect(() => {
+    if (!showDebug) setDebugOpen(false);
+  }, [showDebug]);
 
   useEffect(() => {
     setSelectedOutputPath(null);
@@ -511,7 +533,7 @@ export function Inspector({
         </section>
       </div>
 
-      <section className="inspector-debug" data-open={debugOpen}>
+      <section className="inspector-debug" data-open={debugOpen} hidden={!showDebug}>
         <div
           className="inspector-debug-body"
           id="inspector-debug-panel"

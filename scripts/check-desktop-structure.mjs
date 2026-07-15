@@ -356,6 +356,23 @@ assert(
   "Inspector must use one stable toggle instead of duplicate controls"
 );
 assert(
+  appSource.includes('const [inspectorOpen, setInspectorOpen] = useState(false)') &&
+    appSource.includes('const [inspectorOpenBeforeSettings, setInspectorOpenBeforeSettings] = useState(false)') &&
+    appSource.includes("onOutputCreated={() =>") &&
+    inspectorSource.includes("outputSignaturesBySessionRef") &&
+    inspectorSource.includes("onOutputCreated();"),
+  "Inspector must start closed and open when the active session creates an output"
+);
+assert(
+  appSource.includes('DEBUG_ALWAYS_VISIBLE_STORAGE_KEY = "cindx.debug.always-visible"') &&
+    appSource.includes("loadDebugAlwaysVisible") &&
+    appSource.includes("Always show Debug") &&
+    appSource.includes("showDebug={debugAlwaysVisible}") &&
+    inspectorSource.includes('hidden={!showDebug}') &&
+    inspectorSource.includes("showDebug: boolean"),
+  "Debug entry must stay hidden by default and use the persisted Settings preference"
+);
+assert(
   appSource.includes("window-toolbar") &&
     appSource.includes("data-sidebar-open={sidebarOpen}") &&
     appSource.includes('aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}'),
@@ -733,7 +750,7 @@ assert(
 assert(
   appSource.includes('className="settings-saved-toast"') &&
     appSource.includes("showSettingsSaved();") &&
-    (appSource.match(/showSettingsSaved\(\);/g)?.length ?? 0) === 4 &&
+    (appSource.match(/showSettingsSaved\(\);/g)?.length ?? 0) === 5 &&
     appSource.includes("<CheckCircle2 aria-hidden=\"true\" />") &&
     styles.includes(".settings-saved-toast") &&
     styles.includes("color: #2f9e64;"),
