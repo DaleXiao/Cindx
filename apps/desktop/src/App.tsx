@@ -157,6 +157,7 @@ function providerDraftFromState(provider: ProviderConfigState): ProviderConfigIn
     summarizerModel: provider.summarizerModel,
     embeddingModel: provider.embeddingModel,
     imageModel: provider.imageModel,
+    imageEndpoint: provider.imageEndpoint,
     collaborationPolicy: normalizedEffortPolicy(provider.collaborationPolicy),
     contextWindowTokens: provider.contextWindowTokens,
     agentSystemPrompt: provider.agentSystemPrompt
@@ -2271,7 +2272,7 @@ export function App() {
                       })
                     }
                   />
-                  <div className="role-grid">
+                  <div className="role-grid provider-meta-grid">
                     <ModelSelect
                       label="Conductor"
                       value={providerDraft.conductorModel}
@@ -2329,6 +2330,20 @@ export function App() {
                         setProviderDraft({ ...providerDraft, imageModel })
                       }
                     />
+                    <label>
+                      <span>Image API endpoint</span>
+                      <input
+                        value={providerDraft.imageEndpoint}
+                        spellCheck={false}
+                        placeholder="Uses provider Base URL when empty"
+                        onChange={(event) =>
+                          setProviderDraft({
+                            ...providerDraft,
+                            imageEndpoint: event.target.value
+                          })
+                        }
+                      />
+                    </label>
                   </div>
                   <dl className="settings-facts">
                     <div>

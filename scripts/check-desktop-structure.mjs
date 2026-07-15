@@ -909,12 +909,15 @@ assert(
 );
 assert(
   appSource.includes('label="Image generation"') &&
+    appSource.includes("Image API endpoint") &&
     appSource.includes('emptyLabel="Not configured"') &&
     tauriBridge.includes("imageModel: string") &&
-    rustLib.includes("image_model") &&
+    tauriBridge.includes("imageEndpoint: string") &&
+    rustLib.includes("image_endpoint") &&
     rustLib.includes("ImageGenerationConfig") &&
     toolsSource.includes('"image.generate"') &&
-    modelProviderSource.includes('format!("{}/images/generations"'),
+    modelProviderSource.includes('"/images/generations"') &&
+    modelProviderSource.includes("DashScopeMultimodal"),
   "Models settings must persist an image model and expose the image.generate agent tool"
 );
 assert(

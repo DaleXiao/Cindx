@@ -196,6 +196,7 @@ export type ProviderConfigState = {
   summarizerModel: string;
   embeddingModel: string;
   imageModel: string;
+  imageEndpoint: string;
   collaborationPolicy: string;
   contextWindowTokens: number;
   agentSystemPrompt: string;
@@ -213,6 +214,7 @@ export type ProviderConfigInput = {
   summarizerModel: string;
   embeddingModel: string;
   imageModel: string;
+  imageEndpoint: string;
   collaborationPolicy: string;
   contextWindowTokens: number;
   agentSystemPrompt: string;
@@ -564,6 +566,7 @@ let browserPhase4State: Phase4State = {
     summarizerModel: "gpt-4.1-mini",
     embeddingModel: "text-embedding-3-small",
     imageModel: "",
+    imageEndpoint: "",
     collaborationPolicy: "auto_router",
     contextWindowTokens: 128000,
     agentSystemPrompt:
@@ -1484,6 +1487,7 @@ export async function saveProviderConfig(input: ProviderConfigInput): Promise<Ph
         summarizerModel: input.summarizerModel || input.model,
         embeddingModel: input.embeddingModel || "text-embedding-3-small",
         imageModel: input.imageModel,
+        imageEndpoint: input.imageEndpoint,
         collaborationPolicy: input.collaborationPolicy || "auto_router",
         contextWindowTokens: Math.max(4096, input.contextWindowTokens || 128000),
         agentSystemPrompt: input.agentSystemPrompt,
