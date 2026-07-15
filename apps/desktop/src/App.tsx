@@ -30,6 +30,7 @@ import {
   TerminalSquare,
   Trash2,
   TriangleAlert,
+  Workflow,
   XCircle
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
@@ -136,7 +137,7 @@ function agentEffortFromPolicy(policy: string): AgentEffort {
 
 function runBudgetForEffort(effort: AgentEffort) {
   if (effort === "fast") return { durationMs: 3 * 60_000, modelCalls: 6, toolCalls: 12 };
-  if (effort === "pro") return { durationMs: 15 * 60_000, modelCalls: 40, toolCalls: 72 };
+  if (effort === "pro") return { durationMs: 60 * 60_000, modelCalls: 96, toolCalls: 180 };
   return { durationMs: 8 * 60_000, modelCalls: 18, toolCalls: 36 };
 }
 
@@ -692,6 +693,7 @@ export function App() {
   const contextCheckpoint = contextState?.checkpoint ?? null;
   const agentCanCancel = Boolean(agentState?.canCancel || activeSessionBusy);
   const agentCanRetry = Boolean(agentState?.canRetry);
+  const agentCanContinue = Boolean(agentState?.canContinue);
   const agentWorking = Boolean(activeSessionBusy || agentState?.status === "running");
   const traceTurns = agentTraceState?.turns ?? [];
   const traceSteps = traceTurns.flatMap((turn) => turn.steps);
@@ -1458,6 +1460,7 @@ export function App() {
         status: "running",
         canCancel: true,
         canRetry: false,
+        canContinue: false,
         runBudgetMs: runBudget.durationMs,
         runModelCallBudget: runBudget.modelCalls,
         runToolCallBudget: runBudget.toolCalls,
@@ -1741,6 +1744,7 @@ export function App() {
             status: "running",
             canCancel: true,
             canRetry: false,
+            canContinue: false,
             pendingApprovals: current.pendingApprovals.filter(
               (approval) => approval.requestId !== requestId
             )
@@ -1915,6 +1919,7 @@ export function App() {
               working={agentWorking}
               canStop={agentCanCancel}
               canRetry={agentCanRetry}
+              canContinue={agentCanContinue}
               error={composerError}
               focusRequest={composerFocusRequest}
               pendingApproval={agentApprovals[0] ?? null}
@@ -2581,7 +2586,7 @@ export function App() {
 
             <section className="settings-section" data-settings-group="models">
               <div className="section-title">
-                <Play size={17} aria-hidden="true" />
+                <Workflow size={16} strokeWidth={1.7} aria-hidden="true" />
                 <h2>Orchestration</h2>
               </div>
               <details className="advanced-settings">

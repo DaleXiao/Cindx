@@ -20,6 +20,7 @@ type ComposerProps = {
   working: boolean;
   canStop: boolean;
   canRetry: boolean;
+  canContinue: boolean;
   error: string | null;
   focusRequest: number;
   pendingApproval: ToolApprovalView | null;
@@ -46,6 +47,7 @@ export function Composer({
   working,
   canStop,
   canRetry,
+  canContinue,
   error,
   focusRequest,
   pendingApproval,
@@ -70,6 +72,7 @@ export function Composer({
   const canSend =
     !working && !canStop && !pendingApproval && !attachmentBusy && Boolean(value.trim() || attachments.length);
   const canRetryError = canRetry && Boolean(error) && !working && !canStop && !pendingApproval;
+  const canContinueRun = canContinue && !working && !canStop && !pendingApproval;
   const effortTitle = {
     fast: "Single model with the lowest latency",
     auto: "Route each request by complexity",
@@ -171,6 +174,24 @@ export function Composer({
               ref={textareaRef}
               value={value}
               onChange={(event) => onChange(event.target.value)}
+              onPaste={(event) => {
+                if (attachmentBusy || attachments.length >= 10) return;
+                const pastedImages = Array.from(event.clipboardData.items)
+                  .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+                  .map((item, index) => {
+                    const file = item.getAsFile();
+                    if (!file) return null;
+                    const extension = file.type.split("/")[1]?.replace("jpeg", "jpg") || "png";
+                    const name = file.name.trim() || `pasted-image-${Date.now()}-${index + 1}.${extension}`;
+                    return file.name.trim()
+                      ? file
+                      : new File([file], name, { type: file.type, lastModified: file.lastModified });
+                  })
+                  .filter((file): file is File => Boolean(file));
+                if (pastedImages.length === 0) return;
+                event.preventDefault();
+                onPickAttachments(pastedImages);
+              }}
               onCompositionStart={() => {
                 composingRef.current = true;
                 compositionJustEndedRef.current = false;
@@ -287,6 +308,15 @@ export function Composer({
               <X aria-hidden="true" />
             </button>
           </div>
+        </div>
+      )}
+      {!error && canContinueRun && (
+        <div className="composer-continuation">
+          <span>Run paused at a safety checkpoint.</span>
+          <button type="button" onClick={onRetry}>
+            <RotateCcw aria-hidden="true" />
+            <span>Continue</span>
+          </button>
         </div>
       )}
     </form>
