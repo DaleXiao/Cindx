@@ -424,10 +424,12 @@ assert(
     /\.app-shell\[data-active-view="settings"\] \.window-toolbar \{[\s\S]*?background: var\(--bg\);/.test(
       styles
     ) &&
-    /\.settings-view \{[\s\S]*?overflow-y: scroll;[\s\S]*?scrollbar-gutter: stable;/.test(
+    /\.settings-view \{[\s\S]*?overflow-y: auto;[\s\S]*?scrollbar-gutter: stable;/.test(
       styles
-    ),
-  "Settings must use a uniform titlebar background and reserve a stable scroll gutter"
+    ) &&
+    styles.includes("--scrollbar-size: 6px") &&
+    styles.includes("*::-webkit-scrollbar-thumb"),
+  "Settings must scroll only when needed and use the shared compact scrollbar"
 );
 assert(composerSource.includes('event.key !== "Enter"'), "Composer must support Enter to send");
 assert(composerSource.includes("event.shiftKey"), "Composer must reserve Shift+Enter for a new line");

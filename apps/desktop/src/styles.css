@@ -36,11 +36,44 @@
   --icon-radius: var(--radius-md);
   --titlebar-height: 46px;
   --titlebar-control-size: 28px;
+  --scrollbar-size: 6px;
+  --scrollbar-thumb: rgb(24 24 24 / 20%);
+  --scrollbar-thumb-hover: rgb(24 24 24 / 34%);
   --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
 }
 
 * {
   box-sizing: border-box;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 html,
@@ -2644,7 +2677,7 @@ textarea::placeholder {
   gap: 28px;
   padding: 20px 24px 32px;
   overflow-x: hidden;
-  overflow-y: scroll;
+  overflow-y: auto;
   scrollbar-gutter: stable;
   background: var(--bg);
 }
