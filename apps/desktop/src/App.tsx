@@ -4,6 +4,7 @@ import {
   ArchiveRestore,
   BookOpen,
   Bot,
+  Bug,
   Cable,
   CheckCircle2,
   Clock3,
@@ -128,6 +129,16 @@ import {
 } from "./tauri";
 
 const appIconUrl = new URL("../src-tauri/icons/icon.png", import.meta.url).href;
+const DEBUG_ALWAYS_VISIBLE_STORAGE_KEY = "cindx.debug.always-visible";
+
+function loadDebugAlwaysVisible() {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(DEBUG_ALWAYS_VISIBLE_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
 
 function agentEffortFromPolicy(policy: string): AgentEffort {
   if (policy === "single") return "fast";
@@ -262,8 +273,6 @@ function SettingsCategoryIcon({ category }: { category: SettingsCategory }) {
 }
 
 export function App() {
-  const compactDesktop =
-    typeof window !== "undefined" && window.matchMedia("(max-width: 1180px)").matches;
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [activeView, setActiveView] = useState<WorkspaceView>("timeline");
   const [workspaceViewBeforeSettings, setWorkspaceViewBeforeSettings] =
@@ -271,9 +280,10 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>("runtime");
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("details");
-  const [inspectorOpen, setInspectorOpen] = useState(!compactDesktop);
-  const [inspectorOpenBeforeSettings, setInspectorOpenBeforeSettings] = useState(!compactDesktop);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorOpenBeforeSettings, setInspectorOpenBeforeSettings] = useState(false);
   const [inspectorWidth, setInspectorWidth] = useState(320);
+  const [debugAlwaysVisible, setDebugAlwaysVisible] = useState(loadDebugAlwaysVisible);
   const [phase3, setPhase3] = useState<Phase3State | null>(null);
   const [phase4, setPhase4] = useState<Phase4State | null>(null);
   const [phase5, setPhase5] = useState<Phase5State | null>(null);
@@ -531,13 +541,23 @@ export function App() {
     if (!sessionId || !activeSessionBusy) return;
     let disposed = false;
     let inFlight = false;
+    let lastTraceRefreshAt = 0;
     const refresh = async () => {
       if (inFlight) return;
       inFlight = true;
       try {
-        const next = await getAgentState(sessionId);
+        const now = Date.now();
+        const refreshTrace = now - lastTraceRefreshAt >= 3_000;
+        if (refreshTrace) lastTraceRefreshAt = now;
+        const [next, nextTrace] = await Promise.all([
+          getAgentState(sessionId),
+          refreshTrace
+            ? getAgentTraceState(sessionId).catch(() => null)
+            : Promise.resolve(null)
+        ]);
         if (!disposed && activeSessionIdRef.current === sessionId) {
           setAgentState(next);
+          if (nextTrace) setAgentTraceState(nextTrace);
           updateSessionStatus(sessionId, next.status);
         }
       } catch (error) {
@@ -2098,6 +2118,33 @@ export function App() {
               </div>
             </section>
 
+            <section className="settings-section" data-settings-group="runtime">
+              <div className="section-title">
+                <Bug size={17} aria-hidden="true" />
+                <h2>Diagnostics</h2>
+              </div>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={debugAlwaysVisible}
+                  onChange={(event) => {
+                    const visible = event.target.checked;
+                    setDebugAlwaysVisible(visible);
+                    try {
+                      window.localStorage.setItem(
+                        DEBUG_ALWAYS_VISIBLE_STORAGE_KEY,
+                        String(visible)
+                      );
+                    } catch {
+                      // The preference still applies for this app session.
+                    }
+                    showSettingsSaved();
+                  }}
+                />
+                <span>Always show Debug</span>
+              </label>
+            </section>
+
             <section className="settings-section" data-settings-group="knowledge">
               <div className="section-title">
                 <Database size={17} aria-hidden="true" />
@@ -3383,6 +3430,7 @@ export function App() {
 
       <Inspector
         open={inspectorOpen}
+        showDebug={debugAlwaysVisible}
         width={inspectorWidth}
         tab={inspectorTab}
         sessionId={activeSession?.id ?? null}
@@ -3414,6 +3462,10 @@ export function App() {
         onTraceExport={() => void handleExportAgentTrace()}
         traceBusy={traceBusy}
         onWidthChange={setInspectorWidth}
+        onOutputCreated={() => {
+          if (activeView === "settings") setInspectorOpenBeforeSettings(true);
+          else setInspectorOpen(true);
+        }}
         onReview={() => {
           if (activeView !== "settings") setWorkspaceViewBeforeSettings(activeView);
           setInspectorOpenBeforeSettings(inspectorOpen);
