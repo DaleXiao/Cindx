@@ -315,6 +315,7 @@ name = "tools"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "model-provider",
  "serde_json",
 ]
 

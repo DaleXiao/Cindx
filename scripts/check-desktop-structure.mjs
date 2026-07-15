@@ -902,10 +902,20 @@ assert(
     tauriBridge.includes('invoke<WebSearchConfigState>("save_web_search_config"') &&
     rustLib.includes("fn save_web_search_config(") &&
     rustLib.includes("web-search.conf") &&
-    rustLib.includes("with_workspace_tools_and_web_search") &&
+    rustLib.includes("with_workspace_tools_and_services") &&
     toolsSource.includes("fetch_search_api") &&
     toolsSource.includes('"Authorization: Bearer {}"'),
   "Tools settings must persist a private custom web search API and expand built-in tool details"
+);
+assert(
+  appSource.includes('label="Image generation"') &&
+    appSource.includes('emptyLabel="Not configured"') &&
+    tauriBridge.includes("imageModel: string") &&
+    rustLib.includes("image_model") &&
+    rustLib.includes("ImageGenerationConfig") &&
+    toolsSource.includes('"image.generate"') &&
+    modelProviderSource.includes('format!("{}/images/generations"'),
+  "Models settings must persist an image model and expose the image.generate agent tool"
 );
 assert(
   appSource.includes("<TriangleAlert size={14}") &&

@@ -12,6 +12,10 @@ use agent_core::{
     Metadata, PermissionRequest, PermissionRequestId, PermissionRisk, TaskId, ToolCallId,
     ToolArtifact, ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
 };
+use model_provider::{
+    ImageGenerationRequest, OpenAiCompatibleImageConfig, OpenAiCompatibleImageProvider,
+    MODEL_REQUEST_CANCELLED,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolError {
@@ -103,6 +107,22 @@ pub struct WebSearchConfig {
     pub api_key: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImageGenerationConfig {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    pub timeout_seconds: u64,
+}
+
+impl ImageGenerationConfig {
+    pub fn is_ready(&self) -> bool {
+        !self.base_url.trim().is_empty()
+            && !self.api_key.trim().is_empty()
+            && !self.model.trim().is_empty()
+    }
+}
+
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
@@ -118,6 +138,14 @@ impl ToolRegistry {
         workspace_root: impl Into<PathBuf>,
         web_search_config: WebSearchConfig,
     ) -> Self {
+        Self::with_workspace_tools_and_services(workspace_root, web_search_config, None)
+    }
+
+    pub fn with_workspace_tools_and_services(
+        workspace_root: impl Into<PathBuf>,
+        web_search_config: WebSearchConfig,
+        image_generation_config: Option<ImageGenerationConfig>,
+    ) -> Self {
         let workspace_root = workspace_root.into();
         let mut registry = Self::new();
         registry.register(Box::new(ReadFileTool::new(workspace_root.clone())));
@@ -126,6 +154,12 @@ impl ToolRegistry {
         registry.register(Box::new(WriteFileTool::new(workspace_root.clone())));
         registry.register(Box::new(ShellRunTool::new(workspace_root.clone())));
         registry.register(Box::new(WebSearchTool::new(web_search_config)));
+        if let Some(config) = image_generation_config.filter(ImageGenerationConfig::is_ready) {
+            registry.register(Box::new(ImageGenerationTool::new(
+                workspace_root.clone(),
+                config,
+            )));
+        }
         registry.register(Box::new(BrowserTool::open(workspace_root.clone())));
         registry.register(Box::new(BrowserTool::extract_text(workspace_root.clone())));
         registry.register(Box::new(BrowserTool::capture(workspace_root.clone())));
@@ -1015,6 +1049,232 @@ impl Tool for WebSearchTool {
             metadata,
         ))
     }
+}
+
+pub struct ImageGenerationTool {
+    workspace_root: PathBuf,
+    config: ImageGenerationConfig,
+}
+
+impl ImageGenerationTool {
+    pub fn new(workspace_root: impl Into<PathBuf>, config: ImageGenerationConfig) -> Self {
+        Self {
+            workspace_root: workspace_root.into(),
+            config,
+        }
+    }
+}
+
+impl Tool for ImageGenerationTool {
+    fn spec(&self) -> ToolSpec {
+        let mut spec = ToolSpec::new(
+            "image.generate",
+            "image",
+            "Generate one raster image with the configured image model and save it in the active workspace.",
+            ToolRisk::UsesNetwork,
+            agent_core::ToolSource::BuiltIn,
+            agent_core::ToolExposure::Auto,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "A detailed visual description of the image to generate."
+                    },
+                    "size": {
+                        "type": "string",
+                        "description": "Optional provider-supported size such as 1024x1024."
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "Optional workspace-relative output path. The file extension is normalized to the returned image format."
+                    }
+                },
+                "required": ["prompt"],
+                "additionalProperties": false
+            })
+            .to_string(),
+        );
+        spec.output_schema_json = Some(
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "mimeType": { "type": "string" },
+                    "model": { "type": "string" }
+                },
+                "required": ["path", "mimeType", "model"]
+            })
+            .to_string(),
+        );
+        spec
+    }
+
+    fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
+        let input = parse_input(&invocation.input_json);
+        let output_path = input
+            .get("output_path")
+            .filter(|value| !value.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| "generated-images/".to_string());
+        Some(permission_request(
+            &invocation.task_id,
+            PermissionRisk::Network,
+            "image.generate",
+            "Send a visual prompt to the configured image provider and write the result in the workspace.",
+            &output_path,
+            [
+                ("tool_call_id".to_string(), invocation.id.0.clone()),
+                ("tool_name".to_string(), invocation.tool_name.clone()),
+                ("model".to_string(), self.config.model.clone()),
+            ]
+            .into_iter()
+            .collect(),
+        ))
+    }
+
+    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
+        self.execute_with_control(invocation, &ToolExecutionControl::never_cancelled())
+    }
+
+    fn execute_with_control(
+        &self,
+        invocation: ToolInvocation,
+        control: &ToolExecutionControl,
+    ) -> Result<ToolResult, ToolError> {
+        if control.should_cancel() {
+            return Ok(ToolResult::text(
+                invocation.id,
+                ToolOutcomeStatus::Cancelled,
+                "Image generation cancelled before it started.",
+                Metadata::new(),
+            ));
+        }
+        let input = parse_input(&invocation.input_json);
+        let prompt = required_input(&input, "prompt")?;
+        let size = input
+            .get("size")
+            .filter(|value| !value.trim().is_empty())
+            .cloned();
+        let provider = OpenAiCompatibleImageProvider::new(OpenAiCompatibleImageConfig {
+            base_url: self.config.base_url.clone(),
+            api_key: self.config.api_key.clone(),
+            model: self.config.model.clone(),
+            timeout_seconds: self.config.timeout_seconds.max(1),
+        });
+        let response = match provider.generate_cancellable(
+            ImageGenerationRequest {
+                prompt,
+                size: size.clone(),
+                metadata: Metadata::new(),
+            },
+            || control.should_cancel(),
+        ) {
+            Ok(response) => response,
+            Err(error) if error.message == MODEL_REQUEST_CANCELLED => {
+                return Ok(ToolResult::text(
+                    invocation.id,
+                    ToolOutcomeStatus::Cancelled,
+                    "Image generation cancelled.",
+                    Metadata::new(),
+                ));
+            }
+            Err(error) => return Err(ToolError::new(error.message)),
+        };
+        let image = response
+            .images
+            .into_iter()
+            .next()
+            .ok_or_else(|| ToolError::new("image provider returned no image"))?;
+        if control.should_cancel() {
+            return Ok(ToolResult::text(
+                invocation.id,
+                ToolOutcomeStatus::Cancelled,
+                "Image generation cancelled.",
+                Metadata::new(),
+            ));
+        }
+
+        let requested_path = input.get("output_path").map(String::as_str);
+        let (resolved_path, relative_path) = image_output_path(
+            &self.workspace_root,
+            requested_path,
+            &image.mime_type,
+        )?;
+        if let Some(parent) = resolved_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                ToolError::new(format!("failed to create image output directory: {error}"))
+            })?;
+        }
+        fs::write(&resolved_path, &image.bytes)
+            .map_err(|error| ToolError::new(format!("failed to write generated image: {error}")))?;
+
+        let mut metadata = Metadata::new();
+        metadata.insert("artifact_path".to_string(), relative_path.clone());
+        metadata.insert("model".to_string(), response.model.clone());
+        metadata.insert("mime_type".to_string(), image.mime_type.clone());
+        metadata.insert("bytes".to_string(), image.bytes.len().to_string());
+        if let Some(size) = size {
+            metadata.insert("size".to_string(), size);
+        }
+        let title = resolved_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("Generated image")
+            .to_string();
+        let mut result = ToolResult::text(
+            invocation.id,
+            ToolOutcomeStatus::Succeeded,
+            format!("Generated image: {relative_path}"),
+            metadata,
+        );
+        result.artifacts.push(ToolArtifact {
+            path: relative_path.clone(),
+            mime_type: Some(image.mime_type.clone()),
+            title: Some(title),
+        });
+        result.structured_output_json = Some(
+            serde_json::json!({
+                "path": relative_path,
+                "mimeType": image.mime_type,
+                "model": response.model,
+                "revisedPrompt": image.revised_prompt
+            })
+            .to_string(),
+        );
+        Ok(result)
+    }
+}
+
+fn image_output_path(
+    workspace_root: &Path,
+    requested_path: Option<&str>,
+    mime_type: &str,
+) -> Result<(PathBuf, String), ToolError> {
+    let extension = match mime_type {
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/avif" => "avif",
+        "image/png" => "png",
+        _ => return Err(ToolError::new("unsupported generated image format")),
+    };
+    let timestamp = current_time_millis();
+    let mut relative = requested_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(format!("generated-images/image-{timestamp}.{extension}"))
+        });
+    if relative.file_name().is_none() || requested_path.is_some_and(|value| value.ends_with('/')) {
+        relative.push(format!("image-{timestamp}.{extension}"));
+    } else {
+        relative.set_extension(extension);
+    }
+    let relative_path = relative.to_string_lossy().to_string();
+    let resolved = resolve_workspace_path(workspace_root, &relative_path)?;
+    Ok((resolved, relative_path))
 }
 
 const BROWSER_CONTROL_REQUEST_SCHEMA: &str = "cindx.browser-control.v2";
@@ -2750,6 +3010,44 @@ mod tests {
         assert!(specs
             .iter()
             .all(|spec| spec.validate_input_schema().is_ok()));
+    }
+
+    #[test]
+    fn configured_image_model_registers_a_permissioned_generation_tool() {
+        let root = temp_workspace();
+        let registry = ToolRegistry::with_workspace_tools_and_services(
+            root.clone(),
+            WebSearchConfig::default(),
+            Some(ImageGenerationConfig {
+                base_url: "https://example.test/v1".to_string(),
+                api_key: "secret".to_string(),
+                model: "image-model-a".to_string(),
+                timeout_seconds: 300,
+            }),
+        );
+        let tool = registry
+            .get("image.generate")
+            .expect("configured image tool should be registered");
+        let spec = tool.spec();
+        let permission = tool
+            .permission_request(&invocation(
+                "image.generate",
+                r#"{"prompt":"A blue circle","output_path":"art/circle.png"}"#
+                    .to_string(),
+            ))
+            .expect("image generation should require permission");
+        let (_, output_path) = image_output_path(&root, Some("art/circle.jpg"), "image/png")
+            .expect("image output path should resolve");
+
+        assert_eq!(spec.namespace, "image");
+        assert!(spec.input_schema_json.contains("output_path"));
+        assert_eq!(permission.risk, PermissionRisk::Network);
+        assert_eq!(permission.scope, "art/circle.png");
+        assert!(!permission
+            .metadata
+            .values()
+            .any(|value| value.contains("blue circle")));
+        assert_eq!(output_path, "art/circle.png");
     }
 
     #[test]
