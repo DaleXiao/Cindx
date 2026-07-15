@@ -192,7 +192,15 @@ pre {
   transition: none;
 }
 
+.app-shell[data-inspector-resizing="true"] {
+  transition: none;
+}
+
 .app-shell[data-sidebar-resizing="true"]::before {
+  transition: none;
+}
+
+.app-shell[data-inspector-resizing="true"]::after {
   transition: none;
 }
 

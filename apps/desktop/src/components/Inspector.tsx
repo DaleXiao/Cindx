@@ -74,6 +74,8 @@ type InspectorProps = {
   onTraceExport: () => void;
   traceBusy: boolean;
   onWidthChange: (width: number) => void;
+  onResizeStart: () => void;
+  onResizeEnd: () => void;
   onOutputCreated: () => void;
   onReview: () => void;
 };
@@ -227,6 +229,8 @@ export function Inspector({
   onTraceExport,
   traceBusy,
   onWidthChange,
+  onResizeStart,
+  onResizeEnd,
   onOutputCreated,
   onReview
 }: InspectorProps) {
@@ -392,6 +396,11 @@ export function Inspector({
     event.preventDefault();
     const startX = event.clientX;
     const startWidth = width;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    onResizeStart();
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
 
     const handleMove = (moveEvent: PointerEvent) => {
       onWidthChange(clampWidth(startWidth + startX - moveEvent.clientX));
@@ -399,10 +408,15 @@ export function Inspector({
     const handleUp = () => {
       window.removeEventListener("pointermove", handleMove);
       window.removeEventListener("pointerup", handleUp);
+      window.removeEventListener("pointercancel", handleUp);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      onResizeEnd();
     };
 
     window.addEventListener("pointermove", handleMove);
     window.addEventListener("pointerup", handleUp);
+    window.addEventListener("pointercancel", handleUp);
   }
 
   const outputPreview = selectedOutput ? (
