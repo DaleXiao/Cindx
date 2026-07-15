@@ -2355,6 +2355,48 @@ fn save_workspace_root(
     runtime_status(&state)
 }
 
+#[tauri::command]
+fn pick_workspace_folder(initial_path: Option<String>) -> Result<Option<String>, String> {
+    show_native_workspace_folder_picker(initial_path.as_deref())
+}
+
+#[cfg(target_os = "macos")]
+fn show_native_workspace_folder_picker(initial_path: Option<&str>) -> Result<Option<String>, String> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
+    use objc2_foundation::{NSString, NSURL};
+
+    let Some(main_thread) = MainThreadMarker::new() else {
+        return Err("workspace folder picker must run on the main thread".to_string());
+    };
+    let panel = NSOpenPanel::openPanel(main_thread);
+    panel.setCanChooseDirectories(true);
+    panel.setCanChooseFiles(false);
+    panel.setAllowsMultipleSelection(false);
+
+    if let Some(path) = initial_path.filter(|path| Path::new(path).is_dir()) {
+        let path = NSString::from_str(path);
+        let directory_url = NSURL::fileURLWithPath_isDirectory(&path, true);
+        panel.setDirectoryURL(Some(&directory_url));
+    }
+
+    if panel.runModal() != NSModalResponseOK {
+        return Ok(None);
+    }
+
+    Ok(panel
+        .URL()
+        .and_then(|url| url.path())
+        .map(|path| path.to_string()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_native_workspace_folder_picker(
+    _initial_path: Option<&str>,
+) -> Result<Option<String>, String> {
+    Err("native workspace folder selection is not available on this platform".to_string())
+}
+
 fn runtime_status(state: &tauri::State<'_, AppState>) -> Result<RuntimeStatus, String> {
     let root = active_workspace_root(state)?;
     let mut status = runtime_status_for_root(root.clone());
@@ -5553,6 +5595,7 @@ pub fn run() {
             delete_session,
             select_project,
             select_session,
+            pick_workspace_folder,
             save_workspace_root,
             get_phase3_state,
             request_mock_permission,

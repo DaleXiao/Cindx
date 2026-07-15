@@ -530,6 +530,19 @@ pre {
   text-transform: uppercase;
 }
 
+.nav-heading-with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.nav-heading-with-icon svg {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  stroke-width: 1.7;
+}
+
 .nav-add-button {
   display: inline-grid;
   width: 22px;
@@ -3056,6 +3069,51 @@ textarea::placeholder {
 .tool-runner label > span {
   color: var(--muted);
   font-size: 10px;
+}
+
+.workspace-folder-field {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.workspace-folder-field > span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.workspace-folder-selector {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 9px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  font-size: 12px;
+  text-align: left;
+}
+
+.workspace-folder-selector:hover:not(:disabled) {
+  border-color: #b8b8b8;
+  background: var(--surface-active);
+}
+
+.workspace-folder-selector > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-folder-selector svg {
+  flex: 0 0 auto;
+  color: var(--muted);
 }
 
 .provider-form input,

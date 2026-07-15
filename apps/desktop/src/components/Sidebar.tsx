@@ -1,6 +1,7 @@
 import {
   Check,
   FolderOpen,
+  Folders,
   LoaderCircle,
   MoreHorizontal,
   Plus,
@@ -308,7 +309,10 @@ export function Sidebar({
 
       <section className="project-tree" aria-label="Project tree">
         <div className="nav-heading-row">
-          <div className="nav-heading">Projects</div>
+          <div className="nav-heading nav-heading-with-icon">
+            <Folders aria-hidden="true" />
+            <span>Projects</span>
+          </div>
           <button
             className={`nav-add-button ${projectCreateOpen ? "active" : ""}`}
             type="button"

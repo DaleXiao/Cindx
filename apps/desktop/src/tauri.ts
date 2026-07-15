@@ -869,6 +869,17 @@ export async function saveWorkspaceRoot(path: string): Promise<RuntimeStatus> {
   }
 }
 
+export async function pickWorkspaceFolder(
+  initialPath?: string
+): Promise<string | null> {
+  try {
+    return await invoke<string | null>("pick_workspace_folder", { initialPath });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    return initialPath ?? null;
+  }
+}
+
 export async function getSidecarState(): Promise<SidecarState> {
   try {
     return await invoke<SidecarState>("get_sidecar_state");
