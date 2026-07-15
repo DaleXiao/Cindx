@@ -156,6 +156,7 @@ function providerDraftFromState(provider: ProviderConfigState): ProviderConfigIn
     reviewerModel: provider.reviewerModel,
     summarizerModel: provider.summarizerModel,
     embeddingModel: provider.embeddingModel,
+    imageModel: provider.imageModel,
     collaborationPolicy: normalizedEffortPolicy(provider.collaborationPolicy),
     contextWindowTokens: provider.contextWindowTokens,
     agentSystemPrompt: provider.agentSystemPrompt
@@ -206,17 +207,20 @@ function ModelSelect({
   label,
   value,
   options,
+  emptyLabel,
   onChange
 }: {
   label: string;
   value: string;
   options: string[];
+  emptyLabel?: string;
   onChange: (value: string) => void;
 }) {
   return (
     <label>
       <span>{label}</span>
       <select value={value} onChange={(event) => onChange(event.target.value)}>
+        {emptyLabel && <option value="">{emptyLabel}</option>}
         {options.map((model) => (
           <option value={model} key={model}>
             {model}
@@ -703,7 +707,8 @@ export function App() {
           providerDraft.executorModel,
           providerDraft.reviewerModel,
           providerDraft.summarizerModel,
-          providerDraft.embeddingModel
+          providerDraft.embeddingModel,
+          providerDraft.imageModel
         ]
       : [];
     return [...new Set([...providerModels, ...configured].filter(Boolean))].sort();
@@ -2313,6 +2318,15 @@ export function App() {
                       options={providerModelOptions}
                       onChange={(embeddingModel) =>
                         setProviderDraft({ ...providerDraft, embeddingModel })
+                      }
+                    />
+                    <ModelSelect
+                      label="Image generation"
+                      value={providerDraft.imageModel}
+                      options={providerModelOptions}
+                      emptyLabel="Not configured"
+                      onChange={(imageModel) =>
+                        setProviderDraft({ ...providerDraft, imageModel })
                       }
                     />
                   </div>

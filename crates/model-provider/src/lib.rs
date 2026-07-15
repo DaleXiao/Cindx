@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 
 pub const MODEL_REQUEST_CANCELLED: &str = "model request cancelled";
 const STREAMING_HARD_TIMEOUT_MULTIPLIER: u64 = 4;
+const MAX_IMAGE_RESPONSE_BYTES: usize = 48 * 1024 * 1024;
+const MAX_GENERATED_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 static CURL_REQUEST_BODY_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +69,27 @@ pub struct EmbeddingResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageGenerationRequest {
+    pub prompt: String,
+    pub size: Option<String>,
+    pub metadata: Metadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedImage {
+    pub bytes: Vec<u8>,
+    pub mime_type: String,
+    pub revised_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageGenerationResponse {
+    pub model: String,
+    pub images: Vec<GeneratedImage>,
+    pub metadata: Metadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCapabilities {
     pub supports_streaming: bool,
     pub supports_tools: bool,
@@ -112,6 +135,26 @@ pub struct OpenAiCompatibleConfig {
     pub timeout_seconds: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAiCompatibleImageConfig {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    pub timeout_seconds: u64,
+}
+
+impl OpenAiCompatibleImageConfig {
+    pub fn images_url(&self) -> String {
+        format!("{}/images/generations", self.base_url.trim_end_matches('/'))
+    }
+
+    pub fn is_ready(&self) -> bool {
+        !self.api_key.trim().is_empty()
+            && !self.model.trim().is_empty()
+            && !self.base_url.trim().is_empty()
+    }
+}
+
 impl OpenAiCompatibleConfig {
     pub fn models_url(&self) -> String {
         format!("{}/models", self.base_url.trim_end_matches('/'))
@@ -142,6 +185,10 @@ pub struct OpenAiCompatibleProvider {
     config: OpenAiCompatibleConfig,
 }
 
+pub struct OpenAiCompatibleImageProvider {
+    config: OpenAiCompatibleImageConfig,
+}
+
 fn curl_config_escape(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
@@ -158,12 +205,14 @@ fn curl_config_escape(value: &str) -> String {
 }
 
 fn curl_request_config(url: &str, api_key: &str, request_body_path: Option<&Path>) -> String {
-    let authorization = format!("Authorization: Bearer {api_key}");
-    let mut config = format!(
-        "url = \"{}\"\nheader = \"{}\"\n",
-        curl_config_escape(url),
-        curl_config_escape(&authorization)
-    );
+    let mut config = format!("url = \"{}\"\n", curl_config_escape(url));
+    if !api_key.trim().is_empty() {
+        let authorization = format!("Authorization: Bearer {api_key}");
+        config.push_str(&format!(
+            "header = \"{}\"\n",
+            curl_config_escape(&authorization)
+        ));
+    }
     if let Some(request_body_path) = request_body_path {
         config.push_str("request = \"POST\"\n");
         config.push_str("header = \"Content-Type: application/json\"\n");
@@ -730,6 +779,124 @@ impl OpenAiCompatibleProvider {
     }
 }
 
+enum ImagePayload {
+    Base64(String),
+    Url(String),
+}
+
+struct ParsedImagePayload {
+    payload: ImagePayload,
+    revised_prompt: Option<String>,
+}
+
+impl OpenAiCompatibleImageProvider {
+    pub fn new(config: OpenAiCompatibleImageConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn generate(
+        &self,
+        request: ImageGenerationRequest,
+    ) -> Result<ImageGenerationResponse, ModelError> {
+        self.generate_cancellable(request, || false)
+    }
+
+    pub fn generate_cancellable(
+        &self,
+        request: ImageGenerationRequest,
+        mut should_cancel: impl FnMut() -> bool,
+    ) -> Result<ImageGenerationResponse, ModelError> {
+        if !self.config.is_ready() {
+            return Err(ModelError::new("image generation provider config is incomplete"));
+        }
+        if request.prompt.trim().is_empty() {
+            return Err(ModelError::new("image generation prompt is empty"));
+        }
+
+        let request_body = build_image_generation_request_json(
+            &self.config.model,
+            &request.prompt,
+            request.size.as_deref(),
+        )?;
+        let output = execute_curl_cancellable(
+            &self.config.images_url(),
+            &self.config.api_key,
+            Some(&request_body),
+            self.config.timeout_seconds,
+            &mut should_cancel,
+        )?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let provider_error = parse_provider_error(&stdout).unwrap_or(stderr);
+            return Err(ModelError::new(if provider_error.is_empty() {
+                format!("image generation request failed with status {}", output.status)
+            } else {
+                provider_error
+            }));
+        }
+        if output.stdout.len() > MAX_IMAGE_RESPONSE_BYTES {
+            return Err(ModelError::new("image generation response exceeded 48 MB"));
+        }
+
+        let (response_model, payloads) =
+            parse_image_generation_payloads(&stdout, &self.config.model)?;
+        let mut images = Vec::with_capacity(payloads.len());
+        for parsed in payloads {
+            if should_cancel() {
+                return Err(ModelError::new(MODEL_REQUEST_CANCELLED));
+            }
+            let bytes = match parsed.payload {
+                ImagePayload::Base64(value) => decode_generated_image(&value)?,
+                ImagePayload::Url(url) => {
+                    if !url.starts_with("https://") && !url.starts_with("http://") {
+                        return Err(ModelError::new(
+                            "image generation response included an unsupported URL",
+                        ));
+                    }
+                    let output = execute_curl_cancellable(
+                        &url,
+                        "",
+                        None,
+                        self.config.timeout_seconds,
+                        &mut should_cancel,
+                    )?;
+                    if !output.status.success() {
+                        return Err(ModelError::new(format!(
+                            "generated image download failed with status {}",
+                            output.status
+                        )));
+                    }
+                    output.stdout
+                }
+            };
+            if bytes.is_empty() {
+                return Err(ModelError::new("image generation returned an empty image"));
+            }
+            if bytes.len() > MAX_GENERATED_IMAGE_BYTES {
+                return Err(ModelError::new("generated image exceeded 32 MB"));
+            }
+            let mime_type = generated_image_mime_type(&bytes)
+                .ok_or_else(|| ModelError::new("image generation returned unsupported data"))?
+                .to_string();
+            images.push(GeneratedImage {
+                bytes,
+                mime_type,
+                revised_prompt: parsed.revised_prompt,
+            });
+        }
+
+        let mut metadata = request.metadata;
+        metadata.insert("model".to_string(), response_model.clone());
+        metadata.insert("images".to_string(), images.len().to_string());
+        Ok(ImageGenerationResponse {
+            model: response_model,
+            images,
+            metadata,
+        })
+    }
+}
+
 pub fn parse_model_list_response(text: &str) -> Result<Vec<String>, ModelError> {
     if let Some(message) = parse_provider_error(text) {
         return Err(ModelError::new(message));
@@ -799,6 +966,116 @@ pub fn build_embedding_request_json(
         inputs.join(","),
         dimensions
     ))
+}
+
+pub fn build_image_generation_request_json(
+    model: &str,
+    prompt: &str,
+    size: Option<&str>,
+) -> Result<String, ModelError> {
+    if model.trim().is_empty() {
+        return Err(ModelError::new("image generation model is empty"));
+    }
+    if prompt.trim().is_empty() {
+        return Err(ModelError::new("image generation prompt is empty"));
+    }
+
+    let mut body = serde_json::json!({
+        "model": model,
+        "prompt": prompt,
+        "n": 1
+    });
+    if let Some(size) = size.filter(|value| !value.trim().is_empty()) {
+        body["size"] = serde_json::Value::String(size.to_string());
+    }
+    serde_json::to_string(&body)
+        .map_err(|error| ModelError::new(format!("failed to encode image request: {error}")))
+}
+
+fn parse_image_generation_payloads(
+    text: &str,
+    fallback_model: &str,
+) -> Result<(String, Vec<ParsedImagePayload>), ModelError> {
+    if let Some(message) = parse_provider_error(text) {
+        return Err(ModelError::new(message));
+    }
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| ModelError::new(format!("invalid image generation response: {error}")))?;
+    let model = value
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(fallback_model)
+        .to_string();
+    let data = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| ModelError::new("image generation response did not include data"))?;
+    let mut payloads = Vec::new();
+    for item in data {
+        let revised_prompt = item
+            .get("revised_prompt")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let payload = if let Some(value) = item
+            .get("b64_json")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            ImagePayload::Base64(value.to_string())
+        } else if let Some(value) = item
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            ImagePayload::Url(value.to_string())
+        } else {
+            return Err(ModelError::new(
+                "image generation item did not include image data",
+            ));
+        };
+        payloads.push(ParsedImagePayload {
+            payload,
+            revised_prompt,
+        });
+    }
+    if payloads.is_empty() {
+        return Err(ModelError::new("image generation returned no images"));
+    }
+    Ok((model, payloads))
+}
+
+fn decode_generated_image(value: &str) -> Result<Vec<u8>, ModelError> {
+    let encoded = value
+        .strip_prefix("data:")
+        .and_then(|data| data.split_once(',').map(|(_, encoded)| encoded))
+        .unwrap_or(value);
+    let compact = encoded
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    base64::engine::general_purpose::STANDARD
+        .decode(compact)
+        .map_err(|error| ModelError::new(format!("invalid generated image data: {error}")))
+}
+
+fn generated_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else if bytes.len() >= 12
+        && &bytes[4..8] == b"ftyp"
+        && (&bytes[8..12] == b"avif" || &bytes[8..12] == b"avis")
+    {
+        Some("image/avif")
+    } else {
+        None
+    }
 }
 
 pub fn parse_embedding_response(text: &str) -> Result<EmbeddingResponse, ModelError> {
@@ -1652,6 +1929,8 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(config.contains("Authorization: Bearer test-secret"));
+        assert!(!curl_request_config("https://example.test/image.png", "", None)
+            .contains("Authorization"));
         assert!(config.contains("data-binary"));
         assert!(config.len() < 2_048);
         assert!(!config.contains(&"x".repeat(1_000)));
@@ -2090,6 +2369,45 @@ mod tests {
         assert!(body.contains("\"model\":\"text-embedding-model\""));
         assert!(body.contains("\"input\":[\"alpha\",\"beta\"]"));
         assert!(body.contains("\"dimensions\":256"));
+    }
+
+    #[test]
+    fn image_generation_request_uses_the_selected_model_and_size() {
+        let body = build_image_generation_request_json(
+            "image-model-a",
+            "A blue circle on white",
+            Some("1024x1024"),
+        )
+        .expect("image body should encode");
+        let value: serde_json::Value =
+            serde_json::from_str(&body).expect("image body should be json");
+
+        assert_eq!(value["model"], "image-model-a");
+        assert_eq!(value["prompt"], "A blue circle on white");
+        assert_eq!(value["size"], "1024x1024");
+        assert_eq!(value["n"], 1);
+    }
+
+    #[test]
+    fn parses_base64_and_url_image_generation_payloads() {
+        let png = b"\x89PNG\r\n\x1a\nfixture";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+        let response = format!(
+            r#"{{"model":"image-model-a","data":[{{"b64_json":"{encoded}","revised_prompt":"refined"}},{{"url":"https://example.test/image.png"}}]}}"#
+        );
+        let (model, payloads) = parse_image_generation_payloads(&response, "fallback")
+            .expect("image payloads should parse");
+
+        assert_eq!(model, "image-model-a");
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0].revised_prompt.as_deref(), Some("refined"));
+        let ImagePayload::Base64(value) = &payloads[0].payload else {
+            panic!("first payload should be base64");
+        };
+        let bytes = decode_generated_image(value).expect("base64 should decode");
+        assert_eq!(bytes, png);
+        assert_eq!(generated_image_mime_type(&bytes), Some("image/png"));
+        assert!(matches!(payloads[1].payload, ImagePayload::Url(_)));
     }
 
     #[test]
