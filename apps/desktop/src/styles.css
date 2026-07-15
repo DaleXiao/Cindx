@@ -128,16 +128,34 @@ pre {
 }
 
 .app-shell {
+  --sidebar-layout-width: var(--sidebar-width, 236px);
   --inspector-layout-width: var(--inspector-width, 320px);
   position: relative;
   display: grid;
-  grid-template-columns: 236px minmax(0, 1fr) var(--inspector-layout-width);
+  grid-template-columns: var(--sidebar-layout-width) minmax(0, 1fr) var(--inspector-layout-width);
   grid-template-rows: var(--titlebar-height) minmax(0, 1fr);
   width: 100%;
   height: 100%;
   min-height: 0;
   background: transparent;
   transition: grid-template-columns 180ms var(--ease-out-quart);
+}
+
+.app-shell::before {
+  position: absolute;
+  z-index: 45;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--sidebar-layout-width) - 1px);
+  width: 1px;
+  content: "";
+  pointer-events: none;
+  background: var(--border);
+  box-shadow: -4px 0 10px rgba(0, 0, 0, 0.045);
+  opacity: 1;
+  transition:
+    left 180ms var(--ease-out-quart),
+    opacity 120ms ease-out;
 }
 
 .app-shell::after {
@@ -155,7 +173,7 @@ pre {
 }
 
 .app-shell[data-inspector-open="false"] {
-  grid-template-columns: 236px minmax(0, 1fr) 0;
+  grid-template-columns: var(--sidebar-layout-width) minmax(0, 1fr) 0;
 }
 
 .app-shell[data-sidebar-open="false"] {
@@ -164,6 +182,18 @@ pre {
 
 .app-shell[data-sidebar-open="false"][data-inspector-open="false"] {
   grid-template-columns: 0 minmax(0, 1fr) 0;
+}
+
+.app-shell[data-sidebar-open="false"]::before {
+  opacity: 0;
+}
+
+.app-shell[data-sidebar-resizing="true"] {
+  transition: none;
+}
+
+.app-shell[data-sidebar-resizing="true"]::before {
+  transition: none;
 }
 
 .app-shell[data-inspector-open="false"]::after {
@@ -205,7 +235,7 @@ pre {
 
 .window-toolbar-panel-left {
   left: 0;
-  width: 236px;
+  width: var(--sidebar-layout-width);
 }
 
 .window-toolbar-panel-right {
@@ -223,7 +253,7 @@ pre {
   z-index: 2;
   top: 0;
   bottom: 0;
-  left: 236px;
+  left: var(--sidebar-layout-width);
   right: var(--inspector-layout-width);
   display: flex;
   min-width: 0;
@@ -250,26 +280,6 @@ pre {
 .app-shell[data-inspector-open="false"] .window-workspace-header {
   right: 0;
   padding-right: 48px;
-}
-
-.window-toolbar::before {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  content: "";
-  pointer-events: none;
-  background: var(--border);
-  z-index: 1;
-  transition: opacity 120ms ease-out;
-}
-
-.window-toolbar::before {
-  left: 235px;
-}
-
-.app-shell[data-sidebar-open="false"] .window-toolbar::before {
-  opacity: 0;
 }
 
 .window-pane-toggle {
@@ -340,6 +350,36 @@ pre {
   right: 10px;
 }
 
+.sidebar-resize-handle {
+  position: absolute;
+  z-index: 50;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--sidebar-layout-width) - 3px);
+  width: 6px;
+  cursor: col-resize;
+}
+
+.sidebar-resize-handle::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  content: "";
+  background: transparent;
+  transform: translateX(-0.5px);
+}
+
+.sidebar-resize-handle:hover::after,
+.sidebar-resize-handle:focus-visible::after {
+  background: #c8c8c8;
+}
+
+.sidebar-resize-handle:focus-visible {
+  outline: 0;
+}
+
 /* Sidebar */
 
 .sidebar {
@@ -353,7 +393,6 @@ pre {
   padding: 14px;
   overflow: hidden;
   background: var(--panel);
-  border-right: 1px solid var(--border);
   opacity: 1;
   transform: translateX(0);
   transition:
@@ -4406,22 +4445,14 @@ textarea::placeholder {
     --inspector-layout-width: min(var(--inspector-width, 320px), calc(100vw - 240px));
   }
 
-  .window-toolbar-panel-left {
-    width: 220px;
-  }
-
   .window-workspace-header {
-    left: 220px;
+    left: var(--sidebar-layout-width);
     right: var(--inspector-layout-width);
-  }
-
-  .window-toolbar::before {
-    left: 219px;
   }
 
   .app-shell,
   .app-shell[data-inspector-open="false"] {
-    grid-template-columns: 220px minmax(0, 1fr) 0;
+    grid-template-columns: var(--sidebar-layout-width) minmax(0, 1fr) 0;
   }
 
   .app-shell[data-sidebar-open="false"],
@@ -4477,7 +4508,8 @@ textarea::placeholder {
     display: none;
   }
 
-  .window-toolbar::before {
+  .app-shell::before,
+  .sidebar-resize-handle {
     display: none;
   }
 

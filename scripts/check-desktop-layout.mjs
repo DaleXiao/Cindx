@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 const css = fs.readFileSync("apps/desktop/src/styles.css", "utf8");
+const appSource = fs.readFileSync("apps/desktop/src/App.tsx", "utf8");
 const config = JSON.parse(
   fs.readFileSync("apps/desktop/src-tauri/tauri.conf.json", "utf8")
 );
@@ -15,7 +16,13 @@ assert(windowConfig.height === 820, "Default desktop height must remain 820px");
 assert(windowConfig.minWidth === 960, "Minimum desktop width must remain 960px");
 assert(windowConfig.titleBarStyle === "Overlay", "macOS title bar must use the overlay layout");
 assert(windowConfig.hiddenTitle === true, "macOS title text must remain hidden");
-assert(css.includes("grid-template-columns: 236px minmax(0, 1fr) var(--inspector-layout-width)"), "Wide layout must use three panes");
+assert(
+  css.includes("--sidebar-layout-width: var(--sidebar-width, 236px)") &&
+    css.includes(
+      "grid-template-columns: var(--sidebar-layout-width) minmax(0, 1fr) var(--inspector-layout-width)"
+    ),
+  "Wide layout must use resizable three-pane columns"
+);
 assert(
   css.includes("--titlebar-height: 46px") &&
     css.includes("grid-template-rows: var(--titlebar-height) minmax(0, 1fr)"),
@@ -32,8 +39,15 @@ assert(
 assert(css.includes('.app-shell[data-inspector-open="false"]'), "Inspector must support a collapsed layout");
 assert(css.includes('.app-shell[data-sidebar-open="false"]'), "Sidebar must support a collapsed layout");
 assert(
-  css.includes(".window-toolbar::before") && css.includes(".app-shell::after"),
+  css.includes(".app-shell::before") && css.includes(".app-shell::after"),
   "Pane dividers must extend through the titlebar"
+);
+assert(
+  appSource.includes('className="sidebar-resize-handle"') &&
+    appSource.includes('aria-label="Resize sidebar"') &&
+    css.includes("left: calc(var(--sidebar-layout-width) - 3px)") &&
+    css.includes("box-shadow: -4px 0 10px rgba(0, 0, 0, 0.045)"),
+  "Sidebar divider must expose a resize edge and subtle left-facing depth"
 );
 assert(
   css.includes(".window-workspace-header") &&
@@ -53,7 +67,7 @@ assert(
 const layouts = [
   { viewport: 1440, sidebar: 236, inspector: 320, overlay: false },
   { viewport: 1280, sidebar: 236, inspector: 320, overlay: false },
-  { viewport: 1024, sidebar: 220, inspector: 320, overlay: true }
+  { viewport: 1024, sidebar: 236, inspector: 320, overlay: true }
 ].map((layout) => ({
   ...layout,
   workspace: layout.viewport - layout.sidebar - (layout.overlay ? 0 : layout.inspector)
