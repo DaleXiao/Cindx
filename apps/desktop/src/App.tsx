@@ -34,7 +34,14 @@ import {
   Workflow,
   XCircle
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent
+} from "react";
 import { Inspector, type InspectorTab } from "./components/Inspector";
 import { Composer } from "./components/Composer";
 import { DisclosureTriangle } from "./components/DisclosureTriangle";
@@ -282,6 +289,10 @@ const settingsCategories = [
 
 type SettingsCategory = (typeof settingsCategories)[number]["id"];
 
+function clampSidebarWidth(width: number) {
+  return Math.min(320, Math.max(200, width));
+}
+
 function SettingsCategoryIcon({ category }: { category: SettingsCategory }) {
   if (category === "runtime") return <LayoutDashboard aria-hidden="true" />;
   if (category === "sessions") return <ArchiveRestore aria-hidden="true" />;
@@ -301,6 +312,8 @@ export function App() {
   const [workspaceViewBeforeSettings, setWorkspaceViewBeforeSettings] =
     useState<Exclude<WorkspaceView, "settings">>("timeline");
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState(236);
+  const [sidebarResizing, setSidebarResizing] = useState(false);
   const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>("runtime");
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("details");
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -1853,13 +1866,46 @@ export function App() {
     }
   }
 
+  function beginSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    setSidebarResizing(true);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const handleMove = (moveEvent: PointerEvent) => {
+      setSidebarWidth(clampSidebarWidth(startWidth + moveEvent.clientX - startX));
+    };
+    const handleUp = () => {
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+      window.removeEventListener("pointercancel", handleUp);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      setSidebarResizing(false);
+    };
+
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp);
+    window.addEventListener("pointercancel", handleUp);
+  }
+
   return (
     <main
       className="app-shell"
       data-active-view={activeView}
       data-sidebar-open={sidebarOpen}
+      data-sidebar-resizing={sidebarResizing}
       data-inspector-open={inspectorOpen}
-      style={{ "--inspector-width": `${inspectorWidth}px` } as CSSProperties}
+      style={
+        {
+          "--sidebar-width": `${sidebarWidth}px`,
+          "--inspector-width": `${inspectorWidth}px`
+        } as CSSProperties
+      }
     >
       <header className="window-toolbar" data-tauri-drag-region>
         <span className="window-toolbar-panel window-toolbar-panel-left" aria-hidden="true" />
@@ -1927,6 +1973,30 @@ export function App() {
           </button>
         )}
       </header>
+
+      {sidebarOpen && (
+        <div
+          className="sidebar-resize-handle"
+          role="separator"
+          aria-label="Resize sidebar"
+          aria-orientation="vertical"
+          aria-valuemin={200}
+          aria-valuemax={320}
+          aria-valuenow={sidebarWidth}
+          tabIndex={0}
+          onPointerDown={beginSidebarResize}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowLeft") {
+              event.preventDefault();
+              setSidebarWidth((width) => clampSidebarWidth(width - 16));
+            }
+            if (event.key === "ArrowRight") {
+              event.preventDefault();
+              setSidebarWidth((width) => clampSidebarWidth(width + 16));
+            }
+          }}
+        />
+      )}
 
       <Sidebar
         activeView={activeView}
