@@ -143,15 +143,39 @@ pub struct OpenAiCompatibleImageConfig {
     pub timeout_seconds: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageGenerationProtocol {
+    OpenAiImages,
+    DashScopeMultimodal,
+}
+
 impl OpenAiCompatibleImageConfig {
     pub fn images_url(&self) -> String {
-        format!("{}/images/generations", self.base_url.trim_end_matches('/'))
+        let endpoint = self.base_url.trim_end_matches('/');
+        if endpoint.ends_with("/images/generations")
+            || endpoint.ends_with("/api/v1/services/aigc/multimodal-generation/generation")
+        {
+            endpoint.to_string()
+        } else {
+            format!("{endpoint}/images/generations")
+        }
     }
 
     pub fn is_ready(&self) -> bool {
         !self.api_key.trim().is_empty()
             && !self.model.trim().is_empty()
             && !self.base_url.trim().is_empty()
+    }
+
+    fn protocol(&self) -> ImageGenerationProtocol {
+        if self
+            .images_url()
+            .contains("/api/v1/services/aigc/multimodal-generation/generation")
+        {
+            ImageGenerationProtocol::DashScopeMultimodal
+        } else {
+            ImageGenerationProtocol::OpenAiImages
+        }
     }
 }
 
@@ -813,11 +837,21 @@ impl OpenAiCompatibleImageProvider {
             return Err(ModelError::new("image generation prompt is empty"));
         }
 
-        let request_body = build_image_generation_request_json(
-            &self.config.model,
-            &request.prompt,
-            request.size.as_deref(),
-        )?;
+        let protocol = self.config.protocol();
+        let request_body = match protocol {
+            ImageGenerationProtocol::OpenAiImages => build_image_generation_request_json(
+                &self.config.model,
+                &request.prompt,
+                request.size.as_deref(),
+            )?,
+            ImageGenerationProtocol::DashScopeMultimodal => {
+                build_dashscope_image_generation_request_json(
+                    &self.config.model,
+                    &request.prompt,
+                    request.size.as_deref(),
+                )?
+            }
+        };
         let output = execute_curl_cancellable(
             &self.config.images_url(),
             &self.config.api_key,
@@ -889,6 +923,14 @@ impl OpenAiCompatibleImageProvider {
         let mut metadata = request.metadata;
         metadata.insert("model".to_string(), response_model.clone());
         metadata.insert("images".to_string(), images.len().to_string());
+        metadata.insert(
+            "protocol".to_string(),
+            match protocol {
+                ImageGenerationProtocol::OpenAiImages => "openai-images",
+                ImageGenerationProtocol::DashScopeMultimodal => "dashscope-multimodal",
+            }
+            .to_string(),
+        );
         Ok(ImageGenerationResponse {
             model: response_model,
             images,
@@ -992,6 +1034,39 @@ pub fn build_image_generation_request_json(
         .map_err(|error| ModelError::new(format!("failed to encode image request: {error}")))
 }
 
+fn build_dashscope_image_generation_request_json(
+    model: &str,
+    prompt: &str,
+    size: Option<&str>,
+) -> Result<String, ModelError> {
+    if model.trim().is_empty() {
+        return Err(ModelError::new("image generation model is empty"));
+    }
+    if prompt.trim().is_empty() {
+        return Err(ModelError::new("image generation prompt is empty"));
+    }
+
+    let mut parameters = serde_json::json!({
+        "n": 1,
+        "watermark": false
+    });
+    if let Some(size) = size.filter(|value| !value.trim().is_empty()) {
+        parameters["size"] = serde_json::Value::String(size.replace('x', "*"));
+    }
+    let body = serde_json::json!({
+        "model": model,
+        "input": {
+            "messages": [{
+                "role": "user",
+                "content": [{ "text": prompt }]
+            }]
+        },
+        "parameters": parameters
+    });
+    serde_json::to_string(&body)
+        .map_err(|error| ModelError::new(format!("failed to encode image request: {error}")))
+}
+
 fn parse_image_generation_payloads(
     text: &str,
     fallback_model: &str,
@@ -1001,43 +1076,75 @@ fn parse_image_generation_payloads(
     }
     let value: serde_json::Value = serde_json::from_str(text)
         .map_err(|error| ModelError::new(format!("invalid image generation response: {error}")))?;
+    if let Some(message) = value
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .filter(|message| !message.trim().is_empty())
+        .filter(|_| value.get("code").is_some())
+    {
+        return Err(ModelError::new(message));
+    }
     let model = value
         .get("model")
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(fallback_model)
         .to_string();
-    let data = value
-        .get("data")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| ModelError::new("image generation response did not include data"))?;
     let mut payloads = Vec::new();
-    for item in data {
-        let revised_prompt = item
-            .get("revised_prompt")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
-        let payload = if let Some(value) = item
-            .get("b64_json")
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-        {
-            ImagePayload::Base64(value.to_string())
-        } else if let Some(value) = item
-            .get("url")
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-        {
-            ImagePayload::Url(value.to_string())
-        } else {
-            return Err(ModelError::new(
-                "image generation item did not include image data",
-            ));
-        };
-        payloads.push(ParsedImagePayload {
-            payload,
-            revised_prompt,
-        });
+    if let Some(data) = value.get("data").and_then(serde_json::Value::as_array) {
+        for item in data {
+            let revised_prompt = item
+                .get("revised_prompt")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let payload = if let Some(value) = item
+                .get("b64_json")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+            {
+                ImagePayload::Base64(value.to_string())
+            } else if let Some(value) = item
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+            {
+                ImagePayload::Url(value.to_string())
+            } else {
+                return Err(ModelError::new(
+                    "image generation item did not include image data",
+                ));
+            };
+            payloads.push(ParsedImagePayload {
+                payload,
+                revised_prompt,
+            });
+        }
+    } else if let Some(choices) = value
+        .pointer("/output/choices")
+        .and_then(serde_json::Value::as_array)
+    {
+        for content in choices.iter().filter_map(|choice| {
+            choice
+                .pointer("/message/content")
+                .and_then(serde_json::Value::as_array)
+        }) {
+            for item in content {
+                if let Some(url) = item
+                    .get("image")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    payloads.push(ParsedImagePayload {
+                        payload: ImagePayload::Url(url.to_string()),
+                        revised_prompt: None,
+                    });
+                }
+            }
+        }
+    } else {
+        return Err(ModelError::new(
+            "image generation response did not include image data",
+        ));
     }
     if payloads.is_empty() {
         return Err(ModelError::new("image generation returned no images"));
@@ -1912,6 +2019,33 @@ mod tests {
     }
 
     #[test]
+    fn image_url_accepts_a_base_url_or_explicit_endpoint() {
+        let base = OpenAiCompatibleImageConfig {
+            base_url: "https://example.test/v1/".to_string(),
+            api_key: "key".to_string(),
+            model: "image-a".to_string(),
+            timeout_seconds: 10,
+        };
+        let dashscope = OpenAiCompatibleImageConfig {
+            base_url: "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation".to_string(),
+            ..base.clone()
+        };
+
+        assert_eq!(
+            base.images_url(),
+            "https://example.test/v1/images/generations"
+        );
+        assert_eq!(
+            dashscope.images_url(),
+            "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+        );
+        assert_eq!(
+            dashscope.protocol(),
+            ImageGenerationProtocol::DashScopeMultimodal
+        );
+    }
+
+    #[test]
     fn curl_keeps_credentials_off_arguments_and_large_bodies_off_config_stdin() {
         let request_text = format!("{{\"prompt\":\"{}\"}}", "x".repeat(2_000_000));
         let request_body = SensitiveRequestBody::write(&request_text)
@@ -2389,6 +2523,27 @@ mod tests {
     }
 
     #[test]
+    fn dashscope_image_request_uses_multimodal_messages() {
+        let body = build_dashscope_image_generation_request_json(
+            "wan2.7-image-pro",
+            "A blue circle on white",
+            Some("1024x1024"),
+        )
+        .expect("DashScope image body should encode");
+        let value: serde_json::Value =
+            serde_json::from_str(&body).expect("DashScope image body should be json");
+
+        assert_eq!(value["model"], "wan2.7-image-pro");
+        assert_eq!(
+            value["input"]["messages"][0]["content"][0]["text"],
+            "A blue circle on white"
+        );
+        assert_eq!(value["parameters"]["size"], "1024*1024");
+        assert_eq!(value["parameters"]["n"], 1);
+        assert_eq!(value["parameters"]["watermark"], false);
+    }
+
+    #[test]
     fn parses_base64_and_url_image_generation_payloads() {
         let png = b"\x89PNG\r\n\x1a\nfixture";
         let encoded = base64::engine::general_purpose::STANDARD.encode(png);
@@ -2408,6 +2563,28 @@ mod tests {
         assert_eq!(bytes, png);
         assert_eq!(generated_image_mime_type(&bytes), Some("image/png"));
         assert!(matches!(payloads[1].payload, ImagePayload::Url(_)));
+    }
+
+    #[test]
+    fn parses_dashscope_multimodal_image_payloads() {
+        let response = r#"{
+            "output": {
+                "choices": [{
+                    "message": {
+                        "content": [{
+                            "image": "https://example.test/generated.png",
+                            "type": "image"
+                        }]
+                    }
+                }]
+            }
+        }"#;
+        let (model, payloads) = parse_image_generation_payloads(response, "wan2.7-image-pro")
+            .expect("DashScope image payload should parse");
+
+        assert_eq!(model, "wan2.7-image-pro");
+        assert_eq!(payloads.len(), 1);
+        assert!(matches!(payloads[0].payload, ImagePayload::Url(_)));
     }
 
     #[test]

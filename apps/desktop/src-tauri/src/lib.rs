@@ -205,6 +205,7 @@ struct ProviderConfig {
     summarizer_model: String,
     embedding_model: String,
     image_model: String,
+    image_endpoint: String,
     collaboration_policy: String,
     context_window_tokens: u64,
     agent_system_prompt: String,
@@ -278,6 +279,7 @@ impl Default for ProviderConfig {
             summarizer_model: model,
             embedding_model: "text-embedding-3-small".to_string(),
             image_model: String::new(),
+            image_endpoint: String::new(),
             collaboration_policy: "auto_router".to_string(),
             context_window_tokens: 128_000,
             agent_system_prompt: String::new(),
@@ -758,6 +760,7 @@ struct ProviderConfigState {
     summarizer_model: String,
     embedding_model: String,
     image_model: String,
+    image_endpoint: String,
     collaboration_policy: String,
     context_window_tokens: u64,
     agent_system_prompt: String,
@@ -1121,6 +1124,8 @@ struct ProviderConfigInput {
     embedding_model: String,
     #[serde(default)]
     image_model: String,
+    #[serde(default)]
+    image_endpoint: String,
     collaboration_policy: String,
     context_window_tokens: u64,
     agent_system_prompt: String,
@@ -11836,6 +11841,7 @@ fn provider_config_state(config: &ProviderConfig) -> ProviderConfigState {
         summarizer_model: config.summarizer_model.clone(),
         embedding_model: config.embedding_model.clone(),
         image_model: config.image_model.clone(),
+        image_endpoint: config.image_endpoint.clone(),
         collaboration_policy: config.collaboration_policy.clone(),
         context_window_tokens: config.context_window_tokens,
         agent_system_prompt: config.agent_system_prompt.clone(),
@@ -12152,6 +12158,7 @@ fn apply_provider_config_input(config: &mut ProviderConfig, input: ProviderConfi
     config.summarizer_model = normalized_config_value(&input.summarizer_model);
     config.embedding_model = normalized_config_value(&input.embedding_model);
     config.image_model = normalized_config_value(&input.image_model);
+    config.image_endpoint = normalized_config_value(&input.image_endpoint);
     config.collaboration_policy = match input.collaboration_policy.as_str() {
         "single" | "plan_execute_review" | "best_of_n" | "auto_router" => {
             input.collaboration_policy
@@ -12213,6 +12220,7 @@ fn provider_config_from_text(text: &str) -> ProviderConfig {
             "summarizer_model" => config.summarizer_model = value.to_string(),
             "embedding_model" => config.embedding_model = value.to_string(),
             "image_model" => config.image_model = value.to_string(),
+            "image_endpoint" => config.image_endpoint = value.to_string(),
             "collaboration_policy" => config.collaboration_policy = value.to_string(),
             "context_window_tokens" => {
                 config.context_window_tokens = value.parse().unwrap_or(128_000)
@@ -12245,7 +12253,7 @@ fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<(), std::io::
     let mut file = options.open(&path)?;
     file.write_all(
         format!(
-            "base_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nembedding_model={}\nimage_model={}\ncollaboration_policy={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\n",
+            "base_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\ncollaboration_policy={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\n",
             sanitize_config_value(&config.base_url),
             sanitize_config_value(&config.api_key),
             sanitize_config_value(&config.model),
@@ -12256,6 +12264,7 @@ fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<(), std::io::
             sanitize_config_value(&config.summarizer_model),
             sanitize_config_value(&config.embedding_model),
             sanitize_config_value(&config.image_model),
+            sanitize_config_value(&config.image_endpoint),
             sanitize_config_value(&config.collaboration_policy),
             config.context_window_tokens,
             config_hex_encode(&config.agent_system_prompt)
@@ -13049,9 +13058,14 @@ fn tool_registry_for_state(
         .lock()
         .map_err(|error| format!("provider config lock poisoned: {error}"))?
         .clone();
+    let image_endpoint = if provider_config.image_endpoint.trim().is_empty() {
+        provider_config.base_url.clone()
+    } else {
+        provider_config.image_endpoint.clone()
+    };
     let image_generation_config = (!provider_config.image_model.trim().is_empty()).then_some(
         ImageGenerationConfig {
-            base_url: provider_config.base_url,
+            base_url: image_endpoint,
             api_key: provider_config.api_key,
             model: provider_config.image_model,
             timeout_seconds: 300,
@@ -14056,6 +14070,7 @@ mod tests {
                 summarizer_model: "".to_string(),
                 embedding_model: "".to_string(),
                 image_model: "image-model-a".to_string(),
+                image_endpoint: "https://images.example.test/v1".to_string(),
                 collaboration_policy: "auto_router".to_string(),
                 context_window_tokens: 128_000,
                 agent_system_prompt: "Be concise.\nUse Chinese when asked.".to_string(),
@@ -14069,6 +14084,7 @@ mod tests {
         assert_eq!(config.context_window_tokens, 128_000);
         assert_eq!(config.agent_system_prompt, "Be concise.\nUse Chinese when asked.");
         assert_eq!(config.image_model, "image-model-a");
+        assert_eq!(config.image_endpoint, "https://images.example.test/v1");
     }
 
     #[test]
