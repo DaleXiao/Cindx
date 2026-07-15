@@ -104,7 +104,7 @@ type ThreadRow =
 
 const MIN_MINIMAP_MARKERS = 2;
 const MAX_MINIMAP_MARKERS = 32;
-const MINIMAP_MARKER_GAP = 14;
+const MINIMAP_MARKER_GAP = 12;
 const threadTimeFormatter = new Intl.DateTimeFormat(undefined, {
   hour: "2-digit",
   minute: "2-digit"

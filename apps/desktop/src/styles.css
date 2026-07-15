@@ -4123,8 +4123,10 @@ textarea::placeholder {
   right: 2px;
   bottom: 44px;
   left: 2px;
-  max-height: min(640px, calc(100vh - var(--titlebar-height) - 44px));
-  overflow: auto;
+  display: grid;
+  height: min(420px, calc(100vh - var(--titlebar-height) - 72px));
+  grid-template-rows: auto auto minmax(0, 1fr);
+  overflow: hidden;
   background: rgba(252, 252, 252, 0.98);
   border: 0.5px solid #e4e4e4;
   border-radius: var(--radius-md) var(--radius-md) 0 0;
@@ -4152,8 +4154,10 @@ textarea::placeholder {
 
 .inspector-panel {
   display: grid;
+  min-height: 0;
   align-content: start;
   gap: 0;
+  overflow: auto;
   padding: 0 14px 24px;
 }
 
