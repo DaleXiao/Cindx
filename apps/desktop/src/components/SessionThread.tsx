@@ -77,7 +77,7 @@ type ThreadScrollMetrics = {
 };
 
 function threadMessageId(message: ChatMessageView, index: number) {
-  return `message-${message.timestampMs}-${index}`;
+  return `message-${message.role}-${index}`;
 }
 
 type MinimapMarker = {
@@ -838,15 +838,11 @@ export function SessionThread({
     return () => window.clearTimeout(timeout);
   }, [hoveredMinimapIndex, minimapDragging]);
 
-  useEffect(() => {
-    const frame = requestAnimationFrame(() => {
-      const thread = threadRef.current;
-      if (thread) {
-        thread.scrollTop = thread.scrollHeight;
-        syncScrollMetrics();
-      }
-    });
-    return () => cancelAnimationFrame(frame);
+  useLayoutEffect(() => {
+    const thread = threadRef.current;
+    if (!thread) return;
+    thread.scrollTop = thread.scrollHeight;
+    syncScrollMetrics();
   }, [items.length, status, streamAnswer, syncScrollMetrics]);
 
   function minimapIndexFromPointer(clientY: number) {
