@@ -39,6 +39,12 @@ assert(
 assert(css.includes('.app-shell[data-inspector-open="false"]'), "Inspector must support a collapsed layout");
 assert(css.includes('.app-shell[data-sidebar-open="false"]'), "Sidebar must support a collapsed layout");
 assert(
+  appSource.includes("data-inspector-resizing={inspectorResizing}") &&
+    appSource.includes("onResizeStart={() => setInspectorResizing(true)}") &&
+    css.includes('.app-shell[data-inspector-resizing="true"]'),
+  "Inspector resizing must keep the panel grid and divider synchronized"
+);
+assert(
   css.includes(".app-shell::before") && css.includes(".app-shell::after"),
   "Pane dividers must extend through the titlebar"
 );

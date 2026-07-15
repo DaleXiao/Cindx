@@ -246,6 +246,73 @@ function latestTraceStep(turns: { steps: AgentTraceStepView[] }[]) {
   return steps.length > 0 ? steps[steps.length - 1] : null;
 }
 
+function agentStateUnchanged(current: AgentState | null, next: AgentState) {
+  if (!current) return false;
+  const currentMessage = current.messages[current.messages.length - 1];
+  const nextMessage = next.messages[next.messages.length - 1];
+  const currentTimeline = current.timeline[current.timeline.length - 1];
+  const nextTimeline = next.timeline[next.timeline.length - 1];
+  const currentApproval = current.pendingApprovals[current.pendingApprovals.length - 1];
+  const nextApproval = next.pendingApprovals[next.pendingApprovals.length - 1];
+
+  return (
+    current.taskId === next.taskId &&
+    current.projectId === next.projectId &&
+    current.projectName === next.projectName &&
+    current.sessionId === next.sessionId &&
+    current.sessionName === next.sessionName &&
+    current.status === next.status &&
+    current.turnCount === next.turnCount &&
+    current.maxTurns === next.maxTurns &&
+    current.transcriptMessages === next.transcriptMessages &&
+    current.contextTokensUsed === next.contextTokensUsed &&
+    current.contextWindowTokens === next.contextWindowTokens &&
+    current.contextRemainingPercent === next.contextRemainingPercent &&
+    current.contextUsageEstimated === next.contextUsageEstimated &&
+    current.runStartedAtMs === next.runStartedAtMs &&
+    current.runBudgetMs === next.runBudgetMs &&
+    current.runModelCallBudget === next.runModelCallBudget &&
+    current.runToolCallBudget === next.runToolCallBudget &&
+    current.canCancel === next.canCancel &&
+    current.canRetry === next.canRetry &&
+    current.canContinue === next.canContinue &&
+    current.latestAnswer === next.latestAnswer &&
+    current.lastError === next.lastError &&
+    current.messages.length === next.messages.length &&
+    current.timeline.length === next.timeline.length &&
+    current.pendingApprovals.length === next.pendingApprovals.length &&
+    currentMessage?.role === nextMessage?.role &&
+    currentMessage?.content === nextMessage?.content &&
+    currentMessage?.timestampMs === nextMessage?.timestampMs &&
+    currentTimeline?.label === nextTimeline?.label &&
+    currentTimeline?.detail === nextTimeline?.detail &&
+    currentTimeline?.state === nextTimeline?.state &&
+    currentTimeline?.timestampMs === nextTimeline?.timestampMs &&
+    currentApproval?.requestId === nextApproval?.requestId &&
+    currentApproval?.input === nextApproval?.input
+  );
+}
+
+function agentTraceUnchanged(current: AgentTraceState | null, next: AgentTraceState) {
+  if (!current) return false;
+  const currentStep = latestTraceStep(current.turns);
+  const nextStep = latestTraceStep(next.turns);
+  return (
+    current.taskId === next.taskId &&
+    current.traceId === next.traceId &&
+    current.runId === next.runId &&
+    current.status === next.status &&
+    current.turnCount === next.turnCount &&
+    current.stepCount === next.stepCount &&
+    current.finishedAtMs === next.finishedAtMs &&
+    current.lastError === next.lastError &&
+    currentStep?.id === nextStep?.id &&
+    currentStep?.status === nextStep?.status &&
+    currentStep?.finishedAtMs === nextStep?.finishedAtMs &&
+    currentStep?.detail === nextStep?.detail
+  );
+}
+
 function ModelSelect({
   label,
   value,
@@ -319,6 +386,7 @@ export function App() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorOpenBeforeSettings, setInspectorOpenBeforeSettings] = useState(false);
   const [inspectorWidth, setInspectorWidth] = useState(320);
+  const [inspectorResizing, setInspectorResizing] = useState(false);
   const [debugAlwaysVisible, setDebugAlwaysVisible] = useState(loadDebugAlwaysVisible);
   const [phase3, setPhase3] = useState<Phase3State | null>(null);
   const [phase4, setPhase4] = useState<Phase4State | null>(null);
@@ -594,8 +662,12 @@ export function App() {
         ]);
         if (!disposed && activeSessionIdRef.current === sessionId) {
           acknowledgeOptimisticUserMessage(sessionId, next.messages);
-          setAgentState(next);
-          if (nextTrace) setAgentTraceState(nextTrace);
+          setAgentState((current) => (agentStateUnchanged(current, next) ? current : next));
+          if (nextTrace) {
+            setAgentTraceState((current) =>
+              agentTraceUnchanged(current, nextTrace) ? current : nextTrace
+            );
+          }
           updateSessionStatus(sessionId, next.status);
         }
       } catch (error) {
@@ -823,16 +895,23 @@ export function App() {
     if (isTerminal) trackedSessionTaskIdsRef.current.delete(sessionId);
 
     setSessionStatusOverrides((current) => {
-      const next = { ...current };
-      if (!tracked) delete next[sessionId];
-      else if (status === "waiting_for_permission") next[sessionId] = "Review";
-      else if (status === "running") next[sessionId] = "Working";
-      else if (activeSessionIdRef.current === sessionId) delete next[sessionId];
-      else if (status === "completed") next[sessionId] = "Completed";
-      else if (status === "failed") next[sessionId] = "Blocked";
-      else if (status === "cancelled") next[sessionId] = "Attention";
-      else delete next[sessionId];
-      return next;
+      let nextStatus: string | undefined;
+      if (tracked && status === "waiting_for_permission") nextStatus = "Review";
+      else if (tracked && status === "running") nextStatus = "Working";
+      else if (tracked && activeSessionIdRef.current !== sessionId) {
+        if (status === "completed") nextStatus = "Completed";
+        else if (status === "failed") nextStatus = "Blocked";
+        else if (status === "cancelled") nextStatus = "Attention";
+      }
+
+      if (nextStatus === undefined) {
+        if (!(sessionId in current)) return current;
+        const next = { ...current };
+        delete next[sessionId];
+        return next;
+      }
+      if (current[sessionId] === nextStatus) return current;
+      return { ...current, [sessionId]: nextStatus };
     });
   }
 
@@ -1900,6 +1979,7 @@ export function App() {
       data-sidebar-open={sidebarOpen}
       data-sidebar-resizing={sidebarResizing}
       data-inspector-open={inspectorOpen}
+      data-inspector-resizing={inspectorResizing}
       style={
         {
           "--sidebar-width": `${sidebarWidth}px`,
@@ -3579,6 +3659,8 @@ export function App() {
         onTraceExport={() => void handleExportAgentTrace()}
         traceBusy={traceBusy}
         onWidthChange={setInspectorWidth}
+        onResizeStart={() => setInspectorResizing(true)}
+        onResizeEnd={() => setInspectorResizing(false)}
         onOutputCreated={() => {
           if (activeView === "settings") setInspectorOpenBeforeSettings(true);
           else setInspectorOpen(true);

@@ -180,6 +180,13 @@ assert(
   ),
   "The macOS titlebar must hide its title and host the pane controls"
 );
+assert(
+  tauriConfig.app.windows.every((window) => window.visible === false) &&
+    rustLib.includes(".on_page_load(|webview, payload|") &&
+    rustLib.includes("PageLoadEvent::Finished") &&
+    rustLib.includes("webview.window().show()"),
+  "The native window must wait for the first styled webview frame before appearing"
+);
 const titlebarHeight = 46;
 // This is the user-confirmed macOS alignment; do not retune it indirectly.
 const confirmedMacOSTrafficLightY = 25;
@@ -684,8 +691,8 @@ assert(
     styles.includes(".session-name") &&
     appSource.includes("trackedSessionTaskIdsRef") &&
     appSource.includes("markSessionTaskStarted(sessionId)") &&
-    appSource.includes('next[sessionId] = "Completed"') &&
-    appSource.includes('next[sessionId] = "Blocked"'),
+    appSource.includes('nextStatus = "Completed"') &&
+    appSource.includes('nextStatus = "Blocked"'),
   "Sidebar rows must show normal-weight titles and only icon-only background task state"
 );
 assert(
@@ -1068,6 +1075,18 @@ assert(
     ciWorkflow.includes("Probe clean-machine startup") &&
     !rustLib.includes('workspace_root().join(".cindx").join("state.sqlite3")'),
   "Installed apps must use user-scoped data and survive persistent-state failures"
+);
+assert(
+  rustLib.includes("EVENT_REDACTION_MARKER_FILE") &&
+    rustLib.includes("event_redaction_pending && persistent_store") &&
+    rustLib.includes("event_redaction_marker_records_completed_migration"),
+  "Legacy event redaction must be a versioned one-time startup migration"
+);
+assert(
+  appSource.includes("agentStateUnchanged") &&
+    appSource.includes("agentTraceUnchanged") &&
+    appSource.includes("if (current[sessionId] === nextStatus) return current"),
+  "Agent polling must preserve unchanged React state references"
 );
 
 const nonGrayColors = [...styles.matchAll(/#([0-9a-fA-F]{6})(?![0-9a-fA-F])/g)]

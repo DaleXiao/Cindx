@@ -84,6 +84,7 @@ const CONTEXT_RECENT_MAX_TOKENS: u64 = 48_000;
 const CONTEXT_RECENT_MAX_MESSAGES: usize = 32;
 const CONTEXT_RESTORE_MAX_CHARS: usize = 32_000;
 const CONTEXT_MEMORY_MAX_ITEMS: usize = 12;
+const EVENT_REDACTION_MARKER_FILE: &str = "events-redaction-v1.complete";
 const LEGACY_AGENT_SYSTEM_PROMPT: &str = "You are Cindx, a desktop-first assistant. Work carefully, be direct, and ask for clarification when the task is ambiguous.";
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -5435,21 +5436,33 @@ pub fn run() {
         std::env::consts::ARCH,
         app_data_root().display()
     ));
-    let mut store = match open_app_store() {
-        Ok(store) => store,
+    let data_root = app_data_root();
+    let event_redaction_pending = !event_redaction_complete(&data_root);
+    let (mut store, persistent_store) = match open_app_store() {
+        Ok(store) => (store, true),
         Err(error) => {
             append_startup_log(&format!(
                 "persistent state unavailable; using in-memory state: {error}"
             ));
-            SqliteStore::in_memory().unwrap_or_else(|memory_error| {
-                panic!(
-                    "failed to open persistent state ({error}) and in-memory state ({memory_error})"
-                )
-            })
+            (
+                SqliteStore::in_memory().unwrap_or_else(|memory_error| {
+                    panic!(
+                        "failed to open persistent state ({error}) and in-memory state ({memory_error})"
+                    )
+                }),
+                false,
+            )
         }
     };
-    if let Err(error) = redact_persisted_events(&mut store) {
-        eprintln!("failed to redact persisted Cindx history: {error}");
+    if event_redaction_pending && persistent_store {
+        match redact_persisted_events(&mut store) {
+            Ok(_) => {
+                if let Err(error) = mark_event_redaction_complete(&data_root) {
+                    append_startup_log(&format!("failed to mark event redaction complete: {error}"));
+                }
+            }
+            Err(error) => eprintln!("failed to redact persisted Cindx history: {error}"),
+        }
     }
     if let Err(error) = reconcile_interrupted_agent_runs(&mut store) {
         append_startup_log(&format!("interrupted run recovery failed: {error}"));
@@ -5495,6 +5508,11 @@ pub fn run() {
             agent_run_controls: Mutex::new(BTreeMap::new()),
             allow_exit: AtomicBool::new(false),
             quit_prompt_active: AtomicBool::new(false),
+        })
+        .on_page_load(|webview, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                let _ = webview.window().show();
+            }
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -11033,6 +11051,27 @@ fn redact_persisted_events(store: &mut SqliteStore) -> Result<usize, StorageErro
     Ok(updated)
 }
 
+fn event_redaction_marker_path(root: &Path) -> PathBuf {
+    root.join(EVENT_REDACTION_MARKER_FILE)
+}
+
+fn event_redaction_complete(root: &Path) -> bool {
+    event_redaction_marker_path(root).is_file()
+}
+
+fn mark_event_redaction_complete(root: &Path) -> Result<(), String> {
+    fs::create_dir_all(root)
+        .map_err(|error| format!("failed to create event redaction marker directory: {error}"))?;
+    secure_directory(root)
+        .map_err(|error| format!("failed to secure event redaction marker directory: {error}"))?;
+    let path = event_redaction_marker_path(root);
+    fs::write(&path, b"events-redaction-v1\n")
+        .map_err(|error| format!("failed to write event redaction marker: {error}"))?;
+    secure_private_file(&path)
+        .map_err(|error| format!("failed to secure event redaction marker: {error}"))?;
+    Ok(())
+}
+
 fn redact_existing_text_artifact(path: &Path) -> Result<bool, String> {
     if !path.exists() {
         return Ok(false);
@@ -14267,6 +14306,22 @@ mod tests {
         assert!(!rendered.contains("1234567890abcdef"));
         assert!(!rendered.contains("old-secret"));
         assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn event_redaction_marker_records_completed_migration() {
+        let root = temp_test_root("cindx-event-redaction-marker");
+        assert!(!event_redaction_complete(&root));
+
+        mark_event_redaction_complete(&root).expect("marker should persist");
+
+        assert!(event_redaction_complete(&root));
+        assert_eq!(
+            fs::read_to_string(event_redaction_marker_path(&root))
+                .expect("marker should be readable"),
+            "events-redaction-v1\n"
+        );
+        fs::remove_dir_all(root).expect("marker fixture should be removed");
     }
 
     #[test]
