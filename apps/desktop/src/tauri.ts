@@ -419,6 +419,7 @@ export type AgentState = {
   runToolCallBudget: number;
   canCancel: boolean;
   canRetry: boolean;
+  canContinue: boolean;
   timeline: TimelineEntry[];
   messages: ChatMessageView[];
   pendingApprovals: ToolApprovalView[];
@@ -759,6 +760,7 @@ let browserAgentState: AgentState = {
   runToolCallBudget: 0,
   canCancel: false,
   canRetry: false,
+  canContinue: false,
   timeline: [],
   messages: [],
   pendingApprovals: [],
@@ -1616,6 +1618,7 @@ export async function runAgentTask(
       status: "failed",
       canCancel: false,
       canRetry: true,
+      canContinue: false,
       timeline: [
         ...browserAgentState.timeline,
         {
@@ -1642,6 +1645,7 @@ export async function cancelAgentTask(sessionId: string): Promise<AgentState> {
       status: "cancelled",
       canCancel: false,
       canRetry: true,
+      canContinue: false,
       pendingApprovals: [],
       timeline: [
         ...browserAgentState.timeline,
@@ -1669,6 +1673,7 @@ export async function retryAgentTask(sessionId: string): Promise<AgentState> {
       status: "failed",
       canCancel: false,
       canRetry: true,
+      canContinue: false,
       timeline: [
         ...browserAgentState.timeline,
         {
@@ -1703,6 +1708,7 @@ export async function resolveAgentPermission(
       status: browserAgentState.pendingApprovals.length > 1 ? "waiting_for_permission" : "running",
       canCancel: true,
       canRetry: false,
+      canContinue: false,
       pendingApprovals: browserAgentState.pendingApprovals.filter(
         (candidate) => candidate.requestId !== requestId
       ),

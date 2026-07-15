@@ -52,10 +52,10 @@ impl RunBudget {
                 max_identical_actions: 3,
             },
             "pro" => Self {
-                max_duration: Duration::from_secs(15 * 60),
-                max_model_calls: 40,
-                max_tool_calls: 72,
-                no_progress_timeout: Duration::from_secs(3 * 60),
+                max_duration: Duration::from_secs(60 * 60),
+                max_model_calls: 96,
+                max_tool_calls: 180,
+                no_progress_timeout: Duration::from_secs(5 * 60),
                 max_identical_actions: 4,
             },
             _ => Self {
@@ -320,6 +320,15 @@ mod tests {
             no_progress_timeout: Duration::from_millis(25),
             max_identical_actions: 2,
         }
+    }
+
+    #[test]
+    fn pro_budget_allows_a_long_running_segment() {
+        let budget = RunBudget::for_effort("pro");
+        assert_eq!(budget.max_duration, Duration::from_secs(60 * 60));
+        assert_eq!(budget.max_model_calls, 96);
+        assert_eq!(budget.max_tool_calls, 180);
+        assert_eq!(budget.no_progress_timeout, Duration::from_secs(5 * 60));
     }
 
     #[test]

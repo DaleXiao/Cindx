@@ -446,6 +446,13 @@ assert(
   "Composer must not submit macOS IME candidate-selection keystrokes"
 );
 assert(
+  composerSource.includes("onPaste={(event) =>") &&
+    composerSource.includes("event.clipboardData.items") &&
+    composerSource.includes('item.type.startsWith("image/")') &&
+    composerSource.includes("onPickAttachments(pastedImages)"),
+  "Composer must stage images pasted from the clipboard"
+);
+assert(
   sessionThreadSource.includes("thread.scrollTop = thread.scrollHeight"),
   "Session thread must follow the latest output"
 );
@@ -544,6 +551,8 @@ assert(
   composerSource.includes("composer-stop-icon") &&
     composerSource.includes("canRetryError") &&
     composerSource.includes("RotateCcw") &&
+    composerSource.includes("canContinueRun") &&
+    composerSource.includes("Run paused at a safety checkpoint.") &&
     composerSource.includes('aria-label="Dismiss error"') &&
     composerSource.includes("onDismissError") &&
     composerSource.includes("Send") &&
@@ -552,10 +561,19 @@ assert(
   "Send and stop must share the primary control while errors expose retry and dismiss actions"
 );
 assert(
+  rustLib.includes("pause_agent_loop_for_control_stop") &&
+    rustLib.includes("resume_suspended_agent_run") &&
+    rustLib.includes("MAX_AGENT_MODEL_TRANSPORT_ATTEMPTS") &&
+    rustLib.includes("is_transient_model_transport_error") &&
+    rustLib.includes('"continuation_available".to_string()') &&
+    tauriBridge.includes("canContinue: boolean"),
+  "Safety-budget stops must retain resumable state and expose a continuation action"
+);
+assert(
   composerSource.includes('className="composer-toolbar"') &&
     composerSource.includes('className="composer-toolbar-actions"') &&
-    styles.includes("width: 38px;") &&
-    styles.includes("height: 38px;") &&
+    styles.includes("width: 36px;") &&
+    styles.includes("height: 36px;") &&
     styles.includes("border-radius: var(--radius-round);") &&
     /\.composer-primary-button\.stop:hover \{[\s\S]*?background: #e05b5b;[\s\S]*?filter: none;/.test(styles) &&
     styles.includes('.composer-primary-button.stop:hover .composer-working-ring'),

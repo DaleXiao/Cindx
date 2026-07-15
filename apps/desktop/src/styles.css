@@ -2135,7 +2135,7 @@ details[open] > summary .disclosure-triangle {
 
 .composer-toolbar {
   display: flex;
-  min-height: 44px;
+  min-height: 42px;
   align-items: flex-end;
   gap: 8px;
   margin-top: auto;
@@ -2155,8 +2155,8 @@ details[open] > summary .disclosure-triangle {
 
 .composer-attach-button {
   display: grid;
-  width: 38px;
-  height: 38px;
+  width: 36px;
+  height: 36px;
   padding: 0;
   color: #555555;
   background: #f3f3f3;
@@ -2184,7 +2184,7 @@ details[open] > summary .disclosure-triangle {
 .composer-effort-control {
   position: relative;
   width: 104px;
-  height: 38px;
+  height: 36px;
   overflow: hidden;
   color: #454545;
   background: #f3f3f3;
@@ -2208,7 +2208,7 @@ details[open] > summary .disclosure-triangle {
 
 .composer-effort-control > svg {
   position: absolute;
-  top: 13px;
+  top: 12px;
   right: 10px;
   width: 12px;
   height: 12px;
@@ -2320,9 +2320,9 @@ textarea::placeholder {
 }
 
 .composer-primary-button {
-  width: 38px;
-  height: 38px;
-  min-height: 38px;
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
   padding: 0;
   border-radius: var(--radius-round);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
@@ -2535,6 +2535,43 @@ textarea::placeholder {
 .composer-error .composer-error-dismiss:hover {
   color: #111111;
   background: #e8e8e8;
+}
+
+.composer-continuation {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 9px;
+  color: #4b4b4b;
+  background: #f6f6f6;
+  border-left: 2px solid #9b9b9b;
+  font-size: 11px;
+}
+
+.composer-continuation button {
+  display: inline-flex;
+  min-height: 24px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  color: #333333;
+  background: #ffffff;
+  border: 1px solid #cfcfcf;
+  border-radius: var(--radius-md);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.composer-continuation button:hover {
+  background: #eeeeee;
+}
+
+.composer-continuation button svg {
+  width: 11px;
+  height: 11px;
 }
 
 /* Trace */
