@@ -23,6 +23,12 @@ assert(
 );
 assert(css.includes("@media (max-width: 1180px)"), "Compact desktop breakpoint is missing");
 assert(css.includes('position: fixed;\n    z-index: 20;'), "Compact inspector must become an overlay");
+assert(
+  /@media \(max-width: 1180px\)[\s\S]*?\.window-workspace-header \{[\s\S]*?right: var\(--inspector-layout-width\);/.test(
+    css
+  ),
+  "Compact titlebar must preserve the inspector surface above the overlay"
+);
 assert(css.includes('.app-shell[data-inspector-open="false"]'), "Inspector must support a collapsed layout");
 assert(css.includes('.app-shell[data-sidebar-open="false"]'), "Sidebar must support a collapsed layout");
 assert(

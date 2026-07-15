@@ -4412,8 +4412,7 @@ textarea::placeholder {
 
   .window-workspace-header {
     left: 220px;
-    right: 0;
-    padding-right: 48px;
+    right: var(--inspector-layout-width);
   }
 
   .window-toolbar::before {
