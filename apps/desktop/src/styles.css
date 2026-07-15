@@ -3754,6 +3754,31 @@ textarea::placeholder {
   border-bottom: 1px solid var(--border);
 }
 
+.inspector-debug-session {
+  display: grid;
+  min-height: 36px;
+  grid-template-columns: auto minmax(0, 1fr) 26px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.inspector-debug-session > span {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.inspector-debug-session code {
+  min-width: 0;
+  overflow: hidden;
+  color: #444444;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .inspector-tab {
   width: 100%;
   min-width: 0;

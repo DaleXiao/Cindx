@@ -760,7 +760,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         ProviderCapabilities {
             supports_streaming: true,
             supports_tools: true,
-            supports_vision: true,
+            supports_vision: model_supports_vision_content(&self.config.model),
             supports_embeddings: true,
         }
     }
@@ -890,7 +890,7 @@ fn build_chat_request_json_with_tools_and_output_limit(
             _ => format!(
                 "{{\"role\":\"{}\",\"content\":{}}}",
                 json_escape(message_role_to_str(&message.role)),
-                message_content_json(message)
+                message_content_json(model, message)
             ),
         })
         .collect::<Vec<_>>();
@@ -921,10 +921,19 @@ fn build_chat_request_json_with_tools_and_output_limit(
     ))
 }
 
-fn message_content_json(message: &Message) -> String {
+fn message_content_json(model: &str, message: &Message) -> String {
     let Some(paths) = message.metadata.get("image_paths") else {
         return format!("\"{}\"", json_escape(&message.content));
     };
+    if !model_supports_vision_content(model) {
+        return format!(
+            "\"{}\"",
+            json_escape(&format!(
+                "{}\n\n[Image attachment omitted because the selected model does not support vision.]",
+                message.content
+            ))
+        );
+    }
     let images = paths
         .lines()
         .filter_map(image_data_url)
@@ -943,6 +952,22 @@ fn message_content_json(message: &Message) -> String {
         )
     }));
     format!("[{}]", parts.join(","))
+}
+
+fn model_supports_vision_content(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase().replace('_', "-");
+    model.contains("vision")
+        || model.contains("-vl")
+        || model.contains("omni")
+        || model.contains("pixtral")
+        || model.contains("llava")
+        || model.contains("glm-4v")
+        || model.starts_with("gpt-4o")
+        || model.starts_with("gpt-4.1")
+        || model.starts_with("gpt-5")
+        || model.starts_with("gemini")
+        || model.starts_with("claude-3")
+        || model.starts_with("claude-4")
 }
 
 fn image_data_url(value: &str) -> Option<String> {
@@ -1723,7 +1748,7 @@ mod tests {
             .expect("fixture directory should write");
         fs::write(&path, [0x89, b'P', b'N', b'G']).expect("image fixture should write");
         let body = build_chat_request_json(
-            "model-a",
+            "qwen-vl-max",
             &[Message {
                 role: MessageRole::User,
                 content: "Inspect this screenshot".to_string(),
@@ -1739,6 +1764,30 @@ mod tests {
         assert!(body.contains("\"type\":\"image_url\""));
         assert!(body.contains("data:image/png;base64,"));
         assert!(body.contains("Inspect this screenshot"));
+    }
+
+    #[test]
+    fn request_json_omits_image_parts_for_text_only_models() {
+        let body = build_chat_request_json(
+            "qwen3.7-max",
+            &[Message {
+                role: MessageRole::User,
+                content: "Inspect this screenshot".to_string(),
+                metadata: [(
+                    "image_paths".to_string(),
+                    "/missing/.cindx/vision.png".to_string(),
+                )]
+                .into_iter()
+                .collect(),
+            }],
+            false,
+        )
+        .expect("body should encode");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("valid request JSON");
+
+        assert!(value["messages"][0]["content"].is_string());
+        assert!(!body.contains("\"type\":\"image_url\""));
+        assert!(body.contains("selected model does not support vision"));
     }
 
     #[test]
@@ -2059,7 +2108,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_capabilities_include_embeddings() {
+    fn provider_capabilities_follow_the_selected_model() {
         let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
             base_url: "https://example.test/v1".to_string(),
             api_key: "key".to_string(),
@@ -2070,5 +2119,15 @@ mod tests {
 
         assert!(provider.capabilities().supports_embeddings);
         assert!(provider.capabilities().supports_tools);
+        assert!(!provider.capabilities().supports_vision);
+
+        let vision_provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url: "https://example.test/v1".to_string(),
+            api_key: "key".to_string(),
+            model: "qwen-vl-max".to_string(),
+            embedding_model: "embed-a".to_string(),
+            timeout_seconds: 10,
+        });
+        assert!(vision_provider.capabilities().supports_vision);
     }
 }

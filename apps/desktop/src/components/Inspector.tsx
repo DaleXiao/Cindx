@@ -1,7 +1,9 @@
 import {
   Activity,
   Bug,
+  Check,
   Clock3,
+  Copy,
   Database,
   ExternalLink,
   File,
@@ -21,6 +23,7 @@ import { createPortal } from "react-dom";
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type PointerEvent as ReactPointerEvent
 } from "react";
@@ -228,6 +231,10 @@ export function Inspector({
   const [outputPreviewFullscreen, setOutputPreviewFullscreen] = useState(false);
   const [openingOutputPath, setOpeningOutputPath] = useState<string | null>(null);
   const [outputActionError, setOutputActionError] = useState<string | null>(null);
+  const [sessionCopyState, setSessionCopyState] = useState<
+    "idle" | "copied" | "failed"
+  >("idle");
+  const sessionCopyTimerRef = useRef<number | null>(null);
   const reviewTotal = reviewCounts.agent + reviewCounts.tool + reviewCounts.browser;
   const hasArtifacts = Boolean(ragAnswer || ragSources.length || browserObservations.length || toolResults.length);
   const hasContext = Boolean(
@@ -268,6 +275,19 @@ export function Inspector({
     setSelectedOutputPath(null);
     setOutputPreviewFullscreen(false);
     setOutputActionError(null);
+  }, [sessionId]);
+
+  useEffect(() => {
+    setSessionCopyState("idle");
+    if (sessionCopyTimerRef.current !== null) {
+      window.clearTimeout(sessionCopyTimerRef.current);
+      sessionCopyTimerRef.current = null;
+    }
+    return () => {
+      if (sessionCopyTimerRef.current !== null) {
+        window.clearTimeout(sessionCopyTimerRef.current);
+      }
+    };
   }, [sessionId]);
 
   useEffect(() => {
@@ -327,6 +347,23 @@ export function Inspector({
     } finally {
       setOpeningOutputPath(null);
     }
+  }
+
+  async function handleCopySessionId() {
+    if (!sessionId) return;
+    if (sessionCopyTimerRef.current !== null) {
+      window.clearTimeout(sessionCopyTimerRef.current);
+    }
+    try {
+      await navigator.clipboard.writeText(sessionId);
+      setSessionCopyState("copied");
+    } catch {
+      setSessionCopyState("failed");
+    }
+    sessionCopyTimerRef.current = window.setTimeout(() => {
+      setSessionCopyState("idle");
+      sessionCopyTimerRef.current = null;
+    }, 1600);
   }
 
   function beginResize(event: ReactPointerEvent<HTMLDivElement>) {
@@ -480,6 +517,26 @@ export function Inspector({
           id="inspector-debug-panel"
           aria-hidden={!debugOpen}
         >
+          <div className="inspector-debug-session">
+            <span>Session ID</span>
+            <code title={sessionId ?? "No active session"}>
+              {sessionId ?? "No active session"}
+            </code>
+            <button
+              className="icon-button quiet"
+              type="button"
+              disabled={!sessionId}
+              aria-label="Copy session ID"
+              title={sessionCopyState === "copied" ? "Copied" : "Copy session ID"}
+              onClick={() => void handleCopySessionId()}
+            >
+              {sessionCopyState === "copied" ? (
+                <Check aria-hidden="true" />
+              ) : (
+                <Copy aria-hidden="true" />
+              )}
+            </button>
+          </div>
           <nav className="inspector-tabs" aria-label="Debug views" role="tablist">
               {(["trace", "details", "artifacts", "context"] as InspectorTab[]).map((item, index, tabs) => (
                 <button
@@ -834,6 +891,27 @@ export function Inspector({
       </section>
       {outputPreviewFullscreen && outputPreview
         ? createPortal(outputPreview, document.body)
+        : null}
+      {sessionCopyState !== "idle"
+        ? createPortal(
+            <div
+              className="clipboard-toast"
+              data-failed={sessionCopyState === "failed"}
+              role="status"
+            >
+              {sessionCopyState === "failed" ? (
+                <TriangleAlert aria-hidden="true" />
+              ) : (
+                <Check aria-hidden="true" />
+              )}
+              <span>
+                {sessionCopyState === "failed"
+                  ? "Could not copy session ID"
+                  : "Session ID copied"}
+              </span>
+            </div>,
+            document.body
+          )
         : null}
     </aside>
   );
