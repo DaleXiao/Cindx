@@ -50,6 +50,7 @@ import {
   AgentEffort,
   AgentTraceState,
   AgentTraceStepView,
+  ChatMessageView,
   answerWithRag,
   archiveSession,
   cancelAgentTask,
@@ -130,6 +131,28 @@ import {
 
 const appIconUrl = new URL("../src-tauri/icons/icon.png", import.meta.url).href;
 const DEBUG_ALWAYS_VISIBLE_STORAGE_KEY = "cindx.debug.always-visible";
+
+function containsOptimisticUserMessage(
+  messages: ChatMessageView[],
+  optimistic: ChatMessageView
+) {
+  return messages.some(
+    (message) =>
+      message.role === "user" &&
+      message.content === optimistic.content &&
+      message.timestampMs >= optimistic.timestampMs - 1_000
+  );
+}
+
+function messagesWithOptimisticUserMessage(
+  messages: ChatMessageView[],
+  optimistic: ChatMessageView | undefined
+) {
+  if (!optimistic || containsOptimisticUserMessage(messages, optimistic)) return messages;
+  return [...messages, optimistic].sort(
+    (left, right) => left.timestampMs - right.timestampMs
+  );
+}
 
 function loadDebugAlwaysVisible() {
   if (typeof window === "undefined") return false;
@@ -363,6 +386,7 @@ export function App() {
   const sessionSelectionQueueRef = useRef<Promise<void>>(Promise.resolve());
   const sessionRefreshRequestRef = useRef(0);
   const trackedSessionTaskIdsRef = useRef<Set<string>>(new Set());
+  const optimisticUserMessagesRef = useRef<Map<string, ChatMessageView>>(new Map());
   const skillPackageInputRef = useRef<HTMLInputElement>(null);
   const settingsToastTimerRef = useRef<number | null>(null);
   const [composerError, setComposerError] = useState<string | null>(null);
@@ -556,6 +580,7 @@ export function App() {
             : Promise.resolve(null)
         ]);
         if (!disposed && activeSessionIdRef.current === sessionId) {
+          acknowledgeOptimisticUserMessage(sessionId, next.messages);
           setAgentState(next);
           if (nextTrace) setAgentTraceState(nextTrace);
           updateSessionStatus(sessionId, next.status);
@@ -719,6 +744,10 @@ export function App() {
   const traceSteps = traceTurns.flatMap((turn) => turn.steps);
   const activeSessionTraceSteps =
     activeSession && agentTraceState?.sessionId === activeSession.id ? traceSteps : [];
+  const visibleAgentMessages = messagesWithOptimisticUserMessage(
+    agentState?.messages ?? [],
+    activeSession ? optimisticUserMessagesRef.current.get(activeSession.id) : undefined
+  );
   const selectedTraceStep =
     traceSteps.find((step) => step.id === selectedTraceStepId) ?? null;
   const providerModelOptions = useMemo(() => {
@@ -792,6 +821,16 @@ export function App() {
       else delete next[sessionId];
       return next;
     });
+  }
+
+  function acknowledgeOptimisticUserMessage(
+    sessionId: string,
+    messages: ChatMessageView[]
+  ) {
+    const optimistic = optimisticUserMessagesRef.current.get(sessionId);
+    if (optimistic && containsOptimisticUserMessage(messages, optimistic)) {
+      optimisticUserMessagesRef.current.delete(sessionId);
+    }
   }
 
   async function refreshAgentTrace(
@@ -968,6 +1007,7 @@ export function App() {
       return;
     }
     if (!isCurrentRequest()) return;
+    acknowledgeOptimisticUserMessage(sessionId, nextAgentState.messages);
     setAgentState(nextAgentState);
     updateSessionStatus(sessionId, nextAgentState.status);
 
@@ -1469,6 +1509,12 @@ export function App() {
     markSessionTaskStarted(sessionId);
     markSessionBusy(sessionId, true);
     const submittedAt = Date.now();
+    const optimisticUserMessage: ChatMessageView = {
+      role: "user",
+      content: visiblePrompt,
+      timestampMs: submittedAt
+    };
+    optimisticUserMessagesRef.current.set(sessionId, optimisticUserMessage);
     const runBudget = runBudgetForEffort(agentEffort);
     setAgentState((current) => {
       if (!current) return current;
@@ -1492,10 +1538,7 @@ export function App() {
         ),
         contextUsageEstimated: true,
         runStartedAtMs: submittedAt,
-        messages: [
-          ...current.messages,
-          { role: "user", content: visiblePrompt, timestampMs: submittedAt }
-        ]
+        messages: current.messages
       };
     });
     try {
@@ -1504,6 +1547,7 @@ export function App() {
         void refineAutomaticSessionTitle(automaticSessionId, visiblePrompt);
       }
       const next = await runAgentTask(nextPrompt, sessionId, attachments, agentEffort);
+      acknowledgeOptimisticUserMessage(sessionId, next.messages);
       updateSessionStatus(sessionId, next.status);
       if (activeSessionIdRef.current === sessionId) {
         setAgentState(next);
@@ -1520,7 +1564,9 @@ export function App() {
       updateSessionStatus(sessionId, "failed");
       if (activeSessionIdRef.current === sessionId) {
         setComposerError(error instanceof Error ? error.message : String(error));
-        setAgentState(await getAgentState(sessionId));
+        const failedState = await getAgentState(sessionId);
+        acknowledgeOptimisticUserMessage(sessionId, failedState.messages);
+        setAgentState(failedState);
       }
     } finally {
       markSessionBusy(sessionId, false);
@@ -1534,6 +1580,7 @@ export function App() {
     setComposerError(null);
     try {
       const next = await cancelAgentTask(sessionId);
+      acknowledgeOptimisticUserMessage(sessionId, next.messages);
       updateSessionStatus(sessionId, next.status);
       markSessionBusy(sessionId, false);
       if (activeSessionIdRef.current === sessionId) {
@@ -1915,7 +1962,7 @@ export function App() {
           <>
             <SessionThread
               sessionId={activeSession?.id ?? null}
-              messages={agentState?.messages ?? []}
+              messages={visibleAgentMessages}
               timeline={agentState?.timeline ?? []}
               streamAnswer={streamAnswer}
               status={agentState?.status ?? "idle"}

@@ -466,12 +466,31 @@ assert(
   composerSource.includes("onPaste={(event) =>") &&
     composerSource.includes("event.clipboardData.items") &&
     composerSource.includes('item.type.startsWith("image/")') &&
-    composerSource.includes("onPickAttachments(pastedImages)"),
-  "Composer must stage images pasted from the clipboard"
+    composerSource.includes("onPickAttachments(pastedImages)") &&
+    composerSource.includes("function ComposerAttachmentPreview") &&
+    composerSource.includes("readArtifactPreview(attachment.path)") &&
+    composerSource.includes('className="composer-attachment-preview"') &&
+    styles.includes('.composer-attachment[data-image="true"]') &&
+    styles.includes(".composer-attachment-preview"),
+  "Composer must stage and preview images pasted from the clipboard"
+);
+const removeAttachmentButton = composerSource.slice(
+  composerSource.indexOf('aria-label={`Remove ${attachment.name}`}'),
+  composerSource.indexOf('aria-label={`Remove ${attachment.name}`}') + 320
 );
 assert(
-  sessionThreadSource.includes("thread.scrollTop = thread.scrollHeight"),
-  "Session thread must follow the latest output"
+  removeAttachmentButton.includes("onRemoveAttachment(attachment)") &&
+    !removeAttachmentButton.includes("disabled="),
+  "Draft attachments must remain removable while the agent is running"
+);
+assert(
+  sessionThreadSource.includes("thread.scrollTop = thread.scrollHeight") &&
+    sessionThreadSource.includes("useLayoutEffect(() => {") &&
+    sessionThreadSource.includes('return `message-${message.role}-${index}`') &&
+    appSource.includes("optimisticUserMessagesRef") &&
+    appSource.includes("messagesWithOptimisticUserMessage") &&
+    appSource.includes("messages={visibleAgentMessages}"),
+  "Session thread must show submitted user messages before paint and preserve them during polling"
 );
 assert(
   sessionThreadSource.includes('className="thread-minimap"') &&
@@ -557,8 +576,11 @@ assert(
     sessionThreadSource.includes("Thinking") &&
     !sessionThreadSource.includes("LoaderCircle") &&
     styles.includes("@keyframes thinking-sheen") &&
+    /\.thread-thinking > span,[\s\S]*?\.thread-thinking > time \{[\s\S]*?min-height: 16px;[\s\S]*?align-items: center;[\s\S]*?line-height: 16px;/.test(
+      styles
+    ) &&
     styles.includes("prefers-reduced-motion: reduce"),
-  "Agent thinking state must use a reduced-motion-safe text sheen without a spinner"
+  "Agent thinking state must align uncropped text and elapsed time without a spinner"
 );
 assert(
   composerSource.includes("pendingApproval") && composerSource.includes("composer-permission"),

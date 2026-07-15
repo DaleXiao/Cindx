@@ -12,8 +12,44 @@ import {
   Square,
   X
 } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { readArtifactPreview } from "../tauri";
 import type { AgentAttachment, AgentEffort, ToolApprovalView } from "../tauri";
+
+function ComposerAttachmentPreview({ attachment }: { attachment: AgentAttachment }) {
+  const isImage = attachment.mimeType.startsWith("image/");
+  const [dataUrl, setDataUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isImage) {
+      setDataUrl(null);
+      return;
+    }
+    let active = true;
+    void readArtifactPreview(attachment.path)
+      .then((preview) => {
+        if (active && preview.kind === "image") setDataUrl(preview.dataUrl);
+      })
+      .catch(() => {
+        if (active) setDataUrl(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [attachment.path, isImage]);
+
+  if (dataUrl) {
+    return (
+      <img
+        className="composer-attachment-preview"
+        src={dataUrl}
+        alt=""
+        aria-hidden="true"
+      />
+    );
+  }
+  return isImage ? <Image aria-hidden="true" /> : <FileText aria-hidden="true" />;
+}
 
 type ComposerProps = {
   value: string;
@@ -89,8 +125,8 @@ export function Composer({
     if (composingRef.current || compositionJustEndedRef.current) return;
     const prompt = value.trim();
     if (!canSend) return;
-    onChange("");
     onSend(prompt);
+    onChange("");
   }
 
   return (
@@ -150,18 +186,18 @@ export function Composer({
             {attachments.length > 0 && (
               <div className="composer-attachments" aria-label="Attachments">
                 {attachments.map((attachment) => (
-                  <div className="composer-attachment" key={attachment.id} title={attachment.path}>
-                    {attachment.mimeType.startsWith("image/") ? (
-                      <Image aria-hidden="true" />
-                    ) : (
-                      <FileText aria-hidden="true" />
-                    )}
+                  <div
+                    className="composer-attachment"
+                    data-image={attachment.mimeType.startsWith("image/")}
+                    key={attachment.id}
+                    title={attachment.path}
+                  >
+                    <ComposerAttachmentPreview attachment={attachment} />
                     <span>{attachment.name}</span>
                     <button
                       type="button"
                       aria-label={`Remove ${attachment.name}`}
                       title="Remove attachment"
-                      disabled={working || canStop || attachmentBusy}
                       onClick={() => onRemoveAttachment(attachment)}
                     >
                       <X aria-hidden="true" />

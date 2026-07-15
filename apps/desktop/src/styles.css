@@ -1802,8 +1802,10 @@ pre {
 
 .thread-thinking > span,
 .thread-thinking > time {
-  display: block;
-  line-height: 1;
+  display: inline-flex;
+  min-height: 16px;
+  align-items: center;
+  line-height: 16px;
 }
 
 .thread-thinking > span {
@@ -2246,6 +2248,20 @@ details[open] > summary .disclosure-triangle {
   background: #f2f2f2;
   border: 1px solid #dddddd;
   border-radius: var(--radius-md);
+}
+
+.composer-attachment[data-image="true"] {
+  height: 48px;
+  grid-template-columns: 40px minmax(0, 1fr) 22px;
+  padding-left: 3px;
+}
+
+.composer-attachment-preview {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  background: #e9e9e9;
+  border-radius: calc(var(--radius-md) - 2px);
 }
 
 .composer-attachment > svg,
