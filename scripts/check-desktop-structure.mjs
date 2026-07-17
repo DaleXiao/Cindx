@@ -204,8 +204,10 @@ assert(
     appSource.includes("startupWindowRevealRequestedRef") &&
     appSource.includes("await document.fonts.ready") &&
     appSource.includes("await revealMainWindow()") &&
+    appSource.includes("!agentStateCacheRef.current.has(state.activeSessionId)") &&
+    !appSource.includes("agentState?.sessionId !== projectSessionState.activeSessionId") &&
     !appSource.includes("revealAfterStableFrame"),
-  "The native window must reveal a stable styled frame and repair native controls after AppKit relayouts"
+  "The native window must reveal a stable loading frame without waiting for large session history and repair native controls after AppKit relayouts"
 );
 const titlebarHeight = 46;
 // This is the user-confirmed macOS alignment; do not retune it indirectly.

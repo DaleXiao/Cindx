@@ -715,6 +715,11 @@ export function App() {
       }),
       getProjectSessionState().then((state) => {
         setProjectSessionState(state);
+        setSessionLoadingId(
+          state.activeSessionId && !agentStateCacheRef.current.has(state.activeSessionId)
+            ? state.activeSessionId
+            : null
+        );
         setComposerError((current) => current ?? state.lastError);
       }),
       getAgentState().then((state) => {
@@ -807,12 +812,6 @@ export function App() {
 
   useEffect(() => {
     if (startupWindowRevealRequestedRef.current || !runtime || !projectSessionState) return;
-    if (
-      projectSessionState.activeSessionId &&
-      agentState?.sessionId !== projectSessionState.activeSessionId
-    ) {
-      return;
-    }
     let disposed = false;
     const reveal = async () => {
       try {
@@ -828,7 +827,7 @@ export function App() {
     return () => {
       disposed = true;
     };
-  }, [agentState?.sessionId, projectSessionState, runtime]);
+  }, [projectSessionState, runtime]);
 
   useEffect(() => {
     if (activeView !== "settings" || settingsCategory !== "permissions") return;
