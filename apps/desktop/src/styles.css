@@ -4849,7 +4849,7 @@ details[open] > summary .settings-disclosure-chevron {
 }
 
 .inspector-debug[data-open="true"] .inspector-debug-chevron {
-  transform: rotate(90deg);
+  transform: rotate(180deg);
 }
 
 .inspector-debug-body {

@@ -743,7 +743,8 @@ assert(
     !appSource.includes("DisclosureTriangle") &&
     (appSource.match(/className="settings-disclosure-chevron"/g)?.length ?? 0) === 8 &&
     (appSource.match(/className="settings-action-chevron"/g)?.length ?? 0) === 1 &&
-    (inspectorSource.match(/<ChevronRight/g)?.length ?? 0) >= 2 &&
+    (inspectorSource.match(/<ChevronRight/g)?.length ?? 0) >= 1 &&
+    inspectorSource.includes('<ChevronDown className="inspector-debug-chevron"') &&
     !styles.includes("advanced-settings summary::before") &&
     styles.includes("details[open] > summary .disclosure-triangle") &&
     styles.includes("details[open] > summary .settings-disclosure-chevron") &&
@@ -1059,10 +1060,10 @@ assert(
   /\.inspector-debug-body \{[\s\S]*?right: 2px;[\s\S]*?bottom: 44px;[\s\S]*?left: 2px;[\s\S]*?border-radius: var\(--radius-md\) var\(--radius-md\) 0 0;/.test(
     styles
   ) &&
-    /\.inspector-debug\[data-open="true"\] \.inspector-debug-chevron \{[\s\S]*?transform: rotate\(90deg\);/.test(
+    /\.inspector-debug\[data-open="true"\] \.inspector-debug-chevron \{[\s\S]*?transform: rotate\(180deg\);/.test(
       styles
     ) &&
-    /<Bug[^>]*\/>\s*<strong>Debug<\/strong>\s*<ChevronRight className="inspector-debug-chevron"[^>]*\/>/.test(
+    /<Bug[^>]*\/>\s*<strong>Debug<\/strong>\s*<ChevronDown className="inspector-debug-chevron"[^>]*\/>/.test(
       inspectorSource
     ),
   "The debug drawer must attach to its bar and use a trailing animated chevron"
