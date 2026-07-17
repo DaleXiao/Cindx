@@ -1353,6 +1353,8 @@ assert(
   styles.includes(".lucide-check") &&
     styles.includes(".lucide-circle-check") &&
     styles.includes("color: var(--accent) !important") &&
+    styles.includes("--sidebar-glass: rgba(255, 255, 255, 0.92)") &&
+    styles.includes("background: var(--sidebar-glass)") &&
     styles.includes("backdrop-filter: saturate(155%) blur(24px)") &&
     inspectorSource.includes("PackageOpen") &&
     inspectorSource.includes("<PackageOpen aria-hidden=\"true\" />"),

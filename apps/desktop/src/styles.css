@@ -26,6 +26,7 @@
   --subtle: #989898;
   --ink: #202020;
   --accent: #2563eb;
+  --sidebar-glass: rgba(255, 255, 255, 0.92);
   --radius-xs: 4px;
   --radius-sm: 6px;
   --radius-md: 8px;
@@ -252,7 +253,7 @@ pre {
 .window-toolbar-panel-left {
   left: 0;
   width: var(--sidebar-layout-width);
-  background: rgba(250, 250, 250, 0.76);
+  background: var(--sidebar-glass);
   -webkit-backdrop-filter: saturate(155%) blur(24px);
   backdrop-filter: saturate(155%) blur(24px);
 }
@@ -411,7 +412,7 @@ pre {
   gap: 14px;
   padding: 14px;
   overflow: hidden;
-  background: rgba(250, 250, 250, 0.76);
+  background: var(--sidebar-glass);
   -webkit-backdrop-filter: saturate(155%) blur(24px);
   backdrop-filter: saturate(155%) blur(24px);
   opacity: 1;
