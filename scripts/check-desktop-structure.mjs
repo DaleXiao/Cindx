@@ -606,8 +606,7 @@ assert(
     /\.window-toolbar-panel \{[\s\S]*?background: var\(--panel\);/.test(styles) &&
     tauriConfig.app.macOSPrivateApi === true &&
     tauriConfig.app.windows.every((window) => window.transparent === true) &&
-    cargoToml.includes('features = ["macos-private-api"]') &&
-    !rustLib.includes("window_vibrancy::apply_vibrancy"),
+    cargoToml.includes('features = ["macos-private-api"]'),
   "Timeline content must scroll beneath the translucent titlebar glass surface"
 );
 assert(
@@ -1355,10 +1354,19 @@ assert(
     styles.includes("color: var(--accent) !important") &&
     styles.includes("--sidebar-glass: rgba(255, 255, 255, 0.92)") &&
     styles.includes("background: var(--sidebar-glass)") &&
-    styles.includes("backdrop-filter: saturate(155%) blur(24px)") &&
+    !/\.window-toolbar-panel-left \{[^}]*backdrop-filter:/.test(styles) &&
+    !/\.sidebar \{[^}]*backdrop-filter:/.test(styles) &&
+    rustLib.includes("install_macos_sidebar_material") &&
+    rustLib.includes("window_vibrancy::apply_vibrancy") &&
+    rustLib.includes("NSVisualEffectMaterial::Sidebar") &&
+    rustLib.includes("NSVisualEffectState::Active") &&
+    rustLib.includes("MACOS_SIDEBAR_MATERIAL_TAG") &&
+    rustLib.includes("set_sidebar_material_width") &&
+    tauriBridge.includes('invoke<void>("set_sidebar_material_width"') &&
+    appSource.includes("setSidebarMaterialWidth(sidebarOpen ? sidebarWidth : 0)") &&
     inspectorSource.includes("PackageOpen") &&
     inspectorSource.includes("<PackageOpen aria-hidden=\"true\" />"),
-  "Checkmarks, sidebar material, and the Outputs heading icon must retain their visual treatment"
+  "Checkmarks, native sidebar material, and the Outputs heading icon must retain their visual treatment"
 );
 assert(
   appSource.includes("busy={projectSessionBusy}") &&
