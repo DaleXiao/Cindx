@@ -2,6 +2,7 @@ import {
   Activity,
   Bug,
   Check,
+  ChevronDown,
   ChevronRight,
   Clock3,
   Copy,
@@ -1110,7 +1111,7 @@ export function Inspector({
         >
           <Bug aria-hidden="true" />
           <strong>Debug</strong>
-          <ChevronRight className="inspector-debug-chevron" aria-hidden="true" />
+          <ChevronDown className="inspector-debug-chevron" aria-hidden="true" />
         </button>
       </section>
       {outputPreviewFullscreen && outputPreview
