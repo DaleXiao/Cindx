@@ -477,11 +477,14 @@ assert(
     styles.includes("@keyframes metadata-disclosure-opening") &&
     styles.includes("@keyframes metadata-disclosure-closing") &&
     /\.metadata-disclosure-icon \{[\s\S]*?transform: rotate\(0deg\);/.test(styles) &&
-    /\.metadata-details\[data-open="true"\] \.metadata-disclosure-icon \{[\s\S]*?transform: rotate\(180deg\);/.test(
+    /\.metadata-details\[data-open="true"\] \.metadata-disclosure-icon \{[\s\S]*?transform: rotate\(90deg\);/.test(
       styles
     ) &&
+    /<span>Metadata<\/span>\s*<span\s+className="metadata-disclosure-icon"[\s\S]*?<ChevronRight[\s\S]*?className="metadata-disclosure-chevron"/.test(
+      inspectorSource
+    ) &&
     styles.includes(".metadata-details-body"),
-  "Inspector metadata must use a controlled animated disclosure"
+  "Inspector metadata must use a trailing animated chevron disclosure"
 );
 assert(inspectorSource.includes("inspector-resize-handle"), "Inspector must remain resizable");
 assert(
@@ -728,18 +731,18 @@ assert(
     disclosureTriangleSource.includes("c.52 0 1 .28 1.26.73") &&
     !disclosureTriangleSource.includes('import { Triangle }') &&
     (sessionThreadSource.match(/<DisclosureTriangle/g)?.length ?? 0) >= 2 &&
-    (inspectorSource.match(/<DisclosureTriangle/g)?.length ?? 0) >= 2 &&
+    !inspectorSource.includes("DisclosureTriangle") &&
     !appSource.includes("DisclosureTriangle") &&
     (appSource.match(/className="settings-disclosure-chevron"/g)?.length ?? 0) === 8 &&
     (appSource.match(/className="settings-action-chevron"/g)?.length ?? 0) === 1 &&
-    !inspectorSource.includes("ChevronRight") &&
+    (inspectorSource.match(/<ChevronRight/g)?.length ?? 0) >= 2 &&
     !styles.includes("advanced-settings summary::before") &&
     styles.includes("details[open] > summary .disclosure-triangle") &&
     styles.includes("details[open] > summary .settings-disclosure-chevron") &&
     styles.includes("transform-box: fill-box") &&
     styles.includes("transition: transform 180ms") &&
     styles.includes(".secondary-button:hover:not(:disabled) .settings-action-chevron"),
-  "Settings must use trailing animated chevrons while other compact disclosures retain the shared marker"
+  "Settings and Inspector must use trailing animated chevrons while thread disclosures retain the shared marker"
 );
 assert(
   sessionThreadSource.includes("thread-thinking") &&
@@ -1041,11 +1044,13 @@ assert(
   /\.inspector-debug-body \{[\s\S]*?right: 2px;[\s\S]*?bottom: 44px;[\s\S]*?left: 2px;[\s\S]*?border-radius: var\(--radius-md\) var\(--radius-md\) 0 0;/.test(
     styles
   ) &&
-    /\.inspector-debug\[data-open="true"\] \.disclosure-triangle \{[\s\S]*?transform: rotate\(180deg\);/.test(
+    /\.inspector-debug\[data-open="true"\] \.inspector-debug-chevron \{[\s\S]*?transform: rotate\(90deg\);/.test(
       styles
     ) &&
-    /<Bug[^>]*\/>\s*<DisclosureTriangle \/>\s*<strong>Debug<\/strong>/.test(inspectorSource),
-  "The debug drawer must attach to its bar and group its icon, triangle, and label"
+    /<Bug[^>]*\/>\s*<strong>Debug<\/strong>\s*<ChevronRight className="inspector-debug-chevron"[^>]*\/>/.test(
+      inspectorSource
+    ),
+  "The debug drawer must attach to its bar and use a trailing animated chevron"
 );
 assert(
   tauriBridge.includes('invoke<string>("read_artifact_image"') &&

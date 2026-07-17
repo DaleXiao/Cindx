@@ -2,6 +2,7 @@ import {
   Activity,
   Bug,
   Check,
+  ChevronRight,
   Clock3,
   Copy,
   Database,
@@ -39,7 +40,6 @@ import type {
   ToolRunView
 } from "../tauri";
 import type { SessionThreadSelection } from "./SessionThread";
-import { DisclosureTriangle } from "./DisclosureTriangle";
 import { TraceStatusIcon } from "./TraceStatusIcon";
 
 export type InspectorTab = "trace" | "details" | "artifacts" | "context";
@@ -891,6 +891,7 @@ export function Inspector({
                       setMetadataOpen(nextOpen);
                     }}
                   >
+                    <span>Metadata</span>
                     <span
                       className="metadata-disclosure-icon"
                       onAnimationEnd={(event) => {
@@ -899,9 +900,11 @@ export function Inspector({
                         }
                       }}
                     >
-                      <DisclosureTriangle />
+                      <ChevronRight
+                        className="metadata-disclosure-chevron"
+                        aria-hidden="true"
+                      />
                     </span>
-                    <span>Metadata</span>
                   </button>
                   <div className="metadata-details-body" aria-hidden={!metadataOpen}>
                     <div>
@@ -1106,8 +1109,8 @@ export function Inspector({
           onClick={() => setDebugOpen((current) => !current)}
         >
           <Bug aria-hidden="true" />
-          <DisclosureTriangle />
           <strong>Debug</strong>
+          <ChevronRight className="inspector-debug-chevron" aria-hidden="true" />
         </button>
       </section>
       {outputPreviewFullscreen && outputPreview
