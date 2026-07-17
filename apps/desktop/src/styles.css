@@ -1276,6 +1276,7 @@ pre {
 }
 
 .session-thread {
+  position: relative;
   display: flex;
   width: 100%;
   height: 100%;
@@ -1288,6 +1289,15 @@ pre {
   overflow: auto;
   scrollbar-width: none;
   background: var(--bg);
+}
+
+.session-thread .thread-content {
+  opacity: 1;
+  transition: opacity 120ms ease-out;
+}
+
+.session-thread[data-content-ready="false"] .thread-content {
+  opacity: 0;
 }
 
 .session-thread::-webkit-scrollbar {
@@ -1378,7 +1388,7 @@ pre {
 .thread-minimap-marker {
   left: 1px;
   width: 20px;
-  height: 1px;
+  height: 1.5px;
   background: #dedede;
   transform: translateY(-50%) scaleX(0.34);
   transform-origin: left center;
@@ -1422,12 +1432,13 @@ pre {
 }
 
 .thread-minimap-position {
-  left: 0;
-  width: 21px;
+  left: 1px;
+  width: 20px;
   height: 2px;
-  background: #333333;
+  background: #222222;
   border-radius: 1px;
-  transform: translateY(-50%);
+  transform: translateY(-50%) scaleX(0.34);
+  transform-origin: left center;
 }
 
 .thread-minimap-preview {
@@ -1492,11 +1503,14 @@ pre {
   }
 }
 
-.session-thread-empty {
-  align-items: center;
-  justify-content: center;
+.session-thread-empty-state {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
   color: var(--subtle);
   font-size: 12px;
+  pointer-events: none;
 }
 
 .thread-message {
@@ -2262,7 +2276,7 @@ details[open] > summary .disclosure-triangle {
   min-width: 0;
   min-height: 106px;
   flex-direction: column;
-  overflow: hidden;
+  overflow: visible;
   background: var(--surface);
   border: 0.5px solid #dedede;
   border-radius: var(--radius-xl);
@@ -2321,43 +2335,124 @@ details[open] > summary .disclosure-triangle {
   position: relative;
   width: 104px;
   height: 36px;
-  overflow: hidden;
   color: #454545;
-  background: #f3f3f3;
-  border-radius: var(--radius-pill);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
-.composer-effort-select {
+.composer-effort-trigger {
+  display: flex;
   width: 100%;
   height: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
   padding: 0 28px 0 12px;
-  appearance: none;
   color: inherit;
-  background: transparent;
+  background: #f3f3f3;
   border: 0;
-  border-radius: inherit;
+  border-radius: var(--radius-pill);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
   outline-offset: -2px;
   font-size: 10px;
   font-weight: 600;
+  white-space: nowrap;
 }
 
-.composer-effort-control > svg {
+.composer-effort-trigger > svg {
   position: absolute;
   top: 12px;
   right: 10px;
   width: 12px;
   height: 12px;
   pointer-events: none;
+  transition: transform 160ms var(--ease-out-quart);
 }
 
-.composer-effort-control:hover {
+.composer-effort-control[data-open="true"] .composer-effort-trigger > svg {
+  transform: rotate(180deg);
+}
+
+.composer-effort-trigger:hover:not(:disabled),
+.composer-effort-trigger:focus-visible {
   color: var(--text);
   background: #eaeaea;
 }
 
-.composer-effort-control:has(.composer-effort-select:disabled) {
+.composer-effort-trigger:disabled {
   opacity: 0.55;
+}
+
+.composer-effort-menu {
+  position: absolute;
+  z-index: 20;
+  right: 0;
+  bottom: calc(100% + 8px);
+  display: grid;
+  width: 250px;
+  gap: 2px;
+  padding: 5px;
+  background: rgba(255, 255, 255, 0.98);
+  border: 0.5px solid #dedede;
+  border-radius: var(--radius-lg);
+  box-shadow: 0 8px 22px rgb(0 0 0 / 10%);
+  animation: composer-effort-menu-in 140ms var(--ease-out-quart);
+}
+
+.composer-effort-menu > button {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(0, 1fr) 14px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 9px;
+  color: var(--text);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-md);
+}
+
+.composer-effort-menu > button:hover,
+.composer-effort-menu > button:focus-visible,
+.composer-effort-menu > button[data-selected="true"] {
+  background: #f1f1f1;
+}
+
+.composer-effort-menu > button > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.composer-effort-menu strong {
+  font-size: 10.5px;
+  line-height: 1.25;
+}
+
+.composer-effort-menu small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9.5px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-effort-menu svg {
+  width: 13px;
+  height: 13px;
+  color: #666666;
+}
+
+@keyframes composer-effort-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .composer-attachments {
@@ -2434,6 +2529,7 @@ details[open] > summary .disclosure-triangle {
   height: 58px;
   min-height: 58px;
   max-height: 180px;
+  overflow-y: hidden;
   padding: 15px 14px 6px;
   resize: none;
   background: var(--surface);
@@ -5325,6 +5421,8 @@ details[open] > summary .settings-disclosure-chevron {
   .settings-disclosure-chevron,
   .settings-action-chevron,
   .settings-refresh-turn,
+  .composer-effort-trigger > svg,
+  .composer-effort-menu,
   .project-disclosure-chevron,
   .inspector-output-chevron,
   .inspector-debug-chevron,

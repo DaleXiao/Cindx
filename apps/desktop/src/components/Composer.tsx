@@ -12,9 +12,34 @@ import {
   Square,
   X
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { readArtifactPreview } from "../tauri";
 import type { AgentAttachment, AgentEffort, ToolApprovalView } from "../tauri";
+
+const COMPOSER_TEXTAREA_MIN_HEIGHT = 58;
+const COMPOSER_TEXTAREA_MAX_HEIGHT = 180;
+
+const EFFORT_OPTIONS: Array<{
+  value: AgentEffort;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "fast",
+    label: "Cindx Fast",
+    description: "One model for quick, focused tasks"
+  },
+  {
+    value: "auto",
+    label: "Cindx Auto",
+    description: "Routes each request by complexity"
+  },
+  {
+    value: "pro",
+    label: "Cindx Pro",
+    description: "Multi-model collaboration for hard tasks"
+  }
+];
 
 function ComposerAttachmentPreview({ attachment }: { attachment: AgentAttachment }) {
   const isImage = attachment.mimeType.startsWith("image/");
@@ -103,17 +128,53 @@ export function Composer({
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const effortControlRef = useRef<HTMLDivElement>(null);
+  const effortTriggerRef = useRef<HTMLButtonElement>(null);
   const composingRef = useRef(false);
   const compositionJustEndedRef = useRef(false);
+  const [effortMenuOpen, setEffortMenuOpen] = useState(false);
   const canSend =
     !working && !canStop && !pendingApproval && !attachmentBusy && Boolean(value.trim() || attachments.length);
   const canRetryError = canRetry && Boolean(error) && !working && !canStop && !pendingApproval;
   const canContinueRun = canContinue && !working && !canStop && !pendingApproval;
-  const effortTitle = {
-    fast: "Single model with the lowest latency",
-    auto: "Route each request by complexity",
-    pro: "Adaptive collaboration with up to three models"
-  }[effort];
+  const activeEffort = EFFORT_OPTIONS.find((option) => option.value === effort)!;
+
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = `${COMPOSER_TEXTAREA_MIN_HEIGHT}px`;
+    const nextHeight = Math.min(
+      COMPOSER_TEXTAREA_MAX_HEIGHT,
+      Math.max(COMPOSER_TEXTAREA_MIN_HEIGHT, textarea.scrollHeight)
+    );
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY =
+      textarea.scrollHeight > COMPOSER_TEXTAREA_MAX_HEIGHT ? "auto" : "hidden";
+  }, [value]);
+
+  useEffect(() => {
+    if (!effortMenuOpen) return;
+    const closeOnPointerDown = (event: globalThis.PointerEvent) => {
+      if (!effortControlRef.current?.contains(event.target as Node)) {
+        setEffortMenuOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setEffortMenuOpen(false);
+      effortTriggerRef.current?.focus();
+    };
+    document.addEventListener("pointerdown", closeOnPointerDown);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnPointerDown);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [effortMenuOpen]);
+
+  useEffect(() => {
+    if (working || canStop) setEffortMenuOpen(false);
+  }, [canStop, working]);
 
   useEffect(() => {
     if (focusRequest <= 0 || pendingApproval) return;
@@ -255,7 +316,7 @@ export function Composer({
               }}
               aria-keyshortcuts="Enter"
               placeholder="Message Cindx"
-              rows={3}
+              rows={1}
             />
             <div className="composer-toolbar">
               <input
@@ -285,20 +346,49 @@ export function Composer({
                 )}
               </button>
               <div className="composer-toolbar-actions">
-                <div className="composer-effort-control">
-                  <select
-                    className="composer-effort-select"
-                    aria-label="Cindx effort"
-                    title={effortTitle}
-                    value={effort}
+                <div
+                  className="composer-effort-control"
+                  data-open={effortMenuOpen}
+                  ref={effortControlRef}
+                >
+                  <button
+                    className="composer-effort-trigger"
+                    type="button"
+                    aria-label={`Effort: ${activeEffort.label}`}
+                    aria-haspopup="listbox"
+                    aria-expanded={effortMenuOpen}
+                    title={activeEffort.description}
                     disabled={working || canStop}
-                    onChange={(event) => onEffortChange(event.target.value as AgentEffort)}
+                    ref={effortTriggerRef}
+                    onClick={() => setEffortMenuOpen((current) => !current)}
                   >
-                    <option value="fast">Cindx Fast</option>
-                    <option value="auto">Cindx Auto</option>
-                    <option value="pro">Cindx Pro</option>
-                  </select>
-                  <ChevronDown aria-hidden="true" />
+                    <span>{activeEffort.label}</span>
+                    <ChevronDown aria-hidden="true" />
+                  </button>
+                  {effortMenuOpen && (
+                    <div className="composer-effort-menu" role="listbox" aria-label="Cindx effort">
+                      {EFFORT_OPTIONS.map((option) => (
+                        <button
+                          type="button"
+                          role="option"
+                          aria-selected={option.value === effort}
+                          data-selected={option.value === effort}
+                          key={option.value}
+                          onClick={() => {
+                            onEffortChange(option.value);
+                            setEffortMenuOpen(false);
+                            effortTriggerRef.current?.focus();
+                          }}
+                        >
+                          <span>
+                            <strong>{option.label}</strong>
+                            <small>{option.description}</small>
+                          </span>
+                          {option.value === effort && <Check aria-hidden="true" />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <button
                   type={canStop ? "button" : "submit"}

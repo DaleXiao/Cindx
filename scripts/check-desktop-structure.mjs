@@ -611,6 +611,18 @@ assert(
 assert(composerSource.includes('event.key !== "Enter"'), "Composer must support Enter to send");
 assert(composerSource.includes("event.shiftKey"), "Composer must reserve Shift+Enter for a new line");
 assert(
+  composerSource.includes("COMPOSER_TEXTAREA_MIN_HEIGHT = 58") &&
+    composerSource.includes("COMPOSER_TEXTAREA_MAX_HEIGHT = 180") &&
+    composerSource.includes("textarea.scrollHeight") &&
+    composerSource.includes('textarea.style.overflowY =') &&
+    composerSource.includes("useLayoutEffect(() => {") &&
+    composerSource.includes("rows={1}") &&
+    /\.composer textarea \{[\s\S]*?min-height: 58px;[\s\S]*?max-height: 180px;[\s\S]*?overflow-y: hidden;/.test(
+      styles
+    ),
+  "Composer must grow with its content before paint and stop at a bounded height"
+);
+assert(
   composerSource.includes('if (working || canStop) return;') &&
     !composerSource.includes('disabled={working || canStop}\n              aria-keyshortcuts="Enter"'),
   "Composer must remain editable while the agent runs and require an explicit stop before sending"
@@ -695,8 +707,26 @@ assert(
   styles.includes(".session-thread::-webkit-scrollbar") &&
     styles.includes("scrollbar-width: none") &&
     styles.includes(".thread-minimap-position") &&
-    styles.includes('.thread-minimap-marker[data-wave-distance="0"]'),
+    styles.includes('.thread-minimap-marker[data-wave-distance="0"]') &&
+    /\.thread-minimap-marker \{[\s\S]*?width: 20px;[\s\S]*?height: 1\.5px;[\s\S]*?scaleX\(0\.34\)/.test(
+      styles
+    ) &&
+    /\.thread-minimap-position \{[\s\S]*?width: 20px;[\s\S]*?height: 2px;[\s\S]*?scaleX\(0\.34\)/.test(
+      styles
+    ),
   "Session thread must replace its native scrollbar with the minimap"
+);
+assert(
+  sessionThreadSource.includes('data-content-ready={contentReady}') &&
+    sessionThreadSource.includes('className="session-thread-empty-state"') &&
+    sessionThreadSource.includes("rowVirtualizer.measure()") &&
+    sessionThreadSource.includes("setContentReady(true)") &&
+    appSource.includes("const sessionPrefetchKey = useMemo") &&
+    appSource.includes("requestSessionAgentState(sessionId).catch(() => null)") &&
+    /\.session-thread\[data-content-ready="false"\] \.thread-content \{[\s\S]*?opacity: 0;/.test(
+      styles
+    ),
+  "Initial session hydration must prewarm local state and reveal measured rows without layout jumps"
 );
 assert(
   sessionThreadSource.includes("thread-message-actions") &&
@@ -1305,10 +1335,16 @@ assert(
   "Agent commands and event boundaries must remain isolated by session"
 );
 assert(
-  composerSource.includes('className="composer-effort-select"') &&
-    composerSource.includes('<option value="fast">Cindx Fast</option>') &&
-    composerSource.includes('<option value="auto">Cindx Auto</option>') &&
-    composerSource.includes('<option value="pro">Cindx Pro</option>') &&
+  composerSource.includes("const EFFORT_OPTIONS") &&
+    composerSource.includes('label: "Cindx Fast"') &&
+    composerSource.includes('description: "One model for quick, focused tasks"') &&
+    composerSource.includes('label: "Cindx Auto"') &&
+    composerSource.includes('description: "Routes each request by complexity"') &&
+    composerSource.includes('label: "Cindx Pro"') &&
+    composerSource.includes('description: "Multi-model collaboration for hard tasks"') &&
+    composerSource.includes('className="composer-effort-menu"') &&
+    composerSource.includes('role="listbox"') &&
+    composerSource.includes('role="option"') &&
     appSource.includes('useState<AgentEffort>("auto")') &&
     tauriBridge.includes('export type AgentEffort = "fast" | "auto" | "pro"') &&
     tauriBridge.includes("currentTime: currentAgentTimeContext(), effort, attachments") &&
