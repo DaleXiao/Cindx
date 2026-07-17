@@ -1364,6 +1364,10 @@ assert(
     rustLib.includes("set_sidebar_material_width") &&
     tauriBridge.includes('invoke<void>("set_sidebar_material_width"') &&
     appSource.includes("setSidebarMaterialWidth(sidebarOpen ? sidebarWidth : 0)") &&
+    styles.includes("--project-selection: rgba(210, 211, 214, 0.78)") &&
+    styles.includes("--session-selection: rgba(220, 221, 224, 0.82)") &&
+    /\.project-row\.active \{[^}]*box-shadow: 0 1px 3px/.test(styles) &&
+    /\.session-item\.active \{[^}]*box-shadow: 0 1px 2px/.test(styles) &&
     inspectorSource.includes("PackageOpen") &&
     inspectorSource.includes("<PackageOpen aria-hidden=\"true\" />"),
   "Checkmarks, native sidebar material, and the Outputs heading icon must retain their visual treatment"
