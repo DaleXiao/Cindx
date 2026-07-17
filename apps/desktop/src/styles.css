@@ -4904,19 +4904,12 @@ details[open] > summary .settings-disclosure-chevron {
   display: block;
   width: 11px;
   height: 11px;
-  animation: debug-chevron-settle 160ms var(--ease-out-quart);
+  transform: rotate(180deg);
+  transition: transform 180ms var(--ease-out-quart);
 }
 
-@keyframes debug-chevron-settle {
-  from {
-    opacity: 0.55;
-    transform: scale(0.86);
-  }
-
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
+.inspector-debug-chevron[data-state="expanded"] > svg {
+  transform: rotate(0deg);
 }
 
 .inspector-debug-body {

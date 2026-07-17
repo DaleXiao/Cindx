@@ -1068,11 +1068,15 @@ assert(
     styles
   ) &&
     inspectorSource.includes('data-state={debugOpen ? "expanded" : "collapsed"}') &&
-    inspectorSource.includes('{debugOpen ? <ChevronUp /> : <ChevronDown />}') &&
+    inspectorSource.includes("<ChevronDown />") &&
+    !inspectorSource.includes("ChevronUp") &&
     /<Bug[^>]*\/>\s*<strong>Debug<\/strong>\s*<span[\s\S]*?className="inspector-debug-chevron"[\s\S]*?data-state=\{debugOpen \? "expanded" : "collapsed"\}[\s\S]*?<\/span>/.test(
       inspectorSource
     ) &&
-    /\.inspector-debug-chevron > svg \{[\s\S]*?animation: debug-chevron-settle 160ms/.test(
+    /\.inspector-debug-chevron > svg \{[\s\S]*?transform: rotate\(180deg\);[\s\S]*?transition: transform 180ms/.test(
+      styles
+    ) &&
+    /\.inspector-debug-chevron\[data-state="expanded"\] > svg \{[\s\S]*?transform: rotate\(0deg\);/.test(
       styles
     ) &&
     /\.inspector-debug-toggle \{[\s\S]*?grid-template-columns: 13px max-content 11px;[\s\S]*?align-items: center;/.test(

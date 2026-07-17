@@ -4,7 +4,6 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  ChevronUp,
   Clock3,
   Copy,
   Database,
@@ -1168,7 +1167,7 @@ export function Inspector({
             data-state={debugOpen ? "expanded" : "collapsed"}
             aria-hidden="true"
           >
-            {debugOpen ? <ChevronUp /> : <ChevronDown />}
+            <ChevronDown />
           </span>
         </button>
       </section>
