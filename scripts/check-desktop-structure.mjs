@@ -1096,9 +1096,9 @@ assert(
   "Output previews must retain session history, preserve file versions, and stay scoped to the active session"
 );
 assert(
-  /\.inspector-debug-body \{[\s\S]*?right: 2px;[\s\S]*?bottom: 44px;[\s\S]*?left: 2px;[\s\S]*?border-radius: var\(--radius-md\) var\(--radius-md\) 0 0;/.test(
-    styles
-  ) &&
+  /\.inspector-debug::before \{[\s\S]*?height: calc\(var\(--inspector-debug-panel-height\) \+ 44px\);[\s\S]*?clip-path: inset\(calc\(100% - 44px\) 0 0 0\);[\s\S]*?backdrop-filter: blur\(18px\) saturate\(1\.08\);/.test(styles) &&
+    /\.inspector-debug\[data-open="true"\]::before \{[\s\S]*?clip-path: inset\(0\);/.test(styles) &&
+    /\.inspector-debug-body \{[\s\S]*?right: 0;[\s\S]*?bottom: 44px;[\s\S]*?left: 0;[\s\S]*?background: transparent;[\s\S]*?border: 0;/.test(styles) &&
     inspectorSource.includes('data-state={debugOpen ? "expanded" : "collapsed"}') &&
     inspectorSource.includes("<ChevronDown />") &&
     !inspectorSource.includes("ChevronUp") &&
@@ -1698,8 +1698,14 @@ assert(
 assert(
   appSource.includes("Graph Explorer") &&
     knowledgeGraphSource.includes('aria-label="Workspace knowledge graph"') &&
-    knowledgeGraphSource.includes("graph.edges.filter"),
-  "Knowledge settings must expose an interactive graph explorer backed by graph state"
+    knowledgeGraphSource.includes('from "d3-force"') &&
+    knowledgeGraphSource.includes("forceSimulation(positioned)") &&
+    knowledgeGraphSource.includes("forceLink<PositionedNode, SimulationEdge>") &&
+    knowledgeGraphSource.includes("graph.edges.filter") &&
+    knowledgeGraphSource.includes('data-muted={Boolean(activeId)') &&
+    styles.includes(".knowledge-graph-node-label") &&
+    styles.includes('.knowledge-graph-edges line[data-muted="true"]'),
+  "Knowledge settings must expose an Obsidian-style force-directed graph backed by graph state"
 );
 assert(
   rustLib.includes("context_checkpoint_path_for_session") &&
