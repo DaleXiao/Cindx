@@ -1,86 +1,181 @@
+import {
+  forceCenter,
+  forceCollide,
+  forceLink,
+  forceManyBody,
+  forceSimulation,
+  forceX,
+  forceY,
+  type SimulationLinkDatum,
+  type SimulationNodeDatum
+} from "d3-force";
 import { useMemo, useState } from "react";
-import type { GraphNodeView, GraphStateView } from "../tauri";
+import type { GraphEdgeView, GraphNodeView, GraphStateView } from "../tauri";
 
 type KnowledgeGraphProps = {
   graph: GraphStateView;
 };
 
-type PositionedNode = GraphNodeView & {
-  x: number;
-  y: number;
+type PositionedNode = GraphNodeView &
+  SimulationNodeDatum & {
+    x: number;
+    y: number;
+    degree: number;
+    radius: number;
+  };
+
+type SimulationEdge = GraphEdgeView & SimulationLinkDatum<PositionedNode>;
+
+type PositionedEdge = GraphEdgeView & {
+  source: PositionedNode;
+  target: PositionedNode;
 };
 
 const WIDTH = 900;
-const HEIGHT = 380;
+const HEIGHT = 420;
 const MAX_VISIBLE_NODES = 56;
-
-const KIND_ORDER = ["file", "symbol", "tool", "decision", "claim", "task"];
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 
 function nodeColor(kind: string) {
   switch (kind) {
     case "file":
-      return "#2f6f9f";
+      return "#595959";
     case "symbol":
-      return "#6d5d9f";
+      return "#737373";
     case "tool":
-      return "#2f8b68";
+      return "#666666";
     case "decision":
-      return "#a16824";
+      return "#888888";
     case "claim":
-      return "#9b4e5f";
+      return "#7b7b7b";
     default:
-      return "#626a73";
+      return "#808080";
   }
 }
 
-function layoutNodes(nodes: GraphNodeView[]): PositionedNode[] {
-  const visible = [...nodes]
-    .sort((left, right) => Number(right.focused) - Number(left.focused))
-    .slice(0, MAX_VISIBLE_NODES);
-  const kinds = KIND_ORDER.filter((kind) => visible.some((node) => node.kind === kind));
-  const unknownKinds = [...new Set(visible.map((node) => node.kind))].filter(
-    (kind) => !kinds.includes(kind)
-  );
-  const columns = [...kinds, ...unknownKinds];
-  const columnWidth = (WIDTH - 100) / Math.max(columns.length - 1, 1);
+function shortNodeLabel(label: string) {
+  const trimmed = label.trim();
+  return trimmed.length > 26 ? `${trimmed.slice(0, 25)}…` : trimmed;
+}
 
-  return columns.flatMap((kind, columnIndex) => {
-    const group = visible.filter((node) => node.kind === kind);
-    const rowHeight = (HEIGHT - 70) / Math.max(group.length, 1);
-    return group.map((node, rowIndex) => ({
-      ...node,
-      x: 50 + columnIndex * columnWidth,
-      y: 42 + rowHeight * (rowIndex + 0.5)
-    }));
+function layoutGraph(nodes: GraphNodeView[], edges: GraphEdgeView[]) {
+  const allDegrees = new Map<string, number>();
+  edges.forEach((edge) => {
+    allDegrees.set(edge.from, (allDegrees.get(edge.from) ?? 0) + 1);
+    allDegrees.set(edge.to, (allDegrees.get(edge.to) ?? 0) + 1);
   });
+
+  const visible = [...nodes]
+    .sort(
+      (left, right) =>
+        Number(right.focused) - Number(left.focused) ||
+        (allDegrees.get(right.id) ?? 0) - (allDegrees.get(left.id) ?? 0) ||
+        left.label.localeCompare(right.label)
+    )
+    .slice(0, MAX_VISIBLE_NODES);
+  const visibleIds = new Set(visible.map((node) => node.id));
+  const visibleEdges = edges.filter(
+    (edge) => visibleIds.has(edge.from) && visibleIds.has(edge.to)
+  );
+  const degrees = new Map<string, number>();
+  visibleEdges.forEach((edge) => {
+    degrees.set(edge.from, (degrees.get(edge.from) ?? 0) + 1);
+    degrees.set(edge.to, (degrees.get(edge.to) ?? 0) + 1);
+  });
+
+  const positioned: PositionedNode[] = visible.map((node, index) => {
+    const degree = degrees.get(node.id) ?? 0;
+    const angle = index * GOLDEN_ANGLE;
+    const initialRadius = 28 + Math.sqrt(index + 1) * 22;
+    return {
+      ...node,
+      degree,
+      radius: Math.min(8.5, 3.8 + Math.sqrt(degree + 1) * 0.9 + (node.focused ? 1.2 : 0)),
+      x: WIDTH / 2 + Math.cos(angle) * initialRadius,
+      y: HEIGHT / 2 + Math.sin(angle) * initialRadius * 0.68
+    };
+  });
+  const simulationEdges: SimulationEdge[] = visibleEdges.map((edge) => ({
+    ...edge,
+    source: edge.from,
+    target: edge.to
+  }));
+
+  const simulation = forceSimulation(positioned)
+    .force(
+      "link",
+      forceLink<PositionedNode, SimulationEdge>(simulationEdges)
+        .id((node) => node.id)
+        .distance((edge) => (edge.kind === "related_to" ? 72 : 58))
+        .strength(0.38)
+    )
+    .force(
+      "charge",
+      forceManyBody<PositionedNode>()
+        .strength((node) => -42 - node.radius * 5)
+        .distanceMax(220)
+    )
+    .force("collision", forceCollide<PositionedNode>().radius((node) => node.radius + 10).iterations(2))
+    .force("center", forceCenter(WIDTH / 2, HEIGHT / 2))
+    .force("x", forceX<PositionedNode>(WIDTH / 2).strength(0.025))
+    .force("y", forceY<PositionedNode>(HEIGHT / 2).strength(0.04))
+    .stop();
+
+  for (let index = 0; index < 220; index += 1) simulation.tick();
+  simulation.stop();
+
+  positioned.forEach((node) => {
+    node.x = Math.min(WIDTH - 44, Math.max(44, node.x));
+    node.y = Math.min(HEIGHT - 34, Math.max(34, node.y));
+  });
+
+  const positionedEdges = simulationEdges.flatMap<PositionedEdge>((edge) => {
+    if (typeof edge.source !== "object" || typeof edge.target !== "object") return [];
+    return [
+      {
+        id: edge.id,
+        from: edge.from,
+        to: edge.to,
+        kind: edge.kind,
+        source: edge.source,
+        target: edge.target
+      }
+    ];
+  });
+
+  return { nodes: positioned, edges: positionedEdges };
 }
 
 export function KnowledgeGraph({ graph }: KnowledgeGraphProps) {
-  const positioned = useMemo(() => layoutNodes(graph.nodes), [graph.nodes]);
+  const layout = useMemo(
+    () => layoutGraph(graph.nodes, graph.edges.filter((edge) => edge.from !== edge.to)),
+    [graph.edges, graph.nodes]
+  );
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const selected = positioned.find((node) => node.id === selectedId) ?? null;
-  const positions = useMemo(
-    () => new Map(positioned.map((node) => [node.id, node])),
-    [positioned]
-  );
-  const visibleEdges = graph.edges.filter(
-    (edge) => positions.has(edge.from) && positions.has(edge.to)
-  );
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const activeId = hoveredId ?? selectedId;
+  const selected = layout.nodes.find((node) => node.id === selectedId) ?? null;
+  const activeNodeIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (!activeId) return ids;
+    ids.add(activeId);
+    layout.edges.forEach((edge) => {
+      if (edge.from === activeId) ids.add(edge.to);
+      if (edge.to === activeId) ids.add(edge.from);
+    });
+    return ids;
+  }, [activeId, layout.edges]);
 
-  if (positioned.length === 0) {
-    return (
-      <div className="knowledge-graph-empty">
-        Index the workspace to build the graph.
-      </div>
-    );
+  if (layout.nodes.length === 0) {
+    return <div className="knowledge-graph-empty">Index the workspace to build the graph.</div>;
   }
 
   return (
     <div className="knowledge-graph">
       <div className="knowledge-graph-meta">
         <span>{graph.totalNodes} nodes</span>
-        <span>{graph.totalEdges} edges</span>
-        <span>{positioned.filter((node) => node.focused).length} recalled</span>
+        <span>{graph.totalEdges} links</span>
+        <span>{layout.nodes.filter((node) => node.focused).length} recalled</span>
       </div>
       <div className="knowledge-graph-canvas">
         <svg
@@ -88,21 +183,20 @@ export function KnowledgeGraph({ graph }: KnowledgeGraphProps) {
           aria-label="Workspace knowledge graph"
           viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
           preserveAspectRatio="xMidYMid meet"
+          onPointerLeave={() => setHoveredId(null)}
         >
           <g className="knowledge-graph-edges">
-            {visibleEdges.map((edge) => {
-              const from = positions.get(edge.from)!;
-              const to = positions.get(edge.to)!;
-              const highlighted =
-                selectedId === edge.from || selectedId === edge.to;
+            {layout.edges.map((edge) => {
+              const highlighted = activeId === edge.from || activeId === edge.to;
               return (
                 <line
                   key={edge.id}
-                  x1={from.x}
-                  y1={from.y}
-                  x2={to.x}
-                  y2={to.y}
+                  x1={edge.source.x}
+                  y1={edge.source.y}
+                  x2={edge.target.x}
+                  y2={edge.target.y}
                   data-highlighted={highlighted || undefined}
+                  data-muted={Boolean(activeId) && !highlighted ? true : undefined}
                 >
                   <title>{edge.kind}</title>
                 </line>
@@ -110,34 +204,58 @@ export function KnowledgeGraph({ graph }: KnowledgeGraphProps) {
             })}
           </g>
           <g className="knowledge-graph-nodes">
-            {positioned.map((node) => (
-              <g
-                key={node.id}
-                className="knowledge-graph-node"
-                data-focused={node.focused || undefined}
-                data-selected={node.id === selectedId || undefined}
-                transform={`translate(${node.x} ${node.y})`}
-                role="button"
-                tabIndex={0}
-                aria-label={`${node.kind}: ${node.label}`}
-                onClick={() => setSelectedId(node.id === selectedId ? null : node.id)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    setSelectedId(node.id === selectedId ? null : node.id);
-                  }
-                }}
-              >
-                {node.focused && <circle className="knowledge-graph-node-halo" r="11" />}
-                <circle r={node.kind === "file" ? 6.5 : 5} fill={nodeColor(node.kind)} />
-                <title>{`${node.label}\n${node.sourcePath}`}</title>
-              </g>
-            ))}
+            {layout.nodes.map((node) => {
+              const active = node.id === activeId;
+              const related = activeNodeIds.has(node.id);
+              const labelVisible = active || node.focused || node.degree >= 4;
+              return (
+                <g
+                  key={node.id}
+                  className="knowledge-graph-node"
+                  data-focused={node.focused || undefined}
+                  data-selected={node.id === selectedId || undefined}
+                  data-active={active || undefined}
+                  data-related={related || undefined}
+                  data-muted={Boolean(activeId) && !related ? true : undefined}
+                  transform={`translate(${node.x} ${node.y})`}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${node.kind}: ${node.label}`}
+                  onPointerEnter={() => setHoveredId(node.id)}
+                  onFocus={() => setHoveredId(node.id)}
+                  onBlur={() => setHoveredId(null)}
+                  onClick={() => setSelectedId(node.id === selectedId ? null : node.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      setSelectedId(node.id === selectedId ? null : node.id);
+                    }
+                  }}
+                >
+                  {(node.focused || active) && (
+                    <circle className="knowledge-graph-node-halo" r={node.radius + 6} />
+                  )}
+                  <circle
+                    className="knowledge-graph-node-core"
+                    r={node.radius}
+                    fill={nodeColor(node.kind)}
+                  />
+                  <text
+                    className="knowledge-graph-node-label"
+                    y={node.radius + 13}
+                    data-visible={labelVisible || undefined}
+                  >
+                    {shortNodeLabel(node.label)}
+                  </text>
+                  <title>{`${node.label}\n${node.sourcePath}`}</title>
+                </g>
+              );
+            })}
           </g>
         </svg>
       </div>
       <div className="knowledge-graph-legend" aria-label="Graph node kinds">
-        {[...new Set(positioned.map((node) => node.kind))].map((kind) => (
+        {[...new Set(layout.nodes.map((node) => node.kind))].map((kind) => (
           <span key={kind}>
             <i style={{ background: nodeColor(kind) }} />
             {kind}
