@@ -25,6 +25,7 @@
   --muted: #707070;
   --subtle: #989898;
   --ink: #202020;
+  --accent: #2563eb;
   --radius-xs: 4px;
   --radius-sm: 6px;
   --radius-md: 8px;
@@ -46,6 +47,13 @@
   box-sizing: border-box;
   scrollbar-color: var(--scrollbar-thumb) transparent;
   scrollbar-width: thin;
+}
+
+.lucide-check,
+.lucide-circle-check,
+.lucide-circle-check-big {
+  color: var(--accent) !important;
+  stroke: currentColor !important;
 }
 
 *::-webkit-scrollbar {
@@ -244,6 +252,9 @@ pre {
 .window-toolbar-panel-left {
   left: 0;
   width: var(--sidebar-layout-width);
+  background: rgba(250, 250, 250, 0.76);
+  -webkit-backdrop-filter: saturate(155%) blur(24px);
+  backdrop-filter: saturate(155%) blur(24px);
 }
 
 .window-toolbar-panel-right {
@@ -400,7 +411,9 @@ pre {
   gap: 14px;
   padding: 14px;
   overflow: hidden;
-  background: var(--panel);
+  background: rgba(250, 250, 250, 0.76);
+  -webkit-backdrop-filter: saturate(155%) blur(24px);
+  backdrop-filter: saturate(155%) blur(24px);
   opacity: 1;
   transform: translateX(0);
   transition:
@@ -1204,6 +1217,53 @@ pre {
   background: var(--bg);
 }
 
+.thread-jump-latest {
+  position: absolute;
+  z-index: 11;
+  right: max(20px, calc((100% - 760px) / 2 + 2px));
+  bottom: 18px;
+  display: grid;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  color: #111111;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: var(--radius-round);
+  box-shadow:
+    0 5px 16px rgb(0 0 0 / 12%),
+    inset 0 0 0 0.5px rgb(0 0 0 / 7%);
+  -webkit-backdrop-filter: saturate(150%) blur(18px);
+  backdrop-filter: saturate(150%) blur(18px);
+  place-items: center;
+  animation: thread-jump-latest-in 160ms var(--ease-out-quart) both;
+}
+
+.thread-jump-latest:hover {
+  background: rgba(255, 255, 255, 0.84);
+  box-shadow:
+    0 7px 20px rgb(0 0 0 / 15%),
+    inset 0 0 0 0.5px rgb(0 0 0 / 8%);
+}
+
+.thread-jump-latest svg {
+  width: 18px;
+  height: 18px;
+  stroke-width: 1.8;
+}
+
+@keyframes thread-jump-latest-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.94);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 .thread-find {
   position: absolute;
   z-index: 12;
@@ -1334,13 +1394,17 @@ pre {
 .thread-content > .thread-message,
 .thread-content > .thread-event-disclosure,
 .thread-content > .thread-tool-message,
-.thread-content > .thread-tool-chain,
+.thread-content > .thread-tool-chain {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 96px;
+}
+
 .thread-virtual-row > .thread-message,
 .thread-virtual-row > .thread-event-disclosure,
 .thread-virtual-row > .thread-tool-message,
 .thread-virtual-row > .thread-tool-chain {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 96px;
+  content-visibility: visible;
+  contain-intrinsic-size: none;
 }
 
 .thread-minimap {
@@ -3564,6 +3628,7 @@ textarea::placeholder {
 }
 
 .settings-disclosure-chevron {
+  display: block;
   width: 13px;
   height: 13px;
   flex: 0 0 auto;
@@ -3571,7 +3636,15 @@ textarea::placeholder {
   stroke-width: 1.8;
   transform: rotate(0deg);
   transform-origin: center;
+  align-self: center;
+  vertical-align: middle;
   transition: transform 180ms var(--ease-out-quart);
+}
+
+.settings-action-chevron {
+  display: block;
+  align-self: center;
+  vertical-align: middle;
 }
 
 details[open] > summary .settings-disclosure-chevron {
@@ -3617,6 +3690,26 @@ details[open] > summary .settings-disclosure-chevron {
 .tool-runner label > span {
   color: var(--muted);
   font-size: 10px;
+}
+
+.provider-endpoint-input {
+  position: relative;
+  min-width: 0;
+}
+
+.provider-endpoint-input input {
+  padding-right: 32px;
+}
+
+.provider-endpoint-check {
+  position: absolute;
+  top: 50%;
+  right: 9px;
+  width: 15px;
+  height: 15px;
+  color: var(--accent);
+  pointer-events: none;
+  transform: translateY(-50%);
 }
 
 .workspace-folder-field {
@@ -5625,6 +5718,11 @@ details[open] > summary .settings-disclosure-chevron {
   .knowledge-graph-node-label,
   .metadata-disclosure-icon,
   .metadata-details-body {
+    transition: none;
+    animation: none;
+  }
+
+  .thread-jump-latest {
     transition: none;
     animation: none;
   }

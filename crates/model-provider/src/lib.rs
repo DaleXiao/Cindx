@@ -852,6 +852,30 @@ impl OpenAiCompatibleImageProvider {
         Self { config }
     }
 
+    pub fn validate_endpoint(&self) -> Result<String, ModelError> {
+        if self.config.base_url.trim().is_empty() || self.config.model.trim().is_empty() {
+            return Err(ModelError::new(
+                "image generation endpoint and model are required",
+            ));
+        }
+        let endpoint = self.config.images_url();
+        let output = execute_http(
+            &endpoint,
+            &self.config.api_key,
+            Some("{}"),
+            self.config.timeout_seconds.min(10).max(1),
+            64 * 1024,
+        )?;
+        if image_endpoint_probe_succeeded(output.status) {
+            Ok(endpoint)
+        } else {
+            Err(ModelError::new(format!(
+                "image endpoint probe returned status {}",
+                output.status
+            )))
+        }
+    }
+
     pub fn generate(
         &self,
         request: ImageGenerationRequest,
@@ -977,6 +1001,10 @@ impl OpenAiCompatibleImageProvider {
             metadata,
         })
     }
+}
+
+fn image_endpoint_probe_succeeded(status: StatusCode) -> bool {
+    status.is_success() || matches!(status.as_u16(), 400 | 401 | 403 | 422 | 429)
 }
 
 pub fn parse_model_list_response(text: &str) -> Result<Vec<String>, ModelError> {
@@ -2097,6 +2125,20 @@ mod tests {
             dashscope.protocol(),
             ImageGenerationProtocol::DashScopeMultimodal
         );
+    }
+
+    #[test]
+    fn image_endpoint_probe_accepts_validation_and_auth_responses() {
+        for status in [200, 400, 401, 403, 422, 429] {
+            assert!(image_endpoint_probe_succeeded(
+                StatusCode::from_u16(status).expect("status should be valid")
+            ));
+        }
+        for status in [404, 405, 500] {
+            assert!(!image_endpoint_probe_succeeded(
+                StatusCode::from_u16(status).expect("status should be valid")
+            ));
+        }
     }
 
     #[test]

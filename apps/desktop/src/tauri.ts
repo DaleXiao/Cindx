@@ -257,6 +257,12 @@ export type ProviderModelsState = {
   lastError: string | null;
 };
 
+export type ImageEndpointValidationState = {
+  endpoint: string;
+  valid: boolean;
+  lastError: string | null;
+};
+
 export type ChatMessageView = {
   sequence?: number;
   role: "user" | "assistant" | "system" | "tool" | "reviewer";
@@ -1433,11 +1439,12 @@ export async function renameSession(
 
 export async function generateSessionTitle(
   sessionId: string,
-  prompt: string
+  prompt: string,
+  answer: string
 ): Promise<ProjectSessionState> {
   try {
     return await invoke<ProjectSessionState>("generate_session_title", {
-      input: { sessionId, prompt }
+      input: { sessionId, prompt, answer }
     });
   } catch {
     return await getProjectSessionState();
@@ -1810,6 +1817,31 @@ export async function listProviderModels(
       models: [],
       fetchedAtMs: 0,
       lastError: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+export async function validateImageEndpoint(
+  input: Pick<
+    ProviderConfigInput,
+    "baseUrl" | "imageModel" | "imageEndpoint"
+  >
+): Promise<ImageEndpointValidationState> {
+  try {
+    return await invoke<ImageEndpointValidationState>("validate_image_endpoint", { input });
+  } catch (error) {
+    const endpoint = input.imageEndpoint.trim() || input.baseUrl.trim();
+    let valid = false;
+    try {
+      const parsed = new URL(endpoint);
+      valid = Boolean(input.imageModel.trim()) && ["http:", "https:"].includes(parsed.protocol);
+    } catch {
+      valid = false;
+    }
+    return {
+      endpoint,
+      valid,
+      lastError: valid ? null : error instanceof Error ? error.message : String(error)
     };
   }
 }

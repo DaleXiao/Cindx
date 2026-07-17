@@ -111,6 +111,7 @@ type ThreadRow =
 const MIN_MINIMAP_MARKERS = 2;
 const MAX_MINIMAP_MARKERS = 32;
 const MINIMAP_MARKER_GAP = 12;
+const LATEST_OUTPUT_THRESHOLD = 48;
 
 function ThreadFind({
   open,
@@ -762,12 +763,15 @@ export const SessionThread = memo(function SessionThread({
   const [contentReady, setContentReady] = useState(false);
   const streamedAnswerRef = useRef(false);
   const scrollSyncFrameRef = useRef<number | null>(null);
+  const followLatestRef = useRef(true);
+  const jumpingToLatestRef = useRef(false);
   const historyLoadRequestedRef = useRef(false);
   const prependScrollHeightRef = useRef<number | null>(null);
-  const previousThreadRef = useRef<{ sessionId: string | null; firstId: string | null }>({
-    sessionId,
-    firstId: null
-  });
+  const previousThreadRef = useRef<{
+    sessionId: string | null;
+    firstId: string | null;
+    status: AgentState["status"] | "idle";
+  }>({ sessionId, firstId: null, status });
   const knownMessageIdsRef = useRef<{ sessionId: string | null; ids: Set<string> }>({
     sessionId,
     ids: new Set(messages.map(threadMessageId))
@@ -777,6 +781,7 @@ export const SessionThread = memo(function SessionThread({
     scrollHeight: 1,
     clientHeight: 1
   });
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
 
   useLayoutEffect(() => {
     if (streamAnswer) streamedAnswerRef.current = true;
@@ -1015,6 +1020,19 @@ export const SessionThread = memo(function SessionThread({
 
     const handleScroll = () => {
       syncScrollMetrics();
+      const distanceFromLatest = Math.max(
+        0,
+        thread.scrollHeight - thread.clientHeight - thread.scrollTop
+      );
+      const atLatest = distanceFromLatest <= LATEST_OUTPUT_THRESHOLD;
+      if (jumpingToLatestRef.current) {
+        followLatestRef.current = true;
+        setShowJumpToLatest(false);
+        if (atLatest) jumpingToLatestRef.current = false;
+      } else {
+        followLatestRef.current = atLatest;
+        setShowJumpToLatest(!atLatest && thread.scrollHeight > thread.clientHeight + 2);
+      }
       if (
         thread.scrollTop <= 160 &&
         hasOlderHistory &&
@@ -1095,7 +1113,11 @@ export const SessionThread = memo(function SessionThread({
     if (!thread) return;
     const firstId = items[0]?.id ?? null;
     const previous = previousThreadRef.current;
+    const runStarted = previous.status !== "running" && status === "running";
     if (previous.sessionId !== sessionId) {
+      followLatestRef.current = true;
+      jumpingToLatestRef.current = false;
+      setShowJumpToLatest(false);
       thread.scrollTop = thread.scrollHeight;
     } else if (
       prependScrollHeightRef.current !== null &&
@@ -1104,10 +1126,12 @@ export const SessionThread = memo(function SessionThread({
     ) {
       thread.scrollTop += Math.max(0, thread.scrollHeight - prependScrollHeightRef.current);
       prependScrollHeightRef.current = null;
-    } else {
+    } else if (runStarted || followLatestRef.current) {
+      followLatestRef.current = true;
+      setShowJumpToLatest(false);
       thread.scrollTop = thread.scrollHeight;
     }
-    previousThreadRef.current = { sessionId, firstId };
+    previousThreadRef.current = { sessionId, firstId, status };
     syncScrollMetrics();
   }, [items, sessionId, status, streamAnswer, syncScrollMetrics]);
 
@@ -1243,6 +1267,15 @@ export const SessionThread = memo(function SessionThread({
     },
     [copyContent]
   );
+
+  function jumpToLatest() {
+    const thread = threadRef.current;
+    if (!thread) return;
+    jumpingToLatestRef.current = true;
+    followLatestRef.current = true;
+    setShowJumpToLatest(false);
+    thread.scrollTo({ top: thread.scrollHeight, behavior: "smooth" });
+  }
 
   const isScrollable = scrollMetrics.scrollHeight > scrollMetrics.clientHeight + 2;
   const minimapAvailable =
@@ -1475,6 +1508,18 @@ export const SessionThread = memo(function SessionThread({
         <span className="thread-scroll-anchor" aria-hidden="true" />
         </div>
       </section>
+
+      {showJumpToLatest && (
+        <button
+          className="thread-jump-latest"
+          type="button"
+          aria-label="Jump to latest output"
+          title="Jump to latest output"
+          onClick={jumpToLatest}
+        >
+          <ChevronDown aria-hidden="true" />
+        </button>
+      )}
 
       <div
         className="thread-minimap"
