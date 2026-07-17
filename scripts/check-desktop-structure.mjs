@@ -1103,6 +1103,21 @@ assert(
     !inspectorSource.includes('<span title={displayPath}>{displayPath}</span>'),
   "Outputs must use a compact path-free file list with a validated Finder reveal action"
 );
+assert(
+  inspectorSource.includes("const [outputsOpen, setOutputsOpen] = useState(true)") &&
+    /className="inspector-output-count"[\s\S]*?className="inspector-output-toggle"/.test(
+      inspectorSource
+    ) &&
+    inspectorSource.includes("data-expanded={outputsOpen}") &&
+    inspectorSource.includes("!outputsOpen ? null : selectedOutput") &&
+    /\.inspector-outputs > header \.inspector-output-chevron \{[\s\S]*?transform: rotate\(180deg\);[\s\S]*?transition: transform 180ms/.test(
+      styles
+    ) &&
+    /\.inspector-output-chevron\[data-expanded="true"\] \{[\s\S]*?transform: rotate\(0deg\);/.test(
+      styles
+    ),
+  "Outputs must default expanded with a trailing down chevron and rotate up when collapsed"
+);
 assert(!tauriBridge.includes("apiKeyPreview"), "Provider state must not expose API key suffixes");
 assert(appSource.includes("<ModelSelect"), "Provider models must use select controls");
 assert(appSource.includes("listProviderModels"), "Provider settings must load the remote model catalog");
