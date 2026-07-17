@@ -1,5 +1,6 @@
 import {
   Check,
+  ChevronRight,
   FolderOpen,
   Folders,
   LoaderCircle,
@@ -14,7 +15,6 @@ import { Menu } from "@tauri-apps/api/menu";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ProjectView, SessionView } from "../tauri";
-import { DisclosureTriangle } from "./DisclosureTriangle";
 
 const appIconUrl = new URL("../../src-tauri/icons/icon.png", import.meta.url).href;
 
@@ -319,13 +319,13 @@ export function Sidebar({
   }
 
   return (
-    <aside className="sidebar" aria-label="Projects and sessions">
+    <aside className="sidebar" aria-label="Projects and tasks">
       <div className="brand-row" title={activeProject?.root}>
         <img className="brand-mark" src={appIconUrl} alt="" />
         <div className="brand-name">Cindx</div>
         <button
           className={`icon-button brand-search ${searchOpen ? "active" : ""}`}
-          aria-label="Search projects and sessions"
+          aria-label="Search projects and tasks"
           title="Search"
           onClick={onSearchToggle}
           type="button"
@@ -422,30 +422,6 @@ export function Sidebar({
                       void openProjectMenu(project, event.clientX, event.clientY);
                     }}
                   >
-                    <button
-                      className="project-disclosure"
-                      type="button"
-                      disabled={busy}
-                      aria-label={
-                        searchActive
-                          ? `Open ${project.name}`
-                          : `${expanded ? "Collapse" : "Expand"} sessions for ${project.name}`
-                      }
-                      aria-expanded={expanded}
-                      title={
-                        searchActive
-                          ? "Open project"
-                          : expanded
-                            ? "Collapse sessions"
-                            : "Expand sessions"
-                      }
-                      onClick={() => {
-                        if (searchActive) selectProjectResult(project.id);
-                        else handleProjectDisclosure(project, expanded);
-                      }}
-                    >
-                      <DisclosureTriangle />
-                    </button>
                     {renamingProjectId === project.id ? (
                       <form
                         className="project-rename-form"
@@ -497,17 +473,46 @@ export function Sidebar({
                       </form>
                     ) : (
                       <>
-                        <button
-                          className="nav-item project-item"
-                          onClick={() => selectProjectResult(project.id)}
-                          type="button"
-                          disabled={busy}
-                          title={project.root}
-                        >
-                          <span>
-                            <strong>{project.name}</strong>
-                          </span>
-                        </button>
+                        <div className="project-main">
+                          <button
+                            className="nav-item project-item"
+                            onClick={() => selectProjectResult(project.id)}
+                            type="button"
+                            disabled={busy}
+                            title={project.root}
+                          >
+                            <span>
+                              <strong>{project.name}</strong>
+                            </span>
+                          </button>
+                          <button
+                            className="project-disclosure"
+                            type="button"
+                            disabled={busy}
+                            aria-label={
+                              searchActive
+                                ? `Open ${project.name}`
+                                : `${expanded ? "Collapse" : "Expand"} tasks for ${project.name}`
+                            }
+                            aria-expanded={expanded}
+                            title={
+                              searchActive
+                                ? "Open project"
+                                : expanded
+                                  ? "Collapse tasks"
+                                  : "Expand tasks"
+                            }
+                            onClick={() => {
+                              if (searchActive) selectProjectResult(project.id);
+                              else handleProjectDisclosure(project, expanded);
+                            }}
+                          >
+                            <ChevronRight
+                              className="project-disclosure-chevron"
+                              aria-hidden="true"
+                            />
+                          </button>
+                        </div>
                         <button
                           className="project-more"
                           type="button"
@@ -530,12 +535,12 @@ export function Sidebar({
                     <div className="session-branch">
                       {!searchActive && (
                         <div className="nav-heading-row session-heading">
-                          <div className="nav-heading">Sessions</div>
+                          <div className="nav-heading">Tasks</div>
                           <button
                             className="nav-add-button"
                             type="button"
-                            aria-label="New session"
-                            title="New session"
+                            aria-label="New task"
+                            title="New task"
                             disabled={busy}
                             onClick={onSessionCreate}
                           >
@@ -546,7 +551,7 @@ export function Sidebar({
 
                       <div className="session-list">
                         {projectSessions.length === 0 ? (
-                          <div className="nav-empty">No sessions</div>
+                          <div className="nav-empty">No tasks</div>
                         ) : (
                           projectSessions.map((session) => (
                           <div
