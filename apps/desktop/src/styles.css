@@ -4555,57 +4555,48 @@ details[open] > summary .settings-disclosure-chevron {
 
 .inspector-output-list {
   display: grid;
-  gap: 6px;
-  padding: 3px 5px 7px;
+  gap: 1px;
+  padding: 2px 5px 7px;
+}
+
+.inspector-output-row {
+  display: grid;
+  min-width: 0;
+  min-height: 30px;
+  grid-template-columns: minmax(0, 1fr) 26px;
+  align-items: center;
+  border-radius: var(--radius-sm);
+}
+
+.inspector-output-row:hover,
+.inspector-output-row:focus-within {
+  background: #f4f4f4;
 }
 
 .inspector-output {
-  display: grid;
+  display: flex;
   width: 100%;
   min-width: 0;
-  grid-template-columns: 32px minmax(0, 1fr);
   align-items: center;
-  gap: 9px;
-  padding: 7px 9px;
+  gap: 7px;
+  padding: 5px 4px 5px 7px;
   color: inherit;
   text-align: left;
-  background: #fafafa;
+  background: transparent;
   border: 0;
-  border-radius: var(--radius-md);
-  box-shadow:
-    0 1px 2px rgb(0 0 0 / 5%),
-    inset 0 0 0 0.5px #e7e7e7;
+  border-radius: var(--radius-sm);
 }
 
 .inspector-output:hover,
 .inspector-output:focus-visible {
-  background: #f4f4f4;
-  box-shadow:
-    0 2px 5px rgb(0 0 0 / 8%),
-    inset 0 0 0 0.5px #dddddd;
+  background: transparent;
 }
 
-.inspector-output-preview {
-  display: grid;
-  width: 32px;
-  height: 32px;
-  overflow: hidden;
+.inspector-output > svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
   color: #777777;
-  background: #f4f4f4;
-  border: 0.5px solid #dddddd;
-  border-radius: var(--radius-md);
-  place-items: center;
-}
-
-.inspector-output-preview > svg {
-  width: 15px;
-  height: 15px;
-}
-
-.inspector-output-copy {
-  display: grid;
-  min-width: 0;
-  gap: 3px;
 }
 
 .inspector-output-name {
@@ -4617,6 +4608,12 @@ details[open] > summary .settings-disclosure-chevron {
 
 .inspector-output-name strong {
   min-width: 0;
+  overflow: hidden;
+  color: #333333;
+  font-size: 10px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .inspector-output-name small {
@@ -4630,22 +4627,34 @@ details[open] > summary .settings-disclosure-chevron {
   border-radius: 999px;
 }
 
-.inspector-output-copy strong,
-.inspector-output-copy span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.inspector-output-reveal {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: #707070;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  opacity: 0;
+  place-items: center;
+  transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease;
 }
 
-.inspector-output-copy strong {
-  color: #333333;
-  font-size: 10px;
-  font-weight: 650;
+.inspector-output-row:hover .inspector-output-reveal,
+.inspector-output-reveal:focus-visible {
+  opacity: 1;
 }
 
-.inspector-output-copy span {
-  color: var(--subtle);
-  font-size: 8px;
+.inspector-output-reveal:hover,
+.inspector-output-reveal:focus-visible {
+  color: #222222;
+  background: #e9e9e9;
+}
+
+.inspector-output-reveal > svg {
+  width: 12px;
+  height: 12px;
 }
 
 .inspector-output-detail {

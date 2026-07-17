@@ -10,6 +10,7 @@ import {
   ExternalLink,
   File,
   FileText,
+  FolderOpen,
   Globe2,
   Image,
   Maximize2,
@@ -29,7 +30,12 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent
 } from "react";
-import { getAgentSessionOutputs, openArtifact, readArtifactPreview } from "../tauri";
+import {
+  getAgentSessionOutputs,
+  openArtifact,
+  readArtifactPreview,
+  revealArtifact
+} from "../tauri";
 import type {
   AgentOutputArtifactView,
   AgentState,
@@ -510,6 +516,19 @@ export function Inspector({
     }
   }
 
+  async function handleRevealOutput(path: string) {
+    if (openingOutputPath) return;
+    setOpeningOutputPath(path);
+    setOutputActionError(null);
+    try {
+      await revealArtifact(path);
+    } catch (error) {
+      setOutputActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setOpeningOutputPath(null);
+    }
+  }
+
   async function handleCopySessionId() {
     if (!sessionId) return;
     if (sessionCopyTimerRef.current !== null) {
@@ -665,32 +684,46 @@ export function Inspector({
                   const versionLabel =
                     artifact.versionCount > 1 ? `Version ${artifact.version}` : null;
                   return (
-                    <button
-                      className="inspector-output"
-                      type="button"
-                      aria-label={`Preview ${artifactName(displayPath)}${
-                        versionLabel ? `, ${versionLabel}` : ""
-                      }`}
-                      title={`Preview ${artifactName(displayPath)}${
-                        versionLabel ? `, ${versionLabel}` : ""
-                      }`}
+                    <div
+                      className="inspector-output-row"
                       key={`${artifact.id}-${artifact.path}`}
-                      onClick={() => selectOutput(artifact.path)}
                     >
-                      <div className="inspector-output-preview">
+                      <button
+                        className="inspector-output"
+                        type="button"
+                        aria-label={`Preview ${artifactName(displayPath)}${
+                          versionLabel ? `, ${versionLabel}` : ""
+                        }`}
+                        title={`Preview ${artifactName(displayPath)}${
+                          versionLabel ? `, ${versionLabel}` : ""
+                        }`}
+                        onClick={() => selectOutput(artifact.path)}
+                      >
                         <ArtifactTypeIcon path={artifact.path} />
-                      </div>
-                      <div className="inspector-output-copy">
                         <div className="inspector-output-name">
                           <strong title={displayPath}>{artifactName(displayPath)}</strong>
                           {versionLabel && <small>v{artifact.version}</small>}
                         </div>
-                        <span title={displayPath}>{displayPath}</span>
-                      </div>
-                    </button>
+                      </button>
+                      <button
+                        className="inspector-output-reveal"
+                        type="button"
+                        aria-label={`Show ${artifactName(displayPath)} in Finder`}
+                        title="Show in Finder"
+                        disabled={openingOutputPath === artifact.path}
+                        onClick={() => void handleRevealOutput(artifact.path)}
+                      >
+                        <FolderOpen aria-hidden="true" />
+                      </button>
+                    </div>
                   );
                 })}
               </div>
+          )}
+          {!selectedOutput && outputActionError && (
+            <div className="inspector-output-action-error" role="alert">
+              {outputActionError}
+            </div>
           )}
         </section>
       </div>

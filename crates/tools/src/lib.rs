@@ -266,6 +266,9 @@ impl Default for ToolRegistry {
 
 fn tool_relevance(spec: &ToolSpec, query: &str) -> usize {
     let mut score = 0;
+    if spec.name == "image.generate" && prompt_requests_image_generation(query) {
+        score += 1_000;
+    }
     for token in query.split(|character: char| !character.is_alphanumeric()) {
         if token.len() < 3 {
             continue;
@@ -281,6 +284,67 @@ fn tool_relevance(spec: &ToolSpec, query: &str) -> usize {
         }
     }
     score
+}
+
+pub fn prompt_requests_image_generation(prompt: &str) -> bool {
+    let prompt = prompt.to_lowercase();
+    const DIRECT_PATTERNS: &[&str] = &[
+        "生图",
+        "生成图片",
+        "生成图像",
+        "生成一张图",
+        "生成一幅图",
+        "画一张",
+        "画一幅",
+        "制作图片",
+        "制作图像",
+        "创建图片",
+        "创建图像",
+        "generate an image",
+        "generate image",
+        "create an image",
+        "create image",
+        "draw an image",
+        "draw a picture",
+        "make an image",
+        "render an image",
+    ];
+    if DIRECT_PATTERNS.iter().any(|pattern| prompt.contains(pattern)) {
+        return true;
+    }
+
+    let has_visual_noun = [
+        "图片",
+        "图像",
+        "插画",
+        "海报",
+        "头像",
+        "壁纸",
+        "精灵图",
+        "sprite",
+        "illustration",
+        "poster",
+        "wallpaper",
+        "image",
+        "picture",
+    ]
+    .iter()
+    .any(|token| prompt.contains(token));
+    let has_generation_action = [
+        "生成",
+        "绘制",
+        "画出",
+        "制作",
+        "设计",
+        "create",
+        "generate",
+        "draw",
+        "render",
+        "illustrate",
+    ]
+    .iter()
+    .any(|token| prompt.contains(token));
+    has_visual_noun && has_generation_action
 }
 
 struct ToolSearchMeta {
@@ -1111,7 +1175,10 @@ impl Tool for ImageGenerationTool {
         let mut spec = ToolSpec::new(
             "image.generate",
             "image",
-            "Generate one raster image with the configured image model and save it in the active workspace.",
+            format!(
+                "Generate one raster image using the user-configured model `{}` and save it in the active workspace. The model and provider are controlled by Settings and cannot be overridden in tool input.",
+                self.config.model
+            ),
             ToolRisk::UsesNetwork,
             agent_core::ToolSource::BuiltIn,
             agent_core::ToolExposure::Auto,
@@ -3132,6 +3199,8 @@ mod tests {
 
         assert_eq!(spec.namespace, "image");
         assert!(spec.input_schema_json.contains("output_path"));
+        assert!(!spec.input_schema_json.contains("\"model\""));
+        assert!(spec.description.contains("image-model-a"));
         assert_eq!(permission.risk, PermissionRisk::Network);
         assert_eq!(permission.scope, "art/circle.png");
         assert!(!permission
@@ -3139,6 +3208,32 @@ mod tests {
             .values()
             .any(|value| value.contains("blue circle")));
         assert_eq!(output_path, "art/circle.png");
+    }
+
+    #[test]
+    fn image_generation_intent_keeps_the_configured_tool_inline() {
+        let mut registry = ToolRegistry::with_workspace_tools_and_services(
+            temp_workspace(),
+            WebSearchConfig::default(),
+            Some(ImageGenerationConfig {
+                base_url: "https://example.test/v1".to_string(),
+                api_key: "secret".to_string(),
+                model: "image-model-a".to_string(),
+                timeout_seconds: 300,
+            }),
+        );
+        for index in 0..30 {
+            registry.register(Box::new(CatalogTool {
+                name: format!("catalog.tool_{index}"),
+            }));
+        }
+        registry.install_meta_tools();
+
+        let plan = registry.exposure_plan("请生成一张写实的猫咪图片", 16_000);
+
+        assert!(prompt_requests_image_generation("请生成一张写实的猫咪图片"));
+        assert!(plan.inline.iter().any(|spec| spec.name == "image.generate"));
+        assert!(!prompt_requests_image_generation("检查这张图片的尺寸"));
     }
 
     #[test]
