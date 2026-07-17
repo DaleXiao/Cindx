@@ -744,7 +744,7 @@ assert(
     (appSource.match(/className="settings-disclosure-chevron"/g)?.length ?? 0) === 8 &&
     (appSource.match(/className="settings-action-chevron"/g)?.length ?? 0) === 1 &&
     (inspectorSource.match(/<ChevronRight/g)?.length ?? 0) >= 1 &&
-    inspectorSource.includes('<ChevronDown className="inspector-debug-chevron"') &&
+    inspectorSource.includes('className="inspector-debug-chevron"') &&
     !styles.includes("advanced-settings summary::before") &&
     styles.includes("details[open] > summary .disclosure-triangle") &&
     styles.includes("details[open] > summary .settings-disclosure-chevron") &&
@@ -855,8 +855,15 @@ assert(
   sidebarSource.includes('if (!state || (active && state !== "working")) return null;') &&
     sidebarSource.includes('<LoaderCircle aria-hidden="true" />') &&
     styles.includes(".session-status-working svg") &&
-    styles.includes("animation: spin 900ms linear infinite"),
-  "The active session must retain its animated working indicator"
+    styles.includes("animation: spin 900ms linear infinite") &&
+    /\.session-status \{[\s\S]*?right: 3px;[\s\S]*?width: 26px;[\s\S]*?height: 28px;/.test(
+      styles
+    ) &&
+    /\.session-row:hover \.session-status,[\s\S]*?\.session-row:focus-within \.session-status \{[\s\S]*?opacity: 0;/.test(
+      styles
+    ) &&
+    styles.includes(".session-row:focus-within .session-more"),
+  "Session state and action menu must share one fixed trailing slot and swap on hover"
 );
 assert(
   appSource.includes("matchingSessionExists") &&
@@ -1060,13 +1067,16 @@ assert(
   /\.inspector-debug-body \{[\s\S]*?right: 2px;[\s\S]*?bottom: 44px;[\s\S]*?left: 2px;[\s\S]*?border-radius: var\(--radius-md\) var\(--radius-md\) 0 0;/.test(
     styles
   ) &&
-    /\.inspector-debug\[data-open="true"\] \.inspector-debug-chevron \{[\s\S]*?transform: rotate\(180deg\);/.test(
+    /\.inspector-debug-chevron\[data-open="true"\] \{[\s\S]*?transform: rotate\(180deg\);/.test(
       styles
     ) &&
-    /<Bug[^>]*\/>\s*<strong>Debug<\/strong>\s*<ChevronDown className="inspector-debug-chevron"[^>]*\/>/.test(
+    /<Bug[^>]*\/>\s*<strong>Debug<\/strong>\s*<ChevronDown[\s\S]*?className="inspector-debug-chevron"[\s\S]*?data-open=\{debugOpen\}[\s\S]*?\/>/.test(
       inspectorSource
+    ) &&
+    /\.inspector-debug-toggle \{[\s\S]*?grid-template-columns: 13px max-content 11px;[\s\S]*?align-items: center;/.test(
+      styles
     ),
-  "The debug drawer must attach to its bar and use a trailing animated chevron"
+  "The debug drawer must attach to its bar with a centered, state-correct trailing chevron"
 );
 assert(
   tauriBridge.includes('invoke<string>("read_artifact_image"') &&

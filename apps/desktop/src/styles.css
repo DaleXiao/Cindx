@@ -782,7 +782,7 @@ pre {
 
 .session-item {
   min-height: 30px;
-  padding-right: 58px;
+  padding-right: 34px;
   padding-block: 3px;
   border-radius: var(--radius-md);
 }
@@ -862,6 +862,7 @@ pre {
   border-radius: var(--icon-radius);
   opacity: 0;
   transform: translateY(-50%);
+  transition: color 120ms ease, opacity 120ms ease;
 }
 
 .session-more::before {
@@ -876,13 +877,14 @@ pre {
 .session-status {
   position: absolute;
   top: 50%;
-  right: 35px;
+  right: 3px;
   display: grid;
-  width: 14px;
-  height: 14px;
+  width: 26px;
+  height: 28px;
   pointer-events: none;
   place-items: center;
   transform: translateY(-50%);
+  transition: opacity 120ms ease;
 }
 
 .session-status-working svg {
@@ -914,9 +916,15 @@ pre {
 }
 
 .session-row:hover .session-more,
+.session-row:focus-within .session-more,
 .session-more:focus-visible,
 .session-more.active {
   opacity: 1;
+}
+
+.session-row:hover .session-status,
+.session-row:focus-within .session-status {
+  opacity: 0;
 }
 
 .session-more:hover,
@@ -4820,9 +4828,10 @@ details[open] > summary .settings-disclosure-chevron {
 }
 
 .inspector-debug-toggle {
-  display: flex;
+  display: grid;
   width: 100%;
   min-height: 44px;
+  grid-template-columns: 13px max-content 11px;
   align-items: center;
   gap: 6px;
   padding: 8px 14px;
@@ -4838,17 +4847,21 @@ details[open] > summary .settings-disclosure-chevron {
 }
 
 .inspector-debug-toggle > svg:first-child {
+  display: block;
   width: 13px;
   height: 13px;
   color: #666666;
 }
 
 .inspector-debug-toggle strong {
+  display: block;
   font-size: 10px;
   font-weight: 650;
+  line-height: 13px;
 }
 
 .inspector-debug-chevron {
+  display: block;
   width: 11px;
   height: 11px;
   color: #999999;
@@ -4857,7 +4870,7 @@ details[open] > summary .settings-disclosure-chevron {
   transition: transform 180ms var(--ease-out-quart);
 }
 
-.inspector-debug[data-open="true"] .inspector-debug-chevron {
+.inspector-debug-chevron[data-open="true"] {
   transform: rotate(180deg);
 }
 
