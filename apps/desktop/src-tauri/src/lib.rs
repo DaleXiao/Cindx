@@ -851,6 +851,7 @@ struct ChatMessageView {
     role: String,
     content: String,
     timestamp_ms: u64,
+    attachments: Vec<AgentAttachmentView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3898,6 +3899,30 @@ fn add_attachment_metadata(metadata: &mut Metadata, attachments: &[AgentAttachme
         attachments
             .iter()
             .map(|attachment| attachment.name.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    metadata.insert(
+        "attachment_ids".to_string(),
+        attachments
+            .iter()
+            .map(|attachment| attachment.id.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    metadata.insert(
+        "attachment_mime_types".to_string(),
+        attachments
+            .iter()
+            .map(|attachment| attachment.mime_type.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    metadata.insert(
+        "attachment_sizes".to_string(),
+        attachments
+            .iter()
+            .map(|attachment| attachment.size_bytes.to_string())
             .collect::<Vec<_>>()
             .join("\n"),
     );
@@ -13645,7 +13670,83 @@ fn message_view_from_event(event: &Event) -> Option<ChatMessageView> {
         role: event.metadata.get("role")?.to_string(),
         content: redact_sensitive_text(event.metadata.get("content")?),
         timestamp_ms: event.timestamp_ms,
+        attachments: attachment_views_from_event(event),
     })
+}
+
+fn attachment_views_from_event(event: &Event) -> Vec<AgentAttachmentView> {
+    let paths = event
+        .metadata
+        .get("attachment_paths")
+        .map(|value| value.lines().collect::<Vec<_>>())
+        .unwrap_or_default();
+    if paths.is_empty() {
+        return Vec::new();
+    }
+
+    let names = event
+        .metadata
+        .get("attachment_names")
+        .map(|value| value.lines().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let ids = event
+        .metadata
+        .get("attachment_ids")
+        .map(|value| value.lines().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mime_types = event
+        .metadata
+        .get("attachment_mime_types")
+        .map(|value| value.lines().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let sizes = event
+        .metadata
+        .get("attachment_sizes")
+        .map(|value| value.lines().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let image_paths = event
+        .metadata
+        .get("image_paths")
+        .map(|value| value.lines().collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    paths
+        .into_iter()
+        .enumerate()
+        .filter(|(_, path)| !path.trim().is_empty())
+        .map(|(index, path)| {
+            let inferred_mime = normalized_attachment_mime("", Path::new(path));
+            let mime_type = mime_types
+                .get(index)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| (*value).to_string())
+                .unwrap_or_else(|| {
+                    if image_paths.contains(&path) && !inferred_mime.starts_with("image/") {
+                        "image/*".to_string()
+                    } else {
+                        inferred_mime
+                    }
+                });
+            AgentAttachmentView {
+                id: ids
+                    .get(index)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| (*value).to_string())
+                    .unwrap_or_else(|| format!("message-attachment-{}-{index}", event.sequence)),
+                name: names
+                    .get(index)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| (*value).to_string())
+                    .unwrap_or_else(|| safe_attachment_name(path)),
+                path: path.to_string(),
+                mime_type,
+                size_bytes: sizes
+                    .get(index)
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or_default(),
+            }
+        })
+        .collect()
 }
 
 fn message_from_event(event: &Event) -> Option<Message> {
@@ -18851,6 +18952,41 @@ mod tests {
         assert!(validated_attachment_path(&root, &outside.display().to_string()).is_err());
         assert_eq!(safe_attachment_name("../nested/screen.png"), "screen.png");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn user_message_projection_preserves_attachment_metadata() {
+        let attachment = AgentAttachmentView {
+            id: "attachment-1".to_string(),
+            name: "screen.png".to_string(),
+            path: "/tmp/cindx/screen.png".to_string(),
+            mime_type: "image/png".to_string(),
+            size_bytes: 1_024,
+        };
+        let mut metadata = [
+            ("role".to_string(), "user".to_string()),
+            ("content".to_string(), "Review this screenshot".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        add_attachment_metadata(&mut metadata, std::slice::from_ref(&attachment));
+        let event = Event {
+            id: EventId("message-with-attachment".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 9,
+            timestamp_ms: 100,
+            kind: EventKind::MessageAdded,
+            summary: "user message".to_string(),
+            metadata,
+        };
+
+        let message = message_view_from_event(&event).expect("message should project");
+        assert_eq!(message.attachments.len(), 1);
+        assert_eq!(message.attachments[0].id, attachment.id);
+        assert_eq!(message.attachments[0].name, attachment.name);
+        assert_eq!(message.attachments[0].path, attachment.path);
+        assert_eq!(message.attachments[0].mime_type, attachment.mime_type);
+        assert_eq!(message.attachments[0].size_bytes, attachment.size_bytes);
     }
 
     #[test]

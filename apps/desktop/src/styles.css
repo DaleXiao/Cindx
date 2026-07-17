@@ -1617,6 +1617,96 @@ pre {
   background: #e3efff;
 }
 
+.thread-message-attachments {
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 7px;
+  flex-wrap: wrap;
+}
+
+.thread-message-attachment {
+  min-width: 0;
+  padding: 0;
+  color: #454545;
+  background: #eef6ff;
+  border: 0;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  transition:
+    background 140ms ease,
+    transform 140ms var(--ease-out-quart);
+}
+
+.thread-message-attachment:hover {
+  background: #e3efff;
+  transform: translateY(-1px);
+}
+
+.thread-message-attachment[data-image="true"] {
+  display: block;
+  width: min(240px, 100%);
+  aspect-ratio: 4 / 3;
+}
+
+.thread-message-attachment[data-image="true"] > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.thread-message-attachment-placeholder {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 112px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 7px;
+  padding: 14px;
+  color: #777777;
+}
+
+.thread-message-attachment-placeholder svg {
+  width: 20px;
+  height: 20px;
+}
+
+.thread-message-attachment-placeholder span {
+  max-width: 100%;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-message-attachment[data-image="false"] {
+  display: flex;
+  width: min(260px, 100%);
+  height: 44px;
+  align-items: center;
+  gap: 9px;
+  padding: 0 12px;
+  text-align: left;
+}
+
+.thread-message-attachment[data-image="false"] > svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.thread-message-attachment[data-image="false"] > span {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .thread-message-tool,
 .thread-message-system,
 .thread-message-reviewer {

@@ -262,6 +262,7 @@ export type ChatMessageView = {
   role: "user" | "assistant" | "system" | "tool" | "reviewer";
   content: string;
   timestampMs: number;
+  attachments?: AgentAttachment[];
 };
 
 export type Phase4State = {

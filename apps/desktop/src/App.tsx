@@ -2073,7 +2073,8 @@ export function App() {
     const optimisticUserMessage: ChatMessageView = {
       role: "user",
       content: visiblePrompt,
-      timestampMs: submittedAt
+      timestampMs: submittedAt,
+      attachments
     };
     optimisticUserMessagesRef.current.set(sessionId, optimisticUserMessage);
     const runBudget = runBudgetForEffort(agentEffort);

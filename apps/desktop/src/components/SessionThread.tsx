@@ -7,6 +7,7 @@ import {
   ChevronUp,
   Copy,
   FileText,
+  Image as ImageIcon,
   Pencil,
   Search,
   ShieldCheck,
@@ -31,8 +32,8 @@ import {
 } from "react";
 import Markdown from "markdown-to-jsx";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { openArtifact, openExternalUrl } from "../tauri";
-import type { AgentState, ChatMessageView, TimelineEntry } from "../tauri";
+import { openArtifact, openExternalUrl, readArtifactPreview } from "../tauri";
+import type { AgentAttachment, AgentState, ChatMessageView, TimelineEntry } from "../tauri";
 import { DisclosureTriangle } from "./DisclosureTriangle";
 import { TraceStatusIcon } from "./TraceStatusIcon";
 
@@ -376,8 +377,104 @@ function estimateThreadRowSize(row: ThreadRow) {
   const explicitLines = Math.max(1, content.split("\n").length);
   const wrappedLines = Math.max(1, Math.ceil(content.length / 72));
   const lineCount = Math.max(explicitLines, wrappedLines);
-  if (row.item.message.role === "user") return 64 + Math.min(8, lineCount) * 18;
+  if (row.item.message.role === "user") {
+    const attachmentRows = Math.ceil((row.item.message.attachments?.length ?? 0) / 2);
+    return 64 + Math.min(8, lineCount) * 18 + attachmentRows * 148;
+  }
   return 48 + Math.min(48, lineCount) * 20;
+}
+
+const MESSAGE_ATTACHMENT_PREVIEW_CACHE_LIMIT = 8;
+const messageAttachmentPreviewCache = new Map<string, string>();
+
+function cacheMessageAttachmentPreview(path: string, dataUrl: string) {
+  messageAttachmentPreviewCache.delete(path);
+  messageAttachmentPreviewCache.set(path, dataUrl);
+  while (messageAttachmentPreviewCache.size > MESSAGE_ATTACHMENT_PREVIEW_CACHE_LIMIT) {
+    const oldestPath = messageAttachmentPreviewCache.keys().next().value;
+    if (!oldestPath) break;
+    messageAttachmentPreviewCache.delete(oldestPath);
+  }
+}
+
+function MessageAttachmentPreview({ attachment }: { attachment: AgentAttachment }) {
+  const [dataUrl, setDataUrl] = useState<string | null>(
+    () => messageAttachmentPreviewCache.get(attachment.path) ?? null
+  );
+
+  useEffect(() => {
+    const cached = messageAttachmentPreviewCache.get(attachment.path);
+    if (cached) {
+      setDataUrl(cached);
+      return;
+    }
+    let active = true;
+    setDataUrl(null);
+    void readArtifactPreview(attachment.path)
+      .then((preview) => {
+        if (!active || preview.kind !== "image" || !preview.dataUrl) return;
+        cacheMessageAttachmentPreview(attachment.path, preview.dataUrl);
+        setDataUrl(preview.dataUrl);
+      })
+      .catch(() => {
+        if (active) setDataUrl(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [attachment.path]);
+
+  if (dataUrl) {
+    return <img src={dataUrl} alt={attachment.name} />;
+  }
+  return (
+    <span className="thread-message-attachment-placeholder">
+      <ImageIcon aria-hidden="true" />
+      <span>{attachment.name}</span>
+    </span>
+  );
+}
+
+function UserMessageAttachments({
+  attachments,
+  onOpenError
+}: {
+  attachments: AgentAttachment[];
+  onOpenError: (message: string) => void;
+}) {
+  return (
+    <div className="thread-message-attachments" aria-label="Message attachments">
+      {attachments.map((attachment) => {
+        const isImage = attachment.mimeType.startsWith("image/");
+        return (
+          <button
+            className="thread-message-attachment"
+            data-image={isImage}
+            type="button"
+            aria-label={`Open ${attachment.name}`}
+            title={attachment.name}
+            key={attachment.id}
+            onClick={(event) => {
+              event.stopPropagation();
+              void openArtifact(attachment.path).catch((error) => {
+                const detail = error instanceof Error ? error.message : String(error);
+                onOpenError(`Could not open ${attachment.name}: ${detail}`);
+              });
+            }}
+          >
+            {isImage ? (
+              <MessageAttachmentPreview attachment={attachment} />
+            ) : (
+              <>
+                <FileText aria-hidden="true" />
+                <span>{attachment.name}</span>
+              </>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 function ToolChainItem({
@@ -1241,6 +1338,7 @@ export const SessionThread = memo(function SessionThread({
 
           const isUser = item.message.role === "user";
           const isAssistant = item.message.role === "assistant";
+          const messageAttachments = isUser ? item.message.attachments ?? [] : [];
           if (item.message.role === "tool") {
             const summary = toolMessageSummary(item.message.content);
             return (
@@ -1303,15 +1401,23 @@ export const SessionThread = memo(function SessionThread({
                   <strong>{item.message.role}</strong>
                 </header>
               )}
+              {messageAttachments.length > 0 && (
+                <UserMessageAttachments
+                  attachments={messageAttachments}
+                  onOpenError={onLinkOpenError}
+                />
+              )}
               {isAssistant ? (
                 <AgentMarkdown
                   content={item.message.content}
                   onOpenError={onLinkOpenError}
                   onCopyCode={copyCode}
                 />
-              ) : (
-                <p>{item.message.content || "Tool request"}</p>
-              )}
+              ) : item.message.content ? (
+                <p>{item.message.content}</p>
+              ) : !isUser ? (
+                <p>Tool request</p>
+              ) : null}
               {isUser && (
                 <footer className="thread-message-actions">
                   <button
