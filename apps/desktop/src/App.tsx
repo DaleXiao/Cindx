@@ -934,6 +934,39 @@ export function App() {
     rememberSessionState(agentTraceCacheRef.current, agentTraceState.sessionId, agentTraceState);
   }, [agentTraceState]);
 
+  const sessionPrefetchKey = useMemo(() => {
+    if (!projectSessionState?.activeProjectId) return "";
+    return projectSessionState.sessions
+      .filter(
+        (session) =>
+          session.projectId === projectSessionState.activeProjectId &&
+          !session.archived &&
+          session.id !== projectSessionState.activeSessionId
+      )
+      .slice(0, 8)
+      .map((session) => session.id)
+      .join("|");
+  }, [projectSessionState]);
+
+  useEffect(() => {
+    if (!sessionPrefetchKey) return;
+    let disposed = false;
+    const sessionIds = sessionPrefetchKey.split("|");
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        for (const sessionId of sessionIds) {
+          if (disposed) return;
+          if (agentStateCacheRef.current.has(sessionId)) continue;
+          await requestSessionAgentState(sessionId).catch(() => null);
+        }
+      })();
+    }, 900);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [sessionPrefetchKey]);
+
   useEffect(() => {
     const sessionId = activeSession?.id;
     if (!sessionId || !activeSessionBusy) return;

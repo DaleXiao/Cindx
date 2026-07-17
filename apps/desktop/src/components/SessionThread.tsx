@@ -662,6 +662,7 @@ export const SessionThread = memo(function SessionThread({
   const [threadFindQuery, setThreadFindQuery] = useState("");
   const [threadFindIndex, setThreadFindIndex] = useState(0);
   const [arrivingMessageId, setArrivingMessageId] = useState<string | null>(null);
+  const [contentReady, setContentReady] = useState(false);
   const streamedAnswerRef = useRef(false);
   const scrollSyncFrameRef = useRef<number | null>(null);
   const historyLoadRequestedRef = useRef(false);
@@ -976,6 +977,23 @@ export const SessionThread = memo(function SessionThread({
   }, [rowVirtualizer, sessionId]);
 
   useLayoutEffect(() => {
+    setContentReady(false);
+  }, [sessionId]);
+
+  useLayoutEffect(() => {
+    if (loading || contentReady) return;
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      rowVirtualizer.measure();
+      secondFrame = window.requestAnimationFrame(() => setContentReady(true));
+    });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) window.cancelAnimationFrame(secondFrame);
+    };
+  }, [contentReady, items.length, loading, rowVirtualizer, sessionId]);
+
+  useLayoutEffect(() => {
     const thread = threadRef.current;
     if (!thread) return;
     const firstId = items[0]?.id ?? null;
@@ -1129,33 +1147,6 @@ export const SessionThread = memo(function SessionThread({
     [copyContent]
   );
 
-  if (items.length === 0 && !streamAnswer) {
-    return (
-      <div className="session-thread-shell">
-        <ThreadFind
-          open={threadFindOpen}
-          query={threadFindQuery}
-          currentIndex={threadFindIndex}
-          matchCount={threadFindMatches.length}
-          inputRef={threadFindInputRef}
-          onQueryChange={setThreadFindQuery}
-          onMove={moveThreadFind}
-          onClose={closeThreadFind}
-        />
-        <section
-          className={`session-thread session-thread-empty ${
-            loading ? "session-thread-loading" : ""
-          }`}
-          id="session-thread-scroll"
-          aria-label="Session thread"
-          ref={threadRef}
-        >
-          <span>{loading ? "Loading conversation" : "No messages yet"}</span>
-        </section>
-      </div>
-    );
-  }
-
   const isScrollable = scrollMetrics.scrollHeight > scrollMetrics.clientHeight + 2;
   const minimapAvailable =
     isScrollable && minimapMarkers.length >= MIN_MINIMAP_MARKERS;
@@ -1177,10 +1168,17 @@ export const SessionThread = memo(function SessionThread({
       />
       <section
         className="session-thread"
+        data-content-ready={contentReady}
+        data-loading={loading}
         id="session-thread-scroll"
         aria-label="Session thread"
         ref={threadRef}
       >
+        {items.length === 0 && !streamAnswer && (
+          <div className="session-thread-empty-state" aria-live="polite">
+            <span>{loading ? "Loading conversation" : "No messages yet"}</span>
+          </div>
+        )}
         <div className="thread-content" ref={threadContentRef}>
         <div
           className="thread-virtual-list"
