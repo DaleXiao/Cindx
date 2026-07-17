@@ -346,6 +346,7 @@ export function Inspector({
   onReview
 }: InspectorProps) {
   const [debugOpen, setDebugOpen] = useState(false);
+  const [outputsOpen, setOutputsOpen] = useState(true);
   const [metadataOpen, setMetadataOpen] = useState(false);
   const [metadataMotion, setMetadataMotion] = useState<"idle" | "opening" | "closing">(
     "idle"
@@ -439,6 +440,7 @@ export function Inspector({
   }, [traceStep?.id]);
 
   useEffect(() => {
+    setOutputsOpen(true);
     setSelectedOutputPath(null);
     setOutputPreviewFullscreen(false);
     setOutputActionError(null);
@@ -660,14 +662,30 @@ export function Inspector({
         <section
           className="inspector-outputs"
           aria-label="Agent outputs"
-          data-preview-open={Boolean(selectedOutput)}
+          data-preview-open={Boolean(selectedOutput && outputsOpen)}
         >
           <header>
             <div className="inspector-output-heading">
               <File aria-hidden="true" />
               <h2>Outputs</h2>
               {outputArtifacts.length > 0 && (
-                <span className="inspector-output-count">{outputArtifacts.length}</span>
+                <>
+                  <span className="inspector-output-count">{outputArtifacts.length}</span>
+                  <button
+                    className="inspector-output-toggle"
+                    type="button"
+                    aria-label={outputsOpen ? "Collapse output files" : "Expand output files"}
+                    aria-expanded={outputsOpen}
+                    title={outputsOpen ? "Collapse output files" : "Expand output files"}
+                    onClick={() => setOutputsOpen((current) => !current)}
+                  >
+                    <ChevronDown
+                      className="inspector-output-chevron"
+                      data-expanded={outputsOpen}
+                      aria-hidden="true"
+                    />
+                  </button>
+                </>
               )}
             </div>
           </header>
@@ -675,7 +693,7 @@ export function Inspector({
             <div className="inspector-output-empty">
               <span>Files and images created by the agent appear here.</span>
             </div>
-          ) : selectedOutput ? (
+          ) : !outputsOpen ? null : selectedOutput ? (
             outputPreviewFullscreen ? null : outputPreview
           ) : (
               <div className="inspector-output-list">
@@ -720,7 +738,7 @@ export function Inspector({
                 })}
               </div>
           )}
-          {!selectedOutput && outputActionError && (
+          {outputsOpen && !selectedOutput && outputActionError && (
             <div className="inspector-output-action-error" role="alert">
               {outputActionError}
             </div>

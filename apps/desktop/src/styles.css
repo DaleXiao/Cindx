@@ -4553,6 +4553,38 @@ details[open] > summary .settings-disclosure-chevron {
   font-size: 9px;
 }
 
+.inspector-output-toggle {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  margin-left: -5px;
+  padding: 0;
+  color: #999999;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  place-items: center;
+}
+
+.inspector-output-toggle:hover,
+.inspector-output-toggle:focus-visible {
+  color: #555555;
+  background: #eeeeee;
+}
+
+.inspector-outputs > header .inspector-output-chevron {
+  display: block;
+  width: 10px;
+  height: 10px;
+  transform: rotate(180deg);
+  transform-origin: center;
+  transition: transform 180ms var(--ease-out-quart);
+}
+
+.inspector-output-chevron[data-expanded="true"] {
+  transform: rotate(0deg);
+}
+
 .inspector-output-empty {
   padding: 20px 8px;
   color: var(--muted);
@@ -5288,6 +5320,7 @@ details[open] > summary .settings-disclosure-chevron {
   .settings-action-chevron,
   .settings-refresh-turn,
   .project-disclosure-chevron,
+  .inspector-output-chevron,
   .inspector-debug-chevron,
   .metadata-disclosure-icon,
   .metadata-details-body {
