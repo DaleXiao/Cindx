@@ -1115,7 +1115,7 @@ assert(
     /\.inspector-outputs > header \.inspector-output-chevron \{[\s\S]*?transform: rotate\(180deg\);[\s\S]*?transition: transform 180ms/.test(
       styles
     ) &&
-    /\.inspector-output-chevron\[data-expanded="true"\] \{[\s\S]*?transform: rotate\(0deg\);/.test(
+    /\.inspector-outputs > header \.inspector-output-chevron\[data-expanded="true"\] \{[\s\S]*?transform: rotate\(0deg\);/.test(
       styles
     ),
   "Outputs must default expanded with a trailing down chevron and rotate up when collapsed"

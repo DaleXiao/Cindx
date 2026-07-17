@@ -4581,7 +4581,7 @@ details[open] > summary .settings-disclosure-chevron {
   transition: transform 180ms var(--ease-out-quart);
 }
 
-.inspector-output-chevron[data-expanded="true"] {
+.inspector-outputs > header .inspector-output-chevron[data-expanded="true"] {
   transform: rotate(0deg);
 }
 
