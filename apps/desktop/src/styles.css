@@ -4893,17 +4893,30 @@ details[open] > summary .settings-disclosure-chevron {
 }
 
 .inspector-debug-chevron {
-  display: block;
+  display: grid;
   width: 11px;
   height: 11px;
   color: #999999;
-  transform: rotate(0deg);
-  transform-origin: center;
-  transition: transform 180ms var(--ease-out-quart);
+  place-items: center;
 }
 
-.inspector-debug-chevron[data-open="true"] {
-  transform: rotate(180deg);
+.inspector-debug-chevron > svg {
+  display: block;
+  width: 11px;
+  height: 11px;
+  animation: debug-chevron-settle 160ms var(--ease-out-quart);
+}
+
+@keyframes debug-chevron-settle {
+  from {
+    opacity: 0.55;
+    transform: scale(0.86);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .inspector-debug-body {
@@ -5322,6 +5335,7 @@ details[open] > summary .settings-disclosure-chevron {
   .project-disclosure-chevron,
   .inspector-output-chevron,
   .inspector-debug-chevron,
+  .inspector-debug-chevron > svg,
   .metadata-disclosure-icon,
   .metadata-details-body {
     transition: none;

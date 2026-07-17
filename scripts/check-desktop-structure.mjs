@@ -1067,11 +1067,13 @@ assert(
   /\.inspector-debug-body \{[\s\S]*?right: 2px;[\s\S]*?bottom: 44px;[\s\S]*?left: 2px;[\s\S]*?border-radius: var\(--radius-md\) var\(--radius-md\) 0 0;/.test(
     styles
   ) &&
-    /\.inspector-debug-chevron\[data-open="true"\] \{[\s\S]*?transform: rotate\(180deg\);/.test(
-      styles
-    ) &&
-    /<Bug[^>]*\/>\s*<strong>Debug<\/strong>\s*<ChevronDown[\s\S]*?className="inspector-debug-chevron"[\s\S]*?data-open=\{debugOpen\}[\s\S]*?\/>/.test(
+    inspectorSource.includes('data-state={debugOpen ? "expanded" : "collapsed"}') &&
+    inspectorSource.includes('{debugOpen ? <ChevronUp /> : <ChevronDown />}') &&
+    /<Bug[^>]*\/>\s*<strong>Debug<\/strong>\s*<span[\s\S]*?className="inspector-debug-chevron"[\s\S]*?data-state=\{debugOpen \? "expanded" : "collapsed"\}[\s\S]*?<\/span>/.test(
       inspectorSource
+    ) &&
+    /\.inspector-debug-chevron > svg \{[\s\S]*?animation: debug-chevron-settle 160ms/.test(
+      styles
     ) &&
     /\.inspector-debug-toggle \{[\s\S]*?grid-template-columns: 13px max-content 11px;[\s\S]*?align-items: center;/.test(
       styles
