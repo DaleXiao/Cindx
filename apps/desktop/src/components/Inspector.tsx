@@ -1144,7 +1144,11 @@ export function Inspector({
         >
           <Bug aria-hidden="true" />
           <strong>Debug</strong>
-          <ChevronDown className="inspector-debug-chevron" aria-hidden="true" />
+          <ChevronDown
+            className="inspector-debug-chevron"
+            data-open={debugOpen}
+            aria-hidden="true"
+          />
         </button>
       </section>
       {outputPreviewFullscreen && outputPreview
