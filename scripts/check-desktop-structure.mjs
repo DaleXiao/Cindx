@@ -450,8 +450,20 @@ assert(
     !sessionThreadSource.includes('querySelectorAll<HTMLElement>("[data-minimap-kind]")') &&
     styles.includes(".thread-content") &&
     styles.includes("content-visibility: auto") &&
-    styles.includes("contain-intrinsic-size: auto 96px"),
+    styles.includes("contain-intrinsic-size: auto 96px") &&
+    styles.includes(".thread-virtual-row > .thread-message") &&
+    styles.includes("content-visibility: visible") &&
+    styles.includes("contain-intrinsic-size: none"),
   "Long conversations must avoid hidden activity trees, row-by-row observation, and offscreen layout work"
+);
+assert(
+  sessionThreadSource.includes("LATEST_OUTPUT_THRESHOLD") &&
+    sessionThreadSource.includes("followLatestRef") &&
+    sessionThreadSource.includes('className="thread-jump-latest"') &&
+    sessionThreadSource.includes('aria-label="Jump to latest output"') &&
+    styles.includes("backdrop-filter: saturate(150%) blur(18px)") &&
+    styles.includes("@keyframes thread-jump-latest-in"),
+  "Scrolling away from the latest output must reveal the frosted jump-to-latest control"
 );
 assert(
   sessionThreadSource.includes("openExternalUrl") &&
@@ -797,6 +809,8 @@ assert(
     !styles.includes("advanced-settings summary::before") &&
     styles.includes("details[open] > summary .disclosure-triangle") &&
     styles.includes("details[open] > summary .settings-disclosure-chevron") &&
+    styles.includes(".settings-action-chevron") &&
+    styles.includes("vertical-align: middle") &&
     styles.includes("transform-box: fill-box") &&
     styles.includes("transition: transform 180ms") &&
     styles.includes(".secondary-button:hover:not(:disabled) .settings-action-chevron"),
@@ -1282,13 +1296,18 @@ assert(
 assert(
   appSource.includes('label="Image generation"') &&
     appSource.includes("Image API endpoint") &&
+    appSource.includes("provider-endpoint-check") &&
+    appSource.includes("validateImageEndpoint") &&
     appSource.includes('emptyLabel="Not configured"') &&
     tauriBridge.includes("imageModel: string") &&
     tauriBridge.includes("imageEndpoint: string") &&
+    tauriBridge.includes('invoke<ImageEndpointValidationState>("validate_image_endpoint"') &&
     rustLib.includes("image_endpoint") &&
+    rustLib.includes("async fn validate_image_endpoint") &&
     rustLib.includes("ImageGenerationConfig") &&
     toolsSource.includes('"image.generate"') &&
     modelProviderSource.includes('"/images/generations"') &&
+    modelProviderSource.includes("pub fn validate_endpoint") &&
     modelProviderSource.includes("DashScopeMultimodal"),
   "Models settings must persist an image model and expose the image.generate agent tool"
 );
@@ -1320,11 +1339,24 @@ assert(
 assert(
   rustLib.includes("maybe_auto_name_session") &&
     rustLib.includes("semantic_session_title") &&
+    rustLib.includes("automatic_conversation_title") &&
+    rustLib.includes("First assistant response") &&
     rustLib.includes("can_apply_generated_session_title") &&
     appSource.includes("sessionTitleFromPrompt") &&
+    appSource.includes("sessionTitleFromFirstRound") &&
     appSource.includes("refineAutomaticSessionTitle") &&
+    appSource.includes("firstRoundAnswer") &&
     tauriBridge.includes('invoke<ProjectSessionState>("generate_session_title"'),
   "New sessions must receive a non-blocking semantic title without overwriting manual names"
+);
+assert(
+  styles.includes(".lucide-check") &&
+    styles.includes(".lucide-circle-check") &&
+    styles.includes("color: var(--accent) !important") &&
+    styles.includes("backdrop-filter: saturate(155%) blur(24px)") &&
+    inspectorSource.includes("PackageOpen") &&
+    inspectorSource.includes("<PackageOpen aria-hidden=\"true\" />"),
+  "Checkmarks, sidebar material, and the Outputs heading icon must retain their visual treatment"
 );
 assert(
   appSource.includes("busy={projectSessionBusy}") &&

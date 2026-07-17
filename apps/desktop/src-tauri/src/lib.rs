@@ -35,7 +35,8 @@ use agent_storage::{EventStore, PermissionAuditRecord, PermissionStore, SqliteSt
 use base64::Engine;
 use model_provider::{
     EmbeddingRequest, ModelCallMode, ModelRequest, OpenAiCompatibleConfig,
-    OpenAiCompatibleProvider, MODEL_REQUEST_CANCELLED,
+    OpenAiCompatibleImageConfig, OpenAiCompatibleImageProvider, OpenAiCompatibleProvider,
+    MODEL_REQUEST_CANCELLED,
 };
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{NSView, NSWindow, NSWindowButton};
@@ -657,6 +658,7 @@ struct RenameSessionInput {
 struct GenerateSessionTitleInput {
     session_id: String,
     prompt: String,
+    answer: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1393,6 +1395,22 @@ struct ProviderModelsState {
     last_error: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImageEndpointValidationInput {
+    base_url: String,
+    image_model: String,
+    image_endpoint: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImageEndpointValidationState {
+    endpoint: String,
+    valid: bool,
+    last_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ModelStreamDelta {
@@ -2119,10 +2137,15 @@ async fn generate_session_title(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let prompt = input.prompt.trim();
-        if prompt.is_empty() {
-            return project_session_state_with_error(&state, "session title prompt is empty");
+        let answer = input.answer.trim();
+        if prompt.is_empty() || answer.is_empty() {
+            return project_session_state_with_error(
+                &state,
+                "session title requires the first user and assistant messages",
+            );
         }
-        let fallback_title = automatic_session_title(prompt);
+        let prompt_fallback_title = automatic_session_title(prompt);
+        let fallback_title = automatic_conversation_title(prompt, answer);
         let expected_updated_at_ms = {
             let mut config = state
                 .project_session_config
@@ -2139,7 +2162,9 @@ async fn generate_session_title(
                         Some("session not found".to_string()),
                     ));
                 };
-                if is_automatic_session_name(&session.name) {
+                if is_automatic_session_name(&session.name)
+                    || session.name == prompt_fallback_title
+                {
                     let now = current_time_millis();
                     session.name = fallback_title.clone();
                     session.updated_at_ms = now;
@@ -2172,7 +2197,7 @@ async fn generate_session_title(
                 .map_err(|error| format!("project session config lock poisoned: {error}"))?;
             return Ok(project_session_state(&config, None));
         }
-        let Ok(title) = semantic_session_title(&provider_config, prompt) else {
+        let Ok(title) = semantic_session_title(&provider_config, prompt, answer) else {
             let config = state
                 .project_session_config
                 .lock()
@@ -2980,6 +3005,35 @@ async fn list_provider_models(
 }
 
 #[tauri::command]
+async fn validate_image_endpoint(
+    input: ImageEndpointValidationInput,
+) -> Result<ImageEndpointValidationState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let base_url = if input.image_endpoint.trim().is_empty() {
+            normalized_config_value(&input.base_url)
+        } else {
+            normalized_config_value(&input.image_endpoint)
+        };
+        let config = OpenAiCompatibleImageConfig {
+            base_url,
+            api_key: String::new(),
+            model: normalized_config_value(&input.image_model),
+            timeout_seconds: 8,
+        };
+        let endpoint = config.images_url();
+        let provider = OpenAiCompatibleImageProvider::new(config);
+        let result = provider.validate_endpoint();
+        Ok(ImageEndpointValidationState {
+            endpoint,
+            valid: result.is_ok(),
+            last_error: result.err().map(|error| error.to_string()),
+        })
+    })
+    .await
+    .map_err(|error| format!("image endpoint validation task failed: {error}"))?
+}
+
+#[tauri::command]
 fn send_model_prompt(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -3725,6 +3779,18 @@ fn automatic_session_title(prompt: &str) -> String {
     }
 }
 
+fn automatic_conversation_title(prompt: &str, answer: &str) -> String {
+    let answer_heading = answer
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with('#'));
+    let first_answer_line = answer.lines().map(str::trim).find(|line| !line.is_empty());
+    answer_heading
+        .and_then(cleaned_generated_session_title)
+        .or_else(|| first_answer_line.and_then(cleaned_generated_session_title))
+        .unwrap_or_else(|| automatic_session_title(prompt))
+}
+
 fn can_apply_generated_session_title(
     current_name: &str,
     current_updated_at_ms: u64,
@@ -3786,7 +3852,11 @@ fn cleaned_generated_session_title(raw: &str) -> Option<String> {
     }
 }
 
-fn semantic_session_title(config: &ProviderConfig, prompt: &str) -> Result<String, String> {
+fn semantic_session_title(
+    config: &ProviderConfig,
+    prompt: &str,
+    answer: &str,
+) -> Result<String, String> {
     let model = config.model_for_role(&ModelRole::Summarizer);
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
         base_url: config.base_url.clone(),
@@ -3807,8 +3877,9 @@ fn semantic_session_title(config: &ProviderConfig, prompt: &str) -> Result<Strin
             Message {
                 role: MessageRole::User,
                 content: format!(
-                    "Initial request:\n{}",
-                    truncate_for_collaboration(prompt, 2_000)
+                    "First user message:\n{}\n\nFirst assistant response:\n{}",
+                    truncate_for_collaboration(prompt, 1_500),
+                    truncate_for_collaboration(answer, 2_500)
                 ),
                 metadata: Metadata::new(),
             },
@@ -6297,6 +6368,7 @@ pub fn run() {
             save_provider_config,
             set_prompt_evolution_enabled,
             list_provider_models,
+            validate_image_endpoint,
             send_model_prompt,
             get_agent_state,
             get_agent_state_revision,
@@ -22264,6 +22336,21 @@ mod tests {
         assert_eq!(
             automatic_session_title("  Review   the project architecture and risks  "),
             "Review the project architecture and"
+        );
+    }
+
+    #[test]
+    fn automatic_conversation_titles_prefer_the_assistant_summary() {
+        assert_eq!(
+            automatic_conversation_title(
+                "请比较虚拟列表中的动态高度测量与固定高度估算，重点解释消息重叠。",
+                "# 虚拟列表：动态测量与固定估算\n\n动态测量使用实际高度。"
+            ),
+            "虚拟列表：动态测量与固定估算"
+        );
+        assert_eq!(
+            automatic_conversation_title("Review the architecture", "\nArchitecture risk review.\n"),
+            "Architecture risk review"
         );
     }
 

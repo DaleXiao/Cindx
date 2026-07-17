@@ -15,6 +15,7 @@ import {
   Image,
   Maximize2,
   Minimize2,
+  PackageOpen,
   Save,
   ShieldCheck,
   TerminalSquare,
@@ -666,7 +667,7 @@ export function Inspector({
         >
           <header>
             <div className="inspector-output-heading">
-              <File aria-hidden="true" />
+              <PackageOpen aria-hidden="true" />
               <h2>Outputs</h2>
               {outputArtifacts.length > 0 && (
                 <>

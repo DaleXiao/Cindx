@@ -94,6 +94,7 @@ import {
   indexWorkspaceRag,
   forkSession,
   listProviderModels,
+  validateImageEndpoint,
   Phase4State,
   Phase5State,
   Phase7State,
@@ -308,6 +309,22 @@ function isAutoSessionName(name: string) {
 function sessionTitleFromPrompt(prompt: string) {
   const compact = prompt.replace(/\s+/g, " ").trim();
   return [...compact].slice(0, 36).join("").trimEnd() || "New Session";
+}
+
+function sessionTitleFromFirstRound(prompt: string, answer: string) {
+  const lines = answer
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const candidate = lines.find((line) => /^#{1,6}\s+/.test(line)) ?? lines[0] ?? "";
+  const compact = candidate
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^(?:title|session title|标题|会话标题)\s*[:：]\s*/i, "")
+    .replace(/^[`*_'“”‘’\"\s]+|[`*_'“”‘’\"\s]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const title = [...compact].slice(0, 28).join("").replace(/[.,;:!?。，；：！？]+$/g, "").trim();
+  return title || sessionTitleFromPrompt(prompt);
 }
 
 function fileDataBase64(file: File) {
@@ -552,6 +569,10 @@ export function App() {
   const [providerModelsBusy, setProviderModelsBusy] = useState(false);
   const [providerModelsRefreshTurn, setProviderModelsRefreshTurn] = useState(0);
   const [providerModelsError, setProviderModelsError] = useState<string | null>(null);
+  const [imageEndpointValidation, setImageEndpointValidation] = useState<
+    "idle" | "checking" | "valid" | "invalid"
+  >("idle");
+  const imageEndpointValidationRequestRef = useRef(0);
   const [selectedTool, setSelectedTool] = useState("file.list");
   const [toolInput, setToolInput] = useState("path=.");
   const [ragQuery, setRagQuery] = useState("What is the Cindx MVP scope?");
@@ -828,6 +849,41 @@ export function App() {
       disposed = true;
     };
   }, [projectSessionState, runtime]);
+
+  useEffect(() => {
+    const requestId = imageEndpointValidationRequestRef.current + 1;
+    imageEndpointValidationRequestRef.current = requestId;
+    const imageEndpoint = providerDraft?.imageEndpoint.trim() ?? "";
+    const imageModel = providerDraft?.imageModel.trim() ?? "";
+    if (!providerDraft || !imageEndpoint || !imageModel) {
+      setImageEndpointValidation("idle");
+      return;
+    }
+    try {
+      const parsed = new URL(imageEndpoint);
+      if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("unsupported URL");
+    } catch {
+      setImageEndpointValidation("invalid");
+      return;
+    }
+
+    setImageEndpointValidation("checking");
+    const timer = window.setTimeout(() => {
+      void validateImageEndpoint({
+        baseUrl: providerDraft.baseUrl,
+        imageModel: providerDraft.imageModel,
+        imageEndpoint: providerDraft.imageEndpoint
+      }).then((result) => {
+        if (imageEndpointValidationRequestRef.current !== requestId) return;
+        setImageEndpointValidation(result.valid ? "valid" : "invalid");
+      });
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [
+    providerDraft?.baseUrl,
+    providerDraft?.imageEndpoint,
+    providerDraft?.imageModel
+  ]);
 
   useEffect(() => {
     if (activeView !== "settings" || settingsCategory !== "permissions") return;
@@ -2004,8 +2060,28 @@ export function App() {
     if (await runSkillInstall(() => installSkillUrl(url))) setSkillUrl("");
   }
 
-  async function refineAutomaticSessionTitle(sessionId: string, prompt: string) {
-    const nextState = await generateSessionTitle(sessionId, prompt);
+  async function refineAutomaticSessionTitle(
+    sessionId: string,
+    prompt: string,
+    answer: string
+  ) {
+    const firstRoundTitle = sessionTitleFromFirstRound(prompt, answer);
+    setProjectSessionState((current) =>
+      current
+        ? {
+            ...current,
+            sessions: current.sessions.map((session) =>
+              session.id === sessionId ? { ...session, name: firstRoundTitle } : session
+            )
+          }
+        : current
+    );
+    setAgentState((current) =>
+      current?.sessionId === sessionId
+        ? { ...current, sessionName: firstRoundTitle }
+        : current
+    );
+    const nextState = await generateSessionTitle(sessionId, prompt, answer);
     const renamedSession = nextState.sessions.find((session) => session.id === sessionId);
     if (!renamedSession) return;
     setProjectSessionState((current) => {
@@ -2105,9 +2181,6 @@ export function App() {
     });
     try {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      if (automaticSessionId) {
-        void refineAutomaticSessionTitle(automaticSessionId, visiblePrompt);
-      }
       const next = await runAgentTask(nextPrompt, sessionId, attachments, agentEffort);
       acknowledgeOptimisticUserMessage(sessionId, next.messages);
       updateSessionStatus(sessionId, next.status);
@@ -2117,6 +2190,17 @@ export function App() {
         setStreamAnswer("");
       }
       setProjectSessionState(await getProjectSessionState());
+      const firstRoundAnswer = [...next.messages]
+        .reverse()
+        .find((message) => message.role === "assistant" && message.content.trim())
+        ?.content.trim();
+      if (automaticSessionId && firstRoundAnswer) {
+        void refineAutomaticSessionTitle(
+          automaticSessionId,
+          visiblePrompt,
+          firstRoundAnswer
+        );
+      }
       await refreshAgentTrace(true, sessionId);
     } catch (error) {
       setAttachmentDrafts((current) => ({
@@ -3062,17 +3146,28 @@ export function App() {
                     />
                     <label>
                       <span>Image API endpoint</span>
-                      <input
-                        value={providerDraft.imageEndpoint}
-                        spellCheck={false}
-                        placeholder="Uses provider Base URL when empty"
-                        onChange={(event) =>
-                          setProviderDraft({
-                            ...providerDraft,
-                            imageEndpoint: event.target.value
-                          })
-                        }
-                      />
+                      <div
+                        className="provider-endpoint-input"
+                        data-validation={imageEndpointValidation}
+                      >
+                        <input
+                          value={providerDraft.imageEndpoint}
+                          spellCheck={false}
+                          placeholder="Uses provider Base URL when empty"
+                          onChange={(event) =>
+                            setProviderDraft({
+                              ...providerDraft,
+                              imageEndpoint: event.target.value
+                            })
+                          }
+                        />
+                        {imageEndpointValidation === "valid" && (
+                          <CheckCircle2
+                            className="provider-endpoint-check"
+                            aria-label="Image endpoint verified"
+                          />
+                        )}
+                      </div>
                     </label>
                   </div>
                   <dl className="settings-facts">
