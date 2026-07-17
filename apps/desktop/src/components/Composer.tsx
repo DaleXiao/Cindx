@@ -1,7 +1,7 @@
 import {
   Check,
   CheckCheck,
-  ChevronDown,
+  ChevronUp,
   FileText,
   Image,
   LoaderCircle,
@@ -363,7 +363,7 @@ export function Composer({
                     onClick={() => setEffortMenuOpen((current) => !current)}
                   >
                     <span>{activeEffort.label}</span>
-                    <ChevronDown aria-hidden="true" />
+                    <ChevronUp aria-hidden="true" />
                   </button>
                   {effortMenuOpen && (
                     <div className="composer-effort-menu" role="listbox" aria-label="Cindx effort">

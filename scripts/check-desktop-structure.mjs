@@ -658,6 +658,23 @@ assert(
   "Draft attachments must remain removable while the agent is running"
 );
 assert(
+  composerSource.includes("<ChevronUp aria-hidden=\"true\" />") &&
+    styles.includes('.composer-effort-control[data-open="true"] .composer-effort-trigger > svg') &&
+    styles.includes("transform: rotate(180deg)"),
+  "The upward-opening effort menu must point up when closed and down when open"
+);
+assert(
+  tauriBridge.includes("attachments?: AgentAttachment[]") &&
+    appSource.includes("attachments\n    };") &&
+    rustLib.includes('"attachment_mime_types".to_string()') &&
+    rustLib.includes("attachments: attachment_views_from_event(event)") &&
+    sessionThreadSource.includes("function UserMessageAttachments") &&
+    sessionThreadSource.includes('className="thread-message-attachments"') &&
+    sessionThreadSource.includes("readArtifactPreview(attachment.path)") &&
+    styles.includes('.thread-message-attachment[data-image="true"]'),
+  "Sent attachments must persist with user messages and render as image or file bubbles"
+);
+assert(
   sessionThreadSource.includes("thread.scrollTop = thread.scrollHeight") &&
     sessionThreadSource.includes("useLayoutEffect(() => {") &&
     sessionThreadSource.includes('message.sequence ?? `${message.role}-${index}`') &&
