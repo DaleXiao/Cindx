@@ -190,14 +190,22 @@ assert(
     rustLib.includes("schedule_main_window_reveal_fallback") &&
     rustLib.includes("MAIN_WINDOW_REVEAL_FALLBACK_MS: u64 = 12_000") &&
     rustLib.includes("fn repair_macos_traffic_light_position(") &&
+    rustLib.includes("fn schedule_macos_traffic_light_position_repair(") &&
+    rustLib.includes("MACOS_TRAFFIC_LIGHT_REPAIR_GENERATION") &&
+    rustLib.includes("MACOS_TRAFFIC_LIGHT_REPAIR_DELAY_MS: u64 = 48") &&
     rustLib.includes("repair_macos_traffic_light_position(&window)?;") &&
     rustLib.includes("let _ = repair_macos_traffic_light_position(&window);") &&
+    rustLib.includes("tauri::WindowEvent::Resized(_)") &&
+    rustLib.includes("tauri::WindowEvent::Moved(_)") &&
+    rustLib.includes("tauri::WindowEvent::Focused(true)") &&
+    rustLib.includes("tauri::WindowEvent::ScaleFactorChanged { .. }") &&
+    rustLib.includes("tauri::WindowEvent::ThemeChanged(_)") &&
     tauriBridge.includes('invoke<void>("reveal_main_window")') &&
     appSource.includes("startupWindowRevealRequestedRef") &&
     appSource.includes("await document.fonts.ready") &&
     appSource.includes("await revealMainWindow()") &&
     !appSource.includes("revealAfterStableFrame"),
-  "The native window must stay hidden until React reveals a stable styled frame"
+  "The native window must reveal a stable styled frame and repair native controls after AppKit relayouts"
 );
 const titlebarHeight = 46;
 // This is the user-confirmed macOS alignment; do not retune it indirectly.

@@ -115,6 +115,10 @@ const MAIN_WINDOW_REVEAL_FALLBACK_MS: u64 = 12_000;
 const MACOS_TRAFFIC_LIGHT_X: f64 = 14.0;
 #[cfg(target_os = "macos")]
 const MACOS_TRAFFIC_LIGHT_Y: f64 = 25.0;
+#[cfg(target_os = "macos")]
+const MACOS_TRAFFIC_LIGHT_REPAIR_DELAY_MS: u64 = 48;
+#[cfg(target_os = "macos")]
+static MACOS_TRAFFIC_LIGHT_REPAIR_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 struct AppState {
     store: Mutex<SqliteStore>,
@@ -1449,6 +1453,28 @@ fn repair_macos_traffic_light_position(_window: &tauri::WebviewWindow) -> Result
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn schedule_macos_traffic_light_position_repair(app: &tauri::AppHandle, window_label: &str) {
+    let app = app.clone();
+    let window_label = window_label.to_string();
+    let generation = MACOS_TRAFFIC_LIGHT_REPAIR_GENERATION
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1);
+
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(MACOS_TRAFFIC_LIGHT_REPAIR_DELAY_MS));
+        if MACOS_TRAFFIC_LIGHT_REPAIR_GENERATION.load(Ordering::Relaxed) != generation {
+            return;
+        }
+        if let Some(window) = app.get_webview_window(&window_label) {
+            let _ = repair_macos_traffic_light_position(&window);
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn schedule_macos_traffic_light_position_repair(_app: &tauri::AppHandle, _window_label: &str) {}
+
 #[tauri::command]
 fn reveal_main_window(app: tauri::AppHandle) -> Result<(), String> {
     let window = app
@@ -1457,10 +1483,11 @@ fn reveal_main_window(app: tauri::AppHandle) -> Result<(), String> {
     window
         .show()
         .map_err(|error| format!("failed to reveal main window: {error}"))?;
-    repair_macos_traffic_light_position(&window)?;
     window
         .set_focus()
         .map_err(|error| format!("failed to focus main window: {error}"))?;
+    repair_macos_traffic_light_position(&window)?;
+    schedule_macos_traffic_light_position_repair(&app, window.label());
     append_startup_log("main window revealed by frontend");
     Ok(())
 }
@@ -1476,8 +1503,9 @@ fn schedule_main_window_reveal_fallback(app: tauri::AppHandle) {
         }
         append_startup_log("main window reveal fallback used");
         let _ = window.show();
-        let _ = repair_macos_traffic_light_position(&window);
         let _ = window.set_focus();
+        let _ = repair_macos_traffic_light_position(&window);
+        schedule_macos_traffic_light_position_repair(&app, window.label());
     });
 }
 
@@ -6142,6 +6170,19 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if matches!(
+                event,
+                tauri::WindowEvent::Resized(_)
+                    | tauri::WindowEvent::Moved(_)
+                    | tauri::WindowEvent::Focused(true)
+                    | tauri::WindowEvent::ScaleFactorChanged { .. }
+                    | tauri::WindowEvent::ThemeChanged(_)
+            ) {
+                schedule_macos_traffic_light_position_repair(
+                    window.app_handle(),
+                    window.label(),
+                );
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if !confirm_application_exit(window.app_handle()) {
                     api.prevent_close();
