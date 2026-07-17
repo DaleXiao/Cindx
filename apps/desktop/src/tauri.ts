@@ -2485,6 +2485,10 @@ export async function openArtifact(path: string): Promise<void> {
   return invoke<void>("open_artifact", { path });
 }
 
+export async function revealArtifact(path: string): Promise<void> {
+  return invoke<void>("reveal_artifact", { path });
+}
+
 export async function openExternalUrl(url: string): Promise<void> {
   return invoke<void>("open_external_url", { url });
 }

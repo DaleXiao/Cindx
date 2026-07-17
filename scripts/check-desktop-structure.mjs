@@ -1082,6 +1082,17 @@ assert(
     rustLib.includes("validated_workspace_artifact_path(&state, &path)"),
   "Default-app artifact opening must reuse workspace path validation"
 );
+assert(
+  inspectorSource.includes("revealArtifact") &&
+    inspectorSource.includes('title="Show in Finder"') &&
+    inspectorSource.includes("inspector-output-row") &&
+    tauriBridge.includes('invoke<void>("reveal_artifact"') &&
+    rustLib.includes("fn reveal_artifact") &&
+    rustLib.includes('command.arg("-R").arg(&canonical_path)') &&
+    styles.includes(".inspector-output-reveal") &&
+    !inspectorSource.includes('<span title={displayPath}>{displayPath}</span>'),
+  "Outputs must use a compact path-free file list with a validated Finder reveal action"
+);
 assert(!tauriBridge.includes("apiKeyPreview"), "Provider state must not expose API key suffixes");
 assert(appSource.includes("<ModelSelect"), "Provider models must use select controls");
 assert(appSource.includes("listProviderModels"), "Provider settings must load the remote model catalog");
