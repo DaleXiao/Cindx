@@ -3,10 +3,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod benchmark;
+mod prompt_evolution;
 
 pub use benchmark::*;
+pub use prompt_evolution::*;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OrchestrationPolicy {
     Single,
     PlanExecuteReview,
@@ -117,13 +120,16 @@ pub fn default_plan(policy: OrchestrationPolicy) -> OrchestrationPlan {
             },
             OrchestrationStep {
                 role: ModelRole::Reviewer,
-                instruction: "Select or synthesize the best candidate using external evidence when possible.".to_string(),
+                instruction:
+                    "Select or synthesize the best candidate using external evidence when possible."
+                        .to_string(),
                 metadata: Metadata::new(),
             },
         ],
         OrchestrationPolicy::AutoRouter => vec![OrchestrationStep {
             role: ModelRole::Executor,
-            instruction: "Answer or act directly after the router selects a concrete policy.".to_string(),
+            instruction: "Answer or act directly after the router selects a concrete policy."
+                .to_string(),
             metadata: Metadata::new(),
         }],
     };
@@ -138,7 +144,12 @@ pub fn default_plan(policy: OrchestrationPolicy) -> OrchestrationPlan {
 pub const MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 5;
 pub const MAX_ADAPTIVE_WORKFLOW_AGENTS: usize = 3;
 pub const WORKFLOW_IR_SCHEMA: &str = "cindx.workflow.v1";
+pub const WORKFLOW_CHECKPOINT_SCHEMA: &str = "cindx.workflow.checkpoint.v1";
 pub const CONDUCTOR_MAX_ATTEMPTS: usize = 2;
+
+fn default_prompt_profile() -> String {
+    "legacy-baseline-v1".to_string()
+}
 
 pub fn adaptive_workflow_step_budget(agent_budget: usize) -> usize {
     match agent_budget.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS) {
@@ -167,6 +178,7 @@ pub struct AdaptiveWorkflow {
 pub enum WorkflowToolPolicy {
     None,
     ReadOnlyEvidence,
+    ReadOnlyExploration,
 }
 
 impl WorkflowToolPolicy {
@@ -174,6 +186,7 @@ impl WorkflowToolPolicy {
         match self {
             Self::None => "none",
             Self::ReadOnlyEvidence => "read_only_evidence",
+            Self::ReadOnlyExploration => "read_only_exploration",
         }
     }
 }
@@ -205,6 +218,8 @@ pub struct WorkflowPlanIr {
     pub effort: String,
     pub policy: String,
     pub coordinator_model: String,
+    #[serde(default = "default_prompt_profile")]
+    pub prompt_profile: String,
     pub steps: Vec<WorkflowPlanStep>,
     pub budget: WorkflowBudget,
 }
@@ -220,6 +235,29 @@ impl WorkflowPlanIr {
         workflow: &AdaptiveWorkflow,
         budget: WorkflowBudget,
     ) -> Self {
+        Self::from_adaptive_with_profile(
+            workflow_id,
+            objective,
+            effort,
+            policy,
+            coordinator_model,
+            "legacy-baseline-v1",
+            workflow,
+            budget,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_adaptive_with_profile(
+        workflow_id: impl Into<String>,
+        objective: impl Into<String>,
+        effort: impl Into<String>,
+        policy: impl Into<String>,
+        coordinator_model: impl Into<String>,
+        prompt_profile: impl Into<String>,
+        workflow: &AdaptiveWorkflow,
+        budget: WorkflowBudget,
+    ) -> Self {
         Self {
             schema: WORKFLOW_IR_SCHEMA.to_string(),
             workflow_id: workflow_id.into(),
@@ -227,27 +265,36 @@ impl WorkflowPlanIr {
             effort: effort.into(),
             policy: policy.into(),
             coordinator_model: coordinator_model.into(),
-            steps: workflow.steps.iter().map(|step| WorkflowPlanStep {
-                id: step.id.clone(),
-                role: step.role.clone(),
-                model: step.model.clone(),
-                subtask: step.subtask.clone(),
-                access: step.access.clone(),
-                tool_policy: WorkflowToolPolicy::ReadOnlyEvidence,
-            }).collect(),
+            prompt_profile: prompt_profile.into(),
+            steps: workflow
+                .steps
+                .iter()
+                .map(|step| WorkflowPlanStep {
+                    id: step.id.clone(),
+                    role: step.role.clone(),
+                    model: step.model.clone(),
+                    subtask: step.subtask.clone(),
+                    access: step.access.clone(),
+                    tool_policy: WorkflowToolPolicy::ReadOnlyEvidence,
+                })
+                .collect(),
             budget,
         }
     }
 
     pub fn adaptive_workflow(&self) -> AdaptiveWorkflow {
         AdaptiveWorkflow {
-            steps: self.steps.iter().map(|step| AdaptiveWorkflowStep {
-                id: step.id.clone(),
-                role: step.role.clone(),
-                model: step.model.clone(),
-                subtask: step.subtask.clone(),
-                access: step.access.clone(),
-            }).collect(),
+            steps: self
+                .steps
+                .iter()
+                .map(|step| AdaptiveWorkflowStep {
+                    id: step.id.clone(),
+                    role: step.role.clone(),
+                    model: step.model.clone(),
+                    subtask: step.subtask.clone(),
+                    access: step.access.clone(),
+                })
+                .collect(),
         }
     }
 
@@ -264,6 +311,7 @@ impl WorkflowPlanIr {
         if self.effort.trim().is_empty()
             || self.policy.trim().is_empty()
             || self.coordinator_model.trim().is_empty()
+            || self.prompt_profile.trim().is_empty()
         {
             return Err("workflow routing metadata is incomplete".to_string());
         }
@@ -279,12 +327,16 @@ impl WorkflowPlanIr {
         if self.steps.len() > self.budget.max_steps {
             return Err("workflow exceeds its declared step budget".to_string());
         }
-        let selected_models = self.steps.iter().map(|step| step.model.as_str()).collect::<BTreeSet<_>>();
+        let selected_models = self
+            .steps
+            .iter()
+            .map(|step| step.model.as_str())
+            .collect::<BTreeSet<_>>();
         if selected_models.len() > self.budget.max_models {
             return Err("workflow exceeds its declared model budget".to_string());
         }
         if self.steps.iter().any(|step| {
-            step.tool_policy == WorkflowToolPolicy::ReadOnlyEvidence
+            step.tool_policy != WorkflowToolPolicy::None
                 && self.budget.max_tool_calls_per_step == 0
         }) {
             return Err("workflow enables evidence tools with a zero tool budget".to_string());
@@ -293,7 +345,8 @@ impl WorkflowPlanIr {
     }
 
     pub fn to_json(&self) -> Result<String, String> {
-        serde_json::to_string(self).map_err(|error| format!("workflow serialization failed: {error}"))
+        serde_json::to_string(self)
+            .map_err(|error| format!("workflow serialization failed: {error}"))
     }
 
     pub fn from_json(value: &str, allowed_models: &[String]) -> Result<Self, String> {
@@ -301,6 +354,354 @@ impl WorkflowPlanIr {
             .map_err(|error| format!("workflow JSON is invalid: {error}"))?;
         workflow.validate(allowed_models)?;
         Ok(workflow)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowStepStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowStepCheckpoint {
+    pub step_id: String,
+    pub status: WorkflowStepStatus,
+    pub attempts: usize,
+    pub model: String,
+    pub output: Option<String>,
+    #[serde(default)]
+    pub evidence_json: String,
+    #[serde(default)]
+    pub evidence_count: usize,
+    #[serde(default)]
+    pub latency_ms: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    #[serde(default)]
+    pub credit: Option<f64>,
+    pub error: Option<String>,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowExecutionCheckpoint {
+    pub schema: String,
+    pub resume_key: String,
+    pub plan: WorkflowPlanIr,
+    #[serde(default)]
+    pub prompt_genome_json: String,
+    pub steps: BTreeMap<String, WorkflowStepCheckpoint>,
+    #[serde(default)]
+    pub finalized: bool,
+    #[serde(default)]
+    pub continuations: usize,
+    #[serde(default)]
+    pub additional_model_turns_per_step: usize,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+}
+
+impl WorkflowExecutionCheckpoint {
+    pub fn new(resume_key: impl Into<String>, plan: WorkflowPlanIr, now_ms: u64) -> Self {
+        let steps = plan
+            .steps
+            .iter()
+            .map(|step| {
+                (
+                    step.id.clone(),
+                    WorkflowStepCheckpoint {
+                        step_id: step.id.clone(),
+                        status: WorkflowStepStatus::Pending,
+                        attempts: 0,
+                        model: step.model.clone(),
+                        output: None,
+                        evidence_json: String::new(),
+                        evidence_count: 0,
+                        latency_ms: 0,
+                        total_tokens: 0,
+                        credit: None,
+                        error: None,
+                        updated_at_ms: now_ms,
+                    },
+                )
+            })
+            .collect();
+        Self {
+            schema: WORKFLOW_CHECKPOINT_SCHEMA.to_string(),
+            resume_key: resume_key.into(),
+            plan,
+            prompt_genome_json: String::new(),
+            steps,
+            finalized: false,
+            continuations: 0,
+            additional_model_turns_per_step: 0,
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+        }
+    }
+
+    pub fn validate(&self, allowed_models: &[String]) -> Result<(), String> {
+        if self.schema != WORKFLOW_CHECKPOINT_SCHEMA {
+            return Err(format!("unsupported workflow checkpoint schema: {}", self.schema));
+        }
+        if self.resume_key.trim().is_empty() {
+            return Err("workflow checkpoint resume key is empty".to_string());
+        }
+        self.plan.validate(allowed_models)?;
+        let expected = self
+            .plan
+            .steps
+            .iter()
+            .map(|step| step.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let actual = self.steps.keys().map(String::as_str).collect::<BTreeSet<_>>();
+        if expected != actual {
+            return Err("workflow checkpoint steps do not match the plan".to_string());
+        }
+        for step in &self.plan.steps {
+            let checkpoint = self
+                .steps
+                .get(&step.id)
+                .ok_or_else(|| format!("workflow checkpoint is missing step {}", step.id))?;
+            if checkpoint.step_id != step.id
+                || !allowed_models.iter().any(|model| model == &checkpoint.model)
+            {
+                return Err(format!("workflow checkpoint step {} changed identity", step.id));
+            }
+            if checkpoint.status == WorkflowStepStatus::Completed
+                && checkpoint.output.as_deref().is_none_or(str::is_empty)
+            {
+                return Err(format!("completed workflow step {} has no output", step.id));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn begin_step(&mut self, step_id: &str, model: &str, now_ms: u64) -> Result<(), String> {
+        let attempt_limit = self
+            .plan
+            .budget
+            .max_model_turns_per_step
+            .saturating_add(self.additional_model_turns_per_step);
+        let step = self
+            .steps
+            .get_mut(step_id)
+            .ok_or_else(|| format!("unknown workflow checkpoint step: {step_id}"))?;
+        if step.status == WorkflowStepStatus::Completed {
+            return Ok(());
+        }
+        if step.attempts >= attempt_limit {
+            return Err(format!(
+                "workflow step {step_id} exhausted its {attempt_limit}-turn budget"
+            ));
+        }
+        step.status = WorkflowStepStatus::Running;
+        step.attempts = step.attempts.saturating_add(1);
+        step.model = model.to_string();
+        step.error = None;
+        step.updated_at_ms = now_ms;
+        self.updated_at_ms = now_ms;
+        Ok(())
+    }
+
+    pub fn complete_step(
+        &mut self,
+        step_id: &str,
+        model: &str,
+        output: String,
+        evidence_json: String,
+        now_ms: u64,
+    ) -> Result<(), String> {
+        let step = self
+            .steps
+            .get_mut(step_id)
+            .ok_or_else(|| format!("unknown workflow checkpoint step: {step_id}"))?;
+        step.status = WorkflowStepStatus::Completed;
+        step.attempts = step.attempts.max(1);
+        step.model = model.to_string();
+        step.output = Some(output);
+        step.evidence_count = serde_json::from_str::<serde_json::Value>(&evidence_json)
+            .ok()
+            .and_then(|value| value.as_array().map(Vec::len))
+            .unwrap_or_default();
+        step.evidence_json = evidence_json;
+        step.error = None;
+        step.updated_at_ms = now_ms;
+        self.updated_at_ms = now_ms;
+        Ok(())
+    }
+
+    pub fn record_step_metrics(
+        &mut self,
+        step_id: &str,
+        latency_ms: u64,
+        total_tokens: u64,
+    ) -> Result<(), String> {
+        let step = self
+            .steps
+            .get_mut(step_id)
+            .ok_or_else(|| format!("unknown workflow checkpoint step: {step_id}"))?;
+        step.latency_ms = step.latency_ms.saturating_add(latency_ms);
+        step.total_tokens = step.total_tokens.saturating_add(total_tokens);
+        Ok(())
+    }
+
+    pub fn assign_step_credits(&mut self, final_quality: f64) -> Vec<PromptStepCredit> {
+        let quality = final_quality.clamp(0.0, 1.0);
+        let roles = self
+            .plan
+            .steps
+            .iter()
+            .map(|step| (step.id.clone(), step.role.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut credits = Vec::new();
+        for (step_id, step) in &mut self.steps {
+            let role = roles
+                .get(step_id)
+                .cloned()
+                .unwrap_or_else(|| "worker".to_string());
+            let role_weight = match role.as_str() {
+                "synthesizer" => 1.0,
+                "verifier" => 0.9,
+                "thinker" => 0.8,
+                _ => 0.75,
+            };
+            let evidence_boost = (step.evidence_count as f64 * 0.025).min(0.15);
+            let retry_penalty = step.attempts.saturating_sub(1) as f64 * 0.06;
+            let succeeded = step.status == WorkflowStepStatus::Completed;
+            let credit = if succeeded {
+                (quality * role_weight + evidence_boost - retry_penalty).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            step.credit = Some(credit);
+            credits.push(PromptStepCredit {
+                step_id: step_id.clone(),
+                role,
+                succeeded,
+                attempts: step.attempts,
+                evidence_count: step.evidence_count,
+                latency_ms: step.latency_ms,
+                total_tokens: step.total_tokens,
+                credit,
+            });
+        }
+        credits.sort_by(|left, right| left.step_id.cmp(&right.step_id));
+        credits
+    }
+
+    pub fn fail_step(
+        &mut self,
+        step_id: &str,
+        error: impl Into<String>,
+        now_ms: u64,
+    ) -> Result<(), String> {
+        let step = self
+            .steps
+            .get_mut(step_id)
+            .ok_or_else(|| format!("unknown workflow checkpoint step: {step_id}"))?;
+        step.status = WorkflowStepStatus::Failed;
+        step.attempts = step.attempts.max(1);
+        step.error = Some(error.into());
+        step.updated_at_ms = now_ms;
+        self.updated_at_ms = now_ms;
+        Ok(())
+    }
+
+    pub fn completed_outputs(&self) -> BTreeMap<String, String> {
+        self.steps
+            .iter()
+            .filter_map(|(id, step)| {
+                (step.status == WorkflowStepStatus::Completed)
+                    .then(|| step.output.clone().map(|output| (id.clone(), output)))
+                    .flatten()
+            })
+            .collect()
+    }
+
+    pub fn runnable_step_indices(&self, layer: &[usize]) -> Result<Vec<usize>, String> {
+        let mut runnable = Vec::new();
+        for index in layer {
+            let plan_step = self
+                .plan
+                .steps
+                .get(*index)
+                .ok_or_else(|| format!("workflow layer references unknown step index {index}"))?;
+            let checkpoint = self
+                .steps
+                .get(&plan_step.id)
+                .ok_or_else(|| format!("workflow checkpoint is missing step {}", plan_step.id))?;
+            if checkpoint.status == WorkflowStepStatus::Completed {
+                continue;
+            }
+            if plan_step.access.iter().any(|dependency| {
+                self.steps.get(dependency).is_none_or(|step| {
+                    step.status != WorkflowStepStatus::Completed
+                })
+            }) {
+                return Err(format!(
+                    "workflow step {} is blocked by an incomplete dependency",
+                    plan_step.id
+                ));
+            }
+            runnable.push(*index);
+        }
+        Ok(runnable)
+    }
+
+    pub fn completed_step_count(&self) -> usize {
+        self.steps
+            .values()
+            .filter(|step| step.status == WorkflowStepStatus::Completed)
+            .count()
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.finalized && self.completed_step_count() == self.plan.steps.len()
+    }
+
+    pub fn continue_with_budget(&mut self, additional_turns_per_step: usize, now_ms: u64) {
+        self.continuations = self.continuations.saturating_add(1);
+        self.additional_model_turns_per_step = self
+            .additional_model_turns_per_step
+            .saturating_add(additional_turns_per_step.max(1));
+        self.updated_at_ms = now_ms;
+    }
+
+    pub fn finalize(&mut self, final_output: String, now_ms: u64) -> Result<(), String> {
+        let final_step = self
+            .plan
+            .steps
+            .last()
+            .ok_or_else(|| "workflow checkpoint has no final step".to_string())?;
+        let checkpoint = self
+            .steps
+            .get_mut(&final_step.id)
+            .ok_or_else(|| "workflow checkpoint is missing its final step".to_string())?;
+        if checkpoint.status != WorkflowStepStatus::Completed {
+            return Err("workflow checkpoint cannot finalize before its final step".to_string());
+        }
+        checkpoint.output = Some(final_output);
+        checkpoint.updated_at_ms = now_ms;
+        self.finalized = true;
+        self.updated_at_ms = now_ms;
+        Ok(())
+    }
+
+    pub fn to_json(&self) -> Result<String, String> {
+        serde_json::to_string(self)
+            .map_err(|error| format!("workflow checkpoint serialization failed: {error}"))
+    }
+
+    pub fn from_json(value: &str, allowed_models: &[String]) -> Result<Self, String> {
+        let checkpoint = serde_json::from_str::<Self>(value)
+            .map_err(|error| format!("workflow checkpoint JSON is invalid: {error}"))?;
+        checkpoint.validate(allowed_models)?;
+        Ok(checkpoint)
     }
 }
 
@@ -324,6 +725,8 @@ pub struct ConductorRequest {
     pub role_hints: ConductorRoleHints,
     pub budget: WorkflowBudget,
     pub prior_hint: Option<String>,
+    pub prompt_evolution_enabled: bool,
+    pub prompt_genome: ConductorPromptGenome,
 }
 
 #[derive(Debug, Clone)]
@@ -358,12 +761,22 @@ impl ConductorHarness {
 
     pub fn planning_prompt(&self) -> String {
         let request = &self.request;
-        let worker_pool = request.worker_models.iter()
+        let worker_pool = request
+            .worker_models
+            .iter()
             .map(|model| format!("- {model}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let prior_hint = request.prior_hint.as_deref()
+        let prior_hint = request
+            .prior_hint
+            .as_deref()
             .unwrap_or("(none - design from the current query)");
+        let evolved_directive = if request.prompt_evolution_enabled {
+            request.prompt_genome.conductor_directive()
+        } else {
+            "Prompt evolution is disabled. Use only the baseline harness constraints above."
+                .to_string()
+        };
         format!(
             concat!(
                 "You are the Conductor Agent for a Fugu-style Cindx workflow. Design a query-specific dependency graph instead of answering the user. Return only strict JSON matching this example:\n",
@@ -373,7 +786,7 @@ impl ConductorHarness {
                 "- Use no more than {max_models} distinct worker models.\n",
                 "- role must be exactly thinker, worker, verifier, or synthesizer.\n",
                 "- Preserve listed order: access may reference only earlier step ids.\n",
-                "- With two or more workers, begin with two independent thinker/worker branches.\n",
+                "- Obey the evolved profile's branch and verification policy; do not add decorative agents.\n",
                 "- Keep workers isolated and expose an earlier result only through access.\n",
                 "- Every branch must reach the final synthesizer; retain dissenting or failed branches.\n",
                 "- Use exact model strings from the worker pool. The Conductor model is not implicitly a worker.\n",
@@ -381,9 +794,14 @@ impl ConductorHarness {
                 "Configured worker role hints:\nPlanner: {planner}\nExecutor: {executor}\nReviewer: {reviewer}\nSynthesizer: {synthesizer}\n\n",
                 "Allowed worker pool:\n{worker_pool}\n\n",
                 "Historical execution prior:\n{prior_hint}\n\n",
+                "Evolved orchestration directive:\n{evolved_directive}\n\n",
                 "User request:\n{objective}\n\nRecent session memory:\n{recent_context}"
             ),
-            schema_example = conductor_schema_example(request.budget.max_models),
+            schema_example = conductor_schema_example(
+                request.budget.max_models,
+                request.prompt_genome.max_parallel_branches,
+                request.prompt_genome.verification,
+            ),
             max_steps = request.budget.max_steps,
             max_models = request.budget.max_models,
             planner = request.role_hints.planner,
@@ -392,6 +810,7 @@ impl ConductorHarness {
             synthesizer = request.role_hints.synthesizer,
             worker_pool = worker_pool,
             prior_hint = prior_hint,
+            evolved_directive = evolved_directive,
             objective = request.objective,
             recent_context = if request.recent_context.trim().is_empty() {
                 "(none)"
@@ -411,47 +830,79 @@ impl ConductorHarness {
     }
 
     pub fn parse_plan(&self, response: &str) -> Result<WorkflowPlanIr, String> {
-        let start = response.find('{')
+        if self.request.prompt_evolution_enabled {
+            self.request.prompt_genome.validate()?;
+        }
+        let start = response
+            .find('{')
             .ok_or_else(|| "conductor did not return a JSON object".to_string())?;
-        let end = response.rfind('}')
+        let end = response
+            .rfind('}')
             .filter(|end| *end >= start)
             .ok_or_else(|| "conductor returned incomplete JSON".to_string())?;
         let payload = serde_json::from_str::<ConductorWorkflowPayload>(&response[start..=end])
             .map_err(|error| format!("conductor workflow JSON is invalid: {error}"))?;
         let step_count = payload.steps.len();
         let workflow = AdaptiveWorkflow {
-            steps: payload.steps.into_iter().enumerate().map(|(index, step)| {
-                let access = step.access.into_iter()
-                    .map(|dependency| dependency.trim().to_string())
-                    .collect::<Vec<_>>();
-                let role = step.role.unwrap_or_else(|| {
-                    if index + 1 == step_count {
-                        "synthesizer".to_string()
-                    } else if access.is_empty() {
-                        "thinker".to_string()
-                    } else {
-                        "worker".to_string()
+            steps: payload
+                .steps
+                .into_iter()
+                .enumerate()
+                .map(|(index, step)| {
+                    let access = step
+                        .access
+                        .into_iter()
+                        .map(|dependency| dependency.trim().to_string())
+                        .collect::<Vec<_>>();
+                    let role = step.role.unwrap_or_else(|| {
+                        if index + 1 == step_count {
+                            "synthesizer".to_string()
+                        } else if access.is_empty() {
+                            "thinker".to_string()
+                        } else {
+                            "worker".to_string()
+                        }
+                    });
+                    AdaptiveWorkflowStep {
+                        id: step.id.trim().to_string(),
+                        role: role.trim().to_ascii_lowercase(),
+                        model: step.model.trim().to_string(),
+                        subtask: step.subtask.trim().to_string(),
+                        access,
                     }
-                });
-                AdaptiveWorkflowStep {
-                    id: step.id.trim().to_string(),
-                    role: role.trim().to_ascii_lowercase(),
-                    model: step.model.trim().to_string(),
-                    subtask: step.subtask.trim().to_string(),
-                    access,
-                }
-            }).collect(),
+                })
+                .collect(),
         };
         self.validate_shape(&workflow)?;
-        let plan = WorkflowPlanIr::from_adaptive(
+        let mut budget = self.request.budget.clone();
+        if self.request.prompt_evolution_enabled {
+            budget.max_model_turns_per_step = budget
+                .max_model_turns_per_step
+                .min(self.request.prompt_genome.max_step_attempts)
+                .max(1);
+        }
+        let mut plan = WorkflowPlanIr::from_adaptive_with_profile(
             self.request.workflow_id.clone(),
             self.request.objective.clone(),
             self.request.effort.clone(),
             self.request.policy.clone(),
             self.request.conductor_model.clone(),
+            if self.request.prompt_evolution_enabled {
+                self.request.prompt_genome.id.clone()
+            } else {
+                "legacy-baseline-v1".to_string()
+            },
             &workflow,
-            self.request.budget.clone(),
+            budget,
         );
+        if self.request.prompt_evolution_enabled {
+            for step in &mut plan.steps {
+                step.tool_policy = self
+                    .request
+                    .prompt_genome
+                    .workflow_tool_policy(&step.role);
+            }
+        }
         plan.validate(&self.request.worker_models)?;
         Ok(plan)
     }
@@ -463,7 +914,9 @@ impl ConductorHarness {
                 self.request.budget.max_steps
             ));
         }
-        let selected_models = workflow.steps.iter()
+        let selected_models = workflow
+            .steps
+            .iter()
             .map(|step| step.model.as_str())
             .collect::<BTreeSet<_>>();
         if selected_models.len() > self.request.budget.max_models {
@@ -472,27 +925,91 @@ impl ConductorHarness {
                 self.request.budget.max_models
             ));
         }
-        let independent_branches = workflow.steps.iter()
+        let independent_branches = workflow
+            .steps
+            .iter()
             .take(workflow.steps.len().saturating_sub(1))
-            .filter(|step| step.access.is_empty() && matches!(step.role.as_str(), "thinker" | "worker"))
+            .filter(|step| {
+                step.access.is_empty() && matches!(step.role.as_str(), "thinker" | "worker")
+            })
             .count();
-        if self.request.budget.max_models >= 2 && independent_branches < 2 {
-            return Err("conductor workflow requires at least two independent branches".to_string());
+        let branch_limit = self
+            .request
+            .prompt_genome
+            .max_parallel_branches
+            .min(self.request.budget.max_models)
+            .max(1);
+        let required_branches = if workflow.steps.len() == 1
+            && self.request.prompt_genome.graph_depth == PromptGraphDepth::Lean
+        {
+            0
+        } else {
+            match self.request.prompt_genome.graph_depth {
+                PromptGraphDepth::Lean => 1,
+                PromptGraphDepth::Balanced | PromptGraphDepth::Deep => {
+                    usize::from(self.request.budget.max_models >= 2) + 1
+                }
+            }
+            .min(branch_limit)
+        };
+        if independent_branches < required_branches {
+            return Err(
+                format!(
+                    "conductor workflow requires at least {required_branches} independent branch{} for the selected prompt profile",
+                    if required_branches == 1 { "" } else { "es" }
+                ),
+            );
         }
-        if workflow.steps.last().is_some_and(|step| {
-            self.request.budget.max_models >= 2 && step.access.len() < 2
-        }) {
+        if independent_branches > branch_limit {
+            return Err(format!(
+                "conductor workflow exceeds the selected prompt profile's {branch_limit}-branch limit"
+            ));
+        }
+        if self.request.prompt_genome.require_final_synthesis
+            && workflow
+                .steps
+                .last()
+                .is_some_and(|step| step.role != "synthesizer")
+        {
+            return Err("conductor workflow must end with a synthesizer".to_string());
+        }
+        if self.request.prompt_genome.verification == PromptVerification::Adversarial
+            && self.request.budget.max_steps >= 4
+            && !workflow.steps.iter().any(|step| step.role == "verifier")
+        {
+            return Err(
+                "adversarial prompt profile requires a verifier before synthesis".to_string(),
+            );
+        }
+        if workflow
+            .steps
+            .last()
+            .is_some_and(|step| required_branches >= 2 && step.access.len() < 2)
+        {
             return Err("conductor synthesis must access at least two prior branches".to_string());
         }
         Ok(())
     }
 }
 
-fn conductor_schema_example(max_models: usize) -> &'static str {
-    match max_models {
-        0 | 1 => r#"{"steps":[{"id":"synthesize","role":"synthesizer","model":"exact model from pool","subtask":"produce a checkable execution brief","access":[]}]}"#,
-        2 => r#"{"steps":[{"id":"approach_a","role":"thinker","model":"exact model from pool","subtask":"analyze the strongest approach","access":[]},{"id":"approach_b","role":"worker","model":"exact model from pool","subtask":"develop an independent alternative","access":[]},{"id":"synthesize","role":"synthesizer","model":"reuse an exact model from pool","subtask":"resolve both branches","access":["approach_a","approach_b"]}]}"#,
-        _ => r#"{"steps":[{"id":"approach_a","role":"thinker","model":"exact model from pool","subtask":"independent approach","access":[]},{"id":"approach_b","role":"worker","model":"exact model from pool","subtask":"independent alternative","access":[]},{"id":"verify","role":"verifier","model":"exact model from pool","subtask":"cross-check both reports","access":["approach_a","approach_b"]},{"id":"synthesize","role":"synthesizer","model":"reuse an exact model from pool","subtask":"resolve disagreements","access":["approach_a","approach_b","verify"]}]}"#,
+fn conductor_schema_example(
+    max_models: usize,
+    max_parallel_branches: usize,
+    verification: PromptVerification,
+) -> &'static str {
+    match max_models.min(max_parallel_branches.max(1)) {
+        0 | 1 => {
+            r#"{"steps":[{"id":"synthesize","role":"synthesizer","model":"exact model from pool","subtask":"produce a checkable execution brief","access":[]}]}"#
+        }
+        2 => {
+            r#"{"steps":[{"id":"approach_a","role":"thinker","model":"exact model from pool","subtask":"analyze the strongest approach","access":[]},{"id":"approach_b","role":"worker","model":"exact model from pool","subtask":"develop an independent alternative","access":[]},{"id":"synthesize","role":"synthesizer","model":"reuse an exact model from pool","subtask":"resolve both branches","access":["approach_a","approach_b"]}]}"#
+        }
+        _ if verification == PromptVerification::Adversarial => {
+            r#"{"steps":[{"id":"approach_a","role":"thinker","model":"exact model from pool","subtask":"independent approach","access":[]},{"id":"approach_b","role":"worker","model":"exact model from pool","subtask":"independent alternative","access":[]},{"id":"verify","role":"verifier","model":"exact model from pool","subtask":"cross-check both reports","access":["approach_a","approach_b"]},{"id":"synthesize","role":"synthesizer","model":"reuse an exact model from pool","subtask":"resolve disagreements","access":["approach_a","approach_b","verify"]}]}"#
+        }
+        _ => {
+            r#"{"steps":[{"id":"approach_a","role":"thinker","model":"exact model from pool","subtask":"independent approach","access":[]},{"id":"approach_b","role":"worker","model":"exact model from pool","subtask":"independent alternative","access":[]},{"id":"synthesize","role":"synthesizer","model":"reuse an exact model from pool","subtask":"resolve both branches","access":["approach_a","approach_b"]}]}"#
+        }
     }
 }
 
@@ -517,7 +1034,10 @@ pub fn validate_adaptive_workflow(
         ));
     }
 
-    let allowed_models = allowed_models.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let allowed_models = allowed_models
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
     let mut seen_ids = BTreeSet::new();
     let mut selected_models = BTreeSet::new();
     for step in &workflow.steps {
@@ -525,14 +1045,23 @@ pub fn validate_adaptive_workflow(
             return Err("adaptive workflow step id is empty".to_string());
         }
         if seen_ids.contains(step.id.as_str()) {
-            return Err(format!("adaptive workflow step id is duplicated: {}", step.id));
+            return Err(format!(
+                "adaptive workflow step id is duplicated: {}",
+                step.id
+            ));
         }
         if !allowed_models.contains(step.model.as_str()) {
-            return Err(format!("adaptive workflow selected an unknown model: {}", step.model));
+            return Err(format!(
+                "adaptive workflow selected an unknown model: {}",
+                step.model
+            ));
         }
         selected_models.insert(step.model.as_str());
         if step.subtask.trim().is_empty() {
-            return Err(format!("adaptive workflow step {} has an empty subtask", step.id));
+            return Err(format!(
+                "adaptive workflow step {} has an empty subtask",
+                step.id
+            ));
         }
         if !matches!(
             step.role.as_str(),
@@ -624,7 +1153,10 @@ pub fn adaptive_workflow_layers(workflow: &AdaptiveWorkflow) -> Result<Vec<Vec<u
     let mut step_layers = vec![0usize; workflow.steps.len()];
     for (step_index, step) in workflow.steps.iter().enumerate() {
         if indexes.contains_key(step.id.as_str()) {
-            return Err(format!("adaptive workflow step id is duplicated: {}", step.id));
+            return Err(format!(
+                "adaptive workflow step id is duplicated: {}",
+                step.id
+            ));
         }
         let mut layer = 0;
         for dependency in &step.access {
@@ -689,7 +1221,8 @@ pub fn adaptive_worker_prompt(
     Some(prompt)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskClass {
     General,
     Coding,
@@ -737,39 +1270,57 @@ pub struct WorkflowTopologyPrior {
     pub task_class: TaskClass,
     pub effort: String,
     pub max_models: usize,
+    pub profile_id: String,
     pub steps: Vec<WorkflowTopologyStep>,
     pub examples: usize,
     pub success_rate: f32,
     pub average_quality: Option<f32>,
     pub average_latency_ms: u64,
     pub average_total_tokens: u64,
+    pub average_tool_calls: f32,
     score: i64,
 }
 
 impl WorkflowTopologyPrior {
     pub fn prompt_hint(&self) -> String {
-        let quality = self.average_quality
+        let quality = self
+            .average_quality
             .map(|score| format!("{score:.2}"))
             .unwrap_or_else(|| "unrated".to_string());
-        let steps = self.steps.iter().enumerate().map(|(index, step)| {
-            let access = if step.access.is_empty() {
-                "none".to_string()
-            } else {
-                step.access.iter().map(|dependency| (dependency + 1).to_string())
-                    .collect::<Vec<_>>().join(",")
-            };
-            format!(
-                "{}. role={} model={} access={} tools={}",
-                index + 1, step.role, step.model, access, step.tool_policy.label()
-            )
-        }).collect::<Vec<_>>().join("\n");
+        let steps = self
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(index, step)| {
+                let access = if step.access.is_empty() {
+                    "none".to_string()
+                } else {
+                    step.access
+                        .iter()
+                        .map(|dependency| (dependency + 1).to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                format!(
+                    "{}. role={} model={} access={} tools={}",
+                    index + 1,
+                    step.role,
+                    step.model,
+                    access,
+                    step.tool_policy.label()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         format!(
-            "Historical topology prior from {} comparable executions (success={:.0}%, quality={}, avg_latency_ms={}, avg_tokens={}). Treat this only as a prior: keep it when it fits the current query, otherwise design a better graph.\n{}",
+            "Pareto prompt/topology prior profile={} from {} comparable executions (success={:.0}%, quality={}, avg_latency_ms={}, avg_tokens={}, avg_tools={:.1}). Treat this only as a prior: keep it when it fits the current query, otherwise design a better graph.\n{}",
+            self.profile_id,
             self.examples,
             self.success_rate * 100.0,
             quality,
             self.average_latency_ms,
             self.average_total_tokens,
+            self.average_tool_calls,
             steps
         )
     }
@@ -792,18 +1343,61 @@ impl WorkflowSearchTeacher {
                 entry.plan.effort.clone(),
                 entry.plan.budget.max_models,
             );
-            grouped.entry(key).or_default()
+            grouped
+                .entry(key)
+                .or_default()
                 .entry(workflow_topology_signature(&entry.plan))
                 .or_insert_with(|| WorkflowPriorAccumulator::new(&entry.plan))
                 .record(entry);
         }
 
-        let priors = grouped.into_iter().filter_map(|((task_class, effort, max_models), candidates)| {
-            candidates.into_values()
-                .map(|candidate| candidate.finish(task_class.clone(), effort.clone(), max_models))
-                .max_by_key(|prior| prior.score)
-        }).collect();
+        let priors = grouped
+            .into_iter()
+            .flat_map(|((task_class, effort, max_models), candidates)| {
+                candidates.into_values().map(move |candidate| {
+                    candidate.finish(task_class.clone(), effort.clone(), max_models)
+                })
+            })
+            .collect();
         Self { priors }
+    }
+
+    pub fn pareto_front(
+        &self,
+        task_class: &TaskClass,
+        effort: &str,
+        allowed_models: &[String],
+        max_models: usize,
+    ) -> Vec<&WorkflowTopologyPrior> {
+        let allowed = allowed_models
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let eligible = self
+            .priors
+            .iter()
+            .filter(|prior| {
+                &prior.task_class == task_class
+                    && prior.effort == effort
+                    && prior.max_models <= max_models
+                    && prior.examples >= 2
+                    && prior.success_rate >= 0.6
+                    && prior
+                        .steps
+                        .iter()
+                        .all(|step| allowed.contains(step.model.as_str()))
+            })
+            .collect::<Vec<_>>();
+        eligible
+            .iter()
+            .enumerate()
+            .filter(|(index, prior)| {
+                !eligible.iter().enumerate().any(|(other_index, other)| {
+                    index != &other_index && workflow_prior_dominates(other, prior)
+                })
+            })
+            .map(|(_, prior)| *prior)
+            .collect()
     }
 
     pub fn best_prior(
@@ -813,15 +1407,46 @@ impl WorkflowSearchTeacher {
         allowed_models: &[String],
         max_models: usize,
     ) -> Option<&WorkflowTopologyPrior> {
-        let allowed = allowed_models.iter().map(String::as_str).collect::<BTreeSet<_>>();
-        self.priors.iter().filter(|prior| {
-            &prior.task_class == task_class
-                && prior.effort == effort
-                && prior.max_models <= max_models
-                && prior.examples >= 2
-                && prior.success_rate >= 0.6
-                && prior.steps.iter().all(|step| allowed.contains(step.model.as_str()))
-        }).max_by_key(|prior| prior.score)
+        self.pareto_front(task_class, effort, allowed_models, max_models)
+            .into_iter()
+            .max_by(|left, right| compare_workflow_priors(left, right, effort))
+    }
+}
+
+fn workflow_prior_dominates(left: &WorkflowTopologyPrior, right: &WorkflowTopologyPrior) -> bool {
+    let left_quality = left.average_quality.unwrap_or(left.success_rate);
+    let right_quality = right.average_quality.unwrap_or(right.success_rate);
+    let no_worse = left.success_rate >= right.success_rate
+        && left_quality >= right_quality
+        && left.average_latency_ms <= right.average_latency_ms
+        && left.average_total_tokens <= right.average_total_tokens
+        && left.average_tool_calls <= right.average_tool_calls;
+    let strictly_better = left.success_rate > right.success_rate
+        || left_quality > right_quality
+        || left.average_latency_ms < right.average_latency_ms
+        || left.average_total_tokens < right.average_total_tokens
+        || left.average_tool_calls < right.average_tool_calls;
+    no_worse && strictly_better
+}
+
+fn compare_workflow_priors(
+    left: &WorkflowTopologyPrior,
+    right: &WorkflowTopologyPrior,
+    effort: &str,
+) -> std::cmp::Ordering {
+    match effort {
+        "fast" => right
+            .average_latency_ms
+            .cmp(&left.average_latency_ms)
+            .then_with(|| right.average_total_tokens.cmp(&left.average_total_tokens))
+            .then_with(|| left.success_rate.total_cmp(&right.success_rate)),
+        "pro" => left
+            .average_quality
+            .unwrap_or(left.success_rate)
+            .total_cmp(&right.average_quality.unwrap_or(right.success_rate))
+            .then_with(|| left.success_rate.total_cmp(&right.success_rate))
+            .then_with(|| right.average_latency_ms.cmp(&left.average_latency_ms)),
+        _ => left.score.cmp(&right.score),
     }
 }
 
@@ -840,8 +1465,14 @@ struct WorkflowPriorAccumulator {
 impl WorkflowPriorAccumulator {
     fn new(plan: &WorkflowPlanIr) -> Self {
         Self {
-            plan: plan.clone(), examples: 0, successes: 0, quality_total: 0.0,
-            quality_examples: 0, latency_ms: 0, total_tokens: 0, tool_calls: 0,
+            plan: plan.clone(),
+            examples: 0,
+            successes: 0,
+            quality_total: 0.0,
+            quality_examples: 0,
+            latency_ms: 0,
+            total_tokens: 0,
+            tool_calls: 0,
         }
     }
 
@@ -857,52 +1488,82 @@ impl WorkflowPriorAccumulator {
         self.tool_calls = self.tool_calls.saturating_add(telemetry.tool_calls);
     }
 
-    fn finish(self, task_class: TaskClass, effort: String, max_models: usize) -> WorkflowTopologyPrior {
+    fn finish(
+        self,
+        task_class: TaskClass,
+        effort: String,
+        max_models: usize,
+    ) -> WorkflowTopologyPrior {
         let divisor = self.examples.max(1) as u64;
         let success_rate = self.successes as f32 / self.examples.max(1) as f32;
-        let average_quality = (self.quality_examples > 0)
-            .then(|| self.quality_total / self.quality_examples as f32);
+        let average_quality =
+            (self.quality_examples > 0).then(|| self.quality_total / self.quality_examples as f32);
         let average_latency_ms = self.latency_ms / divisor;
         let average_total_tokens = self.total_tokens / divisor;
+        let average_tool_calls = self.tool_calls as f32 / self.examples.max(1) as f32;
         let quality = average_quality.unwrap_or(success_rate);
-        let score = (success_rate * 10_000.0) as i64
-            + (quality * 5_000.0) as i64
+        let score = (success_rate * 10_000.0) as i64 + (quality * 5_000.0) as i64
             - average_latency_ms as i64 / 100
             - average_total_tokens as i64 / 20
-            - (self.tool_calls as f32 / self.examples.max(1) as f32 * 25.0) as i64;
+            - (average_tool_calls * 25.0) as i64;
         WorkflowTopologyPrior {
-            task_class, effort, max_models,
+            task_class,
+            effort,
+            max_models,
+            profile_id: self.plan.prompt_profile.clone(),
             steps: normalized_topology_steps(&self.plan),
-            examples: self.examples, success_rate, average_quality,
-            average_latency_ms, average_total_tokens, score,
+            examples: self.examples,
+            success_rate,
+            average_quality,
+            average_latency_ms,
+            average_total_tokens,
+            average_tool_calls,
+            score,
         }
     }
 }
 
 fn normalized_topology_steps(plan: &WorkflowPlanIr) -> Vec<WorkflowTopologyStep> {
-    let indexes = plan.steps.iter().enumerate()
+    let indexes = plan
+        .steps
+        .iter()
+        .enumerate()
         .map(|(index, step)| (step.id.as_str(), index))
         .collect::<BTreeMap<_, _>>();
-    plan.steps.iter().map(|step| WorkflowTopologyStep {
-        role: step.role.clone(),
-        model: step.model.clone(),
-        access: step.access.iter()
-            .filter_map(|dependency| indexes.get(dependency.as_str()).copied())
-            .collect(),
-        tool_policy: step.tool_policy.clone(),
-    }).collect()
+    plan.steps
+        .iter()
+        .map(|step| WorkflowTopologyStep {
+            role: step.role.clone(),
+            model: step.model.clone(),
+            access: step
+                .access
+                .iter()
+                .filter_map(|dependency| indexes.get(dependency.as_str()).copied())
+                .collect(),
+            tool_policy: step.tool_policy.clone(),
+        })
+        .collect()
 }
 
 fn workflow_topology_signature(plan: &WorkflowPlanIr) -> String {
-    normalized_topology_steps(plan).into_iter().map(|step| {
-        format!(
-            "{}:{}:[{}]:{}",
-            step.role,
-            step.model,
-            step.access.iter().map(usize::to_string).collect::<Vec<_>>().join(","),
-            step.tool_policy.label()
-        )
-    }).collect::<Vec<_>>().join("|")
+    let topology = normalized_topology_steps(plan)
+        .into_iter()
+        .map(|step| {
+            format!(
+                "{}:{}:[{}]:{}",
+                step.role,
+                step.model,
+                step.access
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                step.tool_policy.label()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    format!("profile={}|{topology}", plan.prompt_profile)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -940,16 +1601,44 @@ impl RoutingContext {
         let coding_action = contains_any(
             prompt,
             &[
-                "fix", "modify", "edit", "refactor", "implement", "debug", "compile", "test",
-                "run", "修复", "修改", "重构", "实现", "调试", "编译", "测试", "运行", "执行",
-                "定位", "排查",
+                "fix",
+                "modify",
+                "edit",
+                "refactor",
+                "implement",
+                "debug",
+                "compile",
+                "test",
+                "run",
+                "修复",
+                "修改",
+                "重构",
+                "实现",
+                "调试",
+                "编译",
+                "测试",
+                "运行",
+                "执行",
+                "定位",
+                "排查",
             ],
         );
         let workspace_reference = contains_any(
             prompt,
             &[
-                "workspace", "repo", "repository", "project", "codebase", "this file",
-                "these files", "工作区", "仓库", "项目", "代码库", "这个文件", "这些文件",
+                "workspace",
+                "repo",
+                "repository",
+                "project",
+                "codebase",
+                "this file",
+                "these files",
+                "工作区",
+                "仓库",
+                "项目",
+                "代码库",
+                "这个文件",
+                "这些文件",
                 "现有代码",
             ],
         );
@@ -981,36 +1670,100 @@ impl RoutingContext {
         let high_stakes = contains_any(
             prompt,
             &[
-                "security", "legal", "medical", "financial", "production", "migration",
-                "critical", "high-stakes", "安全", "法律", "医疗", "财务", "生产", "迁移",
-                "高风险", "关键",
+                "security",
+                "legal",
+                "medical",
+                "financial",
+                "production",
+                "migration",
+                "critical",
+                "high-stakes",
+                "安全",
+                "法律",
+                "医疗",
+                "财务",
+                "生产",
+                "迁移",
+                "高风险",
+                "关键",
             ],
         );
         let deep_analysis = contains_any(
             prompt,
             &[
-                "compare", "tradeoff", "trade-off", "architecture", "strategy", "root cause",
-                "investigate", "comprehensive", "alternatives", "方案", "比较", "对比", "权衡",
-                "架构", "策略", "根因", "深入", "全面", "多条路径",
+                "compare",
+                "tradeoff",
+                "trade-off",
+                "architecture",
+                "strategy",
+                "root cause",
+                "investigate",
+                "comprehensive",
+                "alternatives",
+                "方案",
+                "比较",
+                "对比",
+                "权衡",
+                "架构",
+                "策略",
+                "根因",
+                "深入",
+                "全面",
+                "多条路径",
             ],
         );
         let parallelizable = !capability_question
             && contains_any(
                 prompt,
                 &[
-                    "compare", "alternatives", "independent", "multiple options", "second opinion",
-                    "cross-check", "parallel", "sources", "citations", "比较", "对比", "多个方案",
-                    "independent analysis", "investigate", "root cause", "独立分析", "交叉验证",
-                    "并行", "多条路径", "来源", "引用", "根因", "排查",
+                    "compare",
+                    "alternatives",
+                    "independent",
+                    "multiple options",
+                    "second opinion",
+                    "cross-check",
+                    "parallel",
+                    "sources",
+                    "citations",
+                    "比较",
+                    "对比",
+                    "多个方案",
+                    "independent analysis",
+                    "investigate",
+                    "root cause",
+                    "独立分析",
+                    "交叉验证",
+                    "并行",
+                    "多条路径",
+                    "来源",
+                    "引用",
+                    "根因",
+                    "排查",
                 ],
             );
         let multi_phase = !capability_question
             && contains_any(
                 prompt,
                 &[
-                    " and then ", " then ", " after that ", "并且", "然后", "之后", "再运行",
-                    "再检查", "同时", "and run tests", "fix and test", "implement and test",
-                    "修改并", "修复并", "实现并", "排查并", "并运行", "并测试", "并检查",
+                    " and then ",
+                    " then ",
+                    " after that ",
+                    "并且",
+                    "然后",
+                    "之后",
+                    "再运行",
+                    "再检查",
+                    "同时",
+                    "and run tests",
+                    "fix and test",
+                    "implement and test",
+                    "修改并",
+                    "修复并",
+                    "实现并",
+                    "排查并",
+                    "并运行",
+                    "并测试",
+                    "并检查",
                     "并验证",
                 ],
             );
@@ -1018,8 +1771,16 @@ impl RoutingContext {
             && contains_any(
                 prompt,
                 &[
-                    "quick", "quickly", "fast", "brief", "one sentence", "简单回答", "快速",
-                    "尽快", "一句话", "简短",
+                    "quick",
+                    "quickly",
+                    "fast",
+                    "brief",
+                    "one sentence",
+                    "简单回答",
+                    "快速",
+                    "尽快",
+                    "一句话",
+                    "简短",
                 ],
             );
         let needs_tools = !capability_question
@@ -1043,7 +1804,14 @@ impl RoutingContext {
                 || contains_any(
                     prompt,
                     &[
-                        "screenshot", "screen", "visible", "ui", "截图", "屏幕", "界面", "可见",
+                        "screenshot",
+                        "screen",
+                        "visible",
+                        "ui",
+                        "截图",
+                        "屏幕",
+                        "界面",
+                        "可见",
                     ],
                 ));
         let verification_required = !capability_question
@@ -1061,8 +1829,7 @@ impl RoutingContext {
         let estimated_steps = if capability_question {
             1
         } else {
-            (1u8
-                + u8::from(needs_tools)
+            (1u8 + u8::from(needs_tools)
                 + u8::from(needs_retrieval)
                 + u8::from(verification_required)
                 + u8::from(deep_analysis)
@@ -1102,7 +1869,11 @@ impl RoutingContext {
             needs_multi_model: !capability_question && explicit_multi_model,
             needs_vision,
             high_stakes: !capability_question && high_stakes,
-            complexity_score: if capability_question { 0 } else { complexity_score },
+            complexity_score: if capability_question {
+                0
+            } else {
+                complexity_score
+            },
             estimated_steps,
             parallelizable,
             verification_required,
@@ -1139,7 +1910,8 @@ pub struct RoutingDecision {
     pub metadata: Metadata,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RoutingOutcome {
     Succeeded,
     Failed,
@@ -1160,7 +1932,7 @@ impl RoutingOutcome {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutingTelemetry {
     pub task_class: TaskClass,
     pub context_signature: String,
@@ -1247,9 +2019,14 @@ pub struct QualityRubricScore {
 
 impl QualityRubricScore {
     pub fn validate(&self) -> Result<(), String> {
-        if [self.correctness, self.evidence, self.completion, self.safety]
-            .into_iter()
-            .all(|score| score <= 5)
+        if [
+            self.correctness,
+            self.evidence,
+            self.completion,
+            self.safety,
+        ]
+        .into_iter()
+        .all(|score| score <= 5)
         {
             Ok(())
         } else {
@@ -1354,9 +2131,10 @@ impl RuleBasedRouter {
                 OrchestrationPolicy::PlanExecuteReview,
                 "ordinary research needs one planned execution path",
             ),
-            TaskClass::General if is_lightweight_direct(context) => {
-                (OrchestrationPolicy::Single, "short general prompt can run directly")
-            }
+            TaskClass::General if is_lightweight_direct(context) => (
+                OrchestrationPolicy::Single,
+                "short general prompt can run directly",
+            ),
             TaskClass::General => (
                 OrchestrationPolicy::PlanExecuteReview,
                 "long or tool-adjacent prompt gets reviewed execution",
@@ -1403,7 +2181,10 @@ impl RuleBasedRouter {
             None
         };
         let mut metadata = Metadata::new();
-        metadata.insert("task_class".to_string(), context.task_class.label().to_string());
+        metadata.insert(
+            "task_class".to_string(),
+            context.task_class.label().to_string(),
+        );
         metadata.insert("needs_tools".to_string(), context.needs_tools.to_string());
         metadata.insert(
             "needs_retrieval".to_string(),
@@ -1515,7 +2296,10 @@ impl LearnedModelRouter {
                     routes.insert(
                         context_signature,
                         LearnedRoute {
-                            task_class: accumulator.task_class.clone().unwrap_or(TaskClass::General),
+                            task_class: accumulator
+                                .task_class
+                                .clone()
+                                .unwrap_or(TaskClass::General),
                             policy,
                             model,
                             examples: accumulator.examples,
@@ -1684,9 +2468,27 @@ fn is_capability_question(prompt: &str) -> bool {
     if contains_any(
         &normalized,
         &[
-            "fix", "modify", "edit", "refactor", "debug", "run", "test", "workspace",
-            "repo", "project", "修复", "修改", "重构", "调试", "运行", "测试", "工作区",
-            "仓库", "项目", "这个文件", "这些文件",
+            "fix",
+            "modify",
+            "edit",
+            "refactor",
+            "debug",
+            "run",
+            "test",
+            "workspace",
+            "repo",
+            "project",
+            "修复",
+            "修改",
+            "重构",
+            "调试",
+            "运行",
+            "测试",
+            "工作区",
+            "仓库",
+            "项目",
+            "这个文件",
+            "这些文件",
         ],
     ) {
         return false;
@@ -1695,9 +2497,8 @@ fn is_capability_question(prompt: &str) -> bool {
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect::<String>();
-    let compact = compact.trim_end_matches(|character| {
-        matches!(character, '?' | '？' | '。' | '!' | '！')
-    });
+    let compact =
+        compact.trim_end_matches(|character| matches!(character, '?' | '？' | '。' | '!' | '！'));
     if [
         "你会不会",
         "你能不能",
@@ -1741,15 +2542,33 @@ pub fn classify_task(prompt: &str) -> TaskClass {
     } else if contains_any(
         prompt,
         &[
-            "computer", "desktop", "screenshot", "screen", "click", "keyboard", "电脑", "桌面",
-            "截图", "屏幕", "点击", "键盘",
+            "computer",
+            "desktop",
+            "screenshot",
+            "screen",
+            "click",
+            "keyboard",
+            "电脑",
+            "桌面",
+            "截图",
+            "屏幕",
+            "点击",
+            "键盘",
         ],
     ) {
         TaskClass::Computer
     } else if contains_any(
         prompt,
         &[
-            "browser", "webpage", "website", "scroll", "form", "浏览器", "网页", "网站", "滚动",
+            "browser",
+            "webpage",
+            "website",
+            "scroll",
+            "form",
+            "浏览器",
+            "网页",
+            "网站",
+            "滚动",
             "表单",
         ],
     ) {
@@ -1765,20 +2584,68 @@ pub fn classify_task(prompt: &str) -> TaskClass {
     } else if contains_any(
         prompt,
         &[
-            "code", "codebase", "rust", "typescript", "file", "files", "test", "tests",
-            "compile", "build", "bug", "implement", "modify", "edit", "refactor", "debug",
-            "function", "parser", "代码", "编程", "文件", "测试", "编译", "错误", "修复",
-            "修改", "调试", "重构", "实现",
+            "code",
+            "codebase",
+            "rust",
+            "typescript",
+            "file",
+            "files",
+            "test",
+            "tests",
+            "compile",
+            "build",
+            "bug",
+            "implement",
+            "modify",
+            "edit",
+            "refactor",
+            "debug",
+            "function",
+            "parser",
+            "代码",
+            "编程",
+            "文件",
+            "测试",
+            "编译",
+            "错误",
+            "修复",
+            "修改",
+            "调试",
+            "重构",
+            "实现",
         ],
     ) {
         TaskClass::Coding
     } else if contains_any(
         prompt,
         &[
-            "research", "compare", "investigate", "latest", "study", "collaboration", "multi-model",
-            "multiple models", "orchestration", "orchestrator", "fugu", "reproduce", "replicate",
-            "研究", "调研", "比较", "对比", "分析", "调查", "最新", "评估", "对标", "协同",
-            "协作", "多模型", "多个模型", "复现",
+            "research",
+            "compare",
+            "investigate",
+            "latest",
+            "study",
+            "collaboration",
+            "multi-model",
+            "multiple models",
+            "orchestration",
+            "orchestrator",
+            "fugu",
+            "reproduce",
+            "replicate",
+            "研究",
+            "调研",
+            "比较",
+            "对比",
+            "分析",
+            "调查",
+            "最新",
+            "评估",
+            "对标",
+            "协同",
+            "协作",
+            "多模型",
+            "多个模型",
+            "复现",
         ],
     ) {
         TaskClass::Research
@@ -1859,9 +2726,7 @@ pub fn evaluate_routing_cases(cases: &[RoutingEvalCase]) -> RoutingBenchmarkRepo
     report
 }
 
-pub fn evaluate_routing_telemetry(
-    telemetry: &[RoutingTelemetry],
-) -> OperationalEvaluationReport {
+pub fn evaluate_routing_telemetry(telemetry: &[RoutingTelemetry]) -> OperationalEvaluationReport {
     let runs = telemetry.len();
     let succeeded = telemetry
         .iter()
@@ -1875,14 +2740,8 @@ pub fn evaluate_routing_telemetry(
         .iter()
         .filter(|entry| entry.outcome == RoutingOutcome::UserRejected)
         .count();
-    let total_latency = telemetry
-        .iter()
-        .map(|entry| entry.latency_ms)
-        .sum::<u64>();
-    let total_cost = telemetry
-        .iter()
-        .map(|entry| entry.cost_proxy)
-        .sum::<u64>();
+    let total_latency = telemetry.iter().map(|entry| entry.latency_ms).sum::<u64>();
+    let total_cost = telemetry.iter().map(|entry| entry.cost_proxy).sum::<u64>();
     let total_tools = telemetry.iter().map(|entry| entry.tool_count).sum::<u64>();
     let total_retrievals = telemetry
         .iter()
@@ -1894,7 +2753,9 @@ pub fn evaluate_routing_telemetry(
         *policy_counts
             .entry(entry.selected_policy.label().to_string())
             .or_default() += 1;
-        *model_counts.entry(entry.selected_model.clone()).or_default() += 1;
+        *model_counts
+            .entry(entry.selected_model.clone())
+            .or_default() += 1;
     }
     let divisor = runs.max(1) as u64;
     OperationalEvaluationReport {
@@ -1989,7 +2850,10 @@ fn contains_any(value: &str, needles: &[&str]) -> bool {
 
 fn contains_keyword(normalized: &str, needle: &str) -> bool {
     let needle = needle.to_ascii_lowercase();
-    if needle.chars().all(|character| character.is_ascii_alphanumeric()) {
+    if needle
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric())
+    {
         normalized
             .split(|character: char| !character.is_alphanumeric())
             .any(|token| token == needle)
@@ -2055,7 +2919,11 @@ mod tests {
             model: "planner".to_string(),
             subtask: "produce one execution brief".to_string(),
             access: if with_verifier {
-                vec!["approach_a".to_string(), "approach_b".to_string(), "verify".to_string()]
+                vec![
+                    "approach_a".to_string(),
+                    "approach_b".to_string(),
+                    "verify".to_string(),
+                ]
             } else {
                 vec!["approach_a".to_string(), "approach_b".to_string()]
             },
@@ -2100,6 +2968,8 @@ mod tests {
                 max_output_tokens_per_step: 4_096,
             },
             prior_hint: Some("Prefer two independent branches.".to_string()),
+            prompt_evolution_enabled: true,
+            prompt_genome: ConductorPromptGenome::seed_for_effort("pro"),
         }
     }
 
@@ -2107,10 +2977,14 @@ mod tests {
     fn workflow_ir_round_trips_and_enforces_declared_budgets() {
         let allowed_models = vec!["planner".to_string(), "reviewer".to_string()];
         let plan = workflow_plan("workflow-1", false);
-        plan.validate(&allowed_models).expect("workflow should be valid");
+        plan.validate(&allowed_models)
+            .expect("workflow should be valid");
 
         let json = plan.to_json().expect("workflow should serialize");
-        assert_eq!(WorkflowPlanIr::from_json(&json, &allowed_models).unwrap(), plan);
+        assert_eq!(
+            WorkflowPlanIr::from_json(&json, &allowed_models).unwrap(),
+            plan
+        );
 
         let mut invalid = plan;
         invalid.budget.max_steps = 2;
@@ -2118,6 +2992,89 @@ mod tests {
             invalid.validate(&allowed_models),
             Err("workflow exceeds its declared step budget".to_string())
         );
+    }
+
+    #[test]
+    fn workflow_checkpoint_resumes_only_incomplete_dependency_ready_steps() {
+        let allowed_models = vec!["planner".to_string(), "reviewer".to_string()];
+        let plan = workflow_plan("workflow-resume", false);
+        let layers = adaptive_workflow_layers(&plan.adaptive_workflow()).unwrap();
+        let mut checkpoint =
+            WorkflowExecutionCheckpoint::new("resume-key", plan.clone(), 1_000);
+
+        assert_eq!(checkpoint.runnable_step_indices(&layers[0]).unwrap(), vec![0, 1]);
+        checkpoint.begin_step("approach_a", "planner", 1_010).unwrap();
+        checkpoint
+            .complete_step(
+                "approach_a",
+                "planner",
+                "primary".to_string(),
+                "[]".to_string(),
+                1_020,
+            )
+            .unwrap();
+        assert_eq!(checkpoint.runnable_step_indices(&layers[0]).unwrap(), vec![1]);
+        assert!(checkpoint.runnable_step_indices(&layers[1]).is_err());
+
+        let json = checkpoint.to_json().unwrap();
+        let mut restored =
+            WorkflowExecutionCheckpoint::from_json(&json, &allowed_models).unwrap();
+        restored.begin_step("approach_b", "reviewer", 1_030).unwrap();
+        restored
+            .complete_step(
+                "approach_b",
+                "reviewer",
+                "alternative".to_string(),
+                "[]".to_string(),
+                1_040,
+            )
+            .unwrap();
+        assert_eq!(restored.runnable_step_indices(&layers[1]).unwrap(), vec![2]);
+        restored.begin_step("synthesize", "planner", 1_050).unwrap();
+        restored.fail_step("synthesize", "transient", 1_060).unwrap();
+        assert_eq!(restored.runnable_step_indices(&layers[1]).unwrap(), vec![2]);
+        restored
+            .complete_step(
+                "synthesize",
+                "reviewer",
+                "final".to_string(),
+                "[]".to_string(),
+                1_070,
+            )
+            .unwrap();
+        restored.record_step_metrics("synthesize", 420, 900).unwrap();
+        let credits = restored.assign_step_credits(0.9);
+        assert_eq!(credits.len(), 3);
+        assert!(credits
+            .iter()
+            .find(|step| step.step_id == "synthesize")
+            .is_some_and(|step| step.credit > 0.7 && step.total_tokens == 900));
+        assert!(!restored.is_complete());
+        restored.finalize("quality-gated final".to_string(), 1_080).unwrap();
+        assert!(restored.is_complete());
+        assert_eq!(restored.completed_outputs().get("approach_a").map(String::as_str), Some("primary"));
+        assert_eq!(
+            restored.completed_outputs().get("synthesize").map(String::as_str),
+            Some("quality-gated final")
+        );
+    }
+
+    #[test]
+    fn workflow_checkpoint_requires_an_explicit_budget_continuation() {
+        let mut plan = workflow_plan("workflow-budget", false);
+        plan.budget.max_model_turns_per_step = 1;
+        let mut checkpoint = WorkflowExecutionCheckpoint::new("resume-budget", plan, 2_000);
+
+        checkpoint.begin_step("approach_a", "planner", 2_010).unwrap();
+        checkpoint.fail_step("approach_a", "timeout", 2_020).unwrap();
+        assert!(checkpoint
+            .begin_step("approach_a", "planner", 2_030)
+            .unwrap_err()
+            .contains("exhausted"));
+        checkpoint.continue_with_budget(1, 2_040);
+        checkpoint.begin_step("approach_a", "planner", 2_050).unwrap();
+        assert_eq!(checkpoint.continuations, 1);
+        assert_eq!(checkpoint.steps["approach_a"].attempts, 2);
     }
 
     #[test]
@@ -2198,12 +3155,52 @@ mod tests {
     fn conductor_harness_produces_a_bounded_repair_request() {
         let harness = ConductorHarness::new(conductor_request());
         let invalid = r#"{"steps":[{"id":"final","role":"synthesizer","model":"planner","subtask":"merge","access":[]}]}"#;
-        let error = harness.parse_plan(invalid).expect_err("one branch should fail");
+        let error = harness
+            .parse_plan(invalid)
+            .expect_err("one branch should fail");
         let repair = harness.repair_prompt(invalid, &error);
 
-        assert!(error.contains("two independent branches"));
+        assert!(error.contains("at least 2 independent branches"));
         assert!(repair.contains("deterministic Cindx Harness"));
         assert!(repair.contains(&error));
+    }
+
+    #[test]
+    fn conductor_harness_enforces_the_selected_prompt_genome() {
+        let mut lean_request = conductor_request();
+        lean_request.prompt_genome = ConductorPromptGenome::seed_for_effort("fast");
+        let lean = ConductorHarness::new(lean_request);
+        let lean_plan = lean.parse_plan(
+            r#"{"steps":[{"id":"final","role":"synthesizer","model":"planner","subtask":"direct answer","access":[]}]}"#,
+        )
+        .expect("lean profile should allow one direct branch");
+        assert_eq!(lean_plan.budget.max_model_turns_per_step, 1);
+        assert_eq!(lean_plan.steps[0].tool_policy, WorkflowToolPolicy::None);
+
+        let mut adversarial_request = conductor_request();
+        adversarial_request.budget.max_steps = 5;
+        let adversarial = ConductorHarness::new(adversarial_request);
+        let error = adversarial
+            .parse_plan(
+                r#"{"steps":[{"id":"a","role":"thinker","model":"planner","subtask":"primary","access":[]},{"id":"b","role":"worker","model":"reviewer","subtask":"alternative","access":[]},{"id":"final","role":"synthesizer","model":"planner","subtask":"merge","access":["a","b"]}]}"#,
+            )
+            .expect_err("adversarial profile should require a verifier");
+        assert!(error.contains("requires a verifier"));
+
+        let pro_plan = adversarial
+            .parse_plan(
+                r#"{"steps":[{"id":"a","role":"thinker","model":"planner","subtask":"primary","access":[]},{"id":"b","role":"worker","model":"reviewer","subtask":"alternative","access":[]},{"id":"verify","role":"verifier","model":"reviewer","subtask":"challenge","access":["a","b"]},{"id":"final","role":"synthesizer","model":"planner","subtask":"merge","access":["a","b","verify"]}]}"#,
+            )
+            .expect("pro profile should accept a verified graph");
+        assert_eq!(pro_plan.budget.max_model_turns_per_step, 3);
+        assert_eq!(
+            pro_plan.steps[0].tool_policy,
+            WorkflowToolPolicy::ReadOnlyExploration
+        );
+        assert_eq!(
+            pro_plan.steps.last().unwrap().tool_policy,
+            WorkflowToolPolicy::None
+        );
     }
 
     #[test]
@@ -2242,7 +3239,10 @@ mod tests {
             parse_policy("best_of_n"),
             Some(OrchestrationPolicy::BestOfN { candidates: 3 })
         );
-        assert_eq!(parse_policy("auto_router"), Some(OrchestrationPolicy::AutoRouter));
+        assert_eq!(
+            parse_policy("auto_router"),
+            Some(OrchestrationPolicy::AutoRouter)
+        );
         assert_eq!(parse_policy("unknown"), None);
     }
 
@@ -2423,11 +3423,8 @@ mod tests {
         let mut unknown_model_workflow = workflow;
         unknown_model_workflow.steps[0].access.clear();
         unknown_model_workflow.steps[0].model = "unknown".to_string();
-        let error = validate_adaptive_workflow(
-            &unknown_model_workflow,
-            &["fast-mini".to_string()],
-        )
-        .expect_err("unknown model should be rejected");
+        let error = validate_adaptive_workflow(&unknown_model_workflow, &["fast-mini".to_string()])
+            .expect_err("unknown model should be rejected");
         assert!(error.contains("unknown model"));
     }
 
@@ -2478,7 +3475,8 @@ mod tests {
 
     #[test]
     fn rule_router_explains_four_way_retrieval_choice() {
-        let context = RoutingContext::from_prompt("Search the docs with RAG and cite sources", candidates());
+        let context =
+            RoutingContext::from_prompt("Search the docs with RAG and cite sources", candidates());
         let router = RuleBasedRouter;
         let decision = router.route(&context);
 
@@ -2489,10 +3487,8 @@ mod tests {
 
     #[test]
     fn chinese_collaboration_request_routes_to_real_ensemble() {
-        let context = RoutingContext::from_prompt(
-            "分析多个模型协同，并对标 Sakana Fugu Ultra",
-            candidates(),
-        );
+        let context =
+            RoutingContext::from_prompt("分析多个模型协同，并对标 Sakana Fugu Ultra", candidates());
         let decision = RuleBasedRouter.route(&context);
 
         assert_eq!(context.task_class, TaskClass::Research);
@@ -2505,10 +3501,8 @@ mod tests {
 
     #[test]
     fn fugu_reproduction_request_routes_to_adaptive_ensemble() {
-        let context = RoutingContext::from_prompt(
-            "继续完善 Sakana Fugu Ultra 的复现",
-            candidates(),
-        );
+        let context =
+            RoutingContext::from_prompt("继续完善 Sakana Fugu Ultra 的复现", candidates());
         let decision = RuleBasedRouter.route(&context);
 
         assert_eq!(context.task_class, TaskClass::Research);
@@ -2540,7 +3534,10 @@ mod tests {
 
         assert!(context.high_stakes);
         assert!(context.complexity_score >= 3);
-        assert_eq!(decision.policy, OrchestrationPolicy::BestOfN { candidates: 3 });
+        assert_eq!(
+            decision.policy,
+            OrchestrationPolicy::BestOfN { candidates: 3 }
+        );
     }
 
     #[test]
@@ -2553,7 +3550,10 @@ mod tests {
 
         assert!(!context.high_stakes);
         assert!(context.complexity_score >= 3);
-        assert_eq!(decision.policy, OrchestrationPolicy::BestOfN { candidates: 2 });
+        assert_eq!(
+            decision.policy,
+            OrchestrationPolicy::BestOfN { candidates: 2 }
+        );
     }
 
     #[test]
@@ -2594,7 +3594,8 @@ mod tests {
 
     #[test]
     fn rule_router_respects_user_override() {
-        let mut context = RoutingContext::from_prompt("Research three implementation options", candidates());
+        let mut context =
+            RoutingContext::from_prompt("Research three implementation options", candidates());
         context.user_policy_override = Some(OrchestrationPolicy::Single);
         let decision = RuleBasedRouter.route(&context);
 
@@ -2604,10 +3605,8 @@ mod tests {
 
     #[test]
     fn learned_router_uses_successful_trace_table() {
-        let context = RoutingContext::from_prompt(
-            "Research and compare local agent routers",
-            candidates(),
-        );
+        let context =
+            RoutingContext::from_prompt("Research and compare local agent routers", candidates());
         let context_signature = context.learning_signature();
         let telemetry = vec![
             RoutingTelemetry {
@@ -2650,21 +3649,27 @@ mod tests {
 
     #[test]
     fn learned_router_can_downshift_a_matching_context_without_tools() {
-        let prompt = "Discuss this topic clearly and summarize the important distinctions. ".repeat(10);
+        let prompt =
+            "Discuss this topic clearly and summarize the important distinctions. ".repeat(10);
         let context = RoutingContext::from_prompt(&prompt, candidates());
-        assert_eq!(RuleBasedRouter.route(&context).policy, OrchestrationPolicy::PlanExecuteReview);
-        let telemetry = (0..3).map(|_| RoutingTelemetry {
-            task_class: TaskClass::General,
-            context_signature: context.learning_signature(),
-            selected_policy: OrchestrationPolicy::Single,
-            selected_model: "fast-mini".to_string(),
-            latency_ms: 250,
-            outcome: RoutingOutcome::Succeeded,
-            cost_proxy: 80,
-            tool_count: 0,
-            retrieval_count: 0,
-            user_override: false,
-        }).collect::<Vec<_>>();
+        assert_eq!(
+            RuleBasedRouter.route(&context).policy,
+            OrchestrationPolicy::PlanExecuteReview
+        );
+        let telemetry = (0..3)
+            .map(|_| RoutingTelemetry {
+                task_class: TaskClass::General,
+                context_signature: context.learning_signature(),
+                selected_policy: OrchestrationPolicy::Single,
+                selected_model: "fast-mini".to_string(),
+                latency_ms: 250,
+                outcome: RoutingOutcome::Succeeded,
+                cost_proxy: 80,
+                tool_count: 0,
+                retrieval_count: 0,
+                user_override: false,
+            })
+            .collect::<Vec<_>>();
 
         let decision = LearnedModelRouter::train(&telemetry).route(&context);
         assert_eq!(decision.policy, OrchestrationPolicy::Single);
@@ -2682,8 +3687,14 @@ mod tests {
 
         assert!(context.latency_sensitive);
         assert!(context.parallelizable);
-        assert_ne!(decision.policy, OrchestrationPolicy::BestOfN { candidates: 2 });
-        assert_ne!(decision.policy, OrchestrationPolicy::BestOfN { candidates: 3 });
+        assert_ne!(
+            decision.policy,
+            OrchestrationPolicy::BestOfN { candidates: 2 }
+        );
+        assert_ne!(
+            decision.policy,
+            OrchestrationPolicy::BestOfN { candidates: 3 }
+        );
     }
 
     #[test]
@@ -2802,10 +3813,8 @@ mod tests {
 
     #[test]
     fn chinese_multi_phase_root_cause_work_routes_to_two_experts() {
-        let context = RoutingContext::from_prompt(
-            "排查这个项目的根因，修改文件并运行测试。",
-            candidates(),
-        );
+        let context =
+            RoutingContext::from_prompt("排查这个项目的根因，修改文件并运行测试。", candidates());
         let decision = RuleBasedRouter.route(&context);
 
         assert_eq!(context.task_class, TaskClass::Coding);

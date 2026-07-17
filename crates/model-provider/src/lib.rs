@@ -1,22 +1,23 @@
 use agent_core::{Message, MessageRole, Metadata, ModelRole, ToolSpec};
 use base64::Engine;
+use futures_util::{Stream, StreamExt};
+use reqwest::{header, Client, RequestBuilder, Response, StatusCode};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    mpsc::{self, RecvTimeoutError},
-};
-use std::thread;
+use std::future::Future;
+use std::path::Path;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
 pub const MODEL_REQUEST_CANCELLED: &str = "model request cancelled";
 const STREAMING_HARD_TIMEOUT_MULTIPLIER: u64 = 4;
+const HTTP_POLL_INTERVAL: Duration = Duration::from_millis(40);
+const MAX_MODEL_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_IMAGE_RESPONSE_BYTES: usize = 48 * 1024 * 1024;
 const MAX_GENERATED_IMAGE_BYTES: usize = 32 * 1024 * 1024;
-static CURL_REQUEST_BODY_ID: AtomicU64 = AtomicU64::new(1);
+static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
+static HTTP_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelCallMode {
@@ -213,368 +214,254 @@ pub struct OpenAiCompatibleImageProvider {
     config: OpenAiCompatibleImageConfig,
 }
 
-fn curl_config_escape(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            other => escaped.push(other),
-        }
-    }
-    escaped
-}
-
-fn curl_request_config(url: &str, api_key: &str, request_body_path: Option<&Path>) -> String {
-    let mut config = format!("url = \"{}\"\n", curl_config_escape(url));
-    if !api_key.trim().is_empty() {
-        let authorization = format!("Authorization: Bearer {api_key}");
-        config.push_str(&format!(
-            "header = \"{}\"\n",
-            curl_config_escape(&authorization)
-        ));
-    }
-    if let Some(request_body_path) = request_body_path {
-        config.push_str("request = \"POST\"\n");
-        config.push_str("header = \"Content-Type: application/json\"\n");
-        config.push_str(&format!(
-            "data-binary = \"@{}\"\n",
-            curl_config_escape(&request_body_path.to_string_lossy())
-        ));
-    }
-    config
-}
-
-struct SensitiveRequestBody {
-    path: PathBuf,
-}
-
-impl SensitiveRequestBody {
-    fn write(contents: &str) -> Result<Self, ModelError> {
-        let temp_dir = std::env::temp_dir();
-        for _ in 0..32 {
-            let id = CURL_REQUEST_BODY_ID.fetch_add(1, Ordering::Relaxed);
-            let path = temp_dir.join(format!(
-                "cindx-model-request-{}-{id}.json",
-                std::process::id()
-            ));
-            let mut options = fs::OpenOptions::new();
-            options.create_new(true).write(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            match options.open(&path) {
-                Ok(mut file) => {
-                    file.write_all(contents.as_bytes()).map_err(|error| {
-                        let _ = fs::remove_file(&path);
-                        ModelError::new(format!("failed to stage model request: {error}"))
-                    })?;
-                    return Ok(Self { path });
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => {
-                    return Err(ModelError::new(format!(
-                        "failed to stage model request: {error}"
-                    )))
-                }
-            }
-        }
-        Err(ModelError::new(
-            "failed to allocate a private model request file",
-        ))
-    }
-}
-
-impl Drop for SensitiveRequestBody {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-struct CurlProcess {
-    child: Child,
-    _request_body: Option<SensitiveRequestBody>,
-}
-
-fn curl_command(timeout_seconds: u64, no_buffer: bool) -> Command {
-    let mut command = Command::new("/usr/bin/curl");
-    command
-        .arg("-sS")
-        .arg("--fail-with-body")
-        .arg("--max-time")
-        .arg(timeout_seconds.to_string());
-    if no_buffer {
-        command.arg("--no-buffer");
-    }
-    command.arg("--config").arg("-");
-    command
-}
-
 fn streaming_hard_timeout_seconds(idle_timeout_seconds: u64) -> u64 {
     idle_timeout_seconds
         .max(1)
         .saturating_mul(STREAMING_HARD_TIMEOUT_MULTIPLIER)
 }
 
-fn spawn_curl(
-    url: &str,
-    api_key: &str,
-    request_body: Option<&str>,
-    timeout_seconds: u64,
-    no_buffer: bool,
-) -> Result<CurlProcess, ModelError> {
-    let request_body = request_body
-        .map(SensitiveRequestBody::write)
-        .transpose()?;
-    let config = curl_request_config(
-        url,
-        api_key,
-        request_body.as_ref().map(|body| body.path.as_path()),
-    );
-    let mut child = curl_command(timeout_seconds, no_buffer)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| ModelError::new(format!("failed to start curl: {error}")))?;
-
-    let write_result = child
-        .stdin
-        .take()
-        .ok_or_else(|| ModelError::new("curl stdin was not available"))
-        .and_then(|mut stdin| {
-            stdin
-                .write_all(config.as_bytes())
-                .map_err(|error| ModelError::new(format!("failed to configure curl: {error}")))
-        });
-    if let Err(error) = write_result {
-        let output = child.wait_with_output().map_err(|wait_error| {
-            ModelError::new(format!("{error}; failed to read curl failure: {wait_error}"))
-        })?;
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(ModelError::new(if stderr.is_empty() {
-            error.message
-        } else {
-            format!("curl rejected the request before upload: {stderr}")
-        }));
+fn http_client() -> Result<&'static Client, ModelError> {
+    if let Some(client) = HTTP_CLIENT.get() {
+        return Ok(client);
     }
-
-    Ok(CurlProcess {
-        child,
-        _request_body: request_body,
-    })
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(8)
+        .tcp_keepalive(Duration::from_secs(30))
+        .build()
+        .map_err(|error| ModelError::new(format!("failed to initialize HTTP client: {error}")))?;
+    let _ = HTTP_CLIENT.set(client);
+    HTTP_CLIENT
+        .get()
+        .ok_or_else(|| ModelError::new("HTTP client did not initialize"))
 }
 
-fn execute_curl(
+fn http_runtime() -> Result<&'static Runtime, ModelError> {
+    if let Some(runtime) = HTTP_RUNTIME.get() {
+        return Ok(runtime);
+    }
+    let runtime = RuntimeBuilder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("cindx-model-http")
+        .enable_all()
+        .build()
+        .map_err(|error| ModelError::new(format!("failed to initialize HTTP runtime: {error}")))?;
+    let _ = HTTP_RUNTIME.set(runtime);
+    HTTP_RUNTIME
+        .get()
+        .ok_or_else(|| ModelError::new("HTTP runtime did not initialize"))
+}
+
+fn run_http<T>(future: impl Future<Output = Result<T, ModelError>>) -> Result<T, ModelError> {
+    http_runtime()?.block_on(future)
+}
+
+fn http_request(
+    url: &str,
+    api_key: &str,
+    request_body: Option<&str>,
+    hard_timeout: Duration,
+    streaming: bool,
+) -> Result<RequestBuilder, ModelError> {
+    let client = http_client()?;
+    let mut request = if let Some(request_body) = request_body {
+        client
+            .post(url)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(request_body.to_string())
+    } else {
+        client.get(url)
+    };
+    if !api_key.trim().is_empty() {
+        request = request.bearer_auth(api_key);
+    }
+    request = request.header(
+        header::ACCEPT,
+        if streaming {
+            "text/event-stream"
+        } else {
+            "application/json"
+        },
+    );
+    Ok(request.timeout(hard_timeout))
+}
+
+async fn await_http<T, E>(
+    future: impl Future<Output = Result<T, E>>,
+    deadline: Instant,
+    timeout: Duration,
+    action: &str,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<T, ModelError>
+where
+    E: std::fmt::Display,
+{
+    let mut future = Box::pin(future);
+    loop {
+        if should_cancel() {
+            return Err(ModelError::new(MODEL_REQUEST_CANCELLED));
+        }
+        if Instant::now() >= deadline {
+            return Err(ModelError::new(format!(
+                "{action} timed out after {} seconds",
+                timeout.as_secs().max(1)
+            )));
+        }
+        match tokio::time::timeout(HTTP_POLL_INTERVAL, future.as_mut()).await {
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(error)) => return Err(ModelError::new(format!("{action} failed: {error}"))),
+            Err(_) => continue,
+        }
+    }
+}
+
+async fn collect_response_body(
+    response: Response,
+    max_bytes: usize,
+    deadline: Instant,
+    timeout: Duration,
+    action: &str,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<Vec<u8>, ModelError> {
+    let mut stream = Box::pin(response.bytes_stream());
+    let mut bytes = Vec::new();
+    loop {
+        if should_cancel() {
+            return Err(ModelError::new(MODEL_REQUEST_CANCELLED));
+        }
+        if Instant::now() >= deadline {
+            return Err(ModelError::new(format!(
+                "{action} timed out after {} seconds",
+                timeout.as_secs().max(1)
+            )));
+        }
+        match tokio::time::timeout(HTTP_POLL_INTERVAL, stream.next()).await {
+            Ok(Some(Ok(chunk))) => {
+                if bytes.len().saturating_add(chunk.len()) > max_bytes {
+                    return Err(ModelError::new(format!(
+                        "{action} exceeded {} MB",
+                        max_bytes / (1024 * 1024)
+                    )));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(Some(Err(error))) => {
+                return Err(ModelError::new(format!(
+                    "{action} failed while reading response: {error}"
+                )))
+            }
+            Ok(None) => return Ok(bytes),
+            Err(_) => continue,
+        }
+    }
+}
+
+struct HttpOutput {
+    status: StatusCode,
+    body: Vec<u8>,
+}
+
+fn execute_http(
     url: &str,
     api_key: &str,
     request_body: Option<&str>,
     timeout_seconds: u64,
-) -> Result<Output, ModelError> {
-    execute_curl_cancellable(
+    max_response_bytes: usize,
+) -> Result<HttpOutput, ModelError> {
+    execute_http_cancellable(
         url,
         api_key,
         request_body,
         timeout_seconds,
+        max_response_bytes,
         &mut || false,
     )
 }
 
-fn execute_curl_cancellable(
+fn execute_http_cancellable(
     url: &str,
     api_key: &str,
     request_body: Option<&str>,
     timeout_seconds: u64,
+    max_response_bytes: usize,
     should_cancel: &mut impl FnMut() -> bool,
-) -> Result<Output, ModelError> {
-    let process = spawn_curl(url, api_key, request_body, timeout_seconds, false)?;
-    consume_buffered_child(process, should_cancel)
-}
-
-fn consume_buffered_child(
-    mut process: CurlProcess,
-    should_cancel: &mut impl FnMut() -> bool,
-) -> Result<Output, ModelError> {
-    let mut stdout = process
-        .child
-        .stdout
-        .take()
-        .ok_or_else(|| ModelError::new("child stdout was not available"))?;
-    let mut stderr = process
-        .child
-        .stderr
-        .take()
-        .ok_or_else(|| ModelError::new("child stderr was not available"))?;
-    let stdout_handle = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
-            .map_err(|error| format!("failed to read child stdout: {error}"))
-    });
-    let stderr_handle = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
-            .map_err(|error| format!("failed to read child stderr: {error}"))
-    });
-
-    let status = loop {
-        if should_cancel() {
-            let _ = process.child.kill();
-            let _ = process.child.wait();
-            return Err(ModelError::new(MODEL_REQUEST_CANCELLED));
-        }
-        match process.child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => thread::sleep(Duration::from_millis(40)),
-            Err(error) => {
-                let _ = process.child.kill();
-                let _ = process.child.wait();
-                return Err(ModelError::new(format!("failed to wait for child: {error}")));
-            }
-        }
-    };
-    let stdout = stdout_handle
-        .join()
-        .map_err(|_| ModelError::new("child stdout reader panicked"))?
-        .map_err(ModelError::new)?;
-    let stderr = stderr_handle
-        .join()
-        .map_err(|_| ModelError::new("child stderr reader panicked"))?
-        .map_err(ModelError::new)?;
-
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
+) -> Result<HttpOutput, ModelError> {
+    let timeout = Duration::from_secs(timeout_seconds.max(1));
+    let deadline = Instant::now() + timeout;
+    let request = http_request(url, api_key, request_body, timeout, false)?;
+    run_http(async {
+        let response = await_http(
+            request.send(),
+            deadline,
+            timeout,
+            "model request",
+            should_cancel,
+        )
+        .await?;
+        let status = response.status();
+        let body = collect_response_body(
+            response,
+            max_response_bytes,
+            deadline,
+            timeout,
+            "model response",
+            should_cancel,
+        )
+        .await?;
+        Ok(HttpOutput { status, body })
     })
 }
 
-fn consume_streaming_child(
-    mut process: CurlProcess,
+fn apply_stream_line(
+    line: &str,
+    answer: &mut String,
+    streamed_tool_calls: &mut BTreeMap<usize, StreamingToolCall>,
+    on_delta: &mut impl FnMut(&str),
+) -> Result<(), ModelError> {
+    if let Some(event) = parse_stream_event(line)? {
+        if let Some(delta) = event.content {
+            answer.push_str(&delta);
+            on_delta(&delta);
+        }
+        for delta in event.tool_calls {
+            streamed_tool_calls
+                .entry(delta.index)
+                .or_default()
+                .merge(delta);
+        }
+    }
+    Ok(())
+}
+
+fn apply_complete_stream_lines(
+    pending: &mut Vec<u8>,
+    answer: &mut String,
+    streamed_tool_calls: &mut BTreeMap<usize, StreamingToolCall>,
+    on_delta: &mut impl FnMut(&str),
+) -> Result<(), ModelError> {
+    let mut consumed = 0;
+    for index in 0..pending.len() {
+        if pending[index] != b'\n' {
+            continue;
+        }
+        let line = String::from_utf8_lossy(&pending[consumed..=index]);
+        apply_stream_line(&line, answer, streamed_tool_calls, on_delta)?;
+        consumed = index + 1;
+    }
+    if consumed > 0 {
+        pending.drain(..consumed);
+    }
+    Ok(())
+}
+
+fn finish_streaming_response(
+    raw_response: String,
+    mut answer: String,
+    streamed_tool_calls: BTreeMap<usize, StreamingToolCall>,
     model: &str,
     base_url: &str,
-    idle_timeout: Duration,
-    on_delta: &mut impl FnMut(&str),
-    should_cancel: &mut impl FnMut() -> bool,
 ) -> Result<ModelResponse, ModelError> {
-    let stdout = process
-        .child
-        .stdout
-        .take()
-        .ok_or_else(|| ModelError::new("curl stdout was not available"))?;
-    let (line_sender, line_receiver) = mpsc::channel();
-    let reader_handle = thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {
-                    if line_sender.send(Ok(line)).is_err() {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    let _ = line_sender.send(Err(format!("failed to read model stream: {error}")));
-                    break;
-                }
-            }
-        }
-    });
-    let mut raw_response = String::new();
-    let mut answer = String::new();
-    let mut streamed_tool_calls = BTreeMap::<usize, StreamingToolCall>::new();
-    let idle_timeout = if idle_timeout.is_zero() {
-        Duration::from_secs(1)
-    } else {
-        idle_timeout
-    };
-    let mut last_activity = Instant::now();
-
-    loop {
-        if should_cancel() {
-            let _ = process.child.kill();
-            let _ = process.child.wait();
-            return Err(ModelError::new(MODEL_REQUEST_CANCELLED));
-        }
-        match line_receiver.recv_timeout(Duration::from_millis(40)) {
-            Ok(Ok(line)) => {
-                last_activity = Instant::now();
-                raw_response.push_str(&line);
-                let event = match parse_stream_event(&line) {
-                    Ok(event) => event,
-                    Err(error) => {
-                        let _ = process.child.kill();
-                        let _ = process.child.wait();
-                        return Err(error);
-                    }
-                };
-                if let Some(event) = event {
-                    if let Some(delta) = event.content {
-                        answer.push_str(&delta);
-                        on_delta(&delta);
-                    }
-                    for delta in event.tool_calls {
-                        streamed_tool_calls
-                            .entry(delta.index)
-                            .or_default()
-                            .merge(delta);
-                    }
-                }
-            }
-            Ok(Err(error)) => {
-                let _ = process.child.kill();
-                let _ = process.child.wait();
-                let _ = reader_handle.join();
-                return Err(ModelError::new(error));
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                if last_activity.elapsed() >= idle_timeout {
-                    let _ = process.child.kill();
-                    let _ = process.child.wait();
-                    let _ = reader_handle.join();
-                    return Err(ModelError::new(format!(
-                        "model stream timed out after {} seconds without receiving data",
-                        idle_timeout.as_secs()
-                    )));
-                }
-            }
-            Err(RecvTimeoutError::Disconnected) => break,
-        }
-    }
-
-    let status = process
-        .child
-        .wait()
-        .map_err(|error| ModelError::new(format!("failed to wait for curl: {error}")))?;
-    let _ = reader_handle.join();
-    let mut stderr = String::new();
-    if let Some(mut stream) = process.child.stderr.take() {
-        stream
-            .read_to_string(&mut stderr)
-            .map_err(|error| ModelError::new(format!("failed to read curl stderr: {error}")))?;
-    }
-
-    if !status.success() {
-        let provider_error = parse_provider_error(&raw_response)
-            .unwrap_or_else(|| stderr.trim().to_string())
-            .trim()
-            .to_string();
-        return Err(ModelError::new(if provider_error.is_empty() {
-            format!("model request failed with status {status}")
-        } else {
-            provider_error
-        }));
-    }
-
     let mut metadata = Metadata::new();
     metadata.insert("provider".to_string(), "openai-compatible".to_string());
     metadata.insert("model".to_string(), model.to_string());
@@ -630,6 +517,134 @@ fn consume_streaming_child(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn consume_streaming_body<S, B, E>(
+    stream: S,
+    model: &str,
+    base_url: &str,
+    idle_timeout: Duration,
+    hard_timeout: Duration,
+    deadline: Instant,
+    on_delta: &mut impl FnMut(&str),
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<ModelResponse, ModelError>
+where
+    S: Stream<Item = Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
+    let idle_timeout = if idle_timeout.is_zero() {
+        Duration::from_secs(1)
+    } else {
+        idle_timeout
+    };
+    let mut stream = Box::pin(stream);
+    let mut raw_response = Vec::new();
+    let mut pending = Vec::new();
+    let mut answer = String::new();
+    let mut streamed_tool_calls = BTreeMap::<usize, StreamingToolCall>::new();
+    let mut last_activity = Instant::now();
+
+    loop {
+        if should_cancel() {
+            return Err(ModelError::new(MODEL_REQUEST_CANCELLED));
+        }
+        if Instant::now() >= deadline {
+            return Err(ModelError::new(format!(
+                "model stream timed out after {} seconds",
+                hard_timeout.as_secs().max(1)
+            )));
+        }
+        match tokio::time::timeout(HTTP_POLL_INTERVAL, stream.next()).await {
+            Ok(Some(Ok(chunk))) => {
+                last_activity = Instant::now();
+                let chunk = chunk.as_ref();
+                if raw_response.len().saturating_add(chunk.len()) > MAX_MODEL_RESPONSE_BYTES {
+                    return Err(ModelError::new("model stream exceeded 64 MB"));
+                }
+                raw_response.extend_from_slice(chunk);
+                pending.extend_from_slice(chunk);
+                apply_complete_stream_lines(
+                    &mut pending,
+                    &mut answer,
+                    &mut streamed_tool_calls,
+                    on_delta,
+                )?;
+            }
+            Ok(Some(Err(error))) => {
+                return Err(ModelError::new(format!(
+                    "model stream failed while reading response: {error}"
+                )))
+            }
+            Ok(None) => break,
+            Err(_) => {
+                if last_activity.elapsed() >= idle_timeout {
+                    return Err(ModelError::new(format!(
+                        "model stream timed out after {} seconds without receiving data",
+                        idle_timeout.as_secs().max(1)
+                    )));
+                }
+            }
+        }
+    }
+
+    if !pending.is_empty() {
+        let line = String::from_utf8_lossy(&pending).into_owned();
+        apply_stream_line(&line, &mut answer, &mut streamed_tool_calls, on_delta)?;
+    }
+    finish_streaming_response(
+        String::from_utf8_lossy(&raw_response).into_owned(),
+        answer,
+        streamed_tool_calls,
+        model,
+        base_url,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn consume_streaming_response(
+    response: Response,
+    model: &str,
+    base_url: &str,
+    idle_timeout: Duration,
+    hard_timeout: Duration,
+    deadline: Instant,
+    on_delta: &mut impl FnMut(&str),
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<ModelResponse, ModelError> {
+    let status = response.status();
+    if !status.is_success() {
+        let body = collect_response_body(
+            response,
+            MAX_MODEL_RESPONSE_BYTES,
+            deadline,
+            hard_timeout,
+            "model response",
+            should_cancel,
+        )
+        .await?;
+        let text = String::from_utf8_lossy(&body).into_owned();
+        let provider_error = parse_provider_error(&text).unwrap_or_default();
+        return Err(ModelError::new(if provider_error.trim().is_empty() {
+            format!("model request failed with status {status}")
+        } else {
+            provider_error
+        }));
+    }
+
+    consume_streaming_body(
+        response.bytes_stream(),
+        model,
+        base_url,
+        idle_timeout,
+        hard_timeout,
+        deadline,
+        on_delta,
+        should_cancel,
+    )
+    .await
+}
+
 impl OpenAiCompatibleProvider {
     pub fn new(config: OpenAiCompatibleConfig) -> Self {
         Self { config }
@@ -637,20 +652,22 @@ impl OpenAiCompatibleProvider {
 
     pub fn list_models(&self) -> Result<Vec<String>, ModelError> {
         if self.config.base_url.trim().is_empty() || self.config.api_key.trim().is_empty() {
-            return Err(ModelError::new("provider base URL and API key are required"));
+            return Err(ModelError::new(
+                "provider base URL and API key are required",
+            ));
         }
 
-        let output = execute_curl(
+        let output = execute_http(
             &self.config.models_url(),
             &self.config.api_key,
             None,
             self.config.timeout_seconds,
+            MAX_MODEL_RESPONSE_BYTES,
         )?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let provider_error = parse_provider_error(&stdout).unwrap_or(stderr);
+        let stdout = String::from_utf8_lossy(&output.body).to_string();
+        if !output.status.is_success() {
+            let provider_error = parse_provider_error(&stdout).unwrap_or_default();
             return Err(ModelError::new(if provider_error.is_empty() {
                 format!("model list request failed with status {}", output.status)
             } else {
@@ -691,21 +708,38 @@ impl OpenAiCompatibleProvider {
             &request.tools,
             max_output_tokens,
         )?;
-        let process = spawn_curl(
+        let idle_timeout = Duration::from_secs(self.config.timeout_seconds.max(1));
+        let hard_timeout =
+            Duration::from_secs(streaming_hard_timeout_seconds(self.config.timeout_seconds));
+        let deadline = Instant::now() + hard_timeout;
+        let request = http_request(
             &self.config.chat_completions_url(),
             &self.config.api_key,
             Some(&request_body),
-            streaming_hard_timeout_seconds(self.config.timeout_seconds),
+            hard_timeout,
             true,
         )?;
-        consume_streaming_child(
-            process,
-            &self.config.model,
-            &self.config.base_url,
-            Duration::from_secs(self.config.timeout_seconds.max(1)),
-            &mut on_delta,
-            &mut should_cancel,
-        )
+        run_http(async {
+            let response = await_http(
+                request.send(),
+                deadline,
+                hard_timeout,
+                "model stream request",
+                &mut should_cancel,
+            )
+            .await?;
+            consume_streaming_response(
+                response,
+                &self.config.model,
+                &self.config.base_url,
+                idle_timeout,
+                hard_timeout,
+                deadline,
+                &mut on_delta,
+                &mut should_cancel,
+            )
+            .await
+        })
     }
 
     pub fn complete_once(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
@@ -725,17 +759,17 @@ impl OpenAiCompatibleProvider {
             &request.tools,
             max_output_tokens,
         )?;
-        let output = execute_curl(
+        let output = execute_http(
             &self.config.chat_completions_url(),
             &self.config.api_key,
             Some(&request_body),
             self.config.timeout_seconds,
+            MAX_MODEL_RESPONSE_BYTES,
         )?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let provider_error = parse_provider_error(&stdout).unwrap_or(stderr);
+        let stdout = String::from_utf8_lossy(&output.body).to_string();
+        if !output.status.is_success() {
+            let provider_error = parse_provider_error(&stdout).unwrap_or_default();
             return Err(ModelError::new(if provider_error.is_empty() {
                 format!("model request failed with status {}", output.status)
             } else {
@@ -767,18 +801,18 @@ impl OpenAiCompatibleProvider {
             &request.input,
             request.dimensions,
         )?;
-        let output = execute_curl_cancellable(
+        let output = execute_http_cancellable(
             &self.config.embeddings_url(),
             &self.config.api_key,
             Some(&request_body),
             self.config.timeout_seconds,
+            MAX_MODEL_RESPONSE_BYTES,
             &mut should_cancel,
         )?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let provider_error = parse_provider_error(&stdout).unwrap_or(stderr);
+        let stdout = String::from_utf8_lossy(&output.body).to_string();
+        if !output.status.is_success() {
+            let provider_error = parse_provider_error(&stdout).unwrap_or_default();
             return Err(ModelError::new(if provider_error.is_empty() {
                 format!("embedding request failed with status {}", output.status)
             } else {
@@ -831,7 +865,9 @@ impl OpenAiCompatibleImageProvider {
         mut should_cancel: impl FnMut() -> bool,
     ) -> Result<ImageGenerationResponse, ModelError> {
         if !self.config.is_ready() {
-            return Err(ModelError::new("image generation provider config is incomplete"));
+            return Err(ModelError::new(
+                "image generation provider config is incomplete",
+            ));
         }
         if request.prompt.trim().is_empty() {
             return Err(ModelError::new("image generation prompt is empty"));
@@ -852,24 +888,27 @@ impl OpenAiCompatibleImageProvider {
                 )?
             }
         };
-        let output = execute_curl_cancellable(
+        let output = execute_http_cancellable(
             &self.config.images_url(),
             &self.config.api_key,
             Some(&request_body),
             self.config.timeout_seconds,
+            MAX_IMAGE_RESPONSE_BYTES,
             &mut should_cancel,
         )?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let provider_error = parse_provider_error(&stdout).unwrap_or(stderr);
+        let stdout = String::from_utf8_lossy(&output.body).to_string();
+        if !output.status.is_success() {
+            let provider_error = parse_provider_error(&stdout).unwrap_or_default();
             return Err(ModelError::new(if provider_error.is_empty() {
-                format!("image generation request failed with status {}", output.status)
+                format!(
+                    "image generation request failed with status {}",
+                    output.status
+                )
             } else {
                 provider_error
             }));
         }
-        if output.stdout.len() > MAX_IMAGE_RESPONSE_BYTES {
+        if output.body.len() > MAX_IMAGE_RESPONSE_BYTES {
             return Err(ModelError::new("image generation response exceeded 48 MB"));
         }
 
@@ -888,20 +927,21 @@ impl OpenAiCompatibleImageProvider {
                             "image generation response included an unsupported URL",
                         ));
                     }
-                    let output = execute_curl_cancellable(
+                    let output = execute_http_cancellable(
                         &url,
                         "",
                         None,
                         self.config.timeout_seconds,
+                        MAX_GENERATED_IMAGE_BYTES,
                         &mut should_cancel,
                     )?;
-                    if !output.status.success() {
+                    if !output.status.is_success() {
                         return Err(ModelError::new(format!(
                             "generated image download failed with status {}",
                             output.status
                         )));
                     }
-                    output.stdout
+                    output.body
                 }
             };
             if bytes.is_empty() {
@@ -1318,10 +1358,7 @@ fn message_content_json(model: &str, message: &Message) -> String {
             ))
         );
     }
-    let images = paths
-        .lines()
-        .filter_map(image_data_url)
-        .collect::<Vec<_>>();
+    let images = paths.lines().filter_map(image_data_url).collect::<Vec<_>>();
     if images.is_empty() {
         return format!("\"{}\"", json_escape(&message.content));
     }
@@ -1510,8 +1547,8 @@ pub fn parse_model_response(text: &str) -> Result<ModelResponse, ModelError> {
         return Err(ModelError::new(message));
     }
 
-    let content = extract_json_string_field_after(text, "\"message\"", "content")
-        .unwrap_or_default();
+    let content =
+        extract_json_string_field_after(text, "\"message\"", "content").unwrap_or_default();
     let tool_calls = parse_tool_calls(text)?;
     let raw_tool_calls_json = extract_json_array_after(text, "\"tool_calls\"");
     let mut metadata = Metadata::new();
@@ -1541,8 +1578,8 @@ pub fn parse_tool_calls(text: &str) -> Result<Vec<ModelToolCall>, ModelError> {
 
     let mut calls = Vec::new();
     for (index, object) in split_top_level_objects(&array).into_iter().enumerate() {
-        let id = extract_json_string_field(&object, "id")
-            .unwrap_or_else(|| format!("call-{index}"));
+        let id =
+            extract_json_string_field(&object, "id").unwrap_or_else(|| format!("call-{index}"));
         let name = extract_json_string_field_after(&object, "\"function\"", "name")
             .ok_or_else(|| ModelError::new("tool call did not include function name"))?;
         let arguments_json = extract_json_string_field_after(&object, "\"function\"", "arguments")
@@ -1624,14 +1661,8 @@ fn normalize_tool_input(input: &str) -> String {
     let Some((raw_key, raw_value)) = trimmed.split_once(ARGUMENT_SEPARATOR) else {
         return trimmed.to_string();
     };
-    let key = raw_key
-        .trim()
-        .trim_start_matches("<arg_key>")
-        .trim();
-    let value = raw_value
-        .trim()
-        .trim_end_matches("</arg_value>")
-        .trim();
+    let key = raw_key.trim().trim_start_matches("<arg_key>").trim();
+    let value = raw_value.trim().trim_end_matches("</arg_value>").trim();
     if key.is_empty() {
         trimmed.to_string()
     } else {
@@ -1659,11 +1690,7 @@ fn message_role_to_str(role: &MessageRole) -> &'static str {
 
 fn tool_spec_json(tool: &ToolSpec) -> String {
     let function_name = tool_function_name(&tool.name);
-    let description = format!(
-        "{} Original tool name: {}.",
-        tool.description,
-        tool.name
-    );
+    let description = format!("{} Original tool name: {}.", tool.description, tool.name);
     let parameters = serde_json::from_str::<serde_json::Value>(&tool.input_schema_json)
         .ok()
         .filter(|schema| schema.get("type").and_then(serde_json::Value::as_str) == Some("object"))
@@ -1991,13 +2018,37 @@ fn parse_json_string_at(text: &str, quote_index: usize) -> Result<String, ModelE
 mod tests {
     use super::*;
     use agent_core::{MessageRole, ToolRisk};
+    use futures_util::stream;
     use std::time::Instant;
 
-    fn test_curl_process(child: Child) -> CurlProcess {
-        CurlProcess {
-            child,
-            _request_body: None,
-        }
+    fn delayed_stream(
+        chunks: Vec<(Duration, &'static str)>,
+    ) -> impl Stream<Item = Result<Vec<u8>, ModelError>> {
+        stream::unfold(chunks.into_iter(), |mut chunks| async move {
+            let (delay, chunk) = chunks.next()?;
+            tokio::time::sleep(delay).await;
+            Some((Ok(chunk.as_bytes().to_vec()), chunks))
+        })
+    }
+
+    fn consume_test_stream(
+        chunks: Vec<(Duration, &'static str)>,
+        idle_timeout: Duration,
+        on_delta: &mut impl FnMut(&str),
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<ModelResponse, ModelError> {
+        let hard_timeout = Duration::from_secs(10);
+        let deadline = Instant::now() + hard_timeout;
+        run_http(consume_streaming_body(
+            delayed_stream(chunks),
+            "test-model",
+            "http://example.test/v1",
+            idle_timeout,
+            hard_timeout,
+            deadline,
+            on_delta,
+            should_cancel,
+        ))
     }
 
     #[test]
@@ -2015,7 +2066,10 @@ mod tests {
             "https://example.test/v1/chat/completions"
         );
         assert_eq!(config.models_url(), "https://example.test/v1/models");
-        assert_eq!(config.embeddings_url(), "https://example.test/v1/embeddings");
+        assert_eq!(
+            config.embeddings_url(),
+            "https://example.test/v1/embeddings"
+        );
     }
 
     #[test]
@@ -2046,53 +2100,42 @@ mod tests {
     }
 
     #[test]
-    fn curl_keeps_credentials_off_arguments_and_large_bodies_off_config_stdin() {
+    fn pooled_http_request_keeps_credentials_in_headers_and_bodies_in_memory() {
         let request_text = format!("{{\"prompt\":\"{}\"}}", "x".repeat(2_000_000));
-        let request_body = SensitiveRequestBody::write(&request_text)
-            .expect("request body should be staged privately");
-        let request_path = request_body.path.clone();
-        let config = curl_request_config(
+        let request = http_request(
             "https://example.test/v1/chat/completions",
             "test-secret",
-            Some(&request_path),
-        );
-        let command = curl_command(10, true);
-        let arguments = command
-            .get_args()
-            .map(|argument| argument.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
+            Some(&request_text),
+            Duration::from_secs(10),
+            false,
+        )
+        .expect("request should build")
+        .build()
+        .expect("request should be valid");
 
-        assert!(config.contains("Authorization: Bearer test-secret"));
-        assert!(!curl_request_config("https://example.test/image.png", "", None)
-            .contains("Authorization"));
-        assert!(config.contains("data-binary"));
-        assert!(config.len() < 2_048);
-        assert!(!config.contains(&"x".repeat(1_000)));
         assert_eq!(
-            fs::metadata(&request_path)
-                .expect("request file should exist")
-                .len(),
-            request_text.len() as u64
+            request.url().as_str(),
+            "https://example.test/v1/chat/completions"
         );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(&request_path)
-                    .expect("request file should exist")
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600
-            );
-        }
-        assert!(arguments.iter().any(|argument| argument == "--config"));
-        assert!(arguments.iter().any(|argument| argument == "-"));
-        assert!(!arguments.iter().any(|argument| argument.contains("test-secret")));
-        assert!(!arguments.iter().any(|argument| argument.contains("prompt")));
-        assert_eq!(curl_config_escape("a\"b\\c\n"), "a\\\"b\\\\c\\n");
-        drop(request_body);
-        assert!(!request_path.exists());
+        assert_eq!(
+            request
+                .headers()
+                .get(header::AUTHORIZATION)
+                .expect("authorization header should exist"),
+            "Bearer test-secret"
+        );
+        assert_eq!(
+            request
+                .body()
+                .and_then(|body| body.as_bytes())
+                .expect("request body should remain in memory")
+                .len(),
+            request_text.len()
+        );
+        assert!(std::ptr::eq(
+            http_client().expect("shared client should exist"),
+            http_client().expect("shared client should be reused")
+        ));
     }
 
     #[test]
@@ -2275,10 +2318,9 @@ mod tests {
 
     #[test]
     fn parses_streaming_delta_lines() {
-        let delta = parse_stream_line(
-            r#"data: {"choices":[{"delta":{"content":"hi"},"index":0}]}"#,
-        )
-        .expect("line should parse");
+        let delta =
+            parse_stream_line(r#"data: {"choices":[{"delta":{"content":"hi"},"index":0}]}"#)
+                .expect("line should parse");
 
         assert_eq!(delta.as_deref(), Some("hi"));
         assert_eq!(parse_stream_line("data: [DONE]").expect("done"), None);
@@ -2309,43 +2351,35 @@ mod tests {
 
     #[test]
     fn cancels_an_open_model_stream_without_waiting_for_timeout() {
-        let child = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(r#"printf 'data: {"choices":[{"delta":{"content":"started"}}]}\n\n'; sleep 2"#)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("test stream process should start");
+        let chunks = vec![
+            (
+                Duration::ZERO,
+                "data: {\"choices\":[{\"delta\":{\"content\":\"started\"}}]}\n\n",
+            ),
+            (Duration::from_secs(2), ""),
+        ];
         let started = Instant::now();
         let mut output = String::new();
-        let result = consume_streaming_child(
-            test_curl_process(child),
-            "test-model",
-            "http://example.test/v1",
+        let result = consume_test_stream(
+            chunks,
             Duration::from_secs(10),
             &mut |delta| output.push_str(delta),
             &mut || started.elapsed() >= Duration::from_millis(100),
         );
 
-        assert_eq!(result.expect_err("stream should cancel").message, MODEL_REQUEST_CANCELLED);
+        assert_eq!(
+            result.expect_err("stream should cancel").message,
+            MODEL_REQUEST_CANCELLED
+        );
         assert!(started.elapsed() < Duration::from_secs(1));
         assert_eq!(output, "started");
     }
 
     #[test]
     fn stops_a_stream_after_the_idle_timeout() {
-        let child = Command::new("/bin/sh")
-            .arg("-c")
-            .arg("sleep 2")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("test stream process should start");
         let started = Instant::now();
-        let result = consume_streaming_child(
-            test_curl_process(child),
-            "test-model",
-            "http://example.test/v1",
+        let result = consume_test_stream(
+            vec![(Duration::from_secs(2), "")],
             Duration::from_millis(100),
             &mut |_| {},
             &mut || false,
@@ -2360,25 +2394,23 @@ mod tests {
 
     #[test]
     fn stream_activity_refreshes_the_idle_timeout() {
-        let child = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(concat!(
-                "printf 'data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\\n'; ",
-                "sleep 0.1; ",
-                "printf 'data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\\n'; ",
-                "sleep 0.1; ",
-                "printf 'data: {\"choices\":[{\"delta\":{\"content\":\"c\"}}]}\\n'; ",
-                "sleep 0.1"
-            ))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("test stream process should start");
+        let chunks = vec![
+            (
+                Duration::ZERO,
+                "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n",
+            ),
+            (
+                Duration::from_millis(100),
+                "data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n",
+            ),
+            (
+                Duration::from_millis(100),
+                "data: {\"choices\":[{\"delta\":{\"content\":\"c\"}}]}\n",
+            ),
+        ];
         let mut output = String::new();
-        let response = consume_streaming_child(
-            test_curl_process(child),
-            "test-model",
-            "http://example.test/v1",
+        let response = consume_test_stream(
+            chunks,
             Duration::from_millis(250),
             &mut |delta| output.push_str(delta),
             &mut || false,
@@ -2391,16 +2423,17 @@ mod tests {
 
     #[test]
     fn cancels_a_buffered_model_request_without_waiting_for_timeout() {
-        let child = Command::new("/bin/sh")
-            .arg("-c")
-            .arg("sleep 2; printf done")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("test request process should start");
         let started = Instant::now();
-        let result = consume_buffered_child(test_curl_process(child), &mut || {
-            started.elapsed() >= Duration::from_millis(100)
+        let timeout = Duration::from_secs(10);
+        let result = run_http(async {
+            await_http(
+                std::future::pending::<Result<(), std::io::Error>>(),
+                Instant::now() + timeout,
+                timeout,
+                "test request",
+                &mut || started.elapsed() >= Duration::from_millis(100),
+            )
+            .await
         });
 
         assert_eq!(
@@ -2412,22 +2445,12 @@ mod tests {
 
     #[test]
     fn streaming_reader_accepts_non_streaming_tool_call_fallback() {
-        let child = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(
-                r#"printf '%s\n' '{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"file_read","arguments":"{\"input\":\"path=README.md\"}"}}]}}]}'"#,
-            )
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("test response process should start");
-        let response = consume_streaming_child(
-            test_curl_process(child),
+        let response = finish_streaming_response(
+            r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"file_read","arguments":"{\"input\":\"path=README.md\"}"}}]}}]}"#.to_string(),
+            String::new(),
+            BTreeMap::new(),
             "test-model",
             "http://example.test/v1",
-            Duration::from_secs(10),
-            &mut |_| {},
-            &mut || false,
         )
         .expect("fallback response should parse");
 
@@ -2439,13 +2462,18 @@ mod tests {
     #[test]
     fn parses_non_streaming_chat_response() {
         let text = r#"{"choices":[{"message":{"role":"assistant","content":"done"}}],"usage":{"prompt_tokens":21,"completion_tokens":4,"total_tokens":25}}"#;
-        let answer = parse_chat_response(text)
-        .expect("response should parse");
+        let answer = parse_chat_response(text).expect("response should parse");
 
         assert_eq!(answer, "done");
         let response = parse_model_response(text).expect("model response should parse");
-        assert_eq!(response.metadata.get("prompt_tokens").map(String::as_str), Some("21"));
-        assert_eq!(response.metadata.get("total_tokens").map(String::as_str), Some("25"));
+        assert_eq!(
+            response.metadata.get("prompt_tokens").map(String::as_str),
+            Some("21")
+        );
+        assert_eq!(
+            response.metadata.get("total_tokens").map(String::as_str),
+            Some("25")
+        );
     }
 
     #[test]
@@ -2473,7 +2501,9 @@ mod tests {
             "path=README.md"
         );
         assert_eq!(
-            tool_arguments_to_key_value_input(r#"{"path":"README.md","limit":3,"destructive":false}"#),
+            tool_arguments_to_key_value_input(
+                r#"{"path":"README.md","limit":3,"destructive":false}"#
+            ),
             "path=README.md\ndestructive=false\nlimit=3"
         );
         assert_eq!(
@@ -2599,7 +2629,10 @@ mod tests {
         assert_eq!(response.vectors[0].index, 0);
         assert_eq!(response.vectors[0].embedding, vec![0.1, 0.2]);
         assert_eq!(response.vectors[1].index, 1);
-        assert_eq!(response.metadata.get("vectors").map(String::as_str), Some("2"));
+        assert_eq!(
+            response.metadata.get("vectors").map(String::as_str),
+            Some("2")
+        );
     }
 
     #[test]

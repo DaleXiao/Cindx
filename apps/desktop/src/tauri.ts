@@ -162,11 +162,20 @@ export type ArtifactPreview = {
 };
 
 export type TimelineEntry = {
+  sequence?: number;
   label: string;
   detail: string;
   kind: "message" | "tool" | "permission" | "model";
   state: "done" | "pending" | "idle";
   timestampMs: number;
+  workflowProgress?: {
+    completedSteps: number;
+    totalSteps: number;
+    currentStepId: string | null;
+    stepStatus: string | null;
+    continuations: number;
+    recoverable: boolean;
+  };
 };
 
 export type PermissionAudit = {
@@ -186,6 +195,26 @@ export type Phase3State = {
   permissions: PermissionAudit[];
 };
 
+export type PermissionReviewItem = {
+  requestId: string;
+  action: string;
+  risk: string;
+  reason: string;
+  scope: string;
+  source: "agent" | "tool" | "browser" | "test";
+  projectId: string | null;
+  projectName: string | null;
+  sessionId: string | null;
+  sessionName: string | null;
+  input: string;
+  requestedAtMs: number;
+  canAllowSession: boolean;
+};
+
+export type PermissionReviewState = {
+  pending: PermissionReviewItem[];
+};
+
 export type ProviderConfigState = {
   baseUrl: string;
   model: string;
@@ -198,6 +227,7 @@ export type ProviderConfigState = {
   imageModel: string;
   imageEndpoint: string;
   collaborationPolicy: string;
+  promptEvolutionEnabled: boolean;
   contextWindowTokens: number;
   agentSystemPrompt: string;
   apiKeySet: boolean;
@@ -216,6 +246,7 @@ export type ProviderConfigInput = {
   imageModel: string;
   imageEndpoint: string;
   collaborationPolicy: string;
+  promptEvolutionEnabled: boolean;
   contextWindowTokens: number;
   agentSystemPrompt: string;
 };
@@ -227,6 +258,7 @@ export type ProviderModelsState = {
 };
 
 export type ChatMessageView = {
+  sequence?: number;
   role: "user" | "assistant" | "system" | "tool" | "reviewer";
   content: string;
   timestampMs: number;
@@ -234,9 +266,65 @@ export type ChatMessageView = {
 
 export type Phase4State = {
   provider: ProviderConfigState;
+  promptEvolution: PromptEvolutionState;
   timeline: TimelineEntry[];
   messages: ChatMessageView[];
   lastError: string | null;
+};
+
+export type PromptEvolutionProfileState = {
+  id: string;
+  effort: string;
+  generation: number;
+  runs: number;
+  trainRuns: number;
+  holdoutRuns: number;
+  successRate: number;
+  averageReward: number | null;
+  averageRelativeReward: number | null;
+  averageStepCredit: number | null;
+  averageQuality: number | null;
+  averageLatencyMs: number;
+  averageTokens: number;
+  frontier: boolean;
+  champion: boolean;
+  learned: boolean;
+  next: boolean;
+};
+
+export type PromptEvolutionEffortState = {
+  effort: string;
+  status: string;
+  championId: string | null;
+  championScore: number | null;
+  stagnantGenerations: number;
+  evaluatedGenerations: number;
+  freezeReason: string | null;
+  shadowRatePercent: number;
+  nextMode: string;
+  pairedRuns: number;
+  replayRuns: number;
+  readyProfiles: number;
+  evaluationInflight: boolean;
+  stableProfileId: string;
+  canaryProfileId: string | null;
+  canaryPercent: number;
+  promotionConfidence: number | null;
+  rollbackCount: number;
+  rolloutStatus: string;
+};
+
+export type PromptEvolutionState = {
+  enabled: boolean;
+  observedRuns: number;
+  generation: number;
+  populationSize: number;
+  frontierProfiles: number;
+  pairedRuns: number;
+  replayRuns: number;
+  evaluationInflight: boolean;
+  efforts: PromptEvolutionEffortState[];
+  profiles: PromptEvolutionProfileState[];
 };
 
 export type ToolSpecView = {
@@ -420,11 +508,36 @@ export type AgentState = {
   canCancel: boolean;
   canRetry: boolean;
   canContinue: boolean;
+  eventCount: number;
+  latestSequence: number;
+  oldestSequence: number;
+  hasOlderHistory: boolean;
   timeline: TimelineEntry[];
   messages: ChatMessageView[];
   pendingApprovals: ToolApprovalView[];
   latestAnswer: string | null;
   lastError: string | null;
+};
+
+export type AgentStateRevision = {
+  sessionId: string;
+  eventCount: number;
+  latestSequence: number;
+  latestTimestampMs: number;
+};
+
+export type AgentStateDelta = {
+  reset: boolean;
+  latestSequence: number;
+  state: AgentState;
+};
+
+export type AgentHistoryPage = {
+  sessionId: string;
+  oldestSequence: number;
+  hasOlderHistory: boolean;
+  timeline: TimelineEntry[];
+  messages: ChatMessageView[];
 };
 
 export type AgentTraceStepView = {
@@ -480,6 +593,17 @@ export type AgentTraceState = {
   exportPath: string | null;
   turns: AgentTraceTurnView[];
   lastError: string | null;
+};
+
+export type AgentOutputArtifactView = {
+  id: string;
+  path: string;
+  sourcePath: string | null;
+  toolName: string;
+  status: string;
+  timestampMs: number;
+  runId: string | null;
+  version: number;
 };
 
 export type ModelStreamDelta = {
@@ -569,10 +693,61 @@ let browserPhase4State: Phase4State = {
     imageModel: "",
     imageEndpoint: "",
     collaborationPolicy: "auto_router",
+    promptEvolutionEnabled: true,
     contextWindowTokens: 128000,
     agentSystemPrompt:
       "You are Cindx, a desktop-first assistant. Work carefully, be direct, and ask for clarification when the task is ambiguous.",
     apiKeySet: false
+  },
+  promptEvolution: {
+    enabled: true,
+    observedRuns: 0,
+    generation: 1,
+    populationSize: 15,
+    frontierProfiles: 0,
+    pairedRuns: 0,
+    replayRuns: 0,
+    evaluationInflight: false,
+    efforts: ["fast", "auto", "pro"].map((effort) => ({
+      effort,
+      status: "exploring",
+      championId: null,
+      championScore: null,
+      stagnantGenerations: 0,
+      evaluatedGenerations: 0,
+      freezeReason: null,
+      shadowRatePercent: 10,
+      nextMode: "explore",
+      pairedRuns: 0,
+      replayRuns: 0,
+      readyProfiles: 0,
+      evaluationInflight: false,
+      stableProfileId: `seed-${effort}-v1`,
+      canaryProfileId: null,
+      canaryPercent: 0,
+      promotionConfidence: null,
+      rollbackCount: 0,
+      rolloutStatus: "stable"
+    })),
+    profiles: ["fast", "auto", "pro"].map((effort) => ({
+      id: `seed-${effort}-v1`,
+      effort,
+      generation: 0,
+      runs: 0,
+      trainRuns: 0,
+      holdoutRuns: 0,
+      successRate: 0,
+      averageReward: null,
+      averageRelativeReward: null,
+      averageStepCredit: null,
+      averageQuality: null,
+      averageLatencyMs: 0,
+      averageTokens: 0,
+      frontier: false,
+      champion: false,
+      learned: false,
+      next: true
+    }))
   },
   timeline: [],
   messages: [],
@@ -761,6 +936,10 @@ let browserAgentState: AgentState = {
   canCancel: false,
   canRetry: false,
   canContinue: false,
+  eventCount: 0,
+  latestSequence: 0,
+  oldestSequence: 0,
+  hasOlderHistory: false,
   timeline: [],
   messages: [],
   pendingApprovals: [],
@@ -792,6 +971,11 @@ let browserAgentTraceState: AgentTraceState = {
 
 function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+export async function revealMainWindow(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke<void>("reveal_main_window");
 }
 
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {
@@ -1397,6 +1581,79 @@ export async function getPhase3State(): Promise<Phase3State> {
   }
 }
 
+export async function getPermissionReviewState(): Promise<PermissionReviewState> {
+  try {
+    return await invoke<PermissionReviewState>("get_permission_review_state");
+  } catch {
+    const activeSession = browserProjectSessionState.sessions.find((session) => session.active);
+    const activeProject = browserProjectSessionState.projects.find((project) => project.active);
+    const context = {
+      projectId: activeProject?.id ?? null,
+      projectName: activeProject?.name ?? null,
+      sessionId: activeSession?.id ?? null,
+      sessionName: activeSession?.name ?? null
+    };
+    const toolReviews = browserPhase5State.pendingApprovals.map((approval) => ({
+      requestId: approval.requestId,
+      action: approval.toolName,
+      risk: approval.risk,
+      reason: approval.reason,
+      scope: approval.scope,
+      source: "tool" as const,
+      ...context,
+      input: approval.input,
+      requestedAtMs: approval.requestedAtMs,
+      canAllowSession: false
+    }));
+    const browserReviews = browserPhase8State.pendingApprovals.map((approval) => ({
+      requestId: approval.requestId,
+      action: approval.toolName,
+      risk: approval.risk,
+      reason: approval.reason,
+      scope: approval.scope,
+      source: "browser" as const,
+      ...context,
+      input: approval.input,
+      requestedAtMs: approval.requestedAtMs,
+      canAllowSession: false
+    }));
+    const agentReviews = browserAgentState.pendingApprovals.map((approval) => ({
+      requestId: approval.requestId,
+      action: approval.toolName,
+      risk: approval.risk,
+      reason: approval.reason,
+      scope: approval.scope,
+      source: "agent" as const,
+      ...context,
+      input: approval.input,
+      requestedAtMs: approval.requestedAtMs,
+      canAllowSession: approval.risk !== "destructive"
+    }));
+    const testReviews = browserPhase3State.permissions
+      .filter((permission) => permission.status === "pending")
+      .map((permission) => ({
+        requestId: permission.id,
+        action: permission.action,
+        risk: permission.risk,
+        reason: permission.reason,
+        scope: permission.scope,
+        source: "test" as const,
+        projectId: null,
+        projectName: null,
+        sessionId: null,
+        sessionName: null,
+        input: "",
+        requestedAtMs: permission.requestedAtMs,
+        canAllowSession: false
+      }));
+    return {
+      pending: [...agentReviews, ...toolReviews, ...browserReviews, ...testReviews].sort(
+        (left, right) => right.requestedAtMs - left.requestedAtMs
+      )
+    };
+  }
+}
+
 export async function requestMockPermission(): Promise<Phase3State> {
   try {
     return await invoke<Phase3State>("request_mock_permission");
@@ -1502,6 +1759,7 @@ export async function saveProviderConfig(input: ProviderConfigInput): Promise<Ph
         imageModel: input.imageModel,
         imageEndpoint: input.imageEndpoint,
         collaborationPolicy: input.collaborationPolicy || "auto_router",
+        promptEvolutionEnabled: input.promptEvolutionEnabled,
         contextWindowTokens: Math.max(4096, input.contextWindowTokens || 128000),
         agentSystemPrompt: input.agentSystemPrompt,
         apiKeySet: Boolean(input.apiKey) || browserPhase4State.provider.apiKeySet
@@ -1517,6 +1775,25 @@ export async function saveProviderConfig(input: ProviderConfigInput): Promise<Ph
         }
       ],
       lastError: null
+    };
+    return browserPhase4State;
+  }
+}
+
+export async function setPromptEvolutionEnabled(enabled: boolean): Promise<Phase4State> {
+  try {
+    return await invoke<Phase4State>("set_prompt_evolution_enabled", { enabled });
+  } catch {
+    browserPhase4State = {
+      ...browserPhase4State,
+      provider: {
+        ...browserPhase4State.provider,
+        promptEvolutionEnabled: enabled
+      },
+      promptEvolution: {
+        ...browserPhase4State.promptEvolution,
+        enabled
+      }
     };
     return browserPhase4State;
   }
@@ -1574,16 +1851,88 @@ export async function sendModelPrompt(prompt: string): Promise<Phase4State> {
 export async function getAgentState(sessionId?: string | null): Promise<AgentState> {
   try {
     return await invoke<AgentState>("get_agent_state", { sessionId: sessionId ?? null });
-  } catch {
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
     return browserAgentState;
+  }
+}
+
+export async function getAgentStateRevision(sessionId: string): Promise<AgentStateRevision> {
+  try {
+    return await invoke<AgentStateRevision>("get_agent_state_revision", { sessionId });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    const events = browserAgentState.timeline;
+    return {
+      sessionId,
+      eventCount: events.length,
+      latestSequence: events.length,
+      latestTimestampMs: events[events.length - 1]?.timestampMs ?? 0
+    };
+  }
+}
+
+export async function getAgentStateDelta(
+  sessionId: string,
+  afterSequence: number
+): Promise<AgentStateDelta> {
+  try {
+    return await invoke<AgentStateDelta>("get_agent_state_delta", {
+      sessionId,
+      afterSequence
+    });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    return {
+      reset: true,
+      latestSequence:
+        browserAgentState.timeline[browserAgentState.timeline.length - 1]?.sequence ??
+        browserAgentState.timeline.length,
+      state: browserAgentState
+    };
+  }
+}
+
+export async function getAgentHistoryPage(
+  sessionId: string,
+  beforeSequence: number,
+  limit = 360
+): Promise<AgentHistoryPage> {
+  try {
+    return await invoke<AgentHistoryPage>("get_agent_history_page", {
+      sessionId,
+      beforeSequence,
+      limit
+    });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    return {
+      sessionId,
+      oldestSequence: browserAgentState.oldestSequence,
+      hasOlderHistory: false,
+      timeline: [],
+      messages: []
+    };
   }
 }
 
 export async function getAgentTraceState(sessionId?: string | null): Promise<AgentTraceState> {
   try {
     return await invoke<AgentTraceState>("get_agent_trace_state", { sessionId: sessionId ?? null });
-  } catch {
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
     return browserAgentTraceState;
+  }
+}
+
+export async function getAgentSessionOutputs(
+  sessionId: string
+): Promise<AgentOutputArtifactView[]> {
+  try {
+    return await invoke<AgentOutputArtifactView[]>("get_agent_session_outputs", { sessionId });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    return [];
   }
 }
 
@@ -1592,7 +1941,8 @@ export async function exportAgentTraceJsonl(sessionId?: string | null): Promise<
     return await invoke<AgentTraceState>("export_agent_trace_jsonl", {
       sessionId: sessionId ?? null
     });
-  } catch {
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
     browserAgentTraceState = {
       ...browserAgentTraceState,
       lastError: "Browser preview cannot export the Rust agent trace. Open the Tauri app to export JSONL."
@@ -1621,7 +1971,8 @@ export async function runAgentTask(
     return await invoke<AgentState>("run_agent_task", {
       input: { prompt, sessionId, currentTime: currentAgentTimeContext(), effort, attachments }
     });
-  } catch {
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
     const now = Date.now();
     browserAgentState = {
       ...browserAgentState,
@@ -1649,7 +2000,8 @@ export async function runAgentTask(
 export async function cancelAgentTask(sessionId: string): Promise<AgentState> {
   try {
     return await invoke<AgentState>("cancel_agent_task", { input: { sessionId } });
-  } catch {
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
     const now = Date.now();
     browserAgentState = {
       ...browserAgentState,
@@ -1677,7 +2029,8 @@ export async function cancelAgentTask(sessionId: string): Promise<AgentState> {
 export async function retryAgentTask(sessionId: string): Promise<AgentState> {
   try {
     return await invoke<AgentState>("retry_agent_task", { input: { sessionId } });
-  } catch {
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
     const now = Date.now();
     browserAgentState = {
       ...browserAgentState,
@@ -1712,7 +2065,8 @@ export async function resolveAgentPermission(
       decision,
       sessionId
     });
-  } catch {
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
     const now = Date.now();
     browserAgentState = {
       ...browserAgentState,

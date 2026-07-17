@@ -93,9 +93,27 @@ function nextBuildNumber() {
   return Number.isSafeInteger(requested) && requested > baseline ? requested : baseline + 1;
 }
 
+function processIsRunning(name) {
+  return run("pgrep", ["-x", name], { encoding: "utf8", allowFailure: true }).status === 0;
+}
+
+function waitForProcessExit(name, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  const sleeper = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+  while (processIsRunning(name) && Date.now() < deadline) {
+    Atomics.wait(sleeper, 0, 0, 100);
+  }
+  if (processIsRunning(name)) {
+    throw new Error(`${name} did not exit after SIGTERM; close Cindx before installing`);
+  }
+}
+
 function install(outputApp) {
   const destination = "/Applications/Cindx.app";
-  run("pkill", ["-f", `${destination}/Contents/MacOS/cindx-desktop`], { allowFailure: true });
+  // Build outputs share the installed app's name and bundle id. Stop every copy so
+  // LaunchServices cannot reactivate a stale target/dist process after installation.
+  run("pkill", ["-x", "cindx-desktop"], { allowFailure: true });
+  waitForProcessExit("cindx-desktop");
   fs.rmSync(destination, { recursive: true, force: true });
   run("/usr/bin/ditto", [outputApp, destination]);
   run("codesign", ["--verify", "--deep", "--strict", "--verbose=2", destination]);

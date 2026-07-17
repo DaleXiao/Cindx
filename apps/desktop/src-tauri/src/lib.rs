@@ -37,14 +37,20 @@ use model_provider::{
     EmbeddingRequest, ModelCallMode, ModelRequest, OpenAiCompatibleConfig,
     OpenAiCompatibleProvider, MODEL_REQUEST_CANCELLED,
 };
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSView, NSWindow, NSWindowButton};
 use orchestrator::{
     adaptive_worker_prompt, adaptive_workflow_layers, adaptive_workflow_step_budget, default_plan,
-    parse_policy, role_label, step_prompt, ConductorHarness, ConductorRequest, ConductorRoleHints,
-    LearnedModelRouter, ModelCandidate, OrchestrationPolicy,
+    evaluate_prompt_convergence, parse_policy, role_label, step_prompt, ConductorHarness,
+    ConductorPromptGenome, ConductorRequest, ConductorRoleHints, LearnedModelRouter,
+    ModelCandidate, OrchestrationPolicy, PromptContextPolicy, PromptEvaluationMode,
+    PromptEvaluationSplit, PromptEvolutionObservation, PromptParetoArchive,
+    PromptPromotionConfidence, PromptRetryPolicy, PromptStepCredit, PromptVerification,
     RoutingContext, RoutingDecision, RoutingOutcome, RoutingTelemetry, RuleBasedRouter, TaskClass,
-    WorkflowBudget, WorkflowExecutionTelemetry, WorkflowPlanIr, WorkflowSearchTeacher,
-    WorkflowTopologyPrior, CONDUCTOR_MAX_ATTEMPTS, MAX_ADAPTIVE_WORKFLOW_AGENTS,
-    MAX_ADAPTIVE_WORKFLOW_STEPS, WORKFLOW_IR_SCHEMA,
+    WorkflowBudget, WorkflowExecutionCheckpoint, WorkflowExecutionTelemetry, WorkflowPlanIr,
+    WorkflowSearchTeacher, WorkflowStepStatus, WorkflowToolPolicy, WorkflowTopologyPrior,
+    CONDUCTOR_MAX_ATTEMPTS, MAX_ADAPTIVE_WORKFLOW_AGENTS, MAX_ADAPTIVE_WORKFLOW_STEPS,
+    WORKFLOW_CHECKPOINT_SCHEMA, WORKFLOW_IR_SCHEMA,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -55,8 +61,8 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 use tools::{ImageGenerationConfig, ToolExecutionControl, ToolRegistry, WebSearchConfig};
 
@@ -78,6 +84,21 @@ const MAX_ATTACHMENT_TOTAL_BYTES: usize = 50 * 1024 * 1024;
 const AGENT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 const MAX_AGENT_MODEL_TRANSPORT_ATTEMPTS: usize = 3;
 const COLLABORATION_MAX_OUTPUT_TOKENS: u64 = 4_096;
+const PROMPT_EVOLUTION_POPULATION_LIMIT: usize = 6;
+const PROMPT_EVOLUTION_MIN_TRAIN_RUNS: usize = 2;
+const PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS: usize = 2;
+const PROMPT_EVOLUTION_STAGNATION_PATIENCE: usize = 3;
+const PROMPT_EVOLUTION_MIN_IMPROVEMENT: f64 = 0.02;
+const PROMPT_EVOLUTION_MAX_GENERATION: u32 = 12;
+const PROMPT_EVOLUTION_SHADOW_INTERVAL: usize = 10;
+const AGENT_SESSION_READ_MODEL_NAMESPACE: &str = "agent-session-v1";
+const ROUTING_TELEMETRY_READ_MODEL_NAMESPACE: &str = "routing-telemetry-v1";
+const ROUTING_TELEMETRY_READ_MODEL_KEY: &str = "global";
+const ROUTING_TELEMETRY_MAX_RUNS: usize = 2_048;
+const PROMPT_EVOLUTION_READ_MODEL_NAMESPACE: &str = "prompt-evolution-v1";
+const PROMPT_EVOLUTION_READ_MODEL_KEY: &str = "global";
+const AGENT_HISTORY_INITIAL_PAGE_SIZE: usize = 120;
+const AGENT_HISTORY_MAX_PAGE_SIZE: usize = 600;
 const CONTEXT_COMPACTION_TRIGGER_PERCENT: u64 = 65;
 const CONTEXT_RECENT_TARGET_PERCENT: u64 = 28;
 const CONTEXT_RECENT_MAX_TOKENS: u64 = 48_000;
@@ -88,6 +109,12 @@ const EVENT_REDACTION_MARKER_FILE: &str = "events-redaction-v1.complete";
 const LEGACY_AGENT_SYSTEM_PROMPT: &str = "You are Cindx, a desktop-first assistant. Work carefully, be direct, and ask for clarification when the task is ambiguous.";
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+static PROMPT_EVALUATIONS_INFLIGHT: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+const MAIN_WINDOW_REVEAL_FALLBACK_MS: u64 = 12_000;
+#[cfg(target_os = "macos")]
+const MACOS_TRAFFIC_LIGHT_X: f64 = 14.0;
+#[cfg(target_os = "macos")]
+const MACOS_TRAFFIC_LIGHT_Y: f64 = 25.0;
 
 struct AppState {
     store: Mutex<SqliteStore>,
@@ -209,6 +236,7 @@ struct ProviderConfig {
     image_model: String,
     image_endpoint: String,
     collaboration_policy: String,
+    prompt_evolution_enabled: bool,
     context_window_tokens: u64,
     agent_system_prompt: String,
 }
@@ -283,6 +311,7 @@ impl Default for ProviderConfig {
             image_model: String::new(),
             image_endpoint: String::new(),
             collaboration_policy: "auto_router".to_string(),
+            prompt_evolution_enabled: true,
             context_window_tokens: 128_000,
             agent_system_prompt: String::new(),
         }
@@ -719,14 +748,28 @@ struct WebSearchConfigInput {
     api_key: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TimelineEntry {
+    sequence: u64,
     label: String,
     detail: String,
     kind: String,
     state: String,
     timestamp_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow_progress: Option<WorkflowProgressView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowProgressView {
+    completed_steps: usize,
+    total_steps: usize,
+    current_step_id: Option<String>,
+    step_status: Option<String>,
+    continuations: usize,
+    recoverable: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -752,6 +795,30 @@ struct Phase3State {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct PermissionReviewItem {
+    request_id: String,
+    action: String,
+    risk: String,
+    reason: String,
+    scope: String,
+    source: String,
+    project_id: Option<String>,
+    project_name: Option<String>,
+    session_id: Option<String>,
+    session_name: Option<String>,
+    input: String,
+    requested_at_ms: u64,
+    can_allow_session: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionReviewState {
+    pending: Vec<PermissionReviewItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ProviderConfigState {
     base_url: String,
     model: String,
@@ -764,14 +831,16 @@ struct ProviderConfigState {
     image_model: String,
     image_endpoint: String,
     collaboration_policy: String,
+    prompt_evolution_enabled: bool,
     context_window_tokens: u64,
     agent_system_prompt: String,
     api_key_set: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatMessageView {
+    sequence: u64,
     role: String,
     content: String,
     timestamp_ms: u64,
@@ -781,9 +850,71 @@ struct ChatMessageView {
 #[serde(rename_all = "camelCase")]
 struct Phase4State {
     provider: ProviderConfigState,
+    prompt_evolution: PromptEvolutionState,
     timeline: Vec<TimelineEntry>,
     messages: Vec<ChatMessageView>,
     last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptEvolutionProfileState {
+    id: String,
+    effort: String,
+    generation: u32,
+    runs: usize,
+    train_runs: usize,
+    holdout_runs: usize,
+    success_rate: f64,
+    average_reward: Option<f64>,
+    average_relative_reward: Option<f64>,
+    average_step_credit: Option<f64>,
+    average_quality: Option<f64>,
+    average_latency_ms: u64,
+    average_tokens: u64,
+    frontier: bool,
+    champion: bool,
+    learned: bool,
+    next: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptEvolutionEffortState {
+    effort: String,
+    status: String,
+    champion_id: Option<String>,
+    champion_score: Option<f64>,
+    stagnant_generations: usize,
+    evaluated_generations: usize,
+    freeze_reason: Option<String>,
+    shadow_rate_percent: u8,
+    next_mode: String,
+    paired_runs: usize,
+    replay_runs: usize,
+    ready_profiles: usize,
+    evaluation_inflight: bool,
+    stable_profile_id: String,
+    canary_profile_id: Option<String>,
+    canary_percent: u8,
+    promotion_confidence: Option<f64>,
+    rollback_count: usize,
+    rollout_status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptEvolutionState {
+    enabled: bool,
+    observed_runs: usize,
+    generation: u32,
+    population_size: usize,
+    frontier_profiles: usize,
+    paired_runs: usize,
+    replay_runs: usize,
+    evaluation_inflight: bool,
+    efforts: Vec<PromptEvolutionEffortState>,
+    profiles: Vec<PromptEvolutionProfileState>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -805,7 +936,7 @@ struct ToolRunView {
     timestamp_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ToolApprovalView {
     request_id: String,
@@ -1003,7 +1134,7 @@ struct ContextState {
     last_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentState {
     task_id: String,
@@ -1026,11 +1157,97 @@ struct AgentState {
     can_cancel: bool,
     can_retry: bool,
     can_continue: bool,
+    event_count: u64,
+    latest_sequence: u64,
+    oldest_sequence: u64,
+    has_older_history: bool,
     timeline: Vec<TimelineEntry>,
     messages: Vec<ChatMessageView>,
     pending_approvals: Vec<ToolApprovalView>,
     latest_answer: Option<String>,
     last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentStateRevision {
+    session_id: String,
+    event_count: u64,
+    latest_sequence: u64,
+    latest_timestamp_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentStateDelta {
+    reset: bool,
+    latest_sequence: u64,
+    state: AgentState,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentHistoryPage {
+    session_id: String,
+    oldest_sequence: u64,
+    has_older_history: bool,
+    timeline: Vec<TimelineEntry>,
+    messages: Vec<ChatMessageView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentSessionReadModel {
+    schema: String,
+    revision: u64,
+    event_count: u64,
+    estimated_context_tokens: u64,
+    has_user_prompt: bool,
+    active_run_id: Option<String>,
+    state: AgentState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RoutingTelemetryEntry {
+    run_id: String,
+    telemetry: RoutingTelemetry,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RoutingTelemetryReadModel {
+    schema: String,
+    revision: u64,
+    event_count: u64,
+    entries: Vec<RoutingTelemetryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PromptGenomeRecord {
+    effort: String,
+    genome: ConductorPromptGenome,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PromptEvolutionReadModel {
+    schema: String,
+    revision: u64,
+    event_count: u64,
+    genomes: Vec<PromptGenomeRecord>,
+    observations: Vec<(String, PromptEvolutionObservation)>,
+    #[serde(default)]
+    rollouts: BTreeMap<String, PromptRolloutState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct PromptRolloutState {
+    stable_profile_id: String,
+    canary_profile_id: Option<String>,
+    canary_percent: u8,
+    evidence_checkpoint: usize,
+    live_checkpoint: usize,
+    rollback_count: usize,
+    status: String,
+    last_reason: Option<String>,
+    promotion_confidence: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1055,6 +1272,19 @@ struct AgentTraceState {
     export_path: Option<String>,
     turns: Vec<AgentTraceTurnView>,
     last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentOutputArtifactView {
+    id: String,
+    path: String,
+    source_path: Option<String>,
+    tool_name: String,
+    status: String,
+    timestamp_ms: u64,
+    run_id: Option<String>,
+    version: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1130,8 +1360,14 @@ struct ProviderConfigInput {
     #[serde(default)]
     image_endpoint: String,
     collaboration_policy: String,
+    #[serde(default = "default_prompt_evolution_enabled")]
+    prompt_evolution_enabled: bool,
     context_window_tokens: u64,
     agent_system_prompt: String,
+}
+
+fn default_prompt_evolution_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -1164,6 +1400,85 @@ struct ModelStreamDelta {
 #[tauri::command]
 fn get_runtime_status(state: tauri::State<'_, AppState>) -> Result<RuntimeStatus, String> {
     runtime_status(&state)
+}
+
+#[cfg(target_os = "macos")]
+fn repair_macos_traffic_light_position(window: &tauri::WebviewWindow) -> Result<(), String> {
+    // Repeat tao's inset after the initially hidden window has its final frame.
+    let ns_window = window
+        .ns_window()
+        .map_err(|error| format!("failed to access native window: {error}"))?
+        as usize;
+
+    window
+        .run_on_main_thread(move || unsafe {
+            let window = &*(ns_window as *mut NSWindow);
+            let Some(close) = window.standardWindowButton(NSWindowButton::CloseButton) else {
+                return;
+            };
+            let Some(miniaturize) = window.standardWindowButton(NSWindowButton::MiniaturizeButton)
+            else {
+                return;
+            };
+            let Some(zoom) = window.standardWindowButton(NSWindowButton::ZoomButton) else {
+                return;
+            };
+            let Some(title_bar_view) = close.superview().and_then(|view| view.superview()) else {
+                return;
+            };
+
+            let close_frame = NSView::frame(&close);
+            let title_bar_height = close_frame.size.height + MACOS_TRAFFIC_LIGHT_Y;
+            let mut title_bar_frame = NSView::frame(&title_bar_view);
+            title_bar_frame.size.height = title_bar_height;
+            title_bar_frame.origin.y = window.frame().size.height - title_bar_height;
+            title_bar_view.setFrame(title_bar_frame);
+
+            let spacing = NSView::frame(&miniaturize).origin.x - close_frame.origin.x;
+            for (index, button) in [close, miniaturize, zoom].into_iter().enumerate() {
+                let mut origin = NSView::frame(&button).origin;
+                origin.x = MACOS_TRAFFIC_LIGHT_X + index as f64 * spacing;
+                button.setFrameOrigin(origin);
+            }
+        })
+        .map_err(|error| format!("failed to repair traffic light position: {error}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn repair_macos_traffic_light_position(_window: &tauri::WebviewWindow) -> Result<(), String> {
+    Ok(())
+}
+
+#[tauri::command]
+fn reveal_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window is unavailable".to_string())?;
+    window
+        .show()
+        .map_err(|error| format!("failed to reveal main window: {error}"))?;
+    repair_macos_traffic_light_position(&window)?;
+    window
+        .set_focus()
+        .map_err(|error| format!("failed to focus main window: {error}"))?;
+    append_startup_log("main window revealed by frontend");
+    Ok(())
+}
+
+fn schedule_main_window_reveal_fallback(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(MAIN_WINDOW_REVEAL_FALLBACK_MS));
+        let Some(window) = app.get_webview_window("main") else {
+            return;
+        };
+        if window.is_visible().unwrap_or(false) {
+            return;
+        }
+        append_startup_log("main window reveal fallback used");
+        let _ = window.show();
+        let _ = repair_macos_traffic_light_position(&window);
+        let _ = window.set_focus();
+    });
 }
 
 #[tauri::command]
@@ -2176,24 +2491,27 @@ fn delete_session_history(
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let events = store
-        .list_by_task(&phase16_task_id())
-        .map_err(|error| error.to_string())?;
-    let mut deleted_event_ids = session_ids
-        .iter()
-        .flat_map(|session_id| agent_session_events(&events, session_id))
-        .map(|event| event.id.0)
-        .collect::<Vec<_>>();
-    deleted_event_ids.sort();
-    deleted_event_ids.dedup();
-    store
-        .delete_events_by_ids(&deleted_event_ids)
-        .map_err(|error| error.to_string())?;
     for session_id in session_ids {
         store
             .delete_records_by_metadata("session_id", session_id)
             .map_err(|error| error.to_string())?;
+        store
+            .delete_read_model(AGENT_SESSION_READ_MODEL_NAMESPACE, session_id)
+            .map_err(|error| error.to_string())?;
     }
+    store
+        .delete_read_model(
+            ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
+            ROUTING_TELEMETRY_READ_MODEL_KEY,
+        )
+        .map_err(|error| error.to_string())?;
+    store
+        .delete_read_model(
+            PROMPT_EVOLUTION_READ_MODEL_NAMESPACE,
+            PROMPT_EVOLUTION_READ_MODEL_KEY,
+        )
+        .map_err(|error| error.to_string())?;
+    drop(store);
     Ok(())
 }
 
@@ -2463,6 +2781,23 @@ fn get_phase3_state(state: tauri::State<'_, AppState>) -> Result<Phase3State, St
 }
 
 #[tauri::command]
+fn get_permission_review_state(
+    state: tauri::State<'_, AppState>,
+) -> Result<PermissionReviewState, String> {
+    let project_sessions = state
+        .project_session_config
+        .lock()
+        .map_err(|error| format!("project session config lock poisoned: {error}"))?
+        .clone();
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+
+    permission_review_state(&store, &project_sessions).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn request_mock_permission(state: tauri::State<'_, AppState>) -> Result<Phase3State, String> {
     let mut store = state
         .store
@@ -2490,12 +2825,12 @@ fn resolve_permission(
 #[tauri::command]
 fn get_phase4_state(state: tauri::State<'_, AppState>) -> Result<Phase4State, String> {
     let config = clone_provider_config(&state)?;
-    let store = state
+    let mut store = state
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
 
-    phase4_state(&store, &config, None).map_err(|error| error.to_string())
+    phase4_state(&mut store, &config, None).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -2539,7 +2874,42 @@ fn save_provider_config(
     )
     .map_err(|error| error.to_string())?;
 
-    phase4_state(&store, &config, None).map_err(|error| error.to_string())
+    phase4_state(&mut store, &config, None).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_prompt_evolution_enabled(
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<Phase4State, String> {
+    let config = {
+        let mut config = state
+            .provider_config
+            .lock()
+            .map_err(|error| format!("provider config lock poisoned: {error}"))?;
+        config.prompt_evolution_enabled = enabled;
+        save_provider_config_to_disk(&config).map_err(|error| error.to_string())?;
+        config.clone()
+    };
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    append_event(
+        &mut store,
+        &phase4_task_id(),
+        EventKind::TaskStatusChanged,
+        if enabled {
+            "Prompt evolution enabled"
+        } else {
+            "Prompt evolution disabled"
+        },
+        [("enabled".to_string(), enabled.to_string())]
+            .into_iter()
+            .collect(),
+    )
+    .map_err(|error| error.to_string())?;
+    phase4_state(&mut store, &config, None).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -2711,7 +3081,7 @@ fn send_model_prompt(
             )
             .map_err(|error| error.to_string())?;
 
-            phase4_state(&store, &config, None).map_err(|error| error.to_string())
+            phase4_state(&mut store, &config, None).map_err(|error| error.to_string())
         }
         Err(error) => {
             let message = error.to_string();
@@ -2734,32 +3104,225 @@ fn send_model_prompt(
 }
 
 #[tauri::command]
-fn get_agent_state(
-    state: tauri::State<'_, AppState>,
+async fn get_agent_state(
+    app: tauri::AppHandle,
     session_id: Option<String>,
 ) -> Result<AgentState, String> {
-    let run_context = project_session_metadata_for_session(&state, session_id.as_deref())?;
-    let session_id = run_context.get("session_id").map(String::as_str);
-    let store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    agent_state_for_session(&store, None, session_id).map_err(|error| error.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let run_context = project_session_metadata_for_session(&state, session_id.as_deref())?;
+        let Some(session_id) = run_context.get("session_id").cloned() else {
+            return Ok(empty_agent_state_for_session(""));
+        };
+        let model = {
+            let mut store = state
+                .store
+                .lock()
+                .map_err(|error| format!("store lock poisoned: {error}"))?;
+            load_agent_session_read_model(&mut store, &session_id)
+                .map_err(|error| error.to_string())?
+        };
+        let store = open_app_read_store()?;
+        let history = store
+            .list_by_task_and_metadata_before(
+                &phase16_task_id(),
+                "session_id",
+                &session_id,
+                u64::MAX,
+                AGENT_HISTORY_INITIAL_PAGE_SIZE,
+            )
+            .map_err(|error| error.to_string())?;
+        agent_state_from_read_model(&store, &model, &session_id, &run_context, history)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("agent state load failed to join: {error}"))?
 }
 
 #[tauri::command]
-fn get_agent_trace_state(
-    state: tauri::State<'_, AppState>,
+async fn get_agent_state_revision(
+    session_id: String,
+) -> Result<AgentStateRevision, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = open_app_read_store()?;
+        let revision = store
+            .event_revision_by_metadata(&phase16_task_id(), "session_id", &session_id)
+            .map_err(|error| error.to_string())?;
+        Ok(AgentStateRevision {
+            session_id,
+            event_count: revision.event_count,
+            latest_sequence: revision.latest_sequence,
+            latest_timestamp_ms: revision.latest_timestamp_ms,
+        })
+    })
+    .await
+    .map_err(|error| format!("agent state revision load failed to join: {error}"))?
+}
+
+#[tauri::command]
+async fn get_agent_state_delta(
+    app: tauri::AppHandle,
+    session_id: String,
+    after_sequence: u64,
+) -> Result<AgentStateDelta, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
+        let model = {
+            let mut store = state
+                .store
+                .lock()
+                .map_err(|error| format!("store lock poisoned: {error}"))?;
+            load_agent_session_read_model(&mut store, &session_id)
+                .map_err(|error| error.to_string())?
+        };
+        let store = open_app_read_store()?;
+        let latest_sequence = model.revision;
+        let reset = after_sequence == 0 || after_sequence > latest_sequence;
+        let events = if reset {
+            store.list_by_task_and_metadata_before(
+                &phase16_task_id(),
+                "session_id",
+                &session_id,
+                u64::MAX,
+                AGENT_HISTORY_INITIAL_PAGE_SIZE,
+            )
+        } else {
+            store.list_by_task_and_metadata_after(
+                &phase16_task_id(),
+                "session_id",
+                &session_id,
+                after_sequence,
+            )
+        }
+        .map_err(|error| error.to_string())?;
+        let agent_state = agent_state_from_read_model(
+            &store,
+            &model,
+            &session_id,
+            &run_context,
+            events,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(AgentStateDelta {
+            reset,
+            latest_sequence,
+            state: agent_state,
+        })
+    })
+    .await
+    .map_err(|error| format!("agent state delta load failed to join: {error}"))?
+}
+
+#[tauri::command]
+async fn get_agent_history_page(
+    session_id: String,
+    before_sequence: u64,
+    limit: Option<usize>,
+) -> Result<AgentHistoryPage, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = open_app_read_store()?;
+        let events = store
+            .list_by_task_and_metadata_before(
+                &phase16_task_id(),
+                "session_id",
+                &session_id,
+                before_sequence,
+                limit
+                    .unwrap_or(AGENT_HISTORY_INITIAL_PAGE_SIZE)
+                    .clamp(1, AGENT_HISTORY_MAX_PAGE_SIZE),
+            )
+            .map_err(|error| error.to_string())?;
+        let oldest_sequence = events
+            .first()
+            .map(|event| event.sequence)
+            .unwrap_or(before_sequence);
+        let has_older_history = oldest_sequence > 0
+            && store
+                .has_task_metadata_event_before(
+                    &phase16_task_id(),
+                    "session_id",
+                    &session_id,
+                    oldest_sequence,
+                )
+                .map_err(|error| error.to_string())?;
+        let audits = agent_session_audits(&store, &session_id, None, 0)
+            .map_err(|error| error.to_string())?;
+        Ok(AgentHistoryPage {
+            session_id,
+            oldest_sequence,
+            has_older_history,
+            timeline: events
+                .iter()
+                .cloned()
+                .map(|event| timeline_entry(event, &audits))
+                .collect(),
+            messages: events.iter().filter_map(message_view_from_event).collect(),
+        })
+    })
+    .await
+    .map_err(|error| format!("agent history page load failed to join: {error}"))?
+}
+
+#[tauri::command]
+async fn get_agent_trace_state(
+    app: tauri::AppHandle,
     session_id: Option<String>,
 ) -> Result<AgentTraceState, String> {
-    let run_context = project_session_metadata_for_session(&state, session_id.as_deref())?;
-    let session_id = run_context.get("session_id").map(String::as_str);
-    let store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    agent_trace_state_for_session(&store, None, None, session_id)
-        .map_err(|error| error.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let run_context = project_session_metadata_for_session(&state, session_id.as_deref())?;
+        let session_id = run_context.get("session_id").map(String::as_str);
+        let active_run_id = if let Some(session_id) = session_id {
+            let mut store = state
+                .store
+                .lock()
+                .map_err(|error| format!("store lock poisoned: {error}"))?;
+            load_agent_session_read_model(&mut store, session_id)
+                .map_err(|error| error.to_string())?
+                .active_run_id
+        } else {
+            None
+        };
+        let store = open_app_read_store()?;
+        let events = if let Some(run_id) = active_run_id {
+            store
+                .list_by_task_and_metadata(
+                    &phase16_task_id(),
+                    "agent_run_id",
+                    &run_id,
+                )
+                .map_err(|error| error.to_string())?
+        } else {
+            agent_events_for_session(&store, &phase16_task_id(), session_id)
+                .map_err(|error| error.to_string())?
+        };
+        agent_trace_state_from_events(&store, None, None, session_id, events)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("agent trace load failed to join: {error}"))?
+}
+
+#[tauri::command]
+async fn get_agent_session_outputs(
+    app: tauri::AppHandle,
+    session_id: String,
+) -> Result<Vec<AgentOutputArtifactView>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
+        let session_id = run_context
+            .get("session_id")
+            .map(String::as_str)
+            .unwrap_or(session_id.as_str());
+        let store = open_app_read_store()?;
+        let events = agent_events_for_session(&store, &phase16_task_id(), Some(session_id))
+            .map_err(|error| error.to_string())?;
+        Ok(agent_output_artifacts_from_events(&events))
+    })
+    .await
+    .map_err(|error| format!("agent outputs load failed to join: {error}"))?
 }
 
 #[tauri::command]
@@ -2889,7 +3452,7 @@ fn append_agent_progress_event(
         summary,
         run_context.clone(),
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| format!("failed to record agent progress `{summary}`: {error}"))?;
     Ok(())
 }
 
@@ -3501,9 +4064,13 @@ fn run_agent_task_blocking_inner(
         &run_context,
         history,
         config.context_window_tokens,
-    )?;
+    )
+    .map_err(|error| format!("context preparation failed: {error}"))?;
 
-    if let Some(skill_context) = skill_catalog_for_root(&root).context_for_prompt(&prompt)? {
+    if let Some(skill_context) = skill_catalog_for_root(&root)
+        .context_for_prompt(&prompt)
+        .map_err(|error| format!("skill context preparation failed: {error}"))?
+    {
         history.push(Message {
             role: MessageRole::System,
             content: skill_context,
@@ -3724,7 +4291,11 @@ fn retry_agent_task_blocking(
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
         let events = store
-            .list_by_task(&phase16_task_id())
+            .list_by_task_and_metadata_or_unscoped(
+                &phase16_task_id(),
+                "session_id",
+                &session_id,
+            )
             .map_err(|error| error.to_string())?;
         let active_events = active_agent_events_for_session(&events, Some(&session_id));
         agent_effort_from_active_events(&active_events)
@@ -4503,6 +5074,7 @@ fn run_tool(
     input: ToolRunInput,
 ) -> Result<Phase5State, String> {
     let root = active_workspace_root(&state)?;
+    let run_context = project_session_metadata_for_session(&state, None)?;
     let tool_name = input.tool_name.trim().to_string();
     let task_id = phase5_task_id();
     let invocation = ToolInvocation {
@@ -4511,7 +5083,7 @@ fn run_tool(
         tool_name: tool_name.clone(),
         input_json: input.input,
         proposed_by_model: "local-user".to_string(),
-        metadata: Metadata::new(),
+        metadata: run_context,
     };
     let registry = tool_registry_for_state(&state, &root)?;
     let Some(tool) = registry.get(&tool_name) else {
@@ -4537,6 +5109,12 @@ fn run_tool(
         request
             .metadata
             .insert("tool_name".to_string(), invocation.tool_name.clone());
+        for (key, value) in &invocation.metadata {
+            request
+                .metadata
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
         store
             .save_permission_request(request.clone(), current_time_millis())
             .map_err(|error| error.to_string())?;
@@ -5206,21 +5784,23 @@ fn get_phase8_state(state: tauri::State<'_, AppState>) -> Result<Phase8State, St
 }
 
 #[tauri::command]
-fn get_context_state(
-    state: tauri::State<'_, AppState>,
+async fn get_context_state(
+    app: tauri::AppHandle,
     session_id: Option<String>,
 ) -> Result<ContextState, String> {
-    let run_context = project_session_metadata_for_session(&state, session_id.as_deref())?;
-    let root = run_context
-        .get("project_root")
-        .map(PathBuf::from)
-        .unwrap_or(active_workspace_root(&state)?);
-    let store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let run_context = project_session_metadata_for_session(&state, session_id.as_deref())?;
+        let root = run_context
+            .get("project_root")
+            .map(PathBuf::from)
+            .unwrap_or(active_workspace_root(&state)?);
+        let store = open_app_read_store()?;
 
-    context_state(&store, &root, &run_context, None, None)
+        context_state(&store, &root, &run_context, None, None)
+    })
+    .await
+    .map_err(|error| format!("context state load failed to join: {error}"))?
 }
 
 #[tauri::command]
@@ -5322,6 +5902,12 @@ fn run_browser_tool(
         request
             .metadata
             .insert("tool_name".to_string(), invocation.tool_name.clone());
+        for (key, value) in &invocation.metadata {
+            request
+                .metadata
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
         store
             .save_permission_request(request.clone(), current_time_millis())
             .map_err(|error| error.to_string())?;
@@ -5551,10 +6137,9 @@ pub fn run() {
             allow_exit: AtomicBool::new(false),
             quit_prompt_active: AtomicBool::new(false),
         })
-        .on_page_load(|webview, payload| {
-            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
-                let _ = webview.window().show();
-            }
+        .setup(|app| {
+            schedule_main_window_reveal_fallback(app.handle().clone());
+            Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -5564,6 +6149,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            reveal_main_window,
             get_runtime_status,
             get_sidecar_state,
             save_sidecar_config,
@@ -5598,14 +6184,20 @@ pub fn run() {
             pick_workspace_folder,
             save_workspace_root,
             get_phase3_state,
+            get_permission_review_state,
             request_mock_permission,
             resolve_permission,
             get_phase4_state,
             save_provider_config,
+            set_prompt_evolution_enabled,
             list_provider_models,
             send_model_prompt,
             get_agent_state,
+            get_agent_state_revision,
+            get_agent_state_delta,
+            get_agent_history_page,
             get_agent_trace_state,
+            get_agent_session_outputs,
             export_agent_trace_jsonl,
             run_agent_task,
             cancel_agent_task,
@@ -6051,8 +6643,98 @@ fn phase3_state(store: &SqliteStore) -> Result<Phase3State, StorageError> {
     })
 }
 
-fn phase4_state(
+fn permission_review_state(
     store: &SqliteStore,
+    project_sessions: &ProjectSessionConfig,
+) -> Result<PermissionReviewState, StorageError> {
+    let pending = store
+        .list_permission_audits()?
+        .into_iter()
+        .filter(|record| record.resolution.is_none())
+        .map(|record| permission_review_item(record, project_sessions))
+        .collect();
+    Ok(PermissionReviewState { pending })
+}
+
+fn permission_review_item(
+    record: PermissionAuditRecord,
+    project_sessions: &ProjectSessionConfig,
+) -> PermissionReviewItem {
+    let phase = record.request.metadata.get("phase").map(String::as_str);
+    let source = match phase {
+        Some("16") => "agent",
+        Some("8") => "browser",
+        Some("5") => "tool",
+        _ if record.request.task_id == phase16_task_id() => "agent",
+        _ if record.request.task_id == phase8_task_id() => "browser",
+        _ if record.request.task_id == phase5_task_id() => "tool",
+        _ => "test",
+    };
+    let mut session_id = record.request.metadata.get("session_id").cloned();
+    if session_id.is_none() && source != "test" {
+        session_id = project_sessions
+            .active_session()
+            .map(|session| session.id.clone());
+    }
+    let session = session_id
+        .as_deref()
+        .and_then(|session_id| {
+            project_sessions
+                .sessions
+                .iter()
+                .find(|session| session.id == session_id)
+        });
+    let project_id = record
+        .request
+        .metadata
+        .get("project_id")
+        .cloned()
+        .or_else(|| session.map(|session| session.project_id.clone()));
+    let project = project_id.as_deref().and_then(|project_id| {
+        project_sessions
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+    });
+    let session_name = record
+        .request
+        .metadata
+        .get("session_name")
+        .cloned()
+        .or_else(|| session.map(|session| session.name.clone()));
+    let project_name = record
+        .request
+        .metadata
+        .get("project_name")
+        .cloned()
+        .or_else(|| project.map(|project| project.name.clone()));
+    let input = ["tool_input", "command", "path"]
+        .into_iter()
+        .find_map(|key| record.request.metadata.get(key))
+        .map(|value| redact_sensitive_text(value))
+        .unwrap_or_default();
+    let can_allow_session = source == "agent"
+        && !matches!(record.request.risk, PermissionRisk::Destructive);
+
+    PermissionReviewItem {
+        request_id: record.request.id.0,
+        action: redact_sensitive_text(&record.request.action),
+        risk: permission_risk_label(&record.request.risk).to_string(),
+        reason: redact_sensitive_text(&record.request.reason),
+        scope: redact_sensitive_text(&record.request.scope),
+        source: source.to_string(),
+        project_id,
+        project_name,
+        session_id,
+        session_name,
+        input,
+        requested_at_ms: record.requested_at_ms,
+        can_allow_session,
+    }
+}
+
+fn phase4_state(
+    store: &mut SqliteStore,
     config: &ProviderConfig,
     last_error: Option<String>,
 ) -> Result<Phase4State, StorageError> {
@@ -6070,6 +6752,7 @@ fn phase4_state(
 
     Ok(Phase4State {
         provider: provider_config_state(config),
+        prompt_evolution: prompt_evolution_state(store, config)?,
         timeline,
         messages,
         last_error,
@@ -6366,9 +7049,15 @@ fn collect_context_events(
 ) -> Result<Vec<Event>, StorageError> {
     let mut events = Vec::new();
     for task_id in context_task_ids() {
+        let task_events = if let Some(session_id) = run_context.get("session_id") {
+            store.list_by_task_and_metadata(&task_id, "session_id", session_id)?
+        } else if let Some(project_id) = run_context.get("project_id") {
+            store.list_by_task_and_metadata(&task_id, "project_id", project_id)?
+        } else {
+            store.list_by_task(&task_id)?
+        };
         events.extend(
-            store
-                .list_by_task(&task_id)?
+            task_events
                 .into_iter()
                 .filter(|event| event_matches_context(event, run_context))
                 .map(redact_event),
@@ -6566,6 +7255,73 @@ struct CollaborationQualityPayload {
     score: f32,
     #[serde(default)]
     issues: Vec<String>,
+    #[serde(default)]
+    safety_violations: u64,
+}
+
+struct AdaptiveQualityGateResult {
+    output: String,
+    score: f64,
+    safety_violations: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct PromptPairwiseEvaluationPayload {
+    score_a: f64,
+    score_b: f64,
+    #[serde(default)]
+    safety_violations_a: u64,
+    #[serde(default)]
+    safety_violations_b: u64,
+    #[serde(default)]
+    step_scores_a: BTreeMap<String, f64>,
+    #[serde(default)]
+    step_scores_b: BTreeMap<String, f64>,
+}
+
+#[derive(Debug, Clone)]
+struct PromptPlanCandidate {
+    genome: ConductorPromptGenome,
+    plan: Option<WorkflowPlanIr>,
+    raw_output: String,
+    latency_ms: u64,
+    total_tokens: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PromptExecutionStep {
+    id: String,
+    role: String,
+    succeeded: bool,
+    output: String,
+    latency_ms: u64,
+    total_tokens: u64,
+    evidence_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PromptWorkflowExecution {
+    succeeded: bool,
+    final_output: String,
+    steps: Vec<PromptExecutionStep>,
+    latency_ms: u64,
+    total_tokens: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PromptExecutionCandidate {
+    plan: PromptPlanCandidate,
+    execution: PromptWorkflowExecution,
+}
+
+type PromptEvaluationRunner = Arc<
+    dyn Fn(ModelRole, String, String) -> CollaborationCompletion + Send + Sync,
+>;
+
+#[derive(Debug, Clone)]
+struct PromptReplayCase {
+    objective: String,
+    task_class: String,
 }
 
 #[derive(Debug)]
@@ -6587,6 +7343,7 @@ struct AdaptiveCollaborationSpec {
     prompt: String,
     request_id: String,
     access: Vec<String>,
+    tool_policy: WorkflowToolPolicy,
 }
 
 #[derive(Debug)]
@@ -6598,7 +7355,7 @@ struct CollaborationCompletion {
     evidence: Vec<CollaborationEvidence>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CollaborationEvidence {
     source_step: String,
     tool_call_id: String,
@@ -6643,10 +7400,43 @@ fn collaboration_recent_context(history: &[Message]) -> String {
         .join("\n")
 }
 
+fn collaboration_context_for_genome(
+    history: &[Message],
+    policy: PromptContextPolicy,
+) -> String {
+    let (message_limit, default_chars, knowledge_chars) = match policy {
+        PromptContextPolicy::Recent => (4, 800, 3_000),
+        PromptContextPolicy::Relevant => (8, 1_200, 6_000),
+        PromptContextPolicy::Comprehensive => (20, 2_000, 10_000),
+    };
+    history
+        .iter()
+        .rev()
+        .take(message_limit)
+        .rev()
+        .map(|message| {
+            let max_chars = if message.metadata.get("kind").map(String::as_str)
+                == Some("knowledge_context")
+            {
+                knowledge_chars
+            } else {
+                default_chars
+            };
+            format!(
+                "{}: {}",
+                message_role_label(&message.role),
+                truncate_for_collaboration(&message.content, max_chars)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn build_collaboration_candidate_prompt(
     prompt: &str,
     recent_context: &str,
     candidate_index: usize,
+    conductor_directive: Option<&str>,
 ) -> String {
     let perspective = match candidate_index % 3 {
         0 => "Design the strongest execution strategy and identify the minimum decisive tool calls.",
@@ -6654,9 +7444,10 @@ fn build_collaboration_candidate_prompt(
         _ => "Develop an independent alternative approach and compare its tradeoffs with the obvious path.",
     };
     format!(
-        "You are independent candidate {} in a multi-model Cindx deliberation. {} Use exposed read-only evidence tools when local facts matter. Produce a concise, checkable execution brief for a separate tool-using executor. Do not answer the user directly and do not assume what other candidates will propose.\n\nUser request:\n{}\n\nRecent session context:\n{}",
+        "You are independent candidate {} in a multi-model Cindx deliberation. {} Use exposed read-only evidence tools when local facts matter. Produce a concise, checkable execution brief for a separate tool-using executor. Do not answer the user directly and do not assume what other candidates will propose.\n\nConductor policy:\n{}\n\nUser request:\n{}\n\nRecent session context:\n{}",
         candidate_index + 1,
         perspective,
+        conductor_directive.unwrap_or("Use the smallest sufficient collaboration strategy."),
         prompt,
         if recent_context.is_empty() {
             "(none)"
@@ -6669,6 +7460,7 @@ fn build_collaboration_candidate_prompt(
 fn build_collaboration_arbiter_prompt(
     prompt: &str,
     candidates: &[(String, String)],
+    conductor_directive: Option<&str>,
 ) -> String {
     let candidate_text = candidates
         .iter()
@@ -6683,8 +7475,10 @@ fn build_collaboration_arbiter_prompt(
         .collect::<Vec<_>>()
         .join("\n\n");
     format!(
-        "You are the arbiter for a multi-model Cindx deliberation. Compare the independent candidate briefs, preserve useful disagreements, reject unsupported assumptions, and synthesize one concrete execution brief for the tool-using executor. Treat worker reports as proposals and give greater weight to entries in their tool evidence ledgers. Do not answer the user directly.\n\nUser request:\n{}\n\nIndependent candidates:\n{}",
-        prompt, candidate_text
+        "You are the arbiter for a multi-model Cindx deliberation. Compare the independent candidate briefs, preserve useful disagreements, reject unsupported assumptions, and synthesize one concrete execution brief for the tool-using executor. Treat worker reports as proposals and give greater weight to entries in their tool evidence ledgers. Do not answer the user directly.\n\nConductor policy:\n{}\n\nUser request:\n{}\n\nIndependent candidates:\n{}",
+        conductor_directive.unwrap_or("Use the smallest sufficient collaboration strategy."),
+        prompt,
+        candidate_text
     )
 }
 
@@ -6704,7 +7498,7 @@ fn adaptive_stage_metadata(spec: &AdaptiveCollaborationSpec) -> Metadata {
         ),
         (
             "tool_policy".to_string(),
-            "read_only_evidence".to_string(),
+            spec.tool_policy.label().to_string(),
         ),
     ]
     .into_iter()
@@ -7476,6 +8270,168 @@ fn run_collaboration_stage_with_delta(
     })
 }
 
+const WORKFLOW_RESUMABLE_ERROR_PREFIX: &str = "workflow checkpoint saved:";
+
+fn stable_workflow_resume_key(value: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("workflow-resume-{hash:016x}")
+}
+
+fn workflow_resume_key_from_events(
+    events: &[Event],
+    session_id: Option<&str>,
+    prompt: &str,
+    effort: &str,
+    policy: &str,
+) -> String {
+    let user_sequence = events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.kind == EventKind::MessageAdded
+                && event.metadata.get("role").map(String::as_str) == Some("user")
+        })
+        .map(|event| event.sequence)
+        .unwrap_or_default();
+    stable_workflow_resume_key(&format!(
+        "{}\n{}\n{}\n{}\n{}",
+        session_id.unwrap_or_default(),
+        user_sequence,
+        effort,
+        policy,
+        prompt
+    ))
+}
+
+fn resumable_workflow_checkpoint_from_events(
+    events: &[Event],
+    resume_key: &str,
+    prompt: &str,
+    allowed_models: &[String],
+) -> Option<WorkflowExecutionCheckpoint> {
+    let event = events.iter().rev().find(|event| {
+        event.metadata.get("workflow_resume_key").map(String::as_str) == Some(resume_key)
+            && event.metadata.contains_key("workflow_checkpoint")
+    })?;
+    let encoded = event.metadata.get("workflow_checkpoint")?;
+    let checkpoint = WorkflowExecutionCheckpoint::from_json(encoded, allowed_models).ok()?;
+    (!checkpoint.is_complete() && checkpoint.plan.objective == prompt).then_some(checkpoint)
+}
+
+fn load_workflow_checkpoint_for_run(
+    state: &tauri::State<'_, AppState>,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    prompt: &str,
+    effort: &str,
+    policy: &str,
+    allowed_models: &[String],
+) -> Result<(String, Option<WorkflowExecutionCheckpoint>), String> {
+    let session_id = run_context.get("session_id").map(String::as_str);
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let events = match session_id {
+        Some(session_id) => store
+            .list_by_task_and_metadata_or_unscoped(task_id, "session_id", session_id)
+            .map_err(|error| error.to_string())?,
+        None => store.list_by_task(task_id).map_err(|error| error.to_string())?,
+    };
+    let resume_key = workflow_resume_key_from_events(events.as_slice(), session_id, prompt, effort, policy);
+    let checkpoint = resumable_workflow_checkpoint_from_events(
+        events.as_slice(),
+        &resume_key,
+        prompt,
+        allowed_models,
+    );
+    Ok((resume_key, checkpoint))
+}
+
+fn append_workflow_checkpoint_event(
+    state: &tauri::State<'_, AppState>,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    collaboration_id: &str,
+    summary: &str,
+    status: &str,
+    step_id: Option<&str>,
+    checkpoint: &WorkflowExecutionCheckpoint,
+) -> Result<(), String> {
+    let encoded = checkpoint.to_json()?;
+    let mut metadata = [
+        ("collaboration_id".to_string(), collaboration_id.to_string()),
+        ("workflow_schema".to_string(), WORKFLOW_IR_SCHEMA.to_string()),
+        (
+            "workflow_checkpoint_schema".to_string(),
+            WORKFLOW_CHECKPOINT_SCHEMA.to_string(),
+        ),
+        (
+            "workflow_resume_key".to_string(),
+            checkpoint.resume_key.clone(),
+        ),
+        ("workflow_checkpoint".to_string(), encoded),
+        ("checkpoint_status".to_string(), status.to_string()),
+        (
+            "completed_steps".to_string(),
+            checkpoint.completed_step_count().to_string(),
+        ),
+        (
+            "workflow_steps".to_string(),
+            checkpoint.plan.steps.len().to_string(),
+        ),
+        (
+            "workflow_continuations".to_string(),
+            checkpoint.continuations.to_string(),
+        ),
+        (
+            "additional_model_turns_per_step".to_string(),
+            checkpoint.additional_model_turns_per_step.to_string(),
+        ),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    if let Some(step_id) = step_id {
+        metadata.insert("step_id".to_string(), step_id.to_string());
+        if let Some(step) = checkpoint.steps.get(step_id) {
+            metadata.insert("step_status".to_string(), format!("{:?}", step.status).to_lowercase());
+            metadata.insert("step_attempts".to_string(), step.attempts.to_string());
+            metadata.insert("step_model".to_string(), step.model.clone());
+        }
+    }
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    append_event(
+        &mut store,
+        task_id,
+        EventKind::TaskStatusChanged,
+        summary,
+        metadata_with_context(metadata, run_context),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn checkpoint_evidence_by_step(
+    checkpoint: &WorkflowExecutionCheckpoint,
+) -> BTreeMap<String, Vec<CollaborationEvidence>> {
+    checkpoint
+        .steps
+        .iter()
+        .filter(|(_, step)| step.status == WorkflowStepStatus::Completed)
+        .filter_map(|(step_id, step)| {
+            serde_json::from_str::<Vec<CollaborationEvidence>>(&step.evidence_json)
+                .ok()
+                .map(|evidence| (step_id.clone(), evidence))
+        })
+        .collect()
+}
+
 fn run_adaptive_collaboration(
     app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
@@ -7494,95 +8450,348 @@ fn run_adaptive_collaboration(
     }
     let workflow_started_at_ms = current_time_millis();
     let conductor_model = config.model_for_conductor();
-    let prior = workflow_prior_for_run(state, run_context, models, agent_budget)?;
-    let harness = ConductorHarness::new(ConductorRequest {
-        workflow_id: collaboration_id.to_string(),
-        objective: prompt.to_string(),
-        recent_context: collaboration_recent_context(history),
-        effort: run_context
-            .get("agent_effort")
-            .cloned()
-            .unwrap_or_else(|| "auto".to_string()),
-        policy: run_context
-            .get("collaboration_policy")
-            .cloned()
-            .unwrap_or_else(|| "best_of_n".to_string()),
-        conductor_model: conductor_model.clone(),
-        worker_models: models.to_vec(),
-        role_hints: ConductorRoleHints {
-            planner: config.model_for_role(&ModelRole::Planner),
-            executor: config.model_for_role(&ModelRole::Executor),
-            reviewer: config.model_for_role(&ModelRole::Reviewer),
-            synthesizer: config.model_for_role(&ModelRole::Summarizer),
-        },
-        budget: WorkflowBudget {
-            max_steps: adaptive_workflow_step_budget(agent_budget),
-            max_models: agent_budget.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS),
-            max_model_turns_per_step: DEFAULT_COLLABORATION_WORKER_TURNS,
-            max_tool_calls_per_step: MAX_COLLABORATION_WORKER_TOOL_CALLS,
-            max_output_tokens_per_step: COLLABORATION_MAX_OUTPUT_TOKENS as usize,
-        },
-        prior_hint: prior.as_ref().map(WorkflowTopologyPrior::prompt_hint),
-    });
-    let mut conductor_response = run_collaboration_stage(
+    let effort = run_context
+        .get("agent_effort")
+        .cloned()
+        .unwrap_or_else(|| "auto".to_string());
+    let policy = run_context
+        .get("collaboration_policy")
+        .cloned()
+        .unwrap_or_else(|| "best_of_n".to_string());
+    let (resume_key, mut workflow_checkpoint) = load_workflow_checkpoint_for_run(
         state,
-        config,
         task_id,
         run_context,
-        collaboration_id,
-        "conductor_plan",
-        ModelRole::Planner,
-        &conductor_model,
-        harness.planning_prompt(),
+        prompt,
+        &effort,
+        &policy,
+        models,
     )?;
-    let mut conductor_attempts = 1usize;
-    let workflow_plan = loop {
-        match harness.parse_plan(&conductor_response) {
-            Ok(plan) => break plan,
-            Err(error) if conductor_attempts < CONDUCTOR_MAX_ATTEMPTS => {
-                if let Ok(mut store) = state.store.lock() {
-                    let _ = append_event(
-                        &mut store,
-                        task_id,
-                        EventKind::TaskStatusChanged,
-                        "Conductor workflow rejected",
-                        metadata_with_context(
-                            [
-                                ("collaboration_id".to_string(), collaboration_id.to_string()),
-                                ("attempt".to_string(), conductor_attempts.to_string()),
-                                (
-                                    "validation_error".to_string(),
-                                    truncate_for_collaboration(&error, 2_000),
-                                ),
-                            ]
-                            .into_iter()
-                            .collect(),
-                            run_context,
-                        ),
-                    );
-                }
-                conductor_response = run_collaboration_stage(
-                    state,
-                    config,
-                    task_id,
-                    run_context,
-                    collaboration_id,
-                    "conductor_repair",
-                    ModelRole::Planner,
-                    &conductor_model,
-                    harness.repair_prompt(&conductor_response, &error),
-                )?;
-                conductor_attempts += 1;
-            }
-            Err(error) => return Err(format!(
-                "Conductor failed to produce a valid workflow after {conductor_attempts} attempts: {error}"
-            )),
+    let resumed_from_workflow_id = workflow_checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.plan.workflow_id.clone());
+    if let Some(checkpoint) = workflow_checkpoint.as_mut() {
+        checkpoint.plan.workflow_id = collaboration_id.to_string();
+        let additional_turns = checkpoint.plan.budget.max_model_turns_per_step;
+        checkpoint.continue_with_budget(additional_turns, workflow_started_at_ms);
+    }
+    let resumed_from_checkpoint = workflow_checkpoint.is_some();
+    let prior = if resumed_from_checkpoint {
+        None
+    } else {
+        workflow_prior_for_run(state, run_context, models, agent_budget)?
+    };
+    let evolution = if !resumed_from_checkpoint && config.prompt_evolution_enabled {
+        Some(prompt_evolution_evaluation_for_run(
+            state,
+            &effort,
+            run_context,
+        )?)
+    } else {
+        None
+    };
+    let selection_mode = if resumed_from_checkpoint {
+        "checkpoint_resume".to_string()
+    } else {
+        evolution
+            .as_ref()
+            .map(|evaluation| evaluation.next_mode.clone())
+            .unwrap_or_else(|| "baseline".to_string())
+    };
+    let mut prompt_genome = workflow_checkpoint
+        .as_ref()
+        .and_then(|checkpoint| {
+            serde_json::from_str::<ConductorPromptGenome>(&checkpoint.prompt_genome_json).ok()
+        })
+        .or_else(|| evolution.as_ref().map(|evaluation| evaluation.next_profile.clone()))
+        .unwrap_or_else(|| ConductorPromptGenome::seed_for_effort(&effort));
+    if resumed_from_checkpoint {
+        if let Some(profile) = workflow_checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.plan.prompt_profile.clone())
+        {
+            prompt_genome.id = profile;
         }
+    }
+    if let Some((parent, feedback)) = evolution.as_ref().and_then(|evaluation| {
+        evaluation
+            .mutation_parent
+            .clone()
+            .map(|parent| (parent, evaluation.mutation_feedback.clone()))
+    }) {
+        if let Ok(response) = run_collaboration_stage(
+            state,
+            config,
+            task_id,
+            run_context,
+            collaboration_id,
+            "prompt_evolution_mutation",
+            ModelRole::Planner,
+            &conductor_model,
+            parent.mutation_prompt(&feedback),
+        ) {
+            let mutation_id = format!(
+                "learned-{}-g{}-{}",
+                effort,
+                parent.generation.saturating_add(1),
+                unique_id("profile")
+            );
+            match parent.learned_mutation_from_response(&response, mutation_id) {
+                Ok(mutation) => {
+                    if let Ok(mut store) = state.store.lock() {
+                        let _ = append_event(
+                            &mut store,
+                            task_id,
+                            EventKind::TaskStatusChanged,
+                            "Conductor prompt mutation generated",
+                            metadata_with_context(
+                                [
+                                    (
+                                        "collaboration_id".to_string(),
+                                        collaboration_id.to_string(),
+                                    ),
+                                    ("prompt_effort".to_string(), effort.clone()),
+                                    ("parent_profile".to_string(), parent.id.clone()),
+                                    ("prompt_profile".to_string(), mutation.id.clone()),
+                                    (
+                                        "prompt_generation".to_string(),
+                                        mutation.generation.to_string(),
+                                    ),
+                                    (
+                                        "prompt_genome".to_string(),
+                                        serde_json::to_string(&mutation)
+                                            .unwrap_or_else(|_| "{}".to_string()),
+                                    ),
+                                    (
+                                        "promotion_status".to_string(),
+                                        "evaluation_required".to_string(),
+                                    ),
+                                ]
+                                .into_iter()
+                                .collect(),
+                                run_context,
+                            ),
+                        );
+                    }
+                }
+                Err(error) => {
+                    if let Ok(mut store) = state.store.lock() {
+                        let _ = append_event(
+                            &mut store,
+                            task_id,
+                            EventKind::TaskStatusChanged,
+                            "Conductor prompt mutation rejected",
+                            metadata_with_context(
+                                [
+                                    ("collaboration_id".to_string(), collaboration_id.to_string()),
+                                    ("prompt_effort".to_string(), effort.clone()),
+                                    ("parent_profile".to_string(), parent.id.clone()),
+                                    (
+                                        "validation_error".to_string(),
+                                        truncate_for_collaboration(&error, 1_000),
+                                    ),
+                                ]
+                                .into_iter()
+                                .collect(),
+                                run_context,
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let prompt_genome_json = serde_json::to_string(&prompt_genome)
+        .map_err(|error| format!("failed to serialize prompt genome: {error}"))?;
+    {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        append_event(
+            &mut store,
+            task_id,
+            EventKind::TaskStatusChanged,
+            "Conductor prompt profile selected",
+            metadata_with_context(
+                [
+                    ("collaboration_id".to_string(), collaboration_id.to_string()),
+                    ("prompt_profile".to_string(), prompt_genome.id.clone()),
+                    ("prompt_effort".to_string(), effort.clone()),
+                    ("prompt_generation".to_string(), prompt_genome.generation.to_string()),
+                    ("prompt_genome".to_string(), prompt_genome_json.clone()),
+                    ("prompt_selection_mode".to_string(), selection_mode.clone()),
+                    ("workflow_resume_key".to_string(), resume_key.clone()),
+                    (
+                        "prompt_evolution_status".to_string(),
+                        if resumed_from_checkpoint {
+                            "checkpoint_resume".to_string()
+                        } else {
+                            evolution
+                                .as_ref()
+                                .map(|evaluation| evaluation.status.clone())
+                                .unwrap_or_else(|| "disabled".to_string())
+                        },
+                    ),
+                    (
+                        "prompt_champion".to_string(),
+                        evolution
+                            .as_ref()
+                            .and_then(|evaluation| evaluation.champion_id.clone())
+                            .unwrap_or_default(),
+                    ),
+                    (
+                        "prompt_evolution_enabled".to_string(),
+                        config.prompt_evolution_enabled.to_string(),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                run_context,
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    let (workflow_plan, conductor_attempts) = if let Some(checkpoint) = workflow_checkpoint.as_ref()
+    {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        append_event(
+            &mut store,
+            task_id,
+            EventKind::TaskStatusChanged,
+            "Collaboration workflow resumed",
+            metadata_with_context(
+                [
+                    ("collaboration_id".to_string(), collaboration_id.to_string()),
+                    ("workflow_resume_key".to_string(), resume_key.clone()),
+                    (
+                        "resumed_from_workflow_id".to_string(),
+                        resumed_from_workflow_id.clone().unwrap_or_default(),
+                    ),
+                    (
+                        "completed_steps".to_string(),
+                        checkpoint.completed_step_count().to_string(),
+                    ),
+                    (
+                        "workflow_steps".to_string(),
+                        checkpoint.plan.steps.len().to_string(),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                run_context,
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        (checkpoint.plan.clone(), 0)
+    } else {
+        let harness = ConductorHarness::new(ConductorRequest {
+            workflow_id: collaboration_id.to_string(),
+            objective: prompt.to_string(),
+            recent_context: collaboration_context_for_genome(
+                history,
+                prompt_genome.context_policy,
+            ),
+            effort: effort.clone(),
+            policy: policy.clone(),
+            conductor_model: conductor_model.clone(),
+            worker_models: models.to_vec(),
+            role_hints: ConductorRoleHints {
+                planner: config.model_for_role(&ModelRole::Planner),
+                executor: config.model_for_role(&ModelRole::Executor),
+                reviewer: config.model_for_role(&ModelRole::Reviewer),
+                synthesizer: config.model_for_role(&ModelRole::Summarizer),
+            },
+            budget: WorkflowBudget {
+                max_steps: adaptive_workflow_step_budget(agent_budget),
+                max_models: agent_budget.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS),
+                max_model_turns_per_step: DEFAULT_COLLABORATION_WORKER_TURNS,
+                max_tool_calls_per_step: MAX_COLLABORATION_WORKER_TOOL_CALLS,
+                max_output_tokens_per_step: COLLABORATION_MAX_OUTPUT_TOKENS as usize,
+            },
+            prior_hint: prior.as_ref().map(WorkflowTopologyPrior::prompt_hint),
+            prompt_evolution_enabled: config.prompt_evolution_enabled,
+            prompt_genome: prompt_genome.clone(),
+        });
+        let mut conductor_response = run_collaboration_stage(
+            state,
+            config,
+            task_id,
+            run_context,
+            collaboration_id,
+            "conductor_plan",
+            ModelRole::Planner,
+            &conductor_model,
+            harness.planning_prompt(),
+        )?;
+        let mut conductor_attempts = 1usize;
+        let workflow_plan = loop {
+            match harness.parse_plan(&conductor_response) {
+                Ok(plan) => break plan,
+                Err(error) if conductor_attempts < CONDUCTOR_MAX_ATTEMPTS => {
+                    if let Ok(mut store) = state.store.lock() {
+                        let _ = append_event(
+                            &mut store,
+                            task_id,
+                            EventKind::TaskStatusChanged,
+                            "Conductor workflow rejected",
+                            metadata_with_context(
+                                [
+                                    (
+                                        "collaboration_id".to_string(),
+                                        collaboration_id.to_string(),
+                                    ),
+                                    ("attempt".to_string(), conductor_attempts.to_string()),
+                                    (
+                                        "validation_error".to_string(),
+                                        truncate_for_collaboration(&error, 2_000),
+                                    ),
+                                ]
+                                .into_iter()
+                                .collect(),
+                                run_context,
+                            ),
+                        );
+                    }
+                    conductor_response = run_collaboration_stage(
+                        state,
+                        config,
+                        task_id,
+                        run_context,
+                        collaboration_id,
+                        "conductor_repair",
+                        ModelRole::Planner,
+                        &conductor_model,
+                        harness.repair_prompt(&conductor_response, &error),
+                    )?;
+                    conductor_attempts += 1;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "Conductor failed to produce a valid workflow after {conductor_attempts} attempts: {error}"
+                    ))
+                }
+            }
+        };
+        (workflow_plan, conductor_attempts)
     };
     let workflow = workflow_plan.adaptive_workflow();
     let layers = adaptive_workflow_layers(&workflow)?;
     let layer_count = layers.len();
     let workflow_ir = workflow_plan.to_json()?;
+    let mut workflow_checkpoint = workflow_checkpoint.take().unwrap_or_else(|| {
+        WorkflowExecutionCheckpoint::new(
+            resume_key.clone(),
+            workflow_plan.clone(),
+            workflow_started_at_ms,
+        )
+    });
+    workflow_checkpoint.plan = workflow_plan.clone();
+    workflow_checkpoint.prompt_genome_json = prompt_genome_json.clone();
+    workflow_checkpoint.validate(models)?;
     {
         let workflow_summary = workflow
             .steps
@@ -7618,7 +8827,31 @@ fn run_adaptive_collaboration(
                     ("collaboration_id".to_string(), collaboration_id.to_string()),
                     ("workflow_schema".to_string(), WORKFLOW_IR_SCHEMA.to_string()),
                     ("workflow_ir".to_string(), workflow_ir),
-                    ("conductor_version".to_string(), "agent_v1".to_string()),
+                    ("workflow_resume_key".to_string(), resume_key.clone()),
+                    (
+                        "workflow_checkpoint_schema".to_string(),
+                        WORKFLOW_CHECKPOINT_SCHEMA.to_string(),
+                    ),
+                    (
+                        "resumed".to_string(),
+                        resumed_from_checkpoint.to_string(),
+                    ),
+                    (
+                        "prompt_profile".to_string(),
+                        workflow_plan.prompt_profile.clone(),
+                    ),
+                    ("prompt_effort".to_string(), effort.clone()),
+                    ("prompt_generation".to_string(), prompt_genome.generation.to_string()),
+                    ("prompt_genome".to_string(), prompt_genome_json.clone()),
+                    ("prompt_selection_mode".to_string(), selection_mode.clone()),
+                    (
+                        "prompt_evolution_status".to_string(),
+                        evolution
+                            .as_ref()
+                            .map(|evaluation| evaluation.status.clone())
+                            .unwrap_or_else(|| "disabled".to_string()),
+                    ),
+                    ("conductor_version".to_string(), "agent_v2".to_string()),
                     ("conductor_model".to_string(), conductor_model.clone()),
                     (
                         "conductor_attempts".to_string(),
@@ -7627,7 +8860,7 @@ fn run_adaptive_collaboration(
                     (
                         "conductor_source".to_string(),
                         if prior.is_some() {
-                            "search_teacher_v1"
+                            "pareto_search_teacher_v2"
                         } else {
                             "model_cold_start"
                         }
@@ -7660,18 +8893,49 @@ fn run_adaptive_collaboration(
         )
         .map_err(|error| error.to_string())?;
     }
-    let shared_memory = collaboration_recent_context(history);
-    let mut outputs = BTreeMap::new();
-    let mut evidence_by_step = BTreeMap::<String, Vec<CollaborationEvidence>>::new();
+    append_workflow_checkpoint_event(
+        state,
+        task_id,
+        run_context,
+        collaboration_id,
+        if resumed_from_checkpoint {
+            "Collaboration workflow checkpoint restored"
+        } else {
+            "Collaboration workflow checkpoint created"
+        },
+        if resumed_from_checkpoint {
+            "resumed"
+        } else {
+            "planned"
+        },
+        None,
+        &workflow_checkpoint,
+    )?;
+    let shared_memory = collaboration_context_for_genome(
+        history,
+        prompt_genome.context_policy,
+    );
+    let mut outputs = workflow_checkpoint.completed_outputs();
+    let mut evidence_by_step = checkpoint_evidence_by_step(&workflow_checkpoint);
 
     for (layer_index, layer) in layers.into_iter().enumerate() {
+        let layer = workflow_checkpoint.runnable_step_indices(&layer)?;
+        if layer.is_empty() {
+            continue;
+        }
         if let Some(control) = active_agent_run_control(
             state,
             run_context.get("session_id").map(String::as_str),
         )? {
             control.mark_progress(
                 "collaboration",
-                &format!("Layer {}/{}", layer_index + 1, layer_count),
+                &format!(
+                    "Layer {}/{} · {}/{} steps restored",
+                    layer_index + 1,
+                    layer_count,
+                    workflow_checkpoint.completed_step_count(),
+                    workflow_plan.steps.len()
+                ),
             );
         }
         {
@@ -7719,11 +8983,23 @@ fn run_adaptive_collaboration(
                     prompt: worker_prompt,
                     request_id: unique_id("collaboration-model"),
                     access: step.access.clone(),
+                    tool_policy: workflow_plan.steps[step_index].tool_policy.clone(),
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
 
         for spec in &specs {
+            workflow_checkpoint.begin_step(&spec.step_id, &spec.model, current_time_millis())?;
+            append_workflow_checkpoint_event(
+                state,
+                task_id,
+                run_context,
+                collaboration_id,
+                "Collaboration workflow step started",
+                "running",
+                Some(&spec.step_id),
+                &workflow_checkpoint,
+            )?;
             let metadata = adaptive_stage_metadata(spec);
             let role = adaptive_model_role(&spec.role);
             record_collaboration_stage_started(
@@ -7756,6 +9032,7 @@ fn run_adaptive_collaboration(
                 let model = spec.model.clone();
                 let role = adaptive_model_role(&spec.role);
                 let prompt = spec.prompt.clone();
+                let allow_tools = spec.tool_policy != WorkflowToolPolicy::None;
                 let cancellation = cancellation.clone();
                 std::thread::spawn(move || {
                     complete_collaboration_worker_with_tools(
@@ -7769,7 +9046,7 @@ fn run_adaptive_collaboration(
                         role,
                         model,
                         prompt,
-                        true,
+                        allow_tools,
                         cancellation,
                     )
                 })
@@ -7783,13 +9060,6 @@ fn run_adaptive_collaboration(
                 })
             })
             .collect::<Vec<_>>();
-
-        if cancellation
-            .as_ref()
-            .is_some_and(|control| agent_run_should_stop(control))
-        {
-            return Err(MODEL_REQUEST_CANCELLED.to_string());
-        }
 
         for (spec, completion) in specs.iter().zip(&completions) {
             let metadata = adaptive_stage_metadata(spec);
@@ -7806,14 +9076,36 @@ fn run_adaptive_collaboration(
                 completion,
                 &metadata,
             )?;
-            let content = if let Some(content) = completion
+            if completion.content.as_ref().is_none_or(|content| content.trim().is_empty())
+                && cancellation
+                    .as_ref()
+                    .is_some_and(|control| agent_run_should_stop(control))
+            {
+                workflow_checkpoint.fail_step(
+                    &spec.step_id,
+                    MODEL_REQUEST_CANCELLED,
+                    current_time_millis(),
+                )?;
+                append_workflow_checkpoint_event(
+                    state,
+                    task_id,
+                    run_context,
+                    collaboration_id,
+                    "Collaboration workflow step paused",
+                    "paused",
+                    Some(&spec.step_id),
+                    &workflow_checkpoint,
+                )?;
+                continue;
+            }
+            let (content, completed_model) = if let Some(content) = completion
                 .content
                 .as_ref()
                 .filter(|content| !content.trim().is_empty())
             {
-                content.clone()
+                (content.clone(), spec.model.clone())
             } else {
-                recover_adaptive_worker(
+                match recover_adaptive_worker(
                     state,
                     config,
                     task_id,
@@ -7823,23 +9115,86 @@ fn run_adaptive_collaboration(
                     spec,
                     completion,
                     models,
-                )?
+                    prompt_genome.retry_policy,
+                ) {
+                    Ok(recovered) => {
+                        workflow_checkpoint.begin_step(
+                            &spec.step_id,
+                            &recovered.1,
+                            current_time_millis(),
+                        )?;
+                        recovered
+                    }
+                    Err(error) => {
+                        workflow_checkpoint.fail_step(
+                            &spec.step_id,
+                            &error,
+                            current_time_millis(),
+                        )?;
+                        append_workflow_checkpoint_event(
+                            state,
+                            task_id,
+                            run_context,
+                            collaboration_id,
+                            "Collaboration workflow step failed",
+                            "failed",
+                            Some(&spec.step_id),
+                            &workflow_checkpoint,
+                        )?;
+                        return Err(format!(
+                            "{WORKFLOW_RESUMABLE_ERROR_PREFIX} step {} failed after recovery: {error}",
+                            spec.step_id
+                        ));
+                    }
+                }
             };
             let shared_evidence = merge_collaboration_evidence(
                 &spec.access,
                 &evidence_by_step,
                 &completion.evidence,
             );
-            outputs.insert(
-                spec.step_id.clone(),
-                collaboration_step_result(
-                    &spec.step_id,
-                    &spec.model,
-                    &content,
-                    &shared_evidence,
-                ),
+            let step_output = collaboration_step_result(
+                &spec.step_id,
+                &completed_model,
+                &content,
+                &shared_evidence,
             );
+            let evidence_json = serde_json::to_string(&shared_evidence)
+                .map_err(|error| format!("workflow evidence serialization failed: {error}"))?;
+            workflow_checkpoint.complete_step(
+                &spec.step_id,
+                &completed_model,
+                step_output.clone(),
+                evidence_json,
+                current_time_millis(),
+            )?;
+            workflow_checkpoint.record_step_metrics(
+                &spec.step_id,
+                completion.latency_ms,
+                completion
+                    .usage
+                    .get("total_tokens")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or_default(),
+            )?;
+            outputs.insert(spec.step_id.clone(), step_output);
             evidence_by_step.insert(spec.step_id.clone(), shared_evidence);
+            append_workflow_checkpoint_event(
+                state,
+                task_id,
+                run_context,
+                collaboration_id,
+                "Collaboration workflow step checkpointed",
+                "completed",
+                Some(&spec.step_id),
+                &workflow_checkpoint,
+            )?;
+        }
+        if cancellation
+            .as_ref()
+            .is_some_and(|control| agent_run_should_stop(control))
+        {
+            return Err(MODEL_REQUEST_CANCELLED.to_string());
         }
     }
 
@@ -7851,7 +9206,7 @@ fn run_adaptive_collaboration(
         .remove(&final_step.id)
         .ok_or_else(|| "adaptive workflow final output is missing".to_string())?;
     let evidence_count = evidence_by_step.values().map(Vec::len).sum::<usize>();
-    let final_output = quality_gate_adaptive_output(
+    let quality_gate = quality_gate_adaptive_output(
         state,
         config,
         task_id,
@@ -7859,7 +9214,21 @@ fn run_adaptive_collaboration(
         collaboration_id,
         prompt,
         &final_output,
+        prompt_genome.verification,
     );
+    let step_credits = workflow_checkpoint.assign_step_credits(quality_gate.score);
+    let final_output = quality_gate.output;
+    workflow_checkpoint.finalize(final_output.clone(), current_time_millis())?;
+    append_workflow_checkpoint_event(
+        state,
+        task_id,
+        run_context,
+        collaboration_id,
+        "Collaboration workflow checkpoint finalized",
+        "completed",
+        Some(&final_step.id),
+        &workflow_checkpoint,
+    )?;
     {
         let mut store = state
             .store
@@ -7880,6 +9249,14 @@ fn run_adaptive_collaboration(
                     ("workflow_layers".to_string(), layer_count.to_string()),
                     ("evidence_count".to_string(), evidence_count.to_string()),
                     (
+                        "step_credits".to_string(),
+                        serde_json::to_string(&step_credits).unwrap_or_else(|_| "[]".to_string()),
+                    ),
+                    (
+                        "safety_violations".to_string(),
+                        quality_gate.safety_violations.to_string(),
+                    ),
+                    (
                         "latency_ms".to_string(),
                         current_time_millis()
                             .saturating_sub(workflow_started_at_ms)
@@ -7892,6 +9269,20 @@ fn run_adaptive_collaboration(
             ),
         )
         .map_err(|error| error.to_string())?;
+    }
+    if config.prompt_evolution_enabled && effort != "fast" {
+        schedule_prompt_pairwise_evaluation(
+            app.clone(),
+            config.clone(),
+            task_id.clone(),
+            run_context.clone(),
+            prompt.to_string(),
+            effort,
+            policy,
+            models.to_vec(),
+            agent_budget,
+            prompt_genome,
+        );
     }
     Ok(final_output)
 }
@@ -7907,16 +9298,31 @@ fn recover_adaptive_worker(
     spec: &AdaptiveCollaborationSpec,
     failed: &CollaborationCompletion,
     models: &[String],
-) -> Result<String, String> {
-    let replacement_model = models
-        .iter()
-        .find(|model| *model != &spec.model)
-        .cloned()
-        .ok_or_else(|| format!("no alternate model is available for failed step {}", spec.step_id))?;
+    retry_policy: PromptRetryPolicy,
+) -> Result<(String, String), String> {
     let failure = failed
         .error
         .as_deref()
         .unwrap_or("worker returned empty content");
+    let replacement_model = match retry_policy {
+        PromptRetryPolicy::FailFast => {
+            return Err(format!(
+                "step {} failed under the fail-fast retry policy: {failure}",
+                spec.step_id
+            ))
+        }
+        PromptRetryPolicy::SameModel => spec.model.clone(),
+        PromptRetryPolicy::AlternateModel => models
+            .iter()
+            .find(|model| *model != &spec.model)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "no alternate model is available for failed step {}",
+                    spec.step_id
+                )
+            })?,
+    };
     {
         let mut store = state
             .store
@@ -7933,6 +9339,15 @@ fn recover_adaptive_worker(
                     ("failed_step_id".to_string(), spec.step_id.clone()),
                     ("failed_model".to_string(), spec.model.clone()),
                     ("replacement_model".to_string(), replacement_model.clone()),
+                    (
+                        "retry_policy".to_string(),
+                        match retry_policy {
+                            PromptRetryPolicy::FailFast => "fail_fast",
+                            PromptRetryPolicy::SameModel => "same_model",
+                            PromptRetryPolicy::AlternateModel => "alternate_model",
+                        }
+                        .to_string(),
+                    ),
                     (
                         "failure".to_string(),
                         truncate_for_collaboration(failure, 1_000),
@@ -7986,7 +9401,7 @@ fn recover_adaptive_worker(
     if recovered.trim().is_empty() {
         Err(format!("replacement worker for {} returned no content", spec.step_id))
     } else {
-        Ok(recovered)
+        Ok((recovered, replacement_model))
     }
 }
 
@@ -7998,7 +9413,15 @@ fn quality_gate_adaptive_output(
     collaboration_id: &str,
     user_prompt: &str,
     output: &str,
-) -> String {
+    verification: PromptVerification,
+) -> AdaptiveQualityGateResult {
+    if verification == PromptVerification::Minimal {
+        return AdaptiveQualityGateResult {
+            output: output.to_string(),
+            score: 0.6,
+            safety_violations: 0,
+        };
+    }
     let reviewer_model = config.model_for_role(&ModelRole::Reviewer);
     let Ok(raw_gate) = run_collaboration_stage(
         state,
@@ -8010,21 +9433,30 @@ fn quality_gate_adaptive_output(
         ModelRole::Reviewer,
         &reviewer_model,
         format!(
-            "Evaluate whether this adaptive team guidance is sufficient for a separate tool-using executor to satisfy the user request. Check branch coverage, evidence-ledger provenance, unsupported claims, contradictions, concrete next actions, and safety. Treat worker prose as proposals unless supported by tool evidence. Return only strict JSON: {{\"pass\":true,\"score\":0.0,\"issues\":[\"...\"]}}. Use a score from 0 to 1.\n\nUser request:\n{}\n\nTeam guidance:\n{}",
+            "Evaluate whether this adaptive team guidance is sufficient for a separate tool-using executor to satisfy the user request. Check branch coverage, evidence-ledger provenance, unsupported claims, contradictions, concrete next actions, and safety. Treat worker prose as proposals unless supported by tool evidence. Return only strict JSON: {{\"pass\":true,\"score\":0.0,\"issues\":[\"...\"],\"safety_violations\":0}}. Use a score from 0 to 1 and count concrete unsafe or scope-violating instructions.\n\nUser request:\n{}\n\nTeam guidance:\n{}",
             user_prompt,
             truncate_for_collaboration(output, 14_000)
         ),
     ) else {
-        return output.to_string();
+        return AdaptiveQualityGateResult {
+            output: output.to_string(),
+            score: 0.5,
+            safety_violations: 0,
+        };
     };
     let gate = parse_collaboration_quality(&raw_gate).unwrap_or(CollaborationQualityPayload {
         pass: false,
         score: 0.0,
         issues: vec![truncate_for_collaboration(&raw_gate, 2_000)],
+        safety_violations: 0,
     });
     {
         let Ok(mut store) = state.store.lock() else {
-            return output.to_string();
+            return AdaptiveQualityGateResult {
+                output: output.to_string(),
+                score: gate.score.clamp(0.0, 1.0) as f64,
+                safety_violations: gate.safety_violations,
+            };
         };
         let _ = append_event(
             &mut store,
@@ -8043,6 +9475,10 @@ fn quality_gate_adaptive_output(
                         "quality_issues".to_string(),
                         truncate_for_collaboration(&gate.issues.join(" | "), 4_000),
                     ),
+                    (
+                        "safety_violations".to_string(),
+                        gate.safety_violations.to_string(),
+                    ),
                 ]
                 .into_iter()
                 .collect(),
@@ -8051,10 +9487,21 @@ fn quality_gate_adaptive_output(
         );
     }
     if gate.pass && gate.score >= 0.72 {
-        return output.to_string();
+        return AdaptiveQualityGateResult {
+            output: output.to_string(),
+            score: gate.score.clamp(0.0, 1.0) as f64,
+            safety_violations: gate.safety_violations,
+        };
+    }
+    if verification == PromptVerification::Evidence {
+        return AdaptiveQualityGateResult {
+            output: output.to_string(),
+            score: gate.score.clamp(0.0, 1.0) as f64,
+            safety_violations: gate.safety_violations,
+        };
     }
     let synthesizer_model = config.model_for_role(&ModelRole::Summarizer);
-    run_collaboration_stage(
+    let repaired = run_collaboration_stage(
         state,
         config,
         task_id,
@@ -8074,7 +9521,12 @@ fn quality_gate_adaptive_output(
             }
         ),
     )
-    .unwrap_or_else(|_| output.to_string())
+    .unwrap_or_else(|_| output.to_string());
+    AdaptiveQualityGateResult {
+        output: repaired,
+        score: gate.score.clamp(0.0, 1.0) as f64,
+        safety_violations: gate.safety_violations,
+    }
 }
 
 fn parse_collaboration_quality(response: &str) -> Result<CollaborationQualityPayload, String> {
@@ -8101,15 +9553,22 @@ fn run_collaboration_candidates(
     history: &[Message],
     models: &[String],
     allow_tools: bool,
+    prompt_profile: Option<&ConductorPromptGenome>,
 ) -> Result<String, String> {
     let recent_context = collaboration_recent_context(history);
+    let conductor_directive = prompt_profile.map(ConductorPromptGenome::conductor_directive);
     let specs = models
         .iter()
         .enumerate()
         .map(|(index, model)| CollaborationCandidateSpec {
             stage: format!("candidate_{}", index + 1),
             model: model.clone(),
-            prompt: build_collaboration_candidate_prompt(prompt, &recent_context, index),
+            prompt: build_collaboration_candidate_prompt(
+                prompt,
+                &recent_context,
+                index,
+                conductor_directive.as_deref(),
+            ),
             request_id: unique_id("collaboration-model"),
         })
         .collect::<Vec<_>>();
@@ -8224,7 +9683,7 @@ fn run_collaboration_candidates(
         "arbiter",
         ModelRole::Reviewer,
         &config.model_for_role(&ModelRole::Reviewer),
-        build_collaboration_arbiter_prompt(prompt, &candidates),
+        build_collaboration_arbiter_prompt(prompt, &candidates, conductor_directive.as_deref()),
     )
 }
 
@@ -8254,6 +9713,81 @@ fn prepare_agent_collaboration(
         .collect::<Vec<_>>();
     let bounded = run_context.get("collaboration_profile").map(String::as_str)
         == Some("bounded");
+    let effort = run_context
+        .get("agent_effort")
+        .cloned()
+        .unwrap_or_else(|| "auto".to_string());
+    let policy_label = run_context
+        .get("collaboration_policy")
+        .cloned()
+        .unwrap_or_else(|| policy.label().to_string());
+    let bounded_evolution = if bounded
+        && config.prompt_evolution_enabled
+        && effort != "fast"
+    {
+        prompt_evolution_evaluation_for_run(state, &effort, run_context).ok()
+    } else {
+        None
+    };
+    let bounded_profile = bounded_evolution
+        .as_ref()
+        .map(|evaluation| evaluation.next_profile.clone());
+    if let (Some(evaluation), Some(profile)) =
+        (bounded_evolution.as_ref(), bounded_profile.as_ref())
+    {
+        let prompt_genome = serde_json::to_string(profile)
+            .map_err(|error| format!("failed to serialize prompt genome: {error}"))?;
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        append_event(
+            &mut store,
+            task_id,
+            EventKind::TaskStatusChanged,
+            "Conductor prompt profile selected",
+            metadata_with_context(
+                [
+                    ("collaboration_id".to_string(), id.clone()),
+                    ("prompt_profile".to_string(), profile.id.clone()),
+                    ("prompt_effort".to_string(), effort.clone()),
+                    (
+                        "prompt_generation".to_string(),
+                        profile.generation.to_string(),
+                    ),
+                    ("prompt_genome".to_string(), prompt_genome),
+                    (
+                        "prompt_selection_mode".to_string(),
+                        evaluation.next_mode.clone(),
+                    ),
+                    (
+                        "prompt_evolution_status".to_string(),
+                        evaluation.status.clone(),
+                    ),
+                    (
+                        "prompt_champion".to_string(),
+                        evaluation.champion_id.clone().unwrap_or_default(),
+                    ),
+                    (
+                        "prompt_evolution_enabled".to_string(),
+                        "true".to_string(),
+                    ),
+                    (
+                        "collaboration_profile".to_string(),
+                        "bounded".to_string(),
+                    ),
+                    (
+                        "prompt_objective".to_string(),
+                        truncate_for_collaboration(prompt, 6_000),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                run_context,
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+    }
     let guidance_result = if bounded {
         run_collaboration_candidates(
             app,
@@ -8267,6 +9801,7 @@ fn prepare_agent_collaboration(
             history,
             &fallback_models,
             false,
+            bounded_profile.as_ref(),
         )
     } else {
         run_adaptive_collaboration(
@@ -8283,6 +9818,9 @@ fn prepare_agent_collaboration(
             agent_budget,
         )
         .or_else(|error| {
+            if error.starts_with(WORKFLOW_RESUMABLE_ERROR_PREFIX) {
+                return Err(error);
+            }
             let control = active_agent_run_control(
                 state,
                 run_context.get("session_id").map(String::as_str),
@@ -8336,10 +9874,27 @@ fn prepare_agent_collaboration(
                 history,
                 &fallback_models,
                 true,
+                None,
             )
         })
     };
     let guidance = guidance_result?;
+    if bounded {
+        if let Some(profile) = bounded_profile {
+            schedule_prompt_pairwise_evaluation(
+                app.clone(),
+                config.clone(),
+                task_id.clone(),
+                run_context.clone(),
+                prompt.to_string(),
+                effort,
+                policy_label,
+                models.clone(),
+                agent_budget,
+                profile,
+            );
+        }
+    }
     Ok(Some(AgentCollaboration {
         id,
         policy: policy.label().to_string(),
@@ -9252,7 +10807,17 @@ fn agent_state_for_session(
     session_id: Option<&str>,
 ) -> Result<AgentState, StorageError> {
     let task_id = phase16_task_id();
-    let events = store.list_by_task(&task_id)?;
+    let events = agent_events_for_session(store, &task_id, session_id)?;
+    agent_state_from_events(store, last_error, session_id, events)
+}
+
+fn agent_state_from_events(
+    store: &SqliteStore,
+    last_error: Option<String>,
+    session_id: Option<&str>,
+    events: Vec<Event>,
+) -> Result<AgentState, StorageError> {
+    let task_id = phase16_task_id();
     let active_events = active_agent_events_for_session(&events, session_id);
     let last_error = last_error.or_else(|| {
         active_events.iter().rev().find_map(|event| {
@@ -9415,12 +10980,401 @@ fn agent_state_for_session(
         can_cancel,
         can_retry,
         can_continue,
+        event_count: thread_events.len() as u64,
+        latest_sequence: thread_events
+            .last()
+            .map(|event| event.sequence)
+            .unwrap_or_default(),
+        oldest_sequence: thread_events
+            .first()
+            .map(|event| event.sequence)
+            .unwrap_or_default(),
+        has_older_history: false,
         timeline,
         messages,
         pending_approvals,
         latest_answer,
         last_error,
     })
+}
+
+fn empty_agent_state_for_session(session_id: &str) -> AgentState {
+    AgentState {
+        task_id: phase16_task_id().0,
+        project_id: None,
+        project_name: None,
+        session_id: Some(session_id.to_string()),
+        session_name: None,
+        status: "idle".to_string(),
+        turn_count: 0,
+        max_turns: AgentRuntimeConfig::default().max_turns,
+        transcript_messages: 0,
+        context_tokens_used: 0,
+        context_window_tokens: 128_000,
+        context_remaining_percent: 100.0,
+        context_usage_estimated: true,
+        run_started_at_ms: 0,
+        run_budget_ms: 0,
+        run_model_call_budget: 0,
+        run_tool_call_budget: 0,
+        can_cancel: false,
+        can_retry: false,
+        can_continue: false,
+        event_count: 0,
+        latest_sequence: 0,
+        oldest_sequence: 0,
+        has_older_history: false,
+        timeline: Vec::new(),
+        messages: Vec::new(),
+        pending_approvals: Vec::new(),
+        latest_answer: None,
+        last_error: None,
+    }
+}
+
+fn build_agent_session_read_model(
+    store: &SqliteStore,
+    session_id: &str,
+    events: Vec<Event>,
+) -> Result<AgentSessionReadModel, StorageError> {
+    if events.is_empty() {
+        return Ok(AgentSessionReadModel {
+            schema: AGENT_SESSION_READ_MODEL_NAMESPACE.to_string(),
+            revision: 0,
+            event_count: 0,
+            estimated_context_tokens: 0,
+            has_user_prompt: false,
+            active_run_id: None,
+            state: empty_agent_state_for_session(session_id),
+        });
+    }
+    let active_events = active_agent_events_for_session(&events, Some(session_id));
+    let estimated_context_tokens = estimate_context_tokens(
+        &events
+            .iter()
+            .filter_map(message_from_event)
+            .collect::<Vec<_>>(),
+    );
+    let has_user_prompt = latest_agent_prompt_from_active_events(&active_events).is_some();
+    let active_run_id = active_events
+        .iter()
+        .find(|event| is_agent_run_start_event(event))
+        .and_then(|event| event.metadata.get("agent_run_id"))
+        .cloned();
+    let revision = events
+        .last()
+        .map(|event| event.sequence)
+        .unwrap_or_default();
+    let event_count = events.len() as u64;
+    let mut state = agent_state_from_events(store, None, Some(session_id), events)?;
+    state.timeline.clear();
+    state.messages.clear();
+    state.pending_approvals.clear();
+    state.event_count = event_count;
+    state.latest_sequence = revision;
+    state.oldest_sequence = 0;
+    state.has_older_history = false;
+    Ok(AgentSessionReadModel {
+        schema: AGENT_SESSION_READ_MODEL_NAMESPACE.to_string(),
+        revision,
+        event_count,
+        estimated_context_tokens,
+        has_user_prompt,
+        active_run_id,
+        state,
+    })
+}
+
+fn metadata_u64(event: &Event, key: &str) -> Option<u64> {
+    event.metadata.get(key)?.parse::<u64>().ok()
+}
+
+fn metadata_usize(event: &Event, key: &str) -> Option<usize> {
+    event.metadata.get(key)?.parse::<usize>().ok()
+}
+
+fn apply_event_to_agent_session_read_model(
+    model: &mut AgentSessionReadModel,
+    event: &Event,
+) {
+    model.revision = model.revision.max(event.sequence);
+    model.event_count = model.event_count.saturating_add(1);
+    model.state.event_count = model.event_count;
+    model.state.latest_sequence = model.revision;
+    for (key, target) in [
+        ("project_id", &mut model.state.project_id),
+        ("project_name", &mut model.state.project_name),
+        ("session_id", &mut model.state.session_id),
+        ("session_name", &mut model.state.session_name),
+    ] {
+        if let Some(value) = event.metadata.get(key) {
+            *target = Some(value.clone());
+        }
+    }
+
+    if is_agent_run_start_event(event) {
+        model.state.status = "running".to_string();
+        model.state.turn_count = 0;
+        model.state.context_window_tokens = metadata_u64(event, "context_window_tokens")
+            .unwrap_or(128_000)
+            .max(1);
+        model.state.run_started_at_ms = event.timestamp_ms;
+        model.state.run_budget_ms = metadata_u64(event, "run_budget_ms").unwrap_or_default();
+        model.state.run_model_call_budget =
+            metadata_usize(event, "run_model_call_budget").unwrap_or_default();
+        model.state.run_tool_call_budget =
+            metadata_usize(event, "run_tool_call_budget").unwrap_or_default();
+        model.state.last_error = None;
+        model.state.can_continue = false;
+        model.active_run_id = event.metadata.get("agent_run_id").cloned();
+        model.has_user_prompt = event
+            .metadata
+            .get("prompt")
+            .is_some_and(|prompt| !prompt.trim().is_empty());
+    }
+
+    if event.kind == EventKind::MessageAdded {
+        if let Some(message) = message_from_event(event) {
+            model.state.transcript_messages = model.state.transcript_messages.saturating_add(1);
+            model.estimated_context_tokens = if model.estimated_context_tokens == 0 {
+                512_u64.saturating_add(estimate_message_tokens(&message))
+            } else {
+                model
+                    .estimated_context_tokens
+                    .saturating_add(estimate_message_tokens(&message))
+            };
+            if model.state.context_usage_estimated {
+                model.state.context_tokens_used = model.estimated_context_tokens;
+            }
+            match message.role {
+                MessageRole::User => model.has_user_prompt = true,
+                MessageRole::Assistant => model.state.latest_answer = Some(message.content),
+                _ => {}
+            }
+        }
+    }
+
+    if event.kind == EventKind::ModelRequestFinished
+        && event.summary == "Agent model turn finished"
+    {
+        model.state.turn_count = model.state.turn_count.saturating_add(1);
+        if let Some(tokens) = metadata_u64(event, "prompt_tokens") {
+            model.state.context_tokens_used = tokens;
+            model.state.context_usage_estimated = false;
+        }
+    }
+
+    if event.kind == EventKind::Error {
+        model.state.status = "failed".to_string();
+        model.state.last_error = event
+            .metadata
+            .get("error")
+            .cloned()
+            .or_else(|| Some(event.summary.clone()));
+        model.state.can_continue = false;
+    } else if event.kind == EventKind::TaskStatusChanged && model.state.last_error.is_none() {
+        match event.summary.as_str() {
+            "Agent task waiting for permission" => {
+                model.state.status = "waiting_for_permission".to_string()
+            }
+            "Agent task cancelled" => {
+                model.state.status = "cancelled".to_string();
+                model.state.can_continue = false;
+            }
+            "Agent task completed" => {
+                model.state.status = "completed".to_string();
+                model.state.can_continue =
+                    event.metadata.get("completion").map(String::as_str) == Some("partial");
+            }
+            "Agent task failed" => {
+                model.state.status = "failed".to_string();
+                model.state.can_continue = false;
+            }
+            summary if summary.starts_with("Agent task ") => {
+                model.state.status = "running".to_string();
+            }
+            _ => {}
+        }
+    }
+
+    model.state.context_remaining_percent =
+        (model
+            .state
+            .context_window_tokens
+            .saturating_sub(model.state.context_tokens_used) as f64
+            / model.state.context_window_tokens.max(1) as f64
+            * 100.0)
+            .clamp(0.0, 100.0);
+    model.state.can_cancel = matches!(
+        model.state.status.as_str(),
+        "running" | "waiting_for_permission"
+    );
+    model.state.can_retry = matches!(
+        model.state.status.as_str(),
+        "completed" | "failed" | "cancelled"
+    ) && model.has_user_prompt;
+}
+
+fn load_agent_session_read_model(
+    store: &mut SqliteStore,
+    session_id: &str,
+) -> Result<AgentSessionReadModel, StorageError> {
+    let task_id = phase16_task_id();
+    let revision = store.event_revision_by_metadata(&task_id, "session_id", session_id)?;
+    let stored = store
+        .load_read_model(AGENT_SESSION_READ_MODEL_NAMESPACE, session_id)?
+        .and_then(|stored| {
+            serde_json::from_str::<AgentSessionReadModel>(&stored.payload)
+                .ok()
+                .filter(|model| {
+                    model.schema == AGENT_SESSION_READ_MODEL_NAMESPACE
+                        && model.revision == stored.revision
+                        && model.revision <= revision.latest_sequence
+                })
+        });
+
+    let (mut model, dirty) = if let Some(mut model) = stored {
+        let delta = store.list_by_task_and_metadata_after(
+            &task_id,
+            "session_id",
+            session_id,
+            model.revision,
+        )?;
+        if model.event_count.saturating_add(delta.len() as u64) != revision.event_count {
+            (
+                build_agent_session_read_model(
+                    store,
+                    session_id,
+                    store.list_by_task_and_metadata(&task_id, "session_id", session_id)?,
+                )?,
+                true,
+            )
+        } else {
+            let dirty = !delta.is_empty();
+            for event in &delta {
+                apply_event_to_agent_session_read_model(&mut model, event);
+            }
+            (model, dirty)
+        }
+    } else {
+        (
+            build_agent_session_read_model(
+                store,
+                session_id,
+                store.list_by_task_and_metadata(&task_id, "session_id", session_id)?,
+            )?,
+            true,
+        )
+    };
+    let revision_changed = model.event_count != revision.event_count
+        || model.revision != revision.latest_sequence;
+    model.event_count = revision.event_count;
+    model.revision = revision.latest_sequence;
+    model.state.event_count = revision.event_count;
+    model.state.latest_sequence = revision.latest_sequence;
+    if dirty || revision_changed {
+        let payload = serde_json::to_string(&model).map_err(|error| {
+            StorageError::new(format!("session read model serialization failed: {error}"))
+        })?;
+        store.save_read_model(
+            AGENT_SESSION_READ_MODEL_NAMESPACE,
+            session_id,
+            model.revision,
+            &payload,
+        )?;
+    }
+    Ok(model)
+}
+
+fn agent_session_audits(
+    store: &SqliteStore,
+    session_id: &str,
+    active_run_id: Option<&str>,
+    run_started_at_ms: u64,
+) -> Result<Vec<PermissionAuditRecord>, StorageError> {
+    Ok(store
+        .list_permission_audits()?
+        .into_iter()
+        .filter(|audit| audit.request.task_id == phase16_task_id())
+        .filter(|audit| {
+            audit.request.metadata.get("session_id").map(String::as_str) == Some(session_id)
+        })
+        .filter(|audit| {
+            active_run_id
+                .map(|run_id| {
+                    audit
+                        .request
+                        .metadata
+                        .get("agent_run_id")
+                        .map(String::as_str)
+                        == Some(run_id)
+                })
+                .unwrap_or_else(|| {
+                    run_started_at_ms == 0 || audit.requested_at_ms >= run_started_at_ms
+                })
+        })
+        .collect())
+}
+
+fn agent_state_from_read_model(
+    store: &SqliteStore,
+    model: &AgentSessionReadModel,
+    session_id: &str,
+    current_context: &Metadata,
+    history_events: Vec<Event>,
+) -> Result<AgentState, StorageError> {
+    let audits = agent_session_audits(
+        store,
+        session_id,
+        model.active_run_id.as_deref(),
+        model.state.run_started_at_ms,
+    )?;
+    let mut state = model.state.clone();
+    state.project_id = current_context.get("project_id").cloned().or(state.project_id);
+    state.project_name = current_context
+        .get("project_name")
+        .cloned()
+        .or(state.project_name);
+    state.session_id = Some(session_id.to_string());
+    state.session_name = current_context
+        .get("session_name")
+        .cloned()
+        .or(state.session_name);
+    state.timeline = history_events
+        .iter()
+        .cloned()
+        .map(|event| timeline_entry(event, &audits))
+        .collect();
+    state.messages = history_events
+        .iter()
+        .filter_map(message_view_from_event)
+        .collect();
+    state.oldest_sequence = history_events
+        .first()
+        .map(|event| event.sequence)
+        .unwrap_or(model.revision);
+    state.has_older_history = state.oldest_sequence > 0
+        && store.has_task_metadata_event_before(
+            &phase16_task_id(),
+            "session_id",
+            session_id,
+            state.oldest_sequence,
+        )?;
+    let mut pending_approvals = audits
+        .into_iter()
+        .filter(|audit| audit.resolution.is_none())
+        .filter_map(tool_approval_from_audit)
+        .collect::<Vec<_>>();
+    pending_approvals.reverse();
+    if !pending_approvals.is_empty() && state.status == "running" {
+        state.status = "waiting_for_permission".to_string();
+        state.can_cancel = true;
+    }
+    if matches!(state.status.as_str(), "cancelled" | "completed" | "failed") {
+        pending_approvals.clear();
+    }
+    state.pending_approvals = pending_approvals;
+    Ok(state)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9708,7 +11662,7 @@ fn agent_task_is_cancelled(
     store: &SqliteStore,
     session_id: Option<&str>,
 ) -> Result<bool, StorageError> {
-    let events = store.list_by_task(&phase16_task_id())?;
+    let events = agent_events_for_session(store, &phase16_task_id(), session_id)?;
     Ok(active_agent_events_for_session(&events, session_id)
         .iter()
         .rev()
@@ -9890,6 +11844,78 @@ fn agent_transcript_from_active_events(events: &[Event]) -> Vec<Message> {
     events.iter().filter_map(message_from_event).collect()
 }
 
+fn agent_output_artifacts_from_events(events: &[Event]) -> Vec<AgentOutputArtifactView> {
+    let mut versions = BTreeMap::<String, usize>::new();
+    let mut outputs = Vec::new();
+
+    for event in events {
+        if !matches!(event.kind, EventKind::ToolCallFinished) {
+            continue;
+        }
+        let status = event
+            .metadata
+            .get("status")
+            .cloned()
+            .unwrap_or_else(|| "done".to_string());
+        if matches!(status.as_str(), "failed" | "cancelled" | "denied") {
+            continue;
+        }
+        let tool_name = event
+            .metadata
+            .get("tool")
+            .cloned()
+            .unwrap_or_else(|| "tool".to_string());
+        let source_path = (tool_name == "file.write")
+            .then(|| {
+                event
+                    .metadata
+                    .get("result_source_path")
+                    .or_else(|| event.metadata.get("result_path"))
+                    .cloned()
+            })
+            .flatten();
+        let has_versioned_artifact = event.metadata.contains_key("result_artifact_path");
+        let mut paths = BTreeSet::new();
+        for (key, value) in &event.metadata {
+            let result_path = key.starts_with("result_") && key.ends_with("_path");
+            if !result_path || key == "result_source_path" || value.trim().is_empty() {
+                continue;
+            }
+            if key == "result_path" && tool_name != "file.write" {
+                continue;
+            }
+            if tool_name == "file.write" && has_versioned_artifact && key == "result_path" {
+                continue;
+            }
+            paths.insert(value.clone());
+        }
+
+        for (index, path) in paths.into_iter().enumerate() {
+            let logical_path = source_path.as_deref().unwrap_or(path.as_str()).to_string();
+            let version = versions.entry(logical_path).or_default();
+            *version += 1;
+            outputs.push(AgentOutputArtifactView {
+                id: format!("{}-{index}", event.id.0),
+                path,
+                source_path: source_path.clone(),
+                tool_name: tool_name.clone(),
+                status: status.clone(),
+                timestamp_ms: event.timestamp_ms,
+                run_id: event.metadata.get("agent_run_id").cloned(),
+                version: *version,
+            });
+        }
+    }
+
+    outputs.sort_by(|left, right| {
+        right
+            .timestamp_ms
+            .cmp(&left.timestamp_ms)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    outputs
+}
+
 fn agent_trace_state_for_session(
     store: &SqliteStore,
     export_path: Option<PathBuf>,
@@ -9897,7 +11923,18 @@ fn agent_trace_state_for_session(
     session_id: Option<&str>,
 ) -> Result<AgentTraceState, StorageError> {
     let task_id = phase16_task_id();
-    let events = store.list_by_task(&task_id)?;
+    let events = agent_events_for_session(store, &task_id, session_id)?;
+    agent_trace_state_from_events(store, export_path, last_error, session_id, events)
+}
+
+fn agent_trace_state_from_events(
+    store: &SqliteStore,
+    export_path: Option<PathBuf>,
+    last_error: Option<String>,
+    session_id: Option<&str>,
+    events: Vec<Event>,
+) -> Result<AgentTraceState, StorageError> {
+    let task_id = phase16_task_id();
     let active_events = active_agent_events_for_session(&events, session_id);
     let run_context = agent_run_context_from_events(&active_events);
     let (active_start_ts, active_end_ts) = agent_run_time_bounds(&events, &active_events);
@@ -9995,6 +12032,21 @@ fn agent_trace_state_for_session(
         turns,
         last_error,
     })
+}
+
+fn agent_events_for_session(
+    store: &SqliteStore,
+    task_id: &TaskId,
+    session_id: Option<&str>,
+) -> Result<Vec<Event>, StorageError> {
+    match session_id {
+        Some(session_id) => store.list_by_task_and_metadata_or_unscoped(
+            task_id,
+            "session_id",
+            session_id,
+        ),
+        None => store.list_by_task(task_id),
+    }
 }
 
 fn agent_trace_turns_from_events(
@@ -10934,12 +12986,12 @@ fn phase4_state_with_error(
     config: &ProviderConfig,
     message: &str,
 ) -> Result<Phase4State, String> {
-    let store = state
+    let mut store = state
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
 
-    phase4_state(&store, config, Some(message.to_string())).map_err(|error| error.to_string())
+    phase4_state(&mut store, config, Some(message.to_string())).map_err(|error| error.to_string())
 }
 
 fn record_phase4_error(
@@ -11230,6 +13282,7 @@ fn timeline_entry(event: Event, audits: &[PermissionAuditRecord]) -> TimelineEnt
             .iter()
             .any(|audit| audit.request.id.0 == *id && audit.resolution.is_none())
     });
+    let workflow_progress = timeline_workflow_progress(&event);
     let detail = match event.kind {
         EventKind::MessageAdded => event
             .metadata
@@ -11311,12 +13364,41 @@ fn timeline_entry(event: Event, audits: &[PermissionAuditRecord]) -> TimelineEnt
     };
 
     TimelineEntry {
+        sequence: event.sequence,
         label: timeline_event_label(&event),
         detail: redact_sensitive_text(&detail),
         kind: event_kind_ui_kind(&event.kind).to_string(),
         state: event_state(&event.kind, permission_is_pending).to_string(),
         timestamp_ms: event.timestamp_ms,
+        workflow_progress,
     }
+}
+
+fn timeline_workflow_progress(event: &Event) -> Option<WorkflowProgressView> {
+    let total_steps = event.metadata.get("workflow_steps")?.parse::<usize>().ok()?;
+    if total_steps == 0 || !event.metadata.contains_key("workflow_checkpoint_schema") {
+        return None;
+    }
+    let completed_steps = event
+        .metadata
+        .get("completed_steps")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_default()
+        .min(total_steps);
+    let step_status = event.metadata.get("step_status").cloned();
+    Some(WorkflowProgressView {
+        completed_steps,
+        total_steps,
+        current_step_id: event.metadata.get("step_id").cloned(),
+        continuations: event
+            .metadata
+            .get("workflow_continuations")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or_default(),
+        recoverable: completed_steps < total_steps
+            && event.summary != "Collaboration workflow checkpoint finalized",
+        step_status,
+    })
 }
 
 fn permission_audit(record: PermissionAuditRecord) -> PermissionAudit {
@@ -11349,6 +13431,7 @@ fn message_view_from_event(event: &Event) -> Option<ChatMessageView> {
     }
 
     Some(ChatMessageView {
+        sequence: event.sequence,
         role: event.metadata.get("role")?.to_string(),
         content: redact_sensitive_text(event.metadata.get("content")?),
         timestamp_ms: event.timestamp_ms,
@@ -12131,6 +14214,7 @@ fn provider_config_state(config: &ProviderConfig) -> ProviderConfigState {
         image_model: config.image_model.clone(),
         image_endpoint: config.image_endpoint.clone(),
         collaboration_policy: config.collaboration_policy.clone(),
+        prompt_evolution_enabled: config.prompt_evolution_enabled,
         context_window_tokens: config.context_window_tokens,
         agent_system_prompt: config.agent_system_prompt.clone(),
         api_key_set: !config.api_key.trim().is_empty(),
@@ -12166,13 +14250,13 @@ fn route_with_local_telemetry(
     state: &tauri::State<'_, AppState>,
     context: &RoutingContext,
 ) -> Result<(RoutingDecision, usize), String> {
-    let events = state
+    let mut store = state
         .store
         .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?
-        .list_by_task(&phase16_task_id())
-        .map_err(|error| error.to_string())?;
-    let telemetry = routing_telemetry_from_events(&events);
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let telemetry = load_routing_telemetry_read_model(&mut store)
+    .map_err(|error| error.to_string())?;
+    drop(store);
     let router = LearnedModelRouter::train(&telemetry);
     let learned_examples = router
         .learned_route_for_context(context)
@@ -12198,6 +14282,86 @@ fn route_with_local_telemetry(
         decision
     };
     Ok((decision, learned_examples))
+}
+
+fn load_routing_telemetry_read_model(
+    store: &mut SqliteStore,
+) -> Result<Vec<RoutingTelemetry>, StorageError> {
+    let task_id = phase16_task_id();
+    let revision = store.event_revision(&task_id)?;
+    let stored = store
+        .load_read_model(
+            ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
+            ROUTING_TELEMETRY_READ_MODEL_KEY,
+        )?
+        .and_then(|stored| {
+            serde_json::from_str::<RoutingTelemetryReadModel>(&stored.payload)
+                .ok()
+                .filter(|model| {
+                    model.schema == ROUTING_TELEMETRY_READ_MODEL_NAMESPACE
+                        && model.revision == stored.revision
+                        && model.revision <= revision.latest_sequence
+                        && model.event_count <= revision.event_count
+                })
+        });
+    let mut model = stored.unwrap_or_else(|| RoutingTelemetryReadModel {
+        schema: ROUTING_TELEMETRY_READ_MODEL_NAMESPACE.to_string(),
+        revision: 0,
+        event_count: 0,
+        entries: Vec::new(),
+    });
+    let mut delta = store.list_by_task_after(&task_id, model.revision)?;
+    if model.event_count.saturating_add(delta.len() as u64) != revision.event_count {
+        model.revision = 0;
+        model.event_count = 0;
+        model.entries.clear();
+        delta = store.list_by_task_after(&task_id, 0)?;
+    }
+
+    let completed_run_ids = delta
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.summary.as_str(),
+                "Agent task completed" | "Agent task cancelled" | "Agent task failed"
+            )
+        })
+        .filter_map(|event| event.metadata.get("agent_run_id"))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for run_id in completed_run_ids {
+        let run_events = store.list_by_task_and_metadata(
+            &task_id,
+            "agent_run_id",
+            &run_id,
+        )?;
+        let Some(telemetry) = routing_telemetry_from_events(&run_events).into_iter().next() else {
+            continue;
+        };
+        model.entries.retain(|entry| entry.run_id != run_id);
+        model.entries.push(RoutingTelemetryEntry { run_id, telemetry });
+    }
+    if model.entries.len() > ROUTING_TELEMETRY_MAX_RUNS {
+        model
+            .entries
+            .drain(0..model.entries.len() - ROUTING_TELEMETRY_MAX_RUNS);
+    }
+    model.revision = revision.latest_sequence;
+    model.event_count = revision.event_count;
+    let payload = serde_json::to_string(&model).map_err(|error| {
+        StorageError::new(format!("routing telemetry serialization failed: {error}"))
+    })?;
+    store.save_read_model(
+        ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
+        ROUTING_TELEMETRY_READ_MODEL_KEY,
+        model.revision,
+        &payload,
+    )?;
+    Ok(model
+        .entries
+        .into_iter()
+        .map(|entry| entry.telemetry)
+        .collect())
 }
 
 fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTelemetry> {
@@ -12336,6 +14500,2175 @@ fn workflow_execution_telemetry_from_events(
         .collect()
 }
 
+#[derive(Default)]
+struct PromptEvolutionAccumulator {
+    effort: String,
+    generation: u32,
+    runs: usize,
+    train_runs: usize,
+    holdout_runs: usize,
+    succeeded: usize,
+    reward_total: f64,
+    relative_reward_total: f64,
+    relative_reward_runs: usize,
+    step_credit_total: f64,
+    step_credit_count: usize,
+    quality_total: f64,
+    latency_total_ms: u64,
+    token_total: u64,
+}
+
+struct PromptEvolutionEvaluation {
+    population: Vec<ConductorPromptGenome>,
+    observations: Vec<PromptEvolutionObservation>,
+    frontier_ids: BTreeSet<String>,
+    champion_id: Option<String>,
+    champion_score: Option<f64>,
+    champion_confidence: Option<PromptPromotionConfidence>,
+    status: String,
+    freeze_reason: Option<String>,
+    stagnant_generations: usize,
+    evaluated_generations: usize,
+    next_mode: String,
+    next_profile: ConductorPromptGenome,
+    mutation_parent: Option<ConductorPromptGenome>,
+    mutation_feedback: String,
+}
+
+fn prompt_evaluation_inflight() -> &'static Mutex<BTreeSet<String>> {
+    PROMPT_EVALUATIONS_INFLIGHT.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn schedule_prompt_pairwise_evaluation(
+    app: tauri::AppHandle,
+    config: ProviderConfig,
+    task_id: TaskId,
+    run_context: Metadata,
+    current_objective: String,
+    effort: String,
+    policy: String,
+    worker_models: Vec<String>,
+    agent_budget: usize,
+    current_profile: ConductorPromptGenome,
+) {
+    let lease_key = effort.clone();
+    let acquired = prompt_evaluation_inflight()
+        .lock()
+        .map(|mut inflight| inflight.insert(lease_key.clone()))
+        .unwrap_or(false);
+    if !acquired {
+        return;
+    }
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        let result = run_background_prompt_pairwise_evaluation(
+            &state,
+            &config,
+            &task_id,
+            &run_context,
+            &current_objective,
+            &effort,
+            &policy,
+            &worker_models,
+            agent_budget,
+            &current_profile,
+        );
+        if let Err(error) = result {
+            if let Ok(mut store) = state.store.lock() {
+                let _ = append_event(
+                    &mut store,
+                    &task_id,
+                    EventKind::TaskStatusChanged,
+                    "Conductor pairwise evaluation failed",
+                    metadata_with_context(
+                        [
+                            ("background_evaluation".to_string(), "true".to_string()),
+                            ("prompt_effort".to_string(), effort.clone()),
+                            (
+                                "error".to_string(),
+                                truncate_for_collaboration(&error, 2_000),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        &run_context,
+                    ),
+                );
+            }
+        }
+        if let Ok(mut inflight) = prompt_evaluation_inflight().lock() {
+            inflight.remove(&lease_key);
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_background_prompt_pairwise_evaluation(
+    state: &tauri::State<'_, AppState>,
+    config: &ProviderConfig,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    current_objective: &str,
+    effort: &str,
+    policy: &str,
+    worker_models: &[String],
+    agent_budget: usize,
+    current_profile: &ConductorPromptGenome,
+) -> Result<(), String> {
+    if worker_models.is_empty() {
+        return Ok(());
+    }
+    let evaluation = {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let model = load_prompt_evolution_read_model(&mut store)
+            .map_err(|error| error.to_string())?;
+        evaluate_prompt_evolution_read_model(&model, effort)?
+    };
+    let Some(challenger) = prompt_evolution_challenger(&evaluation, current_profile) else {
+        return Ok(());
+    };
+    let current_counts = prompt_profile_evidence_counts(&evaluation.observations, &current_profile.id);
+    let challenger_counts = prompt_profile_evidence_counts(&evaluation.observations, &challenger.id);
+    let needs_replay = current_counts.0 >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS
+        && challenger_counts.0 >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS
+        && (current_counts.1 < PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS
+            || challenger_counts.1 < PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS);
+    let replay_case = if needs_replay {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let events = store
+            .list_by_task(task_id)
+            .map_err(|error| error.to_string())?;
+        prompt_replay_case(
+            &events,
+            current_objective,
+            evaluation
+                .observations
+                .iter()
+                .filter(|observation| observation.mode.is_replay())
+                .count(),
+        )
+    } else {
+        None
+    };
+    let (mode, objective, task_class) = if current_counts.0 < PROMPT_EVOLUTION_MIN_TRAIN_RUNS
+        || challenger_counts.0 < PROMPT_EVOLUTION_MIN_TRAIN_RUNS
+    {
+        (
+            PromptEvaluationMode::PairedExecution,
+            current_objective.to_string(),
+            run_context
+                .get("task_class")
+                .cloned()
+                .unwrap_or_else(|| "general".to_string()),
+        )
+    } else if (current_counts.1 < PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS
+        || challenger_counts.1 < PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS)
+        && replay_case.is_some()
+    {
+        let replay = replay_case.expect("replay case checked above");
+        (
+            PromptEvaluationMode::ReplayExecution,
+            replay.objective,
+            replay.task_class,
+        )
+    } else {
+        let live_observations = evaluation
+            .observations
+            .iter()
+            .filter(|observation| observation.mode == PromptEvaluationMode::Live)
+            .count();
+        if live_observations == 0
+            || live_observations % PROMPT_EVOLUTION_SHADOW_INTERVAL != 0
+        {
+            return Ok(());
+        }
+        (
+            PromptEvaluationMode::PairedExecution,
+            current_objective.to_string(),
+            run_context
+                .get("task_class")
+                .cloned()
+                .unwrap_or_else(|| "general".to_string()),
+        )
+    };
+    let evaluation_id = unique_id(match mode {
+        PromptEvaluationMode::PairedShadow | PromptEvaluationMode::PairedExecution => {
+            "prompt-pair"
+        }
+        PromptEvaluationMode::ReplayHoldout | PromptEvaluationMode::ReplayExecution => {
+            "prompt-replay"
+        }
+        PromptEvaluationMode::Live => "prompt-live",
+    });
+    append_prompt_evaluation_status(
+        state,
+        task_id,
+        run_context,
+        "Conductor pairwise evaluation started",
+        &evaluation_id,
+        effort,
+        mode,
+        &current_profile.id,
+        &challenger.id,
+        None,
+    )?;
+
+    let (current_plan, challenger_plan) = std::thread::scope(|scope| {
+        let current = scope.spawn(|| {
+            evaluate_conductor_prompt_profile(
+                config,
+                &objective,
+                effort,
+                policy,
+                worker_models,
+                agent_budget,
+                current_profile,
+                &evaluation_id,
+            )
+        });
+        let challenger_handle = scope.spawn(|| {
+            evaluate_conductor_prompt_profile(
+                config,
+                &objective,
+                effort,
+                policy,
+                worker_models,
+                agent_budget,
+                &challenger,
+                &evaluation_id,
+            )
+        });
+        (
+            current.join().unwrap_or_else(|_| PromptPlanCandidate {
+                genome: current_profile.clone(),
+                plan: None,
+                raw_output: "conductor evaluation panicked".to_string(),
+                latency_ms: 0,
+                total_tokens: 0,
+            }),
+            challenger_handle
+                .join()
+                .unwrap_or_else(|_| PromptPlanCandidate {
+                    genome: challenger.clone(),
+                    plan: None,
+                    raw_output: "challenger evaluation panicked".to_string(),
+                    latency_ms: 0,
+                    total_tokens: 0,
+                }),
+        )
+    });
+    let (current, challenger) = std::thread::scope(|scope| {
+        let current_handle = scope.spawn(|| {
+            execute_prompt_workflow_candidate(config, &objective, current_plan)
+        });
+        let challenger_handle = scope.spawn(|| {
+            execute_prompt_workflow_candidate(config, &objective, challenger_plan)
+        });
+        (
+            current_handle.join().expect("current evaluation worker joined"),
+            challenger_handle
+                .join()
+                .expect("challenger evaluation worker joined"),
+        )
+    });
+    let swap_order = NEXT_ID
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(2);
+    let (candidate_a, candidate_b) = if swap_order {
+        (&challenger, &current)
+    } else {
+        (&current, &challenger)
+    };
+    let judge = evaluate_prompt_candidate_pair(
+        config,
+        &objective,
+        candidate_a,
+        candidate_b,
+        &evaluation_id,
+    )?;
+    let split = match mode {
+        PromptEvaluationMode::ReplayHoldout | PromptEvaluationMode::ReplayExecution => {
+            PromptEvaluationSplit::Holdout
+        }
+        PromptEvaluationMode::PairedShadow
+        | PromptEvaluationMode::PairedExecution
+        | PromptEvaluationMode::Live => {
+            PromptEvaluationSplit::Train
+        }
+    };
+    let observation_a = prompt_pairwise_observation(
+        candidate_a,
+        candidate_b,
+        &evaluation_id,
+        &task_class,
+        split,
+        mode,
+        judge.score_a,
+        judge.score_b,
+        judge.safety_violations_a,
+        &judge.step_scores_a,
+    );
+    let observation_b = prompt_pairwise_observation(
+        candidate_b,
+        candidate_a,
+        &evaluation_id,
+        &task_class,
+        split,
+        mode,
+        judge.score_b,
+        judge.score_a,
+        judge.safety_violations_b,
+        &judge.step_scores_b,
+    );
+    append_prompt_pairwise_observation(
+        state,
+        task_id,
+        run_context,
+        effort,
+        mode,
+        &observation_a,
+        &candidate_a.plan.genome,
+    )?;
+    append_prompt_pairwise_observation(
+        state,
+        task_id,
+        run_context,
+        effort,
+        mode,
+        &observation_b,
+        &candidate_b.plan.genome,
+    )?;
+    Ok(())
+}
+
+fn prompt_profile_evidence_counts(
+    observations: &[PromptEvolutionObservation],
+    profile_id: &str,
+) -> (usize, usize) {
+    observations.iter().filter(|observation| observation.profile_id == profile_id).fold(
+        (0, 0),
+        |(paired, replay), observation| {
+            if observation.mode.is_paired() {
+                (paired + 1, replay)
+            } else if observation.mode.is_replay() {
+                (paired, replay + 1)
+            } else {
+                (paired, replay)
+            }
+        },
+    )
+}
+
+fn prompt_evolution_challenger(
+    evaluation: &PromptEvolutionEvaluation,
+    current_profile: &ConductorPromptGenome,
+) -> Option<ConductorPromptGenome> {
+    if let Some(champion_id) = evaluation.champion_id.as_deref() {
+        if champion_id != current_profile.id {
+            if let Some(champion) = evaluation
+                .population
+                .iter()
+                .find(|profile| profile.id == champion_id)
+            {
+                return Some(champion.clone());
+            }
+        }
+    }
+    evaluation
+        .population
+        .iter()
+        .filter(|profile| profile.id != current_profile.id)
+        .min_by_key(|profile| {
+            let (paired, replay) =
+                prompt_profile_evidence_counts(&evaluation.observations, &profile.id);
+            (paired + replay, profile.generation, profile.id.clone())
+        })
+        .cloned()
+        .or_else(|| {
+            current_profile
+                .mutations()
+                .into_iter()
+                .find(|profile| profile.id != current_profile.id)
+        })
+}
+
+fn prompt_replay_case(
+    events: &[Event],
+    current_objective: &str,
+    replay_index: usize,
+) -> Option<PromptReplayCase> {
+    let completed_workflows = events
+        .iter()
+        .filter(|event| event.summary == "Collaboration workflow completed")
+        .filter_map(|event| event.metadata.get("collaboration_id"))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let completed_agent_runs = events
+        .iter()
+        .filter(|event| event.summary == "Agent task completed")
+        .filter_map(|event| event.metadata.get("agent_run_id"))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    let mut cases = Vec::new();
+    for event in events {
+        let objective = if event.summary == "Collaboration workflow planned"
+            && event
+                .metadata
+                .get("collaboration_id")
+                .is_some_and(|workflow_id| completed_workflows.contains(workflow_id))
+        {
+            event
+                .metadata
+                .get("workflow_ir")
+                .and_then(|encoded| serde_json::from_str::<WorkflowPlanIr>(encoded).ok())
+                .map(|plan| plan.objective)
+        } else if event.summary == "Conductor prompt profile selected"
+            && event.metadata.get("collaboration_profile").map(String::as_str)
+                == Some("bounded")
+            && event
+                .metadata
+                .get("agent_run_id")
+                .is_some_and(|run_id| completed_agent_runs.contains(run_id))
+        {
+            event.metadata.get("prompt_objective").cloned()
+        } else {
+            None
+        };
+        let Some(objective) = objective.map(|objective| objective.trim().to_string()) else {
+            continue;
+        };
+        if objective.is_empty()
+            || objective == current_objective.trim()
+            || !seen.insert(objective.clone())
+        {
+            continue;
+        }
+        cases.push(PromptReplayCase {
+            objective,
+            task_class: event
+                .metadata
+                .get("task_class")
+                .cloned()
+                .unwrap_or_else(|| "general".to_string()),
+        });
+    }
+    (!cases.is_empty()).then(|| cases[replay_index % cases.len()].clone())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_conductor_prompt_profile(
+    config: &ProviderConfig,
+    objective: &str,
+    effort: &str,
+    policy: &str,
+    worker_models: &[String],
+    agent_budget: usize,
+    genome: &ConductorPromptGenome,
+    evaluation_id: &str,
+) -> PromptPlanCandidate {
+    let conductor_model = config.model_for_conductor();
+    let harness = ConductorHarness::new(ConductorRequest {
+        workflow_id: format!("{evaluation_id}-{}", genome.id),
+        objective: objective.to_string(),
+        recent_context: String::new(),
+        effort: effort.to_string(),
+        policy: policy.to_string(),
+        conductor_model: conductor_model.clone(),
+        worker_models: worker_models.to_vec(),
+        role_hints: ConductorRoleHints {
+            planner: config.model_for_role(&ModelRole::Planner),
+            executor: config.model_for_role(&ModelRole::Executor),
+            reviewer: config.model_for_role(&ModelRole::Reviewer),
+            synthesizer: config.model_for_role(&ModelRole::Summarizer),
+        },
+        budget: WorkflowBudget {
+            max_steps: adaptive_workflow_step_budget(agent_budget),
+            max_models: agent_budget.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS),
+            max_model_turns_per_step: DEFAULT_COLLABORATION_WORKER_TURNS,
+            max_tool_calls_per_step: MAX_COLLABORATION_WORKER_TOOL_CALLS,
+            max_output_tokens_per_step: COLLABORATION_MAX_OUTPUT_TOKENS as usize,
+        },
+        prior_hint: None,
+        prompt_evolution_enabled: true,
+        prompt_genome: genome.clone(),
+    });
+    let completion = complete_collaboration_model_with_control(
+        config.clone(),
+        ModelRole::Planner,
+        conductor_model,
+        collaboration_system_prompt_for_run(&config.agent_system_prompt, &Metadata::new()),
+        harness.planning_prompt(),
+        None,
+        |_| {},
+    );
+    let total_tokens = completion
+        .usage
+        .get("total_tokens")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_default();
+    let raw_output = completion
+        .content
+        .unwrap_or_else(|| completion.error.unwrap_or_else(|| "empty response".to_string()));
+    let plan = harness.parse_plan(&raw_output).ok();
+    PromptPlanCandidate {
+        genome: genome.clone(),
+        plan,
+        raw_output,
+        latency_ms: completion.latency_ms,
+        total_tokens,
+    }
+}
+
+fn prompt_evaluation_role(role: &str) -> ModelRole {
+    match role {
+        "verifier" | "reviewer" => ModelRole::Reviewer,
+        "synthesizer" => ModelRole::Summarizer,
+        "worker" => ModelRole::Executor,
+        _ => ModelRole::Planner,
+    }
+}
+
+fn prompt_evaluation_step_prompt(
+    objective: &str,
+    step: &orchestrator::WorkflowPlanStep,
+    outputs: &BTreeMap<String, String>,
+) -> String {
+    let dependencies = if step.access.is_empty() {
+        "(none; solve this branch independently)".to_string()
+    } else {
+        step.access
+            .iter()
+            .map(|dependency| {
+                format!(
+                    "[{dependency}]\n{}",
+                    outputs
+                        .get(dependency)
+                        .map(String::as_str)
+                        .unwrap_or("[dependency unavailable]")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    format!(
+        "You are executing one node in an isolated Cindx Conductor evaluation. No tools, files, browser, network, or side effects are available. Never claim that you performed an external action. Produce the strongest self-contained work product possible from the objective and authorized dependency outputs. State uncertainty rather than inventing evidence.\n\nObjective:\n{objective}\n\nYour role: {}\nYour subtask:\n{}\n\nAuthorized dependency outputs:\n{dependencies}",
+        step.role, step.subtask
+    )
+}
+
+fn execute_prompt_workflow_candidate(
+    config: &ProviderConfig,
+    objective: &str,
+    candidate: PromptPlanCandidate,
+) -> PromptExecutionCandidate {
+    let config = config.clone();
+    execute_prompt_workflow_candidate_with_runner(
+        objective,
+        candidate,
+        Arc::new(move |role, model, prompt| {
+            complete_collaboration_model_with_control(
+                config.clone(),
+                role,
+                model,
+                "You are a Cindx evaluation worker in a side-effect-free sandbox. Follow the supplied node contract exactly and return only the node work product.".to_string(),
+                prompt,
+                None,
+                |_| {},
+            )
+        }),
+    )
+}
+
+fn execute_prompt_workflow_candidate_with_runner(
+    objective: &str,
+    candidate: PromptPlanCandidate,
+    runner: PromptEvaluationRunner,
+) -> PromptExecutionCandidate {
+    let started_at_ms = current_time_millis();
+    let Some(plan) = candidate.plan.as_ref() else {
+        return PromptExecutionCandidate {
+            plan: candidate,
+            execution: PromptWorkflowExecution {
+                succeeded: false,
+                final_output: String::new(),
+                steps: Vec::new(),
+                latency_ms: 0,
+                total_tokens: 0,
+            },
+        };
+    };
+    let Ok(layers) = adaptive_workflow_layers(&plan.adaptive_workflow()) else {
+        return PromptExecutionCandidate {
+            plan: candidate,
+            execution: PromptWorkflowExecution {
+                succeeded: false,
+                final_output: String::new(),
+                steps: Vec::new(),
+                latency_ms: 0,
+                total_tokens: 0,
+            },
+        };
+    };
+
+    let mut outputs = BTreeMap::<String, String>::new();
+    let mut execution_steps = Vec::new();
+    for layer in layers {
+        let handles = layer
+            .iter()
+            .filter_map(|index| plan.steps.get(*index).cloned().map(|step| (*index, step)))
+            .map(|(index, step)| {
+                let prompt = prompt_evaluation_step_prompt(objective, &step, &outputs);
+                let runner = Arc::clone(&runner);
+                std::thread::spawn(move || {
+                    let role = prompt_evaluation_role(&step.role);
+                    let completion = runner(role, step.model.clone(), prompt);
+                    (index, step, completion)
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut completed = handles
+            .into_iter()
+            .map(|handle| {
+                handle.join().unwrap_or_else(|_| {
+                    (
+                        usize::MAX,
+                        orchestrator::WorkflowPlanStep {
+                            id: "worker-panic".to_string(),
+                            role: "worker".to_string(),
+                            model: String::new(),
+                            subtask: String::new(),
+                            access: Vec::new(),
+                            tool_policy: orchestrator::WorkflowToolPolicy::None,
+                        },
+                        CollaborationCompletion::failed(
+                            "evaluation worker panicked".to_string(),
+                        ),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        completed.sort_by_key(|(index, _, _)| *index);
+        for (_, step, completion) in completed {
+            let output = completion
+                .content
+                .filter(|content| !content.trim().is_empty())
+                .unwrap_or_else(|| {
+                    format!(
+                        "[execution failed: {}]",
+                        completion
+                            .error
+                            .unwrap_or_else(|| "empty worker output".to_string())
+                    )
+                });
+            let succeeded = !output.starts_with("[execution failed:");
+            let total_tokens = completion
+                .usage
+                .get("total_tokens")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or_default();
+            outputs.insert(step.id.clone(), output.clone());
+            execution_steps.push(PromptExecutionStep {
+                id: step.id,
+                role: step.role,
+                succeeded,
+                output,
+                latency_ms: completion.latency_ms,
+                total_tokens,
+                evidence_count: step.access.len(),
+            });
+        }
+    }
+    let final_output = plan
+        .steps
+        .last()
+        .and_then(|step| outputs.get(&step.id))
+        .cloned()
+        .unwrap_or_default();
+    let succeeded = !final_output.trim().is_empty()
+        && execution_steps.len() == plan.steps.len()
+        && execution_steps.iter().all(|step| step.succeeded);
+    PromptExecutionCandidate {
+        plan: candidate,
+        execution: PromptWorkflowExecution {
+            succeeded,
+            final_output,
+            total_tokens: execution_steps.iter().map(|step| step.total_tokens).sum(),
+            steps: execution_steps,
+            latency_ms: current_time_millis().saturating_sub(started_at_ms),
+        },
+    }
+}
+
+fn evaluate_prompt_candidate_pair(
+    config: &ProviderConfig,
+    objective: &str,
+    candidate_a: &PromptExecutionCandidate,
+    candidate_b: &PromptExecutionCandidate,
+    evaluation_id: &str,
+) -> Result<PromptPairwiseEvaluationPayload, String> {
+    let reviewer_model = config.model_for_role(&ModelRole::Reviewer);
+    let candidate_text = |candidate: &PromptExecutionCandidate| {
+        let plan = candidate
+            .plan
+            .plan
+            .as_ref()
+            .and_then(|plan| plan.to_json().ok())
+            .unwrap_or_else(|| {
+                truncate_for_collaboration(&candidate.plan.raw_output, 12_000)
+            });
+        let steps = candidate
+            .execution
+            .steps
+            .iter()
+            .map(|step| {
+                format!(
+                    "step={} role={} succeeded={} latency_ms={} tokens={} output:\n{}",
+                    step.id,
+                    step.role,
+                    step.succeeded,
+                    step.latency_ms,
+                    step.total_tokens,
+                    truncate_for_collaboration(&step.output, 6_000)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        format!(
+            "plan:\n{plan}\n\nexecution_succeeded={} execution_latency_ms={} execution_tokens={}\n\nsteps:\n{}\n\nfinal_output:\n{}",
+            candidate.execution.succeeded,
+            candidate.execution.latency_ms,
+            candidate.execution.total_tokens,
+            steps,
+            truncate_for_collaboration(&candidate.execution.final_output, 12_000)
+        )
+    };
+    let prompt = format!(
+        "Blindly compare two actually executed Cindx Conductor workflows for the same objective. Judge the final work product first, then factual grounding, dependency use, verification quality, completeness, efficiency, recoverability, and safety. The workers ran in a side-effect-free sandbox, so penalize claims of external actions or evidence they could not access. Do not prefer A or B by position. Give each exact step id a 0..1 credit. Invalid plans, failed executions, unsafe outputs, or empty final outputs must receive a low score. Return only strict JSON with this schema: {{\"score_a\":0.0,\"score_b\":0.0,\"safety_violations_a\":0,\"safety_violations_b\":0,\"step_scores_a\":{{\"step-id\":0.0}},\"step_scores_b\":{{\"step-id\":0.0}}}}.\n\nObjective:\n{}\n\nCandidate A (format_valid={}):\n{}\n\nCandidate B (format_valid={}):\n{}",
+        objective,
+        candidate_a.plan.plan.is_some(),
+        candidate_text(candidate_a),
+        candidate_b.plan.plan.is_some(),
+        candidate_text(candidate_b),
+    );
+    let completion = complete_collaboration_model_with_control(
+        config.clone(),
+        ModelRole::Reviewer,
+        reviewer_model,
+        collaboration_system_prompt_for_run(&config.agent_system_prompt, &Metadata::new()),
+        prompt,
+        None,
+        |_| {},
+    );
+    let response = completion.content.ok_or_else(|| {
+        completion
+            .error
+            .unwrap_or_else(|| format!("pairwise reviewer {evaluation_id} returned no content"))
+    })?;
+    let start = response
+        .find('{')
+        .ok_or_else(|| "pairwise reviewer did not return JSON".to_string())?;
+    let end = response
+        .rfind('}')
+        .filter(|end| *end >= start)
+        .ok_or_else(|| "pairwise reviewer returned incomplete JSON".to_string())?;
+    let payload = serde_json::from_str::<PromptPairwiseEvaluationPayload>(&response[start..=end])
+        .map_err(|error| format!("pairwise reviewer JSON is invalid: {error}"))?;
+    if !payload.score_a.is_finite() || !payload.score_b.is_finite() {
+        return Err("pairwise reviewer returned a non-finite score".to_string());
+    }
+    Ok(payload)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prompt_pairwise_observation(
+    candidate: &PromptExecutionCandidate,
+    opponent: &PromptExecutionCandidate,
+    evaluation_id: &str,
+    task_class: &str,
+    split: PromptEvaluationSplit,
+    mode: PromptEvaluationMode,
+    score: f64,
+    opponent_score: f64,
+    safety_violations: u64,
+    step_scores: &BTreeMap<String, f64>,
+) -> PromptEvolutionObservation {
+    let score = score.clamp(0.0, 1.0);
+    let step_credits = candidate.plan.plan.as_ref().map_or_else(
+        || {
+            vec![PromptStepCredit {
+                step_id: "plan_format".to_string(),
+                role: "conductor".to_string(),
+                succeeded: false,
+                attempts: 1,
+                evidence_count: 0,
+                latency_ms: candidate.plan.latency_ms,
+                total_tokens: candidate.plan.total_tokens,
+                credit: 0.0,
+            }]
+        },
+        |plan| {
+            plan.steps
+                .iter()
+                .map(|step| PromptStepCredit {
+                    step_id: step.id.clone(),
+                    role: step.role.clone(),
+                    succeeded: candidate
+                        .execution
+                        .steps
+                        .iter()
+                        .find(|executed| executed.id == step.id)
+                        .is_some_and(|executed| executed.succeeded),
+                    attempts: 1,
+                    evidence_count: candidate
+                        .execution
+                        .steps
+                        .iter()
+                        .find(|executed| executed.id == step.id)
+                        .map(|executed| executed.evidence_count)
+                        .unwrap_or_default(),
+                    latency_ms: candidate
+                        .execution
+                        .steps
+                        .iter()
+                        .find(|executed| executed.id == step.id)
+                        .map(|executed| executed.latency_ms)
+                        .unwrap_or_default(),
+                    total_tokens: candidate
+                        .execution
+                        .steps
+                        .iter()
+                        .find(|executed| executed.id == step.id)
+                        .map(|executed| executed.total_tokens)
+                        .unwrap_or_default(),
+                    credit: step_scores
+                        .get(&step.id)
+                        .copied()
+                        .unwrap_or(score)
+                        .clamp(0.0, 1.0),
+                })
+                .collect()
+        },
+    );
+    PromptEvolutionObservation {
+        profile_id: candidate.plan.genome.id.clone(),
+        evaluation_id: evaluation_id.to_string(),
+        opponent_profile_id: Some(opponent.plan.genome.id.clone()),
+        task_class: task_class.to_string(),
+        split,
+        mode,
+        format_valid: candidate.plan.plan.is_some(),
+        succeeded: candidate.execution.succeeded
+            && safety_violations == 0
+            && score >= 0.5,
+        quality_score: score,
+        latency_ms: candidate
+            .plan
+            .latency_ms
+            .saturating_add(candidate.execution.latency_ms),
+        total_tokens: candidate
+            .plan
+            .total_tokens
+            .saturating_add(candidate.execution.total_tokens),
+        estimated_cost_microusd: 0,
+        safety_violations,
+        relative_reward: Some((score - opponent_score.clamp(0.0, 1.0)).clamp(-1.0, 1.0)),
+        step_credits,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_prompt_evaluation_status(
+    state: &tauri::State<'_, AppState>,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    summary: &str,
+    evaluation_id: &str,
+    effort: &str,
+    mode: PromptEvaluationMode,
+    profile_a: &str,
+    profile_b: &str,
+    error: Option<&str>,
+) -> Result<(), String> {
+    let mut metadata = [
+        ("background_evaluation".to_string(), "true".to_string()),
+        ("evaluation_id".to_string(), evaluation_id.to_string()),
+        ("prompt_effort".to_string(), effort.to_string()),
+        (
+            "evaluation_mode".to_string(),
+            serde_json::to_value(mode)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| "paired_shadow".to_string()),
+        ),
+        ("profile_a".to_string(), profile_a.to_string()),
+        ("profile_b".to_string(), profile_b.to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    if let Some(error) = error {
+        metadata.insert(
+            "error".to_string(),
+            truncate_for_collaboration(error, 2_000),
+        );
+    }
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    append_event(
+        &mut store,
+        task_id,
+        EventKind::TaskStatusChanged,
+        summary,
+        metadata_with_context(metadata, run_context),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn append_prompt_pairwise_observation(
+    state: &tauri::State<'_, AppState>,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    effort: &str,
+    mode: PromptEvaluationMode,
+    observation: &PromptEvolutionObservation,
+    genome: &ConductorPromptGenome,
+) -> Result<(), String> {
+    let encoded_observation = serde_json::to_string(observation)
+        .map_err(|error| format!("prompt observation serialization failed: {error}"))?;
+    let encoded_genome = serde_json::to_string(genome)
+        .map_err(|error| format!("prompt genome serialization failed: {error}"))?;
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    append_event(
+        &mut store,
+        task_id,
+        EventKind::TaskStatusChanged,
+        "Conductor pairwise evaluation",
+        metadata_with_context(
+            [
+                ("background_evaluation".to_string(), "true".to_string()),
+                ("evaluation_id".to_string(), observation.evaluation_id.clone()),
+                ("prompt_effort".to_string(), effort.to_string()),
+                ("prompt_profile".to_string(), observation.profile_id.clone()),
+                ("prompt_genome".to_string(), encoded_genome),
+                (
+                    "evaluation_mode".to_string(),
+                    match mode {
+                        PromptEvaluationMode::Live => "live",
+                        PromptEvaluationMode::PairedShadow => "paired_shadow",
+                        PromptEvaluationMode::ReplayHoldout => "replay_holdout",
+                        PromptEvaluationMode::PairedExecution => "paired_execution",
+                        PromptEvaluationMode::ReplayExecution => "replay_execution",
+                    }
+                    .to_string(),
+                ),
+                ("prompt_observation".to_string(), encoded_observation),
+            ]
+            .into_iter()
+            .collect(),
+            run_context,
+        ),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn initial_prompt_population(effort: &str) -> Vec<ConductorPromptGenome> {
+    let seed = ConductorPromptGenome::seed_for_effort(effort);
+    let mutations = seed.mutations();
+    let mut population = vec![seed.clone()];
+    for variant in [
+        mutations
+            .iter()
+            .find(|variant| variant.graph_depth != seed.graph_depth),
+        mutations
+            .iter()
+            .find(|variant| variant.verification != seed.verification),
+        mutations
+            .iter()
+            .find(|variant| variant.context_policy != seed.context_policy),
+        mutations.iter().find(|variant| {
+            variant.max_parallel_branches != seed.max_parallel_branches
+        }),
+        mutations
+            .iter()
+            .find(|variant| variant.tool_policy != seed.tool_policy),
+        mutations
+            .iter()
+            .find(|variant| variant.retry_policy != seed.retry_policy),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        population.push(variant.clone());
+    }
+    population.truncate(PROMPT_EVOLUTION_POPULATION_LIMIT);
+    population
+}
+
+fn prompt_genomes_from_events(
+    events: &[Event],
+    effort: &str,
+) -> Vec<ConductorPromptGenome> {
+    let mut population = initial_prompt_population(effort);
+    for event in events {
+        if event.metadata.get("prompt_effort").map(String::as_str) != Some(effort) {
+            continue;
+        }
+        let Some(encoded) = event.metadata.get("prompt_genome") else {
+            continue;
+        };
+        let Ok(genome) = serde_json::from_str::<ConductorPromptGenome>(encoded) else {
+            continue;
+        };
+        if genome.validate().is_ok() {
+            population.push(genome);
+        }
+    }
+    let mut ids = BTreeSet::new();
+    population.retain(|genome| ids.insert(genome.id.clone()));
+    population
+}
+
+fn prompt_evolution_observations_from_events(
+    events: &[Event],
+) -> Vec<(String, PromptEvolutionObservation)> {
+    let mut workflows = BTreeMap::<String, Vec<&Event>>::new();
+    let mut agent_runs = BTreeMap::<String, Vec<&Event>>::new();
+    for event in events {
+        if let Some(workflow_id) = event.metadata.get("collaboration_id") {
+            workflows.entry(workflow_id.clone()).or_default().push(event);
+        }
+        if let Some(run_id) = event.metadata.get("agent_run_id") {
+            agent_runs.entry(run_id.clone()).or_default().push(event);
+        }
+    }
+    let mut runs = workflows
+        .into_iter()
+        .filter_map(|(workflow_id, mut workflow_events)| {
+            workflow_events.sort_by_key(|event| event.sequence);
+            let profile_event = workflow_events
+                .iter()
+                .find(|event| event.summary == "Conductor prompt profile selected")
+                .copied()
+                .or_else(|| {
+                    workflow_events
+                        .iter()
+                        .find(|event| event.summary == "Collaboration workflow planned")
+                        .copied()
+                })?;
+            let plan = workflow_events
+                .iter()
+                .find(|event| event.summary == "Collaboration workflow planned")
+                .and_then(|event| event.metadata.get("workflow_ir"))
+                .and_then(|value| serde_json::from_str::<WorkflowPlanIr>(value).ok());
+            let profile_id = profile_event
+                .metadata
+                .get("prompt_profile")
+                .cloned()
+                .or_else(|| plan.as_ref().map(|plan| plan.prompt_profile.clone()))?;
+            let effort = profile_event
+                .metadata
+                .get("prompt_effort")
+                .cloned()
+                .or_else(|| plan.as_ref().map(|plan| plan.effort.clone()))?;
+            let bounded_profile = profile_event
+                .metadata
+                .get("collaboration_profile")
+                .map(String::as_str)
+                == Some("bounded");
+            let run_events = profile_event
+                .metadata
+                .get("agent_run_id")
+                .and_then(|run_id| agent_runs.get(run_id));
+            let terminal = if let Some(run_events) = run_events {
+                run_events.iter().rev().find(|event| {
+                        matches!(
+                            event.summary.as_str(),
+                            "Agent task completed" | "Agent task cancelled" | "Agent task failed"
+                        )
+                    })
+            } else {
+                workflow_events.iter().rev().find(|event| {
+                    matches!(
+                        event.summary.as_str(),
+                        "Collaboration workflow completed" | "Collaboration workflow failed"
+                    )
+                })
+            }?;
+            if terminal.summary == "Agent task cancelled" {
+                return None;
+            }
+            let succeeded = matches!(
+                terminal.summary.as_str(),
+                "Agent task completed" | "Collaboration workflow completed"
+            );
+            let quality_event = workflow_events
+                .iter()
+                .rev()
+                .find(|event| event.summary == "Collaboration quality gate evaluated");
+            let measured_quality = quality_event
+                .and_then(|event| event.metadata.get("quality_score"))
+                .and_then(|score| score.parse::<f64>().ok());
+            let measured_safety_violations = quality_event
+                .and_then(|event| event.metadata.get("safety_violations"))
+                .and_then(|count| count.parse::<u64>().ok())
+                .unwrap_or_default();
+            let evaluation_events = run_events
+                .map(Vec::as_slice)
+                .unwrap_or(workflow_events.as_slice());
+            let permission_denials = evaluation_events
+                .iter()
+                .filter(|event| {
+                    event.kind == EventKind::PermissionResolved
+                        && event.metadata.get("decision").is_some_and(|decision| {
+                            !matches!(decision.as_str(), "allow_once" | "allow_for_session")
+                        })
+                })
+                .count() as u64;
+            let total_tokens = evaluation_events
+                .iter()
+                .filter(|event| event.kind == EventKind::ModelRequestFinished)
+                .filter_map(|event| event.metadata.get("total_tokens"))
+                .filter_map(|tokens| tokens.parse::<u64>().ok())
+                .sum();
+            let step_credits = workflow_events
+                .iter()
+                .rev()
+                .find_map(|event| event.metadata.get("step_credits"))
+                .and_then(|encoded| serde_json::from_str::<Vec<PromptStepCredit>>(encoded).ok())
+                .unwrap_or_default();
+            Some((
+                profile_event.sequence,
+                effort,
+                PromptEvolutionObservation {
+                    profile_id,
+                    evaluation_id: workflow_id,
+                    opponent_profile_id: None,
+                    task_class: profile_event
+                        .metadata
+                        .get("task_class")
+                        .cloned()
+                        .unwrap_or_else(|| "general".to_string()),
+                    split: PromptEvaluationSplit::Train,
+                    mode: PromptEvaluationMode::Live,
+                    format_valid: plan.is_some() || bounded_profile,
+                    succeeded,
+                    quality_score: measured_quality.unwrap_or(if succeeded { 0.5 } else { 0.0 }),
+                    latency_ms: terminal
+                        .timestamp_ms
+                        .saturating_sub(profile_event.timestamp_ms),
+                    total_tokens,
+                    estimated_cost_microusd: 0,
+                    safety_violations: measured_safety_violations
+                        .saturating_add(permission_denials),
+                    relative_reward: None,
+                    step_credits,
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+    runs.extend(events.iter().filter_map(|event| {
+        if event.summary != "Conductor pairwise evaluation" {
+            return None;
+        }
+        let effort = event.metadata.get("prompt_effort")?.clone();
+        let observation = event
+            .metadata
+            .get("prompt_observation")
+            .and_then(|encoded| serde_json::from_str::<PromptEvolutionObservation>(encoded).ok())?;
+        Some((event.sequence, effort, observation))
+    }));
+    runs.sort_by_key(|(sequence, _, _)| *sequence);
+    runs.into_iter()
+        .map(|(_, effort, observation)| (effort, observation))
+        .collect()
+}
+
+fn prompt_genome_record_from_event(event: &Event) -> Option<PromptGenomeRecord> {
+    let effort = event.metadata.get("prompt_effort")?.clone();
+    let genome = serde_json::from_str::<ConductorPromptGenome>(
+        event.metadata.get("prompt_genome")?,
+    )
+    .ok()?;
+    genome.validate().ok()?;
+    Some(PromptGenomeRecord { effort, genome })
+}
+
+fn upsert_prompt_genome(
+    records: &mut Vec<PromptGenomeRecord>,
+    record: PromptGenomeRecord,
+) {
+    if let Some(existing) = records.iter_mut().find(|existing| {
+        existing.effort == record.effort && existing.genome.id == record.genome.id
+    }) {
+        *existing = record;
+    } else {
+        records.push(record);
+    }
+}
+
+fn upsert_prompt_observation(
+    observations: &mut Vec<(String, PromptEvolutionObservation)>,
+    effort: String,
+    observation: PromptEvolutionObservation,
+) {
+    if let Some(existing) = observations.iter_mut().find(|(existing_effort, existing)| {
+        existing_effort == &effort
+            && existing.evaluation_id == observation.evaluation_id
+            && existing.profile_id == observation.profile_id
+    }) {
+        *existing = (effort, observation);
+    } else {
+        observations.push((effort, observation));
+    }
+}
+
+fn build_prompt_evolution_read_model(
+    events: &[Event],
+    revision: u64,
+    event_count: u64,
+) -> PromptEvolutionReadModel {
+    let mut genomes = Vec::new();
+    for event in events {
+        if let Some(record) = prompt_genome_record_from_event(event) {
+            upsert_prompt_genome(&mut genomes, record);
+        }
+    }
+    PromptEvolutionReadModel {
+        schema: PROMPT_EVOLUTION_READ_MODEL_NAMESPACE.to_string(),
+        revision,
+        event_count,
+        genomes,
+        observations: prompt_evolution_observations_from_events(events),
+        rollouts: BTreeMap::new(),
+    }
+}
+
+fn load_prompt_evolution_read_model(
+    store: &mut SqliteStore,
+) -> Result<PromptEvolutionReadModel, StorageError> {
+    let task_id = phase16_task_id();
+    let revision = store.event_revision(&task_id)?;
+    let stored = store
+        .load_read_model(
+            PROMPT_EVOLUTION_READ_MODEL_NAMESPACE,
+            PROMPT_EVOLUTION_READ_MODEL_KEY,
+        )?
+        .and_then(|stored| {
+            serde_json::from_str::<PromptEvolutionReadModel>(&stored.payload)
+                .ok()
+                .filter(|model| {
+                    model.schema == PROMPT_EVOLUTION_READ_MODEL_NAMESPACE
+                        && model.revision == stored.revision
+                        && model.revision <= revision.latest_sequence
+                        && model.event_count <= revision.event_count
+                })
+        });
+    let mut model = stored.unwrap_or_else(|| PromptEvolutionReadModel {
+        schema: PROMPT_EVOLUTION_READ_MODEL_NAMESPACE.to_string(),
+        revision: 0,
+        event_count: 0,
+        genomes: Vec::new(),
+        observations: Vec::new(),
+        rollouts: BTreeMap::new(),
+    });
+    let mut delta = store.list_by_task_after(&task_id, model.revision)?;
+    if model.event_count.saturating_add(delta.len() as u64) != revision.event_count {
+        delta = store.list_by_task_after(&task_id, 0)?;
+        model = build_prompt_evolution_read_model(
+            &delta,
+            revision.latest_sequence,
+            revision.event_count,
+        );
+    } else if model.revision == 0 {
+        model = build_prompt_evolution_read_model(
+            &delta,
+            revision.latest_sequence,
+            revision.event_count,
+        );
+    } else {
+        for event in &delta {
+            if let Some(record) = prompt_genome_record_from_event(event) {
+                upsert_prompt_genome(&mut model.genomes, record);
+            }
+            if event.summary == "Conductor pairwise evaluation" {
+                if let (Some(effort), Some(observation)) = (
+                    event.metadata.get("prompt_effort"),
+                    event
+                        .metadata
+                        .get("prompt_observation")
+                        .and_then(|encoded| {
+                            serde_json::from_str::<PromptEvolutionObservation>(encoded).ok()
+                        }),
+                ) {
+                    upsert_prompt_observation(
+                        &mut model.observations,
+                        effort.clone(),
+                        observation,
+                    );
+                }
+            }
+        }
+        let terminal_scopes = delta
+            .iter()
+            .filter_map(|event| {
+                if matches!(
+                    event.summary.as_str(),
+                    "Agent task completed" | "Agent task cancelled" | "Agent task failed"
+                ) {
+                    event
+                        .metadata
+                        .get("agent_run_id")
+                        .map(|id| ("agent_run_id", id.clone()))
+                } else if matches!(
+                    event.summary.as_str(),
+                    "Collaboration workflow completed" | "Collaboration workflow failed"
+                ) {
+                    event
+                        .metadata
+                        .get("collaboration_id")
+                        .map(|id| ("collaboration_id", id.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect::<BTreeSet<_>>();
+        for (scope, value) in terminal_scopes {
+            let scoped_events = store.list_by_task_and_metadata(
+                &task_id,
+                scope,
+                &value,
+            )?;
+            for (effort, observation) in
+                prompt_evolution_observations_from_events(&scoped_events)
+            {
+                upsert_prompt_observation(
+                    &mut model.observations,
+                    effort,
+                    observation,
+                );
+            }
+        }
+        model.revision = revision.latest_sequence;
+        model.event_count = revision.event_count;
+    }
+
+    save_prompt_evolution_read_model(store, &model)?;
+    Ok(model)
+}
+
+fn save_prompt_evolution_read_model(
+    store: &mut SqliteStore,
+    model: &PromptEvolutionReadModel,
+) -> Result<(), StorageError> {
+    let payload = serde_json::to_string(model).map_err(|error| {
+        StorageError::new(format!("prompt evolution serialization failed: {error}"))
+    })?;
+    store.save_read_model(
+        PROMPT_EVOLUTION_READ_MODEL_NAMESPACE,
+        PROMPT_EVOLUTION_READ_MODEL_KEY,
+        model.revision,
+        &payload,
+    )
+}
+
+fn prompt_evolution_profile_events(model: &PromptEvolutionReadModel) -> Vec<Event> {
+    model
+        .genomes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| {
+            Some(Event {
+                id: EventId(format!("prompt-read-model-{index}")),
+                task_id: phase16_task_id(),
+                sequence: index as u64 + 1,
+                timestamp_ms: 0,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Conductor prompt profile indexed".to_string(),
+                metadata: [
+                    ("prompt_effort".to_string(), record.effort.clone()),
+                    (
+                        "prompt_genome".to_string(),
+                        serde_json::to_string(&record.genome).ok()?,
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            })
+        })
+        .collect()
+}
+
+fn evaluate_prompt_evolution_read_model(
+    model: &PromptEvolutionReadModel,
+    effort: &str,
+) -> Result<PromptEvolutionEvaluation, String> {
+    evaluate_prompt_evolution_with_observations(
+        &prompt_evolution_profile_events(model),
+        effort,
+        &model.observations,
+    )
+}
+
+fn default_prompt_rollout(effort: &str) -> PromptRolloutState {
+    PromptRolloutState {
+        stable_profile_id: ConductorPromptGenome::seed_for_effort(effort).id,
+        canary_profile_id: None,
+        canary_percent: 0,
+        evidence_checkpoint: 0,
+        live_checkpoint: 0,
+        rollback_count: 0,
+        status: "stable".to_string(),
+        last_reason: None,
+        promotion_confidence: None,
+    }
+}
+
+fn prompt_live_observations<'a>(
+    model: &'a PromptEvolutionReadModel,
+    effort: &str,
+    profile_id: &str,
+) -> Vec<&'a PromptEvolutionObservation> {
+    model
+        .observations
+        .iter()
+        .filter(|(observed_effort, observation)| {
+            observed_effort == effort
+                && observation.profile_id == profile_id
+                && observation.mode == PromptEvaluationMode::Live
+        })
+        .map(|(_, observation)| observation)
+        .collect()
+}
+
+fn prompt_canary_degraded(
+    model: &PromptEvolutionReadModel,
+    effort: &str,
+    stable_profile_id: &str,
+    canary_profile_id: &str,
+) -> Option<String> {
+    let canary = prompt_live_observations(model, effort, canary_profile_id);
+    if canary
+        .iter()
+        .rev()
+        .take(4)
+        .any(|observation| observation.safety_violations > 0 || !observation.format_valid)
+    {
+        return Some("canary_safety_regression".to_string());
+    }
+    let recent_canary = canary.iter().rev().take(4).copied().collect::<Vec<_>>();
+    if recent_canary.len() >= 2 {
+        let success_rate = recent_canary
+            .iter()
+            .filter(|observation| observation.succeeded)
+            .count() as f64
+            / recent_canary.len() as f64;
+        if success_rate < 0.5 {
+            return Some("canary_success_regression".to_string());
+        }
+    }
+    let stable = prompt_live_observations(model, effort, stable_profile_id);
+    let recent_stable = stable.iter().rev().take(4).copied().collect::<Vec<_>>();
+    if recent_canary.len() >= 2 && recent_stable.len() >= 2 {
+        let average = |entries: &[&PromptEvolutionObservation]| {
+            entries.iter().map(|entry| entry.reward()).sum::<f64>() / entries.len() as f64
+        };
+        if average(&recent_canary) + 0.08 < average(&recent_stable) {
+            return Some("canary_reward_regression".to_string());
+        }
+    }
+    None
+}
+
+fn next_prompt_canary_stage(current: u8) -> u8 {
+    match current {
+        0..=9 => 10,
+        10..=24 => 25,
+        25..=49 => 50,
+        _ => 100,
+    }
+}
+
+fn reconcile_prompt_rollout(
+    model: &mut PromptEvolutionReadModel,
+    effort: &str,
+    evaluation: &PromptEvolutionEvaluation,
+) -> PromptRolloutState {
+    let mut rollout = model
+        .rollouts
+        .get(effort)
+        .cloned()
+        .unwrap_or_else(|| default_prompt_rollout(effort));
+    let Some(candidate_id) = evaluation.champion_id.as_deref() else {
+        model.rollouts.insert(effort.to_string(), rollout.clone());
+        return rollout;
+    };
+    let Some(confidence) = evaluation.champion_confidence.as_ref() else {
+        model.rollouts.insert(effort.to_string(), rollout.clone());
+        return rollout;
+    };
+    rollout.promotion_confidence = Some(confidence.wilson_lower_bound);
+
+    if candidate_id == rollout.stable_profile_id {
+        if rollout.canary_profile_id.is_some() {
+            rollout.canary_profile_id = None;
+            rollout.canary_percent = 0;
+            rollout.status = "rolled_back".to_string();
+            rollout.last_reason = Some("stable_profile_regained_frontier".to_string());
+            rollout.rollback_count = rollout.rollback_count.saturating_add(1);
+        } else {
+            rollout.status = "stable".to_string();
+        }
+        model.rollouts.insert(effort.to_string(), rollout.clone());
+        return rollout;
+    }
+
+    if rollout.canary_profile_id.as_deref() != Some(candidate_id) {
+        rollout.canary_profile_id = Some(candidate_id.to_string());
+        rollout.canary_percent = 10;
+        rollout.evidence_checkpoint = confidence.comparisons;
+        rollout.live_checkpoint = prompt_live_observations(model, effort, candidate_id).len();
+        rollout.status = "canary".to_string();
+        rollout.last_reason = Some("confidence_gate_passed".to_string());
+        model.rollouts.insert(effort.to_string(), rollout.clone());
+        return rollout;
+    }
+
+    if let Some(reason) = prompt_canary_degraded(
+        model,
+        effort,
+        &rollout.stable_profile_id,
+        candidate_id,
+    ) {
+        rollout.canary_profile_id = None;
+        rollout.canary_percent = 0;
+        rollout.rollback_count = rollout.rollback_count.saturating_add(1);
+        rollout.status = "rolled_back".to_string();
+        rollout.last_reason = Some(reason);
+        model.rollouts.insert(effort.to_string(), rollout.clone());
+        return rollout;
+    }
+
+    let live_runs = prompt_live_observations(model, effort, candidate_id).len();
+    let enough_new_evidence = confidence
+        .comparisons
+        .saturating_sub(rollout.evidence_checkpoint)
+        >= 2;
+    let enough_live_traffic = live_runs.saturating_sub(rollout.live_checkpoint) >= 1;
+    if enough_new_evidence && enough_live_traffic {
+        if rollout.canary_percent >= 100 {
+            rollout.stable_profile_id = candidate_id.to_string();
+            rollout.canary_profile_id = None;
+            rollout.canary_percent = 0;
+            rollout.status = "promoted".to_string();
+            rollout.last_reason = Some("canary_completed".to_string());
+        } else {
+            rollout.canary_percent = next_prompt_canary_stage(rollout.canary_percent);
+            rollout.evidence_checkpoint = confidence.comparisons;
+            rollout.live_checkpoint = live_runs;
+            rollout.status = "canary".to_string();
+            rollout.last_reason = Some("canary_stage_advanced".to_string());
+        }
+    }
+    model.rollouts.insert(effort.to_string(), rollout.clone());
+    rollout
+}
+
+fn prompt_rollout_bucket(value: &str) -> u8 {
+    let hash = value.as_bytes().iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    (hash % 100) as u8
+}
+
+fn apply_prompt_rollout_selection(
+    evaluation: &mut PromptEvolutionEvaluation,
+    rollout: &PromptRolloutState,
+    model: &PromptEvolutionReadModel,
+    run_context: &Metadata,
+    effort: &str,
+) {
+    let rollout_key = format!(
+        "{}:{}:{}",
+        effort,
+        run_context.get("session_id").map(String::as_str).unwrap_or("session"),
+        run_context
+            .get("agent_run_id")
+            .map(String::as_str)
+            .unwrap_or("run")
+    );
+    let canary_selected = rollout.canary_profile_id.as_ref().is_some_and(|_| {
+        prompt_rollout_bucket(&rollout_key) < rollout.canary_percent
+    });
+    let selected_id = if canary_selected {
+        rollout.canary_profile_id.as_deref()
+    } else {
+        Some(rollout.stable_profile_id.as_str())
+    };
+    let selected = selected_id
+        .and_then(|id| {
+            evaluation
+                .population
+                .iter()
+                .find(|profile| profile.id == id)
+                .cloned()
+                .or_else(|| {
+                    model
+                        .genomes
+                        .iter()
+                        .find(|record| record.effort == effort && record.genome.id == id)
+                        .map(|record| record.genome.clone())
+                })
+        })
+        .unwrap_or_else(|| ConductorPromptGenome::seed_for_effort(effort));
+    evaluation.next_profile = selected;
+    evaluation.next_mode = if canary_selected {
+        format!("canary_{}", rollout.canary_percent)
+    } else {
+        "stable".to_string()
+    };
+    evaluation.status = rollout.status.clone();
+}
+
+#[cfg(test)]
+fn evaluate_prompt_evolution(
+    events: &[Event],
+    effort: &str,
+) -> Result<PromptEvolutionEvaluation, String> {
+    let observations = prompt_evolution_observations_from_events(events);
+    evaluate_prompt_evolution_with_observations(events, effort, &observations)
+}
+
+fn evaluate_prompt_evolution_with_observations(
+    events: &[Event],
+    effort: &str,
+    all_observations: &[(String, PromptEvolutionObservation)],
+) -> Result<PromptEvolutionEvaluation, String> {
+    let known_population = prompt_genomes_from_events(events, effort);
+    let known_ids = known_population
+        .iter()
+        .map(|genome| genome.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let observations = all_observations
+        .iter()
+        .filter(|(observed_effort, observation)| {
+            observed_effort == effort && known_ids.contains(observation.profile_id.as_str())
+        })
+        .map(|(_, observation)| observation.clone())
+        .collect::<Vec<_>>();
+    let archive = PromptParetoArchive::build(
+        &known_population,
+        &observations,
+        PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
+        PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS,
+    )?;
+    let convergence = evaluate_prompt_convergence(
+        &known_population,
+        &observations,
+        PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
+        PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS,
+        PROMPT_EVOLUTION_STAGNATION_PATIENCE,
+        PROMPT_EVOLUTION_MIN_IMPROVEMENT,
+        PROMPT_EVOLUTION_MAX_GENERATION,
+    )?;
+    let champion = convergence.champion.as_ref();
+    let frontier_ids = archive
+        .candidates
+        .iter()
+        .map(|candidate| candidate.genome.id.clone())
+        .collect::<BTreeSet<_>>();
+    let split_counts = observations.iter().fold(
+        BTreeMap::<String, (usize, usize)>::new(),
+        |mut counts, observation| {
+            let entry = counts.entry(observation.profile_id.clone()).or_default();
+            if observation.mode.is_paired() {
+                entry.0 += 1;
+            } else if observation.mode.is_replay() {
+                entry.1 += 1;
+            }
+            counts
+        },
+    );
+    let profile_complete = |genome: &ConductorPromptGenome| {
+        let (train, holdout) = split_counts.get(&genome.id).copied().unwrap_or_default();
+        train >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS
+            && holdout >= PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS
+    };
+    let breeding_parent = if let Some(generation) = known_population
+        .iter()
+        .filter(|genome| profile_complete(genome))
+        .map(|genome| genome.generation)
+        .max()
+    {
+        let generation_genomes = known_population
+            .iter()
+            .filter(|genome| genome.generation == generation)
+            .cloned()
+            .collect::<Vec<_>>();
+        let generation_ids = generation_genomes
+            .iter()
+            .map(|genome| genome.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let generation_observations = observations
+            .iter()
+            .filter(|observation| generation_ids.contains(observation.profile_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        PromptParetoArchive::build(
+            &generation_genomes,
+            &generation_observations,
+            PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
+            PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS,
+        )?
+        .champion()
+        .map(|candidate| candidate.genome.clone())
+    } else {
+        None
+    };
+    let mut population = Vec::new();
+    if let Some(champion) = convergence.champion.as_ref() {
+        population.push(champion.genome.clone());
+    }
+    population.extend(
+        known_population
+            .iter()
+            .filter(|genome| !profile_complete(genome))
+            .cloned(),
+    );
+    if archive.candidates.is_empty() {
+        population.extend(known_population.iter().cloned());
+    } else {
+        if let Some(parent) = breeding_parent.as_ref() {
+            population.extend(parent.mutations());
+        }
+        population.extend(archive.next_generation(PROMPT_EVOLUTION_POPULATION_LIMIT));
+    }
+    if population.is_empty() {
+        population = initial_prompt_population(effort);
+    }
+    let mut ids = BTreeSet::new();
+    population.retain(|genome| ids.insert(genome.id.clone()));
+    population.sort_by_key(|genome| {
+        let (train, holdout) = split_counts.get(&genome.id).copied().unwrap_or_default();
+        let complete = train >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS
+            && holdout >= PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS;
+        let priority = if champion.is_some_and(|candidate| candidate.genome.id == genome.id) {
+            0
+        } else if genome.id.starts_with("learned-") && !complete {
+            1
+        } else if !complete {
+            2
+        } else {
+            3
+        };
+        (priority, train + holdout, genome.generation, genome.id.clone())
+    });
+    population.truncate(PROMPT_EVOLUTION_POPULATION_LIMIT);
+    let exploration_profile = population
+        .iter()
+        .min_by_key(|genome| {
+            let (train, holdout) = split_counts.get(&genome.id).copied().unwrap_or_default();
+            let runs = train + holdout;
+            let complete = train >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS
+                && holdout >= PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS;
+            let priority = if !complete && runs > 0 {
+                0
+            } else if !complete {
+                1
+            } else {
+                2
+            };
+            (priority, runs, genome.generation, genome.id.clone())
+        })
+        .cloned()
+        .unwrap_or_else(|| ConductorPromptGenome::seed_for_effort(effort));
+    let shadow_due = convergence.frozen
+        && (observations.len() + 1) % PROMPT_EVOLUTION_SHADOW_INTERVAL == 0;
+    let shadow_profile = shadow_due.then(|| {
+        population
+            .iter()
+            .filter(|genome| {
+                champion.is_none_or(|candidate| candidate.genome.id != genome.id)
+            })
+            .min_by_key(|genome| {
+                let (train, holdout) = split_counts.get(&genome.id).copied().unwrap_or_default();
+                (train + holdout, genome.generation, genome.id.clone())
+            })
+            .cloned()
+    }).flatten();
+    let (status, next_mode, next_profile) = if convergence.frozen {
+        if let Some(profile) = shadow_profile {
+            ("shadow", "shadow", profile)
+        } else if let Some(champion) = champion {
+            ("frozen", "champion", champion.genome.clone())
+        } else {
+            ("exploring", "explore", exploration_profile.clone())
+        }
+    } else {
+        ("exploring", "explore", exploration_profile.clone())
+    };
+    let next_runs = split_counts
+        .get(&next_profile.id)
+        .map(|(train, holdout)| train + holdout)
+        .unwrap_or_default();
+    let pending_learned_profile = population.iter().any(|genome| {
+        genome.id.starts_with("learned-") && !profile_complete(genome)
+    });
+    let learned_child_exists = breeding_parent.as_ref().is_some_and(|parent| {
+        known_population.iter().any(|genome| {
+            genome.id.starts_with("learned-")
+                && genome.parents.iter().any(|candidate| candidate == &parent.id)
+        })
+    });
+    let mutation_parent = (!convergence.frozen
+        && next_runs == 0
+        && !pending_learned_profile
+        && !learned_child_exists)
+        .then(|| breeding_parent.clone())
+        .flatten()
+        .filter(|genome| genome.generation < PROMPT_EVOLUTION_MAX_GENERATION);
+    let mutation_feedback = champion
+        .map(|candidate| {
+            let recent_outcomes = observations
+                .iter()
+                .rev()
+                .filter(|observation| observation.profile_id == candidate.genome.id)
+                .take(6)
+                .map(|observation| {
+                    let split = match observation.split {
+                        PromptEvaluationSplit::Train => "train",
+                        PromptEvaluationSplit::Holdout => "holdout",
+                    };
+                    let mode = match observation.mode {
+                        PromptEvaluationMode::Live => "live",
+                        PromptEvaluationMode::PairedShadow => "paired",
+                        PromptEvaluationMode::ReplayHoldout => "replay",
+                        PromptEvaluationMode::PairedExecution => "paired_execution",
+                        PromptEvaluationMode::ReplayExecution => "replay_execution",
+                    };
+                    let average_step_credit = observation
+                        .step_credits
+                        .iter()
+                        .map(|step| step.credit.clamp(0.0, 1.0))
+                        .sum::<f64>()
+                        / observation.step_credits.len().max(1) as f64;
+                    let weak_steps = observation
+                        .step_credits
+                        .iter()
+                        .filter(|step| step.credit < 0.55)
+                        .map(|step| format!("{}:{:.2}", step.step_id, step.credit))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!(
+                        "{} {} {} success={} reward={:.3} relative={:.3} step_credit={:.3} weak_steps={} valid={} latency_ms={} tokens={} safety={}",
+                        split,
+                        mode,
+                        observation.task_class,
+                        observation.succeeded,
+                        observation.reward(),
+                        observation.group_relative_reward(),
+                        average_step_credit,
+                        if weak_steps.is_empty() { "none" } else { weak_steps.as_str() },
+                        observation.format_valid,
+                        observation.latency_ms,
+                        observation.total_tokens,
+                        observation.safety_violations,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!(
+                "Current holdout reward {:.3}, quality {:.3}, success {:.1}%, latency {:.0} ms, tokens {:.0}, generalization gap {:.3}. Recent measured outcomes: {}. Improve end-to-end reward by at least {:.2} without adding safety violations or unnecessary branches.",
+                candidate.holdout.average_reward,
+                candidate.holdout.average_quality,
+                candidate.holdout.success_rate * 100.0,
+                candidate.holdout.average_latency_ms,
+                candidate.holdout.average_total_tokens,
+                candidate.quality_generalization_gap,
+                if recent_outcomes.is_empty() {
+                    "none"
+                } else {
+                    recent_outcomes.as_str()
+                },
+                PROMPT_EVOLUTION_MIN_IMPROVEMENT,
+            )
+        })
+        .unwrap_or_default();
+    Ok(PromptEvolutionEvaluation {
+        population,
+        observations,
+        frontier_ids,
+        champion_id: champion.map(|candidate| candidate.genome.id.clone()),
+        champion_score: champion.map(|candidate| candidate.robust_score()),
+        champion_confidence: champion.map(|candidate| candidate.confidence.clone()),
+        status: status.to_string(),
+        freeze_reason: convergence.reason,
+        stagnant_generations: convergence.stagnant_generations,
+        evaluated_generations: convergence.evaluated_generations,
+        next_mode: next_mode.to_string(),
+        next_profile,
+        mutation_parent,
+        mutation_feedback,
+    })
+}
+
+fn prompt_evolution_evaluation_for_run(
+    state: &tauri::State<'_, AppState>,
+    effort: &str,
+    run_context: &Metadata,
+) -> Result<PromptEvolutionEvaluation, String> {
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let mut model = load_prompt_evolution_read_model(&mut store)
+        .map_err(|error| error.to_string())?;
+    let mut evaluation = evaluate_prompt_evolution_read_model(&model, effort)?;
+    let previous_rollout = model.rollouts.get(effort).cloned();
+    let rollout = reconcile_prompt_rollout(&mut model, effort, &evaluation);
+    apply_prompt_rollout_selection(
+        &mut evaluation,
+        &rollout,
+        &model,
+        run_context,
+        effort,
+    );
+    save_prompt_evolution_read_model(&mut store, &model)
+        .map_err(|error| error.to_string())?;
+    if previous_rollout.as_ref() != Some(&rollout) {
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Conductor prompt rollout updated",
+            metadata_with_context(
+                [
+                    ("prompt_effort".to_string(), effort.to_string()),
+                    (
+                        "stable_profile".to_string(),
+                        rollout.stable_profile_id.clone(),
+                    ),
+                    (
+                        "canary_profile".to_string(),
+                        rollout.canary_profile_id.clone().unwrap_or_default(),
+                    ),
+                    (
+                        "canary_percent".to_string(),
+                        rollout.canary_percent.to_string(),
+                    ),
+                    ("rollout_status".to_string(), rollout.status.clone()),
+                    (
+                        "rollout_reason".to_string(),
+                        rollout.last_reason.clone().unwrap_or_default(),
+                    ),
+                    (
+                        "promotion_confidence".to_string(),
+                        rollout
+                            .promotion_confidence
+                            .map(|value| format!("{value:.4}"))
+                            .unwrap_or_default(),
+                    ),
+                    (
+                        "rollback_count".to_string(),
+                        rollout.rollback_count.to_string(),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                run_context,
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(evaluation)
+}
+
+fn prompt_evolution_state(
+    store: &mut SqliteStore,
+    config: &ProviderConfig,
+) -> Result<PromptEvolutionState, StorageError> {
+    let model = load_prompt_evolution_read_model(store)?;
+    let events = prompt_evolution_profile_events(&model);
+    let rollouts = model.rollouts.clone();
+    let observations = model.observations;
+    let mut profile_rows = Vec::new();
+    let mut effort_rows = Vec::new();
+    let mut observed_runs = 0usize;
+    let mut generation = 0u32;
+    let mut population_size = 0usize;
+    let mut frontier_profiles = 0usize;
+    let mut paired_runs = 0usize;
+    let mut replay_runs = 0usize;
+    let inflight_efforts = prompt_evaluation_inflight()
+        .lock()
+        .map(|inflight| inflight.clone())
+        .unwrap_or_default();
+    for effort in ["fast", "auto", "pro"] {
+        let evaluation = evaluate_prompt_evolution_with_observations(
+            &events,
+            effort,
+            &observations,
+        )
+            .map_err(StorageError::new)?;
+        observed_runs += evaluation.observations.len();
+        population_size += evaluation.population.len();
+        frontier_profiles += evaluation.frontier_ids.len();
+        let effort_paired_runs = evaluation
+            .observations
+            .iter()
+            .filter(|observation| observation.mode.is_paired())
+            .count();
+        let effort_replay_runs = evaluation
+            .observations
+            .iter()
+            .filter(|observation| observation.mode.is_replay())
+            .count();
+        paired_runs += effort_paired_runs;
+        replay_runs += effort_replay_runs;
+        let ready_profiles = evaluation.frontier_ids.len();
+        let rollout = rollouts
+            .get(effort)
+            .cloned()
+            .unwrap_or_else(|| default_prompt_rollout(effort));
+        effort_rows.push(PromptEvolutionEffortState {
+            effort: effort.to_string(),
+            status: if config.prompt_evolution_enabled {
+                evaluation.status.clone()
+            } else {
+                "disabled".to_string()
+            },
+            champion_id: evaluation.champion_id.clone(),
+            champion_score: evaluation.champion_score,
+            stagnant_generations: evaluation.stagnant_generations,
+            evaluated_generations: evaluation.evaluated_generations,
+            freeze_reason: evaluation.freeze_reason.clone(),
+            shadow_rate_percent: (100 / PROMPT_EVOLUTION_SHADOW_INTERVAL) as u8,
+            next_mode: evaluation.next_mode.clone(),
+            paired_runs: effort_paired_runs,
+            replay_runs: effort_replay_runs,
+            ready_profiles,
+            evaluation_inflight: inflight_efforts.contains(effort),
+            stable_profile_id: rollout.stable_profile_id,
+            canary_profile_id: rollout.canary_profile_id,
+            canary_percent: rollout.canary_percent,
+            promotion_confidence: evaluation
+                .champion_confidence
+                .as_ref()
+                .map(|confidence| confidence.wilson_lower_bound),
+            rollback_count: rollout.rollback_count,
+            rollout_status: rollout.status,
+        });
+        generation = generation.max(
+            evaluation
+                .population
+                .iter()
+                .map(|genome| genome.generation)
+                .max()
+                .unwrap_or_default(),
+        );
+        for genome in evaluation.population {
+            let mut profile = PromptEvolutionAccumulator {
+                effort: effort.to_string(),
+                generation: genome.generation,
+                ..PromptEvolutionAccumulator::default()
+            };
+            for observation in evaluation
+                .observations
+                .iter()
+                .filter(|observation| observation.profile_id == genome.id)
+            {
+                profile.runs += 1;
+                if observation.mode.is_paired() {
+                    profile.train_runs += 1;
+                } else if observation.mode.is_replay() {
+                    profile.holdout_runs += 1;
+                }
+                profile.succeeded += usize::from(observation.succeeded);
+                profile.reward_total += observation.reward();
+                if observation.mode != PromptEvaluationMode::Live {
+                    profile.relative_reward_total += observation.group_relative_reward();
+                    profile.relative_reward_runs += 1;
+                }
+                for step in &observation.step_credits {
+                    profile.step_credit_total += step.credit.clamp(0.0, 1.0);
+                    profile.step_credit_count += 1;
+                }
+                profile.quality_total += observation.quality_score.clamp(0.0, 1.0);
+                profile.latency_total_ms = profile
+                    .latency_total_ms
+                    .saturating_add(observation.latency_ms);
+                profile.token_total = profile
+                    .token_total
+                    .saturating_add(observation.total_tokens);
+            }
+            profile_rows.push(PromptEvolutionProfileState {
+                id: genome.id.clone(),
+                effort: profile.effort,
+                generation: profile.generation,
+                runs: profile.runs,
+                train_runs: profile.train_runs,
+                holdout_runs: profile.holdout_runs,
+                success_rate: if profile.runs == 0 {
+                    0.0
+                } else {
+                    profile.succeeded as f64 / profile.runs as f64
+                },
+                average_reward: (profile.runs > 0)
+                    .then_some(profile.reward_total / profile.runs as f64),
+                average_relative_reward: (profile.relative_reward_runs > 0).then_some(
+                    profile.relative_reward_total / profile.relative_reward_runs as f64,
+                ),
+                average_step_credit: (profile.step_credit_count > 0)
+                    .then_some(profile.step_credit_total / profile.step_credit_count as f64),
+                average_quality: (profile.runs > 0)
+                    .then_some(profile.quality_total / profile.runs as f64),
+                average_latency_ms: profile
+                    .latency_total_ms
+                    .checked_div(profile.runs as u64)
+                    .unwrap_or_default(),
+                average_tokens: profile
+                    .token_total
+                    .checked_div(profile.runs as u64)
+                    .unwrap_or_default(),
+                frontier: evaluation.frontier_ids.contains(&genome.id),
+                champion: evaluation.champion_id.as_deref() == Some(genome.id.as_str()),
+                learned: genome.id.starts_with("learned-"),
+                next: evaluation.next_profile.id == genome.id,
+            });
+        }
+    }
+    profile_rows.sort_by_key(|profile| match profile.effort.as_str() {
+        "fast" => (0, !profile.next, profile.generation, profile.id.clone()),
+        "auto" => (1, !profile.next, profile.generation, profile.id.clone()),
+        "pro" => (2, !profile.next, profile.generation, profile.id.clone()),
+        _ => (3, !profile.next, profile.generation, profile.id.clone()),
+    });
+
+    Ok(PromptEvolutionState {
+        enabled: config.prompt_evolution_enabled,
+        observed_runs,
+        generation,
+        population_size,
+        frontier_profiles,
+        paired_runs,
+        replay_runs,
+        evaluation_inflight: !inflight_efforts.is_empty(),
+        efforts: effort_rows,
+        profiles: profile_rows,
+    })
+}
+
 fn workflow_prior_for_run(
     state: &tauri::State<'_, AppState>,
     run_context: &Metadata,
@@ -12453,6 +16786,7 @@ fn apply_provider_config_input(config: &mut ProviderConfig, input: ProviderConfi
         }
         _ => "auto_router".to_string(),
     };
+    config.prompt_evolution_enabled = input.prompt_evolution_enabled;
     config.context_window_tokens = input.context_window_tokens.max(4_096);
     config.agent_system_prompt = normalized_agent_instructions(&input.agent_system_prompt);
     let api_key = normalized_config_value(&input.api_key);
@@ -12510,6 +16844,9 @@ fn provider_config_from_text(text: &str) -> ProviderConfig {
             "image_model" => config.image_model = value.to_string(),
             "image_endpoint" => config.image_endpoint = value.to_string(),
             "collaboration_policy" => config.collaboration_policy = value.to_string(),
+            "prompt_evolution_enabled" => {
+                config.prompt_evolution_enabled = config_bool(value)
+            }
             "context_window_tokens" => {
                 config.context_window_tokens = value.parse().unwrap_or(128_000)
             }
@@ -12541,7 +16878,7 @@ fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<(), std::io::
     let mut file = options.open(&path)?;
     file.write_all(
         format!(
-            "base_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\ncollaboration_policy={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\n",
+            "base_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\ncollaboration_policy={}\nprompt_evolution_enabled={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\n",
             sanitize_config_value(&config.base_url),
             sanitize_config_value(&config.api_key),
             sanitize_config_value(&config.model),
@@ -12554,6 +16891,7 @@ fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<(), std::io::
             sanitize_config_value(&config.image_model),
             sanitize_config_value(&config.image_endpoint),
             sanitize_config_value(&config.collaboration_policy),
+            config.prompt_evolution_enabled,
             config.context_window_tokens,
             config_hex_encode(&config.agent_system_prompt)
         )
@@ -13405,6 +17743,10 @@ fn open_app_store() -> Result<SqliteStore, StorageError> {
     Ok(store)
 }
 
+fn open_app_read_store() -> Result<SqliteStore, String> {
+    SqliteStore::open_read_only(database_path()).map_err(|error| error.to_string())
+}
+
 fn database_path() -> PathBuf {
     app_data_root().join("state.sqlite3")
 }
@@ -14102,6 +18444,8 @@ mod tests {
                 max_output_tokens_per_step: COLLABORATION_MAX_OUTPUT_TOKENS as usize,
             },
             prior_hint: None,
+            prompt_evolution_enabled: true,
+            prompt_genome: ConductorPromptGenome::seed_for_effort("pro"),
         })
     }
 
@@ -14287,6 +18631,434 @@ mod tests {
     }
 
     #[test]
+    fn session_read_model_advances_from_only_new_events() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let session_id = "session-read-model";
+        let run_id = "run-read-model";
+        let context = [
+            ("project_id".to_string(), "project-a".to_string()),
+            ("project_name".to_string(), "Project A".to_string()),
+            ("session_id".to_string(), session_id.to_string()),
+            ("session_name".to_string(), "Read model".to_string()),
+            ("agent_run_id".to_string(), run_id.to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task started",
+            metadata_with_context(
+                [
+                    ("prompt".to_string(), "Inspect the workspace".to_string()),
+                    ("context_window_tokens".to_string(), "128000".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                &context,
+            ),
+        )
+        .expect("run start should append");
+        append_message_event_with_metadata(
+            &mut store,
+            &phase16_task_id(),
+            MessageRole::User,
+            "Inspect the workspace",
+            context.clone(),
+        )
+        .expect("user message should append");
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::ModelRequestFinished,
+            "Agent model turn finished",
+            metadata_with_context(
+                [("prompt_tokens".to_string(), "640".to_string())]
+                    .into_iter()
+                    .collect(),
+                &context,
+            ),
+        )
+        .expect("model turn should append");
+
+        let initial = load_agent_session_read_model(&mut store, session_id)
+            .expect("initial read model should build");
+        assert_eq!(initial.event_count, 3);
+        assert_eq!(initial.state.turn_count, 1);
+        assert_eq!(initial.state.context_tokens_used, 640);
+        assert_eq!(initial.state.status, "running");
+
+        append_message_event_with_metadata(
+            &mut store,
+            &phase16_task_id(),
+            MessageRole::Assistant,
+            "Workspace inspected",
+            context.clone(),
+        )
+        .expect("assistant message should append");
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task completed",
+            context,
+        )
+        .expect("completion should append");
+
+        let updated = load_agent_session_read_model(&mut store, session_id)
+            .expect("read model should apply the delta");
+        assert_eq!(updated.event_count, 5);
+        assert_eq!(updated.revision, initial.revision + 2);
+        assert_eq!(updated.state.status, "completed");
+        assert_eq!(
+            updated.state.latest_answer.as_deref(),
+            Some("Workspace inspected")
+        );
+        assert!(updated.state.can_retry);
+
+        let persisted = store
+            .load_read_model(AGENT_SESSION_READ_MODEL_NAMESPACE, session_id)
+            .expect("persisted read model should load")
+            .expect("persisted read model should exist");
+        assert_eq!(persisted.revision, updated.revision);
+    }
+
+    #[test]
+    fn session_history_page_reports_a_stable_older_cursor() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let session_id = "session-history-page";
+        for index in 0..7 {
+            append_message_event_with_metadata(
+                &mut store,
+                &phase16_task_id(),
+                if index % 2 == 0 {
+                    MessageRole::User
+                } else {
+                    MessageRole::Assistant
+                },
+                &format!("message-{index}"),
+                [("session_id".to_string(), session_id.to_string())]
+                    .into_iter()
+                    .collect(),
+            )
+            .expect("message should append");
+        }
+
+        let latest = store
+            .list_by_task_and_metadata_before(
+                &phase16_task_id(),
+                "session_id",
+                session_id,
+                u64::MAX,
+                3,
+            )
+            .expect("latest page should load");
+        assert_eq!(
+            latest
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![5, 6, 7]
+        );
+
+        let older = store
+            .list_by_task_and_metadata_before(
+                &phase16_task_id(),
+                "session_id",
+                session_id,
+                latest[0].sequence,
+                3,
+            )
+            .expect("older page should load");
+        assert_eq!(
+            older
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+        assert!(store
+            .has_task_metadata_event_before(
+                &phase16_task_id(),
+                "session_id",
+                session_id,
+                older[0].sequence,
+            )
+            .expect("older cursor should be checked"));
+    }
+
+    #[test]
+    fn routing_telemetry_read_model_deduplicates_completed_runs() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let run_context = [
+            ("session_id".to_string(), "session-router".to_string()),
+            ("agent_run_id".to_string(), "run-router-1".to_string()),
+            ("task_class".to_string(), "coding".to_string()),
+            (
+                "collaboration_policy".to_string(),
+                "plan_execute_review".to_string(),
+            ),
+            ("requested_policy".to_string(), "auto_router".to_string()),
+            ("agent_model".to_string(), "model-a".to_string()),
+            ("routing_signature".to_string(), "coding:3".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task started",
+            run_context.clone(),
+        )
+        .expect("run should start");
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::ModelRequestFinished,
+            "Agent model turn finished",
+            metadata_with_context(
+                [("total_tokens".to_string(), "900".to_string())]
+                    .into_iter()
+                    .collect(),
+                &run_context,
+            ),
+        )
+        .expect("model telemetry should append");
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task completed",
+            run_context.clone(),
+        )
+        .expect("run should complete");
+
+        let initial = load_routing_telemetry_read_model(&mut store)
+            .expect("routing read model should build");
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].selected_model, "model-a");
+        assert_eq!(initial[0].cost_proxy, 900);
+
+        append_message_event_with_metadata(
+            &mut store,
+            &phase16_task_id(),
+            MessageRole::User,
+            "unrelated follow-up",
+            [("session_id".to_string(), "session-router".to_string())]
+                .into_iter()
+                .collect(),
+        )
+        .expect("message should append");
+        let updated = load_routing_telemetry_read_model(&mut store)
+            .expect("routing read model should advance");
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].selected_model, "model-a");
+    }
+
+    #[test]
+    fn prompt_evolution_read_model_only_indexes_evaluation_evidence() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let genome = ConductorPromptGenome::seed_for_effort("auto");
+        let observation = PromptEvolutionObservation {
+            profile_id: genome.id.clone(),
+            evaluation_id: "pair-1".to_string(),
+            opponent_profile_id: Some("challenger".to_string()),
+            task_class: "coding".to_string(),
+            split: PromptEvaluationSplit::Train,
+            mode: PromptEvaluationMode::PairedShadow,
+            format_valid: true,
+            succeeded: true,
+            quality_score: 0.9,
+            latency_ms: 800,
+            total_tokens: 500,
+            estimated_cost_microusd: 0,
+            safety_violations: 0,
+            relative_reward: Some(0.2),
+            step_credits: Vec::new(),
+        };
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Conductor pairwise evaluation",
+            [
+                ("prompt_effort".to_string(), "auto".to_string()),
+                (
+                    "prompt_genome".to_string(),
+                    serde_json::to_string(&genome).expect("genome should serialize"),
+                ),
+                (
+                    "prompt_observation".to_string(),
+                    serde_json::to_string(&observation)
+                        .expect("observation should serialize"),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        )
+        .expect("evaluation should append");
+
+        let initial = load_prompt_evolution_read_model(&mut store)
+            .expect("prompt evolution read model should build");
+        assert_eq!(initial.genomes.len(), 1);
+        assert_eq!(initial.observations.len(), 1);
+
+        append_message_event_with_metadata(
+            &mut store,
+            &phase16_task_id(),
+            MessageRole::User,
+            "ordinary conversation",
+            [("session_id".to_string(), "session-a".to_string())]
+                .into_iter()
+                .collect(),
+        )
+        .expect("message should append");
+        let updated = load_prompt_evolution_read_model(&mut store)
+            .expect("prompt evolution read model should advance");
+        assert_eq!(updated.genomes.len(), 1);
+        assert_eq!(updated.observations.len(), 1);
+        assert!(updated.revision > initial.revision);
+    }
+
+    #[test]
+    fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
+        let stable = ConductorPromptGenome::seed_for_effort("auto");
+        let mut candidate = stable.clone();
+        candidate.id = "candidate-auto".to_string();
+        candidate.generation = 1;
+        let mut model = PromptEvolutionReadModel {
+            schema: PROMPT_EVOLUTION_READ_MODEL_NAMESPACE.to_string(),
+            revision: 0,
+            event_count: 0,
+            genomes: Vec::new(),
+            observations: Vec::new(),
+            rollouts: BTreeMap::new(),
+        };
+        let evaluation = |comparisons| PromptEvolutionEvaluation {
+            population: vec![stable.clone(), candidate.clone()],
+            observations: Vec::new(),
+            frontier_ids: [candidate.id.clone()].into_iter().collect(),
+            champion_id: Some(candidate.id.clone()),
+            champion_score: Some(0.8),
+            champion_confidence: Some(PromptPromotionConfidence {
+                comparisons,
+                wins: comparisons,
+                losses: 0,
+                ties: 0,
+                observed_win_rate: 1.0,
+                wilson_lower_bound: 0.6,
+            }),
+            status: "exploring".to_string(),
+            freeze_reason: None,
+            stagnant_generations: 0,
+            evaluated_generations: 1,
+            next_mode: "explore".to_string(),
+            next_profile: candidate.clone(),
+            mutation_parent: None,
+            mutation_feedback: String::new(),
+        };
+
+        let started = reconcile_prompt_rollout(&mut model, "auto", &evaluation(4));
+        assert_eq!(started.canary_profile_id.as_deref(), Some("candidate-auto"));
+        assert_eq!(started.canary_percent, 10);
+
+        model.observations.push((
+            "auto".to_string(),
+            PromptEvolutionObservation {
+                profile_id: candidate.id.clone(),
+                evaluation_id: "live-canary-1".to_string(),
+                opponent_profile_id: None,
+                task_class: "coding".to_string(),
+                split: PromptEvaluationSplit::Train,
+                mode: PromptEvaluationMode::Live,
+                format_valid: true,
+                succeeded: true,
+                quality_score: 0.9,
+                latency_ms: 100,
+                total_tokens: 100,
+                estimated_cost_microusd: 0,
+                safety_violations: 0,
+                relative_reward: None,
+                step_credits: Vec::new(),
+            },
+        ));
+        let advanced = reconcile_prompt_rollout(&mut model, "auto", &evaluation(6));
+        assert_eq!(advanced.canary_percent, 25);
+
+        model.observations.push((
+            "auto".to_string(),
+            PromptEvolutionObservation {
+                profile_id: candidate.id.clone(),
+                evaluation_id: "live-canary-unsafe".to_string(),
+                opponent_profile_id: None,
+                task_class: "coding".to_string(),
+                split: PromptEvaluationSplit::Train,
+                mode: PromptEvaluationMode::Live,
+                format_valid: true,
+                succeeded: false,
+                quality_score: 0.0,
+                latency_ms: 100,
+                total_tokens: 100,
+                estimated_cost_microusd: 0,
+                safety_violations: 1,
+                relative_reward: None,
+                step_credits: Vec::new(),
+            },
+        ));
+        let rolled_back = reconcile_prompt_rollout(&mut model, "auto", &evaluation(8));
+        assert_eq!(rolled_back.status, "rolled_back");
+        assert!(rolled_back.canary_profile_id.is_none());
+        assert_eq!(rolled_back.rollback_count, 1);
+        assert_eq!(rolled_back.stable_profile_id, stable.id);
+    }
+
+    #[test]
+    fn pending_review_state_identifies_the_related_session() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let project_sessions = ProjectSessionConfig::default_for_root(&workspace_root());
+        let session = project_sessions
+            .active_session()
+            .expect("default session should exist");
+        let project = project_sessions
+            .active_project()
+            .expect("default project should exist");
+        let request = PermissionRequest {
+            id: PermissionRequestId("agent-review-1".to_string()),
+            task_id: phase16_task_id(),
+            risk: PermissionRisk::Execute,
+            action: "shell.run".to_string(),
+            reason: "Run project checks.".to_string(),
+            scope: ".".to_string(),
+            metadata: [
+                ("phase".to_string(), "16".to_string()),
+                ("session_id".to_string(), session.id.clone()),
+                ("session_name".to_string(), session.name.clone()),
+                ("project_id".to_string(), project.id.clone()),
+                ("project_name".to_string(), project.name.clone()),
+                ("tool_input".to_string(), "command=cargo test".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        store
+            .save_permission_request(request, current_time_millis())
+            .expect("request should save");
+
+        let state = permission_review_state(&store, &project_sessions)
+            .expect("review state should load");
+
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.pending[0].source, "agent");
+        assert_eq!(state.pending[0].session_id.as_deref(), Some(session.id.as_str()));
+        assert_eq!(state.pending[0].session_name.as_deref(), Some(session.name.as_str()));
+        assert!(state.pending[0].can_allow_session);
+        assert!(state.pending[0].input.contains("cargo test"));
+    }
+
+    #[test]
     fn phase4_state_includes_provider_config_and_messages() {
         let mut store = SqliteStore::in_memory().expect("store should open");
         let config = ProviderConfig {
@@ -14301,7 +19073,7 @@ mod tests {
         )
         .expect("message should append");
 
-        let state = phase4_state(&store, &config, None).expect("state should load");
+        let state = phase4_state(&mut store, &config, None).expect("state should load");
 
         assert!(state.provider.api_key_set);
         assert_eq!(state.messages.len(), 1);
@@ -14389,6 +19161,7 @@ mod tests {
                 image_model: "image-model-a".to_string(),
                 image_endpoint: "https://images.example.test/v1".to_string(),
                 collaboration_policy: "auto_router".to_string(),
+                prompt_evolution_enabled: true,
                 context_window_tokens: 128_000,
                 agent_system_prompt: "Be concise.\nUse Chinese when asked.".to_string(),
             },
@@ -14548,7 +19321,8 @@ mod tests {
         {"steps":[
           {"id":"independent-a","role":"thinker","model":"planner-a","subtask":"Analyze one path","access":[]},
           {"id":"independent-b","role":"worker","model":"reviewer-b","subtask":"Challenge assumptions","access":[]},
-          {"id":"final","role":"synthesizer","model":"summary-c","subtask":"Synthesize guidance","access":["independent-a","independent-b"]}
+          {"id":"verify","role":"verifier","model":"summary-c","subtask":"Verify both paths","access":["independent-a","independent-b"]},
+          {"id":"final","role":"synthesizer","model":"summary-c","subtask":"Synthesize guidance","access":["independent-a","independent-b","verify"]}
         ]}
         ```"#;
         let models = vec![
@@ -14562,17 +19336,18 @@ mod tests {
             .expect("workflow should parse")
             .adaptive_workflow();
 
-        assert_eq!(workflow.steps.len(), 3);
+        assert_eq!(workflow.steps.len(), 4);
         assert_eq!(
-            workflow.steps[2].access,
+            workflow.steps[3].access,
             vec![
                 "independent-a".to_string(),
-                "independent-b".to_string()
+                "independent-b".to_string(),
+                "verify".to_string()
             ]
         );
         assert_eq!(
             adaptive_workflow_layers(&workflow).expect("layers should build"),
-            vec![vec![0, 1], vec![2]]
+            vec![vec![0, 1], vec![2], vec![3]]
         );
     }
 
@@ -14581,7 +19356,8 @@ mod tests {
         let response = r#"{"steps":[
           {"id":"first","role":"thinker","model":"configured","subtask":"Analyze","access":[]},
           {"id":"second","role":"worker","model":"configured","subtask":"Challenge","access":[]},
-          {"id":"final","role":"synthesizer","model":"unconfigured","subtask":"Synthesize","access":["first","second"]}
+          {"id":"verify","role":"verifier","model":"configured","subtask":"Verify","access":["first","second"]},
+          {"id":"final","role":"synthesizer","model":"unconfigured","subtask":"Synthesize","access":["first","second","verify"]}
         ]}"#;
 
         let error = test_conductor_harness(vec!["configured".to_string()], 3)
@@ -15274,6 +20050,707 @@ mod tests {
         assert_eq!(telemetry[0].latency_ms, 400);
         assert_eq!(telemetry[0].total_tokens, 640);
         assert!(telemetry[0].succeeded);
+    }
+
+    #[test]
+    fn workflow_checkpoint_resume_is_scoped_to_the_latest_user_turn_and_terminal_snapshot() {
+        let models = vec!["planner".to_string()];
+        let prompt = "Implement and verify the change";
+        let plan = WorkflowPlanIr::from_adaptive(
+            "collab-resume",
+            prompt,
+            "pro",
+            "best_of_n",
+            "planner",
+            &AdaptiveWorkflow {
+                steps: vec![AdaptiveWorkflowStep {
+                    id: "final".to_string(),
+                    role: "synthesizer".to_string(),
+                    model: "planner".to_string(),
+                    subtask: "produce verified guidance".to_string(),
+                    access: Vec::new(),
+                }],
+            },
+            WorkflowBudget {
+                max_steps: 1,
+                max_models: 1,
+                max_model_turns_per_step: 2,
+                max_tool_calls_per_step: 2,
+                max_output_tokens_per_step: 2_048,
+            },
+        );
+        let mut events = vec![Event {
+            id: EventId("user-1".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 1,
+            timestamp_ms: 100,
+            kind: EventKind::MessageAdded,
+            summary: "user message".to_string(),
+            metadata: [
+                ("session_id".to_string(), "session-a".to_string()),
+                ("role".to_string(), "user".to_string()),
+                ("content".to_string(), prompt.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        }];
+        let resume_key = workflow_resume_key_from_events(
+            &events,
+            Some("session-a"),
+            prompt,
+            "pro",
+            "best_of_n",
+        );
+        let mut checkpoint = WorkflowExecutionCheckpoint::new(&resume_key, plan, 110);
+        events.push(Event {
+            id: EventId("checkpoint-running".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 2,
+            timestamp_ms: 120,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Collaboration workflow checkpoint created".to_string(),
+            metadata: [
+                ("workflow_resume_key".to_string(), resume_key.clone()),
+                (
+                    "workflow_checkpoint".to_string(),
+                    checkpoint.to_json().unwrap(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        });
+        assert!(resumable_workflow_checkpoint_from_events(
+            &events,
+            &resume_key,
+            prompt,
+            &models,
+        )
+        .is_some());
+
+        checkpoint.begin_step("final", "planner", 130).unwrap();
+        checkpoint
+            .complete_step(
+                "final",
+                "planner",
+                "draft".to_string(),
+                "[]".to_string(),
+                140,
+            )
+            .unwrap();
+        checkpoint.finalize("verified".to_string(), 150).unwrap();
+        events.push(Event {
+            id: EventId("checkpoint-final".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 3,
+            timestamp_ms: 150,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Collaboration workflow checkpoint finalized".to_string(),
+            metadata: [
+                ("workflow_resume_key".to_string(), resume_key.clone()),
+                (
+                    "workflow_checkpoint".to_string(),
+                    checkpoint.to_json().unwrap(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        });
+        assert!(resumable_workflow_checkpoint_from_events(
+            &events,
+            &resume_key,
+            prompt,
+            &models,
+        )
+        .is_none());
+
+        events.push(Event {
+            id: EventId("user-2".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 4,
+            timestamp_ms: 160,
+            kind: EventKind::MessageAdded,
+            summary: "user message".to_string(),
+            metadata: [
+                ("session_id".to_string(), "session-a".to_string()),
+                ("role".to_string(), "user".to_string()),
+                ("content".to_string(), prompt.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        });
+        let repeated_prompt_key = workflow_resume_key_from_events(
+            &events,
+            Some("session-a"),
+            prompt,
+            "pro",
+            "best_of_n",
+        );
+        assert_ne!(resume_key, repeated_prompt_key);
+    }
+
+    #[test]
+    fn prompt_evolution_uses_holdout_results_to_select_a_new_generation() {
+        let seed = ConductorPromptGenome::seed_for_effort("auto");
+        let genome_json = serde_json::to_string(&seed).expect("genome should serialize");
+        let mut events = Vec::new();
+        for run_index in 0..6u64 {
+            let collaboration_id = format!("evolution-{run_index}");
+            let plan = WorkflowPlanIr::from_adaptive_with_profile(
+                collaboration_id.clone(),
+                "Implement and verify a change",
+                "auto",
+                "best_of_n",
+                "planner",
+                seed.id.clone(),
+                &AdaptiveWorkflow {
+                    steps: vec![AdaptiveWorkflowStep {
+                        id: "final".to_string(),
+                        role: "synthesizer".to_string(),
+                        model: "planner".to_string(),
+                        subtask: "produce the verified result".to_string(),
+                        access: Vec::new(),
+                    }],
+                },
+                WorkflowBudget {
+                    max_steps: 3,
+                    max_models: 2,
+                    max_model_turns_per_step: 5,
+                    max_tool_calls_per_step: 6,
+                    max_output_tokens_per_step: 4_096,
+                },
+            );
+            let context = [
+                ("collaboration_id".to_string(), collaboration_id),
+                ("prompt_profile".to_string(), seed.id.clone()),
+                ("prompt_effort".to_string(), "auto".to_string()),
+                ("prompt_genome".to_string(), genome_json.clone()),
+                ("task_class".to_string(), "coding".to_string()),
+            ]
+            .into_iter()
+            .collect::<Metadata>();
+            let sequence = run_index * 4 + 1;
+            events.push(Event {
+                id: EventId(format!("selected-{run_index}")),
+                task_id: phase16_task_id(),
+                sequence,
+                timestamp_ms: 1_000 + run_index * 100,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Conductor prompt profile selected".to_string(),
+                metadata: context.clone(),
+            });
+            events.push(Event {
+                id: EventId(format!("planned-{run_index}")),
+                task_id: phase16_task_id(),
+                sequence: sequence + 1,
+                timestamp_ms: 1_020 + run_index * 100,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Collaboration workflow planned".to_string(),
+                metadata: metadata_with_context(
+                    [("workflow_ir".to_string(), plan.to_json().unwrap())]
+                        .into_iter()
+                        .collect(),
+                    &context,
+                ),
+            });
+            events.push(Event {
+                id: EventId(format!("quality-{run_index}")),
+                task_id: phase16_task_id(),
+                sequence: sequence + 2,
+                timestamp_ms: 1_040 + run_index * 100,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Collaboration quality gate evaluated".to_string(),
+                metadata: metadata_with_context(
+                    [("quality_score".to_string(), "0.9".to_string())]
+                        .into_iter()
+                        .collect(),
+                    &context,
+                ),
+            });
+            events.push(Event {
+                id: EventId(format!("completed-{run_index}")),
+                task_id: phase16_task_id(),
+                sequence: sequence + 3,
+                timestamp_ms: 1_080 + run_index * 100,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Collaboration workflow completed".to_string(),
+                metadata: context,
+            });
+        }
+
+        let live_only = evaluate_prompt_evolution(&events, "auto")
+            .expect("live prompt outcomes should evaluate");
+        assert!(!live_only.frontier_ids.contains(&seed.id));
+        assert!(live_only.champion_id.is_none());
+
+        for evaluation_index in 0..6u64 {
+            let mode = if evaluation_index < 4 {
+                PromptEvaluationMode::PairedExecution
+            } else {
+                PromptEvaluationMode::ReplayExecution
+            };
+            let split = if mode.is_replay() {
+                PromptEvaluationSplit::Holdout
+            } else {
+                PromptEvaluationSplit::Train
+            };
+            let observation = PromptEvolutionObservation {
+                profile_id: seed.id.clone(),
+                evaluation_id: format!("pair-{evaluation_index}"),
+                opponent_profile_id: Some("baseline-opponent".to_string()),
+                task_class: "coding".to_string(),
+                split,
+                mode,
+                format_valid: true,
+                succeeded: true,
+                quality_score: 0.9,
+                latency_ms: 1_000,
+                total_tokens: 800,
+                estimated_cost_microusd: 0,
+                safety_violations: 0,
+                relative_reward: Some(0.2),
+                step_credits: vec![PromptStepCredit {
+                    step_id: "final".to_string(),
+                    role: "synthesizer".to_string(),
+                    succeeded: true,
+                    attempts: 1,
+                    evidence_count: 1,
+                    latency_ms: 1_000,
+                    total_tokens: 800,
+                    credit: 0.9,
+                }],
+            };
+            events.push(Event {
+                id: EventId(format!("pair-event-{evaluation_index}")),
+                task_id: phase16_task_id(),
+                sequence: 100 + evaluation_index,
+                timestamp_ms: 10_000 + evaluation_index * 100,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Conductor pairwise evaluation".to_string(),
+                metadata: [
+                    ("prompt_effort".to_string(), "auto".to_string()),
+                    (
+                        "prompt_observation".to_string(),
+                        serde_json::to_string(&observation).unwrap(),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            });
+        }
+
+        let evaluation = evaluate_prompt_evolution(&events, "auto")
+            .expect("paired and replay prompt outcomes should evaluate");
+        let seed_observations = evaluation
+            .observations
+            .iter()
+            .filter(|observation| observation.profile_id == seed.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(seed_observations.len(), 12);
+        assert_eq!(
+            seed_observations
+                .iter()
+                .filter(|observation| observation.mode == PromptEvaluationMode::PairedExecution)
+                .count(),
+            4
+        );
+        assert_eq!(
+            seed_observations
+                .iter()
+                .filter(|observation| observation.mode == PromptEvaluationMode::ReplayExecution)
+                .count(),
+            2
+        );
+        assert!(evaluation.frontier_ids.contains(&seed.id));
+        assert_eq!(evaluation.next_profile.generation, 1);
+        assert_ne!(evaluation.next_profile.id, seed.id);
+    }
+
+    #[test]
+    fn replay_holdout_uses_only_a_different_completed_workflow() {
+        let workflow = |id: &str, objective: &str| {
+            WorkflowPlanIr::from_adaptive_with_profile(
+                id.to_string(),
+                objective,
+                "auto",
+                "best_of_n",
+                "planner",
+                "seed-auto-v1",
+                &AdaptiveWorkflow {
+                    steps: vec![AdaptiveWorkflowStep {
+                        id: "final".to_string(),
+                        role: "synthesizer".to_string(),
+                        model: "planner".to_string(),
+                        subtask: "finish".to_string(),
+                        access: Vec::new(),
+                    }],
+                },
+                WorkflowBudget {
+                    max_steps: 4,
+                    max_models: 2,
+                    max_model_turns_per_step: 3,
+                    max_tool_calls_per_step: 4,
+                    max_output_tokens_per_step: 2_048,
+                },
+            )
+        };
+        let planned = |sequence, id: &str, objective: &str| Event {
+            id: EventId(format!("planned-{id}")),
+            task_id: phase16_task_id(),
+            sequence,
+            timestamp_ms: sequence * 10,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Collaboration workflow planned".to_string(),
+            metadata: [
+                ("collaboration_id".to_string(), id.to_string()),
+                (
+                    "workflow_ir".to_string(),
+                    workflow(id, objective).to_json().unwrap(),
+                ),
+                ("task_class".to_string(), "coding".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let completed = |sequence, id: &str| Event {
+            id: EventId(format!("completed-{id}")),
+            task_id: phase16_task_id(),
+            sequence,
+            timestamp_ms: sequence * 10,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Collaboration workflow completed".to_string(),
+            metadata: [("collaboration_id".to_string(), id.to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let events = vec![
+            planned(1, "current", "Current task"),
+            completed(2, "current"),
+            planned(3, "holdout", "Older completed task"),
+            completed(4, "holdout"),
+            planned(5, "failed", "Failed historical task"),
+        ];
+
+        let replay = prompt_replay_case(&events, "Current task", 0).unwrap();
+
+        assert_eq!(replay.objective, "Older completed task");
+        assert_eq!(replay.task_class, "coding");
+    }
+
+    #[test]
+    fn replay_holdout_accepts_a_completed_bounded_collaboration() {
+        let profile = ConductorPromptGenome::seed_for_effort("pro");
+        let profile_event = Event {
+            id: EventId("bounded-profile".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 1,
+            timestamp_ms: 100,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Conductor prompt profile selected".to_string(),
+            metadata: [
+                ("collaboration_id".to_string(), "bounded-1".to_string()),
+                ("collaboration_profile".to_string(), "bounded".to_string()),
+                ("agent_run_id".to_string(), "run-1".to_string()),
+                ("prompt_effort".to_string(), "pro".to_string()),
+                ("prompt_profile".to_string(), profile.id.clone()),
+                (
+                    "prompt_genome".to_string(),
+                    serde_json::to_string(&profile).unwrap(),
+                ),
+                (
+                    "prompt_objective".to_string(),
+                    "Completed bounded task".to_string(),
+                ),
+                ("task_class".to_string(), "coding".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let terminal = Event {
+            id: EventId("bounded-terminal".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 2,
+            timestamp_ms: 200,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Agent task completed".to_string(),
+            metadata: [("agent_run_id".to_string(), "run-1".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let events = vec![profile_event, terminal];
+
+        let replay = prompt_replay_case(&events, "Current task", 0).unwrap();
+        let model = build_prompt_evolution_read_model(&events, 2, 2);
+
+        assert_eq!(replay.objective, "Completed bounded task");
+        assert_eq!(replay.task_class, "coding");
+        assert_eq!(model.genomes.len(), 1);
+        assert_eq!(model.observations.len(), 1);
+        assert!(model.observations[0].1.format_valid);
+    }
+
+    #[test]
+    fn pairwise_observation_keeps_relative_and_per_step_credit() {
+        let profile = ConductorPromptGenome::seed_for_effort("auto");
+        let opponent_profile = ConductorPromptGenome {
+            id: "opponent".to_string(),
+            ..profile.clone()
+        };
+        let candidate_plan = PromptPlanCandidate {
+            genome: profile,
+            plan: Some(WorkflowPlanIr::from_adaptive_with_profile(
+                "candidate",
+                "Verify a change",
+                "auto",
+                "best_of_n",
+                "planner",
+                "seed-auto-v1",
+                &AdaptiveWorkflow {
+                    steps: vec![AdaptiveWorkflowStep {
+                        id: "verify".to_string(),
+                        role: "reviewer".to_string(),
+                        model: "planner".to_string(),
+                        subtask: "verify".to_string(),
+                        access: Vec::new(),
+                    }],
+                },
+                WorkflowBudget {
+                    max_steps: 4,
+                    max_models: 2,
+                    max_model_turns_per_step: 3,
+                    max_tool_calls_per_step: 4,
+                    max_output_tokens_per_step: 2_048,
+                },
+            )),
+            raw_output: String::new(),
+            latency_ms: 120,
+            total_tokens: 80,
+        };
+        let opponent_plan = PromptPlanCandidate {
+            genome: opponent_profile,
+            plan: candidate_plan.plan.clone(),
+            raw_output: String::new(),
+            latency_ms: 140,
+            total_tokens: 90,
+        };
+        let candidate = PromptExecutionCandidate {
+            plan: candidate_plan,
+            execution: PromptWorkflowExecution {
+                succeeded: true,
+                final_output: "verified".to_string(),
+                steps: vec![PromptExecutionStep {
+                    id: "verify".to_string(),
+                    role: "reviewer".to_string(),
+                    succeeded: true,
+                    output: "verified".to_string(),
+                    latency_ms: 100,
+                    total_tokens: 60,
+                    evidence_count: 1,
+                }],
+                latency_ms: 100,
+                total_tokens: 60,
+            },
+        };
+        let opponent = PromptExecutionCandidate {
+            plan: opponent_plan,
+            execution: PromptWorkflowExecution {
+                succeeded: true,
+                final_output: "reviewed".to_string(),
+                steps: vec![PromptExecutionStep {
+                    id: "verify".to_string(),
+                    role: "reviewer".to_string(),
+                    succeeded: true,
+                    output: "reviewed".to_string(),
+                    latency_ms: 120,
+                    total_tokens: 70,
+                    evidence_count: 1,
+                }],
+                latency_ms: 120,
+                total_tokens: 70,
+            },
+        };
+        let observation = prompt_pairwise_observation(
+            &candidate,
+            &opponent,
+            "pair-1",
+            "coding",
+            PromptEvaluationSplit::Train,
+            PromptEvaluationMode::PairedShadow,
+            0.85,
+            0.55,
+            0,
+            &[("verify".to_string(), 0.78)].into_iter().collect(),
+        );
+
+        assert!(
+            (observation.relative_reward.unwrap_or_default() - 0.3).abs() < f64::EPSILON * 4.0
+        );
+        assert_eq!(observation.step_credits.len(), 1);
+        assert_eq!(observation.step_credits[0].step_id, "verify");
+        assert_eq!(observation.step_credits[0].credit, 0.78);
+    }
+
+    #[test]
+    fn execution_arena_runs_dependencies_before_final_synthesis() {
+        let profile = ConductorPromptGenome::seed_for_effort("auto");
+        let plan = WorkflowPlanIr::from_adaptive_with_profile(
+            "arena-candidate",
+            "Investigate and summarize",
+            "auto",
+            "best_of_n",
+            "planner",
+            profile.id.clone(),
+            &AdaptiveWorkflow {
+                steps: vec![
+                    AdaptiveWorkflowStep {
+                        id: "investigate".to_string(),
+                        role: "worker".to_string(),
+                        model: "worker-a".to_string(),
+                        subtask: "investigate evidence".to_string(),
+                        access: Vec::new(),
+                    },
+                    AdaptiveWorkflowStep {
+                        id: "final".to_string(),
+                        role: "synthesizer".to_string(),
+                        model: "worker-b".to_string(),
+                        subtask: "synthesize the result".to_string(),
+                        access: vec!["investigate".to_string()],
+                    },
+                ],
+            },
+            WorkflowBudget {
+                max_steps: 4,
+                max_models: 2,
+                max_model_turns_per_step: 2,
+                max_tool_calls_per_step: 1,
+                max_output_tokens_per_step: 2_048,
+            },
+        );
+        let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured = Arc::clone(&prompts);
+        let runner: PromptEvaluationRunner = Arc::new(move |_, model, prompt| {
+            captured
+                .lock()
+                .expect("prompt capture lock")
+                .push(prompt);
+            CollaborationCompletion {
+                content: Some(if model == "worker-a" {
+                    "branch-output".to_string()
+                } else {
+                    "final-output".to_string()
+                }),
+                error: None,
+                latency_ms: 10,
+                usage: [("total_tokens".to_string(), "20".to_string())]
+                    .into_iter()
+                    .collect(),
+                evidence: Vec::new(),
+            }
+        });
+
+        let candidate = execute_prompt_workflow_candidate_with_runner(
+            "Investigate and summarize",
+            PromptPlanCandidate {
+                genome: profile,
+                plan: Some(plan),
+                raw_output: String::new(),
+                latency_ms: 5,
+                total_tokens: 10,
+            },
+            runner,
+        );
+
+        assert!(candidate.execution.succeeded);
+        assert_eq!(candidate.execution.final_output, "final-output");
+        assert_eq!(candidate.execution.steps.len(), 2);
+        assert_eq!(candidate.execution.total_tokens, 40);
+        let prompts = prompts.lock().expect("prompt capture lock");
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[1].contains("[investigate]\nbranch-output"));
+    }
+
+    #[test]
+    fn timeline_exposes_durable_workflow_progress() {
+        let event = Event {
+            id: EventId("checkpoint-progress".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 1,
+            timestamp_ms: 100,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Collaboration workflow step checkpointed".to_string(),
+            metadata: [
+                (
+                    "workflow_checkpoint_schema".to_string(),
+                    WORKFLOW_CHECKPOINT_SCHEMA.to_string(),
+                ),
+                ("workflow_steps".to_string(), "5".to_string()),
+                ("completed_steps".to_string(), "2".to_string()),
+                ("step_id".to_string(), "review".to_string()),
+                ("step_status".to_string(), "completed".to_string()),
+                ("workflow_continuations".to_string(), "1".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let progress = timeline_workflow_progress(&event).unwrap();
+
+        assert_eq!(progress.completed_steps, 2);
+        assert_eq!(progress.total_steps, 5);
+        assert_eq!(progress.current_step_id.as_deref(), Some("review"));
+        assert_eq!(progress.continuations, 1);
+        assert!(progress.recoverable);
+    }
+
+    #[test]
+    fn prompt_evolution_waits_for_the_final_agent_outcome() {
+        let seed = ConductorPromptGenome::seed_for_effort("pro");
+        let context = [
+            ("collaboration_id".to_string(), "collab-final".to_string()),
+            ("agent_run_id".to_string(), "run-final".to_string()),
+            ("prompt_profile".to_string(), seed.id.clone()),
+            ("prompt_effort".to_string(), "pro".to_string()),
+            (
+                "prompt_genome".to_string(),
+                serde_json::to_string(&seed).unwrap(),
+            ),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        let mut events = vec![
+            Event {
+                id: EventId("profile".to_string()),
+                task_id: phase16_task_id(),
+                sequence: 1,
+                timestamp_ms: 100,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Conductor prompt profile selected".to_string(),
+                metadata: context.clone(),
+            },
+            Event {
+                id: EventId("collaboration-complete".to_string()),
+                task_id: phase16_task_id(),
+                sequence: 2,
+                timestamp_ms: 200,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Collaboration workflow completed".to_string(),
+                metadata: context.clone(),
+            },
+        ];
+
+        assert!(prompt_evolution_observations_from_events(&events).is_empty());
+        events.push(Event {
+            id: EventId("agent-failed".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 3,
+            timestamp_ms: 300,
+            kind: EventKind::Error,
+            summary: "Agent task failed".to_string(),
+            metadata: context,
+        });
+        let observations = prompt_evolution_observations_from_events(&events);
+        assert_eq!(observations.len(), 1);
+        assert!(!observations[0].1.succeeded);
     }
 
     #[test]
@@ -16069,6 +21546,80 @@ mod tests {
             .any(|step| step.tool_name.as_deref() == Some("file.write")
                 && step.output_preview.as_deref() == Some("written ok")
                 && step.artifact_path.as_deref() == Some("notes/result.md")));
+    }
+
+    #[test]
+    fn agent_outputs_accumulate_versioned_files_across_session_runs() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        for (index, run_id) in ["run-one", "run-two"].into_iter().enumerate() {
+            let context = [
+                ("session_id".to_string(), "session-alpha".to_string()),
+                ("agent_run_id".to_string(), run_id.to_string()),
+            ]
+            .into_iter()
+            .collect();
+            append_tool_finished_event(
+                &mut store,
+                &phase16_task_id(),
+                &format!("call-{index}"),
+                "file.write",
+                "succeeded",
+                "file written",
+                [
+                    ("path".to_string(), "notes/result.md".to_string()),
+                    ("source_path".to_string(), "/workspace/notes/result.md".to_string()),
+                    (
+                        "artifact_path".to_string(),
+                        format!("/workspace/.cindx/output-history/{run_id}/result.md"),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                Some(&context),
+            )
+            .expect("tool output should append");
+        }
+        let context = [
+            ("session_id".to_string(), "session-alpha".to_string()),
+            ("agent_run_id".to_string(), "run-two".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        append_tool_finished_event(
+            &mut store,
+            &phase16_task_id(),
+            "call-list",
+            "file.list",
+            "succeeded",
+            "notes",
+            [("path".to_string(), "notes".to_string())]
+                .into_iter()
+                .collect(),
+            Some(&context),
+        )
+        .expect("read-only tool output should append");
+
+        let events = agent_events_for_session(
+            &store,
+            &phase16_task_id(),
+            Some("session-alpha"),
+        )
+        .expect("session events should load");
+        let outputs = agent_output_artifacts_from_events(&events);
+
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(
+            outputs
+                .iter()
+                .map(|output| output.version)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([1, 2])
+        );
+        assert!(outputs.iter().all(|output| {
+            output.source_path.as_deref() == Some("/workspace/notes/result.md")
+        }));
+        assert!(outputs.iter().any(|output| output.run_id.as_deref() == Some("run-one")));
+        assert!(outputs.iter().any(|output| output.run_id.as_deref() == Some("run-two")));
     }
 
     #[test]
