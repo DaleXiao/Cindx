@@ -9,8 +9,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_core::{
-    Metadata, PermissionRequest, PermissionRequestId, PermissionRisk, TaskId, ToolCallId,
-    ToolArtifact, ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
+    Metadata, PermissionRequest, PermissionRequestId, PermissionRisk, TaskId, ToolArtifact,
+    ToolCallId, ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
 };
 use model_provider::{
     ImageGenerationRequest, OpenAiCompatibleImageConfig, OpenAiCompatibleImageProvider,
@@ -45,7 +45,9 @@ pub struct ToolExecutionControl {
 
 impl ToolExecutionControl {
     pub fn new(should_cancel: impl Fn() -> bool + Send + Sync + 'static) -> Self {
-        Self { should_cancel: Arc::new(should_cancel) }
+        Self {
+            should_cancel: Arc::new(should_cancel),
+        }
     }
 
     pub fn never_cancelled() -> Self {
@@ -318,9 +320,7 @@ impl Tool for ToolSearchMeta {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let namespace = input
-            .get("namespace")
-            .and_then(serde_json::Value::as_str);
+        let namespace = input.get("namespace").and_then(serde_json::Value::as_str);
         let mut rows = self
             .catalog
             .specs()
@@ -520,7 +520,12 @@ impl Tool for ReadFileTool {
         metadata.insert("path".to_string(), path);
         metadata.insert("bytes".to_string(), output.len().to_string());
 
-        Ok(tool_result(invocation.id, ToolOutcomeStatus::Succeeded, output, metadata))
+        Ok(tool_result(
+            invocation.id,
+            ToolOutcomeStatus::Succeeded,
+            output,
+            metadata,
+        ))
     }
 }
 
@@ -563,8 +568,9 @@ impl Tool for ListDirectoryTool {
             .map_err(|error| ToolError::new(format!("failed to list directory: {error}")))?;
 
         for entry in entries {
-            let entry =
-                entry.map_err(|error| ToolError::new(format!("failed to read directory entry: {error}")))?;
+            let entry = entry.map_err(|error| {
+                ToolError::new(format!("failed to read directory entry: {error}"))
+            })?;
             let metadata = entry
                 .metadata()
                 .map_err(|error| ToolError::new(format!("failed to read metadata: {error}")))?;
@@ -633,7 +639,13 @@ impl Tool for SearchFilesTool {
         let root = resolve_workspace_read_path(&self.workspace_root, &root)?;
         reject_sensitive_read_path(&self.workspace_root, &root)?;
         let mut results = Vec::new();
-        search_directory(&self.workspace_root, &root, &query, max_results, &mut results)?;
+        search_directory(
+            &self.workspace_root,
+            &root,
+            &query,
+            max_results,
+            &mut results,
+        )?;
 
         let mut metadata = Metadata::new();
         metadata.insert("query".to_string(), query);
@@ -697,15 +709,44 @@ impl Tool for WriteFileTool {
         let path = required_input(&input, "path")?;
         let content = required_input(&input, "content")?;
         let resolved = resolve_workspace_path(&self.workspace_root, &path)?;
+        let session_key = invocation
+            .metadata
+            .get("session_id")
+            .map(|session_id| stable_hash(session_id).to_string())
+            .unwrap_or_else(|| "unscoped".to_string());
+        let version_key = stable_hash(&invocation.id.0).to_string();
+        let snapshot_relative = PathBuf::from(".cindx")
+            .join("output-history")
+            .join(session_key)
+            .join(version_key)
+            .join(&path);
+        let snapshot = self.workspace_root.join(&snapshot_relative);
+        if let Some(parent) = snapshot.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                ToolError::new(format!("failed to create output history directory: {error}"))
+            })?;
+        }
+        fs::write(&snapshot, content.as_bytes()).map_err(|error| {
+            ToolError::new(format!("failed to preserve output version: {error}"))
+        })?;
         if let Some(parent) = resolved.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| ToolError::new(format!("failed to create parent directory: {error}")))?;
+            fs::create_dir_all(parent).map_err(|error| {
+                ToolError::new(format!("failed to create parent directory: {error}"))
+            })?;
         }
         fs::write(&resolved, content.as_bytes())
             .map_err(|error| ToolError::new(format!("failed to write file: {error}")))?;
 
         let mut metadata = Metadata::new();
         metadata.insert("path".to_string(), path);
+        metadata.insert(
+            "source_path".to_string(),
+            resolved.display().to_string(),
+        );
+        metadata.insert(
+            "artifact_path".to_string(),
+            snapshot_relative.display().to_string(),
+        );
         metadata.insert("bytes".to_string(), content.len().to_string());
 
         Ok(tool_result(
@@ -1196,11 +1237,8 @@ impl Tool for ImageGenerationTool {
         }
 
         let requested_path = input.get("output_path").map(String::as_str);
-        let (resolved_path, relative_path) = image_output_path(
-            &self.workspace_root,
-            requested_path,
-            &image.mime_type,
-        )?;
+        let (resolved_path, relative_path) =
+            image_output_path(&self.workspace_root, requested_path, &image.mime_type)?;
         if let Some(parent) = resolved_path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 ToolError::new(format!("failed to create image output directory: {error}"))
@@ -1451,7 +1489,9 @@ impl BrowserTool {
             .unwrap_or_else(|| ".cindx/browser-artifacts".to_string());
         let resolved_output_dir = resolve_workspace_path(&self.workspace_root, &output_dir)?;
         fs::create_dir_all(&resolved_output_dir).map_err(|error| {
-            ToolError::new(format!("failed to create browser artifact directory: {error}"))
+            ToolError::new(format!(
+                "failed to create browser artifact directory: {error}"
+            ))
         })?;
         let session_id = input
             .get("session_id")
@@ -1463,7 +1503,9 @@ impl BrowserTool {
         let session_relative = format!(".cindx/browser-sessions/{session_key}");
         let session_dir = resolve_workspace_path(&self.workspace_root, &session_relative)?;
         fs::create_dir_all(&session_dir).map_err(|error| {
-            ToolError::new(format!("failed to create browser session directory: {error}"))
+            ToolError::new(format!(
+                "failed to create browser session directory: {error}"
+            ))
         })?;
 
         let action_id = format!(
@@ -1514,12 +1556,16 @@ impl BrowserTool {
             )));
         }
 
-        let response: serde_json::Value = serde_json::from_str(&sidecar.stdout)
-            .map_err(|error| ToolError::new(format!("invalid browser sidecar response: {error}")))?;
+        let response: serde_json::Value =
+            serde_json::from_str(&sidecar.stdout).map_err(|error| {
+                ToolError::new(format!("invalid browser sidecar response: {error}"))
+            })?;
         if response.get("schema").and_then(serde_json::Value::as_str)
             != Some(BROWSER_CONTROL_RESPONSE_SCHEMA)
         {
-            return Err(ToolError::new("browser sidecar returned an unsupported schema"));
+            return Err(ToolError::new(
+                "browser sidecar returned an unsupported schema",
+            ));
         }
         let output = response
             .get("output")
@@ -1542,7 +1588,10 @@ impl BrowserTool {
                 }
             }
         }
-        if let Some(duration) = response.get("duration_ms").and_then(serde_json::Value::as_u64) {
+        if let Some(duration) = response
+            .get("duration_ms")
+            .and_then(serde_json::Value::as_u64)
+        {
             metadata.insert("duration_ms".to_string(), duration.to_string());
         }
         if let Some(trace_path) = response
@@ -1668,7 +1717,9 @@ impl ComputerActionKind {
 
     fn description(self) -> &'static str {
         match self {
-            Self::Screenshot => "Capture a local desktop screenshot artifact with redaction metadata.",
+            Self::Screenshot => {
+                "Capture a local desktop screenshot artifact with redaction metadata."
+            }
             Self::Click => "Click a local desktop coordinate through the computer-use controller.",
             Self::TypeText => "Type text through the computer-use controller.",
             Self::Key => "Press a keyboard shortcut through the computer-use controller.",
@@ -1791,8 +1842,11 @@ impl Tool for ComputerTool {
             .cloned()
             .unwrap_or_else(|| ".cindx/computer-actions".to_string());
         let resolved_dir = resolve_workspace_path(&self.workspace_root, &output_dir)?;
-        fs::create_dir_all(&resolved_dir)
-            .map_err(|error| ToolError::new(format!("failed to create computer action directory: {error}")))?;
+        fs::create_dir_all(&resolved_dir).map_err(|error| {
+            ToolError::new(format!(
+                "failed to create computer action directory: {error}"
+            ))
+        })?;
 
         let action_id = format!(
             "computer-{}-{}",
@@ -1802,8 +1856,9 @@ impl Tool for ComputerTool {
         let request_relative = format!("{output_dir}/{action_id}.json");
         let request_path = resolve_workspace_path(&self.workspace_root, &request_relative)?;
         let request_json = computer_action_request_json(&action_id, self.kind, &input);
-        fs::write(&request_path, request_json.as_bytes())
-            .map_err(|error| ToolError::new(format!("failed to write computer action request: {error}")))?;
+        fs::write(&request_path, request_json.as_bytes()).map_err(|error| {
+            ToolError::new(format!("failed to write computer action request: {error}"))
+        })?;
 
         if self.kind == ComputerActionKind::Screenshot {
             return execute_computer_screenshot(
@@ -1881,9 +1936,7 @@ fn object_schema_from_fields(fields: &str) -> String {
         let value_type = match name {
             "destructive" | "new_tab" | "headless" | "full_page" | "exact" | "download"
             | "append" | "press_enter" => "boolean",
-            "x" | "y" | "delta_x" | "delta_y" | "limit" | "max_results" | "timeout_ms" => {
-                "integer"
-            }
+            "x" | "y" | "delta_x" | "delta_y" | "limit" | "max_results" | "timeout_ms" => "integer",
             _ => "string",
         };
         properties.insert(
@@ -1967,7 +2020,10 @@ fn permission_request(
     metadata: Metadata,
 ) -> PermissionRequest {
     PermissionRequest {
-        id: PermissionRequestId(format!("perm-{}", stable_hash(&format!("{action}:{scope:?}")))),
+        id: PermissionRequestId(format!(
+            "perm-{}",
+            stable_hash(&format!("{action}:{scope:?}"))
+        )),
         task_id: task_id.clone(),
         risk,
         action: action.to_string(),
@@ -1993,7 +2049,10 @@ fn resolve_workspace_path(workspace_root: &Path, path: &str) -> Result<PathBuf, 
     }
 
     for component in candidate.components() {
-        if matches!(component, Component::ParentDir | Component::Prefix(_) | Component::RootDir) {
+        if matches!(
+            component,
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir
+        ) {
             return Err(ToolError::new("path escapes the workspace"));
         }
     }
@@ -2036,7 +2095,9 @@ fn resolve_workspace_read_path(workspace_root: &Path, path: &Path) -> Result<Pat
     let canonical_path = fs::canonicalize(path)
         .map_err(|error| ToolError::new(format!("failed to resolve read path: {error}")))?;
     if !canonical_path.starts_with(&canonical_root) {
-        return Err(ToolError::new("path escapes the workspace through a symbolic link"));
+        return Err(ToolError::new(
+            "path escapes the workspace through a symbolic link",
+        ));
     }
     Ok(canonical_path)
 }
@@ -2075,12 +2136,7 @@ fn is_sensitive_workspace_path(workspace_root: &Path, path: &Path) -> bool {
     is_env_file
         || matches!(
             file_name,
-            ".npmrc"
-                | ".pypirc"
-                | "credentials"
-                | "credentials.json"
-                | "id_rsa"
-                | "id_ed25519"
+            ".npmrc" | ".pypirc" | "credentials" | "credentials.json" | "id_rsa" | "id_ed25519"
         )
         || file_name.ends_with(".pem")
         || file_name.ends_with(".key")
@@ -2110,8 +2166,8 @@ fn search_directory(
         if results.len() >= max_results {
             break;
         }
-        let entry =
-            entry.map_err(|error| ToolError::new(format!("failed to read directory entry: {error}")))?;
+        let entry = entry
+            .map_err(|error| ToolError::new(format!("failed to read directory entry: {error}")))?;
         let path = entry.path();
         let file_name = entry.file_name();
         if file_name.to_string_lossy().starts_with('.') {
@@ -2123,8 +2179,9 @@ fn search_directory(
         if file_type.is_symlink() {
             continue;
         }
-        let metadata =
-            entry.metadata().map_err(|error| ToolError::new(format!("failed to read metadata: {error}")))?;
+        let metadata = entry
+            .metadata()
+            .map_err(|error| ToolError::new(format!("failed to read metadata: {error}")))?;
         if metadata.is_dir() {
             search_directory(workspace_root, &path, query, max_results, results)?;
         } else if metadata.is_file() {
@@ -2215,7 +2272,9 @@ fn validate_browser_input(
             if has_browser_target(input) {
                 return Ok(());
             }
-            Err(ToolError::new("browser.type requires a semantic target or selector"))
+            Err(ToolError::new(
+                "browser.type requires a semantic target or selector",
+            ))
         }
         BrowserToolKind::SelectTab => required_input(input, "tab_id").map(|_| ()),
         BrowserToolKind::ExtractText
@@ -2228,7 +2287,11 @@ fn validate_browser_input(
 fn has_browser_target(input: &BTreeMap<String, String>) -> bool {
     ["selector", "role", "label", "placeholder", "text_target"]
         .iter()
-        .any(|key| input.get(*key).is_some_and(|value| !value.trim().is_empty()))
+        .any(|key| {
+            input
+                .get(*key)
+                .is_some_and(|value| !value.trim().is_empty())
+        })
 }
 
 fn input_is_true(input: &BTreeMap<String, String>, key: &str) -> bool {
@@ -2256,7 +2319,10 @@ fn browser_request_json(
             "schema".to_string(),
             serde_json::Value::String(BROWSER_CONTROL_REQUEST_SCHEMA.to_string()),
         ),
-        ("id".to_string(), serde_json::Value::String(action_id.to_string())),
+        (
+            "id".to_string(),
+            serde_json::Value::String(action_id.to_string()),
+        ),
         (
             "action".to_string(),
             serde_json::Value::String(kind.action().to_string()),
@@ -2562,7 +2628,9 @@ fn try_native_screenshot(path: &Path) -> Result<bool, ToolError> {
     match output {
         Ok(output) => Ok(output.status.success()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(ToolError::new(format!("failed to run screencapture: {error}"))),
+        Err(error) => Err(ToolError::new(format!(
+            "failed to run screencapture: {error}"
+        ))),
     }
 }
 
@@ -2814,10 +2882,13 @@ fn run_json_sidecar(env_key: &str, request_path: &Path) -> Result<Option<String>
     }
 
     let sidecar_path = PathBuf::from(&sidecar);
-    let mut command = if sidecar_path.extension().and_then(|extension| extension.to_str())
+    let mut command = if sidecar_path
+        .extension()
+        .and_then(|extension| extension.to_str())
         == Some("js")
     {
-        let mut command = Command::new(env::var("CINDX_NODE").unwrap_or_else(|_| "node".to_string()));
+        let mut command =
+            Command::new(env::var("CINDX_NODE").unwrap_or_else(|_| "node".to_string()));
         command.arg(&sidecar_path);
         command
     } else {
@@ -2860,30 +2931,47 @@ fn run_json_sidecar_controlled(
         .ok_or_else(|| ToolError::new(format!("{env_key} is not configured")))?;
     let sidecar_path = PathBuf::from(&sidecar);
     if !sidecar_path.is_file() {
-        return Err(ToolError::new(format!("browser sidecar does not exist: {sidecar}")));
+        return Err(ToolError::new(format!(
+            "browser sidecar does not exist: {sidecar}"
+        )));
     }
-    let mut command = if sidecar_path.extension().and_then(|extension| extension.to_str())
+    let mut command = if sidecar_path
+        .extension()
+        .and_then(|extension| extension.to_str())
         == Some("js")
     {
-        let mut command = Command::new(env::var("CINDX_NODE").unwrap_or_else(|_| "node".to_string()));
+        let mut command =
+            Command::new(env::var("CINDX_NODE").unwrap_or_else(|_| "node".to_string()));
         command.arg(&sidecar_path);
         command
     } else {
         Command::new(&sidecar_path)
     };
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = command
         .arg(request_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| ToolError::new(format!("failed to start browser sidecar: {error}")))?;
+    let process_id = child.id();
     let started = Instant::now();
     let (cancelled, timed_out) = loop {
         if control.should_cancel() {
+            terminate_process_group(process_id, 15);
+            thread::sleep(Duration::from_millis(40));
+            terminate_process_group(process_id, 9);
             let _ = child.kill();
             break (true, false);
         }
         if started.elapsed() >= hard_timeout {
+            terminate_process_group(process_id, 15);
+            thread::sleep(Duration::from_millis(40));
+            terminate_process_group(process_id, 9);
             let _ = child.kill();
             break (false, true);
         }
@@ -2896,6 +2984,10 @@ fn run_json_sidecar_controlled(
         }
         thread::sleep(Duration::from_millis(40));
     };
+    if !cancelled && !timed_out {
+        // A sidecar that exits can still leave descendants holding the pipes open.
+        terminate_process_group(process_id, 9);
+    }
     let output = child
         .wait_with_output()
         .map_err(|error| ToolError::new(format!("failed to collect browser sidecar: {error}")))?;
@@ -3032,8 +3124,7 @@ mod tests {
         let permission = tool
             .permission_request(&invocation(
                 "image.generate",
-                r#"{"prompt":"A blue circle","output_path":"art/circle.png"}"#
-                    .to_string(),
+                r#"{"prompt":"A blue circle","output_path":"art/circle.png"}"#.to_string(),
             ))
             .expect("image generation should require permission");
         let (_, output_path) = image_output_path(&root, Some("art/circle.jpg"), "image/png")
@@ -3102,7 +3193,10 @@ mod tests {
             .expect("write target should require permission");
 
         assert_eq!(request.action, "file.write");
-        assert_eq!(request.metadata.get("tool_name").map(String::as_str), Some("file.write"));
+        assert_eq!(
+            request.metadata.get("tool_name").map(String::as_str),
+            Some("file.write")
+        );
     }
 
     #[test]
@@ -3116,7 +3210,10 @@ mod tests {
         writer
             .execute(invocation(
                 "file.write",
-                encode_input(&[("path", "notes/today.txt"), ("content", "hello workspace\nline two")]),
+                encode_input(&[
+                    ("path", "notes/today.txt"),
+                    ("content", "hello workspace\nline two"),
+                ]),
             ))
             .expect("write should succeed");
 
@@ -3139,6 +3236,40 @@ mod tests {
         assert_eq!(read.output, "hello workspace\nline two");
         assert!(listed.output.contains("today.txt"));
         assert!(searched.output.contains("notes/today.txt:1"));
+    }
+
+    #[test]
+    fn write_file_preserves_an_immutable_session_output_version() {
+        let root = temp_workspace();
+        let writer = WriteFileTool::new(root.clone());
+        let mut request = invocation(
+            "file.write",
+            encode_input(&[("path", "notes/versioned.txt"), ("content", "version one")]),
+        );
+        request
+            .metadata
+            .insert("session_id".to_string(), "session-alpha".to_string());
+
+        let result = writer.execute(request).expect("write should succeed");
+        let artifact_path = result
+            .metadata
+            .get("artifact_path")
+            .expect("write should expose the immutable output version");
+        let source_path = root.join("notes/versioned.txt").display().to_string();
+
+        assert_eq!(
+            result.metadata.get("source_path").map(String::as_str),
+            Some(source_path.as_str())
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(artifact_path)).expect("snapshot should be readable"),
+            "version one"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("notes/versioned.txt"))
+                .expect("workspace file should be readable"),
+            "version one"
+        );
     }
 
     #[test]
@@ -3197,16 +3328,16 @@ mod tests {
         let result = shell
             .execute(invocation(
                 "shell.run",
-                encode_input(&[
-                    ("command", "sleep 30"),
-                    ("timeout_seconds", "1"),
-                ]),
+                encode_input(&[("command", "sleep 30"), ("timeout_seconds", "1")]),
             ))
             .expect("timeout should be returned as a tool result");
 
         assert_eq!(result.status, ToolOutcomeStatus::Failed);
         assert!(result.output.contains("timed out after 1 seconds"));
-        assert_eq!(result.metadata.get("timed_out").map(String::as_str), Some("true"));
+        assert_eq!(
+            result.metadata.get("timed_out").map(String::as_str),
+            Some("true")
+        );
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 
@@ -3234,7 +3365,10 @@ mod tests {
         trigger.join().expect("cancellation trigger should finish");
 
         assert_eq!(result.status, ToolOutcomeStatus::Cancelled);
-        assert_eq!(result.metadata.get("cancelled").map(String::as_str), Some("true"));
+        assert_eq!(
+            result.metadata.get("cancelled").map(String::as_str),
+            Some("true")
+        );
         assert!(started.elapsed() < Duration::from_secs(2));
     }
 
@@ -3308,7 +3442,9 @@ mod tests {
             ))
             .expect_err("browser action must not pretend it ran without a controller");
 
-        assert!(error.message.contains("CINDX_BROWSER_SIDECAR is not configured"));
+        assert!(error
+            .message
+            .contains("CINDX_BROWSER_SIDECAR is not configured"));
     }
 
     #[test]
@@ -3460,7 +3596,10 @@ mod tests {
             .expect("artifact should be recorded");
         let request = fs::read_to_string(root.join(artifact)).expect("request should exist");
 
-        assert_eq!(result.metadata.get("controller").map(String::as_str), Some("artifact"));
+        assert_eq!(
+            result.metadata.get("controller").map(String::as_str),
+            Some("artifact")
+        );
         assert!(request.contains("\"namespace\":\"computer\""));
         assert!(request.contains("\"action\":\"click\""));
         assert!(request.contains("\"x\":\"120\""));
@@ -3490,14 +3629,19 @@ mod tests {
         let manifest_text = fs::read_to_string(root.join(manifest)).expect("manifest should exist");
         env::remove_var("CINDX_DISABLE_NATIVE_SCREENSHOT");
 
-        assert_eq!(result.metadata.get("controller").map(String::as_str), Some("artifact"));
+        assert_eq!(
+            result.metadata.get("controller").map(String::as_str),
+            Some("artifact")
+        );
         assert!(manifest_text.contains("\"redaction\":\"manual\""));
         assert!(manifest_text.contains("\"status\":\"pending_review\""));
     }
 
     #[test]
     fn html_text_extraction_strips_tags_and_decodes_entities() {
-        let text = html_to_text("<html><body><h1>Local &amp; Agent</h1><p>RAG&nbsp;ready</p></body></html>");
+        let text = html_to_text(
+            "<html><body><h1>Local &amp; Agent</h1><p>RAG&nbsp;ready</p></body></html>",
+        );
 
         assert!(text.contains("Local & Agent"));
         assert!(text.contains("RAG ready"));
@@ -3510,7 +3654,10 @@ mod tests {
         let valid = parse_input(&encode_input(&[("url", "https://example.com")]));
 
         assert!(required_url(&invalid).is_err());
-        assert_eq!(required_url(&valid).expect("url should pass"), "https://example.com");
+        assert_eq!(
+            required_url(&valid).expect("url should pass"),
+            "https://example.com"
+        );
     }
 
     #[test]
@@ -3519,7 +3666,10 @@ mod tests {
         let reader = ReadFileTool::new(root);
 
         let error = reader
-            .execute(invocation("file.read", encode_input(&[("path", "../secret")])))
+            .execute(invocation(
+                "file.read",
+                encode_input(&[("path", "../secret")]),
+            ))
             .expect_err("path escape should fail");
 
         assert!(error.message.contains("escapes"));

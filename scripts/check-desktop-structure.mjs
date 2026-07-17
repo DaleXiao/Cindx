@@ -50,15 +50,18 @@ const unsignedReleaseBlock =
 const ciWorkflow = read(".github/workflows/ci.yml");
 const releaseVersionCheck = read("scripts/check-release-version.mjs");
 const toolsSource = read("crates/tools/src/lib.rs");
+const agentStorageSource = read("crates/agent-storage/src/lib.rs");
 const agentSkillsSource = read("crates/agent-skills/src/lib.rs");
 const builtinSkillCreator = read("crates/agent-skills/builtins/skill-creator/SKILL.md");
 const modelProviderSource = read("crates/model-provider/src/lib.rs");
+const modelProviderCargo = read("crates/model-provider/Cargo.toml");
 const ragSource = read("crates/agent-rag/src/lib.rs");
 const graphSource = read("crates/agent-graph/src/lib.rs");
 const agentMemorySource = read("crates/agent-memory/src/lib.rs");
 const agentRuntimeSource = read("crates/agent-runtime/src/lib.rs");
 const coreAgentPrompt = read("crates/agent-runtime/src/core_prompt.txt");
 const orchestratorSource = read("crates/orchestrator/src/lib.rs");
+const promptEvolutionSource = read("crates/orchestrator/src/prompt_evolution.rs");
 const benchmarkSource = read("crates/orchestrator/src/benchmark.rs");
 const benchmarkSuite = JSON.parse(read("benchmarks/agent/core-v1.json"));
 const benchmarkBaseline = JSON.parse(read("benchmarks/agent/core-v1-baseline.json"));
@@ -182,10 +185,19 @@ assert(
 );
 assert(
   tauriConfig.app.windows.every((window) => window.visible === false) &&
-    rustLib.includes(".on_page_load(|webview, payload|") &&
-    rustLib.includes("PageLoadEvent::Finished") &&
-    rustLib.includes("webview.window().show()"),
-  "The native window must wait for the first styled webview frame before appearing"
+    !rustLib.includes(".on_page_load(|webview, payload|") &&
+    rustLib.includes("fn reveal_main_window(app: tauri::AppHandle)") &&
+    rustLib.includes("schedule_main_window_reveal_fallback") &&
+    rustLib.includes("MAIN_WINDOW_REVEAL_FALLBACK_MS: u64 = 12_000") &&
+    rustLib.includes("fn repair_macos_traffic_light_position(") &&
+    rustLib.includes("repair_macos_traffic_light_position(&window)?;") &&
+    rustLib.includes("let _ = repair_macos_traffic_light_position(&window);") &&
+    tauriBridge.includes('invoke<void>("reveal_main_window")') &&
+    appSource.includes("startupWindowRevealRequestedRef") &&
+    appSource.includes("await document.fonts.ready") &&
+    appSource.includes("await revealMainWindow()") &&
+    !appSource.includes("revealAfterStableFrame"),
+  "The native window must stay hidden until React reveals a stable styled frame"
 );
 const titlebarHeight = 46;
 // This is the user-confirmed macOS alignment; do not retune it indirectly.
@@ -216,6 +228,8 @@ assert(
     localBuildScript.includes('CINDX_STARTUP_PROBE: "1"') &&
     localBuildScript.includes('"--identifier"') &&
     localBuildScript.includes('const installApp = !args.has("--no-install")') &&
+    localBuildScript.includes('run("pkill", ["-x", "cindx-desktop"]') &&
+    localBuildScript.includes('waitForProcessExit("cindx-desktop")') &&
     localBuildScript.includes("restoreVersions()") &&
     packageJson.scripts?.["build:app"] === "node ../../scripts/build-local-app.mjs",
   "Local builds must auto-version, probe, sign, install, package, and restore source versions"
@@ -242,12 +256,13 @@ assert(mainSource.includes("<App />"), "React entrypoint must render App");
 assert(appSource.includes("<SessionThread"), "App must render the session thread");
 assert(
   rustLib.includes("run_started_at_ms") &&
-    appSource.includes("runStartedAtMs={agentState?.runStartedAtMs ?? 0}") &&
+    appSource.includes("runStartedAtMs={activeAgentState?.runStartedAtMs ?? 0}") &&
     sessionThreadSource.includes("activeRunProgress(timeline, runStartedAtMs)") &&
-    sessionThreadSource.includes("Elapsed since this request was sent") &&
-    sessionThreadSource.includes("`${runElapsed} elapsed`") &&
+    !sessionThreadSource.includes("Elapsed since this request was sent") &&
+    !sessionThreadSource.includes("formatRunElapsed") &&
+    sessionThreadSource.includes("const RunProgressStatus = memo") &&
     !sessionThreadSource.includes("runBudgetMs > 0"),
-  "Running status must use the current request start time and label elapsed wall time clearly"
+  "Running status must use the current request without rendering elapsed time"
 );
 assert(
   sessionThreadSource.includes('aria-label="Session thread"'),
@@ -283,7 +298,12 @@ assert(
 );
 assert(
   modelProviderSource.includes("complete_streaming_cancellable") &&
-    modelProviderSource.includes("RecvTimeoutError::Timeout") &&
+    modelProviderSource.includes("static HTTP_CLIENT: OnceLock<Client>") &&
+    modelProviderSource.includes("pool_idle_timeout") &&
+    modelProviderSource.includes("consume_streaming_body") &&
+    modelProviderSource.includes("tokio::time::timeout(HTTP_POLL_INTERVAL") &&
+    modelProviderCargo.includes('reqwest = { version = "0.13.4", features = ["stream"] }') &&
+    !modelProviderSource.includes('Command::new("/usr/bin/curl")') &&
     modelProviderSource.includes("streamed_tool_calls") &&
     modelProviderSource.includes("MODEL_REQUEST_CANCELLED") &&
     rustLib.includes("agent_run_controls") &&
@@ -295,7 +315,7 @@ assert(
     appSource.includes("payload.sessionId !== activeSessionIdRef.current") &&
     appSource.includes("if (payload.reset)") &&
     appSource.includes("streamBuffer += payload.delta") &&
-    appSource.includes("window.setTimeout(flushStreamBuffer, 40)") &&
+    appSource.includes("window.setTimeout(flushStreamBuffer, 80)") &&
     appSource.includes("markSessionBusy(sessionId, false)") &&
     tauriBridge.includes("sessionId: string | null") &&
     tauriBridge.includes("reset: boolean"),
@@ -329,6 +349,101 @@ assert(
   "Session switching must prioritize chat state and defer workspace-wide refreshes"
 );
 assert(
+  appSource.includes("SESSION_STATE_CACHE_LIMIT = 12") &&
+    appSource.includes("agentStateCacheRef") &&
+    appSource.includes("agentTraceCacheRef") &&
+    appSource.includes("contextStateCacheRef") &&
+    appSource.includes("requestSessionAgentState(sessionId)") &&
+    appSource.includes("restoreCachedSessionState(sessionId)") &&
+    appSource.includes("startTransition(() =>") &&
+    !appSource.includes("onSessionPrefetch") &&
+    !sidebarSource.includes("onSessionPrefetch"),
+  "Session switching must restore a bounded cache without speculative full-session reads"
+);
+assert(
+  rustLib.includes("async fn get_agent_state(") &&
+    rustLib.includes("async fn get_agent_state_delta(") &&
+    rustLib.includes("async fn get_agent_state_revision(") &&
+    rustLib.includes("async fn get_agent_trace_state(") &&
+    rustLib.includes("async fn get_context_state(") &&
+    rustLib.includes("let store = open_app_read_store()?") &&
+    rustLib.includes("load_agent_session_read_model") &&
+    rustLib.includes("list_by_task_and_metadata_before") &&
+    rustLib.includes("list_by_task_and_metadata_after") &&
+    rustLib.includes('"agent_run_id"') &&
+    rustLib.includes("get_agent_history_page") &&
+    !rustLib.includes("cached_agent_events_for_session") &&
+    rustLib.includes("agent state load failed to join") &&
+    rustLib.includes("agent trace load failed to join") &&
+    rustLib.includes("context state load failed to join"),
+  "Session reads must stay off the command thread and query only the requested session"
+);
+assert(
+  agentStorageSource.includes("idx_events_task_session_sequence") &&
+    agentStorageSource.includes("event_scope_columns_v1") &&
+    agentStorageSource.includes("list_by_task_and_metadata_after") &&
+    agentStorageSource.includes("save_read_model") &&
+    rustLib.includes("AGENT_SESSION_READ_MODEL_NAMESPACE") &&
+    rustLib.includes("struct AgentSessionReadModel") &&
+    rustLib.includes("struct AgentStateDelta") &&
+    tauriBridge.includes("export async function getAgentStateDelta") &&
+    appSource.includes("function mergeAgentStateDelta") &&
+    appSource.includes("getAgentStateDelta(sessionId"),
+  "Active session polling must use indexed event deltas and a persistent read model"
+);
+assert(
+  agentStorageSource.includes("pragma journal_mode = WAL") &&
+    agentStorageSource.includes("pragma synchronous = NORMAL") &&
+    agentStorageSource.includes("pragma busy_timeout = 5000") &&
+    agentStorageSource.includes("pragma query_only = ON") &&
+    rustLib.includes("failed to record agent progress") &&
+    rustLib.includes("context preparation failed") &&
+    rustLib.includes("skill context preparation failed"),
+  "Agent storage must tolerate concurrent readers and report the failing run stage"
+);
+assert(
+  tauriBridge.match(/if \(isTauriRuntime\(\)\) throw error;/g)?.length >= 10 &&
+    appSource.includes("function mergeAgentStateSnapshot") &&
+    appSource.includes("mergeAgentStateSnapshot(current, failedState)") &&
+    appSource.includes("mergeAgentStateSnapshot(current, nextAgentState)"),
+  "Real Tauri agent failures must propagate without replacing loaded session history"
+);
+assert(
+  orchestratorSource.includes("pub struct WorkflowExecutionCheckpoint") &&
+    orchestratorSource.includes("pub enum WorkflowStepStatus") &&
+    orchestratorSource.includes("pub fn runnable_step_indices") &&
+    orchestratorSource.includes("pub fn continue_with_budget") &&
+    rustLib.includes("load_workflow_checkpoint_for_run") &&
+    rustLib.includes("append_workflow_checkpoint_event") &&
+    rustLib.includes("Collaboration workflow step checkpointed") &&
+    rustLib.includes("WORKFLOW_RESUMABLE_ERROR_PREFIX") &&
+    rustLib.includes("workflow_checkpoint.completed_outputs()") &&
+    rustLib.includes("workflow_checkpoint.assign_step_credits") &&
+    rustLib.includes("timeline_workflow_progress") &&
+    tauriBridge.includes("workflowProgress?:") &&
+    sessionThreadSource.includes("latestWorkflow.totalSteps") &&
+    sessionThreadSource.includes("Checkpoint saved"),
+  "Adaptive workflows must persist node checkpoints and resume only incomplete branches with fresh budget"
+);
+assert(
+  appSource.includes("sessionLoadingId") &&
+    appSource.includes("loading={sessionLoadingId === activeSession?.id && !activeAgentState}") &&
+    sessionThreadSource.includes('loading ? "Loading conversation" : "No messages yet"'),
+  "Cold session loads must show an explicit loading state instead of a blank thread"
+);
+assert(
+  sessionThreadSource.includes("export const SessionThread = memo(function SessionThread") &&
+    sessionThreadSource.includes("const ToolChainDisclosure = memo(function ToolChainDisclosure") &&
+    sessionThreadSource.includes("{open && (") &&
+    sessionThreadSource.includes("threadContentRef") &&
+    sessionThreadSource.includes("resizeObserver.observe(threadContentRef.current)") &&
+    !sessionThreadSource.includes('querySelectorAll<HTMLElement>("[data-minimap-kind]")') &&
+    styles.includes(".thread-content") &&
+    styles.includes("content-visibility: auto") &&
+    styles.includes("contain-intrinsic-size: auto 96px"),
+  "Long conversations must avoid hidden activity trees, row-by-row observation, and offscreen layout work"
+);
+assert(
   sessionThreadSource.includes("openExternalUrl") &&
     sessionThreadSource.includes("openArtifact") &&
     sessionThreadSource.includes("artifactLinkTarget") &&
@@ -351,11 +466,38 @@ assert(
     styles.includes(".inspector-debug-session"),
   "Debug must expose the active session ID with a clipboard action"
 );
+assert(
+  inspectorSource.includes("const [metadataOpen, setMetadataOpen] = useState(false)") &&
+    inspectorSource.includes('className="metadata-details-toggle"') &&
+    inspectorSource.includes("aria-expanded={metadataOpen}") &&
+    inspectorSource.includes("data-open={metadataOpen}") &&
+    inspectorSource.includes("data-motion={metadataMotion}") &&
+    inspectorSource.includes('className="metadata-disclosure-icon"') &&
+    inspectorSource.includes("setMetadataOpen(false);") &&
+    styles.includes("@keyframes metadata-disclosure-opening") &&
+    styles.includes("@keyframes metadata-disclosure-closing") &&
+    /\.metadata-disclosure-icon \{[\s\S]*?transform: rotate\(0deg\);/.test(styles) &&
+    /\.metadata-details\[data-open="true"\] \.metadata-disclosure-icon \{[\s\S]*?transform: rotate\(180deg\);/.test(
+      styles
+    ) &&
+    styles.includes(".metadata-details-body"),
+  "Inspector metadata must use a controlled animated disclosure"
+);
 assert(inspectorSource.includes("inspector-resize-handle"), "Inspector must remain resizable");
 assert(
   !inspectorSource.includes("<strong>Inspector</strong>") &&
     !styles.includes(".inspector-header"),
   "Inspector tabs must lead the panel without a redundant visible title"
+);
+assert(
+  inspectorSource.includes('<ol className="inspector-trace-list">') &&
+    inspectorSource.includes('className="trace-sequence-item"') &&
+    inspectorSource.includes('className="trace-sequence-marker"') &&
+    inspectorSource.includes("Step ${index + 1}") &&
+    inspectorSource.includes("Turn ${step.turnIndex}") &&
+    styles.includes(".trace-sequence-item:not(:last-child)::after") &&
+    styles.includes(".trace-sequence-marker"),
+  "Agent trace must communicate execution order with a numbered connected timeline"
 );
 assert(
   appSource.includes('aria-label={inspectorOpen ? "Hide inspector" : "Show inspector"}') &&
@@ -493,7 +635,7 @@ assert(
 assert(
   sessionThreadSource.includes("thread.scrollTop = thread.scrollHeight") &&
     sessionThreadSource.includes("useLayoutEffect(() => {") &&
-    sessionThreadSource.includes('return `message-${message.role}-${index}`') &&
+    sessionThreadSource.includes('message.sequence ?? `${message.role}-${index}`') &&
     appSource.includes("optimisticUserMessagesRef") &&
     appSource.includes("messagesWithOptimisticUserMessage") &&
     appSource.includes("messages={visibleAgentMessages}"),
@@ -523,8 +665,20 @@ assert(
     sessionThreadSource.includes('role !== "user"') &&
     sessionThreadSource.includes('role !== "assistant"') &&
     sessionThreadSource.includes('preview.toLowerCase() === "tool request"') &&
-    sessionThreadSource.includes("marker.targetIndex"),
+    sessionThreadSource.includes("rowIndexByItemId.get(marker.id)"),
   "Minimap must index only sparse, substantive user and model output anchors"
+);
+assert(
+  packageJson.dependencies["@tanstack/react-virtual"] &&
+    sessionThreadSource.includes('import { useVirtualizer } from "@tanstack/react-virtual"') &&
+    sessionThreadSource.includes("const rowVirtualizer = useVirtualizer") &&
+    sessionThreadSource.includes("const virtualRows = rowVirtualizer.getVirtualItems()") &&
+    sessionThreadSource.includes("ref={rowVirtualizer.measureElement}") &&
+    sessionThreadSource.includes('className="thread-virtual-list"') &&
+    sessionThreadSource.includes('className="thread-virtual-row"') &&
+    styles.includes(".thread-virtual-list") &&
+    styles.includes(".thread-virtual-row"),
+  "Long sessions must virtualize variable-height rows instead of mounting the full transcript"
 );
 assert(
   styles.includes(".session-thread::-webkit-scrollbar") &&
@@ -549,7 +703,7 @@ assert(
   "Cmd+F must search and navigate message content only within the active session"
 );
 assert(
-  sessionThreadSource.includes("thread-message-agent-meta") &&
+  !sessionThreadSource.includes("thread-message-agent-meta") &&
     sessionThreadSource.includes("!isUser && !isAssistant") &&
     sessionThreadSource.includes("thread-streaming-status") &&
     !sessionThreadSource.includes('<strong>Cindx</strong>'),
@@ -561,33 +715,50 @@ assert(
     !sessionThreadSource.includes("containsToolActivity") &&
     sessionThreadSource.includes("while (end < items.length && isActivityCandidate(items[end]))") &&
     sessionThreadSource.includes("thread-tool-chain") &&
-    sessionThreadSource.includes("Agent activity") &&
-    sessionThreadSource.includes('<Activity aria-hidden="true" />') &&
+    sessionThreadSource.includes("Agent actions") &&
+    sessionThreadSource.includes('className="thread-tool-chain-chevron"') &&
+    !sessionThreadSource.includes("toolChainStatus(row.items)") &&
     sessionThreadSource.includes("<ToolChainItem") &&
-    styles.includes(".thread-tool-chain-items"),
+    styles.includes(".thread-tool-chain-items") &&
+    styles.includes(".thread-tool-chain[open] > summary .thread-tool-chain-chevron"),
   "All contiguous agent reasoning, collaboration, and tool activity must default to one parent disclosure"
 );
 assert(
-  disclosureTriangleSource.includes('import { Triangle } from "lucide-react"') &&
-    (sessionThreadSource.match(/<DisclosureTriangle/g)?.length ?? 0) >= 3 &&
+  disclosureTriangleSource.includes('viewBox="0 0 16 16"') &&
+    disclosureTriangleSource.includes("c.52 0 1 .28 1.26.73") &&
+    !disclosureTriangleSource.includes('import { Triangle }') &&
+    (sessionThreadSource.match(/<DisclosureTriangle/g)?.length ?? 0) >= 2 &&
     (inspectorSource.match(/<DisclosureTriangle/g)?.length ?? 0) >= 2 &&
-    (appSource.match(/<DisclosureTriangle/g)?.length ?? 0) >= 5 &&
-    !sessionThreadSource.includes("ChevronRight") &&
+    !appSource.includes("DisclosureTriangle") &&
+    (appSource.match(/className="settings-disclosure-chevron"/g)?.length ?? 0) === 8 &&
+    (appSource.match(/className="settings-action-chevron"/g)?.length ?? 0) === 1 &&
     !inspectorSource.includes("ChevronRight") &&
     !styles.includes("advanced-settings summary::before") &&
-    styles.includes("details[open] > summary .disclosure-triangle"),
-  "Every disclosure indicator must use the shared equilateral triangle icon"
+    styles.includes("details[open] > summary .disclosure-triangle") &&
+    styles.includes("details[open] > summary .settings-disclosure-chevron") &&
+    styles.includes("transform-box: fill-box") &&
+    styles.includes("transition: transform 180ms") &&
+    styles.includes(".secondary-button:hover:not(:disabled) .settings-action-chevron"),
+  "Settings must use trailing animated chevrons while other compact disclosures retain the shared marker"
 );
 assert(
   sessionThreadSource.includes("thread-thinking") &&
     sessionThreadSource.includes("Thinking") &&
     !sessionThreadSource.includes("LoaderCircle") &&
     styles.includes("@keyframes thinking-sheen") &&
-    /\.thread-thinking > span,[\s\S]*?\.thread-thinking > time \{[\s\S]*?min-height: 16px;[\s\S]*?align-items: center;[\s\S]*?line-height: 16px;/.test(
+    /\.thread-thinking > span,[\s\S]*?\.thread-thinking > small \{[\s\S]*?min-height: 16px;[\s\S]*?align-items: center;[\s\S]*?line-height: 16px;/.test(
       styles
     ) &&
     styles.includes("prefers-reduced-motion: reduce"),
-  "Agent thinking state must align uncropped text and elapsed time without a spinner"
+  "Agent thinking state must align uncropped progress text without a spinner"
+);
+assert(
+  !sessionThreadSource.includes("threadTimeFormatter") &&
+    !sessionThreadSource.includes("formatThreadTime") &&
+    !sessionThreadSource.includes("<time") &&
+    !styles.includes(".thread-message-actions time") &&
+    !styles.includes(".thread-message-agent-meta"),
+  "Session messages and activity must keep timestamps exclusively in Agent Trace"
 );
 assert(
   composerSource.includes("pendingApproval") && composerSource.includes("composer-permission"),
@@ -655,6 +826,20 @@ assert(
   "Settings must remain the only sidebar footer destination"
 );
 assert(
+  sidebarSource.includes("settingsButtonRef") &&
+    sidebarSource.includes('icon.getAnimations().forEach((animation) => animation.cancel())') &&
+    sidebarSource.includes('{ transform: "rotate(360deg)" }') &&
+    sidebarSource.includes('window.matchMedia("(prefers-reduced-motion: reduce)")'),
+  "Settings must rotate once per click and respect reduced-motion preferences"
+);
+assert(
+  sidebarSource.includes('if (!state || (active && state !== "working")) return null;') &&
+    sidebarSource.includes('<LoaderCircle aria-hidden="true" />') &&
+    styles.includes(".session-status-working svg") &&
+    styles.includes("animation: spin 900ms linear infinite"),
+  "The active session must retain its animated working indicator"
+);
+assert(
   appSource.includes("matchingSessionExists") &&
     appSource.includes("if (normalizedSidebarQuery)") &&
     sidebarSource.includes("searchActive") &&
@@ -684,7 +869,7 @@ assert(
     styles.includes(".session-status-working") &&
     styles.includes(".session-status-complete") &&
     styles.includes(".session-status-attention") &&
-    sidebarSource.includes("if (active) return null") &&
+    sidebarSource.includes('if (!state || (active && state !== "working")) return null;') &&
     sidebarSource.includes("active={session.active}") &&
     sidebarSource.includes('className="session-name"') &&
     !sidebarSource.includes("<strong>{session.name}</strong>") &&
@@ -751,8 +936,8 @@ assert(
 assert(
   sidebarSource.includes('aria-label="Create project"') &&
     sidebarSource.includes('title="Create project"') &&
-    inspectorSource.includes('aria-label={`Preview ${artifactName(artifact.path)}`}') &&
-    inspectorSource.includes('title={`Preview ${artifactName(artifact.path)}`}') &&
+    inspectorSource.includes('aria-label={`Preview ${artifactName(displayPath)}${') &&
+    inspectorSource.includes('title={`Preview ${artifactName(displayPath)}${') &&
     composerSource.includes('aria-label={canStop ? "Stop agent" : "Send message"}') &&
     composerSource.includes('title={canStop ? "Stop" : "Send"}'),
   "Icon-only operations must expose accessible hover labels"
@@ -831,9 +1016,17 @@ assert(
     inspectorSource.includes("createPortal(outputPreview, document.body)") &&
     inspectorSource.includes("sessionArtifactPaths") &&
     inspectorSource.includes('key.startsWith("result_")') &&
-    inspectorSource.includes('step.toolName === "file.read"') &&
-    inspectorSource.includes("sessionTraceSteps.forEach") &&
+    inspectorSource.includes('step.toolName === "file.write"') &&
+    inspectorSource.includes("getAgentSessionOutputs") &&
+    inspectorSource.includes("outputHistoryBySession") &&
+    inspectorSource.includes("mergeOutputArtifacts") &&
+    inspectorSource.includes("currentRunOutputs") &&
     inspectorSource.includes("}, [sessionId]);") &&
+    tauriBridge.includes('invoke<AgentOutputArtifactView[]>("get_agent_session_outputs"') &&
+    rustLib.includes("get_agent_session_outputs") &&
+    rustLib.includes("agent_output_artifacts_from_events") &&
+    toolsSource.includes('join("output-history")') &&
+    toolsSource.includes('metadata.insert(\n            "artifact_path"') &&
     !inspectorSource.includes("contextCheckpoint?.artifacts.forEach") &&
     !inspectorSource.includes("ragSources.forEach") &&
     !inspectorSource.includes("browserObservations.forEach") &&
@@ -842,7 +1035,7 @@ assert(
     styles.includes('.inspector-output-detail[data-fullscreen="true"]') &&
     styles.includes("position: fixed;") &&
     styles.includes("z-index: 100;"),
-  "Output previews must stay scoped to the active session and support file references"
+  "Output previews must retain session history, preserve file versions, and stay scoped to the active session"
 );
 assert(
   /\.inspector-debug-body \{[\s\S]*?right: 2px;[\s\S]*?bottom: 44px;[\s\S]*?left: 2px;[\s\S]*?border-radius: var\(--radius-md\) var\(--radius-md\) 0 0;/.test(
@@ -922,9 +1115,10 @@ assert(
 );
 assert(
   appSource.includes("skillRefreshTurn") &&
-    appSource.includes("skills-refresh-turn") &&
-    styles.includes("@keyframes skills-refresh-turn"),
-  "Skills refresh must replay a one-turn icon animation for every click"
+    appSource.includes("providerModelsRefreshTurn") &&
+    (appSource.match(/settings-refresh-turn/g)?.length ?? 0) >= 2 &&
+    styles.includes("@keyframes settings-refresh-turn"),
+  "Settings refresh actions must replay a one-turn icon animation for every click"
 );
 assert(
   agentSkillsSource.includes("BUILTIN_SKILL_CREATOR_ID") &&
@@ -987,16 +1181,21 @@ assert(
   "Models settings must persist an image model and expose the image.generate agent tool"
 );
 assert(
-  appSource.includes("<TriangleAlert size={14}") &&
-    styles.includes(".permission-callout > svg") &&
-    styles.includes("border: 0;"),
-  "Permission settings must use a compact alert icon without a trailing section divider"
+  appSource.includes("Pending Reviews") &&
+    appSource.includes("permission-review-list") &&
+    appSource.includes("handleResolvePermissionReview") &&
+    appSource.includes("handleIgnorePermissionReview") &&
+    appSource.includes("review.sessionName") &&
+    tauriBridge.includes("getPermissionReviewState") &&
+    rustLib.includes("fn get_permission_review_state(") &&
+    rustLib.includes("struct PermissionReviewItem"),
+  "Permission settings must present actionable reviews with source session context"
 );
 assert(
   styles.includes(".advanced-settings summary::-webkit-details-marker") &&
-    appSource.includes("<DisclosureTriangle />") &&
-    styles.includes(".disclosure-triangle"),
-  "Expandable settings must use a consistent equilateral disclosure marker"
+    appSource.includes('className="settings-disclosure-chevron"') &&
+    styles.includes(".settings-disclosure-chevron"),
+  "Expandable settings must use a consistent trailing chevron"
 );
 assert(
   appSource.includes('className="settings-sidebar"') &&
@@ -1021,6 +1220,18 @@ assert(
     appSource.includes("composerDrafts") &&
     !appSource.includes("agentBusy"),
   "Running one session must not disable navigation to other sessions"
+);
+const projectSelectionBlock =
+  appSource.match(
+    /async function handleSelectProject[\s\S]*?(?=\n  async function handleSelectSession)/
+  )?.[0] ?? "";
+assert(
+  projectSelectionBlock.includes(
+    "if (projectId === projectSessionState?.activeProjectId) return;"
+  ) &&
+    projectSelectionBlock.includes("setProjectSessionState((current) =>") &&
+    !projectSelectionBlock.includes("setProjectSessionBusy"),
+  "Project selection must update optimistically without freezing the session list"
 );
 assert(
   tauriBridge.includes("export async function runAgentTask(") &&
@@ -1088,6 +1299,82 @@ assert(
     appSource.includes("if (current[sessionId] === nextStatus) return current"),
   "Agent polling must preserve unchanged React state references"
 );
+assert(
+  rustLib.includes("get_agent_state_revision") &&
+    rustLib.includes("AGENT_HISTORY_INITIAL_PAGE_SIZE: usize = 120") &&
+    tauriBridge.includes("getAgentStateRevision") &&
+    appSource.includes("agentStateRevisionsRef") &&
+    appSource.includes("agentStateRevisionsRef.current.set(state.sessionId") &&
+    sessionThreadSource.includes("const RunProgressStatus = memo") &&
+    styles.includes("content-visibility: auto"),
+  "Long sessions must avoid full-state polling and repeated offscreen rendering"
+);
+assert(
+  orchestratorSource.includes("pub fn pareto_front") &&
+    orchestratorSource.includes("prompt_profile") &&
+    orchestratorSource.includes("prompt_genome") &&
+    promptEvolutionSource.includes("pub fn mutations") &&
+    promptEvolutionSource.includes("pub fn next_generation") &&
+    promptEvolutionSource.includes("learned_mutation_from_response") &&
+    promptEvolutionSource.includes("evaluate_prompt_convergence") &&
+    promptEvolutionSource.includes("pub fn reward(&self)") &&
+    promptEvolutionSource.includes("pub fn group_relative_reward(&self)") &&
+    promptEvolutionSource.includes("pub enum PromptToolPolicy") &&
+    promptEvolutionSource.includes("pub enum PromptRetryPolicy") &&
+    promptEvolutionSource.includes("PromptEvaluationMode::PairedExecution") &&
+    promptEvolutionSource.includes("PromptEvaluationMode::ReplayExecution") &&
+    promptEvolutionSource.includes("prompt_promotion_confidence") &&
+    promptEvolutionSource.includes("wilson_lower_bound") &&
+    promptEvolutionSource.includes("average_step_credit") &&
+    promptEvolutionSource.includes("format_valid_rate < 1.0") &&
+    rustLib.includes("pareto_search_teacher_v2") &&
+    rustLib.includes("prompt_evolution_enabled") &&
+    rustLib.includes("prompt_evolution_evaluation_for_run") &&
+    rustLib.includes('"prompt_evolution_mutation"') &&
+    rustLib.includes("PROMPT_EVOLUTION_STAGNATION_PATIENCE") &&
+    rustLib.includes("PROMPT_EVOLUTION_SHADOW_INTERVAL") &&
+    rustLib.includes('"Agent task completed" | "Agent task cancelled" | "Agent task failed"') &&
+    rustLib.includes("evaluate_prompt_evolution") &&
+    rustLib.includes("Conductor prompt profile selected") &&
+    rustLib.includes("PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS") &&
+    rustLib.includes("schedule_prompt_pairwise_evaluation") &&
+    rustLib.includes("bounded_evolution") &&
+    rustLib.includes("prompt_objective") &&
+    rustLib.includes("conductor_directive.as_deref()") &&
+    rustLib.includes("evaluate_prompt_candidate_pair") &&
+    rustLib.includes("execute_prompt_workflow_candidate") &&
+    rustLib.includes("struct PromptWorkflowExecution") &&
+    rustLib.includes("prompt_replay_case") &&
+    rustLib.includes('"Conductor pairwise evaluation"') &&
+    rustLib.includes("PromptEvaluationMode::PairedExecution") &&
+    rustLib.includes("PromptEvaluationMode::ReplayExecution") &&
+    rustLib.includes("reconcile_prompt_rollout") &&
+    rustLib.includes("next_prompt_canary_stage") &&
+    rustLib.includes("prompt_canary_degraded") &&
+    rustLib.includes('"Conductor prompt rollout updated"') &&
+    rustLib.includes('"evaluation_required"') &&
+    tauriBridge.includes("setPromptEvolutionEnabled") &&
+    tauriBridge.includes("averageRelativeReward") &&
+    tauriBridge.includes("averageStepCredit") &&
+    tauriBridge.includes("promotionConfidence") &&
+    tauriBridge.includes("canaryPercent") &&
+    appSource.includes('if (category === "tools") return <Wrench aria-hidden="true" />;') &&
+    /<Wrench size=\{17\} aria-hidden="true" \/>\s*<h2>Tools<\/h2>/.test(appSource) &&
+    /<Dna size=\{17\} aria-hidden="true" \/>\s*<h2>Genetic Pareto<\/h2>/.test(appSource) &&
+    appSource.includes("Genetic Pareto") &&
+    appSource.includes("Candidate harnesses execute in an isolated arena before promotion") &&
+    appSource.includes("Wilson confidence gate controls staged canary rollout") &&
+    appSource.includes("Evaluating in background") &&
+    appSource.includes("Rollout by effort") &&
+    appSource.includes("Candidate profiles") &&
+    appSource.includes("prompt-evolution-table") &&
+    appSource.includes("prompt-evolution-summary") &&
+    appSource.includes("Rollbacks") &&
+    styles.includes(".prompt-evolution-table") &&
+    !appSource.includes("prompt-evolution-efforts") &&
+    !appSource.includes("prompt-evolution-profiles"),
+  "Conductor workflows must run executable harness evolution with confidence-gated canary rollout"
+);
 
 const nonGrayColors = [...styles.matchAll(/#([0-9a-fA-F]{6})(?![0-9a-fA-F])/g)]
   .map((match) => match[1].toLowerCase())
@@ -1099,9 +1386,8 @@ const nonGrayColors = [...styles.matchAll(/#([0-9a-fA-F]{6})(?![0-9a-fA-F])/g)]
         "39b96b",
         "9fe3b0",
         "e05b5b",
-        "f1fff4",
-        "d8f0dd",
-        "afd2b7"
+        "eef6ff",
+        "e3efff"
       ].includes(hex)
   )
   .filter((hex) => hex.slice(0, 2) !== hex.slice(2, 4) || hex.slice(2, 4) !== hex.slice(4, 6));
@@ -1109,8 +1395,13 @@ assert(
   nonGrayColors.length === 0,
   "Desktop theme must remain grayscale except for brand, message, and session-state accents"
 );
-assert(appSource.includes("Permissions"), "App must render permission UI");
-assert(appSource.includes("Orchestration"), "App must render orchestration UI");
+assert(appSource.includes("Pending Reviews"), "App must render pending permission reviews");
+assert(
+  !appSource.includes("<h2>Orchestration</h2>") &&
+    !appSource.includes("Manual workflow test") &&
+    tauriBridge.includes('invoke<Phase6State>("run_orchestration"'),
+  "Manual orchestration must stay out of user settings while remaining available to diagnostics"
+);
 assert(appSource.includes("Provider"), "App must render provider UI");
 assert(appSource.includes("Save workspace"), "App must render workspace save action");
 assert(
@@ -1127,7 +1418,6 @@ assert(
 );
 assert(appSource.includes("Save provider"), "App must render provider save action");
 assert(appSource.includes("Run tool"), "App must render the Phase 5 tool runner");
-assert(appSource.includes("Run workflow"), "App must render the Phase 6 workflow runner");
 assert(appSource.includes("Index workspace"), "App must render the Phase 7 RAG index action");
 assert(appSource.includes("answerWithRag"), "App must render the Phase 7 RAG answer flow");
 assert(appSource.includes("Search web"), "App must render the Phase 8 web search action");
@@ -1138,7 +1428,10 @@ assert(
   "Browser settings must expose tab listing and selection"
 );
 assert(appSource.includes("getRuntimeStatus"), "App must call the runtime bridge");
-assert(appSource.includes("Request review"), "App must render the Phase 3 mock review action");
+assert(
+  !appSource.includes("Request review") && appSource.includes("Approve once"),
+  "Permission settings must review real pending actions instead of creating mock requests"
+);
 
 assert(
   tauriBridge.includes('invoke<RuntimeStatus>("get_runtime_status")'),
@@ -1366,7 +1659,7 @@ assert(
     orchestratorSource.includes("learned_router_cannot_upgrade_ordinary_research_to_ultra") &&
     rustLib.includes("AgentEffort::Auto if !routing_decision.model.trim().is_empty()") &&
     orchestratorSource.includes("must only access earlier steps") &&
-    rustLib.includes('"conductor_version".to_string(), "agent_v1".to_string()') &&
+    rustLib.includes('"conductor_version".to_string(), "agent_v2".to_string()') &&
     rustLib.includes('"workflow_ir".to_string()') &&
     orchestratorSource.includes('WORKFLOW_IR_SCHEMA: &str = "cindx.workflow.v1"') &&
     orchestratorSource.includes("WorkflowSearchTeacher") &&

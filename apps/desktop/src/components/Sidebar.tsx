@@ -7,12 +7,11 @@ import {
   Plus,
   Search,
   Settings,
-  Trash2,
   X
 } from "lucide-react";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { Menu } from "@tauri-apps/api/menu";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ProjectView, SessionView } from "../tauri";
 import { DisclosureTriangle } from "./DisclosureTriangle";
@@ -45,9 +44,8 @@ function sessionVisualState(status: string): SessionVisualState {
 }
 
 function SessionStatusIndicator({ status, active }: { status: string; active: boolean }) {
-  if (active) return null;
   const state = sessionVisualState(status);
-  if (!state) return null;
+  if (!state || (active && state !== "working")) return null;
 
   const label =
     state === "working"
@@ -134,12 +132,63 @@ export function Sidebar({
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const deleteDialogRef = useRef<HTMLElement>(null);
+  const deleteCancelRef = useRef<HTMLButtonElement>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const searchActive = searchOpen && Boolean(searchQuery.trim());
+
+  useEffect(() => {
+    if (!deleteTarget) return;
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const frame = window.requestAnimationFrame(() => deleteCancelRef.current?.focus());
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setDeleteTarget(null);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const controls = deleteDialogRef.current?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      );
+      if (!controls?.length) return;
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("keydown", handleKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, [deleteTarget]);
 
   function finishSearchSelection() {
     if (!searchOpen) return;
     onSearchQueryChange("");
     onSearchToggle();
+  }
+
+  function handleSettingsClick() {
+    const icon = settingsButtonRef.current?.querySelector("svg");
+    if (icon && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      icon.getAnimations().forEach((animation) => animation.cancel());
+      icon.animate(
+        [{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }],
+        {
+          duration: 420,
+          easing: "cubic-bezier(0.22, 1, 0.36, 1)"
+        }
+      );
+    }
+    onViewChange("settings");
   }
 
   function selectProjectResult(projectId: string) {
@@ -608,13 +657,14 @@ export function Sidebar({
 
       <div className="sidebar-footer">
         <button
+          ref={settingsButtonRef}
           className={`icon-button sidebar-settings ${
             activeView === "settings" ? "active" : ""
           }`}
           aria-label="Settings"
           aria-pressed={activeView === "settings"}
           title="Settings"
-          onClick={() => onViewChange("settings")}
+          onClick={handleSettingsClick}
           type="button"
         >
           <Settings aria-hidden="true" />
@@ -623,39 +673,35 @@ export function Sidebar({
 
       {deleteTarget &&
         createPortal(
-          <div
-            className="delete-confirmation-backdrop"
-            onMouseDown={(event) => {
-              if (event.target === event.currentTarget) setDeleteTarget(null);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") setDeleteTarget(null);
-            }}
-          >
+          <div className="delete-confirmation-backdrop">
             <section
+              ref={deleteDialogRef}
               className="delete-confirmation-dialog"
               role="alertdialog"
               aria-modal="true"
               aria-labelledby="delete-confirmation-title"
               aria-describedby="delete-confirmation-description"
             >
-              <Trash2 aria-hidden="true" />
               <div className="delete-confirmation-copy">
                 <h2 id="delete-confirmation-title">
-                  Delete {deleteTarget.kind === "project" ? "project" : "session"}?
+                  Delete “{deleteTarget.name}”?
                 </h2>
                 <p id="delete-confirmation-description">
                   {deleteTarget.kind === "project"
-                    ? `“${deleteTarget.name}” and all of its sessions will be permanently deleted. Original project files will not be deleted.`
-                    : `“${deleteTarget.name}” and its conversation history will be permanently deleted.`}
+                    ? "This permanently removes the project and its sessions from Cindx. Files in the workspace are not affected."
+                    : "This permanently removes the conversation and its agent history. This action cannot be undone."}
                 </p>
               </div>
               <div className="delete-confirmation-actions">
-                <button type="button" autoFocus onClick={() => setDeleteTarget(null)}>
+                <button
+                  ref={deleteCancelRef}
+                  type="button"
+                  onClick={() => setDeleteTarget(null)}
+                >
                   Cancel
                 </button>
                 <button type="button" className="danger" onClick={confirmDelete}>
-                  Delete
+                  Delete {deleteTarget.kind === "project" ? "Project" : "Session"}
                 </button>
               </div>
             </section>

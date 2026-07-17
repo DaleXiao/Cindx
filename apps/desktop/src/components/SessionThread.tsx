@@ -3,6 +3,7 @@ import {
   Bot,
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   Copy,
   FileText,
@@ -29,6 +30,7 @@ import {
   type RefObject
 } from "react";
 import Markdown from "markdown-to-jsx";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { openArtifact, openExternalUrl } from "../tauri";
 import type { AgentState, ChatMessageView, TimelineEntry } from "../tauri";
 import { DisclosureTriangle } from "./DisclosureTriangle";
@@ -48,12 +50,16 @@ export type SessionThreadSelection =
 
 type SessionThreadProps = {
   sessionId: string | null;
+  loading: boolean;
   messages: ChatMessageView[];
   timeline: TimelineEntry[];
   streamAnswer: string;
   status: AgentState["status"] | "idle";
   runStartedAtMs: number;
+  hasOlderHistory: boolean;
+  loadingOlderHistory: boolean;
   selectedId: string | null;
+  onLoadOlderHistory: () => void;
   onSelect: (selection: SessionThreadSelection) => void;
   onEditMessage: (content: string) => void;
   onLinkOpenError: (message: string) => void;
@@ -77,14 +83,13 @@ type ThreadScrollMetrics = {
 };
 
 function threadMessageId(message: ChatMessageView, index: number) {
-  return `message-${message.role}-${index}`;
+  return `message-${message.sequence ?? `${message.role}-${index}`}`;
 }
 
 type MinimapMarker = {
   id: string;
   kind: string;
   label: string;
-  time: string;
   preview: string;
   targetIndex: number;
 };
@@ -105,10 +110,6 @@ type ThreadRow =
 const MIN_MINIMAP_MARKERS = 2;
 const MAX_MINIMAP_MARKERS = 32;
 const MINIMAP_MARKER_GAP = 12;
-const threadTimeFormatter = new Intl.DateTimeFormat(undefined, {
-  hour: "2-digit",
-  minute: "2-digit"
-});
 
 function ThreadFind({
   open,
@@ -176,18 +177,6 @@ function minimapMarkerPosition(index: number, markerCount: number) {
   return `calc(50% ${centerOffset < 0 ? "-" : "+"} ${Math.abs(centerOffset)}px)`;
 }
 
-function formatThreadTime(timestampMs: number) {
-  return threadTimeFormatter.format(timestampMs);
-}
-
-function formatRunElapsed(elapsedMs: number) {
-  const seconds = Math.max(0, Math.floor(elapsedMs / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-}
-
 function activeRunProgress(timeline: TimelineEntry[], runStartedAtMs: number) {
   let startIndex = -1;
   for (let index = timeline.length - 1; index >= 0; index -= 1) {
@@ -199,12 +188,28 @@ function activeRunProgress(timeline: TimelineEntry[], runStartedAtMs: number) {
   }
   const timelineStartedAtMs = startIndex >= 0 ? timeline[startIndex].timestampMs : 0;
   const startedAtMs = runStartedAtMs || timelineStartedAtMs || Date.now();
-  const runEvents = timeline.filter((event) => event.timestampMs >= startedAtMs);
-  const latest = [...runEvents]
-    .reverse()
-    .find((event) => event.label !== "Message" && !/agent router selected/i.test(event.detail));
+  let latest: TimelineEntry | undefined;
+  let latestWorkflow: TimelineEntry["workflowProgress"] | undefined;
+  let candidateStarts = 0;
+  let candidateFinishes = 0;
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const event = timeline[index];
+    if (event.timestampMs < startedAtMs) break;
+    if (/^Candidate \d+$/.test(event.label)) {
+      if (/started/i.test(event.detail)) candidateStarts += 1;
+      if (/finished/i.test(event.detail)) candidateFinishes += 1;
+    }
+    if (!latestWorkflow && event.workflowProgress) latestWorkflow = event.workflowProgress;
+    if (!latest && event.label !== "Message" && !/agent router selected/i.test(event.detail)) {
+      latest = event;
+    }
+  }
   if (!latest) {
-    return { label: "Thinking", detail: "Cindx is working", startedAtMs };
+    return {
+      label: "Thinking",
+      detail: "Cindx is working",
+      workflow: latestWorkflow ?? null
+    };
   }
 
   let label = "Thinking";
@@ -225,13 +230,10 @@ function activeRunProgress(timeline: TimelineEntry[], runStartedAtMs: number) {
   } else if (/starting execution/i.test(latest.detail)) {
     label = "Executing plan";
   } else if (/^Candidate \d+$/.test(latest.label)) {
-    const started = runEvents.filter(
-      (event) => /^Candidate \d+$/.test(event.label) && /started/i.test(event.detail)
-    ).length;
-    const finished = runEvents.filter(
-      (event) => /^Candidate \d+$/.test(event.label) && /finished/i.test(event.detail)
-    ).length;
-    label = `Exploring approaches ${Math.min(finished, started)}/${Math.max(1, started)}`;
+    label = `Exploring approaches ${Math.min(candidateFinishes, candidateStarts)}/${Math.max(
+      1,
+      candidateStarts
+    )}`;
   } else if (latest.label === "Conductor" || latest.label === "Planner") {
     label = "Planning work";
   } else if (/collaboration layer \d+\/\d+ started/i.test(latest.detail)) {
@@ -247,8 +249,48 @@ function activeRunProgress(timeline: TimelineEntry[], runStartedAtMs: number) {
     label = "Writing final response";
   }
 
-  return { label, detail: latest.detail, startedAtMs };
+  if (latestWorkflow) {
+    const remaining = Math.max(0, latestWorkflow.totalSteps - latestWorkflow.completedSteps);
+    const step = latestWorkflow.currentStepId
+      ? ` · ${latestWorkflow.currentStepId}`
+      : "";
+    if (latestWorkflow.stepStatus === "failed") {
+      label = "Checkpoint saved";
+    } else if (/workflow resumed/i.test(latest.detail)) {
+      label = "Resuming plan";
+    } else if (remaining === 0) {
+      label = "Finalizing plan";
+    } else {
+      label = "Executing plan";
+    }
+    latest = {
+      ...latest,
+      detail: `${latest.detail} · ${latestWorkflow.completedSteps}/${latestWorkflow.totalSteps} complete · ${remaining} remaining${step}${latestWorkflow.continuations ? ` · continuation ${latestWorkflow.continuations}` : ""}${latestWorkflow.recoverable ? " · checkpointed" : ""}`
+    };
+  }
+
+  return { label, detail: latest.detail, workflow: latestWorkflow ?? null };
 }
+
+const RunProgressStatus = memo(function RunProgressStatus({
+  progress,
+  className
+}: {
+  progress: ReturnType<typeof activeRunProgress>;
+  className: string;
+}) {
+  return (
+    <div className={`thread-thinking ${className}`} role="status">
+      <span title={progress.detail}>{progress.label}</span>
+      {progress.workflow && (
+        <small title={progress.detail}>
+          {progress.workflow.completedSteps}/{progress.workflow.totalSteps}
+          {progress.workflow.currentStepId ? ` · ${progress.workflow.currentStepId}` : ""}
+        </small>
+      )}
+    </div>
+  );
+});
 
 function EventIcon({ event }: { event: TimelineEntry }) {
   if (event.kind === "tool") return <TerminalSquare aria-hidden="true" />;
@@ -323,27 +365,19 @@ function groupThreadItems(items: SessionThreadSelection[]): ThreadRow[] {
   return rows;
 }
 
-function threadItemTimestamp(item: SessionThreadSelection) {
-  return item.type === "event" ? item.event.timestampMs : item.message.timestampMs;
+function threadRowKey(row: ThreadRow) {
+  return row.type === "tool-chain" ? row.id : row.item.id;
 }
 
-function toolChainStatus(items: SessionThreadSelection[]) {
-  const statuses = items.flatMap((item) => {
-    if (item.type === "event") return [item.event.state.toLowerCase()];
-    if (item.message.role === "tool") return [toolMessageSummary(item.message.content).status];
-    return [];
-  });
-  if (statuses.some((status) => ["failed", "error", "cancelled", "denied"].includes(status))) {
-    return "failed";
-  }
-  if (
-    statuses.length > 0 &&
-    statuses.every((status) => ["done", "completed", "succeeded"].includes(status))
-  ) {
-    return "done";
-  }
-  if (statuses.some((status) => ["pending", "waiting"].includes(status))) return "waiting";
-  return "running";
+function estimateThreadRowSize(row: ThreadRow) {
+  if (row.type === "tool-chain") return 54;
+  if (row.item.type === "event" || row.item.message.role === "tool") return 54;
+  const content = row.item.message.content;
+  const explicitLines = Math.max(1, content.split("\n").length);
+  const wrappedLines = Math.max(1, Math.ceil(content.length / 72));
+  const lineCount = Math.max(explicitLines, wrappedLines);
+  if (row.item.message.role === "user") return 64 + Math.min(8, lineCount) * 18;
+  return 48 + Math.min(48, lineCount) * 20;
 }
 
 function ToolChainItem({
@@ -373,7 +407,6 @@ function ToolChainItem({
         </span>
         <span className="thread-event-meta">
           <TraceStatusIcon status={item.event.state} />
-          <time>{formatThreadTime(item.event.timestampMs)}</time>
         </span>
       </button>
     );
@@ -393,11 +426,52 @@ function ToolChainItem({
       </span>
       <span className="thread-event-meta">
         <TraceStatusIcon status={summary.status} />
-        <time>{formatThreadTime(item.message.timestampMs)}</time>
       </span>
     </button>
   );
 }
+
+const ToolChainDisclosure = memo(function ToolChainDisclosure({
+  row,
+  selectedId,
+  onSelect
+}: {
+  row: Extract<ThreadRow, { type: "tool-chain" }>;
+  selectedId: string | null;
+  onSelect: (selection: SessionThreadSelection) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = row.items.some((item) => item.id === selectedId);
+
+  return (
+    <details
+      className={`thread-tool-chain ${selected ? "selected" : ""}`}
+      data-minimap-id={row.id}
+      data-minimap-index={row.itemIndex}
+      data-minimap-kind="tool-chain"
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>
+        <strong>Agent actions</strong>
+        <ChevronRight className="thread-tool-chain-chevron" aria-hidden="true" />
+      </summary>
+      {open && (
+        <div className="thread-tool-chain-items">
+          {row.items
+            .filter((item) => !isToolRequestPlaceholder(item))
+            .map((item) => (
+              <ToolChainItem
+                item={item}
+                selected={selectedId === item.id}
+                onSelect={onSelect}
+                key={item.id}
+              />
+            ))}
+        </div>
+      )}
+    </details>
+  );
+});
 
 type MarkdownLinkProps = ComponentPropsWithoutRef<"a"> & {
   onOpenError?: (message: string) => void;
@@ -553,19 +627,24 @@ const AgentMarkdown = memo(function AgentMarkdown({
   );
 });
 
-export function SessionThread({
+export const SessionThread = memo(function SessionThread({
   sessionId,
+  loading,
   messages,
   timeline,
   streamAnswer,
   status,
   runStartedAtMs,
+  hasOlderHistory,
+  loadingOlderHistory,
   selectedId,
+  onLoadOlderHistory,
   onSelect,
   onEditMessage,
   onLinkOpenError
 }: SessionThreadProps) {
   const threadRef = useRef<HTMLElement>(null);
+  const threadContentRef = useRef<HTMLDivElement>(null);
   const threadFindInputRef = useRef<HTMLInputElement>(null);
   const minimapRef = useRef<HTMLDivElement>(null);
   const minimapPointerRef = useRef<number | null>(null);
@@ -583,8 +662,14 @@ export function SessionThread({
   const [threadFindQuery, setThreadFindQuery] = useState("");
   const [threadFindIndex, setThreadFindIndex] = useState(0);
   const [arrivingMessageId, setArrivingMessageId] = useState<string | null>(null);
-  const [progressNowMs, setProgressNowMs] = useState(() => Date.now());
   const streamedAnswerRef = useRef(false);
+  const scrollSyncFrameRef = useRef<number | null>(null);
+  const historyLoadRequestedRef = useRef(false);
+  const prependScrollHeightRef = useRef<number | null>(null);
+  const previousThreadRef = useRef<{ sessionId: string | null; firstId: string | null }>({
+    sessionId,
+    firstId: null
+  });
   const knownMessageIdsRef = useRef<{ sessionId: string | null; ids: Set<string> }>({
     sessionId,
     ids: new Set(messages.map(threadMessageId))
@@ -631,13 +716,6 @@ export function SessionThread({
     return () => window.clearTimeout(timeout);
   }, [arrivingMessageId]);
 
-  useEffect(() => {
-    if (status !== "running") return;
-    setProgressNowMs(Date.now());
-    const interval = window.setInterval(() => setProgressNowMs(Date.now()), 1000);
-    return () => window.clearInterval(interval);
-  }, [status]);
-
   useEffect(
     () => () => {
       if (clipboardToastTimerRef.current !== null) {
@@ -656,17 +734,26 @@ export function SessionThread({
     const eventItems = timeline
       .filter((event) => event.kind !== "message")
       .map((event, index) => ({
-        id: `event-${event.timestampMs}-${index}`,
+        id: `event-${event.sequence ?? `${event.timestampMs}-${index}`}`,
         type: "event" as const,
         event
       }));
 
-    return [...messageItems, ...eventItems].sort((left, right) => {
-      const leftTimestamp = left.type === "message" ? left.message.timestampMs : left.event.timestampMs;
-      const rightTimestamp =
-        right.type === "message" ? right.message.timestampMs : right.event.timestampMs;
-      return leftTimestamp - rightTimestamp;
-    });
+    const merged: SessionThreadSelection[] = [];
+    let messageIndex = 0;
+    let eventIndex = 0;
+    while (messageIndex < messageItems.length || eventIndex < eventItems.length) {
+      const message = messageItems[messageIndex];
+      const event = eventItems[eventIndex];
+      if (message && (!event || message.message.timestampMs <= event.event.timestampMs)) {
+        merged.push(message);
+        messageIndex += 1;
+      } else if (event) {
+        merged.push(event);
+        eventIndex += 1;
+      }
+    }
+    return merged;
   }, [messages, timeline]);
   const threadFindMatches = useMemo(() => {
     const query = threadFindQuery.trim().toLocaleLowerCase();
@@ -682,12 +769,33 @@ export function SessionThread({
       .map((item) => item.id);
   }, [items, threadFindQuery]);
   const threadRows = useMemo(() => groupThreadItems(items), [items]);
+  const rowIndexByItemId = useMemo(() => {
+    const indexes = new Map<string, number>();
+    threadRows.forEach((row, rowIndex) => {
+      if (row.type === "tool-chain") {
+        row.items.forEach((item) => indexes.set(item.id, rowIndex));
+      } else {
+        indexes.set(row.item.id, rowIndex);
+      }
+    });
+    return indexes;
+  }, [threadRows]);
+  const rowVirtualizer = useVirtualizer<HTMLElement, HTMLDivElement>({
+    count: threadRows.length,
+    getScrollElement: () => threadRef.current,
+    estimateSize: (index) => estimateThreadRowSize(threadRows[index]),
+    getItemKey: (index) => `${sessionId ?? "none"}:${threadRowKey(threadRows[index])}`,
+    gap: 10,
+    overscan: 6,
+    anchorTo: "end",
+    followOnAppend: "auto",
+    useAnimationFrameWithResizeObserver: true
+  });
+  const virtualRows = rowVirtualizer.getVirtualItems();
   const runProgress = useMemo(
     () => activeRunProgress(timeline, runStartedAtMs),
     [runStartedAtMs, timeline]
   );
-  const runElapsed = formatRunElapsed(progressNowMs - runProgress.startedAtMs);
-  const runTime = `${runElapsed} elapsed`;
   const hasStreamAnswer = Boolean(streamAnswer);
   const minimapMarkers = useMemo<MinimapMarker[]>(() => {
     const markers: MinimapMarker[] = [];
@@ -707,7 +815,6 @@ export function SessionThread({
             : role === "assistant"
               ? "Cindx"
               : `${role.charAt(0).toUpperCase()}${role.slice(1)}`,
-        time: formatThreadTime(item.message.timestampMs),
         preview,
         targetIndex
       });
@@ -718,7 +825,6 @@ export function SessionThread({
         id: "streaming-answer",
         kind: "streaming",
         label: "Cindx",
-        time: "Thinking",
         preview: streamAnswer.trim(),
         targetIndex: items.length
       });
@@ -734,37 +840,35 @@ export function SessionThread({
   }, [items, streamAnswer]);
 
   const syncScrollMetrics = useCallback(() => {
-    const thread = threadRef.current;
-    if (!thread) return;
-
-    const nextMetrics = {
-      scrollTop: thread.scrollTop,
-      scrollHeight: thread.scrollHeight,
-      clientHeight: thread.clientHeight
-    };
-    setScrollMetrics((current) =>
-      current.scrollTop === nextMetrics.scrollTop &&
-      current.scrollHeight === nextMetrics.scrollHeight &&
-      current.clientHeight === nextMetrics.clientHeight
-        ? current
-        : nextMetrics
-    );
+    if (scrollSyncFrameRef.current !== null) return;
+    scrollSyncFrameRef.current = window.requestAnimationFrame(() => {
+      scrollSyncFrameRef.current = null;
+      const thread = threadRef.current;
+      if (!thread) return;
+      const nextMetrics = {
+        scrollTop: Math.round(thread.scrollTop / 4) * 4,
+        scrollHeight: thread.scrollHeight,
+        clientHeight: thread.clientHeight
+      };
+      setScrollMetrics((current) =>
+        current.scrollTop === nextMetrics.scrollTop &&
+        current.scrollHeight === nextMetrics.scrollHeight &&
+        current.clientHeight === nextMetrics.clientHeight
+          ? current
+          : nextMetrics
+      );
+    });
   }, []);
 
   const scrollToThreadFindMatch = useCallback(
     (index: number) => {
-      const thread = threadRef.current;
       const id = threadFindMatches[index];
-      if (!thread || !id) return;
-      const match = thread.querySelector<HTMLElement>(`[data-thread-search-id="${id}"]`);
-      if (!match) return;
-      thread.scrollTop = Math.max(
-        0,
-        match.offsetTop - Math.max(18, (thread.clientHeight - match.clientHeight) / 2)
-      );
-      syncScrollMetrics();
+      const rowIndex = id ? rowIndexByItemId.get(id) : undefined;
+      if (rowIndex === undefined) return;
+      rowVirtualizer.scrollToIndex(rowIndex, { align: "center" });
+      window.requestAnimationFrame(syncScrollMetrics);
     },
-    [syncScrollMetrics, threadFindMatches]
+    [rowIndexByItemId, rowVirtualizer, syncScrollMetrics, threadFindMatches]
   );
 
   const closeThreadFind = useCallback(() => {
@@ -811,22 +915,51 @@ export function SessionThread({
     const thread = threadRef.current;
     if (!thread) return;
 
-    const handleScroll = () => syncScrollMetrics();
+    const handleScroll = () => {
+      syncScrollMetrics();
+      if (
+        thread.scrollTop <= 160 &&
+        hasOlderHistory &&
+        !loadingOlderHistory &&
+        !historyLoadRequestedRef.current
+      ) {
+        historyLoadRequestedRef.current = true;
+        prependScrollHeightRef.current = thread.scrollHeight;
+        onLoadOlderHistory();
+      }
+    };
     thread.addEventListener("scroll", handleScroll, { passive: true });
 
     const resizeObserver = new ResizeObserver(syncScrollMetrics);
     resizeObserver.observe(thread);
-    thread
-      .querySelectorAll<HTMLElement>("[data-minimap-kind]")
-      .forEach((node) => resizeObserver.observe(node));
+    if (threadContentRef.current) resizeObserver.observe(threadContentRef.current);
 
     const frame = requestAnimationFrame(syncScrollMetrics);
     return () => {
       cancelAnimationFrame(frame);
+      if (scrollSyncFrameRef.current !== null) {
+        cancelAnimationFrame(scrollSyncFrameRef.current);
+        scrollSyncFrameRef.current = null;
+      }
       resizeObserver.disconnect();
       thread.removeEventListener("scroll", handleScroll);
     };
-  }, [hasStreamAnswer, items.length, syncScrollMetrics]);
+  }, [
+    hasOlderHistory,
+    hasStreamAnswer,
+    items.length,
+    loadingOlderHistory,
+    onLoadOlderHistory,
+    syncScrollMetrics
+  ]);
+
+  useEffect(() => {
+    if (loadingOlderHistory) return;
+    historyLoadRequestedRef.current = false;
+    if (previousThreadRef.current.firstId === items[0]?.id) {
+      prependScrollHeightRef.current = null;
+    }
+  }, [items, loadingOlderHistory]);
 
   useEffect(() => {
     setPreviewMinimapIndex(null);
@@ -839,11 +972,29 @@ export function SessionThread({
   }, [hoveredMinimapIndex, minimapDragging]);
 
   useLayoutEffect(() => {
+    rowVirtualizer.measure();
+  }, [rowVirtualizer, sessionId]);
+
+  useLayoutEffect(() => {
     const thread = threadRef.current;
     if (!thread) return;
-    thread.scrollTop = thread.scrollHeight;
+    const firstId = items[0]?.id ?? null;
+    const previous = previousThreadRef.current;
+    if (previous.sessionId !== sessionId) {
+      thread.scrollTop = thread.scrollHeight;
+    } else if (
+      prependScrollHeightRef.current !== null &&
+      previous.firstId !== null &&
+      previous.firstId !== firstId
+    ) {
+      thread.scrollTop += Math.max(0, thread.scrollHeight - prependScrollHeightRef.current);
+      prependScrollHeightRef.current = null;
+    } else {
+      thread.scrollTop = thread.scrollHeight;
+    }
+    previousThreadRef.current = { sessionId, firstId };
     syncScrollMetrics();
-  }, [items.length, status, streamAnswer, syncScrollMetrics]);
+  }, [items, sessionId, status, streamAnswer, syncScrollMetrics]);
 
   function minimapIndexFromPointer(clientY: number) {
     const minimap = minimapRef.current;
@@ -866,12 +1017,14 @@ export function SessionThread({
     const thread = threadRef.current;
     const marker = minimapMarkers[index];
     if (!thread || !marker) return;
-    const markerNode = thread.querySelector<HTMLElement>(
-      `[data-minimap-index="${marker.targetIndex}"]`
-    );
-    if (!markerNode) return;
-    thread.scrollTop = Math.max(0, markerNode.offsetTop - 18);
-    syncScrollMetrics();
+    if (marker.id === "streaming-answer") {
+      thread.scrollTop = thread.scrollHeight;
+    } else {
+      const rowIndex = rowIndexByItemId.get(marker.id);
+      if (rowIndex === undefined) return;
+      rowVirtualizer.scrollToIndex(rowIndex, { align: "start" });
+    }
+    window.requestAnimationFrame(syncScrollMetrics);
   }
 
   function scrollThreadToPointer(clientY: number) {
@@ -943,7 +1096,7 @@ export function SessionThread({
     syncScrollMetrics();
   }
 
-  function showClipboardToast(message: string, failed = false) {
+  const showClipboardToast = useCallback((message: string, failed = false) => {
     if (clipboardToastTimerRef.current !== null) {
       window.clearTimeout(clipboardToastTimerRef.current);
     }
@@ -952,9 +1105,9 @@ export function SessionThread({
       setClipboardToast(null);
       clipboardToastTimerRef.current = null;
     }, 1600);
-  }
+  }, []);
 
-  async function copyContent(content: string, messageId?: string) {
+  const copyContent = useCallback(async (content: string, messageId?: string) => {
     try {
       await navigator.clipboard.writeText(content);
     } catch {
@@ -968,7 +1121,13 @@ export function SessionThread({
       () => setCopiedId((current) => (current === messageId ? null : current)),
       1400
     );
-  }
+  }, [showClipboardToast]);
+  const copyCode = useCallback(
+    (content: string) => {
+      void copyContent(content);
+    },
+    [copyContent]
+  );
 
   if (items.length === 0 && !streamAnswer) {
     return (
@@ -984,12 +1143,14 @@ export function SessionThread({
           onClose={closeThreadFind}
         />
         <section
-          className="session-thread session-thread-empty"
+          className={`session-thread session-thread-empty ${
+            loading ? "session-thread-loading" : ""
+          }`}
           id="session-thread-scroll"
           aria-label="Session thread"
           ref={threadRef}
         >
-          <span>No messages yet</span>
+          <span>{loading ? "Loading conversation" : "No messages yet"}</span>
         </section>
       </div>
     );
@@ -1020,38 +1181,30 @@ export function SessionThread({
         aria-label="Session thread"
         ref={threadRef}
       >
-        {threadRows.map((row) => {
+        <div className="thread-content" ref={threadContentRef}>
+        <div
+          className="thread-virtual-list"
+          style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
+        >
+        {virtualRows.map((virtualRow) => {
+          const row = threadRows[virtualRow.index];
+          return (
+            <div
+              className="thread-virtual-row"
+              data-index={virtualRow.index}
+              key={virtualRow.key}
+              ref={rowVirtualizer.measureElement}
+              style={{ transform: `translateY(${virtualRow.start}px)` }}
+            >
+            {(() => {
           if (row.type === "tool-chain") {
-            const visibleItems = row.items.filter((item) => !isToolRequestPlaceholder(item));
-            const latestTimestamp = Math.max(...row.items.map(threadItemTimestamp));
             return (
-              <details
-                className={`thread-tool-chain ${
-                  row.items.some((item) => item.id === selectedId) ? "selected" : ""
-                }`}
+              <ToolChainDisclosure
                 key={row.id}
-                data-minimap-id={row.id}
-                data-minimap-index={row.itemIndex}
-                data-minimap-kind="tool-chain"
-              >
-                <summary>
-                  <DisclosureTriangle />
-                  <Activity aria-hidden="true" />
-                  <strong>Agent activity</strong>
-                  <TraceStatusIcon status={toolChainStatus(row.items)} />
-                  <time>{formatThreadTime(latestTimestamp)}</time>
-                </summary>
-                <div className="thread-tool-chain-items">
-                  {visibleItems.map((item) => (
-                    <ToolChainItem
-                      item={item}
-                      selected={selectedId === item.id}
-                      onSelect={onSelect}
-                      key={item.id}
-                    />
-                  ))}
-                </div>
-              </details>
+                row={row}
+                selectedId={selectedId}
+                onSelect={onSelect}
+              />
             );
           }
 
@@ -1075,7 +1228,6 @@ export function SessionThread({
                   </span>
                   <span className="thread-event-meta">
                     <TraceStatusIcon status={item.event.state} />
-                    <time>{formatThreadTime(item.event.timestampMs)}</time>
                   </span>
                 </summary>
                 <button
@@ -1106,7 +1258,6 @@ export function SessionThread({
                   <TerminalSquare aria-hidden="true" />
                   <strong>{summary.label}</strong>
                   <TraceStatusIcon status={summary.status} />
-                  <time>{formatThreadTime(item.message.timestampMs)}</time>
                 </summary>
                 <button
                   className="thread-tool-message-body"
@@ -1152,26 +1303,19 @@ export function SessionThread({
                     <MessageIcon role={item.message.role} />
                   </span>
                   <strong>{item.message.role}</strong>
-                  <time>{formatThreadTime(item.message.timestampMs)}</time>
                 </header>
               )}
               {isAssistant ? (
                 <AgentMarkdown
                   content={item.message.content}
                   onOpenError={onLinkOpenError}
-                  onCopyCode={(content) => void copyContent(content)}
+                  onCopyCode={copyCode}
                 />
               ) : (
                 <p>{item.message.content || "Tool request"}</p>
               )}
-              {isAssistant && (
-                <footer className="thread-message-agent-meta">
-                  <time>{formatThreadTime(item.message.timestampMs)}</time>
-                </footer>
-              )}
               {isUser && (
                 <footer className="thread-message-actions">
-                  <time>{formatThreadTime(item.message.timestampMs)}</time>
                   <button
                     type="button"
                     aria-label={copiedId === item.id ? "Message copied" : "Copy message"}
@@ -1198,7 +1342,11 @@ export function SessionThread({
               )}
             </article>
           );
+            })()}
+            </div>
+          );
         })}
+        </div>
 
         {streamAnswer && (
           <article
@@ -1207,26 +1355,21 @@ export function SessionThread({
             data-minimap-index={items.length}
             data-minimap-kind="streaming"
           >
-            <div className="thread-thinking thread-streaming-status" role="status">
-              <span title={runProgress.detail}>{runProgress.label}</span>
-              <time title="Elapsed since this request was sent">{runTime}</time>
-            </div>
+            <RunProgressStatus progress={runProgress} className="thread-streaming-status" />
             <AgentMarkdown
               content={streamAnswer}
               streaming
               onOpenError={onLinkOpenError}
-              onCopyCode={(content) => void copyContent(content)}
+              onCopyCode={copyCode}
             />
           </article>
         )}
 
         {!streamAnswer && status === "running" && (
-          <div className="thread-thinking thread-running" role="status">
-            <span title={runProgress.detail}>{runProgress.label}</span>
-            <time title="Elapsed since this request was sent">{runTime}</time>
-          </div>
+          <RunProgressStatus progress={runProgress} className="thread-running" />
         )}
         <span className="thread-scroll-anchor" aria-hidden="true" />
+        </div>
       </section>
 
       <div
@@ -1289,7 +1432,6 @@ export function SessionThread({
           >
             <header>
               <strong>{minimapMarkers[previewMinimapIndex].label}</strong>
-              <time>{minimapMarkers[previewMinimapIndex].time}</time>
             </header>
             <p>{minimapMarkers[previewMinimapIndex].preview}</p>
           </aside>
@@ -1314,4 +1456,4 @@ export function SessionThread({
       )}
     </div>
   );
-}
+});

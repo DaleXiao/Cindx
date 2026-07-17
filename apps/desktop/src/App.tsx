@@ -7,8 +7,10 @@ import {
   Bug,
   Cable,
   CheckCircle2,
-  Clock3,
+  ChevronRight,
   Database,
+  Dna,
+  EyeOff,
   FileText,
   FolderOpen,
   Globe2,
@@ -21,21 +23,21 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
-  Play,
   RefreshCw,
   Save,
   Search,
   Send,
   Settings,
   ShieldCheck,
-  ShieldQuestion,
   TerminalSquare,
   Trash2,
   TriangleAlert,
-  Workflow,
+  Wrench,
   XCircle
 } from "lucide-react";
 import {
+  startTransition,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -45,7 +47,6 @@ import {
 } from "react";
 import { Inspector, type InspectorTab } from "./components/Inspector";
 import { Composer } from "./components/Composer";
-import { DisclosureTriangle } from "./components/DisclosureTriangle";
 import { KnowledgeGraph } from "./components/KnowledgeGraph";
 import { Sidebar, type WorkspaceView } from "./components/Sidebar";
 import {
@@ -71,12 +72,14 @@ import {
   DESKTOP_VERSION,
   exportAgentTraceJsonl,
   getAgentState,
+  getAgentStateDelta,
+  getAgentHistoryPage,
+  getAgentStateRevision,
   getAgentTraceState,
   getContextState,
-  getPhase3State,
+  getPermissionReviewState,
   getPhase4State,
   getPhase5State,
-  getPhase6State,
   getPhase7State,
   getPhase8State,
   getProjectSessionState,
@@ -91,18 +94,18 @@ import {
   indexWorkspaceRag,
   forkSession,
   listProviderModels,
-  Phase3State,
   Phase4State,
   Phase5State,
-  Phase6State,
   Phase7State,
   Phase8State,
   McpServerConfig,
   McpState,
   ProviderConfigInput,
   ProviderConfigState,
+  PermissionReviewItem,
+  PermissionReviewState,
   ProjectSessionState,
-  requestMockPermission,
+  revealMainWindow,
   resolveBrowserPermission,
   resolveAgentPermission,
   resolveToolPermission,
@@ -116,9 +119,9 @@ import {
   runAgentTask,
   runBrowserTool,
   runTool,
-  runOrchestration,
   pickWorkspaceFolder,
   saveProviderConfig,
+  setPromptEvolutionEnabled,
   saveSidecarConfig,
   saveWebSearchConfig,
   refreshMcpServer,
@@ -140,6 +143,26 @@ import {
 
 const appIconUrl = new URL("../src-tauri/icons/icon.png", import.meta.url).href;
 const DEBUG_ALWAYS_VISIBLE_STORAGE_KEY = "cindx.debug.always-visible";
+const IGNORED_PERMISSION_REVIEWS_STORAGE_KEY = "cindx.permissions.ignored";
+const SESSION_STATE_CACHE_LIMIT = 12;
+
+function rememberSessionState<Value>(cache: Map<string, Value>, sessionId: string, value: Value) {
+  cache.delete(sessionId);
+  cache.set(sessionId, value);
+  while (cache.size > SESSION_STATE_CACHE_LIMIT) {
+    const oldestSessionId = cache.keys().next().value;
+    if (!oldestSessionId) break;
+    cache.delete(oldestSessionId);
+  }
+}
+
+function readSessionState<Value>(cache: Map<string, Value>, sessionId: string) {
+  const value = cache.get(sessionId);
+  if (value === undefined) return null;
+  cache.delete(sessionId);
+  cache.set(sessionId, value);
+  return value;
+}
 
 function containsOptimisticUserMessage(
   messages: ChatMessageView[],
@@ -169,6 +192,18 @@ function loadDebugAlwaysVisible() {
     return window.localStorage.getItem(DEBUG_ALWAYS_VISIBLE_STORAGE_KEY) === "true";
   } catch {
     return false;
+  }
+}
+
+function loadIgnoredPermissionReviewIds() {
+  if (typeof window === "undefined") return new Set<string>();
+  try {
+    const values = JSON.parse(
+      window.localStorage.getItem(IGNORED_PERMISSION_REVIEWS_STORAGE_KEY) ?? "[]"
+    );
+    return new Set<string>(Array.isArray(values) ? values.filter((value) => typeof value === "string") : []);
+  } catch {
+    return new Set<string>();
   }
 }
 
@@ -203,6 +238,7 @@ function providerDraftFromState(provider: ProviderConfigState): ProviderConfigIn
     imageModel: provider.imageModel,
     imageEndpoint: provider.imageEndpoint,
     collaborationPolicy: normalizedEffortPolicy(provider.collaborationPolicy),
+    promptEvolutionEnabled: provider.promptEvolutionEnabled,
     contextWindowTokens: provider.contextWindowTokens,
     agentSystemPrompt: provider.agentSystemPrompt
   };
@@ -221,6 +257,46 @@ function formatTokenCount(tokens: number) {
   if (tokens < 1000) return String(tokens);
   if (tokens < 1_000_000) return `${(tokens / 1000).toFixed(tokens < 10_000 ? 1 : 0)}k`;
   return `${(tokens / 1_000_000).toFixed(1)}M`;
+}
+
+function formatObservedDuration(durationMs: number) {
+  if (durationMs <= 0) return "No data";
+  if (durationMs < 60_000) return `${Math.max(1, Math.round(durationMs / 1000))}s`;
+  return `${Math.round(durationMs / 60_000)}m`;
+}
+
+function promptEvolutionProfileLabel(effort: string) {
+  if (effort === "fast") return "Fast";
+  if (effort === "pro") return "Pro";
+  return "Auto";
+}
+
+function promptEvolutionEffortStatus(
+  effort: Phase4State["promptEvolution"]["efforts"][number]
+) {
+  if (effort.evaluationInflight) return "Evaluating";
+  if (effort.rolloutStatus === "canary") return `Canary ${effort.canaryPercent}%`;
+  if (effort.rolloutStatus === "rolled_back") return "Rolled back";
+  if (effort.rolloutStatus === "promoted") return "Promoted";
+  if (effort.status === "disabled") return "Off";
+  return "Stable";
+}
+
+function promptEvolutionProfileStatus(
+  profile: Phase4State["promptEvolution"]["profiles"][number]
+) {
+  if (profile.champion) return "Champion";
+  if (profile.next) return "Next";
+  if (profile.frontier) return "Frontier";
+  if (profile.runs) return "Observed";
+  return "Queued";
+}
+
+function permissionReviewSourceLabel(source: PermissionReviewItem["source"]) {
+  if (source === "agent") return "Agent";
+  if (source === "browser") return "Browser";
+  if (source === "tool") return "Local tool";
+  return "System test";
 }
 
 function isAutoSessionName(name: string) {
@@ -278,6 +354,10 @@ function agentStateUnchanged(current: AgentState | null, next: AgentState) {
     current.canCancel === next.canCancel &&
     current.canRetry === next.canRetry &&
     current.canContinue === next.canContinue &&
+    current.eventCount === next.eventCount &&
+    current.latestSequence === next.latestSequence &&
+    current.oldestSequence === next.oldestSequence &&
+    current.hasOlderHistory === next.hasOlderHistory &&
     current.latestAnswer === next.latestAnswer &&
     current.lastError === next.lastError &&
     current.messages.length === next.messages.length &&
@@ -292,6 +372,43 @@ function agentStateUnchanged(current: AgentState | null, next: AgentState) {
     currentTimeline?.timestampMs === nextTimeline?.timestampMs &&
     currentApproval?.requestId === nextApproval?.requestId &&
     currentApproval?.input === nextApproval?.input
+  );
+}
+
+function mergeAgentStateDelta(
+  current: AgentState | null,
+  delta: Awaited<ReturnType<typeof getAgentStateDelta>>
+) {
+  if (!current || current.sessionId !== delta.state.sessionId) return delta.state;
+  return mergeAgentStateSnapshot(current, delta.state);
+}
+
+function mergeAgentStateSnapshot(current: AgentState | null, incoming: AgentState) {
+  if (!current || current.sessionId !== incoming.sessionId) return incoming;
+  const currentHasEarlierHistory =
+    current.oldestSequence > 0 &&
+    (incoming.oldestSequence === 0 || current.oldestSequence <= incoming.oldestSequence);
+  return {
+    ...incoming,
+    oldestSequence: currentHasEarlierHistory ? current.oldestSequence : incoming.oldestSequence,
+    hasOlderHistory: currentHasEarlierHistory
+      ? current.hasOlderHistory
+      : incoming.hasOlderHistory,
+    timeline: mergeSequencedItems(current.timeline, incoming.timeline),
+    messages: mergeSequencedItems(current.messages, incoming.messages)
+  };
+}
+
+function mergeSequencedItems<Item extends { sequence?: number }>(
+  current: Item[],
+  incoming: Item[]
+) {
+  if (incoming.length === 0) return current;
+  const merged = new Map<number | string, Item>();
+  current.forEach((item, index) => merged.set(item.sequence ?? `current-${index}`, item));
+  incoming.forEach((item, index) => merged.set(item.sequence ?? `incoming-${index}`, item));
+  return [...merged.values()].sort(
+    (left, right) => (left.sequence ?? Number.MAX_SAFE_INTEGER) - (right.sequence ?? Number.MAX_SAFE_INTEGER)
   );
 }
 
@@ -352,7 +469,7 @@ const settingsCategories = [
   { id: "tools", label: "Tools" },
   { id: "mcp", label: "MCP" },
   { id: "skills", label: "Skills" },
-  { id: "permissions", label: "Permissions" },
+  { id: "permissions", label: "Pending Reviews" },
   { id: "about", label: "About" }
 ] as const;
 
@@ -368,7 +485,7 @@ function SettingsCategoryIcon({ category }: { category: SettingsCategory }) {
   if (category === "models") return <KeyRound aria-hidden="true" />;
   if (category === "agent") return <Bot aria-hidden="true" />;
   if (category === "knowledge") return <Database aria-hidden="true" />;
-  if (category === "tools") return <TerminalSquare aria-hidden="true" />;
+  if (category === "tools") return <Wrench aria-hidden="true" />;
   if (category === "mcp") return <Cable aria-hidden="true" />;
   if (category === "skills") return <BookOpen aria-hidden="true" />;
   if (category === "permissions") return <ShieldCheck aria-hidden="true" />;
@@ -390,14 +507,18 @@ export function App() {
   const [inspectorWidth, setInspectorWidth] = useState(320);
   const [inspectorResizing, setInspectorResizing] = useState(false);
   const [debugAlwaysVisible, setDebugAlwaysVisible] = useState(loadDebugAlwaysVisible);
-  const [phase3, setPhase3] = useState<Phase3State | null>(null);
+  const [permissionReviewState, setPermissionReviewState] =
+    useState<PermissionReviewState | null>(null);
+  const [ignoredPermissionReviewIds, setIgnoredPermissionReviewIds] = useState(
+    loadIgnoredPermissionReviewIds
+  );
   const [phase4, setPhase4] = useState<Phase4State | null>(null);
   const [phase5, setPhase5] = useState<Phase5State | null>(null);
-  const [, setPhase6] = useState<Phase6State | null>(null);
   const [phase7, setPhase7] = useState<Phase7State | null>(null);
   const [phase8, setPhase8] = useState<Phase8State | null>(null);
   const [contextState, setContextState] = useState<ContextState | null>(null);
   const [agentState, setAgentState] = useState<AgentState | null>(null);
+  const [sessionLoadingId, setSessionLoadingId] = useState<string | null>(null);
   const [agentTraceState, setAgentTraceState] = useState<AgentTraceState | null>(null);
   const [selectedThreadItem, setSelectedThreadItem] =
     useState<SessionThreadSelection | null>(null);
@@ -429,11 +550,10 @@ export function App() {
   const [streamAnswer, setStreamAnswer] = useState("");
   const [providerModels, setProviderModels] = useState<string[]>([]);
   const [providerModelsBusy, setProviderModelsBusy] = useState(false);
+  const [providerModelsRefreshTurn, setProviderModelsRefreshTurn] = useState(0);
   const [providerModelsError, setProviderModelsError] = useState<string | null>(null);
   const [selectedTool, setSelectedTool] = useState("file.list");
   const [toolInput, setToolInput] = useState("path=.");
-  const [orchestrationPolicy, setOrchestrationPolicy] = useState("auto_router");
-  const [orchestrationPrompt, setOrchestrationPrompt] = useState("Inspect this project and suggest the next safe MVP step.");
   const [ragQuery, setRagQuery] = useState("What is the Cindx MVP scope?");
   const [browserUrl, setBrowserUrl] = useState("https://example.com");
   const [browserTarget, setBrowserTarget] = useState("body");
@@ -443,7 +563,6 @@ export function App() {
   const [workspacePickerBusy, setWorkspacePickerBusy] = useState(false);
   const [providerBusy, setProviderBusy] = useState(false);
   const [toolBusy, setToolBusy] = useState(false);
-  const [orchestrationBusy, setOrchestrationBusy] = useState(false);
   const [ragBusy, setRagBusy] = useState(false);
   const [browserBusy, setBrowserBusy] = useState(false);
   const [contextBusy, setContextBusy] = useState(false);
@@ -466,17 +585,75 @@ export function App() {
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(() => new Set());
   const [sessionStatusOverrides, setSessionStatusOverrides] = useState<Record<string, string>>({});
   const activeSessionIdRef = useRef<string | null>(null);
+  const agentStateRevisionsRef = useRef<
+    Map<string, { eventCount: number; latestSequence: number; latestTimestampMs: number }>
+  >(new Map());
+  const agentStateCacheRef = useRef<Map<string, AgentState>>(new Map());
+  const agentTraceCacheRef = useRef<Map<string, AgentTraceState>>(new Map());
+  const contextStateCacheRef = useRef<Map<string, ContextState>>(new Map());
+  const agentStateRequestsRef = useRef<Map<string, Promise<AgentState>>>(new Map());
+  const agentHistoryRequestsRef = useRef<Set<string>>(new Set());
+  const [loadingOlderSessionId, setLoadingOlderSessionId] = useState<string | null>(null);
   const sessionSelectionRequestRef = useRef(0);
   const sessionSelectionQueueRef = useRef<Promise<void>>(Promise.resolve());
   const sessionRefreshRequestRef = useRef(0);
   const trackedSessionTaskIdsRef = useRef<Set<string>>(new Set());
   const optimisticUserMessagesRef = useRef<Map<string, ChatMessageView>>(new Map());
+  const startupWindowRevealRequestedRef = useRef(false);
   const skillPackageInputRef = useRef<HTMLInputElement>(null);
   const settingsToastTimerRef = useRef<number | null>(null);
   const [composerError, setComposerError] = useState<string | null>(null);
   const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
   const [webSearchError, setWebSearchError] = useState<string | null>(null);
   const [settingsToast, setSettingsToast] = useState<{ id: number; message: string } | null>(null);
+
+  function requestSessionAgentState(sessionId: string) {
+    const existing = agentStateRequestsRef.current.get(sessionId);
+    if (existing) return existing;
+    const request = getAgentState(sessionId)
+      .then((next) => {
+        agentStateRevisionsRef.current.set(sessionId, {
+          eventCount: next.eventCount,
+          latestSequence: next.latestSequence,
+          latestTimestampMs: 0
+        });
+        rememberSessionState(agentStateCacheRef.current, sessionId, next);
+        return next;
+      })
+      .finally(() => {
+        if (agentStateRequestsRef.current.get(sessionId) === request) {
+          agentStateRequestsRef.current.delete(sessionId);
+        }
+      });
+    agentStateRequestsRef.current.set(sessionId, request);
+    return request;
+  }
+
+  function restoreCachedSessionState(sessionId: string) {
+    const cachedAgentState = readSessionState(agentStateCacheRef.current, sessionId);
+    const cachedTraceState = readSessionState(agentTraceCacheRef.current, sessionId);
+    const cachedContextState = readSessionState(contextStateCacheRef.current, sessionId);
+    setSessionLoadingId(cachedAgentState ? null : sessionId);
+    startTransition(() => {
+      setAgentState(cachedAgentState);
+      setAgentTraceState(cachedTraceState);
+      setContextState(cachedContextState);
+    });
+  }
+
+  const handleThreadSelection = useCallback((selection: SessionThreadSelection) => {
+    setSelectedThreadItem(selection);
+    setSelectedTraceStepId(null);
+    setInspectorTab("details");
+    setInspectorOpen(true);
+  }, []);
+
+  const handleThreadMessageEdit = useCallback((content: string) => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
+    setComposerDrafts((current) => ({ ...current, [sessionId]: content }));
+    setComposerFocusRequest((request) => request + 1);
+  }, []);
 
   useEffect(
     () => () => {
@@ -523,7 +700,7 @@ export function App() {
       if (payload.delta) {
         streamBuffer += payload.delta;
         if (streamFlushTimer === null) {
-          streamFlushTimer = window.setTimeout(flushStreamBuffer, 40);
+          streamFlushTimer = window.setTimeout(flushStreamBuffer, 80);
         }
       }
     }).then((handler) => {
@@ -541,7 +718,16 @@ export function App() {
         setComposerError((current) => current ?? state.lastError);
       }),
       getAgentState().then((state) => {
+        if (state.sessionId) {
+          agentStateRevisionsRef.current.set(state.sessionId, {
+            eventCount: state.eventCount,
+            latestSequence: state.latestSequence,
+            latestTimestampMs: 0
+          });
+          rememberSessionState(agentStateCacheRef.current, state.sessionId, state);
+        }
         setAgentState(state);
+        setSessionLoadingId(null);
         if (state.sessionId) updateSessionStatus(state.sessionId, state.status);
         setComposerError((current) => current ?? state.lastError);
       })
@@ -570,7 +756,7 @@ export function App() {
         setSkillState(state);
         setComposerError((current) => current ?? state.lastError);
       });
-      getPhase3State().then(setPhase3);
+      getPermissionReviewState().then(setPermissionReviewState);
       getPhase4State().then((state) => {
         setPhase4(state);
         setProviderDraft(providerDraftFromState(state.provider));
@@ -579,10 +765,6 @@ export function App() {
       });
       getPhase5State().then((state) => {
         setPhase5(state);
-        setComposerError((current) => current ?? state.lastError);
-      });
-      getPhase6State().then((state) => {
-        setPhase6(state);
         setComposerError((current) => current ?? state.lastError);
       });
       getPhase7State().then((state) => {
@@ -623,6 +805,67 @@ export function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (startupWindowRevealRequestedRef.current || !runtime || !projectSessionState) return;
+    if (
+      projectSessionState.activeSessionId &&
+      agentState?.sessionId !== projectSessionState.activeSessionId
+    ) {
+      return;
+    }
+    let disposed = false;
+    const reveal = async () => {
+      try {
+        await document.fonts.ready;
+      } catch {
+        // A missing font should not keep the native window hidden.
+      }
+      if (disposed || startupWindowRevealRequestedRef.current) return;
+      startupWindowRevealRequestedRef.current = true;
+      await revealMainWindow().catch(() => {});
+    };
+    void reveal();
+    return () => {
+      disposed = true;
+    };
+  }, [agentState?.sessionId, projectSessionState, runtime]);
+
+  useEffect(() => {
+    if (activeView !== "settings" || settingsCategory !== "permissions") return;
+    let disposed = false;
+    const refresh = () => {
+      void getPermissionReviewState().then((next) => {
+        if (!disposed) setPermissionReviewState(next);
+      });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 2_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [activeView, settingsCategory]);
+
+  useEffect(() => {
+    if (!permissionReviewState) return;
+    const pendingIds = new Set(
+      permissionReviewState.pending.map((review) => review.requestId)
+    );
+    setIgnoredPermissionReviewIds((current) => {
+      const next = new Set([...current].filter((requestId) => pendingIds.has(requestId)));
+      if (next.size === current.size) return current;
+      try {
+        window.localStorage.setItem(
+          IGNORED_PERMISSION_REVIEWS_STORAGE_KEY,
+          JSON.stringify([...next])
+        );
+      } catch {
+        // Keep the preference for this app session when storage is unavailable.
+      }
+      return next;
+    });
+  }, [permissionReviewState]);
+
   const statusText = useMemo(() => {
     if (!runtime) return "Connecting";
     if (runtime.kernelStatus === "kernel bridge online") return "Ready";
@@ -638,11 +881,58 @@ export function App() {
     () => projectSessionState?.sessions.find((session) => session.active) ?? null,
     [projectSessionState?.sessions]
   );
+  const activeAgentState =
+    activeSession && agentState?.sessionId === activeSession.id ? agentState : null;
   const activeSessionBusy = Boolean(activeSession && busySessionIds.has(activeSession.id));
+
+  const loadOlderAgentHistory = useCallback(async () => {
+    const sessionId = activeAgentState?.sessionId;
+    if (
+      !sessionId ||
+      !activeAgentState.hasOlderHistory ||
+      activeAgentState.oldestSequence <= 0 ||
+      agentHistoryRequestsRef.current.has(sessionId)
+    ) {
+      return;
+    }
+    agentHistoryRequestsRef.current.add(sessionId);
+    setLoadingOlderSessionId(sessionId);
+    try {
+      const page = await getAgentHistoryPage(
+        sessionId,
+        activeAgentState.oldestSequence
+      );
+      setAgentState((current) => {
+        if (!current || current.sessionId !== page.sessionId) return current;
+        return {
+          ...current,
+          oldestSequence: page.oldestSequence,
+          hasOlderHistory: page.hasOlderHistory,
+          timeline: mergeSequencedItems(page.timeline, current.timeline),
+          messages: mergeSequencedItems(page.messages, current.messages)
+        };
+      });
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      agentHistoryRequestsRef.current.delete(sessionId);
+      setLoadingOlderSessionId((current) => (current === sessionId ? null : current));
+    }
+  }, [activeAgentState?.hasOlderHistory, activeAgentState?.oldestSequence, activeAgentState?.sessionId]);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSession?.id ?? null;
   }, [activeSession?.id]);
+
+  useEffect(() => {
+    if (!agentState?.sessionId) return;
+    rememberSessionState(agentStateCacheRef.current, agentState.sessionId, agentState);
+  }, [agentState]);
+
+  useEffect(() => {
+    if (!agentTraceState?.sessionId) return;
+    rememberSessionState(agentTraceCacheRef.current, agentTraceState.sessionId, agentTraceState);
+  }, [agentTraceState]);
 
   useEffect(() => {
     const sessionId = activeSession?.id;
@@ -657,21 +947,35 @@ export function App() {
         const now = Date.now();
         const refreshTrace = now - lastTraceRefreshAt >= 3_000;
         if (refreshTrace) lastTraceRefreshAt = now;
-        const [next, nextTrace] = await Promise.all([
-          getAgentState(sessionId),
+        const revision = await getAgentStateRevision(sessionId);
+        const previousRevision = agentStateRevisionsRef.current.get(sessionId);
+        const stateChanged =
+          !previousRevision ||
+          previousRevision.eventCount !== revision.eventCount ||
+          previousRevision.latestSequence !== revision.latestSequence;
+        const [nextDelta, nextTrace] = await Promise.all([
+          stateChanged
+            ? getAgentStateDelta(sessionId, previousRevision?.latestSequence ?? 0)
+            : Promise.resolve(null),
           refreshTrace
             ? getAgentTraceState(sessionId).catch(() => null)
             : Promise.resolve(null)
         ]);
         if (!disposed && activeSessionIdRef.current === sessionId) {
-          acknowledgeOptimisticUserMessage(sessionId, next.messages);
-          setAgentState((current) => (agentStateUnchanged(current, next) ? current : next));
+          agentStateRevisionsRef.current.set(sessionId, revision);
+          if (nextDelta) {
+            acknowledgeOptimisticUserMessage(sessionId, nextDelta.state.messages);
+            setAgentState((current) => {
+              const next = mergeAgentStateDelta(current, nextDelta);
+              return agentStateUnchanged(current, next) ? current : next;
+            });
+            updateSessionStatus(sessionId, nextDelta.state.status);
+          }
           if (nextTrace) {
             setAgentTraceState((current) =>
               agentTraceUnchanged(current, nextTrace) ? current : nextTrace
             );
           }
-          updateSessionStatus(sessionId, next.status);
         }
       } catch (error) {
         if (!disposed) {
@@ -806,34 +1110,31 @@ export function App() {
     [normalizedSidebarQuery, projectSessionState?.projects, projectSessionState?.sessions]
   );
 
-  const permissionRows = phase3?.permissions ?? [];
   const toolApprovals = phase5?.pendingApprovals ?? [];
   const browserApprovals = phase8?.pendingApprovals ?? [];
-  const agentApprovals = agentState?.pendingApprovals ?? [];
-  const externalApprovals = [
-    ...toolApprovals.map((approval) => ({ ...approval, source: "tool" as const })),
-    ...browserApprovals.map((approval) => ({ ...approval, source: "browser" as const }))
-  ];
-  const hasPendingPermission =
-    permissionRows.some((permission) => permission.status === "pending") ||
-    toolApprovals.length > 0 ||
-    browserApprovals.length > 0 ||
-    agentApprovals.length > 0;
+  const agentApprovals = activeAgentState?.pendingApprovals ?? [];
+  const permissionReviews = permissionReviewState?.pending ?? [];
+  const activePermissionReviews = permissionReviews.filter(
+    (review) => !ignoredPermissionReviewIds.has(review.requestId)
+  );
+  const ignoredPermissionReviews = permissionReviews.filter((review) =>
+    ignoredPermissionReviewIds.has(review.requestId)
+  );
   const toolResults = phase5?.results ?? [];
   const ragStats = phase7?.stats ?? { filesIndexed: 0, chunksIndexed: 0, indexedAtMs: 0 };
   const ragSources = phase7?.sources ?? [];
   const browserObservations = phase8?.observations ?? [];
   const contextCheckpoint = contextState?.checkpoint ?? null;
-  const agentCanCancel = Boolean(agentState?.canCancel || activeSessionBusy);
-  const agentCanRetry = Boolean(agentState?.canRetry);
-  const agentCanContinue = Boolean(agentState?.canContinue);
-  const agentWorking = Boolean(activeSessionBusy || agentState?.status === "running");
+  const agentCanCancel = Boolean(activeAgentState?.canCancel || activeSessionBusy);
+  const agentCanRetry = Boolean(activeAgentState?.canRetry);
+  const agentCanContinue = Boolean(activeAgentState?.canContinue);
+  const agentWorking = Boolean(activeSessionBusy || activeAgentState?.status === "running");
   const traceTurns = agentTraceState?.turns ?? [];
   const traceSteps = traceTurns.flatMap((turn) => turn.steps);
   const activeSessionTraceSteps =
     activeSession && agentTraceState?.sessionId === activeSession.id ? traceSteps : [];
   const visibleAgentMessages = messagesWithOptimisticUserMessage(
-    agentState?.messages ?? [],
+    activeAgentState?.messages ?? [],
     activeSession ? optimisticUserMessagesRef.current.get(activeSession.id) : undefined
   );
   const selectedTraceStep =
@@ -944,23 +1245,56 @@ export function App() {
     return next;
   }
 
-  async function handleRequestPermission() {
-    setPermissionBusy(true);
+  async function refreshPermissionReviews() {
+    const next = await getPermissionReviewState();
+    setPermissionReviewState(next);
+    return next;
+  }
+
+  function persistIgnoredPermissionReviewIds(ids: Set<string>) {
+    setIgnoredPermissionReviewIds(ids);
     try {
-      setPhase3(await requestMockPermission());
-    } finally {
-      setPermissionBusy(false);
+      window.localStorage.setItem(
+        IGNORED_PERMISSION_REVIEWS_STORAGE_KEY,
+        JSON.stringify([...ids])
+      );
+    } catch {
+      // Keep the preference for this app session when storage is unavailable.
     }
   }
 
-  async function handleResolvePermission(
-    requestId: string,
+  function handleIgnorePermissionReview(requestId: string) {
+    const next = new Set(ignoredPermissionReviewIds);
+    next.add(requestId);
+    persistIgnoredPermissionReviewIds(next);
+  }
+
+  function handleRestorePermissionReview(requestId: string) {
+    const next = new Set(ignoredPermissionReviewIds);
+    next.delete(requestId);
+    persistIgnoredPermissionReviewIds(next);
+  }
+
+  async function handleResolvePermissionReview(
+    review: PermissionReviewItem,
     decision: "allow_once" | "allow_for_session" | "deny"
   ) {
     setPermissionBusy(true);
     try {
-      setPhase3(await resolvePermission(requestId, decision));
+      if (review.source === "agent") {
+        const sessionId = review.sessionId ?? activeSession?.id;
+        if (!sessionId) throw new Error("The related session is no longer available.");
+        await handleResolveAgentPermission(review.requestId, decision, sessionId);
+      } else if (review.source === "tool") {
+        await handleResolveToolPermission(review.requestId, decision);
+      } else if (review.source === "browser") {
+        await handleResolveBrowserPermission(review.requestId, decision);
+      } else {
+        await resolvePermission(review.requestId, decision);
+      }
+      handleRestorePermissionReview(review.requestId);
     } finally {
+      await refreshPermissionReviews().catch(() => {});
       setPermissionBusy(false);
     }
   }
@@ -991,8 +1325,27 @@ export function App() {
     }
   }
 
+  async function handlePromptEvolutionToggle(enabled: boolean) {
+    if (!providerDraft || providerBusy) return;
+    const previous = providerDraft.promptEvolutionEnabled;
+    setProviderDraft({ ...providerDraft, promptEvolutionEnabled: enabled });
+    setProviderBusy(true);
+    try {
+      const next = await setPromptEvolutionEnabled(enabled);
+      setPhase4(next);
+      setProviderDraft(providerDraftFromState(next.provider));
+      showSettingsSaved(enabled ? "Prompt evolution enabled" : "Prompt evolution disabled");
+    } catch (error) {
+      setProviderDraft({ ...providerDraft, promptEvolutionEnabled: previous });
+      setComposerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setProviderBusy(false);
+    }
+  }
+
   async function handleLoadProviderModels() {
     if (!providerDraft || providerModelsBusy) return;
+    setProviderModelsRefreshTurn((current) => current + 1);
     setProviderModelsBusy(true);
     setProviderModelsError(null);
     try {
@@ -1058,6 +1411,7 @@ export function App() {
       activeSessionIdRef.current === sessionId;
     const reportBackgroundError = (error: unknown) => {
       if (!isCurrentRequest()) return;
+      setSessionLoadingId(null);
       setComposerError(error instanceof Error ? error.message : String(error));
     };
     const refreshWorkspaceScopedState = () => {
@@ -1098,38 +1452,55 @@ export function App() {
       );
     }
     if (previousSessionId !== sessionId) {
-      setAgentState(null);
-      setAgentTraceState(null);
-      setContextState(null);
+      if (sessionId) restoreCachedSessionState(sessionId);
+      else {
+        setAgentState(null);
+        setAgentTraceState(null);
+        setContextState(null);
+      }
       setSelectedTraceStepId(null);
     }
     if (!sessionId) {
+      setSessionLoadingId(null);
       if (workspaceChanged) refreshWorkspaceScopedState();
       return;
     }
 
     let nextAgentState: AgentState;
     try {
-      nextAgentState = await getAgentState(sessionId);
+      nextAgentState = await requestSessionAgentState(sessionId);
     } catch (error) {
       reportBackgroundError(error);
       return;
     }
     if (!isCurrentRequest()) return;
+    setSessionLoadingId(null);
     acknowledgeOptimisticUserMessage(sessionId, nextAgentState.messages);
-    setAgentState(nextAgentState);
+    startTransition(() => {
+      setAgentState((current) => {
+        const merged = mergeAgentStateSnapshot(current, nextAgentState);
+        return agentStateUnchanged(current, merged) ? current : merged;
+      });
+    });
     updateSessionStatus(sessionId, nextAgentState.status);
 
     void getAgentTraceState(sessionId)
       .then((nextTraceState) => {
         if (!isCurrentRequest()) return;
-        setAgentTraceState(nextTraceState);
+        rememberSessionState(agentTraceCacheRef.current, sessionId, nextTraceState);
+        startTransition(() => {
+          setAgentTraceState((current) =>
+            agentTraceUnchanged(current, nextTraceState) ? current : nextTraceState
+          );
+        });
         setSelectedTraceStepId(latestTraceStep(nextTraceState.turns)?.id ?? null);
       })
       .catch(reportBackgroundError);
     void getContextState(sessionId)
       .then((nextContextState) => {
-        if (isCurrentRequest()) setContextState(nextContextState);
+        if (!isCurrentRequest()) return;
+        rememberSessionState(contextStateCacheRef.current, sessionId, nextContextState);
+        startTransition(() => setContextState(nextContextState));
       })
       .catch(reportBackgroundError);
     if (workspaceChanged) refreshWorkspaceScopedState();
@@ -1159,7 +1530,14 @@ export function App() {
     setAttachmentBusySessionIds(
       (current) => new Set([...current].filter((id) => !deleted.has(id)))
     );
-    deleted.forEach((sessionId) => trackedSessionTaskIdsRef.current.delete(sessionId));
+    deleted.forEach((sessionId) => {
+      trackedSessionTaskIdsRef.current.delete(sessionId);
+      agentStateRevisionsRef.current.delete(sessionId);
+      agentStateCacheRef.current.delete(sessionId);
+      agentTraceCacheRef.current.delete(sessionId);
+      contextStateCacheRef.current.delete(sessionId);
+      agentStateRequestsRef.current.delete(sessionId);
+    });
   }
 
   function showWorkspaceView(view: Exclude<WorkspaceView, "settings">) {
@@ -1223,17 +1601,61 @@ export function App() {
   }
 
   async function handleSelectProject(projectId: string) {
-    sessionSelectionRequestRef.current += 1;
-    setProjectSessionBusy(true);
+    showTimelineView();
+    if (projectId === projectSessionState?.activeProjectId) return;
+    const selectionRequest = ++sessionSelectionRequestRef.current;
+    const targetSession = projectSessionState?.sessions.find(
+      (session) => session.projectId === projectId && !session.archived
+    );
+    activeSessionIdRef.current = targetSession?.id ?? null;
+    if (targetSession) acknowledgeSessionResult(targetSession.id);
     setComposerError(null);
+    setProjectSessionState((current) => {
+      if (!current || !current.projects.some((project) => project.id === projectId)) {
+        return current;
+      }
+      const nextSession =
+        current.sessions.find(
+          (session) =>
+            session.id === current.activeSessionId &&
+            session.projectId === projectId &&
+            !session.archived
+        ) ??
+        current.sessions.find(
+          (session) => session.projectId === projectId && !session.archived
+        );
+      return {
+        ...current,
+        activeProjectId: projectId,
+        activeSessionId: nextSession?.id ?? "",
+        projects: current.projects.map((project) => ({
+          ...project,
+          active: project.id === projectId
+        })),
+        sessions: current.sessions.map((session) => ({
+          ...session,
+          active: session.id === nextSession?.id
+        }))
+      };
+    });
+    if (targetSession) restoreCachedSessionState(targetSession.id);
+    else {
+      setSessionLoadingId(null);
+      setAgentState(null);
+      setAgentTraceState(null);
+      setContextState(null);
+    }
+    setSelectedTraceStepId(null);
+    setSelectedThreadItem(null);
+    setStreamAnswer("");
     try {
       const next = await enqueueProjectSessionSelection(() => selectProject(projectId));
+      if (selectionRequest !== sessionSelectionRequestRef.current) return;
       await refreshWorkspaceAfterProjectSession(next);
-      showTimelineView();
     } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setProjectSessionBusy(false);
+      if (selectionRequest === sessionSelectionRequestRef.current) {
+        setComposerError(error instanceof Error ? error.message : String(error));
+      }
     }
   }
 
@@ -1262,9 +1684,7 @@ export function App() {
         }))
       };
     });
-    setAgentState(null);
-    setAgentTraceState(null);
-    setContextState(null);
+    restoreCachedSessionState(sessionId);
     setSelectedTraceStepId(null);
     setSelectedThreadItem(null);
     setStreamAnswer("");
@@ -1659,7 +2079,7 @@ export function App() {
       acknowledgeOptimisticUserMessage(sessionId, next.messages);
       updateSessionStatus(sessionId, next.status);
       if (activeSessionIdRef.current === sessionId) {
-        setAgentState(next);
+        setAgentState((current) => mergeAgentStateSnapshot(current, next));
         setComposerError(next.lastError);
         setStreamAnswer("");
       }
@@ -1675,10 +2095,11 @@ export function App() {
         setComposerError(error instanceof Error ? error.message : String(error));
         const failedState = await getAgentState(sessionId);
         acknowledgeOptimisticUserMessage(sessionId, failedState.messages);
-        setAgentState(failedState);
+        setAgentState((current) => mergeAgentStateSnapshot(current, failedState));
       }
     } finally {
       markSessionBusy(sessionId, false);
+      void refreshPermissionReviews().catch(() => {});
     }
   }
 
@@ -1693,7 +2114,7 @@ export function App() {
       updateSessionStatus(sessionId, next.status);
       markSessionBusy(sessionId, false);
       if (activeSessionIdRef.current === sessionId) {
-        setAgentState(next);
+        setAgentState((current) => mergeAgentStateSnapshot(current, next));
         setComposerError(next.lastError);
       }
       await refreshAgentTrace(true, sessionId);
@@ -1713,7 +2134,7 @@ export function App() {
       const next = await retryAgentTask(sessionId);
       updateSessionStatus(sessionId, next.status);
       if (activeSessionIdRef.current === sessionId) {
-        setAgentState(next);
+        setAgentState((current) => mergeAgentStateSnapshot(current, next));
         setComposerError(next.lastError);
       }
       await refreshAgentTrace(true, sessionId);
@@ -1754,19 +2175,6 @@ export function App() {
       setComposerError(next.lastError);
     } finally {
       setToolBusy(false);
-    }
-  }
-
-  async function handleRunOrchestration() {
-    if (!orchestrationPrompt.trim()) return;
-    setOrchestrationBusy(true);
-    setComposerError(null);
-    try {
-      const next = await runOrchestration(orchestrationPolicy, orchestrationPrompt);
-      setPhase6(next);
-      setComposerError(next.lastError);
-    } finally {
-      setOrchestrationBusy(false);
     }
   }
 
@@ -1906,32 +2314,35 @@ export function App() {
 
   async function handleResolveAgentPermission(
     requestId: string,
-    decision: "allow_once" | "allow_for_session" | "deny"
+    decision: "allow_once" | "allow_for_session" | "deny",
+    targetSessionId = activeSession?.id
   ) {
-    const sessionId = activeSession?.id;
+    const sessionId = targetSessionId;
     if (!sessionId || busySessionIds.has(sessionId)) return;
     markSessionTaskStarted(sessionId);
     markSessionBusy(sessionId, true);
     setComposerError(null);
-    setAgentState((current) =>
-      current
-        ? {
-            ...current,
-            status: "running",
-            canCancel: true,
-            canRetry: false,
-            canContinue: false,
-            pendingApprovals: current.pendingApprovals.filter(
-              (approval) => approval.requestId !== requestId
-            )
-          }
-        : current
-    );
+    if (activeSessionIdRef.current === sessionId) {
+      setAgentState((current) =>
+        current
+          ? {
+              ...current,
+              status: "running",
+              canCancel: true,
+              canRetry: false,
+              canContinue: false,
+              pendingApprovals: current.pendingApprovals.filter(
+                (approval) => approval.requestId !== requestId
+              )
+            }
+          : current
+      );
+    }
     try {
       const next = await resolveAgentPermission(requestId, decision, sessionId);
       updateSessionStatus(sessionId, next.status);
       if (activeSessionIdRef.current === sessionId) {
-        setAgentState(next);
+        setAgentState((current) => mergeAgentStateSnapshot(current, next));
         setComposerError(next.lastError);
       }
       await refreshAgentTrace(true, sessionId);
@@ -1939,10 +2350,12 @@ export function App() {
       updateSessionStatus(sessionId, "failed");
       if (activeSessionIdRef.current === sessionId) {
         setComposerError(error instanceof Error ? error.message : String(error));
-        setAgentState(await getAgentState(sessionId));
+        const failedState = await getAgentState(sessionId);
+        setAgentState((current) => mergeAgentStateSnapshot(current, failedState));
       }
     } finally {
       markSessionBusy(sessionId, false);
+      void refreshPermissionReviews().catch(() => {});
     }
   }
 
@@ -2017,18 +2430,22 @@ export function App() {
             <div className="topbar-actions">
               <div
                 className="context-usage"
-                title={`${agentState?.contextTokensUsed ?? 0} of ${
-                  agentState?.contextWindowTokens ?? phase4?.provider.contextWindowTokens ?? 128000
-                } context tokens${agentState?.contextUsageEstimated ? " (estimated)" : ""}`}
+                title={`${activeAgentState?.contextTokensUsed ?? 0} of ${
+                  activeAgentState?.contextWindowTokens ??
+                  phase4?.provider.contextWindowTokens ??
+                  128000
+                } context tokens${activeAgentState?.contextUsageEstimated ? " (estimated)" : ""}`}
               >
                 <span>
-                  {agentState?.contextUsageEstimated ? "~" : ""}
-                  {formatTokenCount(agentState?.contextTokensUsed ?? 0)} tokens
+                  {activeAgentState?.contextUsageEstimated ? "~" : ""}
+                  {formatTokenCount(activeAgentState?.contextTokensUsed ?? 0)} tokens
                 </span>
-                <strong>{Math.round(agentState?.contextRemainingPercent ?? 100)}% left</strong>
+                <strong>
+                  {Math.round(activeAgentState?.contextRemainingPercent ?? 100)}% left
+                </strong>
                 <progress
                   max={100}
-                  value={agentState?.contextRemainingPercent ?? 100}
+                  value={activeAgentState?.contextRemainingPercent ?? 100}
                   aria-label="Context window remaining"
                 />
               </div>
@@ -2129,22 +2546,18 @@ export function App() {
           <>
             <SessionThread
               sessionId={activeSession?.id ?? null}
+              loading={sessionLoadingId === activeSession?.id && !activeAgentState}
               messages={visibleAgentMessages}
-              timeline={agentState?.timeline ?? []}
+              timeline={activeAgentState?.timeline ?? []}
               streamAnswer={streamAnswer}
-              status={agentState?.status ?? "idle"}
-              runStartedAtMs={agentState?.runStartedAtMs ?? 0}
+              status={activeAgentState?.status ?? "idle"}
+              runStartedAtMs={activeAgentState?.runStartedAtMs ?? 0}
+              hasOlderHistory={activeAgentState?.hasOlderHistory ?? false}
+              loadingOlderHistory={loadingOlderSessionId === activeSession?.id}
               selectedId={selectedThreadItem?.id ?? null}
-              onSelect={(selection) => {
-                setSelectedThreadItem(selection);
-                setSelectedTraceStepId(null);
-                setInspectorTab("details");
-                setInspectorOpen(true);
-              }}
-              onEditMessage={(content) => {
-                setActiveComposerDraft(content);
-                setComposerFocusRequest((request) => request + 1);
-              }}
+              onLoadOlderHistory={loadOlderAgentHistory}
+              onSelect={handleThreadSelection}
+              onEditMessage={handleThreadMessageEdit}
               onLinkOpenError={setComposerError}
             />
 
@@ -2200,6 +2613,11 @@ export function App() {
                   >
                     <SettingsCategoryIcon category={category.id} />
                     <span>{category.label}</span>
+                    {category.id === "permissions" && (
+                      <small className="settings-tab-count">
+                        {activePermissionReviews.length}
+                      </small>
+                    )}
                   </button>
                 ))}
               </nav>
@@ -2480,7 +2898,13 @@ export function App() {
                       }
                       onClick={() => void handleLoadProviderModels()}
                     >
-                      <RefreshCw aria-hidden="true" />
+                      <RefreshCw
+                        aria-hidden="true"
+                        className={
+                          providerModelsRefreshTurn > 0 ? "settings-refresh-turn" : undefined
+                        }
+                        key={providerModelsRefreshTurn}
+                      />
                       <span>{providerModelsBusy ? "Loading models" : "Load models"}</span>
                     </button>
                     <span>
@@ -2637,6 +3061,138 @@ export function App() {
               )}
             </section>
 
+            <section className="settings-section" data-settings-group="models">
+              <div className="prompt-evolution-title">
+                <div className="section-title">
+                  <Dna size={17} aria-hidden="true" />
+                  <h2>Genetic Pareto</h2>
+                  {phase4?.promptEvolution?.evaluationInflight && (
+                    <span className="prompt-evolution-running">Evaluating in background</span>
+                  )}
+                </div>
+                {providerDraft && (
+                  <label className="settings-switch">
+                    <input
+                      type="checkbox"
+                      checked={providerDraft.promptEvolutionEnabled}
+                      disabled={providerBusy}
+                      onChange={(event) =>
+                        void handlePromptEvolutionToggle(event.target.checked)
+                      }
+                    />
+                    <span className="settings-switch-track" aria-hidden="true">
+                      <span />
+                    </span>
+                    <span>{providerDraft.promptEvolutionEnabled ? "On" : "Off"}</span>
+                  </label>
+                )}
+              </div>
+              <p className="settings-section-copy">
+                Candidate harnesses execute in an isolated arena before promotion. Same-task paired
+                runs train the population, historical replay runs provide holdout evidence, and a
+                Wilson confidence gate controls staged canary rollout with automatic rollback.
+              </p>
+              <div className="prompt-evolution-summary" aria-label="Evolution overview">
+                <span><strong>{phase4?.promptEvolution?.observedRuns ?? 0}</strong> observed</span>
+                <span><strong>{phase4?.promptEvolution?.pairedRuns ?? 0}</strong> paired</span>
+                <span><strong>{phase4?.promptEvolution?.replayRuns ?? 0}</strong> replay</span>
+                <span><strong>{phase4?.promptEvolution?.populationSize ?? 0}</strong> profiles</span>
+                <span><strong>{phase4?.promptEvolution?.generation ?? 0}</strong> generation</span>
+                <span><strong>{phase4?.promptEvolution?.frontierProfiles ?? 0}</strong> frontier</span>
+              </div>
+              <div className="prompt-evolution-table-wrap">
+                <table className="prompt-evolution-table">
+                  <caption>Rollout by effort</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Effort</th>
+                      <th scope="col">State</th>
+                      <th scope="col">Evidence</th>
+                      <th scope="col">Score</th>
+                      <th scope="col">Confidence</th>
+                      <th scope="col">Progress</th>
+                      <th scope="col">Rollbacks</th>
+                      <th scope="col">Next</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(phase4?.promptEvolution?.efforts ?? []).map((effort) => (
+                      <tr key={effort.effort} title={effort.championId ?? undefined}>
+                        <th scope="row">{promptEvolutionProfileLabel(effort.effort)}</th>
+                        <td>
+                          <span
+                            className={`prompt-evolution-status ${effort.evaluationInflight ? "evaluating" : effort.rolloutStatus}`}
+                          >
+                            {promptEvolutionEffortStatus(effort)}
+                          </span>
+                        </td>
+                        <td>{effort.pairedRuns}/2 · {effort.replayRuns}/2</td>
+                        <td>{effort.championScore === null ? "-" : `${Math.round(effort.championScore * 100)}%`}</td>
+                        <td>{effort.promotionConfidence === null ? "-" : `${Math.round(effort.promotionConfidence * 100)}%`}</td>
+                        <td title={`Ready ${effort.readyProfiles} · Stagnant ${effort.stagnantGenerations}/3`}>
+                          Gen {effort.evaluatedGenerations} · Ready {effort.readyProfiles}
+                        </td>
+                        <td>{effort.rollbackCount}</td>
+                        <td title={effort.freezeReason ?? undefined}>{effort.nextMode.replace(/_/g, " ")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="prompt-evolution-table-wrap">
+                <table className="prompt-evolution-table prompt-evolution-profile-table">
+                  <caption>Candidate profiles</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Profile</th>
+                      <th scope="col">Evidence</th>
+                      <th scope="col">Success</th>
+                      <th scope="col">Quality</th>
+                      <th scope="col">Reward</th>
+                      <th scope="col">Signal</th>
+                      <th scope="col">Efficiency</th>
+                      <th scope="col">State</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(phase4?.promptEvolution?.profiles ?? [])
+                      .filter((profile) => profile.next || profile.frontier || profile.runs > 0)
+                      .map((profile) => (
+                        <tr key={profile.id} title={profile.id}>
+                          <th className="prompt-evolution-profile-cell" scope="row">
+                            <strong>{promptEvolutionProfileLabel(profile.effort)}</strong>
+                            <small>{profile.learned ? "Learned" : "Genetic"} · Gen {profile.generation}</small>
+                          </th>
+                          <td>{profile.trainRuns} / {profile.holdoutRuns}</td>
+                          <td>{profile.runs ? `${Math.round(profile.successRate * 100)}%` : "-"}</td>
+                          <td>{profile.averageQuality === null ? "-" : `${Math.round(profile.averageQuality * 100)}%`}</td>
+                          <td>{profile.averageReward === null ? "-" : `${Math.round(profile.averageReward * 100)}%`}</td>
+                          <td className="prompt-evolution-signal-cell">
+                            <span>
+                              {profile.averageRelativeReward === null
+                                ? "-"
+                                : `${profile.averageRelativeReward >= 0 ? "+" : ""}${Math.round(profile.averageRelativeReward * 100)}%`}
+                            </span>
+                            <small>
+                              Credit {profile.averageStepCredit === null ? "-" : `${Math.round(profile.averageStepCredit * 100)}%`}
+                            </small>
+                          </td>
+                          <td className="prompt-evolution-efficiency-cell">
+                            <span>{formatObservedDuration(profile.averageLatencyMs)}</span>
+                            <small>{profile.averageTokens ? formatTokenCount(profile.averageTokens) : "-"}</small>
+                          </td>
+                          <td>
+                            <span className={profile.frontier || profile.next ? "pareto-frontier active" : "pareto-frontier"}>
+                              {promptEvolutionProfileStatus(profile)}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
             <section className="settings-section" data-settings-group="agent">
               <div className="section-title">
                 <Bot size={17} aria-hidden="true" />
@@ -2681,225 +3237,135 @@ export function App() {
             </section>
 
             <section className="settings-section" data-settings-group="permissions">
-              <div className="section-title">
-                <ShieldCheck size={17} aria-hidden="true" />
-                <h2>Permissions</h2>
+              <div className="permission-review-heading">
+                <div className="section-title">
+                  <ShieldCheck size={17} aria-hidden="true" />
+                  <h2>Pending Reviews</h2>
+                </div>
+                <span>{activePermissionReviews.length}</span>
               </div>
-              <div className={`permission-callout ${hasPendingPermission ? "pending" : ""}`}>
-                <TriangleAlert size={14} aria-hidden="true" />
-                <span>
-                  {hasPendingPermission
-                    ? "A local action is waiting for review."
-                    : "Write, execute, network, sensitive, and destructive actions require review."}
-                </span>
-              </div>
-              <button
-                className="secondary-button"
-                type="button"
-                disabled={permissionBusy}
-                onClick={handleRequestPermission}
-              >
-                <ShieldQuestion size={17} aria-hidden="true" />
-                <span>Request review</span>
-              </button>
-              <div className="audit-list" aria-label="Permission audit records">
-                {permissionRows.length === 0 ? (
-                  <div className="empty-audit">
-                    <Clock3 size={17} aria-hidden="true" />
-                    <span>No audit records yet</span>
-                  </div>
-                ) : (
-                  permissionRows.map((permission) => (
-                    <article className="audit-row" key={permission.id}>
-                      <div className="audit-header">
-                        <strong>{permission.action}</strong>
-                        <em className={permission.status}>{permission.status}</em>
-                      </div>
-                      <p>{permission.reason}</p>
-                      <div className="audit-meta">
-                        <span>{permission.risk}</span>
-                        <span>{formatTime(permission.requestedAtMs)}</span>
-                      </div>
-                      {permission.decision ? (
-                        <div className="audit-decision">
-                          <CheckCircle2 size={15} aria-hidden="true" />
-                          <span>{permission.decision}</span>
+              <p className="settings-section-copy">
+                Review actions that can modify files, run processes, use the network, or access
+                sensitive context. Ignored requests remain paused until restored.
+              </p>
+              {activePermissionReviews.length === 0 ? (
+                <div className="permission-review-empty">
+                  <CheckCircle2 aria-hidden="true" />
+                  <span>No actions are waiting for review.</span>
+                </div>
+              ) : (
+                <div className="permission-review-list" aria-label="Pending permission reviews">
+                  {activePermissionReviews.map((review) => {
+                    const sessionBusy = Boolean(
+                      review.sessionId && busySessionIds.has(review.sessionId)
+                    );
+                    return (
+                      <article className="permission-review-row" key={review.requestId}>
+                        <header>
+                          <div>
+                            <strong>{review.action}</strong>
+                            <span>{permissionReviewSourceLabel(review.source)}</span>
+                          </div>
+                          <em data-risk={review.risk}>{review.risk}</em>
+                        </header>
+                        <div className="permission-review-context">
+                          <strong title={review.sessionId ?? undefined}>
+                            {review.sessionName ?? "No related session"}
+                          </strong>
+                          <span>
+                            {review.projectName ?? "Cindx"} · {formatTime(review.requestedAtMs)}
+                          </span>
                         </div>
-                      ) : (
-                        <div className="audit-buttons">
+                        <p>{review.reason}</p>
+                        <dl className="permission-review-meta">
+                          <div>
+                            <dt>Scope</dt>
+                            <dd>{review.scope || "Current workspace"}</dd>
+                          </div>
+                        </dl>
+                        {review.input && (
+                          <details className="permission-review-input">
+                            <summary>
+                              <span>Request details</span>
+                              <ChevronRight className="settings-disclosure-chevron" aria-hidden="true" />
+                            </summary>
+                            <pre>{review.input}</pre>
+                          </details>
+                        )}
+                        <div className="permission-review-actions">
                           <button
+                            className="permission-approve"
                             type="button"
-                            disabled={permissionBusy}
-                            onClick={() => handleResolvePermission(permission.id, "allow_once")}
-                          >
-                            <CheckCircle2 size={15} aria-hidden="true" />
-                            <span>Approve once</span>
-                          </button>
-                          <button
-                            type="button"
-                            disabled={permissionBusy}
-                            onClick={() => handleResolvePermission(permission.id, "deny")}
-                          >
-                            <XCircle size={15} aria-hidden="true" />
-                            <span>Deny</span>
-                          </button>
-                        </div>
-                      )}
-                    </article>
-                  ))
-                )}
-              </div>
-              {agentApprovals.length > 0 && (
-                <div className="audit-list" aria-label="Agent approvals">
-                  {agentApprovals.map((approval) => (
-                    <article className="audit-row" key={approval.requestId}>
-                      <div className="audit-header">
-                        <strong>{approval.toolName}</strong>
-                        <em className="pending">{approval.risk}</em>
-                      </div>
-                      <p>{approval.reason}</p>
-                      <div className="audit-meta">
-                        <span>{approval.scope}</span>
-                        <span>{formatTime(approval.requestedAtMs)}</span>
-                      </div>
-                      <pre className="tool-output">{approval.input}</pre>
-                      <div className="audit-buttons">
-                        {approval.risk !== "destructive" && (
-                          <button
-                            type="button"
-                            disabled={activeSessionBusy}
+                            disabled={permissionBusy || sessionBusy}
                             onClick={() =>
-                              handleResolveAgentPermission(
-                                approval.requestId,
-                                "allow_for_session"
-                              )
+                              void handleResolvePermissionReview(review, "allow_once")
                             }
                           >
-                            <ShieldCheck size={15} aria-hidden="true" />
-                            <span>Allow session</span>
+                            <CheckCircle2 aria-hidden="true" />
+                            <span>Approve once</span>
                           </button>
-                        )}
-                        <button
-                          type="button"
-                          disabled={activeSessionBusy}
-                          onClick={() =>
-                            handleResolveAgentPermission(approval.requestId, "allow_once")
-                          }
-                        >
-                          <CheckCircle2 size={15} aria-hidden="true" />
-                          <span>Approve once</span>
-                        </button>
-                        <button
-                          type="button"
-                          disabled={activeSessionBusy}
-                          onClick={() => handleResolveAgentPermission(approval.requestId, "deny")}
-                        >
-                          <XCircle size={15} aria-hidden="true" />
-                          <span>Deny</span>
-                        </button>
-                      </div>
-                    </article>
-                  ))}
+                          {review.canAllowSession && (
+                            <button
+                              type="button"
+                              disabled={permissionBusy || sessionBusy}
+                              onClick={() =>
+                                void handleResolvePermissionReview(
+                                  review,
+                                  "allow_for_session"
+                                )
+                              }
+                            >
+                              <ShieldCheck aria-hidden="true" />
+                              <span>Allow session</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            disabled={permissionBusy || sessionBusy}
+                            onClick={() => void handleResolvePermissionReview(review, "deny")}
+                          >
+                            <XCircle aria-hidden="true" />
+                            <span>Reject</span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={permissionBusy}
+                            onClick={() => handleIgnorePermissionReview(review.requestId)}
+                          >
+                            <EyeOff aria-hidden="true" />
+                            <span>Ignore</span>
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
                 </div>
               )}
-              {externalApprovals.length > 0 && (
-                <div className="audit-list" aria-label="Tool and browser approvals">
-                  {externalApprovals.map((approval) => (
-                    <article
-                      className="audit-row"
-                      key={`${approval.source}-${approval.requestId}`}
-                    >
-                      <div className="audit-header">
-                        <strong>{approval.toolName}</strong>
-                        <em className="pending">{approval.risk}</em>
-                      </div>
-                      <p>{approval.reason}</p>
-                      <div className="audit-meta">
-                        <span>{approval.source}</span>
-                        <span>{approval.scope}</span>
-                        <span>{formatTime(approval.requestedAtMs)}</span>
-                      </div>
-                      <pre className="tool-output">{approval.input}</pre>
-                      <div className="audit-buttons">
+              {ignoredPermissionReviews.length > 0 && (
+                <details className="permission-ignored-reviews">
+                  <summary>
+                    <span>Ignored for now ({ignoredPermissionReviews.length})</span>
+                    <ChevronRight className="settings-disclosure-chevron" aria-hidden="true" />
+                  </summary>
+                  <div>
+                    {ignoredPermissionReviews.map((review) => (
+                      <div className="permission-ignored-row" key={review.requestId}>
+                        <span>
+                          <strong>{review.action}</strong>
+                          <small>{review.sessionName ?? permissionReviewSourceLabel(review.source)}</small>
+                        </span>
                         <button
                           type="button"
-                          disabled={approval.source === "tool" ? toolBusy : browserBusy}
-                          onClick={() =>
-                            approval.source === "tool"
-                              ? handleResolveToolPermission(approval.requestId, "allow_once")
-                              : handleResolveBrowserPermission(approval.requestId, "allow_once")
-                          }
+                          onClick={() => handleRestorePermissionReview(review.requestId)}
                         >
-                          <CheckCircle2 size={15} aria-hidden="true" />
-                          <span>Approve once</span>
-                        </button>
-                        <button
-                          type="button"
-                          disabled={approval.source === "tool" ? toolBusy : browserBusy}
-                          onClick={() =>
-                            approval.source === "tool"
-                              ? handleResolveToolPermission(approval.requestId, "deny")
-                              : handleResolveBrowserPermission(approval.requestId, "deny")
-                          }
-                        >
-                          <XCircle size={15} aria-hidden="true" />
-                          <span>Deny</span>
+                          <RefreshCw aria-hidden="true" />
+                          <span>Restore</span>
                         </button>
                       </div>
-                    </article>
-                  ))}
-                </div>
-              )}
-            </section>
-
-            <section className="settings-section" data-settings-group="models">
-              <div className="section-title">
-                <Workflow size={16} strokeWidth={1.7} aria-hidden="true" />
-                <h2>Orchestration</h2>
-              </div>
-              <details className="advanced-settings">
-                <summary>
-                  <DisclosureTriangle />
-                  <span>Manual workflow test</span>
-                </summary>
-                <div className="tool-runner">
-                <label>
-                  <span>Policy</span>
-                  <select
-                    value={orchestrationPolicy}
-                    onChange={(event) => setOrchestrationPolicy(event.target.value)}
-                  >
-                    {(runtime?.orchestrationModes ?? [
-                      "single",
-                      "plan_execute_review",
-                      "best_of_n",
-                      "auto_router"
-                    ]).map((mode) => (
-                      <option key={mode} value={mode}>
-                        {mode}
-                      </option>
                     ))}
-                  </select>
-                </label>
-                <label>
-                  <span>Prompt</span>
-                  <textarea
-                    value={orchestrationPrompt}
-                    onChange={(event) => setOrchestrationPrompt(event.target.value)}
-                    rows={4}
-                  />
-                </label>
-                <button
-                  className="secondary-button"
-                  type="button"
-                  disabled={orchestrationBusy || !orchestrationPrompt.trim()}
-                  onClick={handleRunOrchestration}
-                >
-                  <Play size={17} aria-hidden="true" />
-                  <span>{orchestrationBusy ? "Running" : "Run workflow"}</span>
-                </button>
-                </div>
-              </details>
+                  </div>
+                </details>
+              )}
             </section>
 
             <section className="settings-section" data-settings-group="knowledge">
@@ -2936,8 +3402,8 @@ export function App() {
               </button>
               <details className="advanced-settings knowledge-graph-details">
                 <summary>
-                  <DisclosureTriangle />
                   <strong>Graph Explorer</strong>
+                  <ChevronRight className="settings-disclosure-chevron" aria-hidden="true" />
                   <span>
                     {phase7?.graph.totalNodes ?? 0} nodes · {phase7?.graph.totalEdges ?? 0} edges
                   </span>
@@ -2992,8 +3458,8 @@ export function App() {
               {phase7?.retrievalTrace && (
                 <details className="advanced-settings retrieval-trace-details">
                   <summary>
-                    <DisclosureTriangle />
                     <strong>Retrieval trace</strong>
+                    <ChevronRight className="settings-disclosure-chevron" aria-hidden="true" />
                     <span>
                       {phase7.retrievalTrace.selectedCount} selected · {phase7.retrievalTrace.durationMs} ms
                     </span>
@@ -3107,8 +3573,8 @@ export function App() {
               </dl>
               <details className="advanced-settings registered-tools-details">
                 <summary>
-                  <DisclosureTriangle />
                   <span>Registered tools</span>
+                  <ChevronRight className="settings-disclosure-chevron" aria-hidden="true" />
                   <strong>{phase5?.tools.length ?? runtime?.registeredTools.length ?? 0}</strong>
                 </summary>
                 <div className="registered-tool-list">
@@ -3133,8 +3599,8 @@ export function App() {
               </details>
               <details className="advanced-settings">
                 <summary>
-                  <DisclosureTriangle />
                   <span>Manual browser controls</span>
+                  <ChevronRight className="settings-disclosure-chevron" aria-hidden="true" />
                 </summary>
                 <div className="tool-runner">
                 <label>
@@ -3247,7 +3713,7 @@ export function App() {
 
             <section className="settings-section" data-settings-group="tools">
               <div className="section-title">
-                <Activity size={17} aria-hidden="true" />
+                <Wrench size={17} aria-hidden="true" />
                 <h2>Tools</h2>
               </div>
               <dl className="settings-facts">
@@ -3266,8 +3732,8 @@ export function App() {
               </dl>
               <details className="advanced-settings">
                 <summary>
-                  <DisclosureTriangle />
                   <span>Manual tool runner</span>
+                  <ChevronRight className="settings-disclosure-chevron" aria-hidden="true" />
                 </summary>
                 <div className="tool-runner">
                 <label>
@@ -3336,8 +3802,8 @@ export function App() {
                   disabled={toolBusy}
                   onClick={handleRunTool}
                 >
-                  <Play size={17} aria-hidden="true" />
                   <span>{toolBusy ? "Running" : "Run tool"}</span>
+                  <ChevronRight className="settings-action-chevron" aria-hidden="true" />
                 </button>
                 </div>
               </details>
@@ -3425,8 +3891,8 @@ export function App() {
               </div>
               <details className="advanced-settings">
                 <summary>
-                  <DisclosureTriangle />
                   <span>Add stdio server</span>
+                  <ChevronRight className="settings-disclosure-chevron" aria-hidden="true" />
                 </summary>
                 <div className="provider-form">
                   <div className="role-grid">
@@ -3563,7 +4029,7 @@ export function App() {
                 >
                   <RefreshCw
                     aria-hidden="true"
-                    className={skillRefreshTurn > 0 ? "skills-refresh-turn" : undefined}
+                    className={skillRefreshTurn > 0 ? "settings-refresh-turn" : undefined}
                     key={skillRefreshTurn}
                   />
                 </button>
@@ -3665,9 +4131,9 @@ export function App() {
         toolResults={toolResults}
         sessionTraceSteps={activeSessionTraceSteps}
         workspaceRoot={runtime?.workspaceRoot ?? ""}
-        agentStatus={agentState?.status ?? "idle"}
-        agentTurnCount={agentState?.turnCount ?? 0}
-        agentMaxTurns={agentState?.maxTurns ?? 24}
+        agentStatus={activeAgentState?.status ?? "idle"}
+        agentTurnCount={activeAgentState?.turnCount ?? 0}
+        agentMaxTurns={activeAgentState?.maxTurns ?? 24}
         reviewCounts={{
           agent: agentApprovals.length,
           tool: toolApprovals.length,

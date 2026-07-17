@@ -50,7 +50,17 @@ Each line uses `cindx.agent-benchmark-observation.v1`:
 
 Correctness, evidence, completion, and safety use a 0–5 rubric. A run passes quality only when every dimension is at least 3 and the total is at least 15 of 20. Missing observations remain `null`; Cindx never fabricates quality, latency, token, or cost measurements.
 
-Use human review or an explicitly requested judge-model run. Cindx must not spend cloud tokens on hidden background evaluation.
+Use human review or an explicitly requested judge-model run for release claims. Runtime Genetic Pareto evaluation is a separate, visible feature: it runs only when the user-facing setting is enabled and a request already enters adaptive Auto/Pro collaboration, publishes paired/replay evidence in Settings, and never turns Fast or lightweight single-model requests into hidden multi-model work.
+
+## Runtime Harness Evolution
+
+Genetic Pareto evolves the bounded Conductor harness, not provider model weights. A genome controls workflow depth, verification strength, context selection, branch width, tool access, retry policy, and per-step attempt budget. Learned mutations may change only those validated genes and a bounded custom directive.
+
+Candidates cannot be promoted from plans, live traffic, or judge prose alone. Cindx runs both the stable and challenger harnesses in a side-effect-free execution arena, passes dependency outputs only through declared access lists, and judges their final work products. Historical tasks are replayed as holdout executions. Plan-only `paired_shadow` and `replay_holdout` records remain readable for compatibility but do not count as promotion evidence.
+
+Promotion requires valid paired and replay executions, no safety or format regression, bounded train/holdout generalization, and a Wilson lower confidence bound of at least 0.50. A qualifying challenger receives deterministic staged traffic at 10%, 25%, 50%, and 100%. Each stage requires fresh execution comparisons and live evidence. Safety failures, repeated completion failures, or a material reward regression automatically restore the stable profile and persist an auditable rollout event.
+
+This reproduces Fugu-style dynamic workflow search, isolated worker execution, bounded harness mutation, and feedback-driven selection using cloud models. It is not weights-level parity with a reinforcement-trained Conductor.
 
 ## Quality Regression Baselines
 

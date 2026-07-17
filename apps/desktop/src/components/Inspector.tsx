@@ -27,8 +27,9 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent
 } from "react";
-import { openArtifact, readArtifactPreview } from "../tauri";
+import { getAgentSessionOutputs, openArtifact, readArtifactPreview } from "../tauri";
 import type {
+  AgentOutputArtifactView,
   AgentState,
   AgentTraceStepView,
   ArtifactPreview,
@@ -99,12 +100,8 @@ function clampWidth(width: number) {
   return Math.min(520, Math.max(280, width));
 }
 
-type OutputArtifact = {
-  id: string;
-  path: string;
-  toolName: string;
-  status: string;
-  timestampMs: number;
+type OutputArtifact = AgentOutputArtifactView & {
+  versionCount: number;
 };
 
 const IMAGE_EXTENSIONS = new Set(["avif", "bmp", "gif", "jpeg", "jpg", "png", "webp"]);
@@ -133,15 +130,122 @@ function sessionArtifactPaths(step: AgentTraceStepView) {
 
   Object.entries(step.metadata).forEach(([key, path]) => {
     const resultPath = key.startsWith("result_") && key.endsWith("_path");
-    const fileReference =
-      key === "result_path" && (step.toolName === "file.read" || step.toolName === "file.write");
+    const fileOutput = key === "result_path" && step.toolName === "file.write";
     const contextPath = key === "context_checkpoint_path" || key === "lancedb_export_path";
-    if ((resultPath && (key !== "result_path" || fileReference)) || contextPath) {
+    if ((resultPath && (key !== "result_path" || fileOutput)) || contextPath) {
       if (path.trim()) paths.add(path);
     }
   });
 
   return [...paths];
+}
+
+function resolveOutputArtifact(
+  workspaceRoot: string,
+  artifact: AgentOutputArtifactView
+): OutputArtifact {
+  return {
+    ...artifact,
+    path: absoluteArtifactPath(workspaceRoot, artifact.path),
+    sourcePath: artifact.sourcePath
+      ? absoluteArtifactPath(workspaceRoot, artifact.sourcePath)
+      : null,
+    versionCount: 1
+  };
+}
+
+function traceOutputArtifacts(
+  sessionTraceSteps: AgentTraceStepView[],
+  workspaceRoot: string
+) {
+  return sessionTraceSteps.flatMap((step) => {
+    if (step.status === "failed") return [];
+    const sourcePath =
+      step.toolName === "file.write"
+        ? step.metadata.result_source_path ?? step.metadata.result_path ?? null
+        : null;
+    return sessionArtifactPaths(step).map((path, index) =>
+      resolveOutputArtifact(workspaceRoot, {
+        id: `${step.id}-${index}`,
+        path,
+        sourcePath,
+        toolName: step.toolName ?? step.label,
+        status: step.status,
+        timestampMs: step.finishedAtMs ?? step.startedAtMs,
+        runId: step.metadata.agent_run_id ?? null,
+        version: 0
+      })
+    );
+  });
+}
+
+function mergeOutputArtifacts(...groups: OutputArtifact[][]) {
+  const merged = new Map<string, OutputArtifact>();
+  groups.flat().forEach((artifact) => {
+    const logicalPath = artifact.sourcePath ?? artifact.path;
+    const immutableVersion = Boolean(
+      artifact.sourcePath && artifact.sourcePath !== artifact.path
+    );
+    const key = immutableVersion ? `version:${artifact.path}` : `current:${logicalPath}`;
+    const current = merged.get(key);
+    if (!current || artifact.timestampMs >= current.timestampMs) {
+      merged.set(key, artifact);
+    }
+  });
+
+  const versionedSources = new Set(
+    [...merged.values()]
+      .filter((artifact) => artifact.sourcePath && artifact.sourcePath !== artifact.path)
+      .map((artifact) => artifact.sourcePath as string)
+  );
+  const chronological = [...merged.values()]
+    .filter((artifact) => {
+      const logicalPath = artifact.sourcePath ?? artifact.path;
+      return artifact.sourcePath !== artifact.path || !versionedSources.has(logicalPath);
+    })
+    .sort(
+      (left, right) =>
+        left.timestampMs - right.timestampMs || left.id.localeCompare(right.id)
+    );
+  const versionBySource = new Map<string, number>();
+  const countBySource = new Map<string, number>();
+  chronological.forEach((artifact) => {
+    const logicalPath = artifact.sourcePath ?? artifact.path;
+    countBySource.set(logicalPath, (countBySource.get(logicalPath) ?? 0) + 1);
+  });
+
+  return chronological
+    .map((artifact) => {
+      const logicalPath = artifact.sourcePath ?? artifact.path;
+      const version = (versionBySource.get(logicalPath) ?? 0) + 1;
+      versionBySource.set(logicalPath, version);
+      return {
+        ...artifact,
+        version,
+        versionCount: countBySource.get(logicalPath) ?? 1
+      };
+    })
+    .sort(
+      (left, right) =>
+        right.timestampMs - left.timestampMs || right.id.localeCompare(left.id)
+    );
+}
+
+function outputArtifactsUnchanged(left: OutputArtifact[], right: OutputArtifact[]) {
+  if (left.length !== right.length) return false;
+  return left.every((artifact, index) => {
+    const next = right[index];
+    return (
+      artifact.id === next?.id &&
+      artifact.path === next.path &&
+      artifact.timestampMs === next.timestampMs &&
+      artifact.version === next.version
+    );
+  });
+}
+
+function outputDisplayPath(artifact: OutputArtifact) {
+  return artifact.sourcePath ?? artifact.path;
 }
 
 function ArtifactTypeIcon({ path }: { path: string }) {
@@ -235,10 +339,17 @@ export function Inspector({
   onReview
 }: InspectorProps) {
   const [debugOpen, setDebugOpen] = useState(false);
+  const [metadataOpen, setMetadataOpen] = useState(false);
+  const [metadataMotion, setMetadataMotion] = useState<"idle" | "opening" | "closing">(
+    "idle"
+  );
   const [selectedOutputPath, setSelectedOutputPath] = useState<string | null>(null);
   const [outputPreviewFullscreen, setOutputPreviewFullscreen] = useState(false);
   const [openingOutputPath, setOpeningOutputPath] = useState<string | null>(null);
   const [outputActionError, setOutputActionError] = useState<string | null>(null);
+  const [outputHistoryBySession, setOutputHistoryBySession] = useState<
+    Record<string, OutputArtifact[]>
+  >({});
   const [sessionCopyState, setSessionCopyState] = useState<
     "idle" | "copied" | "failed"
   >("idle");
@@ -254,48 +365,71 @@ export function Inspector({
   const tracePermissionCount = sessionTraceSteps.filter(
     (step) => step.kind === "permission"
   ).length;
-  const outputArtifacts = useMemo(() => {
-    const outputs = new Map<string, OutputArtifact>();
-    const addOutput = (artifact: OutputArtifact) => {
-      const absolutePath = absoluteArtifactPath(workspaceRoot, artifact.path);
-      const current = outputs.get(absolutePath);
-      if (!current || artifact.timestampMs >= current.timestampMs) {
-        outputs.set(absolutePath, { ...artifact, path: absolutePath });
-      }
-    };
+  const currentRunOutputs = useMemo(
+    () => traceOutputArtifacts(sessionTraceSteps, workspaceRoot),
+    [sessionTraceSteps, workspaceRoot]
+  );
+  const historicalOutputs = sessionId ? outputHistoryBySession[sessionId] ?? [] : [];
+  const outputArtifacts = useMemo(
+    () => mergeOutputArtifacts(historicalOutputs, currentRunOutputs),
+    [currentRunOutputs, historicalOutputs]
+  );
 
-    sessionTraceSteps.forEach((step) => {
-      if (step.status === "failed") return;
-      sessionArtifactPaths(step).forEach((path, index) => {
-        addOutput({
-          id: `${step.id}-${index}`,
-          path,
-          toolName: step.toolName ?? step.label,
-          status: step.toolName === "file.read" ? "reference" : step.status,
-          timestampMs: step.finishedAtMs ?? step.startedAtMs
+  useEffect(() => {
+    if (!sessionId) return;
+    let active = true;
+    void getAgentSessionOutputs(sessionId)
+      .then((artifacts) => {
+        if (!active) return;
+        const resolved = artifacts.map((artifact) =>
+          resolveOutputArtifact(workspaceRoot, artifact)
+        );
+        setOutputHistoryBySession((current) => {
+          const merged = mergeOutputArtifacts(current[sessionId] ?? [], resolved);
+          if (outputArtifactsUnchanged(current[sessionId] ?? [], merged)) return current;
+          return { ...current, [sessionId]: merged };
         });
-      });
-    });
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [sessionId, workspaceRoot]);
 
-    return [...outputs.values()].sort((left, right) => right.timestampMs - left.timestampMs);
-  }, [sessionTraceSteps, workspaceRoot]);
+  useEffect(() => {
+    if (!sessionId || currentRunOutputs.length === 0) return;
+    setOutputHistoryBySession((current) => {
+      const merged = mergeOutputArtifacts(current[sessionId] ?? [], currentRunOutputs);
+      if (outputArtifactsUnchanged(current[sessionId] ?? [], merged)) return current;
+      return { ...current, [sessionId]: merged };
+    });
+  }, [currentRunOutputs, sessionId]);
 
   useEffect(() => {
     if (!sessionId) return;
     const signatures = new Set(
-      outputArtifacts.map((artifact) => `${artifact.path}:${artifact.timestampMs}`)
+      currentRunOutputs.map((artifact) => `${artifact.path}:${artifact.timestampMs}`)
     );
     const previous = outputSignaturesBySessionRef.current.get(sessionId);
-    outputSignaturesBySessionRef.current.set(sessionId, signatures);
-    if (!previous) return;
+    if (!previous) {
+      outputSignaturesBySessionRef.current.set(sessionId, signatures);
+      return;
+    }
+    const accumulated = new Set([...previous, ...signatures]);
+    outputSignaturesBySessionRef.current.set(sessionId, accumulated);
     if ([...signatures].some((signature) => !previous.has(signature))) {
       onOutputCreated();
     }
-  }, [onOutputCreated, outputArtifacts, sessionId]);
+  }, [currentRunOutputs, onOutputCreated, sessionId]);
 
   useEffect(() => {
     if (!showDebug) setDebugOpen(false);
   }, [showDebug]);
+
+  useEffect(() => {
+    setMetadataOpen(false);
+    setMetadataMotion("idle");
+  }, [traceStep?.id]);
 
   useEffect(() => {
     setSelectedOutputPath(null);
@@ -427,10 +561,13 @@ export function Inspector({
       data-fullscreen={outputPreviewFullscreen}
       role={outputPreviewFullscreen ? "dialog" : undefined}
     >
-      <header title={selectedOutput.path}>
+      <header title={outputDisplayPath(selectedOutput)}>
         <div className="inspector-output-detail-copy">
-          <strong>{artifactName(selectedOutput.path)}</strong>
-          <span>{selectedOutput.toolName}</span>
+          <strong>{artifactName(outputDisplayPath(selectedOutput))}</strong>
+          <span>
+            {selectedOutput.toolName}
+            {selectedOutput.versionCount > 1 ? ` · Version ${selectedOutput.version}` : ""}
+          </span>
         </div>
         <div className="inspector-output-actions">
           <button
@@ -523,12 +660,19 @@ export function Inspector({
           ) : (
               <div className="inspector-output-list">
                 {outputArtifacts.map((artifact) => {
+                  const displayPath = outputDisplayPath(artifact);
+                  const versionLabel =
+                    artifact.versionCount > 1 ? `Version ${artifact.version}` : null;
                   return (
                     <button
                       className="inspector-output"
                       type="button"
-                      aria-label={`Preview ${artifactName(artifact.path)}`}
-                      title={`Preview ${artifactName(artifact.path)}`}
+                      aria-label={`Preview ${artifactName(displayPath)}${
+                        versionLabel ? `, ${versionLabel}` : ""
+                      }`}
+                      title={`Preview ${artifactName(displayPath)}${
+                        versionLabel ? `, ${versionLabel}` : ""
+                      }`}
                       key={`${artifact.id}-${artifact.path}`}
                       onClick={() => selectOutput(artifact.path)}
                     >
@@ -536,8 +680,11 @@ export function Inspector({
                         <ArtifactTypeIcon path={artifact.path} />
                       </div>
                       <div className="inspector-output-copy">
-                        <strong title={artifact.path}>{artifactName(artifact.path)}</strong>
-                        <span title={artifact.path}>{artifact.path}</span>
+                        <div className="inspector-output-name">
+                          <strong title={displayPath}>{artifactName(displayPath)}</strong>
+                          {versionLabel && <small>v{artifact.version}</small>}
+                        </div>
+                        <span title={displayPath}>{displayPath}</span>
                       </div>
                     </button>
                   );
@@ -642,31 +789,40 @@ export function Inspector({
               </button>
               {traceExportPath && <p className="inspector-path">{traceExportPath}</p>}
             </section>
-            <section className="inspector-trace-list" aria-label="Agent trace steps">
+            <section className="inspector-trace-sequence" aria-label="Agent trace steps">
               {sessionTraceSteps.length === 0 ? (
                 <div className="inspector-empty">
                   <Clock3 aria-hidden="true" />
                   <span>No agent trace yet</span>
                 </div>
               ) : (
-                sessionTraceSteps.map((step) => (
-                  <button
-                    className={`trace-step ${traceStep?.id === step.id ? "selected" : ""}`}
-                    type="button"
-                    key={step.id}
-                    onClick={() => onTraceStepSelect(step.id)}
-                  >
-                    <span className="trace-step-icon"><TraceIcon step={step} /></span>
-                    <span className="trace-step-body">
-                      <strong>{step.label}</strong>
-                      <small>{step.detail}</small>
-                    </span>
-                    <span className="trace-step-meta">
-                      <TraceStatusIcon status={step.status} />
-                      <small>{formatDuration(step.latencyMs)}</small>
-                    </span>
-                  </button>
-                ))
+                <ol className="inspector-trace-list">
+                  {sessionTraceSteps.map((step, index) => (
+                    <li className="trace-sequence-item" key={step.id}>
+                      <span className="trace-sequence-marker" aria-hidden="true">
+                        {index + 1}
+                      </span>
+                      <button
+                        className={`trace-step ${traceStep?.id === step.id ? "selected" : ""}`}
+                        type="button"
+                        aria-label={`Step ${index + 1}: ${step.label}`}
+                        onClick={() => onTraceStepSelect(step.id)}
+                      >
+                        <span className="trace-step-icon"><TraceIcon step={step} /></span>
+                        <span className="trace-step-body">
+                          <strong>{step.label}</strong>
+                          <small>{step.detail}</small>
+                        </span>
+                        <span className="trace-step-meta">
+                          <TraceStatusIcon status={step.status} />
+                          <small>
+                            {step.turnIndex > 0 ? `Turn ${step.turnIndex}` : "Setup"} · {formatDuration(step.latencyMs)}
+                          </small>
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ol>
               )}
             </section>
           </div>
@@ -719,13 +875,42 @@ export function Inspector({
                       .join("\n\n")}
                   </pre>
                 )}
-                <details className="metadata-details">
-                  <summary>
-                    <DisclosureTriangle />
+                <div
+                  className="metadata-details"
+                  data-open={metadataOpen}
+                  data-motion={metadataMotion}
+                >
+                  <button
+                    type="button"
+                    className="metadata-details-toggle"
+                    aria-expanded={metadataOpen}
+                    title={metadataOpen ? "Hide metadata" : "Show metadata"}
+                    onClick={() => {
+                      const nextOpen = !metadataOpen;
+                      setMetadataMotion(nextOpen ? "opening" : "closing");
+                      setMetadataOpen(nextOpen);
+                    }}
+                  >
+                    <span
+                      className="metadata-disclosure-icon"
+                      onAnimationEnd={(event) => {
+                        if (event.animationName.startsWith("metadata-disclosure-")) {
+                          setMetadataMotion("idle");
+                        }
+                      }}
+                    >
+                      <DisclosureTriangle />
+                    </span>
                     <span>Metadata</span>
-                  </summary>
-                  <pre className="inspector-code">{JSON.stringify(traceStep.metadata, null, 2)}</pre>
-                </details>
+                  </button>
+                  <div className="metadata-details-body" aria-hidden={!metadataOpen}>
+                    <div>
+                      <pre className="inspector-code">
+                        {JSON.stringify(traceStep.metadata, null, 2)}
+                      </pre>
+                    </div>
+                  </div>
+                </div>
                 {traceExportPath && <p className="inspector-path">{traceExportPath}</p>}
               </section>
             ) : threadSelection ? (
