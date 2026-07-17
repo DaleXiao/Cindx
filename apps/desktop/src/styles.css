@@ -4821,15 +4821,17 @@ details[open] > summary .settings-disclosure-chevron {
   font-weight: 650;
 }
 
-.inspector-debug .disclosure-triangle {
-  width: 10px;
-  height: 10px;
+.inspector-debug-chevron {
+  width: 11px;
+  height: 11px;
   color: #999999;
   transform: rotate(0deg);
+  transform-origin: center;
+  transition: transform 180ms var(--ease-out-quart);
 }
 
-.inspector-debug[data-open="true"] .disclosure-triangle {
-  transform: rotate(180deg);
+.inspector-debug[data-open="true"] .inspector-debug-chevron {
+  transform: rotate(90deg);
 }
 
 .inspector-debug-body {
@@ -5008,14 +5010,13 @@ details[open] > summary .settings-disclosure-chevron {
   will-change: transform;
 }
 
-.metadata-disclosure-icon .disclosure-triangle {
-  transform: none;
-  transition: none;
-  will-change: auto;
+.metadata-disclosure-chevron {
+  width: 10px;
+  height: 10px;
 }
 
 .metadata-details[data-open="true"] .metadata-disclosure-icon {
-  transform: rotate(180deg);
+  transform: rotate(90deg);
 }
 
 .metadata-details[data-motion="opening"] .metadata-disclosure-icon {
@@ -5033,14 +5034,14 @@ details[open] > summary .settings-disclosure-chevron {
   }
   to {
     opacity: 1;
-    transform: rotate(180deg) scale(1);
+    transform: rotate(90deg) scale(1);
   }
 }
 
 @keyframes metadata-disclosure-closing {
   from {
     opacity: 1;
-    transform: rotate(180deg) scale(1);
+    transform: rotate(90deg) scale(1);
   }
   to {
     opacity: 0.82;
@@ -5246,6 +5247,7 @@ details[open] > summary .settings-disclosure-chevron {
   .settings-disclosure-chevron,
   .settings-action-chevron,
   .settings-refresh-turn,
+  .inspector-debug-chevron,
   .metadata-disclosure-icon,
   .metadata-details-body {
     transition: none;
