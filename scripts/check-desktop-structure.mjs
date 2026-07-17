@@ -799,15 +799,22 @@ assert(
     styles.includes('.composer-primary-button.stop:hover .composer-working-ring'),
   "Composer controls must share a bottom toolbar with a circular primary action"
 );
-assert(sidebarSource.includes("session-branch"), "Sessions must be nested below the active project");
+assert(sidebarSource.includes("session-branch"), "Tasks must be nested below the active project");
 assert(
   sidebarSource.includes("collapsedProjectIds") &&
+    sidebarSource.includes('className="project-main"') &&
     sidebarSource.includes('className="project-disclosure"') &&
     sidebarSource.includes("aria-expanded={expanded}") &&
     sidebarSource.includes("handleProjectDisclosure(project, expanded)") &&
-    sidebarSource.includes("<DisclosureTriangle />") &&
-    styles.includes('.project-disclosure[aria-expanded="true"] .disclosure-triangle'),
-  "Each project must expose an accessible disclosure control for its sessions"
+    /<strong>\{project\.name\}<\/strong>[\s\S]*?<ChevronRight[\s\S]*?className="project-disclosure-chevron"/.test(
+      sidebarSource
+    ) &&
+    styles.includes(
+      '.project-disclosure[aria-expanded="true"] .project-disclosure-chevron'
+    ) &&
+    sidebarSource.includes('<div className="nav-heading">Tasks</div>') &&
+    !sidebarSource.includes('<div className="nav-heading">Sessions</div>'),
+  "Each project must expose a trailing animated chevron and label its child sessions as Tasks"
 );
 assert(
   styles.includes(".project-item") &&

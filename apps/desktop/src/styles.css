@@ -585,7 +585,7 @@ pre {
   position: relative;
   display: grid;
   min-height: 34px;
-  grid-template-columns: 24px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
   background: transparent;
   border: 0;
@@ -600,10 +600,18 @@ pre {
   background: var(--surface-active);
 }
 
+.project-main {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  padding-right: 30px;
+}
+
 .project-disclosure {
   display: grid;
-  width: 24px;
+  width: 22px;
   height: 32px;
+  flex: 0 0 22px;
   padding: 0;
   place-items: center;
   color: var(--muted);
@@ -615,8 +623,16 @@ pre {
   color: var(--text);
 }
 
-.project-disclosure[aria-expanded="true"] .disclosure-triangle {
-  transform: rotate(180deg);
+.project-disclosure-chevron {
+  width: 12px;
+  height: 12px;
+  transform: rotate(0deg);
+  transform-origin: center;
+  transition: transform 180ms var(--ease-out-quart);
+}
+
+.project-disclosure[aria-expanded="true"] .project-disclosure-chevron {
+  transform: rotate(90deg);
 }
 
 .nav-item {
@@ -659,9 +675,11 @@ pre {
 }
 
 .project-item {
+  width: auto;
   min-height: 32px;
-  padding-right: 30px;
+  flex: 0 1 auto;
   padding-left: 2px;
+  padding-right: 0;
   background: transparent;
   border: 0;
   border-radius: 0;
@@ -5247,6 +5265,7 @@ details[open] > summary .settings-disclosure-chevron {
   .settings-disclosure-chevron,
   .settings-action-chevron,
   .settings-refresh-turn,
+  .project-disclosure-chevron,
   .inspector-debug-chevron,
   .metadata-disclosure-icon,
   .metadata-details-body {
