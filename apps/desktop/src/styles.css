@@ -254,8 +254,6 @@ pre {
   left: 0;
   width: var(--sidebar-layout-width);
   background: var(--sidebar-glass);
-  -webkit-backdrop-filter: saturate(155%) blur(24px);
-  backdrop-filter: saturate(155%) blur(24px);
 }
 
 .window-toolbar-panel-right {
@@ -413,8 +411,6 @@ pre {
   padding: 14px;
   overflow: hidden;
   background: var(--sidebar-glass);
-  -webkit-backdrop-filter: saturate(155%) blur(24px);
-  backdrop-filter: saturate(155%) blur(24px);
   opacity: 1;
   transform: translateX(0);
   transition:

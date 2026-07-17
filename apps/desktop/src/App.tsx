@@ -107,6 +107,7 @@ import {
   PermissionReviewState,
   ProjectSessionState,
   revealMainWindow,
+  setSidebarMaterialWidth,
   resolveBrowserPermission,
   resolveAgentPermission,
   resolveToolPermission,
@@ -675,6 +676,10 @@ export function App() {
     setComposerDrafts((current) => ({ ...current, [sessionId]: content }));
     setComposerFocusRequest((request) => request + 1);
   }, []);
+
+  useEffect(() => {
+    void setSidebarMaterialWidth(sidebarOpen ? sidebarWidth : 0).catch(() => {});
+  }, [sidebarOpen, sidebarWidth]);
 
   useEffect(
     () => () => {

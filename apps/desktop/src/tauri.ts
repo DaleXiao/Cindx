@@ -985,6 +985,11 @@ export async function revealMainWindow(): Promise<void> {
   await invoke<void>("reveal_main_window");
 }
 
+export async function setSidebarMaterialWidth(width: number): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke<void>("set_sidebar_material_width", { width });
+}
+
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {
   try {
     return await invoke<RuntimeStatus>("get_runtime_status");

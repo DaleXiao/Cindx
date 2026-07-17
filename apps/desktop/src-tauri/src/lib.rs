@@ -39,7 +39,7 @@ use model_provider::{
     MODEL_REQUEST_CANCELLED,
 };
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSView, NSWindow, NSWindowButton};
+use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindow, NSWindowButton};
 use orchestrator::{
     adaptive_worker_prompt, adaptive_workflow_layers, adaptive_workflow_step_budget, default_plan,
     evaluate_prompt_convergence, parse_policy, role_label, step_prompt, ConductorHarness,
@@ -119,6 +119,10 @@ const MAIN_WINDOW_REVEAL_FALLBACK_MS: u64 = 12_000;
 const MACOS_TRAFFIC_LIGHT_X: f64 = 14.0;
 #[cfg(target_os = "macos")]
 const MACOS_TRAFFIC_LIGHT_Y: f64 = 25.0;
+#[cfg(target_os = "macos")]
+const MACOS_SIDEBAR_MATERIAL_TAG: isize = 91_376_254;
+#[cfg(target_os = "macos")]
+const MACOS_SIDEBAR_DEFAULT_WIDTH: f64 = 236.0;
 #[cfg(target_os = "macos")]
 const MACOS_TRAFFIC_LIGHT_REPAIR_DELAY_MS: u64 = 48;
 #[cfg(target_os = "macos")]
@@ -1426,6 +1430,87 @@ struct ModelStreamDelta {
 #[tauri::command]
 fn get_runtime_status(state: tauri::State<'_, AppState>) -> Result<RuntimeStatus, String> {
     runtime_status(&state)
+}
+
+#[cfg(target_os = "macos")]
+fn resize_macos_sidebar_material(ns_window: usize, width: f64) -> Result<(), String> {
+    unsafe {
+        let window = &*(ns_window as *mut NSWindow);
+        let content_view = window
+            .contentView()
+            .ok_or_else(|| "native window content view is unavailable".to_string())?;
+        let material_view = content_view
+            .viewWithTag(MACOS_SIDEBAR_MATERIAL_TAG)
+            .ok_or_else(|| "native sidebar material view is unavailable".to_string())?;
+        let superview = material_view
+            .superview()
+            .ok_or_else(|| "native sidebar material parent is unavailable".to_string())?;
+        let bounds = NSView::bounds(&superview);
+        let mut frame = bounds;
+        frame.size.width = width.clamp(0.0, 320.0).min(bounds.size.width);
+        material_view.setFrame(frame);
+        material_view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos_sidebar_material(window: &tauri::WebviewWindow) -> Result<(), String> {
+    window_vibrancy::apply_vibrancy(
+        window,
+        window_vibrancy::NSVisualEffectMaterial::Sidebar,
+        Some(window_vibrancy::NSVisualEffectState::Active),
+        None,
+    )
+    .map_err(|error| format!("failed to install native sidebar material: {error}"))?;
+    let ns_window = window
+        .ns_window()
+        .map_err(|error| format!("failed to access native window: {error}"))?
+        as usize;
+    if let Err(error) = resize_macos_sidebar_material(ns_window, MACOS_SIDEBAR_DEFAULT_WIDTH) {
+        let _ = window_vibrancy::clear_vibrancy(window);
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_macos_sidebar_material(_window: &tauri::WebviewWindow) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn update_macos_sidebar_material_width(
+    window: &tauri::WebviewWindow,
+    width: f64,
+) -> Result<(), String> {
+    let ns_window = window
+        .ns_window()
+        .map_err(|error| format!("failed to access native window: {error}"))?
+        as usize;
+    window
+        .run_on_main_thread(move || {
+            if let Err(error) = resize_macos_sidebar_material(ns_window, width) {
+                append_startup_log(&error);
+            }
+        })
+        .map_err(|error| format!("failed to resize native sidebar material: {error}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn update_macos_sidebar_material_width(
+    _window: &tauri::WebviewWindow,
+    _width: f64,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[tauri::command]
+fn set_sidebar_material_width(app: tauri::AppHandle, width: f64) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window is unavailable".to_string())?;
+    update_macos_sidebar_material_width(&window, width)
 }
 
 #[cfg(target_os = "macos")]
@@ -6302,6 +6387,11 @@ pub fn run() {
             quit_prompt_active: AtomicBool::new(false),
         })
         .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(error) = install_macos_sidebar_material(&window) {
+                    append_startup_log(&error);
+                }
+            }
             schedule_main_window_reveal_fallback(app.handle().clone());
             Ok(())
         })
@@ -6327,6 +6417,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             reveal_main_window,
+            set_sidebar_material_width,
             get_runtime_status,
             get_sidecar_state,
             save_sidecar_config,
