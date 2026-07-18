@@ -875,6 +875,7 @@ export const SessionThread = memo(function SessionThread({
   const pinLatestFrameRef = useRef<number | null>(null);
   const followLatestRef = useRef(true);
   const jumpingToLatestRef = useRef(false);
+  const historyScrollIntentRef = useRef(false);
   const lastScrollTopRef = useRef(0);
   const historyLoadRequestedRef = useRef(false);
   const prependScrollHeightRef = useRef<number | null>(null);
@@ -1190,6 +1191,8 @@ export const SessionThread = memo(function SessionThread({
       const previousScrollTop = lastScrollTopRef.current;
       const currentScrollTop = thread.scrollTop;
       const movedTowardHistory = currentScrollTop < previousScrollTop - 1;
+      const historyScrollIntent = historyScrollIntentRef.current;
+      historyScrollIntentRef.current = false;
       lastScrollTopRef.current = currentScrollTop;
       const distanceFromLatest = Math.max(
         0,
@@ -1200,9 +1203,16 @@ export const SessionThread = memo(function SessionThread({
         followLatestRef.current = true;
         setShowJumpToLatest(false);
         if (atLatest) jumpingToLatestRef.current = false;
-      } else if (movedTowardHistory && !atLatest) {
+      } else if (historyScrollIntent || (movedTowardHistory && !atLatest)) {
         followLatestRef.current = false;
         setShowJumpToLatest(thread.scrollHeight > thread.clientHeight + 2);
+      } else if (!followLatestRef.current) {
+        if (atLatest && !movedTowardHistory) {
+          followLatestRef.current = true;
+          setShowJumpToLatest(false);
+        } else {
+          setShowJumpToLatest(thread.scrollHeight > thread.clientHeight + 2);
+        }
       } else if (atLatest) {
         followLatestRef.current = true;
         setShowJumpToLatest(false);
@@ -1223,7 +1233,19 @@ export const SessionThread = memo(function SessionThread({
         onLoadOlderHistory();
       }
     };
+    const handleWheel = (event: WheelEvent) => {
+      if (event.deltaY >= 0) {
+        historyScrollIntentRef.current = false;
+        return;
+      }
+      if (thread.scrollHeight <= thread.clientHeight + 2) return;
+      historyScrollIntentRef.current = true;
+      jumpingToLatestRef.current = false;
+      followLatestRef.current = false;
+      setShowJumpToLatest(true);
+    };
     thread.addEventListener("scroll", handleScroll, { passive: true });
+    thread.addEventListener("wheel", handleWheel, { passive: true });
 
     const resizeObserver = new ResizeObserver(() => {
       if (followLatestRef.current) pinLatestOutput();
@@ -1245,6 +1267,7 @@ export const SessionThread = memo(function SessionThread({
       }
       resizeObserver.disconnect();
       thread.removeEventListener("scroll", handleScroll);
+      thread.removeEventListener("wheel", handleWheel);
     };
   }, [
     hasOlderHistory,
@@ -1303,6 +1326,7 @@ export const SessionThread = memo(function SessionThread({
     if (previous.sessionId !== sessionId) {
       followLatestRef.current = true;
       jumpingToLatestRef.current = false;
+      historyScrollIntentRef.current = false;
       setShowJumpToLatest(false);
       pinLatestOutput(true);
     } else if (
@@ -1460,6 +1484,7 @@ export const SessionThread = memo(function SessionThread({
     if (!thread) return;
     jumpingToLatestRef.current = true;
     followLatestRef.current = true;
+    historyScrollIntentRef.current = false;
     setShowJumpToLatest(false);
     thread.scrollTo({ top: thread.scrollHeight, behavior: "smooth" });
   }

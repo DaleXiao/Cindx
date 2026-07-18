@@ -2575,7 +2575,11 @@ details[open] > summary .disclosure-triangle {
 }
 
 .composer-toolbar-actions {
-  display: flex;
+  display: grid;
+  width: 148px;
+  min-width: 148px;
+  flex: 0 0 148px;
+  grid-template-columns: 104px 36px;
   align-items: flex-end;
   gap: 8px;
   margin-left: auto;
@@ -2853,6 +2857,8 @@ textarea::placeholder {
 
 .composer-primary-button {
   width: 36px;
+  min-width: 36px;
+  max-width: 36px;
   height: 36px;
   min-height: 36px;
   padding: 0;
