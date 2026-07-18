@@ -337,7 +337,10 @@ export function Sidebar({
     <aside className="sidebar" aria-label="Projects and tasks">
       <div className="brand-row" title={activeProject?.root}>
         <img className="brand-mark" src={appIconUrl} alt="" />
-        <div className="brand-name">Cindx</div>
+        <div className="brand-name">
+          Cindx
+          <span className="brand-name-shimmer" aria-hidden="true">Cindx</span>
+        </div>
         <button
           className={`icon-button brand-search ${searchOpen ? "active" : ""}`}
           aria-label="Search projects and tasks"

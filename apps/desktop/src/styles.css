@@ -462,6 +462,8 @@ pre {
 }
 
 .brand-name {
+  position: relative;
+  display: inline-block;
   color: #2563eb;
   font-family: "Borel", cursive;
   font-size: 16px;
@@ -470,6 +472,47 @@ pre {
   font-synthesis: style;
   line-height: 1;
   transform: translateY(6px);
+}
+
+.brand-name-shimmer {
+  position: absolute;
+  inset: 0;
+  color: transparent;
+  background: linear-gradient(
+    108deg,
+    transparent 34%,
+    rgb(255 255 255 / 96%) 48%,
+    rgb(147 197 253 / 82%) 52%,
+    transparent 66%
+  );
+  background-position: 135% 0;
+  background-size: 240% 100%;
+  opacity: 0;
+  pointer-events: none;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.brand-name:hover .brand-name-shimmer {
+  animation: brand-name-shimmer 620ms var(--ease-out-quart) 1 both;
+}
+
+@keyframes brand-name-shimmer {
+  0% {
+    background-position: 135% 0;
+    opacity: 0;
+  }
+
+  18%,
+  82% {
+    opacity: 1;
+  }
+
+  100% {
+    background-position: -135% 0;
+    opacity: 0;
+  }
 }
 
 .brand-search {
@@ -5744,7 +5787,8 @@ details[open] > summary .settings-disclosure-chevron {
   .knowledge-graph-node-core,
   .knowledge-graph-node-label,
   .metadata-disclosure-icon,
-  .metadata-details-body {
+  .metadata-details-body,
+  .brand-name-shimmer {
     transition: none;
     animation: none;
   }
