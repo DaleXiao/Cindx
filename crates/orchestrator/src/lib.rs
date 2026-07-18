@@ -3,9 +3,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod benchmark;
+mod evaluation;
 mod prompt_evolution;
 
 pub use benchmark::*;
+pub use evaluation::*;
 pub use prompt_evolution::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -878,8 +880,17 @@ impl ConductorHarness {
         if self.request.prompt_evolution_enabled {
             budget.max_model_turns_per_step = budget
                 .max_model_turns_per_step
-                .min(self.request.prompt_genome.max_step_attempts)
+                .min(
+                    self.request
+                        .prompt_genome
+                        .effective_max_model_turns_per_step(),
+                )
                 .max(1);
+            budget.max_tool_calls_per_step = budget.max_tool_calls_per_step.min(
+                self.request
+                    .prompt_genome
+                    .effective_max_tool_calls_per_step(),
+            );
         }
         let mut plan = WorkflowPlanIr::from_adaptive_with_profile(
             self.request.workflow_id.clone(),
@@ -3175,6 +3186,7 @@ mod tests {
         )
         .expect("lean profile should allow one direct branch");
         assert_eq!(lean_plan.budget.max_model_turns_per_step, 1);
+        assert_eq!(lean_plan.budget.max_tool_calls_per_step, 0);
         assert_eq!(lean_plan.steps[0].tool_policy, WorkflowToolPolicy::None);
 
         let mut adversarial_request = conductor_request();
@@ -3193,6 +3205,7 @@ mod tests {
             )
             .expect("pro profile should accept a verified graph");
         assert_eq!(pro_plan.budget.max_model_turns_per_step, 3);
+        assert_eq!(pro_plan.budget.max_tool_calls_per_step, 6);
         assert_eq!(
             pro_plan.steps[0].tool_policy,
             WorkflowToolPolicy::ReadOnlyExploration

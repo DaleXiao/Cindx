@@ -7,3 +7,4 @@ dist/
 /.env.*
 !/examples/.env.example
 /releases/*.zip
+/benchmarks/agent/hidden/

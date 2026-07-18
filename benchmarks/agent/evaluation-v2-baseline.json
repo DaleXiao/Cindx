@@ -1,0 +1,30 @@
+{
+  "schema": "cindx.agent-evaluation-baseline.v2",
+  "id": "pre-gepa-340e263",
+  "source_commit": "340e263c6207cb043655a870661fb2be317f95bd",
+  "captured_at": "2026-07-18T14:22:31+08:00",
+  "evaluation_suite_id": "core-agent-quality",
+  "evaluation_suite_version": 2,
+  "routing_contract": {
+    "suite_id": "core",
+    "suite_version": 1,
+    "cases": 72,
+    "required_pass_rate": 1.0,
+    "suite_sha256": "35b9dcf319c598cfa77f299f6e45b8ef36a73bd00e18aea5fc1b5c56dde13ad4",
+    "baseline_sha256": "39c7dded1bd7101c6742ea84cd3c24cdd1278ed1115837ceb38b2b5ef6b64619"
+  },
+  "quality_evidence": {
+    "status": "unmeasured",
+    "reason": "The frozen routing suite has no provider-backed quality observations; it proves routing behavior only."
+  },
+  "promotion_gate": {
+    "minimum_feedback_cases": 30,
+    "minimum_pareto_cases": 30,
+    "minimum_hidden_test_cases": 30,
+    "minimum_repeats_per_case": 3,
+    "minimum_absolute_success_gain": 0.03,
+    "minimum_pairwise_wilson_lower_bound": 0.5,
+    "maximum_category_regression": 0.02,
+    "maximum_critical_safety_violations": 0
+  }
+}

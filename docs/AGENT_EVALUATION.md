@@ -2,6 +2,40 @@
 
 Cindx separates deterministic harness regressions from observed answer quality. A green build proves the routing contract is stable; it does not claim that a model answer is correct.
 
+## Evaluation v2 Foundation
+
+The pre-GEPA baseline is frozen at commit `340e263c6207cb043655a870661fb2be317f95bd` in `benchmarks/agent/evaluation-v2-baseline.json`. It records SHA-256 fingerprints for the 72-case routing suite and baseline. The foundation command verifies those files before reporting any optimization readiness:
+
+```bash
+cargo run -p orchestrator --example evaluation_v2_lab -- \
+  --report target/evaluation-v2-foundation.json
+```
+
+The quality baseline is deliberately `unmeasured`. Provider-backed quality cannot be inferred from the routing contract.
+
+Evaluation v2 keeps three datasets separate:
+
+- `feedback`: full redacted traces, verifier diagnostics, and actionable side information may be shown to the reflection model.
+- `pareto`: only per-case score records may enter candidate selection; prompts, trajectories, and outputs are withheld from reflection.
+- `test`: only final score records may enter the release report; test cases never participate in reflection or Pareto selection.
+
+Hidden test datasets belong under `benchmarks/agent/hidden/`, which Git ignores. A release gate must load them explicitly and use `--require-ready`; checked-in fixtures must never stand in for the hidden test set.
+
+Hidden score sets contain only per-case scores and are bound to one dataset SHA-256. Baseline and candidate records must match on `case_id + seed`, use deterministic verifiers, and declare provider-backed provenance. Synthetic gate-smoke data is always blocked from promotion, regardless of its apparent score. Run the paired release gate with:
+
+```bash
+cargo run -p orchestrator --example evaluation_v2_lab -- \
+  --feedback benchmarks/agent/hidden/feedback.json \
+  --pareto benchmarks/agent/hidden/pareto.json \
+  --test benchmarks/agent/hidden/test.json \
+  --baseline-scores path/to/baseline-scores.json \
+  --candidate-scores path/to/candidate-scores.json \
+  --promotion-report target/evaluation-v2-promotion.json \
+  --require-ready --require-promotion
+```
+
+The promotion report enforces the frozen minimum case and repeat counts, absolute success gain, paired Wilson lower bound, per-category regression ceiling, and zero critical safety violations. Passing recommends the first 10% canary stage; it does not skip staged rollout.
+
 ## Versioned Contract Suite
 
 The checked-in `benchmarks/agent/core-v1.json` suite contains 72 tasks across:
@@ -56,9 +90,11 @@ Pairwise evaluation waits until all foreground agent runs have finished and the 
 
 ## Runtime Harness Evolution
 
-Genetic Pareto evolves the bounded Conductor harness, not provider model weights. A genome controls workflow depth, verification strength, context selection, branch width, tool access, retry policy, and per-step attempt budget. Learned mutations may change only those validated genes and a bounded custom directive.
+Genetic Pareto evolves the bounded Conductor harness, not provider model weights. A genome controls workflow depth, verification strength, context selection, branch width, tool access, retry policy, per-step attempt budget, model-turn budget, and tool-call budget. Learned mutations may change only one or two validated genes and a bounded custom directive. Invalid model-generated mutations receive one bounded schema-repair attempt using exact enum values.
 
-Candidates cannot be promoted from plans, live traffic, or judge prose alone. Cindx runs both the stable and challenger harnesses in a side-effect-free execution arena, passes dependency outputs only through declared access lists, and judges their final work products. Historical tasks are replayed as holdout executions. Plan-only `paired_shadow` and `replay_holdout` records remain readable for compatibility but do not count as promotion evidence.
+Candidates cannot be promoted from plans, live traffic, or judge prose alone. Cindx runs both the stable and challenger harnesses in a read-only Agent sandbox backed by the active workspace, passes dependency outputs only through declared access lists, and records every model input, output, error, tool request, and tool result. Only `ToolRisk::ReadOnly` tools can cross the sandbox boundary; writes, process execution, browser/computer control, sensitive context, and network tools are rejected both when tools are exposed and again when they execute. Historical tasks are replayed as holdout executions. Plan-only `paired_shadow` and `replay_holdout` records remain readable for compatibility but do not count as promotion evidence.
+
+GEPA reflection consumes only redacted `feedback` trajectories and actionable verifier diagnostics. `pareto` and `test` prompts and outputs never enter reflection. Instance-wise Pareto keeps candidates that lead on at least one repeatedly evaluated case, samples mutation parents by complementary case coverage, and merges only disjoint gene changes from a shared direct ancestor. Aggregate fitness remains a compatibility and rollout signal, not a replacement for per-instance selection.
 
 Promotion requires valid paired and replay executions, no safety or format regression, bounded train/holdout generalization, and a Wilson lower confidence bound of at least 0.50. A qualifying challenger receives deterministic staged traffic at 10%, 25%, 50%, and 100%. Each stage requires fresh execution comparisons and live evidence. Safety failures, repeated completion failures, or a material reward regression automatically restore the stable profile and persist an auditable rollout event.
 
