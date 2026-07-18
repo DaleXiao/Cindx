@@ -722,7 +722,7 @@ struct ProjectActionInput {
     project_id: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct AgentAttachmentView {
     id: String,
@@ -730,6 +730,28 @@ struct AgentAttachmentView {
     path: String,
     mime_type: String,
     size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct QueuedAgentMessageView {
+    id: String,
+    session_id: String,
+    prompt: String,
+    attachments: Vec<AgentAttachmentView>,
+    effort: String,
+    mode: String,
+    created_at_ms: u64,
+    updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QueuedAgentMessagePayload {
+    prompt: String,
+    attachments: Vec<AgentAttachmentView>,
+    effort: String,
+    current_time: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -780,6 +802,33 @@ struct SelectSessionInput {
 #[serde(rename_all = "camelCase")]
 struct SessionActionInput {
     session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QueueAgentMessageInput {
+    session_id: String,
+    prompt: String,
+    current_time: String,
+    #[serde(default = "default_agent_effort")]
+    effort: String,
+    #[serde(default)]
+    attachments: Vec<AgentAttachmentView>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QueuedAgentMessageActionInput {
+    session_id: String,
+    queue_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EditQueuedAgentMessageInput {
+    session_id: String,
+    queue_id: String,
+    prompt: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1223,6 +1272,8 @@ struct AgentState {
     timeline: Vec<TimelineEntry>,
     messages: Vec<ChatMessageView>,
     pending_approvals: Vec<ToolApprovalView>,
+    #[serde(default)]
+    queued_messages: Vec<QueuedAgentMessageView>,
     latest_answer: Option<String>,
     last_error: Option<String>,
 }
@@ -1389,6 +1440,8 @@ struct AgentTaskInput {
     prompt: String,
     session_id: String,
     current_time: String,
+    #[serde(default)]
+    queue_id: Option<String>,
     #[serde(default = "default_agent_effort")]
     effort: String,
     #[serde(default)]
@@ -3510,6 +3563,7 @@ async fn get_agent_history_page(
             has_older_history,
             timeline: events
                 .iter()
+                .filter(|event| !is_agent_queue_event(event))
                 .cloned()
                 .map(|event| timeline_entry(event, &audits))
                 .collect(),
@@ -3752,6 +3806,241 @@ fn cancelled_agent_state(
     agent_state_for_session(&store, None, session_id).map_err(|error| error.to_string())
 }
 
+#[derive(Debug, Clone)]
+struct PendingQueuedAgentMessage {
+    view: QueuedAgentMessageView,
+    payload: QueuedAgentMessagePayload,
+    priority_sequence: u64,
+}
+
+fn is_agent_queue_event(event: &Event) -> bool {
+    event.metadata.contains_key("queue_action") && event.metadata.contains_key("queue_id")
+}
+
+fn queued_message_payload(event: &Event) -> Option<QueuedAgentMessagePayload> {
+    event
+        .metadata
+        .get("queue_payload")
+        .and_then(|payload| serde_json::from_str(payload).ok())
+}
+
+fn sort_queued_agent_message_views(messages: &mut [QueuedAgentMessageView]) {
+    messages.sort_by(|left, right| match (
+        left.mode.as_str() == "steer",
+        right.mode.as_str() == "steer",
+    ) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        (true, true) => right
+            .updated_at_ms
+            .cmp(&left.updated_at_ms)
+            .then_with(|| left.id.cmp(&right.id)),
+        (false, false) => left
+            .created_at_ms
+            .cmp(&right.created_at_ms)
+            .then_with(|| left.id.cmp(&right.id)),
+    });
+}
+
+fn apply_queue_event_to_views(messages: &mut Vec<QueuedAgentMessageView>, event: &Event) {
+    let Some(action) = event.metadata.get("queue_action").map(String::as_str) else {
+        return;
+    };
+    let Some(queue_id) = event.metadata.get("queue_id").cloned() else {
+        return;
+    };
+    match action {
+        "enqueue" | "restore" => {
+            let Some(payload) = queued_message_payload(event) else {
+                return;
+            };
+            let session_id = event.metadata.get("session_id").cloned().unwrap_or_default();
+            let created_at_ms = event
+                .metadata
+                .get("queue_created_at_ms")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(event.timestamp_ms);
+            let mode = event
+                .metadata
+                .get("queue_mode")
+                .filter(|mode| mode.as_str() == "steer")
+                .cloned()
+                .unwrap_or_else(|| "queue".to_string());
+            messages.retain(|message| message.id != queue_id);
+            messages.push(QueuedAgentMessageView {
+                id: queue_id,
+                session_id,
+                prompt: payload.prompt,
+                attachments: payload.attachments,
+                effort: AgentEffort::parse(&payload.effort).label().to_string(),
+                mode,
+                created_at_ms,
+                updated_at_ms: event.timestamp_ms,
+            });
+        }
+        "edit" => {
+            let Some(payload) = queued_message_payload(event) else {
+                return;
+            };
+            if let Some(message) = messages.iter_mut().find(|message| message.id == queue_id) {
+                message.prompt = payload.prompt;
+                message.attachments = payload.attachments;
+                message.effort = AgentEffort::parse(&payload.effort).label().to_string();
+                message.updated_at_ms = event.timestamp_ms;
+            }
+        }
+        "steer" => {
+            if let Some(message) = messages.iter_mut().find(|message| message.id == queue_id) {
+                message.mode = "steer".to_string();
+                message.updated_at_ms = event.timestamp_ms;
+            }
+        }
+        "delete" | "start" => messages.retain(|message| message.id != queue_id),
+        _ => {}
+    }
+    sort_queued_agent_message_views(messages);
+}
+
+fn pending_queued_agent_messages(
+    events: &[Event],
+    session_id: &str,
+) -> Vec<PendingQueuedAgentMessage> {
+    let mut pending = BTreeMap::<String, PendingQueuedAgentMessage>::new();
+    for event in events {
+        if event.metadata.get("session_id").map(String::as_str) != Some(session_id) {
+            continue;
+        }
+        let Some(action) = event.metadata.get("queue_action").map(String::as_str) else {
+            continue;
+        };
+        let Some(queue_id) = event.metadata.get("queue_id").cloned() else {
+            continue;
+        };
+        match action {
+            "enqueue" | "restore" => {
+                let Some(payload) = queued_message_payload(event) else {
+                    continue;
+                };
+                let created_at_ms = event
+                    .metadata
+                    .get("queue_created_at_ms")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(event.timestamp_ms);
+                let mode = event
+                    .metadata
+                    .get("queue_mode")
+                    .filter(|mode| mode.as_str() == "steer")
+                    .cloned()
+                    .unwrap_or_else(|| "queue".to_string());
+                pending.insert(
+                    queue_id.clone(),
+                    PendingQueuedAgentMessage {
+                        view: QueuedAgentMessageView {
+                            id: queue_id,
+                            session_id: session_id.to_string(),
+                            prompt: payload.prompt.clone(),
+                            attachments: payload.attachments.clone(),
+                            effort: AgentEffort::parse(&payload.effort).label().to_string(),
+                            mode,
+                            created_at_ms,
+                            updated_at_ms: event.timestamp_ms,
+                        },
+                        payload,
+                        priority_sequence: event.sequence,
+                    },
+                );
+            }
+            "edit" => {
+                let Some(payload) = queued_message_payload(event) else {
+                    continue;
+                };
+                if let Some(message) = pending.get_mut(&queue_id) {
+                    message.view.prompt = payload.prompt.clone();
+                    message.view.attachments = payload.attachments.clone();
+                    message.view.effort = AgentEffort::parse(&payload.effort).label().to_string();
+                    message.view.updated_at_ms = event.timestamp_ms;
+                    message.payload = payload;
+                }
+            }
+            "steer" => {
+                if let Some(message) = pending.get_mut(&queue_id) {
+                    message.view.mode = "steer".to_string();
+                    message.view.updated_at_ms = event.timestamp_ms;
+                    message.priority_sequence = event.sequence;
+                }
+            }
+            "delete" | "start" => {
+                pending.remove(&queue_id);
+            }
+            _ => {}
+        }
+    }
+    let mut messages = pending.into_values().collect::<Vec<_>>();
+    messages.sort_by(|left, right| match (
+        left.view.mode.as_str() == "steer",
+        right.view.mode.as_str() == "steer",
+    ) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        (true, true) => right
+            .priority_sequence
+            .cmp(&left.priority_sequence)
+            .then_with(|| left.view.id.cmp(&right.view.id)),
+        (false, false) => left
+            .view
+            .created_at_ms
+            .cmp(&right.view.created_at_ms)
+            .then_with(|| left.view.id.cmp(&right.view.id)),
+    });
+    messages
+}
+
+fn append_agent_queue_event(
+    store: &mut SqliteStore,
+    run_context: &Metadata,
+    action: &str,
+    queue_id: &str,
+    mode: &str,
+    created_at_ms: u64,
+    payload: Option<&QueuedAgentMessagePayload>,
+) -> Result<(), String> {
+    let mut metadata = [
+        ("queue_action".to_string(), action.to_string()),
+        ("queue_id".to_string(), queue_id.to_string()),
+        ("queue_mode".to_string(), mode.to_string()),
+        (
+            "queue_created_at_ms".to_string(),
+            created_at_ms.to_string(),
+        ),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    if let Some(payload) = payload {
+        metadata.insert(
+            "queue_payload".to_string(),
+            serde_json::to_string(payload)
+                .map_err(|error| format!("failed to encode queued message: {error}"))?,
+        );
+    }
+    let summary = match action {
+        "enqueue" => "Agent message queued",
+        "edit" => "Queued agent message edited",
+        "steer" => "Agent steer requested",
+        "delete" => "Queued agent message deleted",
+        "start" => "Queued agent message started",
+        "restore" => "Queued agent message restored",
+        _ => "Agent queue updated",
+    };
+    append_event(
+        store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        summary,
+        metadata_with_context(metadata, run_context),
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn finish_agent_run_for_control_stop(
     app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
@@ -3895,6 +4184,312 @@ async fn run_agent_task(
     })
     .await
     .map_err(|error| format!("agent task failed to join: {error}"))?
+}
+
+#[tauri::command]
+fn queue_agent_message(
+    app: tauri::AppHandle,
+    input: QueueAgentMessageInput,
+) -> Result<AgentState, String> {
+    let state = app.state::<AppState>();
+    let run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
+    let root = run_context
+        .get("project_root")
+        .map(PathBuf::from)
+        .unwrap_or(active_workspace_root(&state)?);
+    let attachments = validate_agent_attachments(&root, input.attachments)?;
+    let prompt = input.prompt.trim().to_string();
+    if prompt.is_empty() && attachments.is_empty() {
+        return agent_state_with_error_in_context(&state, &run_context, "agent prompt is empty");
+    }
+    let display_prompt = if prompt.is_empty() {
+        format!(
+            "Review attached {}",
+            attachments
+                .iter()
+                .map(|attachment| attachment.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        prompt
+    };
+    let payload = QueuedAgentMessagePayload {
+        prompt: display_prompt,
+        attachments,
+        effort: AgentEffort::parse(&input.effort).label().to_string(),
+        current_time: normalized_current_time_context(&input.current_time),
+    };
+    let queue_id = unique_id("agent-queue");
+    let created_at_ms = current_time_millis();
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    append_agent_queue_event(
+        &mut store,
+        &run_context,
+        "enqueue",
+        &queue_id,
+        "queue",
+        created_at_ms,
+        Some(&payload),
+    )?;
+    agent_state_for_session(&store, None, Some(&input.session_id))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn edit_queued_agent_message(
+    app: tauri::AppHandle,
+    input: EditQueuedAgentMessageInput,
+) -> Result<AgentState, String> {
+    let state = app.state::<AppState>();
+    let run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let events = agent_events_for_session(&store, &phase16_task_id(), Some(&input.session_id))
+        .map_err(|error| error.to_string())?;
+    let Some(mut queued) = pending_queued_agent_messages(&events, &input.session_id)
+        .into_iter()
+        .find(|message| message.view.id == input.queue_id)
+    else {
+        return Err("queued message not found".to_string());
+    };
+    let prompt = input.prompt.trim();
+    if prompt.is_empty() && queued.payload.attachments.is_empty() {
+        return Err("queued message is empty".to_string());
+    }
+    queued.payload.prompt = if prompt.is_empty() {
+        format!(
+            "Review attached {}",
+            queued
+                .payload
+                .attachments
+                .iter()
+                .map(|attachment| attachment.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        prompt.to_string()
+    };
+    append_agent_queue_event(
+        &mut store,
+        &run_context,
+        "edit",
+        &queued.view.id,
+        &queued.view.mode,
+        queued.view.created_at_ms,
+        Some(&queued.payload),
+    )?;
+    agent_state_for_session(&store, None, Some(&input.session_id))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_queued_agent_message(
+    app: tauri::AppHandle,
+    input: QueuedAgentMessageActionInput,
+) -> Result<AgentState, String> {
+    let state = app.state::<AppState>();
+    let run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let events = agent_events_for_session(&store, &phase16_task_id(), Some(&input.session_id))
+        .map_err(|error| error.to_string())?;
+    let Some(queued) = pending_queued_agent_messages(&events, &input.session_id)
+        .into_iter()
+        .find(|message| message.view.id == input.queue_id)
+    else {
+        return agent_state_for_session(&store, None, Some(&input.session_id))
+            .map_err(|error| error.to_string());
+    };
+    append_agent_queue_event(
+        &mut store,
+        &run_context,
+        "delete",
+        &queued.view.id,
+        &queued.view.mode,
+        queued.view.created_at_ms,
+        None,
+    )?;
+    agent_state_for_session(&store, None, Some(&input.session_id))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn steer_queued_agent_message(
+    app: tauri::AppHandle,
+    input: QueuedAgentMessageActionInput,
+) -> Result<AgentState, String> {
+    let state = app.state::<AppState>();
+    let run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
+    let queued = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let events = agent_events_for_session(&store, &phase16_task_id(), Some(&input.session_id))
+            .map_err(|error| error.to_string())?;
+        pending_queued_agent_messages(&events, &input.session_id)
+            .into_iter()
+            .find(|message| message.view.id == input.queue_id)
+            .ok_or_else(|| "queued message not found".to_string())?
+    };
+    let active_run_cancelled = request_agent_run_cancel(&state, &input.session_id)?;
+    clear_suspended_agent_run(&state, &input.session_id)?;
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    append_agent_queue_event(
+        &mut store,
+        &run_context,
+        "steer",
+        &queued.view.id,
+        "steer",
+        queued.view.created_at_ms,
+        None,
+    )?;
+    let current = agent_state_for_session(&store, None, Some(&input.session_id))
+        .map_err(|error| error.to_string())?;
+    if current.can_cancel || active_run_cancelled {
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task cancelled",
+            metadata_with_context(
+                [
+                    ("reason".to_string(), "steered".to_string()),
+                    ("steer_queue_id".to_string(), queued.view.id.clone()),
+                ]
+                .into_iter()
+                .collect(),
+                &run_context,
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        emit_agent_stream_delta(
+            &app,
+            "agent-steered",
+            Some(&input.session_id),
+            "",
+            true,
+            true,
+            None,
+        );
+    }
+    agent_state_for_session(&store, None, Some(&input.session_id))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn run_next_queued_agent_message(
+    app: tauri::AppHandle,
+    input: SessionActionInput,
+) -> Result<Option<AgentState>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        run_next_queued_agent_message_blocking(&app, state, input)
+    })
+    .await
+    .map_err(|error| format!("queued agent task failed to join: {error}"))?
+}
+
+fn run_next_queued_agent_message_blocking(
+    app: &tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    input: SessionActionInput,
+) -> Result<Option<AgentState>, String> {
+    let run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
+    let queued = {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let events = agent_events_for_session(&store, &phase16_task_id(), Some(&input.session_id))
+            .map_err(|error| error.to_string())?;
+        let Some(queued) = pending_queued_agent_messages(&events, &input.session_id)
+            .into_iter()
+            .next()
+        else {
+            return Ok(None);
+        };
+        append_agent_queue_event(
+            &mut store,
+            &run_context,
+            "start",
+            &queued.view.id,
+            &queued.view.mode,
+            queued.view.created_at_ms,
+            None,
+        )?;
+        queued
+    };
+    let task_input = AgentTaskInput {
+        prompt: queued.payload.prompt.clone(),
+        session_id: input.session_id.clone(),
+        current_time: normalized_current_time_context(""),
+        queue_id: Some(queued.view.id.clone()),
+        effort: queued.payload.effort.clone(),
+        attachments: queued.payload.attachments.clone(),
+    };
+    match run_agent_task_blocking(app, state.clone(), task_input) {
+        Ok(next) => {
+            let mut store = state
+                .store
+                .lock()
+                .map_err(|lock_error| format!("store lock poisoned: {lock_error}"))?;
+            let events = agent_events_for_session(
+                &store,
+                &phase16_task_id(),
+                Some(&input.session_id),
+            )
+            .map_err(|event_error| event_error.to_string())?;
+            let started = events.iter().any(|event| {
+                is_agent_run_start_event(event)
+                    && event.metadata.get("queue_id").map(String::as_str)
+                        == Some(queued.view.id.as_str())
+            });
+            if started {
+                return Ok(Some(next));
+            }
+            append_agent_queue_event(
+                &mut store,
+                &run_context,
+                "restore",
+                &queued.view.id,
+                &queued.view.mode,
+                queued.view.created_at_ms,
+                Some(&queued.payload),
+            )?;
+            agent_state_for_session(&store, None, Some(&input.session_id))
+                .map(Some)
+                .map_err(|state_error| state_error.to_string())
+        }
+        Err(error) => {
+            let mut store = state
+                .store
+                .lock()
+                .map_err(|lock_error| format!("store lock poisoned: {lock_error}"))?;
+            append_agent_queue_event(
+                &mut store,
+                &run_context,
+                "restore",
+                &queued.view.id,
+                &queued.view.mode,
+                queued.view.created_at_ms,
+                Some(&queued.payload),
+            )?;
+            Err(error)
+        }
+    }
 }
 
 fn maybe_auto_name_session(
@@ -4218,6 +4813,7 @@ fn run_agent_task_blocking_inner(
 ) -> Result<AgentState, String> {
     let effort = AgentEffort::parse(&input.effort);
     let user_prompt = input.prompt.trim().to_string();
+    let queue_id = input.queue_id.clone();
     let session_id = input.session_id;
     clear_suspended_agent_run(&state, &session_id)?;
     let mut run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
@@ -4262,6 +4858,9 @@ fn run_agent_task_blocking_inner(
     maybe_auto_name_session(&state, &session_id, title_source)?;
     run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
     run_context.insert("agent_run_id".to_string(), unique_id("agent-run"));
+    if let Some(queue_id) = queue_id {
+        run_context.insert("queue_id".to_string(), queue_id);
+    }
     run_context.insert(
         "current_time".to_string(),
         normalized_current_time_context(&input.current_time),
@@ -6617,6 +7216,11 @@ pub fn run() {
             get_agent_session_outputs,
             export_agent_trace_jsonl,
             run_agent_task,
+            queue_agent_message,
+            edit_queued_agent_message,
+            delete_queued_agent_message,
+            steer_queued_agent_message,
+            run_next_queued_agent_message,
             cancel_agent_task,
             retry_agent_task,
             resolve_agent_permission,
@@ -11424,7 +12028,14 @@ fn agent_state_from_events(
     let thread_events = session_id
         .map(|session_id| agent_session_events(&events, session_id))
         .unwrap_or_else(|| active_events.clone());
-    let run_context = agent_run_context_from_events(&active_events);
+    let mut run_context = agent_run_context_from_events(if active_events.is_empty() {
+        &thread_events
+    } else {
+        &active_events
+    });
+    if run_context.session_id.is_none() {
+        run_context.session_id = session_id.map(str::to_string);
+    }
     let (active_start_ts, active_end_ts) = agent_run_time_bounds(&events, &active_events);
     let active_run_id = active_events
         .iter()
@@ -11461,6 +12072,7 @@ fn agent_state_from_events(
         .collect::<Vec<_>>();
     let timeline = thread_events
         .iter()
+        .filter(|event| !is_agent_queue_event(event))
         .cloned()
         .map(|event| timeline_entry(event, &audits))
         .collect::<Vec<_>>();
@@ -11475,6 +12087,14 @@ fn agent_state_from_events(
         .filter_map(tool_approval_from_audit)
         .collect::<Vec<_>>();
     pending_approvals.reverse();
+    let queued_messages = session_id
+        .map(|session_id| {
+            pending_queued_agent_messages(&thread_events, session_id)
+                .into_iter()
+                .map(|message| message.view)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let latest_answer = thread_events
         .iter()
         .rev()
@@ -11546,7 +12166,10 @@ fn agent_state_from_events(
         && active_events
             .iter()
             .rev()
-            .find(|event| matches!(event.kind, EventKind::TaskStatusChanged))
+            .find(|event| {
+                matches!(event.kind, EventKind::TaskStatusChanged)
+                    && !is_agent_queue_event(event)
+            })
             .is_some_and(|event| {
                 event.summary == "Agent task completed"
                     && event.metadata.get("completion").map(String::as_str) == Some("partial")
@@ -11592,6 +12215,7 @@ fn agent_state_from_events(
         timeline,
         messages,
         pending_approvals,
+        queued_messages,
         latest_answer,
         last_error,
     })
@@ -11626,6 +12250,7 @@ fn empty_agent_state_for_session(session_id: &str) -> AgentState {
         timeline: Vec::new(),
         messages: Vec::new(),
         pending_approvals: Vec::new(),
+        queued_messages: Vec::new(),
         latest_answer: None,
         last_error: None,
     }
@@ -11709,6 +12334,10 @@ fn apply_event_to_agent_session_read_model(
         if let Some(value) = event.metadata.get(key) {
             *target = Some(value.clone());
         }
+    }
+
+    if is_agent_queue_event(event) {
+        apply_queue_event_to_views(&mut model.state.queued_messages, event);
     }
 
     if is_agent_run_start_event(event) {
@@ -11925,6 +12554,7 @@ fn agent_state_from_read_model(
         .or(state.session_name);
     state.timeline = history_events
         .iter()
+        .filter(|event| !is_agent_queue_event(event))
         .cloned()
         .map(|event| timeline_entry(event, &audits))
         .collect();
@@ -12283,15 +12913,14 @@ fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Result<usize, St
         append_event(
             store,
             &phase16_task_id(),
-            EventKind::Error,
-            "Agent task failed",
+            EventKind::TaskStatusChanged,
+            "Agent task completed",
             metadata_with_context(
                 [
-                    (
-                        "error".to_string(),
-                        "Cindx closed before this run finished. Retry to continue.".to_string(),
-                    ),
-                    ("failure_code".to_string(), "run_interrupted".to_string()),
+                    ("completion".to_string(), "partial".to_string()),
+                    ("continuation_available".to_string(), "true".to_string()),
+                    ("stop_reason".to_string(), "app_restarted".to_string()),
+                    ("recovery_code".to_string(), "run_interrupted".to_string()),
                 ]
                 .into_iter()
                 .collect(),
@@ -12372,7 +13001,9 @@ fn agent_status_from_events(
     if let Some(status_event) = events
         .iter()
         .rev()
-        .find(|event| matches!(event.kind, EventKind::TaskStatusChanged))
+        .find(|event| {
+            matches!(event.kind, EventKind::TaskStatusChanged) && !is_agent_queue_event(event)
+        })
     {
         match status_event.summary.as_str() {
             "Agent task cancelled" => return "cancelled".to_string(),
@@ -18759,7 +19390,10 @@ fn metadata_with_context(mut metadata: Metadata, context: &Metadata) -> Metadata
 }
 
 fn agent_run_context_from_events(events: &[Event]) -> AgentRunContext {
-    let start = events.iter().find(|event| is_agent_run_start_event(event));
+    let start = events
+        .iter()
+        .find(|event| is_agent_run_start_event(event))
+        .or_else(|| events.iter().find(|event| event.metadata.contains_key("session_id")));
     AgentRunContext {
         project_id: start.and_then(|event| event.metadata.get("project_id").cloned()),
         project_name: start.and_then(|event| event.metadata.get("project_name").cloned()),
@@ -23646,7 +24280,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_recovery_fails_only_unfinished_agent_runs() {
+    fn startup_recovery_preserves_unfinished_agent_runs_as_continuations() {
         let mut store = SqliteStore::in_memory().expect("store should open");
         for (session_id, run_id) in [("session-a", "run-a"), ("session-b", "run-b")] {
             append_event(
@@ -23688,16 +24322,345 @@ mod tests {
             .expect("interrupted state should load");
 
         assert_eq!(completed.status, "completed");
-        assert_eq!(interrupted.status, "failed");
+        assert_eq!(interrupted.status, "completed");
         assert!(interrupted.can_retry);
-        assert!(interrupted
-            .last_error
-            .as_deref()
-            .is_some_and(|error| error.contains("closed before this run finished")));
+        assert!(interrupted.can_continue);
+        assert!(interrupted.last_error.is_none());
         assert_eq!(
             reconcile_interrupted_agent_runs(&mut store).expect("recovery should be idempotent"),
             0
         );
+    }
+
+    #[test]
+    fn queued_agent_messages_are_durable_ordered_and_session_scoped() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let context_a = [("session_id".to_string(), "session-a".to_string())]
+            .into_iter()
+            .collect::<Metadata>();
+        let context_b = [("session_id".to_string(), "session-b".to_string())]
+            .into_iter()
+            .collect::<Metadata>();
+        let payload = |prompt: &str| QueuedAgentMessagePayload {
+            prompt: prompt.to_string(),
+            attachments: Vec::new(),
+            effort: "auto".to_string(),
+            current_time: "now".to_string(),
+        };
+        let first = payload("first");
+        let second = payload("second");
+        let other = payload("other session");
+        append_agent_queue_event(
+            &mut store,
+            &context_a,
+            "enqueue",
+            "queue-a-1",
+            "queue",
+            10,
+            Some(&first),
+        )
+        .expect("first message should queue");
+        append_agent_queue_event(
+            &mut store,
+            &context_a,
+            "enqueue",
+            "queue-a-2",
+            "queue",
+            20,
+            Some(&second),
+        )
+        .expect("second message should queue");
+        append_agent_queue_event(
+            &mut store,
+            &context_b,
+            "enqueue",
+            "queue-b-1",
+            "queue",
+            5,
+            Some(&other),
+        )
+        .expect("other session message should queue");
+        append_agent_queue_event(
+            &mut store,
+            &context_a,
+            "steer",
+            "queue-a-2",
+            "steer",
+            20,
+            None,
+        )
+        .expect("second message should steer");
+
+        let events = store
+            .list_by_task(&phase16_task_id())
+            .expect("queue events should load");
+        let pending = pending_queued_agent_messages(&events, "session-a");
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].view.id, "queue-a-2");
+        assert_eq!(pending[0].view.mode, "steer");
+        assert_eq!(pending[1].view.id, "queue-a-1");
+
+        let state = agent_state_for_session(&store, None, Some("session-a"))
+            .expect("queued state should load");
+        assert_eq!(state.session_id.as_deref(), Some("session-a"));
+        assert_eq!(state.status, "idle");
+        assert_eq!(state.queued_messages.len(), 2);
+        assert!(state.timeline.is_empty());
+        let edited = payload("first edited");
+        append_agent_queue_event(
+            &mut store,
+            &context_a,
+            "edit",
+            "queue-a-1",
+            "queue",
+            10,
+            Some(&edited),
+        )
+        .expect("first message should edit");
+        append_agent_queue_event(
+            &mut store,
+            &context_a,
+            "delete",
+            "queue-a-2",
+            "steer",
+            20,
+            None,
+        )
+        .expect("steered message should delete");
+        let events = store
+            .list_by_task(&phase16_task_id())
+            .expect("edited queue events should load");
+        let remaining = pending_queued_agent_messages(&events, "session-a");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].view.prompt, "first edited");
+        assert_eq!(
+            agent_state_for_session(&store, None, Some("session-b"))
+                .expect("other queued state should load")
+                .queued_messages
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn queue_events_do_not_change_a_terminal_agent_status() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let context = [
+            ("session_id".to_string(), "session-a".to_string()),
+            ("agent_run_id".to_string(), "run-a".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task started",
+            metadata_with_context(
+                [("prompt".to_string(), "first task".to_string())]
+                    .into_iter()
+                    .collect(),
+                &context,
+            ),
+        )
+        .expect("run should start");
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task completed",
+            context.clone(),
+        )
+        .expect("run should complete");
+        let queued = QueuedAgentMessagePayload {
+            prompt: "next task".to_string(),
+            attachments: Vec::new(),
+            effort: "auto".to_string(),
+            current_time: "now".to_string(),
+        };
+        append_agent_queue_event(
+            &mut store,
+            &context,
+            "enqueue",
+            "queue-next",
+            "queue",
+            20,
+            Some(&queued),
+        )
+        .expect("next task should queue");
+
+        let state = agent_state_for_session(&store, None, Some("session-a"))
+            .expect("terminal queue state should load");
+        assert_eq!(state.status, "completed");
+        assert_eq!(state.queued_messages.len(), 1);
+        assert_eq!(state.timeline.len(), 2);
+    }
+
+    #[test]
+    fn queued_messages_preserve_a_permission_waiting_run() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let context = [
+            ("session_id".to_string(), "session-a".to_string()),
+            ("agent_run_id".to_string(), "run-a".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task started",
+            metadata_with_context(
+                [("prompt".to_string(), "inspect files".to_string())]
+                    .into_iter()
+                    .collect(),
+                &context,
+            ),
+        )
+        .expect("run should start");
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task waiting for permission",
+            context.clone(),
+        )
+        .expect("run should wait");
+        let queued = QueuedAgentMessagePayload {
+            prompt: "follow-up".to_string(),
+            attachments: Vec::new(),
+            effort: "auto".to_string(),
+            current_time: "now".to_string(),
+        };
+        append_agent_queue_event(
+            &mut store,
+            &context,
+            "enqueue",
+            "queue-next",
+            "queue",
+            20,
+            Some(&queued),
+        )
+        .expect("follow-up should queue");
+
+        let state = agent_state_for_session(&store, None, Some("session-a"))
+            .expect("waiting queue state should load");
+        assert_eq!(state.status, "waiting_for_permission");
+        assert!(state.can_cancel);
+        assert_eq!(state.queued_messages.len(), 1);
+    }
+
+    #[test]
+    fn queued_agent_message_start_and_restore_are_replay_safe() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let context = [("session_id".to_string(), "session-a".to_string())]
+            .into_iter()
+            .collect::<Metadata>();
+        let payload = QueuedAgentMessagePayload {
+            prompt: "continue safely".to_string(),
+            attachments: Vec::new(),
+            effort: "pro".to_string(),
+            current_time: "now".to_string(),
+        };
+        append_agent_queue_event(
+            &mut store,
+            &context,
+            "enqueue",
+            "queue-a",
+            "queue",
+            10,
+            Some(&payload),
+        )
+        .expect("message should queue");
+        append_agent_queue_event(
+            &mut store,
+            &context,
+            "start",
+            "queue-a",
+            "queue",
+            10,
+            None,
+        )
+        .expect("message should start");
+        let events = store
+            .list_by_task(&phase16_task_id())
+            .expect("queue events should load");
+        assert!(pending_queued_agent_messages(&events, "session-a").is_empty());
+
+        append_agent_queue_event(
+            &mut store,
+            &context,
+            "restore",
+            "queue-a",
+            "queue",
+            10,
+            Some(&payload),
+        )
+        .expect("message should restore");
+        let events = store
+            .list_by_task(&phase16_task_id())
+            .expect("restored queue events should load");
+        let restored = pending_queued_agent_messages(&events, "session-a");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].view.prompt, "continue safely");
+        assert_eq!(restored[0].view.effort, "pro");
+    }
+
+    #[test]
+    fn queued_agent_messages_update_the_incremental_session_read_model() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let session_id = "session-queue-read-model";
+        let context = [("session_id".to_string(), session_id.to_string())]
+            .into_iter()
+            .collect::<Metadata>();
+        let mut payload = QueuedAgentMessagePayload {
+            prompt: "first version".to_string(),
+            attachments: Vec::new(),
+            effort: "auto".to_string(),
+            current_time: "now".to_string(),
+        };
+        append_agent_queue_event(
+            &mut store,
+            &context,
+            "enqueue",
+            "queue-a",
+            "queue",
+            10,
+            Some(&payload),
+        )
+        .expect("message should queue");
+        let initial = load_agent_session_read_model(&mut store, session_id)
+            .expect("initial queue read model should build");
+        assert_eq!(initial.state.queued_messages.len(), 1);
+
+        payload.prompt = "edited version".to_string();
+        append_agent_queue_event(
+            &mut store,
+            &context,
+            "edit",
+            "queue-a",
+            "queue",
+            10,
+            Some(&payload),
+        )
+        .expect("message should edit");
+        let edited = load_agent_session_read_model(&mut store, session_id)
+            .expect("queue edit should apply incrementally");
+        assert_eq!(edited.state.queued_messages[0].prompt, "edited version");
+
+        append_agent_queue_event(
+            &mut store,
+            &context,
+            "start",
+            "queue-a",
+            "queue",
+            10,
+            None,
+        )
+        .expect("message should start");
+        let started = load_agent_session_read_model(&mut store, session_id)
+            .expect("queue start should apply incrementally");
+        assert!(started.state.queued_messages.is_empty());
     }
 
     #[test]

@@ -48,6 +48,7 @@ import {
 import { Inspector, type InspectorTab } from "./components/Inspector";
 import { Composer } from "./components/Composer";
 import { KnowledgeGraph } from "./components/KnowledgeGraph";
+import { QueuedMessages } from "./components/QueuedMessages";
 import { Sidebar, type WorkspaceView } from "./components/Sidebar";
 import {
   LiveSessionThread,
@@ -67,6 +68,7 @@ import {
   ContextState,
   createProject,
   createSession,
+  deleteQueuedAgentMessage,
   deleteProject,
   deleteSession,
   DESKTOP_VERSION,
@@ -87,6 +89,7 @@ import {
   getSidecarState,
   getWebSearchConfig,
   generateSessionTitle,
+  editQueuedAgentMessage,
   getMcpState,
   getSkillState,
   installSkillPackage,
@@ -120,6 +123,7 @@ import {
   renameSession,
   restoreSession,
   runAgentTask,
+  runNextQueuedAgentMessage,
   runBrowserTool,
   runTool,
   pickWorkspaceFolder,
@@ -139,9 +143,11 @@ import {
   selectProject,
   selectSession,
   setSessionEffort,
+  steerQueuedAgentMessage,
   SidecarState,
   WebSearchConfigState,
-  stageAgentAttachments
+  stageAgentAttachments,
+  queueAgentMessage
 } from "./tauri";
 
 const appIconUrl = new URL("../src-tauri/icons/icon.png", import.meta.url).href;
@@ -604,6 +610,7 @@ export function App() {
   });
   const [projectSessionBusy, setProjectSessionBusy] = useState(false);
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(() => new Set());
+  const [queuedMessageBusyId, setQueuedMessageBusyId] = useState<string | null>(null);
   const [sessionStatusOverrides, setSessionStatusOverrides] = useState<Record<string, string>>({});
   const activeSessionIdRef = useRef<string | null>(null);
   const agentStateRevisionsRef = useRef<
@@ -620,6 +627,8 @@ export function App() {
   const sessionRefreshRequestRef = useRef(0);
   const trackedSessionTaskIdsRef = useRef<Set<string>>(new Set());
   const optimisticUserMessagesRef = useRef<Map<string, ChatMessageView>>(new Map());
+  const queueDrainingSessionIdsRef = useRef<Set<string>>(new Set());
+  const suppressQueueDrainSessionIdsRef = useRef<Set<string>>(new Set());
   const startupWindowRevealRequestedRef = useRef(false);
   const skillPackageInputRef = useRef<HTMLInputElement>(null);
   const settingsToastTimerRef = useRef<number | null>(null);
@@ -911,6 +920,7 @@ export function App() {
   const loadOlderAgentHistory = useCallback(async () => {
     const sessionId = activeAgentState?.sessionId;
     if (
+      !activeAgentState ||
       !sessionId ||
       !activeAgentState.hasOlderHistory ||
       activeAgentState.oldestSequence <= 0 ||
@@ -2154,6 +2164,120 @@ export function App() {
     );
   }
 
+  function applyAgentStateForSession(sessionId: string, next: AgentState) {
+    agentStateRevisionsRef.current.set(sessionId, {
+      eventCount: next.eventCount,
+      latestSequence: next.latestSequence,
+      latestTimestampMs: 0
+    });
+    rememberSessionState(agentStateCacheRef.current, sessionId, next);
+    acknowledgeOptimisticUserMessage(sessionId, next.messages);
+    updateSessionStatus(sessionId, next.status, next.canContinue);
+    if (activeSessionIdRef.current === sessionId) {
+      setAgentState((current) => mergeAgentStateSnapshot(current, next));
+    }
+  }
+
+  async function drainQueuedMessages(sessionId: string) {
+    if (
+      queueDrainingSessionIdsRef.current.has(sessionId) ||
+      suppressQueueDrainSessionIdsRef.current.has(sessionId)
+    ) {
+      return;
+    }
+    queueDrainingSessionIdsRef.current.add(sessionId);
+    markSessionBusy(sessionId, true);
+    try {
+      while (!suppressQueueDrainSessionIdsRef.current.has(sessionId)) {
+        markSessionTaskStarted(sessionId);
+        const next = await runNextQueuedAgentMessage(sessionId);
+        if (!next) {
+          trackedSessionTaskIdsRef.current.delete(sessionId);
+          break;
+        }
+        applyAgentStateForSession(sessionId, next);
+        if (activeSessionIdRef.current === sessionId) {
+          setComposerError(next.lastError);
+          setStreamResetVersion((version) => version + 1);
+        }
+        if (
+          next.queuedMessages.length === 0 ||
+          next.status !== "completed" ||
+          next.canContinue ||
+          next.pendingApprovals.length > 0 ||
+          Boolean(next.lastError)
+        ) {
+          break;
+        }
+      }
+      setProjectSessionState(await getProjectSessionState());
+      await refreshAgentTrace(true, sessionId);
+    } catch (error) {
+      updateSessionStatus(sessionId, "failed");
+      const message = error instanceof Error ? error.message : String(error);
+      try {
+        const failedState = await getAgentState(sessionId);
+        applyAgentStateForSession(sessionId, failedState);
+      } catch {
+        // Preserve the original queue error when a follow-up state read also fails.
+      }
+      if (activeSessionIdRef.current === sessionId) setComposerError(message);
+    } finally {
+      queueDrainingSessionIdsRef.current.delete(sessionId);
+      markSessionBusy(sessionId, false);
+      void refreshPermissionReviews().catch(() => {});
+    }
+  }
+
+  async function handleEditQueuedMessage(queueId: string, prompt: string) {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
+    setQueuedMessageBusyId(queueId);
+    setComposerError(null);
+    try {
+      const next = await editQueuedAgentMessage(sessionId, queueId, prompt);
+      applyAgentStateForSession(sessionId, next);
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
+      throw error;
+    } finally {
+      setQueuedMessageBusyId(null);
+    }
+  }
+
+  async function handleDeleteQueuedMessage(queueId: string) {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
+    setQueuedMessageBusyId(queueId);
+    setComposerError(null);
+    try {
+      const next = await deleteQueuedAgentMessage(sessionId, queueId);
+      applyAgentStateForSession(sessionId, next);
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setQueuedMessageBusyId(null);
+    }
+  }
+
+  async function handleSteerQueuedMessage(queueId: string) {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
+    const runCommandActive = busySessionIds.has(sessionId);
+    suppressQueueDrainSessionIdsRef.current.delete(sessionId);
+    setQueuedMessageBusyId(queueId);
+    setComposerError(null);
+    try {
+      const next = await steerQueuedAgentMessage(sessionId, queueId);
+      applyAgentStateForSession(sessionId, next);
+      if (!runCommandActive) void drainQueuedMessages(sessionId);
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setQueuedMessageBusyId(null);
+    }
+  }
+
   async function handleSendPrompt(value: string) {
     const nextPrompt = value.trim();
     const sessionId = activeSession?.id;
@@ -2161,13 +2285,36 @@ export function App() {
     if (
       (!nextPrompt && attachments.length === 0) ||
       !sessionId ||
-      busySessionIds.has(sessionId) ||
       attachmentBusySessionIds.has(sessionId)
     ) {
       return;
     }
     const visiblePrompt =
       nextPrompt || `Review attached ${attachments.map((attachment) => attachment.name).join(", ")}`;
+    const sessionAgentState =
+      activeAgentState?.sessionId === sessionId
+        ? activeAgentState
+        : agentStateCacheRef.current.get(sessionId);
+    if (
+      busySessionIds.has(sessionId) ||
+      sessionAgentState?.status === "running" ||
+      sessionAgentState?.status === "waiting_for_permission" ||
+      sessionAgentState?.canCancel
+    ) {
+      setComposerError(null);
+      try {
+        const next = await queueAgentMessage(nextPrompt, sessionId, attachments, agentEffort);
+        setAttachmentDrafts((current) => ({ ...current, [sessionId]: [] }));
+        applyAgentStateForSession(sessionId, next);
+      } catch (error) {
+        setComposerDrafts((current) => ({
+          ...current,
+          [sessionId]: current[sessionId]?.trim() ? current[sessionId] : value
+        }));
+        setComposerError(error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
     const automaticSessionTitle =
       activeSession &&
       isAutoSessionName(activeSession.name)
@@ -2227,9 +2374,11 @@ export function App() {
         messages: current.messages
       };
     });
+    let completedState: AgentState | null = null;
     try {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       const next = await runAgentTask(nextPrompt, sessionId, attachments, agentEffort);
+      completedState = next;
       acknowledgeOptimisticUserMessage(sessionId, next.messages);
       updateSessionStatus(sessionId, next.status, next.canContinue);
       if (activeSessionIdRef.current === sessionId) {
@@ -2265,12 +2414,24 @@ export function App() {
     } finally {
       markSessionBusy(sessionId, false);
       void refreshPermissionReviews().catch(() => {});
+      const suppressDrain = suppressQueueDrainSessionIdsRef.current.delete(sessionId);
+      if (
+        !suppressDrain &&
+        completedState &&
+        completedState.queuedMessages.length > 0 &&
+        !completedState.canContinue &&
+        !completedState.lastError &&
+        (completedState.status === "completed" || completedState.status === "cancelled")
+      ) {
+        void drainQueuedMessages(sessionId);
+      }
     }
   }
 
   async function handleCancelAgentTask() {
     const sessionId = activeSession?.id;
     if (!sessionId) return;
+    suppressQueueDrainSessionIdsRef.current.add(sessionId);
     setStreamResetVersion((version) => version + 1);
     setComposerError(null);
     try {
@@ -2295,13 +2456,12 @@ export function App() {
     setComposerError(null);
     markSessionTaskStarted(sessionId);
     markSessionBusy(sessionId, true);
+    let completedState: AgentState | null = null;
     try {
       const next = await retryAgentTask(sessionId);
-      updateSessionStatus(sessionId, next.status, next.canContinue);
-      if (activeSessionIdRef.current === sessionId) {
-        setAgentState((current) => mergeAgentStateSnapshot(current, next));
-        setComposerError(next.lastError);
-      }
+      completedState = next;
+      applyAgentStateForSession(sessionId, next);
+      if (activeSessionIdRef.current === sessionId) setComposerError(next.lastError);
       await refreshAgentTrace(true, sessionId);
     } catch (error) {
       updateSessionStatus(sessionId, "failed");
@@ -2310,6 +2470,14 @@ export function App() {
       }
     } finally {
       markSessionBusy(sessionId, false);
+      if (
+        completedState?.status === "completed" &&
+        !completedState.canContinue &&
+        !completedState.lastError &&
+        completedState.queuedMessages.length > 0
+      ) {
+        void drainQueuedMessages(sessionId);
+      }
     }
   }
 
@@ -2503,13 +2671,12 @@ export function App() {
           : current
       );
     }
+    let completedState: AgentState | null = null;
     try {
       const next = await resolveAgentPermission(requestId, decision, sessionId);
-      updateSessionStatus(sessionId, next.status, next.canContinue);
-      if (activeSessionIdRef.current === sessionId) {
-        setAgentState((current) => mergeAgentStateSnapshot(current, next));
-        setComposerError(next.lastError);
-      }
+      completedState = next;
+      applyAgentStateForSession(sessionId, next);
+      if (activeSessionIdRef.current === sessionId) setComposerError(next.lastError);
       await refreshAgentTrace(true, sessionId);
     } catch (error) {
       updateSessionStatus(sessionId, "failed");
@@ -2521,6 +2688,14 @@ export function App() {
     } finally {
       markSessionBusy(sessionId, false);
       void refreshPermissionReviews().catch(() => {});
+      if (
+        completedState?.status === "completed" &&
+        !completedState.canContinue &&
+        !completedState.lastError &&
+        completedState.queuedMessages.length > 0
+      ) {
+        void drainQueuedMessages(sessionId);
+      }
     }
   }
 
@@ -2569,6 +2744,28 @@ export function App() {
     window.addEventListener("pointerup", handleUp);
     window.addEventListener("pointercancel", handleUp);
   }
+
+  useEffect(() => {
+    const sessionId = activeAgentState?.sessionId;
+    if (
+      !sessionId ||
+      activeSessionBusy ||
+      activeAgentState.queuedMessages.length === 0 ||
+      activeAgentState.canContinue ||
+      activeAgentState.pendingApprovals.length > 0 ||
+      !["idle", "completed"].includes(activeAgentState.status)
+    ) {
+      return;
+    }
+    void drainQueuedMessages(sessionId);
+  }, [
+    activeAgentState?.canContinue,
+    activeAgentState?.pendingApprovals.length,
+    activeAgentState?.queuedMessages.length,
+    activeAgentState?.sessionId,
+    activeAgentState?.status,
+    activeSessionBusy
+  ]);
 
   return (
     <main
@@ -2729,31 +2926,40 @@ export function App() {
               onLinkOpenError={setComposerError}
             />
 
-            <Composer
-              value={composerDraft}
-              working={agentWorking}
-              canStop={agentCanCancel}
-              canRetry={agentCanRetry}
-              canContinue={agentCanContinue}
-              error={composerError}
-              focusRequest={composerFocusRequest}
-              pendingApproval={agentApprovals[0] ?? null}
-              permissionBusy={activeSessionBusy}
-              attachments={composerAttachments}
-              attachmentBusy={attachmentBusy}
-              effort={agentEffort}
-              onChange={setActiveComposerDraft}
-              onEffortChange={(effort) => void handleSessionEffortChange(effort)}
-              onSend={(value) => void handleSendPrompt(value)}
-              onPickAttachments={(files) => void handlePickAttachments(files)}
-              onRemoveAttachment={handleRemoveAttachment}
-              onCancel={() => void handleCancelAgentTask()}
-              onRetry={() => void handleRetryAgentTask()}
-              onDismissError={() => setComposerError(null)}
-              onResolvePermission={(requestId, decision) =>
-                void handleResolveAgentPermission(requestId, decision)
-              }
-            />
+            <div className="composer-stack">
+              <QueuedMessages
+                messages={activeAgentState?.queuedMessages ?? []}
+                busyId={queuedMessageBusyId}
+                onSteer={handleSteerQueuedMessage}
+                onEdit={handleEditQueuedMessage}
+                onDelete={handleDeleteQueuedMessage}
+              />
+              <Composer
+                value={composerDraft}
+                working={agentWorking}
+                canStop={agentCanCancel}
+                canRetry={agentCanRetry}
+                canContinue={agentCanContinue}
+                error={composerError}
+                focusRequest={composerFocusRequest}
+                pendingApproval={agentApprovals[0] ?? null}
+                permissionBusy={activeSessionBusy}
+                attachments={composerAttachments}
+                attachmentBusy={attachmentBusy}
+                effort={agentEffort}
+                onChange={setActiveComposerDraft}
+                onEffortChange={(effort) => void handleSessionEffortChange(effort)}
+                onSend={(value) => void handleSendPrompt(value)}
+                onPickAttachments={(files) => void handlePickAttachments(files)}
+                onRemoveAttachment={handleRemoveAttachment}
+                onCancel={() => void handleCancelAgentTask()}
+                onRetry={() => void handleRetryAgentTask()}
+                onDismissError={() => setComposerError(null)}
+                onResolvePermission={(requestId, decision) =>
+                  void handleResolveAgentPermission(requestId, decision)
+                }
+              />
+            </div>
           </>
         ) : (
           <section

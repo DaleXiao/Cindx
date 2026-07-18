@@ -21,6 +21,7 @@ const capability = parseJson("apps/desktop/src-tauri/capabilities/default.json")
 const appSource = read("apps/desktop/src/App.tsx");
 const sessionThreadSource = read("apps/desktop/src/components/SessionThread.tsx");
 const composerSource = read("apps/desktop/src/components/Composer.tsx");
+const queuedMessagesSource = read("apps/desktop/src/components/QueuedMessages.tsx");
 const inspectorSource = read("apps/desktop/src/components/Inspector.tsx");
 const sidebarSource = read("apps/desktop/src/components/Sidebar.tsx");
 const disclosureTriangleSource = read(
@@ -650,9 +651,11 @@ assert(
   "Composer must grow with its content before paint and stop at a bounded height"
 );
 assert(
-  composerSource.includes('if (working || canStop) return;') &&
+  !composerSource.includes('if (working || canStop) return;') &&
+    composerSource.includes('aria-label={working || canStop ? "Queue message" : "Send message"}') &&
+    composerSource.includes('className="composer-stop-button"') &&
     !composerSource.includes('disabled={working || canStop}\n              aria-keyshortcuts="Enter"'),
-  "Composer must remain editable while the agent runs and require an explicit stop before sending"
+  "Composer must remain editable and queue new input while preserving a separate stop action"
 );
 assert(
   composerSource.includes("onCompositionStart") &&
@@ -691,7 +694,7 @@ assert(
 assert(
   composerSource.includes("const restoreKeyboardFocus = event.detail === 0") &&
     composerSource.includes("focus({ preventScroll: true })") &&
-    /\.composer-toolbar-actions \{[\s\S]*?display: grid;[\s\S]*?width: 148px;[\s\S]*?grid-template-columns: 104px 36px;/.test(
+    /\.composer-toolbar-actions \{[\s\S]*?display: grid;[\s\S]*?width: 188px;[\s\S]*?grid-template-columns: 32px 104px 36px;/.test(
       styles
     ) &&
     /\.composer-primary-button \{[\s\S]*?width: 36px;[\s\S]*?min-width: 36px;[\s\S]*?max-width: 36px;/.test(
@@ -879,7 +882,7 @@ assert(
     composerSource.includes("Send") &&
     !composerSource.includes("retryMode") &&
     !composerSource.includes("agent-control-button"),
-  "Send and stop must share the primary control while errors expose retry and dismiss actions"
+  "Composer must expose queue-safe send, stop, retry, continue, and dismiss actions"
 );
 assert(
   rustLib.includes("pause_agent_loop_for_control_stop") &&
@@ -887,8 +890,10 @@ assert(
     rustLib.includes("MAX_AGENT_MODEL_TRANSPORT_ATTEMPTS") &&
     rustLib.includes("is_transient_model_transport_error") &&
     rustLib.includes('"continuation_available".to_string()') &&
+    rustLib.includes('"stop_reason".to_string(), "app_restarted".to_string()') &&
+    rustLib.includes("startup_recovery_preserves_unfinished_agent_runs_as_continuations") &&
     tauriBridge.includes("canContinue: boolean"),
-  "Safety-budget stops must retain resumable state and expose a continuation action"
+  "Safety stops and app restarts must retain resumable state and expose a continuation action"
 );
 assert(
   composerSource.includes('className="composer-toolbar"') &&
@@ -896,9 +901,34 @@ assert(
     styles.includes("width: 36px;") &&
     styles.includes("height: 36px;") &&
     styles.includes("border-radius: var(--radius-round);") &&
-    /\.composer-primary-button\.stop:hover \{[\s\S]*?background: #e05b5b;[\s\S]*?filter: none;/.test(styles) &&
-    styles.includes('.composer-primary-button.stop:hover .composer-working-ring'),
-  "Composer controls must share a bottom toolbar with a circular primary action"
+    /\.composer-stop-button:hover:not\(:disabled\) \{[\s\S]*?background: #e05b5b;[\s\S]*?filter: none;/.test(styles) &&
+    styles.includes('.composer-stop-button:hover .composer-working-ring'),
+  "Composer controls must keep fixed send and stop slots in the bottom toolbar"
+);
+assert(
+  rustLib.includes("struct QueuedAgentMessageView") &&
+    rustLib.includes("fn pending_queued_agent_messages(") &&
+    rustLib.includes("fn append_agent_queue_event(") &&
+    rustLib.includes("fn run_next_queued_agent_message_blocking(") &&
+    rustLib.includes("queued_agent_messages_are_durable_ordered_and_session_scoped") &&
+    rustLib.includes("queued_agent_message_start_and_restore_are_replay_safe") &&
+    rustLib.includes("queued_agent_messages_update_the_incremental_session_read_model") &&
+    rustLib.includes("queue_events_do_not_change_a_terminal_agent_status") &&
+    rustLib.includes("queued_messages_preserve_a_permission_waiting_run") &&
+    tauriBridge.includes("export type QueuedAgentMessage") &&
+    tauriBridge.includes("export async function queueAgentMessage(") &&
+    tauriBridge.includes("export async function runNextQueuedAgentMessage(") &&
+    appSource.includes("async function drainQueuedMessages(sessionId: string)") &&
+    appSource.includes("suppressQueueDrainSessionIdsRef") &&
+    appSource.includes("<QueuedMessages") &&
+    queuedMessagesSource.includes('role="menuitem"') &&
+    queuedMessagesSource.includes("onSteer") &&
+    queuedMessagesSource.includes("onEdit") &&
+    queuedMessagesSource.includes("onDelete") &&
+    styles.includes(".queued-message-stack") &&
+    styles.includes("bottom: calc(100% - 12px)") &&
+    styles.includes(".composer-stack > .composer"),
+  "Session-scoped queued messages must persist, drain safely, and expose Steer, Edit, and Delete"
 );
 assert(sidebarSource.includes("session-branch"), "Tasks must be nested below the active project");
 assert(
@@ -1080,8 +1110,9 @@ assert(
     sidebarSource.includes('title="Create project"') &&
     inspectorSource.includes('aria-label={`Preview ${artifactName(displayPath)}${') &&
     inspectorSource.includes('title={`Preview ${artifactName(displayPath)}${') &&
-    composerSource.includes('aria-label={canStop ? "Stop agent" : "Send message"}') &&
-    composerSource.includes('title={canStop ? "Stop" : "Send"}'),
+    composerSource.includes('aria-label="Stop agent"') &&
+    composerSource.includes('aria-label={working || canStop ? "Queue message" : "Send message"}') &&
+    composerSource.includes('title={working || canStop ? "Queue" : "Send"}'),
   "Icon-only operations must expose accessible hover labels"
 );
 assert(
