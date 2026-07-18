@@ -1,4 +1,5 @@
 import {
+  CalendarClock,
   Check,
   ChevronRight,
   FolderOpen,
@@ -85,7 +86,7 @@ function SessionStatusIndicator({ status, active }: { status: string; active: bo
   );
 }
 
-export type WorkspaceView = "timeline" | "settings";
+export type WorkspaceView = "timeline" | "schedule" | "settings";
 
 type SidebarProps = {
   activeView: WorkspaceView;
@@ -377,6 +378,20 @@ export function Sidebar({
           />
         </label>
       )}
+
+      <nav className="sidebar-primary-nav" aria-label="Workspace views">
+        <button
+          className={`nav-item sidebar-schedule-item ${
+            activeView === "schedule" ? "active" : ""
+          }`}
+          type="button"
+          aria-current={activeView === "schedule" ? "page" : undefined}
+          onClick={() => onViewChange("schedule")}
+        >
+          <CalendarClock aria-hidden="true" />
+          <span>Schedule</span>
+        </button>
+      </nav>
 
       <section className="project-tree" aria-label="Project tree">
         <div className="nav-heading-row">

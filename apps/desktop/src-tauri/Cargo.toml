@@ -21,6 +21,8 @@ agent-runtime = { path = "../../../crates/agent-runtime" }
 agent-skills = { path = "../../../crates/agent-skills" }
 agent-storage = { path = "../../../crates/agent-storage" }
 base64 = "0.22"
+chrono = "0.4"
+chrono-tz = "0.10"
 model-provider = { path = "../../../crates/model-provider" }
 orchestrator = { path = "../../../crates/orchestrator" }
 serde = { version = "1", features = ["derive"] }

@@ -81,8 +81,13 @@ use tools::{
 };
 
 mod run_control;
+mod schedule;
 
 use run_control::{AgentRunControl, RunBudget, RunControlSnapshot};
+use schedule::{
+    initial_next_run_at_ms, next_occurrence_after_ms, timestamp_ms_from_local, ScheduleCadence,
+    ScheduleConfig, ScheduleRecord, ScheduleRunRecord,
+};
 
 const PHASE3_TASK_ID: &str = "phase-3-demo";
 const PHASE4_TASK_ID: &str = "phase-4-demo";
@@ -125,6 +130,12 @@ const CONTEXT_RECENT_MAX_MESSAGES: usize = 32;
 const CONTEXT_RESTORE_MAX_CHARS: usize = 32_000;
 const CONTEXT_MEMORY_MAX_ITEMS: usize = 12;
 const WORKSPACE_KNOWLEDGE_CACHE_TTL: Duration = Duration::from_secs(30);
+const SCHEDULE_POLL_INTERVAL: Duration = Duration::from_secs(10);
+const SCHEDULE_MISSED_GRACE_MS: u64 = 90_000;
+const SCHEDULE_DISPATCH_RETRY_MS: u64 = 60_000;
+const SCHEDULE_MAX_DISPATCH_ATTEMPTS: u32 = 3;
+const SCHEDULE_MAX_NAME_CHARS: usize = 80;
+const SCHEDULE_MAX_PROMPT_CHARS: usize = 32_000;
 const EVENT_REDACTION_MARKER_FILE: &str = "events-redaction-v1.complete";
 const OPENAI_DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
 const DASHSCOPE_DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-v4";
@@ -153,10 +164,13 @@ struct AppState {
     sidecar_config: Mutex<SidecarConfig>,
     web_search_config: Mutex<WebSearchConfig>,
     project_session_config: Mutex<ProjectSessionConfig>,
+    schedule_config: Mutex<ScheduleConfig>,
+    schedule_last_error: Mutex<Option<String>>,
     mcp_catalog: Mutex<McpCatalogService>,
     suspended_agent_runs: Mutex<BTreeMap<String, SuspendedAgentRun>>,
     agent_run_controls: Mutex<BTreeMap<String, Arc<AgentRunControl>>>,
     prompt_evaluation_controls: Mutex<BTreeMap<String, Arc<AgentRunControl>>>,
+    queue_dispatching_sessions: Mutex<BTreeSet<String>>,
     workspace_knowledge_cache: Mutex<BTreeMap<String, WorkspaceKnowledgeCacheEntry>>,
     allow_exit: AtomicBool,
     quit_prompt_active: AtomicBool,
@@ -653,6 +667,35 @@ struct ProjectSessionState {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ScheduleStateView {
+    schedules: Vec<ScheduleView>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScheduleView {
+    id: String,
+    name: String,
+    project_id: String,
+    project_name: String,
+    session_id: String,
+    session_name: String,
+    prompt: String,
+    effort: String,
+    timezone: String,
+    cadence: String,
+    anchor_at_ms: u64,
+    catch_up: bool,
+    enabled: bool,
+    next_run_at_ms: Option<u64>,
+    created_at_ms: u64,
+    updated_at_ms: u64,
+    runs: Vec<ScheduleRunRecord>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ProjectView {
     id: String,
     name: String,
@@ -698,6 +741,35 @@ struct CreateProjectInput {
 struct CreateSessionInput {
     name: String,
     project_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpsertScheduleInput {
+    id: Option<String>,
+    name: String,
+    project_id: String,
+    session_id: String,
+    prompt: String,
+    effort: String,
+    timezone: String,
+    cadence: String,
+    anchor_local: String,
+    catch_up: bool,
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScheduleActionInput {
+    schedule_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetScheduleEnabledInput {
+    schedule_id: String,
+    enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2096,6 +2168,944 @@ fn get_project_session_state(
         .map_err(|error| format!("project session config lock poisoned: {error}"))?
         .clone();
     Ok(project_session_state(&config, None))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScheduleQueueProgress {
+    status: String,
+    started_at_ms: Option<u64>,
+    finished_at_ms: Option<u64>,
+    error: Option<String>,
+}
+
+#[tauri::command]
+fn get_schedule_state(state: tauri::State<'_, AppState>) -> Result<ScheduleStateView, String> {
+    if let Err(error) = reconcile_schedule_runs(&state) {
+        set_schedule_last_error(&state, Some(error));
+    }
+    schedule_state_view(&state)
+}
+
+#[tauri::command]
+fn upsert_schedule(
+    state: tauri::State<'_, AppState>,
+    input: UpsertScheduleInput,
+) -> Result<ScheduleStateView, String> {
+    let name = input.name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        return Err("schedule name is empty".to_string());
+    }
+    if name.chars().count() > SCHEDULE_MAX_NAME_CHARS {
+        return Err(format!(
+            "schedule name exceeds {SCHEDULE_MAX_NAME_CHARS} characters"
+        ));
+    }
+    let prompt = input.prompt.trim().to_string();
+    if prompt.is_empty() {
+        return Err("schedule prompt is empty".to_string());
+    }
+    if prompt.chars().count() > SCHEDULE_MAX_PROMPT_CHARS {
+        return Err(format!(
+            "schedule prompt exceeds {SCHEDULE_MAX_PROMPT_CHARS} characters"
+        ));
+    }
+    let cadence = ScheduleCadence::parse(&input.cadence)
+        .ok_or_else(|| "schedule cadence is invalid".to_string())?;
+    let timezone = input.timezone.trim().to_string();
+    schedule::parse_timezone(&timezone)?;
+    let anchor_at_ms = timestamp_ms_from_local(&input.anchor_local, &timezone)?;
+    validate_schedule_target(&state, &input.project_id, &input.session_id)?;
+    let now = current_time_millis();
+    let next_run_at_ms = if input.enabled {
+        initial_next_run_at_ms(
+            anchor_at_ms,
+            cadence,
+            &timezone,
+            input.catch_up,
+            now,
+        )?
+    } else {
+        None
+    };
+    if input.enabled && next_run_at_ms.is_none() {
+        return Err("a one-time schedule needs a future start time".to_string());
+    }
+
+    let mut config = state
+        .schedule_config
+        .lock()
+        .map_err(|error| format!("schedule config lock poisoned: {error}"))?;
+    let existing_index = match input.id.as_deref() {
+        Some(id) => Some(
+            config
+                .schedules
+                .iter()
+                .position(|schedule| schedule.id == id)
+                .ok_or_else(|| "schedule not found".to_string())?,
+        ),
+        None => None,
+    };
+    if existing_index
+        .and_then(|index| config.schedules[index].active_run())
+        .is_some()
+    {
+        return Err("cancel the current scheduled run before editing".to_string());
+    }
+    let id = existing_index
+        .map(|index| config.schedules[index].id.clone())
+        .unwrap_or_else(|| {
+            unique_config_id(
+                "schedule",
+                &name,
+                &config
+                    .schedules
+                    .iter()
+                    .map(|schedule| schedule.id.clone())
+                    .collect::<Vec<_>>(),
+            )
+        });
+    let (created_at_ms, runs) = existing_index
+        .map(|index| {
+            (
+                config.schedules[index].created_at_ms,
+                config.schedules[index].runs.clone(),
+            )
+        })
+        .unwrap_or((now, Vec::new()));
+    let record = ScheduleRecord {
+        id,
+        name,
+        project_id: input.project_id,
+        session_id: input.session_id,
+        prompt,
+        effort: AgentEffort::parse(&input.effort).label().to_string(),
+        timezone,
+        cadence,
+        anchor_at_ms,
+        catch_up: input.catch_up,
+        enabled: input.enabled,
+        next_run_at_ms,
+        created_at_ms,
+        updated_at_ms: now,
+        runs,
+    };
+    if let Some(index) = existing_index {
+        config.schedules[index] = record;
+    } else {
+        config.schedules.push(record);
+    }
+    save_schedule_config(&config)?;
+    drop(config);
+    set_schedule_last_error(&state, None);
+    schedule_state_view(&state)
+}
+
+#[tauri::command]
+fn set_schedule_enabled(
+    state: tauri::State<'_, AppState>,
+    input: SetScheduleEnabledInput,
+) -> Result<ScheduleStateView, String> {
+    let _ = reconcile_schedule_runs(&state);
+    let now = current_time_millis();
+    let mut config = state
+        .schedule_config
+        .lock()
+        .map_err(|error| format!("schedule config lock poisoned: {error}"))?;
+    let schedule_index = config
+        .schedules
+        .iter()
+        .position(|schedule| schedule.id == input.schedule_id)
+        .ok_or_else(|| "schedule not found".to_string())?;
+    let schedule = &config.schedules[schedule_index];
+    validate_schedule_target(&state, &schedule.project_id, &schedule.session_id)?;
+    let next_run_at_ms = if input.enabled {
+        initial_next_run_at_ms(
+            schedule.anchor_at_ms,
+            schedule.cadence,
+            &schedule.timezone,
+            schedule.catch_up,
+            now,
+        )?
+    } else {
+        None
+    };
+    if input.enabled && next_run_at_ms.is_none() {
+        return Err("edit the one-time start before enabling this schedule".to_string());
+    }
+    let schedule = &mut config.schedules[schedule_index];
+    schedule.enabled = input.enabled;
+    schedule.next_run_at_ms = next_run_at_ms;
+    schedule.updated_at_ms = now;
+    save_schedule_config(&config)?;
+    drop(config);
+    set_schedule_last_error(&state, None);
+    schedule_state_view(&state)
+}
+
+#[tauri::command]
+fn delete_schedule(
+    state: tauri::State<'_, AppState>,
+    input: ScheduleActionInput,
+) -> Result<ScheduleStateView, String> {
+    let _ = reconcile_schedule_runs(&state);
+    let mut config = state
+        .schedule_config
+        .lock()
+        .map_err(|error| format!("schedule config lock poisoned: {error}"))?;
+    let Some(index) = config
+        .schedules
+        .iter()
+        .position(|schedule| schedule.id == input.schedule_id)
+    else {
+        return Err("schedule not found".to_string());
+    };
+    if config.schedules[index].active_run().is_some() {
+        return Err("cancel the current scheduled run before deleting".to_string());
+    }
+    config.schedules.remove(index);
+    save_schedule_config(&config)?;
+    drop(config);
+    set_schedule_last_error(&state, None);
+    schedule_state_view(&state)
+}
+
+#[tauri::command]
+fn run_schedule_now(
+    app: tauri::AppHandle,
+    input: ScheduleActionInput,
+) -> Result<ScheduleStateView, String> {
+    let state = app.state::<AppState>();
+    let session_id = trigger_schedule_run(
+        &state,
+        &input.schedule_id,
+        "manual",
+        current_time_millis(),
+        false,
+    )?;
+    spawn_schedule_dispatch(app.clone(), session_id);
+    schedule_state_view(&state)
+}
+
+#[tauri::command]
+fn cancel_schedule_run(
+    app: tauri::AppHandle,
+    input: ScheduleActionInput,
+) -> Result<ScheduleStateView, String> {
+    let state = app.state::<AppState>();
+    reconcile_schedule_runs(&state)?;
+    let (session_id, queue_id, status) = {
+        let config = state
+            .schedule_config
+            .lock()
+            .map_err(|error| format!("schedule config lock poisoned: {error}"))?;
+        let schedule = config
+            .schedules
+            .iter()
+            .find(|schedule| schedule.id == input.schedule_id)
+            .ok_or_else(|| "schedule not found".to_string())?;
+        let run = schedule
+            .active_run()
+            .ok_or_else(|| "schedule has no active run".to_string())?;
+        (
+            schedule.session_id.clone(),
+            run.queue_id
+                .clone()
+                .ok_or_else(|| "scheduled run is still preparing".to_string())?,
+            run.status.clone(),
+        )
+    };
+
+    if status == "queued" {
+        delete_queue_message_by_id(&state, &session_id, &queue_id)?;
+    } else {
+        let events = {
+            let store = state
+                .store
+                .lock()
+                .map_err(|error| format!("store lock poisoned: {error}"))?;
+            agent_events_for_session(&store, &phase16_task_id(), Some(&session_id))
+                .map_err(|error| error.to_string())?
+        };
+        if latest_unfinished_agent_queue_id(&events).as_deref() != Some(queue_id.as_str()) {
+            return Err("the scheduled run is no longer the active agent run".to_string());
+        }
+        cancel_agent_task(
+            app.clone(),
+            SessionActionInput {
+                session_id: session_id.clone(),
+            },
+        )?;
+    }
+
+    let now = current_time_millis();
+    let mut config = state
+        .schedule_config
+        .lock()
+        .map_err(|error| format!("schedule config lock poisoned: {error}"))?;
+    if let Some(run) = config
+        .schedules
+        .iter_mut()
+        .find(|schedule| schedule.id == input.schedule_id)
+        .and_then(|schedule| {
+            schedule
+                .runs
+                .iter_mut()
+                .rev()
+                .find(|run| run.queue_id.as_deref() == Some(queue_id.as_str()))
+        })
+    {
+        run.status = "cancelled".to_string();
+        run.finished_at_ms = Some(now);
+        run.error = None;
+    }
+    save_schedule_config(&config)?;
+    drop(config);
+    schedule_state_view(&state)
+}
+
+fn validate_schedule_target(
+    state: &tauri::State<'_, AppState>,
+    project_id: &str,
+    session_id: &str,
+) -> Result<(), String> {
+    let config = state
+        .project_session_config
+        .lock()
+        .map_err(|error| format!("project session config lock poisoned: {error}"))?;
+    if !config.projects.iter().any(|project| project.id == project_id) {
+        return Err("schedule project not found".to_string());
+    }
+    let Some(session) = config.sessions.iter().find(|session| session.id == session_id) else {
+        return Err("schedule session not found".to_string());
+    };
+    if session.project_id != project_id {
+        return Err("schedule session does not belong to the selected project".to_string());
+    }
+    if session.archived_at_ms.is_some() {
+        return Err("schedule session is archived".to_string());
+    }
+    Ok(())
+}
+
+fn schedule_state_view(state: &tauri::State<'_, AppState>) -> Result<ScheduleStateView, String> {
+    let config = state
+        .schedule_config
+        .lock()
+        .map_err(|error| format!("schedule config lock poisoned: {error}"))?
+        .clone();
+    let project_sessions = state
+        .project_session_config
+        .lock()
+        .map_err(|error| format!("project session config lock poisoned: {error}"))?
+        .clone();
+    let mut schedules = config
+        .schedules
+        .into_iter()
+        .map(|schedule| {
+            let project_name = project_sessions
+                .projects
+                .iter()
+                .find(|project| project.id == schedule.project_id)
+                .map(|project| project.name.clone())
+                .unwrap_or_else(|| "Missing project".to_string());
+            let session_name = project_sessions
+                .sessions
+                .iter()
+                .find(|session| session.id == schedule.session_id)
+                .map(|session| session.name.clone())
+                .unwrap_or_else(|| "Missing session".to_string());
+            ScheduleView {
+                id: schedule.id,
+                name: schedule.name,
+                project_id: schedule.project_id,
+                project_name,
+                session_id: schedule.session_id,
+                session_name,
+                prompt: schedule.prompt,
+                effort: schedule.effort,
+                timezone: schedule.timezone,
+                cadence: schedule.cadence.label().to_string(),
+                anchor_at_ms: schedule.anchor_at_ms,
+                catch_up: schedule.catch_up,
+                enabled: schedule.enabled,
+                next_run_at_ms: schedule.next_run_at_ms,
+                created_at_ms: schedule.created_at_ms,
+                updated_at_ms: schedule.updated_at_ms,
+                runs: schedule.runs,
+            }
+        })
+        .collect::<Vec<_>>();
+    schedules.sort_by(|left, right| {
+        right
+            .enabled
+            .cmp(&left.enabled)
+            .then_with(|| {
+                left.next_run_at_ms
+                    .unwrap_or(u64::MAX)
+                    .cmp(&right.next_run_at_ms.unwrap_or(u64::MAX))
+            })
+            .then_with(|| right.updated_at_ms.cmp(&left.updated_at_ms))
+    });
+    let last_error = state
+        .schedule_last_error
+        .lock()
+        .map_err(|error| format!("schedule error lock poisoned: {error}"))?
+        .clone();
+    Ok(ScheduleStateView {
+        schedules,
+        last_error,
+    })
+}
+
+fn set_schedule_last_error(state: &tauri::State<'_, AppState>, error: Option<String>) {
+    if let Ok(mut last_error) = state.schedule_last_error.lock() {
+        *last_error = error;
+    }
+}
+
+fn save_schedule_config(config: &ScheduleConfig) -> Result<(), String> {
+    schedule::save(&schedule_config_path(), config)
+        .map_err(|error| format!("failed to save schedules: {error}"))
+}
+
+fn schedule_queue_progress(events: &[Event], queue_id: &str) -> Option<ScheduleQueueProgress> {
+    let mut progress = None;
+    for event in events {
+        if event.metadata.get("queue_id").map(String::as_str) != Some(queue_id) {
+            continue;
+        }
+        if let Some(action) = event.metadata.get("queue_action").map(String::as_str) {
+            match action {
+                "enqueue" | "restore" => {
+                    progress = Some(ScheduleQueueProgress {
+                        status: "queued".to_string(),
+                        started_at_ms: None,
+                        finished_at_ms: None,
+                        error: None,
+                    });
+                }
+                "start" => {
+                    let started_at_ms = progress
+                        .as_ref()
+                        .and_then(|progress| progress.started_at_ms)
+                        .or(Some(event.timestamp_ms));
+                    progress = Some(ScheduleQueueProgress {
+                        status: "running".to_string(),
+                        started_at_ms,
+                        finished_at_ms: None,
+                        error: None,
+                    });
+                }
+                "delete" => {
+                    progress = Some(ScheduleQueueProgress {
+                        status: "cancelled".to_string(),
+                        started_at_ms: progress
+                            .as_ref()
+                            .and_then(|progress| progress.started_at_ms),
+                        finished_at_ms: Some(event.timestamp_ms),
+                        error: None,
+                    });
+                }
+                _ => {}
+            }
+        }
+        let next_status = match event.summary.as_str() {
+            "Agent task started" | "Agent task retry started" => Some("running"),
+            "Agent task waiting for permission" => Some("waiting_for_permission"),
+            "Agent task completed" => Some("completed"),
+            "Agent task failed" => Some("failed"),
+            "Agent task cancelled" => Some("cancelled"),
+            _ => None,
+        };
+        if let Some(status) = next_status {
+            let terminal = matches!(status, "completed" | "failed" | "cancelled");
+            let started_at_ms = progress
+                .as_ref()
+                .and_then(|progress| progress.started_at_ms)
+                .or((!terminal).then_some(event.timestamp_ms));
+            progress = Some(ScheduleQueueProgress {
+                status: status.to_string(),
+                started_at_ms,
+                finished_at_ms: terminal.then_some(event.timestamp_ms),
+                error: if status == "failed" {
+                    event
+                        .metadata
+                        .get("error")
+                        .cloned()
+                        .or_else(|| Some("Agent task failed".to_string()))
+                } else {
+                    None
+                },
+            });
+        }
+    }
+    progress
+}
+
+fn latest_unfinished_agent_queue_id(events: &[Event]) -> Option<String> {
+    let mut active = None;
+    for event in events {
+        if is_agent_run_start_event(event) {
+            active = event.metadata.get("queue_id").cloned();
+            continue;
+        }
+        if matches!(
+            event.summary.as_str(),
+            "Agent task completed" | "Agent task failed" | "Agent task cancelled"
+        ) && event.metadata.get("queue_id") == active.as_ref()
+        {
+            active = None;
+        }
+    }
+    active
+}
+
+fn reconcile_schedule_runs(state: &tauri::State<'_, AppState>) -> Result<(), String> {
+    let active_runs = {
+        let config = state
+            .schedule_config
+            .lock()
+            .map_err(|error| format!("schedule config lock poisoned: {error}"))?;
+        config
+            .schedules
+            .iter()
+            .filter_map(|schedule| {
+                schedule.active_run().map(|run| {
+                    (
+                        schedule.id.clone(),
+                        schedule.session_id.clone(),
+                        run.id.clone(),
+                        run.queue_id.clone(),
+                        run.queued_at_ms,
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    if active_runs.is_empty() {
+        return Ok(());
+    }
+
+    let mut events_by_session = BTreeMap::new();
+    {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        for (_, session_id, _, _, _) in &active_runs {
+            if events_by_session.contains_key(session_id) {
+                continue;
+            }
+            events_by_session.insert(
+                session_id.clone(),
+                agent_events_for_session(&store, &phase16_task_id(), Some(session_id))
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+    }
+
+    let now = current_time_millis();
+    let mut changed = false;
+    let mut config = state
+        .schedule_config
+        .lock()
+        .map_err(|error| format!("schedule config lock poisoned: {error}"))?;
+    for (schedule_id, session_id, run_id, queue_id, queued_at_ms) in active_runs {
+        let Some(schedule) = config
+            .schedules
+            .iter_mut()
+            .find(|schedule| schedule.id == schedule_id)
+        else {
+            continue;
+        };
+        let Some(run) = schedule.runs.iter_mut().find(|run| run.id == run_id) else {
+            continue;
+        };
+        let progress = queue_id.as_deref().and_then(|queue_id| {
+            events_by_session
+                .get(&session_id)
+                .and_then(|events| schedule_queue_progress(events, queue_id))
+        });
+        if let Some(progress) = progress {
+            if run.status != progress.status
+                || run.started_at_ms != progress.started_at_ms
+                || run.finished_at_ms != progress.finished_at_ms
+                || run.error != progress.error
+            {
+                run.status = progress.status;
+                run.started_at_ms = progress.started_at_ms;
+                run.finished_at_ms = progress.finished_at_ms;
+                run.error = progress.error;
+                schedule.updated_at_ms = now;
+                changed = true;
+            }
+        } else if run.status == "preparing"
+            && queued_at_ms.is_some_and(|queued_at_ms| now.saturating_sub(queued_at_ms) > 60_000)
+        {
+            run.status = "failed".to_string();
+            run.finished_at_ms = Some(now);
+            run.error = Some("Scheduled queue entry was not created".to_string());
+            schedule.updated_at_ms = now;
+            changed = true;
+        }
+    }
+    if changed {
+        save_schedule_config(&config)?;
+    }
+    Ok(())
+}
+
+fn trigger_schedule_run(
+    state: &tauri::State<'_, AppState>,
+    schedule_id: &str,
+    source: &str,
+    scheduled_for_ms: u64,
+    advance_schedule: bool,
+) -> Result<String, String> {
+    let now = current_time_millis();
+    let mut config = state
+        .schedule_config
+        .lock()
+        .map_err(|error| format!("schedule config lock poisoned: {error}"))?;
+    let schedule = config
+        .schedules
+        .iter_mut()
+        .find(|schedule| schedule.id == schedule_id)
+        .ok_or_else(|| "schedule not found".to_string())?;
+    if schedule.active_run().is_some() {
+        return Err("schedule already has an active run".to_string());
+    }
+    validate_schedule_target(state, &schedule.project_id, &schedule.session_id)?;
+    let session_id = schedule.session_id.clone();
+    let queue_input = QueueAgentMessageInput {
+        session_id: session_id.clone(),
+        prompt: schedule.prompt.clone(),
+        current_time: normalized_current_time_context(""),
+        effort: schedule.effort.clone(),
+        attachments: Vec::new(),
+    };
+    let run_id = unique_id("schedule-run");
+    let queue_result = enqueue_agent_message_inner(state, queue_input);
+    let (queue_id, run_status, run_error) = match queue_result {
+        Ok((_, queue_id)) => (Some(queue_id), "queued".to_string(), None),
+        Err(error) => (None, "failed".to_string(), Some(error)),
+    };
+    schedule.push_run(ScheduleRunRecord {
+        id: run_id,
+        queue_id: queue_id.clone(),
+        source: source.to_string(),
+        scheduled_for_ms,
+        queued_at_ms: queue_id.as_ref().map(|_| now),
+        dispatch_attempts: 0,
+        last_dispatch_at_ms: None,
+        started_at_ms: None,
+        finished_at_ms: queue_id.is_none().then_some(now),
+        status: run_status,
+        error: run_error.clone(),
+    });
+    if advance_schedule {
+        if schedule.cadence.recurring() {
+            schedule.next_run_at_ms = next_occurrence_after_ms(
+                schedule.anchor_at_ms,
+                schedule.cadence,
+                &schedule.timezone,
+                now,
+            )?;
+        } else {
+            schedule.enabled = false;
+            schedule.next_run_at_ms = None;
+        }
+    }
+    schedule.updated_at_ms = now;
+    save_schedule_config(&config)?;
+    if let Some(error) = run_error {
+        set_schedule_last_error(state, Some(error.clone()));
+        return Err(error);
+    }
+    set_schedule_last_error(state, None);
+    Ok(session_id)
+}
+
+fn delete_queue_message_by_id(
+    state: &tauri::State<'_, AppState>,
+    session_id: &str,
+    queue_id: &str,
+) -> Result<(), String> {
+    let run_context = project_session_metadata_for_session(state, Some(session_id))?;
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let events = agent_events_for_session(&store, &phase16_task_id(), Some(session_id))
+        .map_err(|error| error.to_string())?;
+    let Some(queued) = pending_queued_agent_messages(&events, session_id)
+        .into_iter()
+        .find(|message| message.view.id == queue_id)
+    else {
+        return Ok(());
+    };
+    append_agent_queue_event(
+        &mut store,
+        &run_context,
+        "delete",
+        &queued.view.id,
+        &queued.view.mode,
+        queued.view.created_at_ms,
+        None,
+    )
+}
+
+fn poll_schedules(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
+    let state = app.state::<AppState>();
+    reconcile_schedule_runs(&state)?;
+    let now = current_time_millis();
+    let mut due = Vec::new();
+    let mut changed = false;
+    {
+        let mut config = state
+            .schedule_config
+            .lock()
+            .map_err(|error| format!("schedule config lock poisoned: {error}"))?;
+        for schedule in &mut config.schedules {
+            if !schedule.enabled || schedule.active_run().is_some() {
+                continue;
+            }
+            let Some(next_run_at_ms) = schedule.next_run_at_ms else {
+                continue;
+            };
+            if next_run_at_ms > now {
+                continue;
+            }
+            if !schedule.catch_up
+                && now.saturating_sub(next_run_at_ms) > SCHEDULE_MISSED_GRACE_MS
+            {
+                schedule.push_run(ScheduleRunRecord {
+                    id: unique_id("schedule-run"),
+                    queue_id: None,
+                    source: "scheduled".to_string(),
+                    scheduled_for_ms: next_run_at_ms,
+                    queued_at_ms: None,
+                    dispatch_attempts: 0,
+                    last_dispatch_at_ms: None,
+                    started_at_ms: None,
+                    finished_at_ms: Some(now),
+                    status: "skipped".to_string(),
+                    error: Some("Missed while Cindx was not running".to_string()),
+                });
+                if schedule.cadence.recurring() {
+                    schedule.next_run_at_ms = next_occurrence_after_ms(
+                        schedule.anchor_at_ms,
+                        schedule.cadence,
+                        &schedule.timezone,
+                        now,
+                    )?;
+                } else {
+                    schedule.enabled = false;
+                    schedule.next_run_at_ms = None;
+                }
+                schedule.updated_at_ms = now;
+                changed = true;
+            } else {
+                due.push((schedule.id.clone(), next_run_at_ms));
+            }
+        }
+        if changed {
+            save_schedule_config(&config)?;
+        }
+    }
+
+    let mut sessions = BTreeSet::new();
+    for (schedule_id, scheduled_for_ms) in due {
+        match trigger_schedule_run(&state, &schedule_id, "scheduled", scheduled_for_ms, true) {
+            Ok(session_id) => {
+                sessions.insert(session_id);
+            }
+            Err(error) => set_schedule_last_error(&state, Some(error)),
+        }
+    }
+    let config = state
+        .schedule_config
+        .lock()
+        .map_err(|error| format!("schedule config lock poisoned: {error}"))?;
+    for schedule in &config.schedules {
+        if schedule.active_run().is_some_and(|run| run.status == "queued") {
+            sessions.insert(schedule.session_id.clone());
+        }
+    }
+    Ok(sessions.into_iter().collect())
+}
+
+fn spawn_schedule_dispatch(app: tauri::AppHandle, session_id: String) {
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(error) = dispatch_scheduled_session(&app, &session_id) {
+            let state = app.state::<AppState>();
+            set_schedule_last_error(&state, Some(error));
+        }
+    });
+}
+
+fn dispatch_scheduled_session(app: &tauri::AppHandle, session_id: &str) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    reconcile_schedule_runs(&state)?;
+    let now = current_time_millis();
+    let first_queue_id = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let events = agent_events_for_session(&store, &phase16_task_id(), Some(session_id))
+            .map_err(|error| error.to_string())?;
+        let agent = agent_state_for_session(&store, None, Some(session_id))
+            .map_err(|error| error.to_string())?;
+        if matches!(agent.status.as_str(), "running" | "waiting_for_permission")
+            || !agent.pending_approvals.is_empty()
+        {
+            return Ok(());
+        }
+        let Some(queue_id) = pending_queued_agent_messages(&events, session_id)
+            .first()
+            .map(|queued| queued.view.id.clone())
+        else {
+            return Ok(());
+        };
+        queue_id
+    };
+    let (schedule_id, queue_id) = {
+        let config = state
+            .schedule_config
+            .lock()
+            .map_err(|error| format!("schedule config lock poisoned: {error}"))?;
+        let Some((schedule, run)) = config.schedules.iter().find_map(|schedule| {
+            (schedule.session_id == session_id).then(|| {
+                schedule
+                    .active_run()
+                    .filter(|run| {
+                        run.status == "queued"
+                            && run.queue_id.as_deref() == Some(first_queue_id.as_str())
+                    })
+                    .map(|run| (schedule, run))
+            })?
+        }) else {
+            return Ok(());
+        };
+        if run.dispatch_attempts >= SCHEDULE_MAX_DISPATCH_ATTEMPTS
+            || run.last_dispatch_at_ms.is_some_and(|last| {
+                now.saturating_sub(last) < SCHEDULE_DISPATCH_RETRY_MS
+            })
+        {
+            return Ok(());
+        }
+        (
+            schedule.id.clone(),
+            run.queue_id
+                .clone()
+                .ok_or_else(|| "scheduled queue id is missing".to_string())?,
+        )
+    };
+
+    if !begin_queue_dispatch(&state, session_id)? {
+        return Ok(());
+    }
+    let result = (|| {
+        let mut config = state
+            .schedule_config
+            .lock()
+            .map_err(|error| format!("schedule config lock poisoned: {error}"))?;
+        let run = config
+            .schedules
+            .iter_mut()
+            .find(|schedule| schedule.id == schedule_id)
+            .and_then(|schedule| {
+                schedule
+                    .runs
+                    .iter_mut()
+                    .rev()
+                    .find(|run| run.queue_id.as_deref() == Some(queue_id.as_str()))
+            })
+            .ok_or_else(|| "scheduled run not found".to_string())?;
+        run.dispatch_attempts = run.dispatch_attempts.saturating_add(1);
+        run.last_dispatch_at_ms = Some(now);
+        save_schedule_config(&config)?;
+        drop(config);
+        run_next_queued_agent_message_blocking_inner(
+            app,
+            state.clone(),
+            SessionActionInput {
+                session_id: session_id.to_string(),
+            },
+        )
+    })();
+    finish_queue_dispatch(&state, session_id);
+    reconcile_schedule_runs(&state)?;
+
+    let exhausted = {
+        let config = state
+            .schedule_config
+            .lock()
+            .map_err(|error| format!("schedule config lock poisoned: {error}"))?;
+        config
+            .schedules
+            .iter()
+            .find(|schedule| schedule.id == schedule_id)
+            .and_then(|schedule| {
+                schedule
+                    .runs
+                    .iter()
+                    .rev()
+                    .find(|run| run.queue_id.as_deref() == Some(queue_id.as_str()))
+            })
+            .is_some_and(|run| {
+                run.status == "queued" && run.dispatch_attempts >= SCHEDULE_MAX_DISPATCH_ATTEMPTS
+            })
+    };
+    if exhausted {
+        delete_queue_message_by_id(&state, session_id, &queue_id)?;
+        let mut config = state
+            .schedule_config
+            .lock()
+            .map_err(|error| format!("schedule config lock poisoned: {error}"))?;
+        if let Some(run) = config
+            .schedules
+            .iter_mut()
+            .find(|schedule| schedule.id == schedule_id)
+            .and_then(|schedule| {
+                schedule
+                    .runs
+                    .iter_mut()
+                    .rev()
+                    .find(|run| run.queue_id.as_deref() == Some(queue_id.as_str()))
+            })
+        {
+            run.status = "failed".to_string();
+            run.finished_at_ms = Some(current_time_millis());
+            run.error = Some("Agent could not start after three attempts".to_string());
+        }
+        save_schedule_config(&config)?;
+    }
+    result.map(|_| ())
+}
+
+fn start_schedule_runner(app: tauri::AppHandle) {
+    let _ = std::thread::Builder::new()
+        .name("cindx-schedule-runner".to_string())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_secs(2));
+            loop {
+                match poll_schedules(&app) {
+                    Ok(session_ids) => {
+                        for session_id in session_ids {
+                            spawn_schedule_dispatch(app.clone(), session_id);
+                        }
+                    }
+                    Err(error) => {
+                        let state = app.state::<AppState>();
+                        set_schedule_last_error(&state, Some(error.clone()));
+                        append_startup_log(&format!("schedule runner failed: {error}"));
+                    }
+                }
+                std::thread::sleep(SCHEDULE_POLL_INTERVAL);
+            }
+        });
 }
 
 #[tauri::command]
@@ -4249,15 +5259,23 @@ fn queue_agent_message(
     input: QueueAgentMessageInput,
 ) -> Result<AgentState, String> {
     let state = app.state::<AppState>();
-    let run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
+    enqueue_agent_message_inner(&state, input).map(|(agent, _)| agent)
+}
+
+fn enqueue_agent_message_inner(
+    state: &tauri::State<'_, AppState>,
+    input: QueueAgentMessageInput,
+) -> Result<(AgentState, String), String> {
+    let run_context = project_session_metadata_for_session(state, Some(&input.session_id))?;
     let root = run_context
         .get("project_root")
         .map(PathBuf::from)
-        .unwrap_or(active_workspace_root(&state)?);
+        .unwrap_or(active_workspace_root(state)?);
     let attachments = validate_agent_attachments(&root, input.attachments)?;
     let prompt = input.prompt.trim().to_string();
     if prompt.is_empty() && attachments.is_empty() {
-        return agent_state_with_error_in_context(&state, &run_context, "agent prompt is empty");
+        let _ = agent_state_with_error_in_context(state, &run_context, "agent prompt is empty")?;
+        return Err("agent prompt is empty".to_string());
     }
     let display_prompt = if prompt.is_empty() {
         format!(
@@ -4292,8 +5310,9 @@ fn queue_agent_message(
         created_at_ms,
         Some(&payload),
     )?;
-    agent_state_for_session(&store, None, Some(&input.session_id))
-        .map_err(|error| error.to_string())
+    let agent = agent_state_for_session(&store, None, Some(&input.session_id))
+        .map_err(|error| error.to_string())?;
+    Ok((agent, queue_id))
 }
 
 #[tauri::command]
@@ -4460,6 +5479,37 @@ async fn run_next_queued_agent_message(
 }
 
 fn run_next_queued_agent_message_blocking(
+    app: &tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    input: SessionActionInput,
+) -> Result<Option<AgentState>, String> {
+    if !begin_queue_dispatch(&state, &input.session_id)? {
+        return Ok(None);
+    }
+    let session_id = input.session_id.clone();
+    let result = run_next_queued_agent_message_blocking_inner(app, state.clone(), input);
+    finish_queue_dispatch(&state, &session_id);
+    result
+}
+
+fn begin_queue_dispatch(
+    state: &tauri::State<'_, AppState>,
+    session_id: &str,
+) -> Result<bool, String> {
+    Ok(state
+        .queue_dispatching_sessions
+        .lock()
+        .map_err(|error| format!("queue dispatch lock poisoned: {error}"))?
+        .insert(session_id.to_string()))
+}
+
+fn finish_queue_dispatch(state: &tauri::State<'_, AppState>, session_id: &str) {
+    if let Ok(mut dispatching) = state.queue_dispatching_sessions.lock() {
+        dispatching.remove(session_id);
+    }
+}
+
+fn run_next_queued_agent_message_blocking_inner(
     app: &tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     input: SessionActionInput,
@@ -7195,6 +8245,13 @@ pub fn run() {
     let sidecar_config = load_sidecar_config();
     let web_search_config = load_web_search_config();
     let project_session_config = load_project_session_config(&workspace_config.root);
+    let (schedule_config, schedule_last_error) = match schedule::load(&schedule_config_path()) {
+        Ok(config) => (config, None),
+        Err(error) => {
+            append_startup_log(&error);
+            (ScheduleConfig::default(), Some(error))
+        }
+    };
     if let Some(project) = project_session_config.active_project() {
         if let Ok(root) = validate_workspace_root(&project.root) {
             workspace_config.root = root;
@@ -7225,10 +8282,13 @@ pub fn run() {
             sidecar_config: Mutex::new(sidecar_config),
             web_search_config: Mutex::new(web_search_config),
             project_session_config: Mutex::new(project_session_config),
+            schedule_config: Mutex::new(schedule_config),
+            schedule_last_error: Mutex::new(schedule_last_error),
             mcp_catalog: Mutex::new(mcp_catalog),
             suspended_agent_runs: Mutex::new(BTreeMap::new()),
             agent_run_controls: Mutex::new(BTreeMap::new()),
             prompt_evaluation_controls: Mutex::new(BTreeMap::new()),
+            queue_dispatching_sessions: Mutex::new(BTreeSet::new()),
             workspace_knowledge_cache: Mutex::new(BTreeMap::new()),
             allow_exit: AtomicBool::new(false),
             quit_prompt_active: AtomicBool::new(false),
@@ -7240,6 +8300,7 @@ pub fn run() {
                 }
             }
             schedule_main_window_reveal_fallback(app.handle().clone());
+            start_schedule_runner(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -7282,6 +8343,12 @@ pub fn run() {
             install_skill_package,
             install_skill_url,
             get_project_session_state,
+            get_schedule_state,
+            upsert_schedule,
+            set_schedule_enabled,
+            delete_schedule,
+            run_schedule_now,
+            cancel_schedule_run,
             create_project,
             create_session,
             rename_project,
@@ -20388,6 +21455,10 @@ fn project_session_config_path() -> PathBuf {
     app_data_root().join("projects.conf")
 }
 
+fn schedule_config_path() -> PathBuf {
+    app_data_root().join("schedules.json")
+}
+
 fn sidecar_config_path() -> PathBuf {
     app_data_root().join("sidecars.conf")
 }
@@ -20719,6 +21790,7 @@ fn migrate_legacy_app_data() -> Result<(), std::io::Error> {
         "provider.conf",
         "workspace.conf",
         "projects.conf",
+        "schedules.json",
         "sidecars.conf",
         "mcp-servers.json",
         "mcp-catalog.json",
@@ -24538,6 +25610,100 @@ mod tests {
         let observations = prompt_evolution_observations_from_events(&events);
         assert_eq!(observations.len(), 1);
         assert!(!observations[0].1.succeeded);
+    }
+
+    #[test]
+    fn scheduled_queue_progress_tracks_permission_and_completion() {
+        let queue_id = "schedule-queue";
+        let event = |sequence: u64, summary: &str, queue_action: Option<&str>| Event {
+            id: EventId(format!("schedule-event-{sequence}")),
+            task_id: phase16_task_id(),
+            sequence,
+            timestamp_ms: sequence * 100,
+            kind: EventKind::TaskStatusChanged,
+            summary: summary.to_string(),
+            metadata: [
+                ("queue_id".to_string(), queue_id.to_string()),
+                ("session_id".to_string(), "session-a".to_string()),
+            ]
+            .into_iter()
+            .chain(
+                queue_action
+                    .map(|action| ("queue_action".to_string(), action.to_string())),
+            )
+            .collect(),
+        };
+        let mut events = vec![
+            event(1, "Agent message queued", Some("enqueue")),
+            event(2, "Queued agent message started", Some("start")),
+            event(3, "Agent task started", None),
+            event(4, "Agent task waiting for permission", None),
+        ];
+
+        let waiting = schedule_queue_progress(&events, queue_id).unwrap();
+        assert_eq!(waiting.status, "waiting_for_permission");
+        assert_eq!(waiting.started_at_ms, Some(200));
+        assert_eq!(latest_unfinished_agent_queue_id(&events).as_deref(), Some(queue_id));
+
+        events.push(event(5, "Agent task completed", None));
+        let completed = schedule_queue_progress(&events, queue_id).unwrap();
+        assert_eq!(completed.status, "completed");
+        assert_eq!(completed.finished_at_ms, Some(500));
+        assert!(latest_unfinished_agent_queue_id(&events).is_none());
+    }
+
+    #[test]
+    fn restored_scheduled_queue_is_retryable_instead_of_running() {
+        let queue_id = "schedule-queue";
+        let events = vec![
+            Event {
+                id: EventId("schedule-enqueue".to_string()),
+                task_id: phase16_task_id(),
+                sequence: 1,
+                timestamp_ms: 100,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Agent message queued".to_string(),
+                metadata: [
+                    ("queue_id".to_string(), queue_id.to_string()),
+                    ("queue_action".to_string(), "enqueue".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            Event {
+                id: EventId("schedule-start".to_string()),
+                task_id: phase16_task_id(),
+                sequence: 2,
+                timestamp_ms: 200,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Queued agent message started".to_string(),
+                metadata: [
+                    ("queue_id".to_string(), queue_id.to_string()),
+                    ("queue_action".to_string(), "start".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            Event {
+                id: EventId("schedule-restore".to_string()),
+                task_id: phase16_task_id(),
+                sequence: 3,
+                timestamp_ms: 300,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Queued agent message restored".to_string(),
+                metadata: [
+                    ("queue_id".to_string(), queue_id.to_string()),
+                    ("queue_action".to_string(), "restore".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        ];
+
+        let progress = schedule_queue_progress(&events, queue_id).unwrap();
+        assert_eq!(progress.status, "queued");
+        assert_eq!(progress.started_at_ms, None);
+        assert_eq!(progress.finished_at_ms, None);
     }
 
     #[test]

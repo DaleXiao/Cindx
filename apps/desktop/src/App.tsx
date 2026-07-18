@@ -49,6 +49,7 @@ import { Inspector, type InspectorTab } from "./components/Inspector";
 import { Composer } from "./components/Composer";
 import { KnowledgeGraph } from "./components/KnowledgeGraph";
 import { QueuedMessages } from "./components/QueuedMessages";
+import { ScheduleView } from "./components/ScheduleView";
 import { Sidebar, type WorkspaceView } from "./components/Sidebar";
 import {
   LiveSessionThread,
@@ -529,6 +530,7 @@ export function App() {
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("details");
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorOpenBeforeSettings, setInspectorOpenBeforeSettings] = useState(false);
+  const [inspectorOpenBeforeSchedule, setInspectorOpenBeforeSchedule] = useState(false);
   const [inspectorWidth, setInspectorWidth] = useState(320);
   const [inspectorResizing, setInspectorResizing] = useState(false);
   const [debugAlwaysVisible, setDebugAlwaysVisible] = useState(loadDebugAlwaysVisible);
@@ -1647,10 +1649,18 @@ export function App() {
 
   function showWorkspaceView(view: Exclude<WorkspaceView, "settings">) {
     const leavingSettings = activeView === "settings";
+    const leavingSchedule = activeView === "schedule" && view === "timeline";
+    const enteringSchedule = activeView !== "schedule" && view === "schedule";
+    if (enteringSchedule) {
+      if (activeView === "timeline") setInspectorOpenBeforeSchedule(inspectorOpen);
+      setInspectorOpen(false);
+    }
     setWorkspaceViewBeforeSettings(view);
     setActiveView(view);
-    if (leavingSettings) {
+    if (leavingSettings && view === "timeline") {
       setInspectorOpen(inspectorOpenBeforeSettings);
+    } else if (leavingSchedule) {
+      setInspectorOpen(inspectorOpenBeforeSchedule);
     }
   }
 
@@ -1665,7 +1675,9 @@ export function App() {
         return;
       }
       setWorkspaceViewBeforeSettings(activeView);
-      setInspectorOpenBeforeSettings(inspectorOpen);
+      setInspectorOpenBeforeSettings(
+        activeView === "schedule" ? inspectorOpenBeforeSchedule : inspectorOpen
+      );
       setActiveView("settings");
       setInspectorOpen(false);
       return;
@@ -1801,6 +1813,23 @@ export function App() {
       if (selectionRequest === sessionSelectionRequestRef.current) {
         setComposerError(error instanceof Error ? error.message : String(error));
       }
+    }
+  }
+
+  async function handleOpenScheduledSession(sessionId: string) {
+    if (sessionId !== activeSessionIdRef.current) {
+      await handleSelectSession(sessionId);
+      return;
+    }
+    showTimelineView();
+    setSessionLoadingId(sessionId);
+    setComposerError(null);
+    try {
+      const next = await enqueueProjectSessionSelection(() => selectSession(sessionId));
+      await refreshWorkspaceAfterProjectSession(next);
+    } catch (error) {
+      setSessionLoadingId(null);
+      setComposerError(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -2790,10 +2819,10 @@ export function App() {
           <div className="window-workspace-header">
             <div className="topbar-title">
               <div>
-                <h1>{activeSession?.name ?? "Session"}</h1>
+                <h1>{activeView === "schedule" ? "Schedule" : activeSession?.name ?? "Session"}</h1>
               </div>
             </div>
-            <div className="topbar-actions">
+            {activeView === "timeline" && <div className="topbar-actions">
               <div
                 className="context-usage"
                 title={`${activeAgentState?.contextTokensUsed ?? 0} of ${
@@ -2819,7 +2848,7 @@ export function App() {
                 <CheckCircle2 size={16} aria-hidden="true" />
                 <span>{statusText}</span>
               </div>
-            </div>
+            </div>}
           </div>
         )}
         <button
@@ -2836,7 +2865,7 @@ export function App() {
             <PanelLeftOpen className="pane-icon-closed" />
           </span>
         </button>
-        {activeView !== "settings" && (
+        {activeView === "timeline" && (
           <button
             className="window-pane-toggle inspector-pane-toggle"
             type="button"
@@ -2962,6 +2991,12 @@ export function App() {
               />
             </div>
           </>
+        ) : activeView === "schedule" ? (
+          <ScheduleView
+            projects={projectSessionState?.projects ?? []}
+            sessions={projectSessionState?.sessions ?? []}
+            onOpenSession={(sessionId) => void handleOpenScheduledSession(sessionId)}
+          />
         ) : (
           <section
             className="settings-view"

@@ -1,0 +1,753 @@
+import {
+  CalendarClock,
+  CheckCircle2,
+  CircleAlert,
+  Clock3,
+  Pencil,
+  Play,
+  Plus,
+  Save,
+  Trash2,
+  X,
+  XCircle
+} from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
+import {
+  cancelScheduleRun,
+  deleteSchedule,
+  getScheduleState,
+  runScheduleNow,
+  setScheduleEnabled,
+  upsertSchedule,
+  type AgentEffort,
+  type ProjectView,
+  type ScheduleCadence,
+  type ScheduleState,
+  type ScheduleView as ScheduleRecord,
+  type SessionView,
+  type UpsertScheduleInput
+} from "../tauri";
+
+type ScheduleDraft = {
+  id: string | null;
+  name: string;
+  projectId: string;
+  sessionId: string;
+  prompt: string;
+  effort: AgentEffort;
+  timezone: string;
+  cadence: ScheduleCadence;
+  startLocal: string;
+  catchUp: boolean;
+  enabled: boolean;
+};
+
+const cadenceOptions: Array<{ value: ScheduleCadence; label: string }> = [
+  { value: "once", label: "Once" },
+  { value: "daily", label: "Daily" },
+  { value: "weekdays", label: "Weekdays" },
+  { value: "weekly", label: "Weekly" }
+];
+
+const effortOptions: Array<{ value: AgentEffort; label: string }> = [
+  { value: "fast", label: "Fast" },
+  { value: "auto", label: "Auto" },
+  { value: "pro", label: "Pro" }
+];
+
+const activeRunStatuses = new Set([
+  "preparing",
+  "queued",
+  "running",
+  "waiting_for_permission"
+]);
+
+function localDateTimeValue(timestampMs: number) {
+  const date = new Date(timestampMs);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(
+    date.getHours()
+  )}:${pad(date.getMinutes())}`;
+}
+
+function zonedDateTimeValue(timestampMs: number, timezone: string) {
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23"
+    }).formatToParts(new Date(timestampMs));
+    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    return `${values.year}-${values.month}-${values.day}T${values.hour}:${values.minute}`;
+  } catch {
+    return localDateTimeValue(timestampMs);
+  }
+}
+
+function defaultStartValue() {
+  const date = new Date(Date.now() + 5 * 60_000);
+  date.setSeconds(0, 0);
+  return localDateTimeValue(date.getTime());
+}
+
+function currentTimeZone() {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+
+function timeZoneOptions() {
+  return Array.from(
+    new Set([
+      currentTimeZone(),
+      "UTC",
+      "Asia/Shanghai",
+      "Asia/Tokyo",
+      "Europe/London",
+      "Europe/Paris",
+      "America/New_York",
+      "America/Chicago",
+      "America/Los_Angeles"
+    ])
+  );
+}
+
+function formatTime(timestampMs: number | null, timezone: string) {
+  if (!timestampMs) return "Not scheduled";
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+      timeZone: timezone
+    }).format(new Date(timestampMs));
+  } catch {
+    return new Date(timestampMs).toLocaleString();
+  }
+}
+
+function runStatusLabel(status: string) {
+  if (status === "waiting_for_permission") return "Needs approval";
+  return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
+function draftForNew(projects: ProjectView[], sessions: SessionView[]): ScheduleDraft {
+  const project = projects.find((candidate) => candidate.active) ?? projects[0];
+  const session =
+    sessions.find(
+      (candidate) =>
+        candidate.projectId === project?.id && candidate.active && !candidate.archived
+    ) ??
+    sessions.find(
+      (candidate) => candidate.projectId === project?.id && !candidate.archived
+    );
+  return {
+    id: null,
+    name: "",
+    projectId: project?.id ?? "",
+    sessionId: session?.id ?? "",
+    prompt: "",
+    effort: "auto",
+    timezone: currentTimeZone(),
+    cadence: "once",
+    startLocal: defaultStartValue(),
+    catchUp: true,
+    enabled: true
+  };
+}
+
+function draftForSchedule(schedule: ScheduleRecord): ScheduleDraft {
+  return {
+    id: schedule.id,
+    name: schedule.name,
+    projectId: schedule.projectId,
+    sessionId: schedule.sessionId,
+    prompt: schedule.prompt,
+    effort: schedule.effort,
+    timezone: schedule.timezone,
+    cadence: schedule.cadence,
+    startLocal: zonedDateTimeValue(schedule.anchorAtMs, schedule.timezone),
+    catchUp: schedule.catchUp,
+    enabled: schedule.enabled
+  };
+}
+
+type ScheduleViewProps = {
+  projects: ProjectView[];
+  sessions: SessionView[];
+  onOpenSession: (sessionId: string) => void;
+};
+
+export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleViewProps) {
+  const [state, setState] = useState<ScheduleState | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<ScheduleDraft>(() => draftForNew(projects, sessions));
+  const [editing, setEditing] = useState(false);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ScheduleRecord | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    const refresh = async () => {
+      try {
+        const next = await getScheduleState();
+        if (disposed) return;
+        setState(next);
+        setError((current) => current ?? next.lastError);
+        setSelectedId((current) =>
+          current && next.schedules.some((schedule) => schedule.id === current)
+            ? current
+            : next.schedules[0]?.id ?? null
+        );
+      } catch (loadError) {
+        if (!disposed) {
+          setError(loadError instanceof Error ? loadError.message : String(loadError));
+        }
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 3_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!editing || draft.id) return;
+    setDraft((current) => {
+      if (current.projectId && current.sessionId) return current;
+      return draftForNew(projects, sessions);
+    });
+  }, [draft.id, editing, projects, sessions]);
+
+  const selected =
+    state?.schedules.find((schedule) => schedule.id === selectedId) ?? null;
+  const projectSessions = useMemo(
+    () =>
+      sessions.filter(
+        (session) => session.projectId === draft.projectId && !session.archived
+      ),
+    [draft.projectId, sessions]
+  );
+
+  function beginNew() {
+    setDraft(draftForNew(projects, sessions));
+    setEditing(true);
+    setError(null);
+  }
+
+  function beginEdit(schedule: ScheduleRecord) {
+    setSelectedId(schedule.id);
+    setDraft(draftForSchedule(schedule));
+    setEditing(true);
+    setError(null);
+  }
+
+  async function perform(action: string, operation: () => Promise<ScheduleState>) {
+    setBusyAction(action);
+    setError(null);
+    try {
+      const next = await operation();
+      setState(next);
+      return next;
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : String(actionError));
+      return null;
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function saveDraft() {
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(draft.startLocal)) {
+      setError("Choose a valid start time.");
+      return;
+    }
+    const input: UpsertScheduleInput = {
+      id: draft.id,
+      name: draft.name,
+      projectId: draft.projectId,
+      sessionId: draft.sessionId,
+      prompt: draft.prompt,
+      effort: draft.effort,
+      timezone: draft.timezone,
+      cadence: draft.cadence,
+      anchorLocal: draft.startLocal,
+      catchUp: draft.catchUp,
+      enabled: draft.enabled
+    };
+    const next = await perform("save", () => upsertSchedule(input));
+    if (!next) return;
+    const saved = draft.id
+      ? next.schedules.find((schedule) => schedule.id === draft.id)
+      : [...next.schedules]
+          .filter(
+            (schedule) =>
+              schedule.name === draft.name.trim() && schedule.sessionId === draft.sessionId
+          )
+          .sort((left, right) => right.updatedAtMs - left.updatedAtMs)[0];
+    setSelectedId(saved?.id ?? next.schedules[0]?.id ?? null);
+    setEditing(false);
+  }
+
+  const latestRun = selected?.runs[selected.runs.length - 1] ?? null;
+  const activeRun = latestRun && activeRunStatuses.has(latestRun.status) ? latestRun : null;
+
+  return (
+    <section className="schedule-view" aria-label="Schedule">
+      <header className="schedule-toolbar">
+        <div className="schedule-title">
+          <CalendarClock aria-hidden="true" />
+          <h2>Scheduled tasks</h2>
+          <span>{state?.schedules.length ?? 0}</span>
+        </div>
+        <button
+          className="secondary-button schedule-new-button"
+          type="button"
+          onClick={beginNew}
+        >
+          <Plus aria-hidden="true" />
+          <span>New schedule</span>
+        </button>
+      </header>
+
+      {error && (
+        <div className="schedule-notice" role="alert">
+          <CircleAlert aria-hidden="true" />
+          <span>{error}</span>
+          <button type="button" aria-label="Dismiss" title="Dismiss" onClick={() => setError(null)}>
+            <X aria-hidden="true" />
+          </button>
+        </div>
+      )}
+
+      <div className="schedule-layout">
+        <div className="schedule-list" aria-label="Scheduled tasks">
+          {!state ? (
+            <div className="schedule-empty">Loading</div>
+          ) : state.schedules.length === 0 ? (
+            <div className="schedule-empty">No schedules</div>
+          ) : (
+            state.schedules.map((schedule) => {
+              const run = schedule.runs[schedule.runs.length - 1];
+              return (
+                <button
+                  className={`schedule-list-row ${selectedId === schedule.id ? "active" : ""}`}
+                  type="button"
+                  key={schedule.id}
+                  onClick={() => {
+                    setSelectedId(schedule.id);
+                    setEditing(false);
+                  }}
+                >
+                  <span className="schedule-list-icon" data-enabled={schedule.enabled}>
+                    <Clock3 aria-hidden="true" />
+                  </span>
+                  <span className="schedule-list-copy">
+                    <strong>{schedule.name}</strong>
+                    <small>{schedule.projectName} · {schedule.sessionName}</small>
+                  </span>
+                  <span
+                    className="schedule-list-state"
+                    data-status={run?.status ?? (schedule.enabled ? "idle" : "paused")}
+                  >
+                    {run && activeRunStatuses.has(run.status)
+                      ? runStatusLabel(run.status)
+                      : schedule.enabled
+                        ? formatTime(schedule.nextRunAtMs, schedule.timezone)
+                        : "Paused"}
+                  </span>
+                </button>
+              );
+            })
+          )}
+        </div>
+
+        <div className="schedule-detail">
+          {editing ? (
+            <form
+              className="schedule-editor"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void saveDraft();
+              }}
+            >
+              <div className="schedule-editor-heading">
+                <h3>{draft.id ? "Edit schedule" : "New schedule"}</h3>
+                <button
+                  className="icon-button"
+                  type="button"
+                  aria-label="Close editor"
+                  title="Close"
+                  onClick={() => setEditing(false)}
+                >
+                  <X aria-hidden="true" />
+                </button>
+              </div>
+
+              <label className="schedule-field">
+                <span>Name</span>
+                <input
+                  autoFocus
+                  required
+                  maxLength={80}
+                  value={draft.name}
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, name: event.target.value }))
+                  }
+                />
+              </label>
+
+              <div className="schedule-field-grid">
+                <label className="schedule-field">
+                  <span>Project</span>
+                  <select
+                    required
+                    value={draft.projectId}
+                    onChange={(event) => {
+                      const projectId = event.target.value;
+                      const sessionId =
+                        sessions.find(
+                          (session) => session.projectId === projectId && !session.archived
+                        )?.id ?? "";
+                      setDraft((current) => ({ ...current, projectId, sessionId }));
+                    }}
+                  >
+                    {projects.map((project) => (
+                      <option value={project.id} key={project.id}>
+                        {project.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="schedule-field">
+                  <span>Task</span>
+                  <select
+                    required
+                    value={draft.sessionId}
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, sessionId: event.target.value }))
+                    }
+                  >
+                    {projectSessions.map((session) => (
+                      <option value={session.id} key={session.id}>
+                        {session.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <label className="schedule-field">
+                <span>Prompt</span>
+                <textarea
+                  required
+                  rows={6}
+                  value={draft.prompt}
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, prompt: event.target.value }))
+                  }
+                />
+              </label>
+
+              <fieldset className="schedule-field schedule-segment-field">
+                <legend>Repeat</legend>
+                <div className="schedule-segmented">
+                  {cadenceOptions.map((option) => (
+                    <button
+                      className={draft.cadence === option.value ? "active" : ""}
+                      type="button"
+                      key={option.value}
+                      aria-pressed={draft.cadence === option.value}
+                      onClick={() =>
+                        setDraft((current) => ({ ...current, cadence: option.value }))
+                      }
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </fieldset>
+
+              <div className="schedule-field-grid">
+                <label className="schedule-field">
+                  <span>Starts</span>
+                  <input
+                    required
+                    type="datetime-local"
+                    value={draft.startLocal}
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, startLocal: event.target.value }))
+                    }
+                  />
+                </label>
+                <label className="schedule-field">
+                  <span>Time zone</span>
+                  <select
+                    value={draft.timezone}
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, timezone: event.target.value }))
+                    }
+                  >
+                    {timeZoneOptions().map((timezone) => (
+                      <option value={timezone} key={timezone}>
+                        {timezone}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <fieldset className="schedule-field schedule-segment-field">
+                <legend>Effort</legend>
+                <div className="schedule-segmented schedule-effort-segmented">
+                  {effortOptions.map((option) => (
+                    <button
+                      className={draft.effort === option.value ? "active" : ""}
+                      type="button"
+                      key={option.value}
+                      aria-pressed={draft.effort === option.value}
+                      onClick={() =>
+                        setDraft((current) => ({ ...current, effort: option.value }))
+                      }
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </fieldset>
+
+              <div className="schedule-switches">
+                <label className="settings-switch">
+                  <input
+                    type="checkbox"
+                    checked={draft.enabled}
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, enabled: event.target.checked }))
+                    }
+                  />
+                  <span className="settings-switch-track" aria-hidden="true"><span /></span>
+                  <span>Enabled</span>
+                </label>
+                <label className="settings-switch">
+                  <input
+                    type="checkbox"
+                    checked={draft.catchUp}
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, catchUp: event.target.checked }))
+                    }
+                  />
+                  <span className="settings-switch-track" aria-hidden="true"><span /></span>
+                  <span>Catch up</span>
+                </label>
+              </div>
+
+              <div className="schedule-editor-actions">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={busyAction === "save"}
+                  onClick={() => setEditing(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="primary-button"
+                  type="submit"
+                  disabled={
+                    busyAction === "save" ||
+                    !draft.name.trim() ||
+                    !draft.projectId ||
+                    !draft.sessionId ||
+                    !draft.prompt.trim()
+                  }
+                >
+                  <Save aria-hidden="true" />
+                  <span>{busyAction === "save" ? "Saving" : "Save"}</span>
+                </button>
+              </div>
+            </form>
+          ) : selected ? (
+            <div className="schedule-summary">
+              <header className="schedule-summary-header">
+                <div>
+                  <span className="schedule-eyebrow">{selected.cadence}</span>
+                  <h3>{selected.name}</h3>
+                  <p>{selected.projectName} · {selected.sessionName}</p>
+                </div>
+                <div className="schedule-summary-actions">
+                  {activeRun ? (
+                    <button
+                      className="icon-button danger"
+                      type="button"
+                      aria-label="Cancel current run"
+                      title="Cancel run"
+                      disabled={busyAction === `cancel-${selected.id}`}
+                      onClick={() =>
+                        void perform(`cancel-${selected.id}`, () =>
+                          cancelScheduleRun(selected.id)
+                        )
+                      }
+                    >
+                      <XCircle aria-hidden="true" />
+                    </button>
+                  ) : (
+                    <button
+                      className="icon-button"
+                      type="button"
+                      aria-label="Run now"
+                      title="Run now"
+                      disabled={busyAction === `run-${selected.id}`}
+                      onClick={() =>
+                        void perform(`run-${selected.id}`, () => runScheduleNow(selected.id))
+                      }
+                    >
+                      <Play aria-hidden="true" />
+                    </button>
+                  )}
+                  <button
+                    className="icon-button"
+                    type="button"
+                    aria-label="Edit schedule"
+                    title="Edit"
+                    disabled={Boolean(activeRun)}
+                    onClick={() => beginEdit(selected)}
+                  >
+                    <Pencil aria-hidden="true" />
+                  </button>
+                  <button
+                    className="icon-button danger"
+                    type="button"
+                    aria-label="Delete schedule"
+                    title="Delete"
+                    disabled={Boolean(activeRun)}
+                    onClick={() => setDeleteTarget(selected)}
+                  >
+                    <Trash2 aria-hidden="true" />
+                  </button>
+                </div>
+              </header>
+
+              <div className="schedule-status-band">
+                <div>
+                  <span>Next</span>
+                  <strong>{formatTime(selected.nextRunAtMs, selected.timezone)}</strong>
+                </div>
+                <div>
+                  <span>Time zone</span>
+                  <strong>{selected.timezone}</strong>
+                </div>
+                <div>
+                  <span>Effort</span>
+                  <strong>{selected.effort}</strong>
+                </div>
+                <label className="settings-switch schedule-enabled-switch">
+                  <input
+                    type="checkbox"
+                    checked={selected.enabled}
+                    disabled={busyAction === `toggle-${selected.id}`}
+                    onChange={(event) =>
+                      void perform(`toggle-${selected.id}`, () =>
+                        setScheduleEnabled(selected.id, event.target.checked)
+                      )
+                    }
+                  />
+                  <span className="settings-switch-track" aria-hidden="true"><span /></span>
+                  <span>{selected.enabled ? "Enabled" : "Paused"}</span>
+                </label>
+              </div>
+
+              <div className="schedule-prompt-preview">
+                <span>Prompt</span>
+                <p>{selected.prompt}</p>
+              </div>
+
+              <section className="schedule-history" aria-label="Run history">
+                <div className="schedule-history-title">
+                  <h4>Run history</h4>
+                  <button
+                    type="button"
+                    onClick={() => onOpenSession(selected.sessionId)}
+                  >
+                    Open task
+                  </button>
+                </div>
+                {selected.runs.length === 0 ? (
+                  <div className="schedule-history-empty">No runs</div>
+                ) : (
+                  [...selected.runs].reverse().map((run) => (
+                    <div className="schedule-run-row" key={run.id} data-status={run.status}>
+                      {run.status === "completed" ? (
+                        <CheckCircle2 aria-hidden="true" />
+                      ) : run.status === "failed" || run.status === "cancelled" ? (
+                        <CircleAlert aria-hidden="true" />
+                      ) : (
+                        <Clock3 aria-hidden="true" />
+                      )}
+                      <span>
+                        <strong>{runStatusLabel(run.status)}</strong>
+                        <small>{run.source === "manual" ? "Manual" : "Scheduled"}</small>
+                      </span>
+                      <time>{formatTime(run.scheduledForMs, selected.timezone)}</time>
+                      {run.error && <p>{run.error}</p>}
+                    </div>
+                  ))
+                )}
+              </section>
+            </div>
+          ) : (
+            <button className="schedule-empty-action schedule-detail-empty" type="button" onClick={beginNew}>
+              <Plus aria-hidden="true" />
+              <span>New schedule</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {deleteTarget &&
+        createPortal(
+          <div className="delete-confirmation-backdrop">
+            <section
+              className="delete-confirmation-dialog"
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="delete-schedule-title"
+              aria-describedby="delete-schedule-description"
+            >
+              <div className="delete-confirmation-copy">
+                <h2 id="delete-schedule-title">Delete “{deleteTarget.name}”?</h2>
+                <p id="delete-schedule-description">
+                  This removes the schedule and its run history. Conversation history is not affected.
+                </p>
+              </div>
+              <div className="delete-confirmation-actions">
+                <button type="button" onClick={() => setDeleteTarget(null)}>
+                  Cancel
+                </button>
+                <button
+                  className="danger"
+                  type="button"
+                  onClick={() => {
+                    const scheduleId = deleteTarget.id;
+                    setDeleteTarget(null);
+                    void perform(`delete-${scheduleId}`, async () => {
+                      const next = await deleteSchedule(scheduleId);
+                      setSelectedId(next.schedules[0]?.id ?? null);
+                      return next;
+                    });
+                  }}
+                >
+                  Delete Schedule
+                </button>
+              </div>
+            </section>
+          </div>,
+          document.body
+        )}
+    </section>
+  );
+}
