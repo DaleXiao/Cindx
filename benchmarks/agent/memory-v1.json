@@ -1,0 +1,55 @@
+{
+  "schema": "cindx.memory-evaluation.v1",
+  "id": "core-memory",
+  "version": 1,
+  "cases": [
+    {
+      "id": "session-effort-scope",
+      "requirement": "Keep the selected effort scoped to each session",
+      "query": "Why did effort leak between sessions?",
+      "expected": "effort scoped to each session"
+    },
+    {
+      "id": "delete-confirmation",
+      "requirement": "Project and session deletion must require explicit confirmation",
+      "query": "Preserve the deletion confirmation behavior",
+      "expected": "deletion must require explicit confirmation"
+    },
+    {
+      "id": "sidebar-material",
+      "requirement": "The sidebar must use a high-opacity white frosted glass material",
+      "query": "Continue improving the frosted sidebar",
+      "expected": "white frosted glass"
+    },
+    {
+      "id": "traffic-light-position",
+      "requirement": "Do not change the validated macOS traffic light vertical position",
+      "query": "Build without moving the traffic lights",
+      "expected": "traffic light vertical position"
+    },
+    {
+      "id": "rag-routing",
+      "requirement": "Simple greetings and capability questions must not trigger workspace RAG",
+      "query": "A capability question should skip RAG",
+      "expected": "capability questions must not trigger workspace RAG"
+    },
+    {
+      "id": "output-isolation",
+      "requirement": "Output artifacts must remain isolated to their originating session",
+      "query": "Keep output files scoped to the active session",
+      "expected": "artifacts must remain isolated"
+    },
+    {
+      "id": "tool-collapse",
+      "requirement": "The complete agent tool chain must be collapsed by default",
+      "query": "Preserve the default collapsed agent actions",
+      "expected": "tool chain must be collapsed"
+    },
+    {
+      "id": "memory-chinese",
+      "requirement": "左侧边栏需要白色高不透明度的磨砂玻璃效果",
+      "query": "继续优化左侧边栏的磨砂效果",
+      "expected": "白色高不透明度的磨砂玻璃"
+    }
+  ]
+}

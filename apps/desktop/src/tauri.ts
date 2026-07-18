@@ -403,6 +403,15 @@ export type RagStatsView = {
   indexedAtMs: number;
 };
 
+export type MemoryStatsView = {
+  records: number;
+  requirements: number;
+  outcomes: number;
+  evidence: number;
+  recalls: number;
+  updatedAtMs: number;
+};
+
 export type RagSourceView = {
   path: string;
   startLine: number;
@@ -423,9 +432,12 @@ export type RetrievalChannelView = {
 
 export type RetrievalTraceView = {
   query: string;
+  mode: string;
   channels: RetrievalChannelView[];
   selectedCount: number;
   durationMs: number;
+  indexCacheHit: boolean;
+  indexDurationMs: number;
 };
 
 export type GraphNodeView = {
@@ -453,6 +465,7 @@ export type GraphStateView = {
 export type Phase7State = {
   timeline: TimelineEntry[];
   stats: RagStatsView;
+  memory: MemoryStatsView;
   sources: RagSourceView[];
   retrievalTrace: RetrievalTraceView | null;
   graph: GraphStateView;
@@ -593,6 +606,18 @@ export type AgentTraceTurnView = {
   steps: AgentTraceStepView[];
 };
 
+export type AgentTraceRoleSummary = {
+  role: string;
+  models: string[];
+  calls: number;
+  completed: number;
+  degraded: number;
+  latencyMs: number;
+  firstTokenLatencyMs: number | null;
+  totalTokens: number;
+  evidenceCount: number;
+};
+
 export type AgentTraceState = {
   taskId: string;
   traceId: string;
@@ -610,6 +635,7 @@ export type AgentTraceState = {
   toolCallCount: number;
   permissionWaitCount: number;
   errorCount: number;
+  roleSummaries: AgentTraceRoleSummary[];
   exportPath: string | null;
   turns: AgentTraceTurnView[];
   lastError: string | null;
@@ -911,6 +937,14 @@ let browserPhase7State: Phase7State = {
     chunksIndexed: 0,
     indexedAtMs: 0
   },
+  memory: {
+    records: 0,
+    requirements: 0,
+    outcomes: 0,
+    evidence: 0,
+    recalls: 0,
+    updatedAtMs: 0
+  },
   sources: [],
   retrievalTrace: null,
   graph: {
@@ -986,6 +1020,7 @@ let browserAgentTraceState: AgentTraceState = {
   toolCallCount: 0,
   permissionWaitCount: 0,
   errorCount: 0,
+  roleSummaries: [],
   exportPath: null,
   turns: [],
   lastError: null

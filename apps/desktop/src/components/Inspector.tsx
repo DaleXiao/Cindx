@@ -40,6 +40,7 @@ import {
 import type {
   AgentOutputArtifactView,
   AgentState,
+  AgentTraceRoleSummary,
   AgentTraceStepView,
   ArtifactPreview,
   BrowserObservationView,
@@ -73,6 +74,7 @@ type InspectorProps = {
   browserObservations: BrowserObservationView[];
   toolResults: ToolRunView[];
   sessionTraceSteps: AgentTraceStepView[];
+  roleSummaries: AgentTraceRoleSummary[];
   workspaceRoot: string;
   agentStatus: AgentState["status"] | "idle";
   agentTurnCount: number;
@@ -331,6 +333,7 @@ export function Inspector({
   browserObservations,
   toolResults,
   sessionTraceSteps,
+  roleSummaries,
   workspaceRoot,
   agentStatus,
   agentTurnCount,
@@ -831,6 +834,25 @@ export function Inspector({
                   <dd>{tracePermissionCount}</dd>
                 </div>
               </dl>
+              {roleSummaries.length > 0 && (
+                <dl className="detail-list inspector-role-summary" aria-label="Model role activity">
+                  {roleSummaries.map((summary) => (
+                    <div key={summary.role}>
+                      <dt>{summary.role}</dt>
+                      <dd>
+                        <span>
+                          {summary.calls} calls · {formatDuration(summary.latencyMs)}
+                          {summary.firstTokenLatencyMs != null
+                            ? ` · TTFT ${formatDuration(summary.firstTokenLatencyMs)}`
+                            : ""}
+                          {` · ${summary.evidenceCount} evidence`}
+                        </span>
+                        <small>{summary.models.join(", ") || "unreported model"}</small>
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
               <button
                 className="secondary-button inspector-trace-export"
                 type="button"

@@ -8,7 +8,9 @@ use agent_graph::{
 };
 use agent_memory::{
     build_restore_context_pack, build_session_checkpoint_at, conversation_memory_to_markdown,
-    CheckpointOptions, RestoreContextPack, SessionCheckpoint,
+    extract_durable_memories, memory_recalls_to_markdown, merge_memory_records,
+    recall_memories_at, record_memory_recalls, CheckpointOptions, MemoryKind, MemoryLedger,
+    RestoreContextPack, SessionCheckpoint, MEMORY_LEDGER_SCHEMA,
 };
 use agent_mcp::{McpCatalogService, McpServerConfig, McpTransportConfig};
 use agent_rag::{
@@ -106,6 +108,9 @@ const PROMPT_EVALUATION_IDLE_GRACE_MS: u64 = 1_200;
 const PROMPT_EVOLUTION_MAX_GENERATION: u32 = 12;
 const PROMPT_EVOLUTION_SHADOW_INTERVAL: usize = 10;
 const AGENT_SESSION_READ_MODEL_NAMESPACE: &str = "agent-session-v1";
+const AGENT_MEMORY_READ_MODEL_NAMESPACE: &str = "agent-memory-v1";
+const AGENT_MEMORY_MAX_RECORDS: usize = 256;
+const AGENT_MEMORY_RECALL_LIMIT: usize = 6;
 const ROUTING_TELEMETRY_READ_MODEL_NAMESPACE: &str = "routing-telemetry-v1";
 const ROUTING_TELEMETRY_READ_MODEL_KEY: &str = "global";
 const ROUTING_TELEMETRY_MAX_RUNS: usize = 2_048;
@@ -119,6 +124,7 @@ const CONTEXT_RECENT_MAX_TOKENS: u64 = 48_000;
 const CONTEXT_RECENT_MAX_MESSAGES: usize = 32;
 const CONTEXT_RESTORE_MAX_CHARS: usize = 32_000;
 const CONTEXT_MEMORY_MAX_ITEMS: usize = 12;
+const WORKSPACE_KNOWLEDGE_CACHE_TTL: Duration = Duration::from_secs(30);
 const EVENT_REDACTION_MARKER_FILE: &str = "events-redaction-v1.complete";
 const OPENAI_DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
 const DASHSCOPE_DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-v4";
@@ -151,8 +157,15 @@ struct AppState {
     suspended_agent_runs: Mutex<BTreeMap<String, SuspendedAgentRun>>,
     agent_run_controls: Mutex<BTreeMap<String, Arc<AgentRunControl>>>,
     prompt_evaluation_controls: Mutex<BTreeMap<String, Arc<AgentRunControl>>>,
+    workspace_knowledge_cache: Mutex<BTreeMap<String, WorkspaceKnowledgeCacheEntry>>,
     allow_exit: AtomicBool,
     quit_prompt_active: AtomicBool,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceKnowledgeCacheEntry {
+    adapter: FileRagAdapter,
+    validated_at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -1109,6 +1122,17 @@ struct RagStatsView {
     indexed_at_ms: u64,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryStatsView {
+    records: usize,
+    requirements: usize,
+    outcomes: usize,
+    evidence: usize,
+    recalls: u64,
+    updated_at_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RagSourceView {
@@ -1139,6 +1163,8 @@ struct RetrievalTraceView {
     channels: Vec<RetrievalChannelView>,
     selected_count: usize,
     duration_ms: u64,
+    index_cache_hit: bool,
+    index_duration_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1174,6 +1200,7 @@ struct GraphStateView {
 struct Phase7State {
     timeline: Vec<TimelineEntry>,
     stats: RagStatsView,
+    memory: MemoryStatsView,
     sources: Vec<RagSourceView>,
     retrieval_trace: Option<RetrievalTraceView>,
     graph: GraphStateView,
@@ -1379,9 +1406,24 @@ struct AgentTraceState {
     tool_call_count: usize,
     permission_wait_count: usize,
     error_count: usize,
+    role_summaries: Vec<AgentTraceRoleSummaryView>,
     export_path: Option<String>,
     turns: Vec<AgentTraceTurnView>,
     last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentTraceRoleSummaryView {
+    role: String,
+    models: Vec<String>,
+    calls: usize,
+    completed: usize,
+    degraded: usize,
+    latency_ms: u64,
+    first_token_latency_ms: Option<u64>,
+    total_tokens: u64,
+    evidence_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2259,6 +2301,9 @@ fn delete_project(
     if let Err(error) = delete_session_history(&state, &deleted_session_ids) {
         cleanup_errors.push(error);
     }
+    if let Err(error) = delete_project_memory(&state, &input.project_id) {
+        cleanup_errors.push(error);
+    }
     if let Err(error) = remove_staged_attachment_dirs(&attachment_dirs) {
         cleanup_errors.push(error);
     }
@@ -2792,6 +2837,18 @@ fn delete_session_history(
         .map_err(|error| error.to_string())?;
     drop(store);
     Ok(())
+}
+
+fn delete_project_memory(
+    state: &tauri::State<'_, AppState>,
+    project_id: &str,
+) -> Result<(), String> {
+    state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?
+        .delete_read_model(AGENT_MEMORY_READ_MODEL_NAMESPACE, project_id)
+        .map_err(|error| error.to_string())
 }
 
 fn remove_staged_attachment_dirs(paths: &[PathBuf]) -> Result<(), String> {
@@ -4994,6 +5051,14 @@ fn run_agent_task_blocking_inner(
         config.context_window_tokens,
     )
     .map_err(|error| format!("context preparation failed: {error}"))?;
+    if should_recall_agent_memory(&routing_context, &prompt) {
+        cancellation.mark_progress("memory", "Recalling relevant project memory");
+        match recall_project_memory_for_prompt(&state, &task_id, &run_context, &prompt) {
+            Ok(Some(memory_context)) => history.push(memory_context),
+            Ok(None) => {}
+            Err(error) => eprintln!("project memory recall unavailable: {error}"),
+        }
+    }
     if let Some(artifact_manifest) = artifact_manifest {
         history.push(artifact_manifest);
     }
@@ -6428,14 +6493,26 @@ fn run_orchestration(
 #[tauri::command]
 fn get_phase7_state(state: tauri::State<'_, AppState>) -> Result<Phase7State, String> {
     let root = active_workspace_root(&state)?;
-    let adapter = open_rag_adapter_for(&root)?;
+    let project_id = active_project_id_for_memory(&state)?;
+    let (adapter, _) = cached_rag_adapter_for(&state, &root)?;
     let graph = graph_state_for(&root, &[])?;
-    let store = state
+    let mut store = state
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let memory = project_memory_stats(&mut store, project_id.as_deref())
+        .map_err(|error| error.to_string())?;
 
-    phase7_state(&store, &adapter, Vec::new(), None, graph, None, None)
+    phase7_state(
+        &store,
+        &adapter,
+        memory,
+        Vec::new(),
+        None,
+        graph,
+        None,
+        None,
+    )
         .map_err(|error| error.to_string())
 }
 
@@ -6478,6 +6555,7 @@ fn index_workspace_with_cloud_fallback(
 #[tauri::command]
 fn index_workspace_rag(state: tauri::State<'_, AppState>) -> Result<Phase7State, String> {
     let root = active_workspace_root(&state)?;
+    let project_id = active_project_id_for_memory(&state)?;
     let config = clone_provider_config(&state)?;
     let mut adapter = open_rag_adapter_for(&root)?;
     let (index, embedding_backend, embedding_model, embedding_fallback_error) = if config.is_ready()
@@ -6511,6 +6589,7 @@ fn index_workspace_rag(state: tauri::State<'_, AppState>) -> Result<Phase7State,
     let stats = adapter
         .replace_all(index)
         .map_err(|error| error.to_string())?;
+    cache_rag_adapter(&state, &root, &adapter)?;
     let mut store = state
         .store
         .lock()
@@ -6554,7 +6633,18 @@ fn index_workspace_rag(state: tauri::State<'_, AppState>) -> Result<Phase7State,
     .map_err(|error| error.to_string())?;
 
     let graph = graph_state_for(&root, &[])?;
-    phase7_state(&store, &adapter, Vec::new(), None, graph, None, None)
+    let memory = project_memory_stats(&mut store, project_id.as_deref())
+        .map_err(|error| error.to_string())?;
+    phase7_state(
+        &store,
+        &adapter,
+        memory,
+        Vec::new(),
+        None,
+        graph,
+        None,
+        None,
+    )
         .map_err(|error| error.to_string())
 }
 
@@ -6564,15 +6654,16 @@ fn search_rag(
     input: RagSearchInput,
 ) -> Result<Phase7State, String> {
     let root = active_workspace_root(&state)?;
+    let project_id = active_project_id_for_memory(&state)?;
     let query = input.query.trim().to_string();
     if query.is_empty() {
         return phase7_state_with_error(&state, "RAG query is empty", Vec::new(), None);
     }
 
-    let adapter = open_rag_adapter_for(&root)?;
+    let (adapter, index_cache_hit) = cached_rag_adapter_for(&state, &root)?;
     let config = clone_provider_config(&state)?;
     let cancellation = Arc::new(AgentRunControl::new("auto"));
-    let retrieval = run_parallel_retrieval(
+    let mut retrieval = run_parallel_retrieval(
         &root,
         &adapter,
         &config,
@@ -6581,6 +6672,7 @@ fn search_rag(
         "four_way_parallel",
         &cancellation,
     )?;
+    retrieval.trace.index_cache_hit = index_cache_hit;
     let focus_paths = retrieval
         .sources
         .iter()
@@ -6599,10 +6691,13 @@ fn search_rag(
         Some(&retrieval.trace),
     )
         .map_err(|error| error.to_string())?;
+    let memory = project_memory_stats(&mut store, project_id.as_deref())
+        .map_err(|error| error.to_string())?;
 
     phase7_state(
         &store,
         &adapter,
+        memory,
         retrieval.sources,
         Some(retrieval.trace),
         graph,
@@ -6618,15 +6713,16 @@ fn answer_with_rag(
     input: RagSearchInput,
 ) -> Result<Phase7State, String> {
     let root = active_workspace_root(&state)?;
+    let project_id = active_project_id_for_memory(&state)?;
     let query = input.query.trim().to_string();
     if query.is_empty() {
         return phase7_state_with_error(&state, "RAG query is empty", Vec::new(), None);
     }
 
-    let adapter = open_rag_adapter_for(&root)?;
+    let (adapter, index_cache_hit) = cached_rag_adapter_for(&state, &root)?;
     let config = clone_provider_config(&state)?;
     let cancellation = Arc::new(AgentRunControl::new("auto"));
-    let retrieval = run_parallel_retrieval(
+    let mut retrieval = run_parallel_retrieval(
         &root,
         &adapter,
         &config,
@@ -6635,6 +6731,7 @@ fn answer_with_rag(
         "four_way_parallel",
         &cancellation,
     )?;
+    retrieval.trace.index_cache_hit = index_cache_hit;
     let selected_results = retrieval.results.clone();
     let sources = retrieval.sources.clone();
     let focus_paths = sources
@@ -6748,10 +6845,13 @@ fn answer_with_rag(
                 .collect(),
             )
             .map_err(|error| error.to_string())?;
+            let memory = project_memory_stats(&mut store, project_id.as_deref())
+                .map_err(|error| error.to_string())?;
 
             phase7_state(
                 &store,
                 &adapter,
+                memory,
                 sources,
                 Some(retrieval.trace),
                 graph,
@@ -7129,6 +7229,7 @@ pub fn run() {
             suspended_agent_runs: Mutex::new(BTreeMap::new()),
             agent_run_controls: Mutex::new(BTreeMap::new()),
             prompt_evaluation_controls: Mutex::new(BTreeMap::new()),
+            workspace_knowledge_cache: Mutex::new(BTreeMap::new()),
             allow_exit: AtomicBool::new(false),
             quit_prompt_active: AtomicBool::new(false),
         })
@@ -7881,6 +7982,7 @@ fn phase6_state(
 fn phase7_state(
     store: &SqliteStore,
     adapter: &FileRagAdapter,
+    memory: MemoryStatsView,
     sources: Vec<RagSourceView>,
     retrieval_trace: Option<RetrievalTraceView>,
     graph: GraphStateView,
@@ -7898,6 +8000,7 @@ fn phase7_state(
     Ok(Phase7State {
         timeline,
         stats: rag_stats_view(adapter.stats()),
+        memory,
         sources,
         retrieval_trace,
         graph,
@@ -7914,7 +8017,8 @@ fn phase7_state_with_error(
 ) -> Result<Phase7State, String> {
     let message = message.into();
     let root = active_workspace_root(state)?;
-    let adapter = open_rag_adapter_for(&root)?;
+    let project_id = active_project_id_for_memory(state)?;
+    let (adapter, _) = cached_rag_adapter_for(state, &root)?;
     let focus_paths = sources
         .iter()
         .map(|source| source.path.clone())
@@ -7934,10 +8038,13 @@ fn phase7_state_with_error(
             .collect(),
     )
     .map_err(|error| error.to_string())?;
+    let memory = project_memory_stats(&mut store, project_id.as_deref())
+        .map_err(|error| error.to_string())?;
 
     phase7_state(
         &store,
         &adapter,
+        memory,
         sources,
         None,
         graph,
@@ -8621,6 +8728,22 @@ fn collaboration_candidate_models(config: &ProviderConfig, candidates: usize) ->
     models
 }
 
+fn collaboration_agent_budget(candidates: usize) -> usize {
+    candidates.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS)
+}
+
+fn collaboration_fallback_models(models: &[String], agent_budget: usize) -> Vec<String> {
+    if models.is_empty() {
+        return Vec::new();
+    }
+    models
+        .iter()
+        .cycle()
+        .take(agent_budget.max(1))
+        .cloned()
+        .collect()
+}
+
 fn synthesize_agent_answer(
     app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
@@ -8808,6 +8931,7 @@ fn complete_collaboration_model_with_control(
         timeout_seconds,
     });
     let mut partial_output = String::new();
+    let mut first_delta_at_ms = None;
     let response = provider.complete_streaming_cancellable(
         ModelRequest {
             role,
@@ -8834,6 +8958,7 @@ fn complete_collaboration_model_with_control(
         },
         |delta| {
             if !delta.is_empty() {
+                first_delta_at_ms.get_or_insert_with(current_time_millis);
                 partial_output.push_str(delta);
             }
             if let Some(control) = cancellation.as_ref() {
@@ -8856,6 +8981,12 @@ fn complete_collaboration_model_with_control(
                 if let Some(value) = response.metadata.get(key) {
                     usage.insert(key.to_string(), value.clone());
                 }
+            }
+            if let Some(first_delta_at_ms) = first_delta_at_ms {
+                usage.insert(
+                    "first_token_latency_ms".to_string(),
+                    first_delta_at_ms.saturating_sub(started_at_ms).to_string(),
+                );
             }
             if let Some(control) = cancellation.as_ref() {
                 control.record_partial_output(&response.message.content);
@@ -8950,6 +9081,7 @@ fn complete_collaboration_worker_with_tools(
     let mut usage = Metadata::new();
     let mut evidence = Vec::new();
     let mut tool_call_count = 0usize;
+    let mut first_delta_at_ms = None;
 
     loop {
         if cancellation
@@ -8996,6 +9128,7 @@ fn complete_collaboration_worker_with_tools(
             request,
             |delta| {
                 if !delta.is_empty() {
+                    first_delta_at_ms.get_or_insert_with(current_time_millis);
                     partial_output.push_str(delta);
                 }
                 if let Some(control) = cancellation.as_ref() {
@@ -9041,6 +9174,12 @@ fn complete_collaboration_worker_with_tools(
                 usage.insert("worker_turns".to_string(), runtime.turn.to_string());
                 usage.insert("worker_tool_calls".to_string(), tool_call_count.to_string());
                 usage.insert("worker_tool_count".to_string(), tools.len().to_string());
+                if let Some(first_delta_at_ms) = first_delta_at_ms {
+                    usage.insert(
+                        "first_token_latency_ms".to_string(),
+                        first_delta_at_ms.saturating_sub(started_at_ms).to_string(),
+                    );
+                }
                 usage.insert(
                     "worker_runtime".to_string(),
                     "isolated_evidence_v1".to_string(),
@@ -10886,14 +11025,8 @@ fn prepare_agent_collaboration(
     };
     let id = unique_id("collab");
     let models = collaboration_candidate_models(config, MAX_ADAPTIVE_WORKFLOW_STEPS);
-    let agent_budget = (*candidates)
-        .clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS)
-        .min(models.len().max(1));
-    let fallback_models = models
-        .iter()
-        .take(agent_budget)
-        .cloned()
-        .collect::<Vec<_>>();
+    let agent_budget = collaboration_agent_budget(*candidates);
+    let fallback_models = collaboration_fallback_models(&models, agent_budget);
     let bounded = run_context.get("collaboration_profile").map(String::as_str)
         == Some("bounded");
     let effort = run_context
@@ -11319,6 +11452,7 @@ fn continue_agent_loop(
         let visible_stream = collaboration.is_none();
         let mut streamed_output = false;
         let mut partial_stream = String::new();
+        let mut first_delta_at_ms = None;
         let mut transport_attempt = 0usize;
         let mut response = loop {
             transport_attempt += 1;
@@ -11327,6 +11461,7 @@ fn continue_agent_loop(
                 request.clone(),
                 |delta| {
                     if !delta.is_empty() {
+                        first_delta_at_ms.get_or_insert_with(current_time_millis);
                         partial_stream.push_str(delta);
                         cancellation.mark_progress("model_stream", "executor");
                         cancellation.record_partial_output(&partial_stream);
@@ -11454,6 +11589,12 @@ fn continue_agent_loop(
             let mut metadata = Metadata::new();
             metadata.insert("request_id".to_string(), request_id.clone());
             metadata.insert("latency_ms".to_string(), latency_ms.to_string());
+            if let Some(first_delta_at_ms) = first_delta_at_ms {
+                metadata.insert(
+                    "first_token_latency_ms".to_string(),
+                    first_delta_at_ms.saturating_sub(started_at_ms).to_string(),
+                );
+            }
             metadata.insert("output_length".to_string(), output_length.to_string());
             metadata.insert("tool_calls".to_string(), tool_call_count.to_string());
             for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
@@ -11639,6 +11780,10 @@ fn continue_agent_loop(
                     ),
                 )
                 .map_err(|error| error.to_string())?;
+                if let Err(error) = refresh_project_memory_after_completion(&mut store, &run_context)
+                {
+                    eprintln!("project memory checkpoint unavailable: {error}");
+                }
                 return agent_state_for_session(&store, None, session_id)
                     .map_err(|error| error.to_string());
             }
@@ -13213,6 +13358,88 @@ fn agent_trace_state_for_session(
     agent_trace_state_from_events(store, export_path, last_error, session_id, events)
 }
 
+#[derive(Default)]
+struct AgentTraceRoleAccumulator {
+    models: BTreeSet<String>,
+    calls: usize,
+    completed: usize,
+    degraded: usize,
+    latency_ms: u64,
+    first_token_latency_ms: u64,
+    first_token_samples: u64,
+    total_tokens: u64,
+    evidence_count: usize,
+}
+
+fn agent_trace_role_summaries(events: &[Event]) -> Vec<AgentTraceRoleSummaryView> {
+    let mut roles = BTreeMap::<String, AgentTraceRoleAccumulator>::new();
+    for event in events.iter().filter(|event| {
+        matches!(event.kind, EventKind::ModelRequestFinished)
+            && event.metadata.contains_key("collaboration_id")
+    }) {
+        let Some(role) = event.metadata.get("role") else {
+            continue;
+        };
+        let entry = roles.entry(role.clone()).or_default();
+        entry.calls += 1;
+        if event.metadata.get("status").map(String::as_str) == Some("degraded") {
+            entry.degraded += 1;
+        } else {
+            entry.completed += 1;
+        }
+        if let Some(model) = event.metadata.get("model").filter(|model| !model.trim().is_empty()) {
+            entry.models.insert(model.clone());
+        }
+        entry.latency_ms = entry.latency_ms.saturating_add(
+            event
+                .metadata
+                .get("latency_ms")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or_default(),
+        );
+        if let Some(first_token_latency_ms) = event
+            .metadata
+            .get("first_token_latency_ms")
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            entry.first_token_latency_ms = entry
+                .first_token_latency_ms
+                .saturating_add(first_token_latency_ms);
+            entry.first_token_samples = entry.first_token_samples.saturating_add(1);
+        }
+        entry.total_tokens = entry.total_tokens.saturating_add(
+            event
+                .metadata
+                .get("total_tokens")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or_default(),
+        );
+        entry.evidence_count = entry.evidence_count.saturating_add(
+            event
+                .metadata
+                .get("evidence_count")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or_default(),
+        );
+    }
+    roles
+        .into_iter()
+        .map(|(role, summary)| AgentTraceRoleSummaryView {
+            role,
+            models: summary.models.into_iter().collect(),
+            calls: summary.calls,
+            completed: summary.completed,
+            degraded: summary.degraded,
+            latency_ms: summary.latency_ms,
+            first_token_latency_ms: (summary.first_token_samples > 0).then(|| {
+                summary.first_token_latency_ms / summary.first_token_samples
+            }),
+            total_tokens: summary.total_tokens,
+            evidence_count: summary.evidence_count,
+        })
+        .collect()
+}
+
 fn agent_trace_state_from_events(
     store: &SqliteStore,
     export_path: Option<PathBuf>,
@@ -13276,6 +13503,7 @@ fn agent_trace_state_from_events(
         .flat_map(|turn| turn.steps.iter())
         .filter(|step| step.kind == "error")
         .count();
+    let role_summaries = agent_trace_role_summaries(&active_events);
     let started_at_ms = active_events
         .first()
         .map(|event| event.timestamp_ms)
@@ -13314,6 +13542,7 @@ fn agent_trace_state_from_events(
         tool_call_count,
         permission_wait_count,
         error_count,
+        role_summaries,
         export_path: export_path.map(|path| path.display().to_string()),
         turns,
         last_error,
@@ -13880,6 +14109,9 @@ fn execute_agent_tool_invocation(
         move || run_control.as_ref().is_some_and(|control| control.should_stop())
     });
     let registry = tool_registry_for_state(state, workspace_root)?;
+    let mutates_workspace = registry.get(&tool_name).is_some_and(|tool| {
+        !matches!(tool.spec().risk, ToolRisk::ReadOnly)
+    });
     let mut result = if let Some(reason) = budget_stop {
         ToolResult::text(
             invocation.id,
@@ -13911,6 +14143,11 @@ fn execute_agent_tool_invocation(
         }
     }
     materialize_tool_result_artifacts(&mut result, workspace_root)?;
+    if mutates_workspace && matches!(result.status, ToolOutcomeStatus::Succeeded) {
+        if let Err(error) = invalidate_workspace_knowledge_cache(state, workspace_root) {
+            eprintln!("workspace knowledge cache invalidation failed: {error}");
+        }
+    }
 
     let mut store = state
         .store
@@ -14907,13 +15144,20 @@ fn prepare_agent_knowledge_context(
     retrieval_mode: &str,
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<Option<Message>, String> {
-    let mut adapter = open_rag_adapter_for(workspace_root)?;
-    let auto_indexed =
-        ensure_workspace_knowledge_index(workspace_root, &mut adapter, cancellation)?;
+    let index_started_at = Instant::now();
+    let (mut adapter, index_cache_hit) = cached_rag_adapter_for(state, workspace_root)?;
+    let auto_indexed = ensure_workspace_knowledge_index(
+        workspace_root,
+        &mut adapter,
+        index_cache_hit,
+        cancellation,
+    )?;
+    cache_rag_adapter(state, workspace_root, &adapter)?;
+    let index_duration_ms = index_started_at.elapsed().as_millis() as u64;
     if agent_run_should_stop(cancellation) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
-    let retrieval = run_parallel_retrieval(
+    let mut retrieval = run_parallel_retrieval(
         workspace_root,
         &adapter,
         config,
@@ -14922,6 +15166,8 @@ fn prepare_agent_knowledge_context(
         retrieval_mode,
         cancellation,
     )?;
+    retrieval.trace.index_cache_hit = index_cache_hit;
+    retrieval.trace.index_duration_ms = index_duration_ms;
 
     {
         let mut store = state
@@ -15016,10 +15262,14 @@ fn prepare_agent_knowledge_context(
 fn ensure_workspace_knowledge_index(
     workspace_root: &Path,
     adapter: &mut FileRagAdapter,
+    cache_hit: bool,
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<Option<RagIndexStats>, String> {
     if agent_run_should_stop(cancellation) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
+    if cache_hit && !adapter.chunks().is_empty() && graph_store_path_for(workspace_root).exists() {
+        return Ok(None);
     }
     let options = IndexOptions::default();
     let index_is_fresh = !adapter.chunks().is_empty()
@@ -15083,17 +15333,6 @@ fn run_parallel_retrieval(
     let channel_limit = limit.saturating_mul(3).min(50);
     let chunks = adapter.chunks().to_vec();
     let include_graph = retrieval_mode == "four_way_parallel";
-    let graph_seeds = if include_graph {
-        let local_embedding = local_query_embedding(query);
-        let semantic = search_chunks_semantic(&chunks, &local_embedding, channel_limit);
-        if semantic.is_empty() {
-            search_chunks_literal(&chunks, query, channel_limit)
-        } else {
-            semantic
-        }
-    } else {
-        Vec::new()
-    };
 
     let semantic_chunks = chunks.clone();
     let semantic_query = query.to_string();
@@ -15119,8 +15358,12 @@ fn run_parallel_retrieval(
         let direct_chunks = chunks.clone();
         let direct_query = query.to_string();
         let direct_root = workspace_root.to_path_buf();
+        let direct_cancellation = cancellation.clone();
         std::thread::spawn(move || {
             timed_retrieval_channel("graph_recall", || {
+                if agent_run_should_stop(&direct_cancellation) {
+                    return Err(MODEL_REQUEST_CANCELLED.to_string());
+                }
                 let store = FileGraphStore::open(graph_store_path_for(&direct_root))
                     .map_err(|error| error.to_string())?;
                 Ok(graph_direct_recall(
@@ -15141,9 +15384,25 @@ fn run_parallel_retrieval(
 
     let walk_handle = include_graph.then(|| {
         let walk_chunks = chunks.clone();
+        let walk_query = query.to_string();
         let walk_root = workspace_root.to_path_buf();
+        let walk_cancellation = cancellation.clone();
         std::thread::spawn(move || {
             timed_retrieval_channel("graph_walk", || {
+                if agent_run_should_stop(&walk_cancellation) {
+                    return Err(MODEL_REQUEST_CANCELLED.to_string());
+                }
+                let local_embedding = local_query_embedding(&walk_query);
+                let semantic = search_chunks_semantic(
+                    &walk_chunks,
+                    &local_embedding,
+                    channel_limit,
+                );
+                let graph_seeds = if semantic.is_empty() {
+                    search_chunks_literal(&walk_chunks, &walk_query, channel_limit)
+                } else {
+                    semantic
+                };
                 let store = FileGraphStore::open(graph_store_path_for(&walk_root))
                     .map_err(|error| error.to_string())?;
                 Ok(graph_walk_recall(
@@ -15163,8 +15422,12 @@ fn run_parallel_retrieval(
     });
 
     let literal_query = query.to_string();
+    let literal_cancellation = cancellation.clone();
     let literal_handle = std::thread::spawn(move || {
         timed_retrieval_channel("file_search", || {
+            if agent_run_should_stop(&literal_cancellation) {
+                return Err(MODEL_REQUEST_CANCELLED.to_string());
+            }
             Ok(search_chunks_literal(
                 &chunks,
                 &literal_query,
@@ -15207,6 +15470,8 @@ fn run_parallel_retrieval(
             channels: channel_views,
             selected_count: results.len(),
             duration_ms: started_at.elapsed().as_millis() as u64,
+            index_cache_hit: false,
+            index_duration_ms: 0,
         },
         results,
         sources,
@@ -15438,6 +15703,14 @@ fn append_retrieval_event_for_task(
             "selected_count".to_string(),
             trace.selected_count.to_string(),
         );
+        metadata.insert(
+            "index_cache_hit".to_string(),
+            trace.index_cache_hit.to_string(),
+        );
+        metadata.insert(
+            "index_duration_ms".to_string(),
+            trace.index_duration_ms.to_string(),
+        );
         for channel in &trace.channels {
             metadata.insert(
                 format!("{}_count", channel.name),
@@ -15654,6 +15927,282 @@ fn route_with_local_telemetry(
         decision
     };
     Ok((decision, learned_examples))
+}
+
+fn load_project_memory_ledger(
+    store: &mut SqliteStore,
+    project_id: &str,
+) -> Result<MemoryLedger, StorageError> {
+    let task_id = phase16_task_id();
+    let revision = store.event_revision(&task_id)?;
+    let stored = store
+        .load_read_model(AGENT_MEMORY_READ_MODEL_NAMESPACE, project_id)?
+        .and_then(|stored| {
+            serde_json::from_str::<MemoryLedger>(&stored.payload)
+                .ok()
+                .filter(|ledger| {
+                    ledger.schema == MEMORY_LEDGER_SCHEMA
+                        && ledger.project_id == project_id
+                        && ledger.revision == stored.revision
+                        && ledger.revision <= revision.latest_sequence
+                        && ledger.event_count <= revision.event_count
+                })
+        });
+    let mut rebuilding = stored.is_none();
+    let mut ledger = stored.unwrap_or_else(|| MemoryLedger::new(project_id));
+    let mut delta = store.list_by_task_after(&task_id, ledger.revision)?;
+    if ledger.event_count.saturating_add(delta.len() as u64) != revision.event_count {
+        rebuilding = true;
+        ledger = MemoryLedger::new(project_id);
+        delta = store.list_by_task_after(&task_id, 0)?;
+    }
+
+    let completed_runs = if rebuilding {
+        let mut runs = BTreeMap::<String, Vec<Event>>::new();
+        for event in &delta {
+            if event.metadata.get("project_id").map(String::as_str) != Some(project_id) {
+                continue;
+            }
+            if let Some(run_id) = event.metadata.get("agent_run_id") {
+                runs.entry(run_id.clone()).or_default().push(event.clone());
+            }
+        }
+        runs.into_iter()
+            .filter(|(_, events)| {
+                events
+                    .iter()
+                    .any(|event| event.summary == "Agent task completed")
+            })
+            .map(|(run_id, events)| (run_id, Some(events)))
+            .collect::<Vec<_>>()
+    } else {
+        delta
+            .iter()
+            .filter(|event| event.summary == "Agent task completed")
+            .filter(|event| {
+                event.metadata.get("project_id").map(String::as_str) == Some(project_id)
+            })
+            .filter_map(|event| {
+                event
+                    .metadata
+                    .get("agent_run_id")
+                    .cloned()
+                    .map(|run_id| (run_id, None))
+            })
+            .collect::<Vec<_>>()
+    };
+    for (run_id, cached_events) in completed_runs {
+        let events = match cached_events {
+            Some(events) => events,
+            None => store.list_by_task_and_metadata(&task_id, "agent_run_id", &run_id)?,
+        };
+        let Some(session_id) = events
+            .iter()
+            .find_map(|event| event.metadata.get("session_id"))
+        else {
+            continue;
+        };
+        merge_memory_records(
+            &mut ledger,
+            extract_durable_memories(&events, project_id, session_id),
+            AGENT_MEMORY_MAX_RECORDS,
+        );
+    }
+    ledger.revision = revision.latest_sequence;
+    ledger.event_count = revision.event_count;
+    save_project_memory_ledger(store, &ledger)?;
+    Ok(ledger)
+}
+
+fn save_project_memory_ledger(
+    store: &mut SqliteStore,
+    ledger: &MemoryLedger,
+) -> Result<(), StorageError> {
+    let payload = serde_json::to_string(ledger)
+        .map_err(|error| StorageError::new(format!("memory serialization failed: {error}")))?;
+    store.save_read_model(
+        AGENT_MEMORY_READ_MODEL_NAMESPACE,
+        &ledger.project_id,
+        ledger.revision,
+        &payload,
+    )
+}
+
+fn active_project_id_for_memory(
+    state: &tauri::State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    Ok(state
+        .project_session_config
+        .lock()
+        .map_err(|error| format!("project session config lock poisoned: {error}"))?
+        .active_project()
+        .map(|project| project.id.clone()))
+}
+
+fn project_memory_stats(
+    store: &mut SqliteStore,
+    project_id: Option<&str>,
+) -> Result<MemoryStatsView, StorageError> {
+    let Some(project_id) = project_id else {
+        return Ok(MemoryStatsView::default());
+    };
+    let ledger = load_project_memory_ledger(store, project_id)?;
+    Ok(MemoryStatsView {
+        records: ledger.records.len(),
+        requirements: ledger
+            .records
+            .iter()
+            .filter(|record| record.kind == MemoryKind::Requirement)
+            .count(),
+        outcomes: ledger
+            .records
+            .iter()
+            .filter(|record| record.kind == MemoryKind::Outcome)
+            .count(),
+        evidence: ledger
+            .records
+            .iter()
+            .filter(|record| record.kind == MemoryKind::Evidence)
+            .count(),
+        recalls: ledger.records.iter().map(|record| record.recall_count).sum(),
+        updated_at_ms: ledger
+            .records
+            .iter()
+            .map(|record| record.updated_at_ms)
+            .max()
+            .unwrap_or_default(),
+    })
+}
+
+fn should_recall_agent_memory(context: &RoutingContext, prompt: &str) -> bool {
+    if context.needs_tools
+        || context.needs_retrieval
+        || context.needs_multi_model
+        || context.complexity_score > 0
+        || !matches!(context.task_class, TaskClass::General)
+    {
+        return true;
+    }
+    let normalized = prompt.to_ascii_lowercase();
+    [
+        "remember",
+        "previous",
+        "last time",
+        "continue",
+        "之前",
+        "上次",
+        "刚才",
+        "继续",
+        "还记得",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+fn recall_project_memory_for_prompt(
+    state: &tauri::State<'_, AppState>,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    prompt: &str,
+) -> Result<Option<Message>, String> {
+    let Some(project_id) = run_context.get("project_id") else {
+        return Ok(None);
+    };
+    let session_id = run_context.get("session_id").map(String::as_str);
+    let started_at = Instant::now();
+    let now_ms = current_time_millis();
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let mut ledger = load_project_memory_ledger(&mut store, project_id)
+        .map_err(|error| error.to_string())?;
+    let mut recalls = recall_memories_at(
+        &ledger,
+        prompt,
+        session_id,
+        AGENT_MEMORY_RECALL_LIMIT.saturating_mul(2),
+        now_ms,
+    );
+    if let Some(session_id) = session_id {
+        recalls.retain(|recall| {
+            recall
+                .record
+                .source_session_ids
+                .iter()
+                .any(|source| source != session_id)
+        });
+    }
+    recalls.truncate(AGENT_MEMORY_RECALL_LIMIT);
+    if recalls.is_empty() {
+        return Ok(None);
+    }
+    record_memory_recalls(&mut ledger, &recalls, now_ms);
+    let mut metadata = [
+        ("action".to_string(), "memory_recall".to_string()),
+        ("query".to_string(), prompt.to_string()),
+        ("retrieval_mode".to_string(), "project_memory".to_string()),
+        ("selected_count".to_string(), recalls.len().to_string()),
+        (
+            "memory_ids".to_string(),
+            recalls
+                .iter()
+                .map(|recall| recall.record.id.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        (
+            "memory_reasons".to_string(),
+            recalls
+                .iter()
+                .map(|recall| format!("{}={}", recall.record.id, recall.reasons.join("+")))
+                .collect::<Vec<_>>()
+                .join(";"),
+        ),
+        (
+            "duration_ms".to_string(),
+            started_at.elapsed().as_millis().to_string(),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    metadata = metadata_with_context(metadata, run_context);
+    append_event(
+        &mut store,
+        task_id,
+        EventKind::RetrievalPerformed,
+        "Project memory recalled",
+        metadata,
+    )
+    .map_err(|error| error.to_string())?;
+    let revision = store
+        .event_revision(task_id)
+        .map_err(|error| error.to_string())?;
+    ledger.revision = revision.latest_sequence;
+    ledger.event_count = revision.event_count;
+    save_project_memory_ledger(&mut store, &ledger).map_err(|error| error.to_string())?;
+
+    Ok(Some(Message {
+        role: MessageRole::System,
+        content: memory_recalls_to_markdown(&recalls),
+        metadata: [
+            ("internal".to_string(), "true".to_string()),
+            ("kind".to_string(), "project_memory".to_string()),
+            ("selected_count".to_string(), recalls.len().to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    }))
+}
+
+fn refresh_project_memory_after_completion(
+    store: &mut SqliteStore,
+    run_context: &Metadata,
+) -> Result<usize, StorageError> {
+    let Some(project_id) = run_context.get("project_id") else {
+        return Ok(0);
+    };
+    load_project_memory_ledger(store, project_id).map(|ledger| ledger.records.len())
 }
 
 fn load_routing_telemetry_read_model(
@@ -20004,6 +20553,62 @@ fn open_rag_adapter_for(workspace_root: &Path) -> Result<FileRagAdapter, String>
     FileRagAdapter::open(rag_index_path_for(workspace_root)).map_err(|error| error.to_string())
 }
 
+fn workspace_knowledge_cache_key(workspace_root: &Path) -> String {
+    fs::canonicalize(workspace_root)
+        .unwrap_or_else(|_| workspace_root.to_path_buf())
+        .display()
+        .to_string()
+}
+
+fn cached_rag_adapter_for(
+    state: &tauri::State<'_, AppState>,
+    workspace_root: &Path,
+) -> Result<(FileRagAdapter, bool), String> {
+    let key = workspace_knowledge_cache_key(workspace_root);
+    if let Some(entry) = state
+        .workspace_knowledge_cache
+        .lock()
+        .map_err(|error| format!("workspace knowledge cache lock poisoned: {error}"))?
+        .get(&key)
+        .filter(|entry| entry.validated_at.elapsed() <= WORKSPACE_KNOWLEDGE_CACHE_TTL)
+        .cloned()
+    {
+        return Ok((entry.adapter, true));
+    }
+    open_rag_adapter_for(workspace_root).map(|adapter| (adapter, false))
+}
+
+fn cache_rag_adapter(
+    state: &tauri::State<'_, AppState>,
+    workspace_root: &Path,
+    adapter: &FileRagAdapter,
+) -> Result<(), String> {
+    state
+        .workspace_knowledge_cache
+        .lock()
+        .map_err(|error| format!("workspace knowledge cache lock poisoned: {error}"))?
+        .insert(
+            workspace_knowledge_cache_key(workspace_root),
+            WorkspaceKnowledgeCacheEntry {
+                adapter: adapter.clone(),
+                validated_at: Instant::now(),
+            },
+        );
+    Ok(())
+}
+
+fn invalidate_workspace_knowledge_cache(
+    state: &tauri::State<'_, AppState>,
+    workspace_root: &Path,
+) -> Result<(), String> {
+    state
+        .workspace_knowledge_cache
+        .lock()
+        .map_err(|error| format!("workspace knowledge cache lock poisoned: {error}"))?
+        .remove(&workspace_knowledge_cache_key(workspace_root));
+    Ok(())
+}
+
 fn index_graph_chunks(workspace_root: &Path, chunks: &[RagChunk]) -> Result<(usize, usize), String> {
     index_graph_chunks_cancellable(workspace_root, chunks, || false)
 }
@@ -20894,6 +21499,113 @@ mod tests {
     }
 
     #[test]
+    fn project_memory_read_model_persists_deduplicated_cross_session_requirements() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        for (session_id, run_id) in [
+            ("session-memory-a", "run-memory-a"),
+            ("session-memory-b", "run-memory-b"),
+        ] {
+            let context = [
+                ("project_id".to_string(), "project-memory".to_string()),
+                ("session_id".to_string(), session_id.to_string()),
+                ("agent_run_id".to_string(), run_id.to_string()),
+            ]
+            .into_iter()
+            .collect::<Metadata>();
+            append_event(
+                &mut store,
+                &phase16_task_id(),
+                EventKind::TaskStatusChanged,
+                "Agent task started",
+                context.clone(),
+            )
+            .expect("run should start");
+            append_message_event_with_metadata(
+                &mut store,
+                &phase16_task_id(),
+                MessageRole::User,
+                "Keep effort selection scoped to each session",
+                context.clone(),
+            )
+            .expect("user requirement should append");
+            append_message_event_with_metadata(
+                &mut store,
+                &phase16_task_id(),
+                MessageRole::Assistant,
+                "Effort is now stored per session.",
+                context.clone(),
+            )
+            .expect("assistant outcome should append");
+            append_event(
+                &mut store,
+                &phase16_task_id(),
+                EventKind::TaskStatusChanged,
+                "Agent task completed",
+                context,
+            )
+            .expect("run should complete");
+        }
+
+        let ledger = load_project_memory_ledger(&mut store, "project-memory")
+            .expect("memory read model should build");
+        assert_eq!(ledger.project_id, "project-memory");
+        assert_eq!(
+            ledger
+                .records
+                .iter()
+                .filter(|record| record.kind == agent_memory::MemoryKind::Requirement)
+                .count(),
+            1
+        );
+        let requirement = ledger
+            .records
+            .iter()
+            .find(|record| record.kind == agent_memory::MemoryKind::Requirement)
+            .expect("requirement memory should exist");
+        assert_eq!(requirement.source_session_ids.len(), 2);
+        let persisted = store
+            .load_read_model(AGENT_MEMORY_READ_MODEL_NAMESPACE, "project-memory")
+            .expect("memory read model should load")
+            .expect("memory read model should exist");
+        assert_eq!(persisted.revision, ledger.revision);
+    }
+
+    #[test]
+    fn project_memory_never_persists_raw_secrets() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let context = [
+            ("project_id".to_string(), "project-memory-secret".to_string()),
+            ("session_id".to_string(), "session-memory-secret".to_string()),
+            ("agent_run_id".to_string(), "run-memory-secret".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        append_message_event_with_metadata(
+            &mut store,
+            &phase16_task_id(),
+            MessageRole::User,
+            "Use sk-1234567890abcdef only for this request",
+            context.clone(),
+        )
+        .expect("redacted message should append");
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task completed",
+            context,
+        )
+        .expect("run should complete");
+
+        let ledger = load_project_memory_ledger(&mut store, "project-memory-secret")
+            .expect("memory ledger should build");
+        let payload = serde_json::to_string(&ledger).expect("memory ledger should serialize");
+
+        assert!(!payload.contains("sk-1234567890abcdef"));
+        assert!(payload.contains("[REDACTED]"));
+    }
+
+    #[test]
     fn session_history_page_reports_a_stable_older_cursor() {
         let mut store = SqliteStore::in_memory().expect("store should open");
         let session_id = "session-history-page";
@@ -21416,6 +22128,20 @@ mod tests {
         assert_eq!(config.model_for_conductor(), "conductor-z");
         assert!(!collaboration_candidate_models(&config, 5)
             .contains(&"conductor-z".to_string()));
+    }
+
+    #[test]
+    fn pro_role_budget_does_not_collapse_when_roles_share_one_model() {
+        let models = vec!["shared-frontier-model".to_string()];
+        let budget = collaboration_agent_budget(3);
+        let fallback = collaboration_fallback_models(&models, budget);
+
+        assert_eq!(budget, 3);
+        assert_eq!(fallback.len(), 3);
+        assert!(fallback
+            .iter()
+            .all(|model| model == "shared-frontier-model"));
+        assert_eq!(adaptive_workflow_step_budget(budget), 5);
     }
 
     #[test]
@@ -21952,6 +22678,7 @@ mod tests {
         let state = phase7_state(
             &store,
             &adapter,
+            MemoryStatsView::default(),
             Vec::new(),
             None,
             empty_graph_state(),
@@ -24935,6 +25662,103 @@ mod tests {
             .any(|step| step.tool_name.as_deref() == Some("file.write")
                 && step.output_preview.as_deref() == Some("written ok")
                 && step.artifact_path.as_deref() == Some("notes/result.md")));
+    }
+
+    #[test]
+    fn agent_trace_reports_actual_collaboration_role_activity() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let context = [
+            ("session_id".to_string(), "session-role-trace".to_string()),
+            ("project_id".to_string(), "project-role-trace".to_string()),
+            ("agent_run_id".to_string(), "run-role-trace".to_string()),
+            ("collaboration_id".to_string(), "collab-role-trace".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task started",
+            metadata_with_context(
+                [("prompt".to_string(), "compare approaches".to_string())]
+                    .into_iter()
+                    .collect(),
+                &context,
+            ),
+        )
+        .expect("start should append");
+        for (role, model, status, latency, first_token, tokens, evidence) in [
+            (
+                "planner",
+                "model-planner",
+                "completed",
+                "120",
+                "30",
+                "80",
+                "2",
+            ),
+            (
+                "reviewer",
+                "model-reviewer",
+                "degraded",
+                "90",
+                "25",
+                "40",
+                "1",
+            ),
+        ] {
+            append_event(
+                &mut store,
+                &phase16_task_id(),
+                EventKind::ModelRequestFinished,
+                format!("Collaboration {role} finished"),
+                metadata_with_context(
+                    [
+                        ("role".to_string(), role.to_string()),
+                        ("model".to_string(), model.to_string()),
+                        ("status".to_string(), status.to_string()),
+                        ("latency_ms".to_string(), latency.to_string()),
+                        (
+                            "first_token_latency_ms".to_string(),
+                            first_token.to_string(),
+                        ),
+                        ("total_tokens".to_string(), tokens.to_string()),
+                        ("evidence_count".to_string(), evidence.to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    &context,
+                ),
+            )
+            .expect("role event should append");
+        }
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task completed",
+            context,
+        )
+        .expect("completion should append");
+
+        let trace = agent_trace_state_for_session(
+            &store,
+            None,
+            None,
+            Some("session-role-trace"),
+        )
+        .expect("trace should build");
+
+        assert_eq!(trace.role_summaries.len(), 2);
+        assert_eq!(trace.role_summaries[0].role, "planner");
+        assert_eq!(trace.role_summaries[0].models, vec!["model-planner"]);
+        assert_eq!(trace.role_summaries[0].completed, 1);
+        assert_eq!(trace.role_summaries[0].latency_ms, 120);
+        assert_eq!(trace.role_summaries[0].first_token_latency_ms, Some(30));
+        assert_eq!(trace.role_summaries[1].role, "reviewer");
+        assert_eq!(trace.role_summaries[1].degraded, 1);
+        assert_eq!(trace.role_summaries[1].evidence_count, 1);
     }
 
     #[test]

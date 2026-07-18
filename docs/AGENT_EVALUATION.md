@@ -66,6 +66,17 @@ The report compares four modes for every case:
 
 Projected model calls, latency units, and cost units compare topology only. They are not presented as measured provider usage.
 
+## Project Memory Gate
+
+The checked-in `benchmarks/agent/memory-v1.json` suite verifies deterministic project-memory behavior separately from provider answer quality. It covers English and Chinese continuity queries, cross-session recall, requirement trust labels, and duplicate-source compaction. Run it with:
+
+```bash
+cargo run -p agent-memory --example memory_lab --locked -- \
+  --report target/memory-evaluation.json
+```
+
+The gate requires 100% top-1 and recall@3 matches, zero trust-boundary violations, and zero deduplication failures. Reported local recall latency is measured for diagnostics but is not a machine-independent quality claim.
+
 ## Real Run Observations
 
 Pass an explicit JSONL file to compare measured quality and efficiency:

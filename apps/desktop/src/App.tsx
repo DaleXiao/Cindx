@@ -449,6 +449,7 @@ function agentTraceUnchanged(current: AgentTraceState | null, next: AgentTraceSt
     current.stepCount === next.stepCount &&
     current.finishedAtMs === next.finishedAtMs &&
     current.lastError === next.lastError &&
+    JSON.stringify(current.roleSummaries) === JSON.stringify(next.roleSummaries) &&
     currentStep?.id === nextStep?.id &&
     currentStep?.status === nextStep?.status &&
     currentStep?.finishedAtMs === nextStep?.finishedAtMs &&
@@ -3776,6 +3777,24 @@ export function App() {
                   <span>Retrieval</span>
                 </div>
               </div>
+              <div className="rag-stats" aria-label="Project memory stats">
+                <div>
+                  <strong>{phase7?.memory.records ?? 0}</strong>
+                  <span>Memories</span>
+                </div>
+                <div>
+                  <strong>{phase7?.memory.requirements ?? 0}</strong>
+                  <span>Requirements</span>
+                </div>
+                <div>
+                  <strong>{phase7?.memory.evidence ?? 0}</strong>
+                  <span>Evidence</span>
+                </div>
+                <div>
+                  <strong>{phase7?.memory.recalls ?? 0}</strong>
+                  <span>Recalls</span>
+                </div>
+              </div>
               <button
                 className="secondary-button"
                 type="button"
@@ -3846,7 +3865,9 @@ export function App() {
                     <strong>Retrieval trace</strong>
                     <ChevronRight className="settings-disclosure-chevron" aria-hidden="true" />
                     <span>
-                      {phase7.retrievalTrace.selectedCount} selected · {phase7.retrievalTrace.durationMs} ms
+                      {phase7.retrievalTrace.selectedCount} selected · {phase7.retrievalTrace.durationMs} ms · {phase7.retrievalTrace.indexCacheHit
+                        ? "index cached"
+                        : `index ${phase7.retrievalTrace.indexDurationMs} ms`}
                     </span>
                   </summary>
                   <div className="retrieval-channel-list">
@@ -4515,6 +4536,7 @@ export function App() {
         browserObservations={browserObservations}
         toolResults={toolResults}
         sessionTraceSteps={activeSessionTraceSteps}
+        roleSummaries={agentTraceState?.roleSummaries ?? []}
         workspaceRoot={runtime?.workspaceRoot ?? ""}
         agentStatus={activeAgentState?.status ?? "idle"}
         agentTurnCount={activeAgentState?.turnCount ?? 0}
