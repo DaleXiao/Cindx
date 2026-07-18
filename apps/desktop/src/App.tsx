@@ -138,6 +138,7 @@ import {
   searchRag,
   selectProject,
   selectSession,
+  setSessionEffort,
   SidecarState,
   WebSearchConfigState,
   stageAgentAttachments
@@ -209,9 +210,8 @@ function loadIgnoredPermissionReviewIds() {
   }
 }
 
-function agentEffortFromPolicy(policy: string): AgentEffort {
-  if (policy === "single") return "fast";
-  if (policy === "best_of_n") return "pro";
+function normalizedSessionEffort(effort: string | undefined): AgentEffort {
+  if (effort === "fast" || effort === "pro") return effort;
   return "auto";
 }
 
@@ -558,7 +558,6 @@ export function App() {
   const [projectCreateOpen, setProjectCreateOpen] = useState(false);
   const [sidebarSearchOpen, setSidebarSearchOpen] = useState(false);
   const [sidebarQuery, setSidebarQuery] = useState("");
-  const [agentEffort, setAgentEffort] = useState<AgentEffort>("auto");
   const [composerDrafts, setComposerDrafts] = useState<Record<string, string>>({});
   const [attachmentDrafts, setAttachmentDrafts] = useState<Record<string, AgentAttachment[]>>({});
   const [attachmentBusySessionIds, setAttachmentBusySessionIds] = useState<Set<string>>(
@@ -757,7 +756,6 @@ export function App() {
       getPhase4State().then((state) => {
         setPhase4(state);
         setProviderDraft(providerDraftFromState(state.provider));
-        setAgentEffort(agentEffortFromPolicy(state.provider.collaborationPolicy));
         setComposerError(state.lastError);
       });
       getPhase5State().then((state) => {
@@ -905,6 +903,7 @@ export function App() {
     () => projectSessionState?.sessions.find((session) => session.active) ?? null,
     [projectSessionState?.sessions]
   );
+  const agentEffort = normalizedSessionEffort(activeSession?.effort);
   const activeAgentState =
     activeSession && agentState?.sessionId === activeSession.id ? agentState : null;
   const activeSessionBusy = Boolean(activeSession && busySessionIds.has(activeSession.id));
@@ -1433,7 +1432,6 @@ export function App() {
       const next = await saveProviderConfig(providerDraft);
       setPhase4(next);
       setProviderDraft(providerDraftFromState(next.provider));
-      setAgentEffort(agentEffortFromPolicy(next.provider.collaborationPolicy));
       showSettingsSaved();
     } finally {
       setProviderBusy(false);
@@ -1817,6 +1815,48 @@ export function App() {
       setComposerError(error instanceof Error ? error.message : String(error));
     } finally {
       setProjectSessionBusy(false);
+    }
+  }
+
+  async function handleSessionEffortChange(effort: AgentEffort) {
+    const sessionId = activeSession?.id;
+    if (!sessionId || effort === agentEffort) return;
+    const previousEffort = agentEffort;
+    setProjectSessionState((current) =>
+      current
+        ? {
+            ...current,
+            sessions: current.sessions.map((session) =>
+              session.id === sessionId ? { ...session, effort } : session
+            )
+          }
+        : current
+    );
+    try {
+      const next = await setSessionEffort(sessionId, effort);
+      const persisted = next.sessions.find((session) => session.id === sessionId)?.effort ?? effort;
+      setProjectSessionState((current) =>
+        current
+          ? {
+              ...current,
+              sessions: current.sessions.map((session) =>
+                session.id === sessionId ? { ...session, effort: persisted } : session
+              )
+            }
+          : next
+      );
+    } catch (error) {
+      setProjectSessionState((current) =>
+        current
+          ? {
+              ...current,
+              sessions: current.sessions.map((session) =>
+                session.id === sessionId ? { ...session, effort: previousEffort } : session
+              )
+            }
+          : current
+      );
+      setComposerError(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -2703,7 +2743,7 @@ export function App() {
               attachmentBusy={attachmentBusy}
               effort={agentEffort}
               onChange={setActiveComposerDraft}
-              onEffortChange={setAgentEffort}
+              onEffortChange={(effort) => void handleSessionEffortChange(effort)}
               onSend={(value) => void handleSendPrompt(value)}
               onPickAttachments={(files) => void handlePickAttachments(files)}
               onRemoveAttachment={handleRemoveAttachment}

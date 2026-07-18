@@ -490,6 +490,7 @@ struct SessionRecord {
     project_id: String,
     name: String,
     detail: String,
+    effort: String,
     created_at_ms: u64,
     updated_at_ms: u64,
     archived_at_ms: Option<u64>,
@@ -516,6 +517,7 @@ impl ProjectSessionConfig {
                 project_id,
                 name: "Runtime Session".to_string(),
                 detail: "timeline + chat".to_string(),
+                effort: default_agent_effort(),
                 created_at_ms: now,
                 updated_at_ms: now,
                 archived_at_ms: None,
@@ -565,6 +567,7 @@ impl ProjectSessionConfig {
                 project_id: self.active_project_id.clone(),
                 name: "Runtime Session".to_string(),
                 detail: "timeline + chat".to_string(),
+                effort: default_agent_effort(),
                 created_at_ms: now,
                 updated_at_ms: now,
                 archived_at_ms: None,
@@ -655,6 +658,7 @@ struct SessionView {
     project_id: String,
     name: String,
     detail: String,
+    effort: String,
     status: String,
     active: bool,
     archived: bool,
@@ -688,6 +692,13 @@ struct CreateSessionInput {
 struct RenameSessionInput {
     session_id: String,
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionEffortInput {
+    session_id: String,
+    effort: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2042,6 +2053,7 @@ fn create_project(
         project_id: project_id.clone(),
         name: "New Session".to_string(),
         detail: "timeline + chat".to_string(),
+        effort: default_agent_effort(),
         created_at_ms: now,
         updated_at_ms: now,
         archived_at_ms: None,
@@ -2093,6 +2105,7 @@ fn create_session(
         project_id: project_id.clone(),
         name,
         detail: "timeline + chat".to_string(),
+        effort: default_agent_effort(),
         created_at_ms: now,
         updated_at_ms: now,
         archived_at_ms: None,
@@ -2246,6 +2259,42 @@ fn rename_session(
     }
     save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
     Ok(project_session_state(&config, None))
+}
+
+#[tauri::command]
+fn set_session_effort(
+    state: tauri::State<'_, AppState>,
+    input: SessionEffortInput,
+) -> Result<ProjectSessionState, String> {
+    let effort = AgentEffort::parse(&input.effort).label().to_string();
+    let mut config = state
+        .project_session_config
+        .lock()
+        .map_err(|error| format!("project session config lock poisoned: {error}"))?;
+    if !update_session_effort(&mut config, &input.session_id, &effort) {
+        return Ok(project_session_state(
+            &config,
+            Some("session not found".to_string()),
+        ));
+    }
+    save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+    Ok(project_session_state(&config, None))
+}
+
+fn update_session_effort(
+    config: &mut ProjectSessionConfig,
+    session_id: &str,
+    effort: &str,
+) -> bool {
+    let Some(session) = config
+        .sessions
+        .iter_mut()
+        .find(|session| session.id == session_id && session.archived_at_ms.is_none())
+    else {
+        return false;
+    };
+    session.effort = effort.to_string();
+    true
 }
 
 #[tauri::command]
@@ -2480,6 +2529,7 @@ fn fork_session(
             project_id: source.project_id.clone(),
             name,
             detail: format!("Fork of {}", source.name),
+            effort: default_agent_effort(),
             created_at_ms: now,
             updated_at_ms: now,
             archived_at_ms: None,
@@ -2774,6 +2824,7 @@ fn select_project(
                     project_id: project.id.clone(),
                     name: format!("{} Session", project.name),
                     detail: "timeline + chat".to_string(),
+                    effort: default_agent_effort(),
                     created_at_ms: now,
                     updated_at_ms: now,
                     archived_at_ms: None,
@@ -6536,6 +6587,7 @@ pub fn run() {
             rename_project,
             delete_project,
             rename_session,
+            set_session_effort,
             generate_session_title,
             stage_agent_attachments,
             remove_agent_attachment,
@@ -18366,6 +18418,10 @@ fn load_project_session_config(fallback_root: &Path) -> ProjectSessionConfig {
                     project_id: fields[1].to_string(),
                     name: fields[2].to_string(),
                     detail: fields[3].to_string(),
+                    effort: fields
+                        .get(8)
+                        .map(|value| AgentEffort::parse(value).label().to_string())
+                        .unwrap_or_else(default_agent_effort),
                     created_at_ms: fields[4].parse().unwrap_or_default(),
                     updated_at_ms: fields[5].parse().unwrap_or_default(),
                     archived_at_ms: fields
@@ -18426,7 +18482,7 @@ fn save_project_session_config_to_disk(
             ""
         };
         text.push_str(&format!(
-            "session\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "session\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             sanitize_record_field(&session.id),
             sanitize_record_field(&session.project_id),
             sanitize_record_field(&session.name),
@@ -18434,7 +18490,8 @@ fn save_project_session_config_to_disk(
             session.created_at_ms,
             session.updated_at_ms,
             active_marker,
-            session.archived_at_ms.unwrap_or_default()
+            session.archived_at_ms.unwrap_or_default(),
+            sanitize_record_field(&session.effort)
         ));
     }
 
@@ -18481,6 +18538,7 @@ fn project_session_state(
                 project_id: session.project_id.clone(),
                 name: session.name.clone(),
                 detail: session.detail.clone(),
+                effort: session.effort.clone(),
                 status: if session.id == config.active_session_id {
                     "Active".to_string()
                 } else if session.archived_at_ms.is_some() {
@@ -18581,6 +18639,7 @@ fn ensure_open_session_for_project(
         project_id: project_id.to_string(),
         name,
         detail: "timeline + chat".to_string(),
+        effort: default_agent_effort(),
         created_at_ms: now,
         updated_at_ms: now,
         archived_at_ms: None,
@@ -24035,8 +24094,30 @@ mod tests {
         assert_eq!(state.projects[0].root, root.display().to_string());
         assert!(state.projects[0].active);
         assert!(state.sessions[0].active);
+        assert_eq!(state.sessions[0].effort, "auto");
         assert_eq!(state.active_project_id, "project-cindx");
         assert_eq!(state.active_session_id, "session-runtime");
+    }
+
+    #[test]
+    fn session_effort_updates_only_the_selected_session() {
+        let root = temp_test_root("session-effort");
+        let mut config = ProjectSessionConfig::default_for_root(&root);
+        config.sessions.push(SessionRecord {
+            id: "session-second".to_string(),
+            project_id: config.projects[0].id.clone(),
+            name: "Second".to_string(),
+            detail: "timeline + chat".to_string(),
+            effort: default_agent_effort(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+            archived_at_ms: None,
+        });
+
+        assert!(update_session_effort(&mut config, "session-runtime", "pro"));
+        assert_eq!(config.sessions[0].effort, "pro");
+        assert_eq!(config.sessions[1].effort, "auto");
+        assert!(!update_session_effort(&mut config, "missing", "high"));
     }
 
     #[test]
@@ -24056,6 +24137,7 @@ mod tests {
             project_id: "project-next".to_string(),
             name: "Next Session".to_string(),
             detail: "timeline + chat".to_string(),
+            effort: "pro".to_string(),
             created_at_ms: 2,
             updated_at_ms: 2,
             archived_at_ms: None,
@@ -24069,6 +24151,7 @@ mod tests {
         assert_eq!(config.sessions.len(), 1);
         assert_eq!(config.active_project_id, "project-next");
         assert_eq!(config.active_session_id, "session-next");
+        assert_eq!(config.sessions[0].effort, "pro");
     }
 
     #[test]
@@ -24181,6 +24264,7 @@ mod tests {
             project_id: source.project_id.clone(),
             name: "Runtime Session Fork".to_string(),
             detail: "fork".to_string(),
+            effort: default_agent_effort(),
             created_at_ms: 1,
             updated_at_ms: 1,
             archived_at_ms: None,

@@ -9,7 +9,7 @@ import {
   type SimulationLinkDatum,
   type SimulationNodeDatum
 } from "d3-force";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { GraphEdgeView, GraphNodeView, GraphStateView } from "../tauri";
 
 type KnowledgeGraphProps = {
@@ -35,6 +35,15 @@ const WIDTH = 900;
 const HEIGHT = 420;
 const MAX_VISIBLE_NODES = 56;
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+
+function motionSeed(value: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) / 0xffffffff;
+}
 
 function nodeColor(kind: string) {
   switch (kind) {
@@ -152,6 +161,7 @@ function layoutGraph(nodes: GraphNodeView[], edges: GraphEdgeView[]) {
 }
 
 export function KnowledgeGraph({ graph }: KnowledgeGraphProps) {
+  const sceneRef = useRef<SVGGElement>(null);
   const layout = useMemo(
     () => layoutGraph(graph.nodes, graph.edges.filter((edge) => edge.from !== edge.to)),
     [graph.edges, graph.nodes]
@@ -170,6 +180,71 @@ export function KnowledgeGraph({ graph }: KnowledgeGraphProps) {
     });
     return ids;
   }, [activeId, layout.edges]);
+
+  useEffect(() => {
+    const scene = sceneRef.current;
+    if (!scene || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const nodeElements = Array.from(
+      scene.querySelectorAll<SVGGElement>(".knowledge-graph-node")
+    );
+    const edgeElements = Array.from(
+      scene.querySelectorAll<SVGLineElement>(".knowledge-graph-edges line")
+    );
+    const nodeIndexes = new Map(layout.nodes.map((node, index) => [node.id, index]));
+    const edgeIndexes = layout.edges.map((edge) => ({
+      source: nodeIndexes.get(edge.from),
+      target: nodeIndexes.get(edge.to)
+    }));
+    const motion = layout.nodes.map((node) => {
+      const seed = motionSeed(node.id);
+      return {
+        phase: seed * Math.PI * 2,
+        amplitudeX: 1.2 + seed * 1.6,
+        amplitudeY: 1.1 + ((seed * 7.13) % 1) * 1.5,
+        speed: 0.17 + ((seed * 3.71) % 1) * 0.09
+      };
+    });
+    const positions = layout.nodes.map((node) => ({ x: node.x, y: node.y }));
+    const startedAt = performance.now();
+    let previousFrame = 0;
+    let animationFrame = 0;
+
+    const update = (timestamp: number) => {
+      if (timestamp - previousFrame >= 32) {
+        previousFrame = timestamp;
+        const elapsed = (timestamp - startedAt) / 1000;
+        layout.nodes.forEach((node, index) => {
+          const drift = motion[index];
+          const x = node.x + Math.sin(elapsed * drift.speed + drift.phase) * drift.amplitudeX;
+          const y =
+            node.y +
+            Math.cos(elapsed * drift.speed * 0.83 + drift.phase * 1.17) * drift.amplitudeY;
+          positions[index] = { x, y };
+          nodeElements[index]?.setAttribute("transform", `translate(${x} ${y})`);
+        });
+        edgeIndexes.forEach((edge, index) => {
+          if (edge.source === undefined || edge.target === undefined) return;
+          const source = positions[edge.source];
+          const target = positions[edge.target];
+          const line = edgeElements[index];
+          if (!line) return;
+          line.setAttribute("x1", String(source.x));
+          line.setAttribute("y1", String(source.y));
+          line.setAttribute("x2", String(target.x));
+          line.setAttribute("y2", String(target.y));
+        });
+      }
+      animationFrame = window.requestAnimationFrame(update);
+    };
+    animationFrame = window.requestAnimationFrame(update);
+
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      layout.nodes.forEach((node, index) => {
+        nodeElements[index]?.setAttribute("transform", `translate(${node.x} ${node.y})`);
+      });
+    };
+  }, [layout]);
 
   if (layout.nodes.length === 0) {
     return <div className="knowledge-graph-empty">Index the workspace to build the graph.</div>;
@@ -190,7 +265,7 @@ export function KnowledgeGraph({ graph }: KnowledgeGraphProps) {
           preserveAspectRatio="xMidYMid meet"
           onPointerLeave={() => setHoveredId(null)}
         >
-          <g className="knowledge-graph-scene">
+          <g className="knowledge-graph-scene" ref={sceneRef}>
             <g className="knowledge-graph-edges">
               {layout.edges.map((edge) => {
                 const connected = activeId === edge.from || activeId === edge.to;
