@@ -468,12 +468,14 @@ assert(
     sessionThreadSource.includes("const handleWheel = (event: WheelEvent)") &&
     sessionThreadSource.includes('thread.addEventListener("wheel", handleWheel') &&
     sessionThreadSource.includes("historyScrollIntent || (movedTowardHistory && !atLatest)") &&
+    sessionThreadSource.includes("const requestOlderHistoryIfNeeded = () =>") &&
+    (sessionThreadSource.match(/requestOlderHistoryIfNeeded\(\);/g)?.length ?? 0) >= 3 &&
     sessionThreadSource.includes("if (followLatestRef.current) pinLatestOutput()") &&
     sessionThreadSource.includes('className="thread-jump-latest"') &&
     sessionThreadSource.includes('aria-label="Jump to latest output"') &&
     styles.includes("backdrop-filter: saturate(150%) blur(18px)") &&
     styles.includes("@keyframes thread-jump-latest-in"),
-  "Streaming output must stay pinned to the latest content until the user scrolls toward history"
+  "Streaming output must stay pinned until user scroll intent, while short initial pages bootstrap older history"
 );
 assert(
   sessionThreadSource.includes("openExternalUrl") &&

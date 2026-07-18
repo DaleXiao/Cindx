@@ -1186,6 +1186,20 @@ export const SessionThread = memo(function SessionThread({
     const thread = threadRef.current;
     if (!thread) return;
 
+    const requestOlderHistoryIfNeeded = () => {
+      if (
+        thread.clientHeight > 0 &&
+        thread.scrollTop <= 160 &&
+        hasOlderHistory &&
+        !loadingOlderHistory &&
+        !historyLoadRequestedRef.current
+      ) {
+        historyLoadRequestedRef.current = true;
+        prependScrollHeightRef.current = thread.scrollHeight;
+        onLoadOlderHistory();
+      }
+    };
+
     const handleScroll = () => {
       syncScrollMetrics();
       const previousScrollTop = lastScrollTopRef.current;
@@ -1222,16 +1236,7 @@ export const SessionThread = memo(function SessionThread({
       } else {
         setShowJumpToLatest(thread.scrollHeight > thread.clientHeight + 2);
       }
-      if (
-        thread.scrollTop <= 160 &&
-        hasOlderHistory &&
-        !loadingOlderHistory &&
-        !historyLoadRequestedRef.current
-      ) {
-        historyLoadRequestedRef.current = true;
-        prependScrollHeightRef.current = thread.scrollHeight;
-        onLoadOlderHistory();
-      }
+      requestOlderHistoryIfNeeded();
     };
     const handleWheel = (event: WheelEvent) => {
       if (event.deltaY >= 0) {
@@ -1250,11 +1255,15 @@ export const SessionThread = memo(function SessionThread({
     const resizeObserver = new ResizeObserver(() => {
       if (followLatestRef.current) pinLatestOutput();
       else syncScrollMetrics();
+      requestOlderHistoryIfNeeded();
     });
     resizeObserver.observe(thread);
     if (threadContentRef.current) resizeObserver.observe(threadContentRef.current);
 
-    const frame = requestAnimationFrame(syncScrollMetrics);
+    const frame = requestAnimationFrame(() => {
+      syncScrollMetrics();
+      requestOlderHistoryIfNeeded();
+    });
     return () => {
       cancelAnimationFrame(frame);
       if (scrollSyncFrameRef.current !== null) {
