@@ -106,6 +106,7 @@ import {
   PermissionReviewItem,
   PermissionReviewState,
   ProjectSessionState,
+  revealArtifact,
   revealMainWindow,
   setSidebarMaterialWidth,
   resolveBrowserPermission,
@@ -2494,6 +2495,9 @@ export function App() {
       const latestStep = latestTraceStep(next.turns);
       setSelectedTraceStepId((current) => current ?? latestStep?.id ?? null);
       setComposerError(next.lastError);
+      if (next.exportPath) {
+        await revealArtifact(next.exportPath);
+      }
     } finally {
       setTraceBusy(false);
     }

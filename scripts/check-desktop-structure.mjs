@@ -1186,6 +1186,13 @@ assert(
   "Outputs must use a compact path-free file list with a validated Finder reveal action"
 );
 assert(
+  appSource.includes("async function handleExportAgentTrace()") &&
+    appSource.includes("const next = await exportAgentTraceJsonl(activeSession?.id)") &&
+    appSource.includes("if (next.exportPath)") &&
+    appSource.includes("await revealArtifact(next.exportPath)"),
+  "Exporting agent trace JSONL must reveal the exported file in the system file browser"
+);
+assert(
   inspectorSource.includes("const [outputsOpen, setOutputsOpen] = useState(true)") &&
     /className="inspector-output-count"[\s\S]*?className="inspector-output-toggle"/.test(
       inspectorSource
