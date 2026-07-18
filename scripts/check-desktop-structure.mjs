@@ -22,6 +22,7 @@ const appSource = read("apps/desktop/src/App.tsx");
 const sessionThreadSource = read("apps/desktop/src/components/SessionThread.tsx");
 const composerSource = read("apps/desktop/src/components/Composer.tsx");
 const queuedMessagesSource = read("apps/desktop/src/components/QueuedMessages.tsx");
+const scheduleViewSource = read("apps/desktop/src/components/ScheduleView.tsx");
 const inspectorSource = read("apps/desktop/src/components/Inspector.tsx");
 const sidebarSource = read("apps/desktop/src/components/Sidebar.tsx");
 const disclosureTriangleSource = read(
@@ -38,6 +39,7 @@ const browserSidecarSource = read("scripts/sidecars/browser-sidecar.js");
 const browserIntegrationTest = read("scripts/test-browser-sidecar.mjs");
 const rustLib = read("apps/desktop/src-tauri/src/lib.rs");
 const runControlSource = read("apps/desktop/src-tauri/src/run_control.rs");
+const scheduleSource = read("apps/desktop/src-tauri/src/schedule.rs");
 const cargoToml = read("apps/desktop/src-tauri/Cargo.toml");
 const cargoLock = read("apps/desktop/src-tauri/Cargo.lock");
 const runTauriSource = read("scripts/run-tauri.mjs");
@@ -2160,6 +2162,38 @@ assert(
     ciWorkflow.includes("Test Browser Control v2") &&
     localBuildScript.includes("test-browser-sidecar.mjs"),
   "Browser Control v2 must combine CDP transport, Playwright semantics, and a real-browser gate"
+);
+
+assert(
+  sidebarSource.includes('onViewChange("schedule")') &&
+    sidebarSource.indexOf("sidebar-schedule-item") < sidebarSource.indexOf('className="project-tree"') &&
+    appSource.includes('activeView === "schedule"') &&
+    appSource.includes("<ScheduleView") &&
+    scheduleViewSource.includes("New schedule") &&
+    scheduleViewSource.includes("Run history") &&
+    scheduleViewSource.includes("cancelScheduleRun") &&
+    styles.includes(".schedule-layout") &&
+    styles.includes(".sidebar-schedule-item"),
+  "Schedule must be a first-class workspace above Projects with configuration and run history"
+);
+assert(
+  cargoToml.includes('chrono-tz = "0.10"') &&
+    scheduleSource.includes("daily_schedule_keeps_local_time_across_dst") &&
+    scheduleSource.includes("file.sync_all()") &&
+    scheduleSource.includes("Permissions::from_mode(0o600)") &&
+    rustLib.includes("start_schedule_runner(app.handle().clone())") &&
+    rustLib.includes("queue_dispatching_sessions") &&
+    rustLib.includes("SCHEDULE_MAX_DISPATCH_ATTEMPTS") &&
+    rustLib.includes("fn reconcile_schedule_runs(") &&
+    rustLib.includes("fn trigger_schedule_run(") &&
+    rustLib.includes("get_schedule_state,") &&
+    rustLib.includes("upsert_schedule,") &&
+    rustLib.includes("run_schedule_now,") &&
+    rustLib.includes("cancel_schedule_run,") &&
+    tauriBridge.includes('invoke<ScheduleState>("get_schedule_state")') &&
+    tauriBridge.includes('invoke<ScheduleState>("upsert_schedule"') &&
+    tauriBridge.includes('invoke<ScheduleState>("run_schedule_now"'),
+  "Scheduled work must persist privately and execute through the guarded existing agent queue"
 );
 
 console.log("desktop structure ok");

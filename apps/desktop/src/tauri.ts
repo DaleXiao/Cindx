@@ -140,6 +140,69 @@ export type ProjectSessionState = {
   lastError: string | null;
 };
 
+export type ScheduleCadence = "once" | "daily" | "weekdays" | "weekly";
+
+export type ScheduleRun = {
+  id: string;
+  queueId: string | null;
+  source: "scheduled" | "manual";
+  scheduledForMs: number;
+  queuedAtMs: number | null;
+  dispatchAttempts: number;
+  lastDispatchAtMs: number | null;
+  startedAtMs: number | null;
+  finishedAtMs: number | null;
+  status:
+    | "preparing"
+    | "queued"
+    | "running"
+    | "waiting_for_permission"
+    | "completed"
+    | "failed"
+    | "cancelled"
+    | "skipped";
+  error: string | null;
+};
+
+export type ScheduleView = {
+  id: string;
+  name: string;
+  projectId: string;
+  projectName: string;
+  sessionId: string;
+  sessionName: string;
+  prompt: string;
+  effort: AgentEffort;
+  timezone: string;
+  cadence: ScheduleCadence;
+  anchorAtMs: number;
+  catchUp: boolean;
+  enabled: boolean;
+  nextRunAtMs: number | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+  runs: ScheduleRun[];
+};
+
+export type ScheduleState = {
+  schedules: ScheduleView[];
+  lastError: string | null;
+};
+
+export type UpsertScheduleInput = {
+  id?: string | null;
+  name: string;
+  projectId: string;
+  sessionId: string;
+  prompt: string;
+  effort: AgentEffort;
+  timezone: string;
+  cadence: ScheduleCadence;
+  anchorLocal: string;
+  catchUp: boolean;
+  enabled: boolean;
+};
+
 export type AgentAttachment = {
   id: string;
   name: string;
@@ -727,6 +790,11 @@ let browserProjectSessionState: ProjectSessionState = {
   lastError: null
 };
 
+let browserScheduleState: ScheduleState = {
+  schedules: [],
+  lastError: null
+};
+
 let browserPhase4State: Phase4State = {
   provider: {
     baseUrl: "https://api.openai.com/v1",
@@ -1291,6 +1359,175 @@ export async function getProjectSessionState(): Promise<ProjectSessionState> {
     return await invoke<ProjectSessionState>("get_project_session_state");
   } catch {
     return browserProjectSessionState;
+  }
+}
+
+export async function getScheduleState(): Promise<ScheduleState> {
+  try {
+    return await invoke<ScheduleState>("get_schedule_state");
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    return browserScheduleState;
+  }
+}
+
+function browserScheduleTarget(input: UpsertScheduleInput) {
+  const project = browserProjectSessionState.projects.find(
+    (candidate) => candidate.id === input.projectId
+  );
+  const session = browserProjectSessionState.sessions.find(
+    (candidate) => candidate.id === input.sessionId
+  );
+  return {
+    projectName: project?.name ?? "Missing project",
+    sessionName: session?.name ?? "Missing session"
+  };
+}
+
+export async function upsertSchedule(input: UpsertScheduleInput): Promise<ScheduleState> {
+  try {
+    return await invoke<ScheduleState>("upsert_schedule", { input });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    const now = Date.now();
+    const anchorAtMs = new Date(input.anchorLocal).getTime();
+    const current = input.id
+      ? browserScheduleState.schedules.find((schedule) => schedule.id === input.id)
+      : null;
+    const target = browserScheduleTarget(input);
+    const next: ScheduleView = {
+      id: current?.id ?? `schedule-${now}`,
+      name: input.name.trim(),
+      projectId: input.projectId,
+      projectName: target.projectName,
+      sessionId: input.sessionId,
+      sessionName: target.sessionName,
+      prompt: input.prompt.trim(),
+      effort: input.effort,
+      timezone: input.timezone,
+      cadence: input.cadence,
+      anchorAtMs,
+      catchUp: input.catchUp,
+      enabled: input.enabled,
+      nextRunAtMs: input.enabled ? anchorAtMs : null,
+      createdAtMs: current?.createdAtMs ?? now,
+      updatedAtMs: now,
+      runs: current?.runs ?? []
+    };
+    browserScheduleState = {
+      schedules: [
+        ...browserScheduleState.schedules.filter((schedule) => schedule.id !== next.id),
+        next
+      ],
+      lastError: null
+    };
+    return browserScheduleState;
+  }
+}
+
+export async function setScheduleEnabled(
+  scheduleId: string,
+  enabled: boolean
+): Promise<ScheduleState> {
+  try {
+    return await invoke<ScheduleState>("set_schedule_enabled", {
+      input: { scheduleId, enabled }
+    });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    browserScheduleState = {
+      ...browserScheduleState,
+      schedules: browserScheduleState.schedules.map((schedule) =>
+        schedule.id === scheduleId
+          ? {
+              ...schedule,
+              enabled,
+              nextRunAtMs: enabled ? schedule.anchorAtMs : null,
+              updatedAtMs: Date.now()
+            }
+          : schedule
+      )
+    };
+    return browserScheduleState;
+  }
+}
+
+export async function deleteSchedule(scheduleId: string): Promise<ScheduleState> {
+  try {
+    return await invoke<ScheduleState>("delete_schedule", { input: { scheduleId } });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    browserScheduleState = {
+      ...browserScheduleState,
+      schedules: browserScheduleState.schedules.filter(
+        (schedule) => schedule.id !== scheduleId
+      )
+    };
+    return browserScheduleState;
+  }
+}
+
+export async function runScheduleNow(scheduleId: string): Promise<ScheduleState> {
+  try {
+    return await invoke<ScheduleState>("run_schedule_now", { input: { scheduleId } });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    const now = Date.now();
+    browserScheduleState = {
+      ...browserScheduleState,
+      schedules: browserScheduleState.schedules.map((schedule) =>
+        schedule.id === scheduleId
+          ? {
+              ...schedule,
+              runs: [
+                ...schedule.runs,
+                {
+                  id: `schedule-run-${now}`,
+                  queueId: null,
+                  source: "manual" as const,
+                  scheduledForMs: now,
+                  queuedAtMs: now,
+                  dispatchAttempts: 1,
+                  lastDispatchAtMs: now,
+                  startedAtMs: now,
+                  finishedAtMs: now,
+                  status: "completed" as const,
+                  error: null
+                }
+              ]
+            }
+          : schedule
+      )
+    };
+    return browserScheduleState;
+  }
+}
+
+export async function cancelScheduleRun(scheduleId: string): Promise<ScheduleState> {
+  try {
+    return await invoke<ScheduleState>("cancel_schedule_run", { input: { scheduleId } });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    const now = Date.now();
+    browserScheduleState = {
+      ...browserScheduleState,
+      schedules: browserScheduleState.schedules.map((schedule) =>
+        schedule.id === scheduleId
+          ? {
+              ...schedule,
+              runs: schedule.runs.map((run, index) =>
+                index === schedule.runs.length - 1 &&
+                ["preparing", "queued", "running", "waiting_for_permission"].includes(
+                  run.status
+                )
+                  ? { ...run, status: "cancelled" as const, finishedAtMs: now }
+                  : run
+              )
+            }
+          : schedule
+      )
+    };
+    return browserScheduleState;
   }
 }
 
