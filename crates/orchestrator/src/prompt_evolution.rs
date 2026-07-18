@@ -928,8 +928,6 @@ fn dominates(left: &PromptParetoCandidate, right: &PromptParetoCandidate) -> boo
         && left.average_step_credit >= right.average_step_credit
         && left.average_quality >= right.average_quality
         && left.average_latency_ms <= right.average_latency_ms
-        && left.average_total_tokens <= right.average_total_tokens
-        && left.average_cost_microusd <= right.average_cost_microusd
         && left.safety_violations <= right.safety_violations
         && left.task_class_coverage >= right.task_class_coverage;
     let strictly_better = left.success_rate > right.success_rate
@@ -938,8 +936,6 @@ fn dominates(left: &PromptParetoCandidate, right: &PromptParetoCandidate) -> boo
         || left.average_step_credit > right.average_step_credit
         || left.average_quality > right.average_quality
         || left.average_latency_ms < right.average_latency_ms
-        || left.average_total_tokens < right.average_total_tokens
-        || left.average_cost_microusd < right.average_cost_microusd
         || left.safety_violations < right.safety_violations
         || left.task_class_coverage > right.task_class_coverage;
     no_worse && strictly_better
@@ -1223,6 +1219,30 @@ mod tests {
         assert!(ids.contains(pro.id.as_str()));
         assert!(!ids.contains(dominated.id.as_str()));
         assert!(!archive.next_generation(8).is_empty());
+    }
+
+    #[test]
+    fn pareto_selection_does_not_treat_token_cost_as_intelligence() {
+        let compact = ConductorPromptGenome::seed_for_effort("fast");
+        let expansive = ConductorPromptGenome::seed_for_effort("pro");
+        let genomes = vec![compact.clone(), expansive.clone()];
+        let mut observations = Vec::new();
+        for split in [PromptEvaluationSplit::Train, PromptEvaluationSplit::Holdout] {
+            observations.push(observation(&compact.id, split, 0.9, 2_000, 500));
+            observations.push(observation(&compact.id, split, 0.9, 2_000, 500));
+            observations.push(observation(&expansive.id, split, 0.9, 2_000, 8_000));
+            observations.push(observation(&expansive.id, split, 0.9, 2_000, 8_000));
+        }
+
+        let archive = PromptParetoArchive::build(&genomes, &observations, 2, 2).unwrap();
+        let ids = archive
+            .candidates
+            .iter()
+            .map(|candidate| candidate.genome.id.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert!(ids.contains(compact.id.as_str()));
+        assert!(ids.contains(expansive.id.as_str()));
     }
 
     #[test]

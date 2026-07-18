@@ -31,10 +31,25 @@ function sessionVisualState(status: string): SessionVisualState {
   if (
     [
       "review",
+      "approval required",
+      "approval_required",
+      "pending approval",
+      "pending_approval",
       "waiting_for_permission",
+      "waiting for input",
+      "waiting_for_input",
+      "needs input",
+      "needs_input",
+      "needs user input",
+      "needs_user_input",
+      "paused",
+      "stopped",
       "failed",
+      "error",
       "blocked",
       "cancelled",
+      "canceled",
+      "interrupted",
       "attention"
     ].includes(normalized)
   ) {

@@ -15,7 +15,8 @@ use agent_rag::{
     build_grounded_answer_prompt, export_lancedb_records_jsonl, index_workspace,
     index_workspace_cancellable, index_workspace_with_embedder, local_query_embedding,
     search_chunks_literal, search_chunks_semantic, EmbeddingBatch, FileRagAdapter, IndexOptions,
-    RagAdapter, RagChunk, RagEmbedder, RagIndexStats, RagSearchResult, RAG_INDEX_CANCELLED,
+    workspace_index_is_fresh, RagAdapter, RagChunk, RagEmbedder, RagError, RagIndex,
+    RagIndexStats, RagSearchResult, RAG_INDEX_CANCELLED,
 };
 use agent_skills::{
     install_skill_archive as install_skill_archive_package, SkillCatalog, SkillPreference,
@@ -54,6 +55,7 @@ use orchestrator::{
     WORKFLOW_CHECKPOINT_SCHEMA, WORKFLOW_IR_SCHEMA,
 };
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
@@ -93,6 +95,7 @@ const PROMPT_EVOLUTION_MIN_TRAIN_RUNS: usize = 2;
 const PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS: usize = 2;
 const PROMPT_EVOLUTION_STAGNATION_PATIENCE: usize = 3;
 const PROMPT_EVOLUTION_MIN_IMPROVEMENT: f64 = 0.02;
+const PROMPT_EVALUATION_IDLE_GRACE_MS: u64 = 1_200;
 const PROMPT_EVOLUTION_MAX_GENERATION: u32 = 12;
 const PROMPT_EVOLUTION_SHADOW_INTERVAL: usize = 10;
 const AGENT_SESSION_READ_MODEL_NAMESPACE: &str = "agent-session-v1";
@@ -110,6 +113,8 @@ const CONTEXT_RECENT_MAX_MESSAGES: usize = 32;
 const CONTEXT_RESTORE_MAX_CHARS: usize = 32_000;
 const CONTEXT_MEMORY_MAX_ITEMS: usize = 12;
 const EVENT_REDACTION_MARKER_FILE: &str = "events-redaction-v1.complete";
+const OPENAI_DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
+const DASHSCOPE_DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-v4";
 const LEGACY_AGENT_SYSTEM_PROMPT: &str = "You are Cindx, a desktop-first assistant. Work carefully, be direct, and ask for clarification when the task is ambiguous.";
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -138,6 +143,7 @@ struct AppState {
     mcp_catalog: Mutex<McpCatalogService>,
     suspended_agent_runs: Mutex<BTreeMap<String, SuspendedAgentRun>>,
     agent_run_controls: Mutex<BTreeMap<String, Arc<AgentRunControl>>>,
+    prompt_evaluation_controls: Mutex<BTreeMap<String, Arc<AgentRunControl>>>,
     allow_exit: AtomicBool,
     quit_prompt_active: AtomicBool,
 }
@@ -319,7 +325,7 @@ impl Default for ProviderConfig {
             executor_model: model.clone(),
             reviewer_model: model.clone(),
             summarizer_model: model,
-            embedding_model: "text-embedding-3-small".to_string(),
+            embedding_model: OPENAI_DEFAULT_EMBEDDING_MODEL.to_string(),
             image_model: String::new(),
             image_endpoint: String::new(),
             collaboration_policy: "auto_router".to_string(),
@@ -338,12 +344,15 @@ impl ProviderConfig {
     }
 
     fn model_for_role(&self, role: &ModelRole) -> String {
+        if *role == ModelRole::Embedder {
+            return embedding_model_for_provider(&self.base_url, &self.embedding_model);
+        }
         let model = match role {
             ModelRole::Planner => &self.planner_model,
             ModelRole::Executor => &self.executor_model,
             ModelRole::Reviewer => &self.reviewer_model,
             ModelRole::Summarizer => &self.summarizer_model,
-            ModelRole::Embedder => &self.embedding_model,
+            ModelRole::Embedder => unreachable!("embedder handled above"),
         };
 
         if model.trim().is_empty() {
@@ -367,6 +376,23 @@ impl ProviderConfig {
         } else {
             self.model_for_role(&ModelRole::Executor)
         }
+    }
+}
+
+fn embedding_model_for_provider(base_url: &str, configured_model: &str) -> String {
+    let configured_model = configured_model.trim();
+    let normalized_url = base_url.trim().to_ascii_lowercase();
+    let is_dashscope =
+        normalized_url.contains("dashscope") && normalized_url.contains("aliyuncs.com");
+    if is_dashscope
+        && (configured_model.is_empty()
+            || configured_model.eq_ignore_ascii_case(OPENAI_DEFAULT_EMBEDDING_MODEL))
+    {
+        DASHSCOPE_DEFAULT_EMBEDDING_MODEL.to_string()
+    } else if configured_model.is_empty() {
+        OPENAI_DEFAULT_EMBEDDING_MODEL.to_string()
+    } else {
+        configured_model.to_string()
     }
 }
 
@@ -1042,6 +1068,7 @@ struct RetrievalChannelView {
 #[serde(rename_all = "camelCase")]
 struct RetrievalTraceView {
     query: String,
+    mode: String,
     channels: Vec<RetrievalChannelView>,
     selected_count: usize,
     duration_ms: u64,
@@ -3523,6 +3550,7 @@ fn begin_agent_run_control_for_effort(
     effort: &str,
     snapshot: Option<RunControlSnapshot>,
 ) -> Result<Arc<AgentRunControl>, String> {
+    cancel_background_prompt_evaluations(state)?;
     let control = Arc::new(
         snapshot
             .map(AgentRunControl::from_snapshot)
@@ -3536,6 +3564,19 @@ fn begin_agent_run_control_for_effort(
         previous.request_cancel();
     }
     Ok(control)
+}
+
+fn cancel_background_prompt_evaluations(
+    state: &tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let controls = state
+        .prompt_evaluation_controls
+        .lock()
+        .map_err(|error| format!("prompt evaluation control lock poisoned: {error}"))?;
+    for control in controls.values() {
+        control.request_cancel();
+    }
+    Ok(())
 }
 
 fn agent_runtime_config_for_control(control: &AgentRunControl) -> AgentRuntimeConfig {
@@ -5741,27 +5782,70 @@ fn get_phase7_state(state: tauri::State<'_, AppState>) -> Result<Phase7State, St
         .map_err(|error| error.to_string())
 }
 
+fn index_workspace_with_cloud_fallback(
+    root: &Path,
+    options: IndexOptions,
+    embedder: &mut impl RagEmbedder,
+    configured_model: &str,
+) -> Result<(RagIndex, String, String, Option<String>), RagError> {
+    match index_workspace_with_embedder(root, options.clone(), embedder) {
+        Ok(index) => {
+            let model = index
+                .chunks
+                .first()
+                .map(|chunk| chunk.embedding_model.clone())
+                .unwrap_or_else(|| configured_model.to_string());
+            Ok((index, "cloud".to_string(), model, None))
+        }
+        Err(cloud_error) => {
+            let index = index_workspace(root, options).map_err(|local_error| {
+                RagError::new(format!(
+                    "cloud embedding failed: {cloud_error}; local indexing also failed: {local_error}"
+                ))
+            })?;
+            let model = index
+                .chunks
+                .first()
+                .map(|chunk| chunk.embedding_model.clone())
+                .unwrap_or_else(|| "local-hash".to_string());
+            Ok((
+                index,
+                "local-fallback".to_string(),
+                model,
+                Some(cloud_error.to_string()),
+            ))
+        }
+    }
+}
+
 #[tauri::command]
 fn index_workspace_rag(state: tauri::State<'_, AppState>) -> Result<Phase7State, String> {
     let root = active_workspace_root(&state)?;
     let config = clone_provider_config(&state)?;
     let mut adapter = open_rag_adapter_for(&root)?;
-    let (index, embedding_backend, embedding_model) = if config.is_ready() {
+    let (index, embedding_backend, embedding_model, embedding_fallback_error) = if config.is_ready()
+    {
+        let configured_model = config.model_for_role(&ModelRole::Embedder);
         let mut embedder = CloudRagEmbedder {
             config: config.clone(),
             cancellation: None,
         };
-        let index = index_workspace_with_embedder(&root, IndexOptions::default(), &mut embedder)
-            .map_err(|error| error.to_string())?;
-        (
-            index,
-            "cloud".to_string(),
-            config.model_for_role(&ModelRole::Embedder),
+        index_workspace_with_cloud_fallback(
+            &root,
+            IndexOptions::default(),
+            &mut embedder,
+            &configured_model,
         )
+        .map_err(|error| error.to_string())?
     } else {
         let index =
             index_workspace(&root, IndexOptions::default()).map_err(|error| error.to_string())?;
-        (index, "local".to_string(), "local-hash".to_string())
+        let model = index
+            .chunks
+            .first()
+            .map(|chunk| chunk.embedding_model.clone())
+            .unwrap_or_else(|| "local-hash".to_string());
+        (index, "local".to_string(), model, None)
     };
     let lancedb_export_path = lancedb_export_path_for(&root);
     let lancedb_records =
@@ -5775,36 +5859,40 @@ fn index_workspace_rag(state: tauri::State<'_, AppState>) -> Result<Phase7State,
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
 
+    let mut index_metadata = [
+        ("action".to_string(), "index".to_string()),
+        ("files_indexed".to_string(), stats.files_indexed.to_string()),
+        ("chunks_indexed".to_string(), stats.chunks_indexed.to_string()),
+        ("indexed_at_ms".to_string(), stats.indexed_at_ms.to_string()),
+        (
+            "index_path".to_string(),
+            rag_index_path_for(&root).display().to_string(),
+        ),
+        (
+            "lancedb_export_path".to_string(),
+            lancedb_export_path.display().to_string(),
+        ),
+        ("lancedb_records".to_string(), lancedb_records.to_string()),
+        ("embedding_backend".to_string(), embedding_backend),
+        ("embedding_model".to_string(), embedding_model),
+        (
+            "graph_store_path".to_string(),
+            graph_store_path_for(&root).display().to_string(),
+        ),
+        ("graph_nodes".to_string(), graph_nodes.to_string()),
+        ("graph_edges".to_string(), graph_edges.to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    if let Some(error) = embedding_fallback_error {
+        index_metadata.insert("embedding_fallback_error".to_string(), error);
+    }
     append_event(
         &mut store,
         &phase7_task_id(),
         EventKind::RetrievalPerformed,
         "Workspace indexed for RAG",
-        [
-            ("action".to_string(), "index".to_string()),
-            ("files_indexed".to_string(), stats.files_indexed.to_string()),
-            ("chunks_indexed".to_string(), stats.chunks_indexed.to_string()),
-            ("indexed_at_ms".to_string(), stats.indexed_at_ms.to_string()),
-            (
-                "index_path".to_string(),
-                rag_index_path_for(&root).display().to_string(),
-            ),
-            (
-                "lancedb_export_path".to_string(),
-                lancedb_export_path.display().to_string(),
-            ),
-            ("lancedb_records".to_string(), lancedb_records.to_string()),
-            ("embedding_backend".to_string(), embedding_backend),
-            ("embedding_model".to_string(), embedding_model),
-            (
-                "graph_store_path".to_string(),
-                graph_store_path_for(&root).display().to_string(),
-            ),
-            ("graph_nodes".to_string(), graph_nodes.to_string()),
-            ("graph_edges".to_string(), graph_edges.to_string()),
-        ]
-        .into_iter()
-        .collect(),
+        index_metadata,
     )
     .map_err(|error| error.to_string())?;
 
@@ -6383,6 +6471,7 @@ pub fn run() {
             mcp_catalog: Mutex::new(mcp_catalog),
             suspended_agent_runs: Mutex::new(BTreeMap::new()),
             agent_run_controls: Mutex::new(BTreeMap::new()),
+            prompt_evaluation_controls: Mutex::new(BTreeMap::new()),
             allow_exit: AtomicBool::new(false),
             quit_prompt_active: AtomicBool::new(false),
         })
@@ -11618,28 +11707,12 @@ fn agent_session_audits(
     active_run_id: Option<&str>,
     run_started_at_ms: u64,
 ) -> Result<Vec<PermissionAuditRecord>, StorageError> {
-    Ok(store
-        .list_permission_audits()?
-        .into_iter()
-        .filter(|audit| audit.request.task_id == phase16_task_id())
-        .filter(|audit| {
-            audit.request.metadata.get("session_id").map(String::as_str) == Some(session_id)
-        })
-        .filter(|audit| {
-            active_run_id
-                .map(|run_id| {
-                    audit
-                        .request
-                        .metadata
-                        .get("agent_run_id")
-                        .map(String::as_str)
-                        == Some(run_id)
-                })
-                .unwrap_or_else(|| {
-                    run_started_at_ms == 0 || audit.requested_at_ms >= run_started_at_ms
-                })
-        })
-        .collect())
+    store.list_permission_audits_for_session(
+        &phase16_task_id(),
+        session_id,
+        active_run_id,
+        run_started_at_ms,
+    )
 }
 
 fn agent_state_from_read_model(
@@ -14133,7 +14206,19 @@ fn ensure_workspace_knowledge_index(
     if agent_run_should_stop(cancellation) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
-    if !adapter.chunks().is_empty() {
+    let options = IndexOptions::default();
+    let index_is_fresh = !adapter.chunks().is_empty()
+        && workspace_index_is_fresh(workspace_root, adapter.chunks(), options.clone(), || {
+            agent_run_should_stop(cancellation)
+        })
+        .map_err(|error| {
+            if error.message == RAG_INDEX_CANCELLED {
+                MODEL_REQUEST_CANCELLED.to_string()
+            } else {
+                error.to_string()
+            }
+        })?;
+    if index_is_fresh {
         if !graph_store_path_for(workspace_root).exists() {
             index_graph_chunks_cancellable(workspace_root, adapter.chunks(), || {
                 agent_run_should_stop(cancellation)
@@ -14142,7 +14227,7 @@ fn ensure_workspace_knowledge_index(
         return Ok(None);
     }
 
-    let index = index_workspace_cancellable(workspace_root, IndexOptions::default(), || {
+    let index = index_workspace_cancellable(workspace_root, options, || {
         agent_run_should_stop(cancellation)
     })
     .map_err(|error| {
@@ -14303,6 +14388,7 @@ fn run_parallel_retrieval(
     Ok(ParallelRetrievalResult {
         trace: RetrievalTraceView {
             query: query.to_string(),
+            mode: retrieval_mode.to_string(),
             channels: channel_views,
             selected_count: results.len(),
             duration_ms: started_at.elapsed().as_millis() as u64,
@@ -14528,10 +14614,7 @@ fn append_retrieval_event_for_task(
     .into_iter()
     .collect::<Metadata>();
     if let Some(trace) = trace {
-        metadata.insert(
-            "retrieval_mode".to_string(),
-            "four_way_parallel".to_string(),
-        );
+        metadata.insert("retrieval_mode".to_string(), trace.mode.clone());
         metadata.insert(
             "retrieval_duration_ms".to_string(),
             trace.duration_ms.to_string(),
@@ -14684,7 +14767,7 @@ fn provider_config_state(config: &ProviderConfig) -> ProviderConfigState {
         executor_model: config.executor_model.clone(),
         reviewer_model: config.reviewer_model.clone(),
         summarizer_model: config.summarizer_model.clone(),
-        embedding_model: config.embedding_model.clone(),
+        embedding_model: config.model_for_role(&ModelRole::Embedder),
         image_model: config.image_model.clone(),
         image_endpoint: config.image_endpoint.clone(),
         collaboration_policy: config.collaboration_policy.clone(),
@@ -15013,6 +15096,51 @@ fn prompt_evaluation_inflight() -> &'static Mutex<BTreeSet<String>> {
     PROMPT_EVALUATIONS_INFLIGHT.get_or_init(|| Mutex::new(BTreeSet::new()))
 }
 
+fn wait_for_prompt_evaluation_idle(
+    state: &tauri::State<'_, AppState>,
+    control: &Arc<AgentRunControl>,
+) -> Result<bool, String> {
+    let mut idle_since = None::<Instant>;
+    loop {
+        if control.should_stop() {
+            return Ok(false);
+        }
+        let foreground_active = !state
+            .agent_run_controls
+            .lock()
+            .map_err(|error| format!("agent run control lock poisoned: {error}"))?
+            .is_empty();
+        if foreground_active {
+            idle_since = None;
+        } else if idle_since
+            .get_or_insert_with(Instant::now)
+            .elapsed()
+            >= Duration::from_millis(PROMPT_EVALUATION_IDLE_GRACE_MS)
+        {
+            return Ok(true);
+        }
+        std::thread::sleep(Duration::from_millis(80));
+    }
+}
+
+fn finish_prompt_evaluation_control(
+    state: &tauri::State<'_, AppState>,
+    lease_key: &str,
+    control: &Arc<AgentRunControl>,
+) {
+    if let Ok(mut controls) = state.prompt_evaluation_controls.lock() {
+        if controls
+            .get(lease_key)
+            .is_some_and(|current| Arc::ptr_eq(current, control))
+        {
+            controls.remove(lease_key);
+        }
+    }
+    if let Ok(mut inflight) = prompt_evaluation_inflight().lock() {
+        inflight.remove(lease_key);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn schedule_prompt_pairwise_evaluation(
     app: tauri::AppHandle,
@@ -15036,6 +15164,25 @@ fn schedule_prompt_pairwise_evaluation(
     }
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
+        let control = Arc::new(AgentRunControl::new("pro"));
+        let registered = state
+            .prompt_evaluation_controls
+            .lock()
+            .map(|mut controls| {
+                controls.insert(lease_key.clone(), control.clone());
+            })
+            .is_ok();
+        if !registered {
+            finish_prompt_evaluation_control(&state, &lease_key, &control);
+            return;
+        }
+        match wait_for_prompt_evaluation_idle(&state, &control) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => {
+                finish_prompt_evaluation_control(&state, &lease_key, &control);
+                return;
+            }
+        }
         let result = run_background_prompt_pairwise_evaluation(
             &state,
             &config,
@@ -15047,33 +15194,34 @@ fn schedule_prompt_pairwise_evaluation(
             &worker_models,
             agent_budget,
             &current_profile,
+            &control,
         );
         if let Err(error) = result {
-            if let Ok(mut store) = state.store.lock() {
-                let _ = append_event(
-                    &mut store,
-                    &task_id,
-                    EventKind::TaskStatusChanged,
-                    "Conductor pairwise evaluation failed",
-                    metadata_with_context(
-                        [
-                            ("background_evaluation".to_string(), "true".to_string()),
-                            ("prompt_effort".to_string(), effort.clone()),
-                            (
-                                "error".to_string(),
-                                truncate_for_collaboration(&error, 2_000),
-                            ),
-                        ]
-                        .into_iter()
-                        .collect(),
-                        &run_context,
-                    ),
-                );
+            if error != MODEL_REQUEST_CANCELLED {
+                if let Ok(mut store) = state.store.lock() {
+                    let _ = append_event(
+                        &mut store,
+                        &task_id,
+                        EventKind::TaskStatusChanged,
+                        "Conductor pairwise evaluation failed",
+                        metadata_with_context(
+                            [
+                                ("background_evaluation".to_string(), "true".to_string()),
+                                ("prompt_effort".to_string(), effort.clone()),
+                                (
+                                    "error".to_string(),
+                                    truncate_for_collaboration(&error, 2_000),
+                                ),
+                            ]
+                            .into_iter()
+                            .collect(),
+                            &run_context,
+                        ),
+                    );
+                }
             }
         }
-        if let Ok(mut inflight) = prompt_evaluation_inflight().lock() {
-            inflight.remove(&lease_key);
-        }
+        finish_prompt_evaluation_control(&state, &lease_key, &control);
     });
 }
 
@@ -15089,7 +15237,11 @@ fn run_background_prompt_pairwise_evaluation(
     worker_models: &[String],
     agent_budget: usize,
     current_profile: &ConductorPromptGenome,
+    control: &Arc<AgentRunControl>,
 ) -> Result<(), String> {
+    if control.should_stop() {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
     if worker_models.is_empty() {
         return Ok(());
     }
@@ -15102,7 +15254,13 @@ fn run_background_prompt_pairwise_evaluation(
             .map_err(|error| error.to_string())?;
         evaluate_prompt_evolution_read_model(&model, effort)?
     };
-    let Some(challenger) = prompt_evolution_challenger(&evaluation, current_profile) else {
+    let current_task_class = run_context
+        .get("task_class")
+        .map(String::as_str)
+        .unwrap_or("general");
+    let Some(challenger) =
+        prompt_evolution_challenger(&evaluation, current_profile, current_task_class)
+    else {
         return Ok(());
     };
     let current_counts = prompt_profile_evidence_counts(&evaluation.observations, &current_profile.id);
@@ -15205,6 +15363,7 @@ fn run_background_prompt_pairwise_evaluation(
                 agent_budget,
                 current_profile,
                 &evaluation_id,
+                control,
             )
         });
         let challenger_handle = scope.spawn(|| {
@@ -15217,6 +15376,7 @@ fn run_background_prompt_pairwise_evaluation(
                 agent_budget,
                 &challenger,
                 &evaluation_id,
+                control,
             )
         });
         (
@@ -15238,12 +15398,15 @@ fn run_background_prompt_pairwise_evaluation(
                 }),
         )
     });
+    if control.should_stop() {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
     let (current, challenger) = std::thread::scope(|scope| {
         let current_handle = scope.spawn(|| {
-            execute_prompt_workflow_candidate(config, &objective, current_plan)
+            execute_prompt_workflow_candidate(config, &objective, current_plan, control)
         });
         let challenger_handle = scope.spawn(|| {
-            execute_prompt_workflow_candidate(config, &objective, challenger_plan)
+            execute_prompt_workflow_candidate(config, &objective, challenger_plan, control)
         });
         (
             current_handle.join().expect("current evaluation worker joined"),
@@ -15252,6 +15415,9 @@ fn run_background_prompt_pairwise_evaluation(
                 .expect("challenger evaluation worker joined"),
         )
     });
+    if control.should_stop() {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
     let swap_order = NEXT_ID
         .fetch_add(1, Ordering::Relaxed)
         .is_multiple_of(2);
@@ -15266,7 +15432,11 @@ fn run_background_prompt_pairwise_evaluation(
         candidate_a,
         candidate_b,
         &evaluation_id,
+        control,
     )?;
+    if control.should_stop() {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
     let split = match mode {
         PromptEvaluationMode::ReplayHoldout | PromptEvaluationMode::ReplayExecution => {
             PromptEvaluationSplit::Holdout
@@ -15343,6 +15513,7 @@ fn prompt_profile_evidence_counts(
 fn prompt_evolution_challenger(
     evaluation: &PromptEvolutionEvaluation,
     current_profile: &ConductorPromptGenome,
+    task_class: &str,
 ) -> Option<ConductorPromptGenome> {
     if let Some(champion_id) = evaluation.champion_id.as_deref() {
         if champion_id != current_profile.id {
@@ -15362,7 +15533,19 @@ fn prompt_evolution_challenger(
         .min_by_key(|profile| {
             let (paired, replay) =
                 prompt_profile_evidence_counts(&evaluation.observations, &profile.id);
-            (paired + replay, profile.generation, profile.id.clone())
+            let task_class_evidence = evaluation
+                .observations
+                .iter()
+                .filter(|observation| {
+                    observation.profile_id == profile.id && observation.task_class == task_class
+                })
+                .count();
+            (
+                task_class_evidence,
+                paired + replay,
+                Reverse(profile.generation),
+                profile.id.clone(),
+            )
         })
         .cloned()
         .or_else(|| {
@@ -15447,6 +15630,7 @@ fn evaluate_conductor_prompt_profile(
     agent_budget: usize,
     genome: &ConductorPromptGenome,
     evaluation_id: &str,
+    control: &Arc<AgentRunControl>,
 ) -> PromptPlanCandidate {
     let conductor_model = config.model_for_conductor();
     let harness = ConductorHarness::new(ConductorRequest {
@@ -15483,7 +15667,7 @@ fn evaluate_conductor_prompt_profile(
             conductor_model.clone(),
             system_prompt.clone(),
             prompt,
-            None,
+            Some(control.clone()),
             |_| {},
         )
     })
@@ -15582,8 +15766,10 @@ fn execute_prompt_workflow_candidate(
     config: &ProviderConfig,
     objective: &str,
     candidate: PromptPlanCandidate,
+    control: &Arc<AgentRunControl>,
 ) -> PromptExecutionCandidate {
     let config = config.clone();
+    let control = control.clone();
     execute_prompt_workflow_candidate_with_runner(
         objective,
         candidate,
@@ -15594,7 +15780,7 @@ fn execute_prompt_workflow_candidate(
                 model,
                 "You are a Cindx evaluation worker in a side-effect-free sandbox. Follow the supplied node contract exactly and return only the node work product.".to_string(),
                 prompt,
-                None,
+                Some(control.clone()),
                 |_| {},
             )
         }),
@@ -15727,6 +15913,7 @@ fn evaluate_prompt_candidate_pair(
     candidate_a: &PromptExecutionCandidate,
     candidate_b: &PromptExecutionCandidate,
     evaluation_id: &str,
+    control: &Arc<AgentRunControl>,
 ) -> Result<PromptPairwiseEvaluationPayload, String> {
     let reviewer_model = config.model_for_role(&ModelRole::Reviewer);
     let candidate_text = |candidate: &PromptExecutionCandidate| {
@@ -15778,7 +15965,7 @@ fn evaluate_prompt_candidate_pair(
         reviewer_model,
         collaboration_system_prompt_for_run(&config.agent_system_prompt, &Metadata::new()),
         prompt,
-        None,
+        Some(control.clone()),
         |_| {},
     );
     let response = completion.content.ok_or_else(|| {
@@ -17323,9 +17510,8 @@ fn apply_provider_config_input(config: &mut ProviderConfig, input: ProviderConfi
     if config.summarizer_model.is_empty() {
         config.summarizer_model = config.model.clone();
     }
-    if config.embedding_model.is_empty() {
-        config.embedding_model = "text-embedding-3-small".to_string();
-    }
+    config.embedding_model =
+        embedding_model_for_provider(&config.base_url, &config.embedding_model);
 }
 
 fn load_provider_config() -> ProviderConfig {
@@ -17376,6 +17562,8 @@ fn provider_config_from_text(text: &str) -> ProviderConfig {
     if !conductor_model_loaded || config.conductor_model.trim().is_empty() {
         config.conductor_model = config.model_for_role(&ModelRole::Planner);
     }
+    config.embedding_model =
+        embedding_model_for_provider(&config.base_url, &config.embedding_model);
     config
 }
 
@@ -17401,7 +17589,7 @@ fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<(), std::io::
             sanitize_config_value(&config.executor_model),
             sanitize_config_value(&config.reviewer_model),
             sanitize_config_value(&config.summarizer_model),
-            sanitize_config_value(&config.embedding_model),
+            sanitize_config_value(&config.model_for_role(&ModelRole::Embedder)),
             sanitize_config_value(&config.image_model),
             sanitize_config_value(&config.image_endpoint),
             sanitize_config_value(&config.collaboration_policy),
@@ -19797,6 +19985,34 @@ mod tests {
     }
 
     #[test]
+    fn dashscope_provider_migrates_the_openai_embedding_default() {
+        let migrated = provider_config_from_text(
+            "base_url=https://dashscope.aliyuncs.com/compatible-mode/v1\n\
+             model=qwen-plus\n\
+             embedding_model=text-embedding-3-small\n",
+        );
+        assert_eq!(
+            migrated.model_for_role(&ModelRole::Embedder),
+            DASHSCOPE_DEFAULT_EMBEDDING_MODEL
+        );
+
+        let explicit = provider_config_from_text(
+            "base_url=https://dashscope.aliyuncs.com/compatible-mode/v1\n\
+             embedding_model=custom-embedding-model\n",
+        );
+        assert_eq!(
+            explicit.model_for_role(&ModelRole::Embedder),
+            "custom-embedding-model"
+        );
+
+        let openai = ProviderConfig::default();
+        assert_eq!(
+            openai.model_for_role(&ModelRole::Embedder),
+            OPENAI_DEFAULT_EMBEDDING_MODEL
+        );
+    }
+
+    #[test]
     fn ensemble_uses_distinct_role_models_in_stable_order() {
         let config = ProviderConfig {
             model: "default".to_string(),
@@ -20278,6 +20494,45 @@ mod tests {
         assert_eq!(state.steps[0].policy, "plan_execute_review");
         assert_eq!(state.steps[0].role, "planner");
         assert_eq!(state.steps[0].output, "Plan first.");
+    }
+
+    #[test]
+    fn workspace_index_falls_back_to_local_embeddings_when_cloud_fails() {
+        struct FailingEmbedder;
+
+        impl RagEmbedder for FailingEmbedder {
+            fn embed_texts(&mut self, _texts: &[String]) -> Result<EmbeddingBatch, RagError> {
+                Err(RagError::new("configured embedding model is unavailable"))
+            }
+        }
+
+        let root = temp_test_root("phase7-cloud-fallback");
+        fs::create_dir_all(&root).expect("temp root should exist");
+        fs::write(
+            root.join("notes.md"),
+            "# Cindx\n\nLocal indexing remains available when cloud embeddings fail.",
+        )
+        .expect("fixture should write");
+
+        let (index, backend, model, fallback_error) = index_workspace_with_cloud_fallback(
+            &root,
+            IndexOptions::default(),
+            &mut FailingEmbedder,
+            "missing-cloud-model",
+        )
+        .expect("local fallback should build the index");
+
+        assert_eq!(backend, "local-fallback");
+        assert!(model.starts_with("local-hash-"));
+        assert_eq!(
+            fallback_error.as_deref(),
+            Some("configured embedding model is unavailable")
+        );
+        assert!(!index.chunks.is_empty());
+        assert!(index
+            .chunks
+            .iter()
+            .all(|chunk| chunk.embedding_provider == "local"));
     }
 
     #[test]
@@ -22556,7 +22811,7 @@ mod tests {
     }
 
     #[test]
-    fn default_sidecar_state_is_healthy() {
+    fn default_sidecar_state_reports_runtime_capabilities() {
         let config = SidecarConfig::default();
         let state = sidecar_state(&config, None);
 
@@ -22564,7 +22819,10 @@ mod tests {
         assert!(state.browser.exists);
         assert!(state.browser.healthy);
         assert!(state.computer.exists);
-        assert!(state.computer.healthy);
+        assert!(state.computer.executable);
+        if !state.computer.healthy {
+            assert!(!state.computer.health_output.trim().is_empty());
+        }
     }
 
     fn temp_test_root(name: &str) -> PathBuf {

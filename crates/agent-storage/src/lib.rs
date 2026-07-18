@@ -137,9 +137,19 @@ const EVENT_SCOPE_COLUMNS: [(&str, &str); 4] = [
     ("collaboration_id", "collaboration_id"),
     ("prompt_profile", "prompt_profile"),
 ];
+const PERMISSION_SCOPE_COLUMNS: [(&str, &str); 2] = [
+    ("session_id", "session_id"),
+    ("agent_run_id", "agent_run_id"),
+];
 
 fn event_scope_column(key: &str) -> Option<&'static str> {
     EVENT_SCOPE_COLUMNS
+        .iter()
+        .find_map(|(metadata_key, column)| (*metadata_key == key).then_some(*column))
+}
+
+fn permission_scope_column(key: &str) -> Option<&'static str> {
+    PERMISSION_SCOPE_COLUMNS
         .iter()
         .find_map(|(metadata_key, column)| (*metadata_key == key).then_some(*column))
 }
@@ -558,6 +568,46 @@ impl SqliteStore {
         statement.expect_done()
     }
 
+    pub fn list_permission_audits_for_session(
+        &self,
+        task_id: &TaskId,
+        session_id: &str,
+        active_run_id: Option<&str>,
+        requested_after_ms: u64,
+    ) -> Result<Vec<PermissionAuditRecord>, StorageError> {
+        let mut statement = if active_run_id.is_some() {
+            self.prepare(
+                "select
+                   pr.id, pr.task_id, pr.risk, pr.action, pr.reason, pr.scope,
+                   pr.metadata_text, pr.requested_at_ms, rr.decision,
+                   rr.resolved_at_ms, rr.resolved_by
+                 from permission_requests pr
+                 left join permission_resolutions rr on rr.request_id = pr.id
+                 where pr.task_id = ?1 and pr.session_id = ?2 and pr.agent_run_id = ?3
+                 order by pr.requested_at_ms desc, pr.id desc",
+            )?
+        } else {
+            self.prepare(
+                "select
+                   pr.id, pr.task_id, pr.risk, pr.action, pr.reason, pr.scope,
+                   pr.metadata_text, pr.requested_at_ms, rr.decision,
+                   rr.resolved_at_ms, rr.resolved_by
+                 from permission_requests pr
+                 left join permission_resolutions rr on rr.request_id = pr.id
+                 where pr.task_id = ?1 and pr.session_id = ?2 and pr.requested_at_ms >= ?3
+                 order by pr.requested_at_ms desc, pr.id desc",
+            )?
+        };
+        statement.bind_text(1, &task_id.0)?;
+        statement.bind_text(2, session_id)?;
+        if let Some(run_id) = active_run_id {
+            statement.bind_text(3, run_id)?;
+        } else {
+            statement.bind_i64(3, requested_after_ms.min(i64::MAX as u64) as i64)?;
+        }
+        permission_audits_from_statement(&mut statement)
+    }
+
     pub fn delete_records_by_metadata(
         &mut self,
         key: &str,
@@ -571,23 +621,26 @@ impl SqliteStore {
         self.exec_batch("begin immediate transaction")?;
 
         let result = (|| {
-            let predicate =
+            let metadata_predicate =
                 "instr(char(10) || metadata_text || char(10), char(10) || ?1 || char(10)) > 0";
+            let (permission_predicate, permission_value) = permission_scope_column(key)
+                .map(|column| (format!("{column} = ?1"), value.to_string()))
+                .unwrap_or_else(|| (metadata_predicate.to_string(), row.clone()));
             let mut delete_resolutions = self.prepare(&format!(
-                "delete from permission_resolutions where request_id in (select id from permission_requests where {predicate})"
+                "delete from permission_resolutions where request_id in (select id from permission_requests where {permission_predicate})"
             ))?;
-            delete_resolutions.bind_text(1, &row)?;
+            delete_resolutions.bind_text(1, &permission_value)?;
             delete_resolutions.expect_done()?;
 
             let mut delete_requests = self.prepare(&format!(
-                "delete from permission_requests where {predicate}"
+                "delete from permission_requests where {permission_predicate}"
             ))?;
-            delete_requests.bind_text(1, &row)?;
+            delete_requests.bind_text(1, &permission_value)?;
             delete_requests.expect_done()?;
 
             let (event_predicate, event_value) = event_scope_column(key)
                 .map(|column| (format!("{column} = ?1"), value.to_string()))
-                .unwrap_or_else(|| (predicate.to_string(), row.clone()));
+                .unwrap_or_else(|| (metadata_predicate.to_string(), row.clone()));
             let mut delete_events =
                 self.prepare(&format!("delete from events where {event_predicate}"))?;
             delete_events.bind_text(1, &event_value)?;
@@ -702,7 +755,9 @@ impl SqliteStore {
               scope text not null,
               metadata_text text not null,
               requested_at_ms integer not null,
-              status text not null
+              status text not null,
+              session_id text,
+              agent_run_id text
             );
 
             create table if not exists permission_resolutions (
@@ -728,6 +783,7 @@ impl SqliteStore {
             ",
         )?;
         self.ensure_event_scope_columns()?;
+        self.ensure_permission_scope_columns()?;
         self.exec_batch(
             "
             create index if not exists idx_events_task_session_sequence
@@ -738,15 +794,31 @@ impl SqliteStore {
               on events(task_id, collaboration_id, sequence);
             create index if not exists idx_events_task_prompt_profile_sequence
               on events(task_id, prompt_profile, sequence);
+            create index if not exists idx_permission_requests_task_session_time
+              on permission_requests(task_id, session_id, requested_at_ms desc);
+            create index if not exists idx_permission_requests_task_session_run
+              on permission_requests(task_id, session_id, agent_run_id, requested_at_ms desc);
             ",
         )?;
-        self.backfill_event_scope_columns()
+        self.backfill_event_scope_columns()?;
+        self.backfill_permission_scope_columns()
     }
 
     fn ensure_event_scope_columns(&self) -> Result<(), StorageError> {
         for (_, column) in EVENT_SCOPE_COLUMNS {
             if !self.table_has_column("events", column)? {
                 self.exec_batch(&format!("alter table events add column {column} text"))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_permission_scope_columns(&self) -> Result<(), StorageError> {
+        for (_, column) in PERMISSION_SCOPE_COLUMNS {
+            if !self.table_has_column("permission_requests", column)? {
+                self.exec_batch(&format!(
+                    "alter table permission_requests add column {column} text"
+                ))?;
             }
         }
         Ok(())
@@ -824,6 +896,51 @@ impl SqliteStore {
                 "insert or replace into storage_meta(key, value) values (?1, ?2)",
             )?;
             marker.bind_text(1, "event_scope_columns_v1")?;
+            marker.bind_text(2, "complete")?;
+            marker.expect_done()
+        })();
+        match result {
+            Ok(()) => self.exec_batch("commit"),
+            Err(error) => {
+                let _ = self.exec_batch("rollback");
+                Err(error)
+            }
+        }
+    }
+
+    fn backfill_permission_scope_columns(&self) -> Result<(), StorageError> {
+        if self
+            .storage_meta_value("permission_scope_columns_v1")?
+            .as_deref()
+            == Some("complete")
+        {
+            return Ok(());
+        }
+        let mut statement = self.prepare("select id, metadata_text from permission_requests")?;
+        let mut rows = Vec::new();
+        while statement.step()? == StepResult::Row {
+            rows.push((statement.column_text(0)?, statement.column_text(1)?));
+        }
+        drop(statement);
+
+        self.exec_batch("begin immediate transaction")?;
+        let result = (|| {
+            for (request_id, metadata_text) in rows {
+                let metadata = metadata_from_text(&metadata_text)?;
+                let mut update = self.prepare(
+                    "update permission_requests
+                     set session_id = ?1, agent_run_id = ?2
+                     where id = ?3",
+                )?;
+                update.bind_optional_text(1, metadata.get("session_id").map(String::as_str))?;
+                update.bind_optional_text(2, metadata.get("agent_run_id").map(String::as_str))?;
+                update.bind_text(3, &request_id)?;
+                update.expect_done()?;
+            }
+            let mut marker = self.prepare(
+                "insert or replace into storage_meta(key, value) values (?1, ?2)",
+            )?;
+            marker.bind_text(1, "permission_scope_columns_v1")?;
             marker.bind_text(2, "complete")?;
             marker.expect_done()
         })();
@@ -989,9 +1106,10 @@ impl PermissionStore for SqliteStore {
         let mut statement = self.prepare(
             "
             insert or replace into permission_requests(
-              id, task_id, risk, action, reason, scope, metadata_text, requested_at_ms, status
+              id, task_id, risk, action, reason, scope, metadata_text, requested_at_ms, status,
+              session_id, agent_run_id
             )
-            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending')
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10)
             ",
         )?;
 
@@ -1003,6 +1121,11 @@ impl PermissionStore for SqliteStore {
         statement.bind_text(6, &request.scope)?;
         statement.bind_text(7, &metadata_to_text(&request.metadata))?;
         statement.bind_i64(8, requested_at_ms as i64)?;
+        statement.bind_optional_text(9, request.metadata.get("session_id").map(String::as_str))?;
+        statement.bind_optional_text(
+            10,
+            request.metadata.get("agent_run_id").map(String::as_str),
+        )?;
         statement.expect_done()
     }
 
@@ -1090,38 +1213,42 @@ impl PermissionStore for SqliteStore {
             ",
         )?;
 
-        let mut audits = Vec::new();
-        while statement.step()? == StepResult::Row {
-            let request_id = PermissionRequestId(statement.column_text(0)?);
-            let decision = statement.column_optional_text(8)?;
-            let resolution = if let Some(decision) = decision {
-                Some(PermissionResolution {
-                    request_id: request_id.clone(),
-                    decision: str_to_permission_decision(&decision)?,
-                    resolved_at_ms: statement.column_i64(9) as u64,
-                    resolved_by: statement.column_text(10)?,
-                })
-            } else {
-                None
-            };
-
-            audits.push(PermissionAuditRecord {
-                request: PermissionRequest {
-                    id: request_id,
-                    task_id: TaskId(statement.column_text(1)?),
-                    risk: str_to_permission_risk(&statement.column_text(2)?)?,
-                    action: statement.column_text(3)?,
-                    reason: statement.column_text(4)?,
-                    scope: statement.column_text(5)?,
-                    metadata: metadata_from_text(&statement.column_text(6)?)?,
-                },
-                requested_at_ms: statement.column_i64(7) as u64,
-                resolution,
-            });
-        }
-
-        Ok(audits)
+        permission_audits_from_statement(&mut statement)
     }
+}
+
+fn permission_audits_from_statement(
+    statement: &mut Statement<'_>,
+) -> Result<Vec<PermissionAuditRecord>, StorageError> {
+    let mut audits = Vec::new();
+    while statement.step()? == StepResult::Row {
+        let request_id = PermissionRequestId(statement.column_text(0)?);
+        let decision = statement.column_optional_text(8)?;
+        let resolution = if let Some(decision) = decision {
+            Some(PermissionResolution {
+                request_id: request_id.clone(),
+                decision: str_to_permission_decision(&decision)?,
+                resolved_at_ms: statement.column_i64(9) as u64,
+                resolved_by: statement.column_text(10)?,
+            })
+        } else {
+            None
+        };
+        audits.push(PermissionAuditRecord {
+            request: PermissionRequest {
+                id: request_id,
+                task_id: TaskId(statement.column_text(1)?),
+                risk: str_to_permission_risk(&statement.column_text(2)?)?,
+                action: statement.column_text(3)?,
+                reason: statement.column_text(4)?,
+                scope: statement.column_text(5)?,
+                metadata: metadata_from_text(&statement.column_text(6)?)?,
+            },
+            requested_at_ms: statement.column_i64(7) as u64,
+            resolution,
+        });
+    }
+    Ok(audits)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1566,6 +1693,53 @@ mod tests {
                 .map(|resolution| &resolution.decision),
             Some(&PermissionDecision::AllowOnce)
         );
+    }
+
+    #[test]
+    fn lists_permission_audits_by_indexed_session_and_run() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("task-agent".to_string());
+        for (id, session_id, run_id, requested_at_ms) in [
+            ("perm-a1", "session-a", "run-a1", 100),
+            ("perm-a2", "session-a", "run-a2", 300),
+            ("perm-b1", "session-b", "run-b1", 400),
+        ] {
+            store
+                .save_permission_request(
+                    PermissionRequest {
+                        id: PermissionRequestId(id.to_string()),
+                        task_id: task_id.clone(),
+                        risk: PermissionRisk::Read,
+                        action: "file.read".to_string(),
+                        reason: "test".to_string(),
+                        scope: ".".to_string(),
+                        metadata: [
+                            ("session_id".to_string(), session_id.to_string()),
+                            ("agent_run_id".to_string(), run_id.to_string()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    },
+                    requested_at_ms,
+                )
+                .expect("permission should save");
+        }
+
+        let session = store
+            .list_permission_audits_for_session(&task_id, "session-a", None, 0)
+            .expect("session audits should list");
+        let active_run = store
+            .list_permission_audits_for_session(&task_id, "session-a", Some("run-a2"), 0)
+            .expect("run audits should list");
+        let recent = store
+            .list_permission_audits_for_session(&task_id, "session-a", None, 200)
+            .expect("recent audits should list");
+
+        assert_eq!(session.len(), 2);
+        assert_eq!(active_run.len(), 1);
+        assert_eq!(active_run[0].request.id.0, "perm-a2");
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].request.id.0, "perm-a2");
     }
 
     #[test]

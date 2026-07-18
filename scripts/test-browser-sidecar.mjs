@@ -87,6 +87,15 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const address = server.address();
 const baseUrl = `http://127.0.0.1:${address.port}`;
@@ -94,6 +103,9 @@ const baseUrl = `http://127.0.0.1:${address.port}`;
 try {
   const opened = await invoke("open", { url: baseUrl });
   assert(opened.page?.id, "open should return a CDP target id");
+  const statePath = path.join(sessionDir, "session-state.json");
+  const browserPid = JSON.parse(fs.readFileSync(statePath, "utf8")).browser_pid;
+  assert(processIsAlive(browserPid), "open should leave a live browser process");
 
   await invoke("type", { role: "textbox", name: "Message", text: "hello-cdp" });
   await invoke("click", { role: "button", name: "Increment", wait_for: "#count" });
@@ -124,6 +136,8 @@ try {
   );
 
   await invoke("close");
+  assert(!processIsAlive(browserPid), "close should terminate the browser process");
+  assert(!fs.existsSync(statePath), "close should remove stale browser session state");
   process.stdout.write("browser sidecar integration ok\n");
 } finally {
   await new Promise((resolve) => server.close(resolve));

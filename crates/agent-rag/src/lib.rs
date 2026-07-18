@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -9,6 +9,7 @@ const DEFAULT_MAX_FILE_BYTES: u64 = 512 * 1024;
 const DEFAULT_MAX_FILES: usize = 10_000;
 const DEFAULT_CHUNK_LINES: usize = 80;
 const DEFAULT_CHUNK_OVERLAP: usize = 8;
+const DEFAULT_EMBEDDING_BATCH_SIZE: usize = 20;
 
 pub const RAG_INDEX_CANCELLED: &str = "RAG indexing cancelled";
 
@@ -210,6 +211,33 @@ pub fn index_workspace_cancellable(
     Ok(RagIndex { chunks, stats })
 }
 
+pub fn workspace_index_is_fresh(
+    workspace_root: impl AsRef<Path>,
+    chunks: &[RagChunk],
+    options: IndexOptions,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<bool, RagError> {
+    if chunks.is_empty() {
+        return Ok(false);
+    }
+    let indexed_files = chunks
+        .iter()
+        .map(|chunk| (chunk.path.clone(), chunk.modified_time_ms))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = BTreeSet::new();
+    let mut files_indexed = 0usize;
+    let fresh = inspect_workspace_freshness(
+        workspace_root.as_ref(),
+        workspace_root.as_ref(),
+        &options,
+        &indexed_files,
+        &mut seen,
+        &mut files_indexed,
+        &mut should_cancel,
+    )?;
+    Ok(fresh && seen.len() == indexed_files.len())
+}
+
 pub fn index_workspace_with_embedder(
     workspace_root: impl AsRef<Path>,
     options: IndexOptions,
@@ -225,18 +253,33 @@ pub fn index_workspace_with_embedder(
         return Ok(index);
     }
 
-    let batch = embedder.embed_texts(&texts)?;
-    if batch.vectors.len() != index.chunks.len() {
-        return Err(RagError::new(format!(
-            "embedding count mismatch: got {}, expected {}",
-            batch.vectors.len(),
-            index.chunks.len()
-        )));
+    let mut provider = None;
+    let mut model = None;
+    let mut vectors = Vec::with_capacity(texts.len());
+    for texts_batch in texts.chunks(DEFAULT_EMBEDDING_BATCH_SIZE) {
+        let batch = embedder.embed_texts(texts_batch)?;
+        if batch.vectors.len() != texts_batch.len() {
+            return Err(RagError::new(format!(
+                "embedding count mismatch: got {}, expected {}",
+                batch.vectors.len(),
+                texts_batch.len()
+            )));
+        }
+        if provider.as_ref().is_some_and(|value| value != &batch.provider)
+            || model.as_ref().is_some_and(|value| value != &batch.model)
+        {
+            return Err(RagError::new(
+                "embedding provider or model changed between batches",
+            ));
+        }
+        provider.get_or_insert(batch.provider);
+        model.get_or_insert(batch.model);
+        vectors.extend(batch.vectors);
     }
 
-    let provider = batch.provider;
-    let model = batch.model;
-    for (chunk, vector) in index.chunks.iter_mut().zip(batch.vectors) {
+    let provider = provider.unwrap_or_default();
+    let model = model.unwrap_or_default();
+    for (chunk, vector) in index.chunks.iter_mut().zip(vectors) {
         if vector.is_empty() {
             return Err(RagError::new("embedding vector was empty"));
         }
@@ -292,12 +335,17 @@ pub fn search_chunks_literal(
         .cloned()
         .filter_map(|chunk| {
             let normalized_text = chunk.text.to_lowercase();
+            let normalized_path = chunk.path.to_lowercase();
             let exact_matches = normalized_text.matches(&normalized_query).count();
-            let lexical_score = lexical_overlap(&query_tokens, &token_counts(&normalized_text));
-            let score = if exact_matches > 0 {
+            let path_exact = normalized_path.contains(&normalized_query);
+            let text_score = lexical_overlap(&query_tokens, &token_counts(&normalized_text));
+            let path_score = lexical_overlap(&query_tokens, &token_counts(&normalized_path));
+            let score = if path_exact {
+                1.25 + (exact_matches.min(8) as f32 * 0.04)
+            } else if exact_matches > 0 {
                 1.0 + (exact_matches.min(8) as f32 * 0.05)
             } else {
-                lexical_score
+                (text_score * 0.75) + (path_score * 0.45)
             };
             (score > 0.0).then_some(RagSearchResult { chunk, score })
         })
@@ -524,6 +572,133 @@ fn collect_chunks(
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn inspect_workspace_freshness(
+    workspace_root: &Path,
+    current: &Path,
+    options: &IndexOptions,
+    indexed_files: &BTreeMap<String, u64>,
+    seen: &mut BTreeSet<String>,
+    files_indexed: &mut usize,
+    should_cancel: &mut dyn FnMut() -> bool,
+) -> Result<bool, RagError> {
+    if should_cancel() {
+        return Err(RagError::new(RAG_INDEX_CANCELLED));
+    }
+    if *files_indexed >= options.max_files.max(1) {
+        return Ok(true);
+    }
+    let metadata = match fs::metadata(current) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(true),
+        Err(error) => return Err(RagError::new(format!("failed to stat path: {error}"))),
+    };
+    if metadata.is_file() {
+        return inspect_file_freshness(
+            workspace_root,
+            current,
+            &metadata,
+            options,
+            indexed_files,
+            seen,
+            files_indexed,
+        );
+    }
+
+    let entries = match fs::read_dir(current) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(true),
+        Err(error) => return Err(RagError::new(format!("failed to read directory: {error}"))),
+    };
+    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.path());
+    for entry in entries {
+        if should_cancel() {
+            return Err(RagError::new(RAG_INDEX_CANCELLED));
+        }
+        if *files_indexed >= options.max_files.max(1) {
+            break;
+        }
+        let path = entry.path();
+        let name = entry.file_name();
+        if should_skip_workspace_entry(workspace_root, current, &name.to_string_lossy()) {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let fresh = if metadata.is_dir() {
+            inspect_workspace_freshness(
+                workspace_root,
+                &path,
+                options,
+                indexed_files,
+                seen,
+                files_indexed,
+                should_cancel,
+            )?
+        } else if metadata.is_file() {
+            inspect_file_freshness(
+                workspace_root,
+                &path,
+                &metadata,
+                options,
+                indexed_files,
+                seen,
+                files_indexed,
+            )?
+        } else {
+            true
+        };
+        if !fresh {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn inspect_file_freshness(
+    workspace_root: &Path,
+    path: &Path,
+    metadata: &fs::Metadata,
+    options: &IndexOptions,
+    indexed_files: &BTreeMap<String, u64>,
+    seen: &mut BTreeSet<String>,
+    files_indexed: &mut usize,
+) -> Result<bool, RagError> {
+    if metadata.len() > options.max_file_bytes {
+        return Ok(true);
+    }
+    let relative = relative_workspace_path(workspace_root, path)?;
+    if is_probably_binary_path(&relative) {
+        return Ok(true);
+    }
+    let modified_time_ms = metadata
+        .modified()
+        .ok()
+        .and_then(system_time_millis)
+        .unwrap_or(0);
+    if let Some(indexed_time) = indexed_files.get(&relative) {
+        *files_indexed += 1;
+        seen.insert(relative);
+        return Ok(*indexed_time == modified_time_ms);
+    }
+
+    let Ok(content) = fs::read_to_string(path) else {
+        return Ok(true);
+    };
+    if content.trim().is_empty() {
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn index_file(
@@ -1009,6 +1184,70 @@ mod tests {
     }
 
     #[test]
+    fn workspace_index_freshness_detects_modified_added_and_deleted_files() {
+        let root = temp_workspace();
+        let notes = root.join("notes.md");
+        fs::write(&notes, "original workspace notes").expect("file should write");
+        let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+
+        assert!(workspace_index_is_fresh(
+            &root,
+            &index.chunks,
+            IndexOptions::default(),
+            || false
+        )
+        .expect("freshness should be checked"));
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        fs::write(&notes, "modified workspace notes").expect("file should update");
+        assert!(!workspace_index_is_fresh(
+            &root,
+            &index.chunks,
+            IndexOptions::default(),
+            || false
+        )
+        .expect("modified file should be detected"));
+
+        let updated = index_workspace(&root, IndexOptions::default()).expect("index should rebuild");
+        fs::write(root.join("new.md"), "new knowledge").expect("new file should write");
+        assert!(!workspace_index_is_fresh(
+            &root,
+            &updated.chunks,
+            IndexOptions::default(),
+            || false
+        )
+        .expect("new file should be detected"));
+
+        fs::remove_file(root.join("new.md")).expect("new file should remove");
+        fs::remove_file(&notes).expect("indexed file should remove");
+        assert!(!workspace_index_is_fresh(
+            &root,
+            &updated.chunks,
+            IndexOptions::default(),
+            || false
+        )
+        .expect("deleted file should be detected"));
+    }
+
+    #[test]
+    fn literal_search_uses_file_paths_as_retrieval_evidence() {
+        let root = temp_workspace();
+        fs::create_dir_all(root.join("src")).expect("source directory should create");
+        fs::write(
+            root.join("src/permission_router.rs"),
+            "routes requests through the configured policy",
+        )
+        .expect("source file should write");
+        fs::write(root.join("notes.md"), "unrelated project notes").expect("notes should write");
+        let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+
+        let results = search_chunks_literal(&index.chunks, "permission_router", 4);
+
+        assert_eq!(results[0].chunk.path, "src/permission_router.rs");
+        assert!(results[0].score > 1.0);
+    }
+
+    #[test]
     fn cancellable_index_stops_during_workspace_scan() {
         let root = temp_workspace();
         fs::write(root.join("one.md"), "one").expect("first file should write");
@@ -1089,6 +1328,49 @@ mod tests {
         assert_eq!(index.chunks[0].embedding_provider, "test-provider");
         assert_eq!(index.chunks[0].embedding_model, "test-embedding");
         assert_eq!(index.chunks[0].embedding_dimensions, 3);
+    }
+
+    #[test]
+    fn external_embeddings_are_requested_in_provider_safe_batches() {
+        struct RecordingEmbedder {
+            batch_sizes: Vec<usize>,
+        }
+
+        impl RagEmbedder for RecordingEmbedder {
+            fn embed_texts(&mut self, texts: &[String]) -> Result<EmbeddingBatch, RagError> {
+                self.batch_sizes.push(texts.len());
+                Ok(EmbeddingBatch {
+                    provider: "test-provider".to_string(),
+                    model: "test-embedding".to_string(),
+                    vectors: vec![vec![1.0, 0.0]; texts.len()],
+                })
+            }
+        }
+
+        let root = temp_workspace();
+        let content = (0..360)
+            .map(|line| format!("knowledge line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(root.join("many-chunks.md"), content).expect("file should write");
+        let mut embedder = RecordingEmbedder {
+            batch_sizes: Vec::new(),
+        };
+        let options = IndexOptions {
+            chunk_lines: 8,
+            chunk_overlap: 0,
+            ..IndexOptions::default()
+        };
+
+        let index = index_workspace_with_embedder(&root, options, &mut embedder)
+            .expect("batched external embeddings should build");
+
+        assert_eq!(index.chunks.len(), 45);
+        assert_eq!(embedder.batch_sizes, vec![20, 20, 5]);
+        assert!(index
+            .chunks
+            .iter()
+            .all(|chunk| chunk.embedding_model == "test-embedding"));
     }
 
     #[test]

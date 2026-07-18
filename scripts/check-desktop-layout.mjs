@@ -49,10 +49,11 @@ assert(
   "Pane dividers must extend through the titlebar"
 );
 assert(
-  appSource.includes('className="sidebar-resize-handle"') &&
+    appSource.includes('className="sidebar-resize-handle"') &&
     appSource.includes('aria-label="Resize sidebar"') &&
     css.includes("left: calc(var(--sidebar-layout-width) - 3px)") &&
-    css.includes("box-shadow: -4px 0 10px rgba(0, 0, 0, 0.045)"),
+    css.includes("-1px 0 3px rgba(0, 0, 0, 0.075)") &&
+    css.includes("-8px 0 18px rgba(0, 0, 0, 0.028)"),
   "Sidebar divider must expose a resize edge and subtle left-facing depth"
 );
 assert(

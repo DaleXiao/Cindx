@@ -28,7 +28,12 @@
   --subtle: #989898;
   --ink: #202020;
   --accent: #2563eb;
-  --sidebar-glass: rgba(255, 255, 255, 0.92);
+  --sidebar-glass: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.91) 0%,
+    rgba(255, 255, 255, 0.85) 46%,
+    rgba(255, 255, 255, 0.8) 100%
+  );
   --radius-xs: 4px;
   --radius-sm: 6px;
   --radius-md: 8px;
@@ -162,7 +167,9 @@ pre {
   content: "";
   pointer-events: none;
   background: var(--border);
-  box-shadow: -4px 0 10px rgba(0, 0, 0, 0.045);
+  box-shadow:
+    -1px 0 3px rgba(0, 0, 0, 0.075),
+    -8px 0 18px rgba(0, 0, 0, 0.028);
   opacity: 1;
   transition:
     left 180ms var(--ease-out-quart),
@@ -610,7 +617,6 @@ pre {
 
 .project-row.active {
   background: var(--project-selection);
-  box-shadow: 0 1px 3px rgb(0 0 0 / 10%);
 }
 
 .project-main {
@@ -802,7 +808,6 @@ pre {
 
 .session-item.active {
   background: var(--session-selection);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 9%);
 }
 
 .session-item > .session-name {
@@ -923,6 +928,7 @@ pre {
   box-shadow:
     0 0 0 2px rgb(57 185 107 / 14%),
     0 0 8px rgb(57 185 107 / 65%);
+  animation: session-status-breathe 1800ms ease-in-out infinite;
 }
 
 .session-status-attention > span {
@@ -1834,6 +1840,18 @@ pre {
   user-select: text;
 }
 
+.thread-markdown-chunk {
+  display: contents;
+}
+
+.thread-markdown-chunk:first-child > :first-child {
+  margin-top: 0;
+}
+
+.thread-markdown-chunk:last-child > :last-child {
+  margin-bottom: 0;
+}
+
 .thread-markdown > :first-child {
   margin-top: 0;
 }
@@ -2398,6 +2416,7 @@ details[open] > summary .disclosure-triangle {
 @media (prefers-reduced-motion: reduce) {
   .composer-working-ring,
   .session-status-working svg,
+  .session-status-complete > span,
   .session-status-attention > span,
   .skills-refresh-turn,
   .thread-message-streaming,
@@ -3698,23 +3717,23 @@ details[open] > summary .settings-disclosure-chevron {
 }
 
 .provider-endpoint-input {
-  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
 }
 
 .provider-endpoint-input input {
-  padding-right: 32px;
+  width: 100%;
+  min-width: 0;
 }
 
 .provider-endpoint-check {
-  position: absolute;
-  top: 50%;
-  right: 9px;
   width: 15px;
   height: 15px;
   color: var(--accent);
   pointer-events: none;
-  transform: translateY(-50%);
 }
 
 .workspace-folder-field {
@@ -4169,21 +4188,28 @@ details[open] > summary .settings-disclosure-chevron {
   max-height: 420px;
 }
 
+.knowledge-graph-details[open] .knowledge-graph-scene {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: knowledge-graph-float 8s ease-in-out infinite alternate;
+}
+
+@keyframes knowledge-graph-float {
+  from {
+    transform: translate(-0.5px, 1px);
+  }
+
+  to {
+    transform: translate(0.5px, -1px);
+  }
+}
+
 .knowledge-graph-edges line {
   opacity: 0.62;
   stroke: #cdcdcd;
   stroke-linecap: round;
   stroke-width: 0.8;
-  transition:
-    opacity 150ms ease-out,
-    stroke 150ms ease-out,
-    stroke-width 150ms ease-out;
-}
-
-.knowledge-graph-edges line[data-highlighted="true"] {
-  opacity: 1;
-  stroke: #777777;
-  stroke-width: 1.35;
+  transition: opacity 150ms ease-out;
 }
 
 .knowledge-graph-edges line[data-muted="true"] {
@@ -4198,34 +4224,20 @@ details[open] > summary .settings-disclosure-chevron {
 
 .knowledge-graph-node-core {
   stroke: rgb(255 255 255 / 92%);
-  stroke-width: 1.3;
-  transform-box: fill-box;
-  transform-origin: center;
-  transition:
-    filter 150ms ease-out,
-    stroke 150ms ease-out,
-    stroke-width 150ms ease-out,
-    transform 170ms var(--ease-out-quart);
-}
-
-.knowledge-graph-node-halo {
-  fill: none;
-  opacity: 0.42;
-  stroke: #2563eb;
   stroke-width: 1;
+  transition:
+    fill 150ms ease-out,
+    stroke 150ms ease-out;
 }
 
 .knowledge-graph-node[data-active="true"] .knowledge-graph-node-core,
 .knowledge-graph-node[data-selected="true"] .knowledge-graph-node-core,
 .knowledge-graph-node:focus-visible .knowledge-graph-node-core {
-  filter: drop-shadow(0 1px 2px rgb(0 0 0 / 22%));
-  stroke: #ffffff;
-  stroke-width: 1.8;
-  transform: scale(1.28);
+  stroke: rgb(255 255 255 / 92%);
 }
 
 .knowledge-graph-node[data-muted="true"] {
-  opacity: 0.2;
+  opacity: 0.18;
 }
 
 .knowledge-graph-node-label {
@@ -4256,7 +4268,6 @@ details[open] > summary .settings-disclosure-chevron {
 .knowledge-graph-node[data-active="true"] .knowledge-graph-node-label {
   opacity: 1;
   fill: #333333;
-  font-weight: 650;
 }
 
 .knowledge-graph-legend span {
@@ -5717,6 +5728,7 @@ details[open] > summary .settings-disclosure-chevron {
   .inspector-output-chevron,
   .inspector-debug-chevron,
   .inspector-debug-chevron > svg,
+  .knowledge-graph-scene,
   .knowledge-graph-edges line,
   .knowledge-graph-node,
   .knowledge-graph-node-core,
