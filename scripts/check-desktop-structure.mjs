@@ -1381,6 +1381,13 @@ assert(
     styles.includes("rgba(255, 255, 255, 0.91) 0%") &&
     styles.includes("rgba(255, 255, 255, 0.8) 100%") &&
     styles.includes("background: var(--sidebar-glass)") &&
+    /\.window-toolbar-panel-left \{[^}]*background-position: left top;[^}]*background-size: 100% 100vh;/.test(
+      styles
+    ) &&
+    /\.sidebar \{[^}]*background-position: left calc\(0px - var\(--titlebar-height\)\);[^}]*background-size: 100% 100vh;/.test(
+      styles
+    ) &&
+    /\.project-item \{[^}]*padding-left: 12px;/.test(styles) &&
     !/\.window-toolbar-panel-left \{[^}]*backdrop-filter:/.test(styles) &&
     !/\.sidebar \{[^}]*backdrop-filter:/.test(styles) &&
     rustLib.includes("install_macos_sidebar_material") &&
@@ -1800,11 +1807,16 @@ assert(
     knowledgeGraphSource.includes("graph.edges.filter") &&
     knowledgeGraphSource.includes("Math.min(6.6") &&
     knowledgeGraphSource.includes('className="knowledge-graph-scene"') &&
-    knowledgeGraphSource.includes("data-muted={Boolean(activeId) && !active") &&
+    knowledgeGraphSource.includes("const activeNodeIds = useMemo") &&
+    knowledgeGraphSource.includes("data-related={connected || undefined}") &&
+    knowledgeGraphSource.includes("data-muted={Boolean(activeId) && !related") &&
     !knowledgeGraphSource.includes("data-highlighted") &&
     !knowledgeGraphSource.includes("knowledge-graph-node-halo") &&
     styles.includes(".knowledge-graph-node-label") &&
     styles.includes('.knowledge-graph-edges line[data-muted="true"]') &&
+    /\.knowledge-graph-edges line\[data-related="true"\] \{[^}]*stroke: #4f4f4f;/.test(
+      styles
+    ) &&
     styles.includes(".knowledge-graph-details[open] .knowledge-graph-scene") &&
     styles.includes("animation: knowledge-graph-float 8s ease-in-out infinite alternate") &&
     !/\.knowledge-graph-node\[data-active="true"\][\s\S]*?transform: scale/.test(styles),
