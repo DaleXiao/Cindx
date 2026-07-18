@@ -461,11 +461,15 @@ assert(
 assert(
   sessionThreadSource.includes("LATEST_OUTPUT_THRESHOLD") &&
     sessionThreadSource.includes("followLatestRef") &&
+    sessionThreadSource.includes("lastScrollTopRef") &&
+    sessionThreadSource.includes("const pinLatestOutput = useCallback") &&
+    sessionThreadSource.includes("const movedTowardHistory =") &&
+    sessionThreadSource.includes("if (followLatestRef.current) pinLatestOutput()") &&
     sessionThreadSource.includes('className="thread-jump-latest"') &&
     sessionThreadSource.includes('aria-label="Jump to latest output"') &&
     styles.includes("backdrop-filter: saturate(150%) blur(18px)") &&
     styles.includes("@keyframes thread-jump-latest-in"),
-  "Scrolling away from the latest output must reveal the frosted jump-to-latest control"
+  "Streaming output must stay pinned to the latest content until the user scrolls toward history"
 );
 assert(
   sessionThreadSource.includes("openExternalUrl") &&
