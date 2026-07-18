@@ -263,6 +263,9 @@ pre {
   left: 0;
   width: var(--sidebar-layout-width);
   background: var(--sidebar-glass);
+  background-repeat: no-repeat;
+  background-position: left top;
+  background-size: 100% 100vh;
 }
 
 .window-toolbar-panel-right {
@@ -420,6 +423,9 @@ pre {
   padding: 14px;
   overflow: hidden;
   background: var(--sidebar-glass);
+  background-repeat: no-repeat;
+  background-position: left calc(0px - var(--titlebar-height));
+  background-size: 100% 100vh;
   opacity: 1;
   transform: translateX(0);
   transition:
@@ -697,7 +703,7 @@ pre {
   width: auto;
   min-height: 32px;
   flex: 0 1 auto;
-  padding-left: 2px;
+  padding-left: 12px;
   padding-right: 0;
   background: transparent;
   border: 0;
@@ -4214,6 +4220,11 @@ details[open] > summary .settings-disclosure-chevron {
 
 .knowledge-graph-edges line[data-muted="true"] {
   opacity: 0.1;
+}
+
+.knowledge-graph-edges line[data-related="true"] {
+  opacity: 0.88;
+  stroke: #4f4f4f;
 }
 
 .knowledge-graph-node {

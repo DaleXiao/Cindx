@@ -160,6 +160,16 @@ export function KnowledgeGraph({ graph }: KnowledgeGraphProps) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const activeId = hoveredId ?? selectedId;
   const selected = layout.nodes.find((node) => node.id === selectedId) ?? null;
+  const activeNodeIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (!activeId) return ids;
+    ids.add(activeId);
+    layout.edges.forEach((edge) => {
+      if (edge.from === activeId) ids.add(edge.to);
+      if (edge.to === activeId) ids.add(edge.from);
+    });
+    return ids;
+  }, [activeId, layout.edges]);
 
   if (layout.nodes.length === 0) {
     return <div className="knowledge-graph-empty">Index the workspace to build the graph.</div>;
@@ -188,10 +198,11 @@ export function KnowledgeGraph({ graph }: KnowledgeGraphProps) {
                   <line
                     key={edge.id}
                     x1={edge.source.x}
-                    y1={edge.source.y}
-                    x2={edge.target.x}
-                    y2={edge.target.y}
-                    data-muted={Boolean(activeId) && !connected ? true : undefined}
+                  y1={edge.source.y}
+                  x2={edge.target.x}
+                  y2={edge.target.y}
+                  data-related={connected || undefined}
+                  data-muted={Boolean(activeId) && !connected ? true : undefined}
                   >
                     <title>{edge.kind}</title>
                   </line>
@@ -201,6 +212,7 @@ export function KnowledgeGraph({ graph }: KnowledgeGraphProps) {
             <g className="knowledge-graph-nodes">
               {layout.nodes.map((node) => {
                 const active = node.id === activeId;
+                const related = activeNodeIds.has(node.id);
                 const labelVisible = active || node.focused || node.degree >= 4;
                 return (
                   <g
@@ -209,7 +221,8 @@ export function KnowledgeGraph({ graph }: KnowledgeGraphProps) {
                     data-focused={node.focused || undefined}
                     data-selected={node.id === selectedId || undefined}
                     data-active={active || undefined}
-                    data-muted={Boolean(activeId) && !active ? true : undefined}
+                    data-related={related || undefined}
+                    data-muted={Boolean(activeId) && !related ? true : undefined}
                     transform={`translate(${node.x} ${node.y})`}
                     role="button"
                     tabIndex={0}
