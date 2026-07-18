@@ -336,10 +336,14 @@ export function Sidebar({
   return (
     <aside className="sidebar" aria-label="Projects and tasks">
       <div className="brand-row" title={activeProject?.root}>
-        <img className="brand-mark" src={appIconUrl} alt="" />
-        <div className="brand-name">
-          Cindx
-          <span className="brand-name-shimmer" aria-hidden="true">Cindx</span>
+        <div className="brand-identity">
+          <span className="brand-mark-shell">
+            <img className="brand-mark" src={appIconUrl} alt="" />
+          </span>
+          <div className="brand-name">
+            Cindx
+            <span className="brand-name-shimmer" aria-hidden="true">Cindx</span>
+          </div>
         </div>
         <button
           className={`icon-button brand-search ${searchOpen ? "active" : ""}`}

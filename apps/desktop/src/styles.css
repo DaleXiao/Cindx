@@ -453,12 +453,46 @@ pre {
   min-width: 0;
 }
 
-.brand-mark {
+.brand-identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.brand-mark-shell {
+  position: relative;
+  display: block;
   width: 28px;
   height: 28px;
   flex: 0 0 auto;
+  overflow: hidden;
   border-radius: var(--radius);
+}
+
+.brand-mark {
+  display: block;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
+}
+
+.brand-mark-shell::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  background: linear-gradient(
+    108deg,
+    transparent 34%,
+    rgb(255 255 255 / 78%) 48%,
+    rgb(191 219 254 / 58%) 52%,
+    transparent 66%
+  );
+  background-position: 135% 0;
+  background-size: 240% 100%;
+  mix-blend-mode: screen;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .brand-name {
@@ -494,8 +528,29 @@ pre {
   -webkit-text-fill-color: transparent;
 }
 
-.brand-name:hover .brand-name-shimmer {
-  animation: brand-name-shimmer 620ms var(--ease-out-quart) 1 both;
+.brand-identity:hover .brand-mark-shell::after {
+  animation: brand-mark-shimmer 560ms var(--ease-out-quart) 1 both;
+}
+
+.brand-identity:hover .brand-name-shimmer {
+  animation: brand-name-shimmer 720ms 280ms var(--ease-out-quart) 1 both;
+}
+
+@keyframes brand-mark-shimmer {
+  0% {
+    background-position: 135% 0;
+    opacity: 0;
+  }
+
+  18%,
+  82% {
+    opacity: 1;
+  }
+
+  100% {
+    background-position: -135% 0;
+    opacity: 0;
+  }
 }
 
 @keyframes brand-name-shimmer {
@@ -5788,6 +5843,7 @@ details[open] > summary .settings-disclosure-chevron {
   .knowledge-graph-node-label,
   .metadata-disclosure-icon,
   .metadata-details-body,
+  .brand-mark-shell::after,
   .brand-name-shimmer {
     transition: none;
     animation: none;

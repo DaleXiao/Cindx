@@ -964,16 +964,21 @@ assert(
   "Sidebar brand must use the high-resolution packaged app icon"
 );
 assert(
-  sidebarSource.includes('className="brand-name-shimmer" aria-hidden="true"') &&
-    styles.includes(".brand-name:hover .brand-name-shimmer") &&
-    styles.includes("animation: brand-name-shimmer 620ms") &&
+  sidebarSource.includes('className="brand-identity"') &&
+    sidebarSource.includes('className="brand-mark-shell"') &&
+    sidebarSource.includes('className="brand-name-shimmer" aria-hidden="true"') &&
+    styles.includes(".brand-identity:hover .brand-mark-shell::after") &&
+    styles.includes("animation: brand-mark-shimmer 560ms") &&
+    styles.includes(".brand-identity:hover .brand-name-shimmer") &&
+    styles.includes("animation: brand-name-shimmer 720ms 280ms") &&
+    styles.includes("@keyframes brand-mark-shimmer") &&
     styles.includes("@keyframes brand-name-shimmer") &&
     styles.includes(".brand-name-shimmer {") &&
     styles.includes("background-clip: text") &&
-    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.brand-name-shimmer[\s\S]*?animation: none;/.test(
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.brand-mark-shell::after,[\s\S]*?\.brand-name-shimmer[\s\S]*?animation: none;/.test(
       styles
     ),
-  "Sidebar brand hover must play one glyph-clipped shimmer and respect reduced motion"
+  "Sidebar brand hover must sweep once from the icon through the glyph-clipped name and respect reduced motion"
 );
 assert(!sidebarSource.includes("Local agent"), "Sidebar brand must not show the old subtitle");
 assert(
