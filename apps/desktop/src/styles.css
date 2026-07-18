@@ -5674,6 +5674,26 @@ details[open] > summary .settings-disclosure-chevron {
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.inspector-trace-summary .inspector-role-summary {
+  grid-template-columns: minmax(0, 1fr);
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.inspector-trace-summary .inspector-role-summary > div {
+  grid-template-columns: 72px minmax(0, 1fr);
+}
+
+.inspector-role-summary dd {
+  display: grid;
+  gap: 2px;
+}
+
+.inspector-role-summary small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
 .inspector-trace-export {
   width: 100%;
   min-height: 28px;

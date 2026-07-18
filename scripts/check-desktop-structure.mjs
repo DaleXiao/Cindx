@@ -66,7 +66,9 @@ const promptEvolutionSource = read("crates/orchestrator/src/prompt_evolution.rs"
 const benchmarkSource = read("crates/orchestrator/src/benchmark.rs");
 const benchmarkSuite = JSON.parse(read("benchmarks/agent/core-v1.json"));
 const benchmarkBaseline = JSON.parse(read("benchmarks/agent/core-v1-baseline.json"));
+const memoryBenchmarkSuite = JSON.parse(read("benchmarks/agent/memory-v1.json"));
 const evaluationLabSource = read("crates/orchestrator/examples/evaluation_lab.rs");
+const memoryEvaluationLabSource = read("crates/agent-memory/examples/memory_lab.rs");
 const agentEvaluationDoc = read("docs/AGENT_EVALUATION.md");
 const browserControlDoc = read("docs/BROWSER_CONTROL.md");
 const mainSource = read("apps/desktop/src/main.tsx");
@@ -1596,6 +1598,40 @@ assert(
   "Long sessions must avoid full-state polling and repeated offscreen rendering"
 );
 assert(
+  agentMemorySource.includes('MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v2"') &&
+    agentMemorySource.includes("extract_durable_memories") &&
+    agentMemorySource.includes("merge_memory_records") &&
+    agentMemorySource.includes("recall_memories_at") &&
+    agentMemorySource.includes("Memory does not override the current user request") &&
+    rustLib.includes('AGENT_MEMORY_READ_MODEL_NAMESPACE: &str = "agent-memory-v1"') &&
+    rustLib.includes("load_project_memory_ledger") &&
+    rustLib.includes("recall_project_memory_for_prompt") &&
+    rustLib.includes("MemoryStatsView") &&
+    rustLib.includes('"Project memory recalled"') &&
+    rustLib.includes("delete_project_memory") &&
+    appSource.includes('aria-label="Project memory stats"'),
+  "Project memory must be durable, deduplicated, explainable, trust-scoped, and deleted with its project"
+);
+assert(
+  rustLib.includes("WORKSPACE_KNOWLEDGE_CACHE_TTL") &&
+    rustLib.includes("cached_rag_adapter_for") &&
+    rustLib.includes("invalidate_workspace_knowledge_cache") &&
+    rustLib.includes('timed_retrieval_channel("graph_walk"') &&
+    rustLib.includes("let graph_seeds = if semantic.is_empty()") &&
+    tauriBridge.includes("indexCacheHit") &&
+    appSource.includes('"index cached"'),
+  "Knowledge retrieval must reuse a bounded index cache and keep graph walk inside the parallel channel"
+);
+assert(
+  rustLib.includes("agent_trace_role_summaries") &&
+    rustLib.includes("AgentTraceRoleSummaryView") &&
+    rustLib.includes('"first_token_latency_ms"') &&
+    tauriBridge.includes("AgentTraceRoleSummary") &&
+    inspectorSource.includes('aria-label="Model role activity"') &&
+    inspectorSource.includes("TTFT"),
+  "Agent trace must expose the real model, latency, evidence, and completion status for each collaboration role"
+);
+assert(
   orchestratorSource.includes("pub fn pareto_front") &&
     orchestratorSource.includes("prompt_profile") &&
     orchestratorSource.includes("prompt_genome") &&
@@ -1612,6 +1648,7 @@ assert(
     promptEvolutionSource.includes("prompt_promotion_confidence") &&
     promptEvolutionSource.includes("wilson_lower_bound") &&
     promptEvolutionSource.includes("average_step_credit") &&
+    promptEvolutionSource.includes("pareto_selection_does_not_treat_token_cost_as_intelligence") &&
     promptEvolutionSource.includes("format_valid_rate < 1.0") &&
     rustLib.includes("pareto_search_teacher_v2") &&
     rustLib.includes("prompt_evolution_enabled") &&
@@ -1999,6 +2036,7 @@ assert(
     rustLib.includes("collaboration_step_result(") &&
     rustLib.includes('"evidence_count"') &&
     rustLib.includes("adaptive_coordinator_accepts_five_steps_with_three_reused_models") &&
+    rustLib.includes("pro_role_budget_does_not_collapse_when_roles_share_one_model") &&
     rustLib.includes("conductor_result_separates_worker_claims_from_tool_evidence"),
   "Primary agent must reserve bounded tool-capable adaptive workflows for Ultra-routed requests"
 );
@@ -2019,6 +2057,16 @@ assert(
     ciWorkflow.includes("--report target/agent-benchmark-report.json") &&
     ciWorkflow.includes("Upload agent benchmark report"),
   "CI must run the versioned offline benchmark and retain auditable quality guidance"
+);
+assert(
+  memoryBenchmarkSuite.schema === "cindx.memory-evaluation.v1" &&
+    memoryBenchmarkSuite.cases.length >= 8 &&
+    memoryEvaluationLabSource.includes("top_1_correct") &&
+    memoryEvaluationLabSource.includes("recall_at_3_correct") &&
+    memoryEvaluationLabSource.includes("trust_violations") &&
+    memoryEvaluationLabSource.includes("dedup_failures") &&
+    agentEvaluationDoc.includes("Project Memory Gate"),
+  "Project memory must have a versioned deterministic recall and trust-boundary gate"
 );
 assert(
   rustLib.includes('"prompt_tokens"') && rustLib.includes("context_remaining_percent"),
