@@ -873,6 +873,7 @@ export const SessionThread = memo(function SessionThread({
   const streamedAnswerRef = useRef(false);
   const scrollSyncFrameRef = useRef<number | null>(null);
   const pinLatestFrameRef = useRef<number | null>(null);
+  const shortBounceAnimationRef = useRef<Animation | null>(null);
   const followLatestRef = useRef(true);
   const jumpingToLatestRef = useRef(false);
   const historyScrollIntentRef = useRef(false);
@@ -947,7 +948,14 @@ export const SessionThread = memo(function SessionThread({
       message
     }));
     const eventItems = timeline
-      .filter((event) => event.kind !== "message")
+      .filter(
+        (event) =>
+          event.kind !== "message" &&
+          !(
+            event.kind === "model" &&
+            (event.label === "Model started" || event.label === "Model finished")
+          )
+      )
       .map((event, index) => ({
         id: `event-${event.sequence ?? `${event.timestampMs}-${index}`}`,
         type: "event" as const,
@@ -1131,15 +1139,23 @@ export const SessionThread = memo(function SessionThread({
     [syncScrollMetrics]
   );
 
+  const pauseLatestFollow = useCallback(() => {
+    jumpingToLatestRef.current = false;
+    historyScrollIntentRef.current = true;
+    followLatestRef.current = false;
+    setShowJumpToLatest(true);
+  }, []);
+
   const scrollToThreadFindMatch = useCallback(
     (index: number) => {
       const id = threadFindMatches[index];
       const rowIndex = id ? rowIndexByItemId.get(id) : undefined;
       if (rowIndex === undefined) return;
+      pauseLatestFollow();
       rowVirtualizer.scrollToIndex(rowIndex, { align: "center" });
       window.requestAnimationFrame(syncScrollMetrics);
     },
-    [rowIndexByItemId, rowVirtualizer, syncScrollMetrics, threadFindMatches]
+    [pauseLatestFollow, rowIndexByItemId, rowVirtualizer, syncScrollMetrics, threadFindMatches]
   );
 
   const closeThreadFind = useCallback(() => {
@@ -1202,9 +1218,7 @@ export const SessionThread = memo(function SessionThread({
 
     const handleScroll = () => {
       syncScrollMetrics();
-      const previousScrollTop = lastScrollTopRef.current;
       const currentScrollTop = thread.scrollTop;
-      const movedTowardHistory = currentScrollTop < previousScrollTop - 1;
       const historyScrollIntent = historyScrollIntentRef.current;
       historyScrollIntentRef.current = false;
       lastScrollTopRef.current = currentScrollTop;
@@ -1217,11 +1231,11 @@ export const SessionThread = memo(function SessionThread({
         followLatestRef.current = true;
         setShowJumpToLatest(false);
         if (atLatest) jumpingToLatestRef.current = false;
-      } else if (historyScrollIntent || (movedTowardHistory && !atLatest)) {
+      } else if (historyScrollIntent) {
         followLatestRef.current = false;
         setShowJumpToLatest(thread.scrollHeight > thread.clientHeight + 2);
       } else if (!followLatestRef.current) {
-        if (atLatest && !movedTowardHistory) {
+        if (atLatest) {
           followLatestRef.current = true;
           setShowJumpToLatest(false);
         } else {
@@ -1239,11 +1253,33 @@ export const SessionThread = memo(function SessionThread({
       requestOlderHistoryIfNeeded();
     };
     const handleWheel = (event: WheelEvent) => {
+      if (thread.scrollHeight <= thread.clientHeight + 2) {
+        const content = threadContentRef.current;
+        if (
+          !content ||
+          (items.length === 0 && !hasStreamAnswer) ||
+          Math.abs(event.deltaY) < 1 ||
+          window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ) {
+          return;
+        }
+        shortBounceAnimationRef.current?.cancel();
+        const amplitude = Math.min(8, Math.max(3, Math.abs(event.deltaY) / 14));
+        const offset = event.deltaY < 0 ? amplitude : -amplitude;
+        shortBounceAnimationRef.current = content.animate(
+          [
+            { transform: "translateY(0)" },
+            { transform: `translateY(${offset}px)`, offset: 0.34 },
+            { transform: "translateY(0)" }
+          ],
+          { duration: 280, easing: "cubic-bezier(0.22, 1, 0.36, 1)" }
+        );
+        return;
+      }
       if (event.deltaY >= 0) {
         historyScrollIntentRef.current = false;
         return;
       }
-      if (thread.scrollHeight <= thread.clientHeight + 2) return;
       historyScrollIntentRef.current = true;
       jumpingToLatestRef.current = false;
       followLatestRef.current = false;
@@ -1274,6 +1310,8 @@ export const SessionThread = memo(function SessionThread({
         cancelAnimationFrame(pinLatestFrameRef.current);
         pinLatestFrameRef.current = null;
       }
+      shortBounceAnimationRef.current?.cancel();
+      shortBounceAnimationRef.current = null;
       resizeObserver.disconnect();
       thread.removeEventListener("scroll", handleScroll);
       thread.removeEventListener("wheel", handleWheel);
@@ -1377,10 +1415,15 @@ export const SessionThread = memo(function SessionThread({
     const marker = minimapMarkers[index];
     if (!thread || !marker) return;
     if (marker.id === "streaming-answer") {
+      jumpingToLatestRef.current = true;
+      followLatestRef.current = true;
+      historyScrollIntentRef.current = false;
+      setShowJumpToLatest(false);
       thread.scrollTop = thread.scrollHeight;
     } else {
       const rowIndex = rowIndexByItemId.get(marker.id);
       if (rowIndex === undefined) return;
+      pauseLatestFollow();
       rowVirtualizer.scrollToIndex(rowIndex, { align: "start" });
     }
     window.requestAnimationFrame(syncScrollMetrics);
@@ -1451,6 +1494,14 @@ export const SessionThread = memo(function SessionThread({
     if (nextTop === null) return;
 
     event.preventDefault();
+    if (event.key === "End") {
+      jumpingToLatestRef.current = true;
+      followLatestRef.current = true;
+      historyScrollIntentRef.current = false;
+      setShowJumpToLatest(false);
+    } else {
+      pauseLatestFollow();
+    }
     thread.scrollTop = nextTop;
     syncScrollMetrics();
   }

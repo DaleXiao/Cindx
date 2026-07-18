@@ -464,10 +464,12 @@ assert(
     sessionThreadSource.includes("historyScrollIntentRef") &&
     sessionThreadSource.includes("lastScrollTopRef") &&
     sessionThreadSource.includes("const pinLatestOutput = useCallback") &&
-    sessionThreadSource.includes("const movedTowardHistory =") &&
+    sessionThreadSource.includes("const pauseLatestFollow = useCallback") &&
+    !sessionThreadSource.includes("const movedTowardHistory =") &&
     sessionThreadSource.includes("const handleWheel = (event: WheelEvent)") &&
     sessionThreadSource.includes('thread.addEventListener("wheel", handleWheel') &&
-    sessionThreadSource.includes("historyScrollIntent || (movedTowardHistory && !atLatest)") &&
+    sessionThreadSource.includes("shortBounceAnimationRef.current = content.animate") &&
+    sessionThreadSource.includes('window.matchMedia("(prefers-reduced-motion: reduce)")') &&
     sessionThreadSource.includes("const requestOlderHistoryIfNeeded = () =>") &&
     (sessionThreadSource.match(/requestOlderHistoryIfNeeded\(\);/g)?.length ?? 0) >= 3 &&
     sessionThreadSource.includes("if (followLatestRef.current) pinLatestOutput()") &&
@@ -1491,13 +1493,21 @@ assert(
     composerSource.includes('className="composer-effort-menu"') &&
     composerSource.includes('role="listbox"') &&
     composerSource.includes('role="option"') &&
-    appSource.includes('useState<AgentEffort>("auto")') &&
+    appSource.includes("normalizedSessionEffort(activeSession?.effort)") &&
+    appSource.includes("handleSessionEffortChange") &&
+    appSource.includes("setSessionEffort(sessionId, effort)") &&
+    !appSource.includes('useState<AgentEffort>("auto")') &&
     tauriBridge.includes('export type AgentEffort = "fast" | "auto" | "pro"') &&
+    tauriBridge.includes("effort: AgentEffort") &&
+    tauriBridge.includes("export async function setSessionEffort") &&
     tauriBridge.includes("currentTime: currentAgentTimeContext(), effort, attachments") &&
     rustLib.includes("enum AgentEffort") &&
+    rustLib.includes("fn set_session_effort(") &&
+    rustLib.includes("fn update_session_effort(") &&
+    rustLib.includes("session_effort_updates_only_the_selected_session") &&
     rustLib.includes('"agent_effort".to_string()') &&
     rustLib.includes("agent_effort_from_active_events"),
-  "Composer effort must map Cindx Fast, Auto, and Pro through retries and traces"
+  "Composer effort must persist per session, default independently, and survive retries and traces"
 );
 assert(
   tauriBridge.includes("function currentAgentTimeContext()") &&
@@ -1853,8 +1863,12 @@ assert(
     knowledgeGraphSource.includes("forceLink<PositionedNode, SimulationEdge>") &&
     knowledgeGraphSource.includes("graph.edges.filter") &&
     knowledgeGraphSource.includes("Math.min(6.6") &&
-    knowledgeGraphSource.includes('className="knowledge-graph-scene"') &&
+    knowledgeGraphSource.includes('className="knowledge-graph-scene" ref={sceneRef}') &&
     knowledgeGraphSource.includes("const activeNodeIds = useMemo") &&
+    knowledgeGraphSource.includes("window.requestAnimationFrame(update)") &&
+    knowledgeGraphSource.includes('line.setAttribute("x1", String(source.x))') &&
+    knowledgeGraphSource.includes('line.setAttribute("y2", String(target.y))') &&
+    knowledgeGraphSource.includes('window.matchMedia("(prefers-reduced-motion: reduce)")') &&
     knowledgeGraphSource.includes("data-related={connected || undefined}") &&
     knowledgeGraphSource.includes("data-muted={Boolean(activeId) && !related") &&
     !knowledgeGraphSource.includes("data-highlighted") &&
@@ -1864,10 +1878,27 @@ assert(
     /\.knowledge-graph-edges line\[data-related="true"\] \{[^}]*stroke: #4f4f4f;/.test(
       styles
     ) &&
-    styles.includes(".knowledge-graph-details[open] .knowledge-graph-scene") &&
-    styles.includes("animation: knowledge-graph-float 8s ease-in-out infinite alternate") &&
+    styles.includes(".knowledge-graph-node") &&
+    styles.includes("will-change: transform") &&
+    !styles.includes("animation: knowledge-graph-float") &&
     !/\.knowledge-graph-node\[data-active="true"\][\s\S]*?transform: scale/.test(styles),
-  "Knowledge settings must expose a restrained force-directed graph with flat focus and subtle motion"
+  "Knowledge settings must expose a restrained force-directed graph with connected ambient node motion"
+);
+assert(
+  sessionThreadSource.includes('event.label === "Model started"') &&
+    sessionThreadSource.includes('event.label === "Model finished"') &&
+    rustLib.includes('"Model started"') &&
+    rustLib.includes('"Model finished"'),
+  "Internal model lifecycle events must stay in trace storage without appearing in chat"
+);
+assert(
+  /:root\s*\{[\s\S]*?font-size: 14px;/.test(styles) &&
+    /\.brand-name\s*\{[\s\S]*?font-size: 16px;/.test(styles) &&
+    /\.composer-error,\s*\.composer-continuation\s*\{[\s\S]*?border-radius: var\(--radius-lg\);/.test(
+      styles
+    ) &&
+    !/\.composer-(?:error|continuation)\s*\{[^}]*border-left:/.test(styles),
+  "App typography must be one step larger while the Cindx brand stays fixed and run notices use rounded bars"
 );
 assert(
   rustLib.includes("context_checkpoint_path_for_session") &&

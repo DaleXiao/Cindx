@@ -10,7 +10,7 @@
   color: #181818;
   background: transparent;
   font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 13px;
+  font-size: 14px;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -628,7 +628,7 @@ pre {
   background: transparent;
   border: 0;
   outline: 0;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .project-tree {
@@ -648,7 +648,7 @@ pre {
 
 .nav-heading {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
   text-transform: uppercase;
 }
@@ -793,7 +793,7 @@ pre {
 }
 
 .nav-item strong {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 650;
 }
 
@@ -861,7 +861,7 @@ pre {
   background: var(--surface);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .project-rename-form button {
@@ -900,7 +900,7 @@ pre {
 }
 
 .session-heading .nav-heading {
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .session-item {
@@ -919,7 +919,7 @@ pre {
   width: 100%;
   min-width: 0;
   overflow: hidden;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -948,7 +948,7 @@ pre {
   background: var(--surface);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .session-rename-action {
@@ -1074,7 +1074,7 @@ pre {
 .nav-empty {
   padding: 8px;
   color: var(--subtle);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .quick-create {
@@ -1091,7 +1091,7 @@ pre {
   background: var(--surface);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .sidebar-footer {
@@ -1137,14 +1137,14 @@ pre {
 }
 
 .delete-confirmation-copy h2 {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 650;
   line-height: 1.35;
 }
 
 .delete-confirmation-copy p {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.48;
   overflow-wrap: anywhere;
 }
@@ -1165,7 +1165,7 @@ pre {
   border: 0.5px solid #d7d7d7;
   border-radius: 7px;
   box-shadow: 0 1px 1px rgb(0 0 0 / 5%);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .delete-confirmation-actions button:hover {
@@ -1240,7 +1240,7 @@ pre {
 
 .window-workspace-header h1 {
   overflow: hidden;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
   line-height: 1.2;
   text-overflow: ellipsis;
@@ -1250,7 +1250,7 @@ pre {
 .window-workspace-header p {
   overflow: hidden;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1269,13 +1269,13 @@ pre {
   align-items: center;
   gap: 3px 8px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
   white-space: nowrap;
 }
 
 .context-usage strong {
   color: #444444;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 650;
 }
 
@@ -1309,7 +1309,7 @@ pre {
   color: #454545;
   background: transparent;
   border: 0;
-  font-size: 11px;
+  font-size: 12px;
   white-space: nowrap;
 }
 
@@ -1411,12 +1411,12 @@ pre {
   background: transparent;
   border: 0;
   outline: 0;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .thread-find > span {
   color: var(--subtle);
-  font-size: 9px;
+  font-size: 10px;
   text-align: right;
   white-space: nowrap;
 }
@@ -1646,7 +1646,7 @@ pre {
 
 .thread-minimap-preview strong {
   overflow: hidden;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1656,7 +1656,7 @@ pre {
   display: -webkit-box;
   overflow: hidden;
   color: #4f4f4f;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
   white-space: normal;
@@ -1688,7 +1688,7 @@ pre {
   display: grid;
   place-items: center;
   color: var(--subtle);
-  font-size: 12px;
+  font-size: 13px;
   pointer-events: none;
 }
 
@@ -1856,7 +1856,7 @@ pre {
 
 .thread-message-attachment-placeholder span {
   max-width: 100%;
-  font-size: 11px;
+  font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1881,7 +1881,7 @@ pre {
 .thread-message-attachment[data-image="false"] > span {
   min-width: 0;
   overflow: hidden;
-  font-size: 12px;
+  font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1902,7 +1902,7 @@ pre {
 }
 
 .thread-message header strong {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
   text-transform: capitalize;
 }
@@ -1910,7 +1910,7 @@ pre {
 .thread-message header > span:last-child {
   margin-left: auto;
   color: var(--subtle);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .thread-message-icon {
@@ -1928,7 +1928,7 @@ pre {
 
 .thread-message p {
   color: #252525;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.62;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
@@ -1937,7 +1937,7 @@ pre {
 .thread-markdown {
   min-width: 0;
   color: #252525;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.62;
   overflow-wrap: anywhere;
   cursor: text;
@@ -1990,21 +1990,21 @@ pre {
 }
 
 .thread-markdown h1 {
-  font-size: 18px;
+  font-size: 19px;
 }
 
 .thread-markdown h2 {
-  font-size: 16px;
+  font-size: 17px;
 }
 
 .thread-markdown h3 {
-  font-size: 14px;
+  font-size: 15px;
 }
 
 .thread-markdown h4,
 .thread-markdown h5,
 .thread-markdown h6 {
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .thread-markdown ul,
@@ -2050,7 +2050,7 @@ pre {
 
 .thread-markdown pre code {
   padding: 0;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.55;
   white-space: pre;
   background: transparent;
@@ -2083,7 +2083,7 @@ pre {
 .thread-code-block-header > span {
   overflow: hidden;
   font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
-  font-size: 9px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2205,7 +2205,7 @@ pre {
   align-items: center;
   gap: 7px;
   margin-bottom: 7px;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .thread-thinking > span,
@@ -2220,7 +2220,7 @@ pre {
   overflow: hidden;
   max-width: min(46vw, 360px);
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2324,14 +2324,14 @@ details[open] > summary .disclosure-triangle {
 
 .thread-event-copy strong {
   flex: 0 0 auto;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
 }
 
 .thread-event-copy > span {
   overflow: hidden;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2341,7 +2341,7 @@ details[open] > summary .disclosure-triangle {
   align-items: center;
   gap: 6px;
   color: var(--subtle);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .thread-event-meta em {
@@ -2358,7 +2358,7 @@ details[open] > summary .disclosure-triangle {
   text-align: left;
   background: transparent;
   border: 0;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -2381,7 +2381,7 @@ details[open] > summary .disclosure-triangle {
   min-width: 0;
   overflow: hidden;
   font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2391,7 +2391,7 @@ details[open] > summary .disclosure-triangle {
   min-width: 0;
   overflow: hidden;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2458,20 +2458,20 @@ details[open] > summary .disclosure-triangle {
 }
 
 .thread-tool-chain-copy strong {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
 }
 
 .thread-tool-chain-copy small {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .thread-tool-message-body pre {
   margin: 0;
   color: #555555;
   font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.5;
   white-space: pre-wrap;
 }
@@ -2483,7 +2483,7 @@ details[open] > summary .disclosure-triangle {
   align-items: center;
   gap: 7px;
   padding: 6px 2px;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .thread-scroll-anchor {
@@ -2638,7 +2638,7 @@ details[open] > summary .disclosure-triangle {
   border-radius: var(--radius-pill);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
   outline-offset: -2px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
 }
@@ -2710,14 +2710,14 @@ details[open] > summary .disclosure-triangle {
 }
 
 .composer-effort-menu strong {
-  font-size: 10.5px;
+  font-size: 11.5px;
   line-height: 1.25;
 }
 
 .composer-effort-menu small {
   overflow: hidden;
   color: var(--muted);
-  font-size: 9.5px;
+  font-size: 10.5px;
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2788,7 +2788,7 @@ details[open] > summary .disclosure-triangle {
 .composer-attachment > span {
   min-width: 0;
   overflow: hidden;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2845,7 +2845,7 @@ textarea::placeholder {
   gap: 6px;
   padding: 0 10px;
   border-radius: var(--radius);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
 }
 
@@ -2933,14 +2933,14 @@ textarea::placeholder {
 }
 
 .composer-permission-copy strong {
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .composer-permission-copy p,
 .composer-permission-copy span {
   overflow: hidden;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2966,7 +2966,7 @@ textarea::placeholder {
   background: #ffffff;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
 }
 
@@ -3031,18 +3031,26 @@ textarea::placeholder {
   transform: translateX(1px) scale(0.92);
 }
 
-.composer-error {
+.composer-error,
+.composer-continuation {
   display: flex;
   grid-column: 1 / -1;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  width: min(100%, 760px);
+  margin: 4px auto 0;
   padding: 7px 9px;
-  color: #3f3f3f;
-  background: #f4f4f4;
-  border-left: 2px solid #777777;
-  font-size: 11px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.055);
   overflow-wrap: anywhere;
+}
+
+.composer-error {
+  color: #3f3f3f;
+  background: rgba(248, 246, 246, 0.98);
+  font-size: 12px;
 }
 
 .composer-error button {
@@ -3056,7 +3064,7 @@ textarea::placeholder {
   background: #ffffff;
   border: 1px solid #cfcfcf;
   border-radius: var(--radius-md);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
 }
 
@@ -3092,16 +3100,9 @@ textarea::placeholder {
 }
 
 .composer-continuation {
-  display: flex;
-  grid-column: 1 / -1;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 7px 9px;
   color: #4b4b4b;
-  background: #f6f6f6;
-  border-left: 2px solid #9b9b9b;
-  font-size: 11px;
+  background: rgba(247, 247, 247, 0.98);
+  font-size: 12px;
 }
 
 .composer-continuation button {
@@ -3115,7 +3116,7 @@ textarea::placeholder {
   background: #ffffff;
   border: 1px solid #cfcfcf;
   border-radius: var(--radius-md);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
 }
 
@@ -3140,7 +3141,7 @@ textarea::placeholder {
   background: transparent;
   border: 0;
   border-radius: var(--radius-md);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
 }
 
@@ -3221,7 +3222,7 @@ textarea::placeholder {
   background: #ffffff;
   border: 1px solid #d8d8d8;
   border-radius: 50%;
-  font-size: 8px;
+  font-size: 9px;
   font-variant-numeric: tabular-nums;
   font-weight: 650;
   place-items: center;
@@ -3269,13 +3270,13 @@ textarea::placeholder {
 }
 
 .trace-step-body strong {
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .trace-step-body small {
   overflow: hidden;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3289,7 +3290,7 @@ textarea::placeholder {
 
 .trace-step-meta small {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 /* Settings */
@@ -3364,7 +3365,7 @@ textarea::placeholder {
 
 .settings-tabs span {
   overflow: hidden;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 450;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3377,7 +3378,7 @@ textarea::placeholder {
 .settings-tab-count {
   min-width: 16px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
   text-align: right;
 }
@@ -3396,7 +3397,7 @@ textarea::placeholder {
   border: 0;
   border-bottom: 2px solid transparent;
   border-radius: 0;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .inspector-tab:hover,
@@ -3454,19 +3455,19 @@ textarea::placeholder {
 }
 
 .about-app h2 {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 700;
 }
 
 .about-app span {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .settings-empty {
   padding: 12px 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .archived-session-list {
@@ -3494,14 +3495,14 @@ textarea::placeholder {
 
 .archived-session-row strong {
   overflow: hidden;
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .archived-session-row small {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .section-title {
@@ -3520,7 +3521,7 @@ textarea::placeholder {
 
 .section-title h2 {
   min-width: 0;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
 }
 
@@ -3534,14 +3535,14 @@ textarea::placeholder {
 
 .prompt-evolution-running {
   color: #2f9e64;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
 }
 
 .settings-section-copy {
   max-width: 680px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.5;
 }
 
@@ -3552,7 +3553,7 @@ textarea::placeholder {
   gap: 7px;
   color: var(--muted);
   cursor: pointer;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .settings-switch input {
@@ -3608,7 +3609,7 @@ textarea::placeholder {
   align-items: baseline;
   gap: 5px 16px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .prompt-evolution-summary strong {
@@ -3628,13 +3629,13 @@ textarea::placeholder {
   border-collapse: separate;
   border-spacing: 0 4px;
   table-layout: auto;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .prompt-evolution-table caption {
   padding: 4px 0 1px;
   color: #333333;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
   text-align: left;
 }
@@ -3654,7 +3655,7 @@ textarea::placeholder {
   padding-top: 3px;
   padding-bottom: 3px;
   color: var(--muted);
-  font-size: 8px;
+  font-size: 9px;
   font-weight: 600;
 }
 
@@ -3678,7 +3679,7 @@ textarea::placeholder {
 
 .prompt-evolution-table tbody th {
   color: #252525;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
 }
 
@@ -3699,13 +3700,13 @@ textarea::placeholder {
 .prompt-evolution-signal-cell small,
 .prompt-evolution-efficiency-cell small {
   color: var(--muted);
-  font-size: 8px;
+  font-size: 9px;
   font-weight: 450;
 }
 
 .prompt-evolution-status {
   color: #777777;
-  font-size: 8px;
+  font-size: 9px;
   font-weight: 650;
   text-transform: uppercase;
 }
@@ -3724,7 +3725,7 @@ textarea::placeholder {
 
 .pareto-frontier {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .pareto-frontier.active {
@@ -3749,7 +3750,7 @@ textarea::placeholder {
   gap: 6px;
   color: var(--muted);
   cursor: pointer;
-  font-size: 10px;
+  font-size: 11px;
   list-style: none;
 }
 
@@ -3802,7 +3803,7 @@ details[open] > summary .settings-disclosure-chevron {
   gap: 12px;
   padding: 7px 0;
   border-bottom: 1px solid var(--border);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .settings-facts dt {
@@ -3823,7 +3824,7 @@ details[open] > summary .settings-disclosure-chevron {
 .provider-form label > span,
 .tool-runner label > span {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .provider-endpoint-input {
@@ -3854,7 +3855,7 @@ details[open] > summary .settings-disclosure-chevron {
 
 .workspace-folder-field > span {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .workspace-folder-selector {
@@ -3870,7 +3871,7 @@ details[open] > summary .settings-disclosure-chevron {
   background: var(--surface);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
-  font-size: 12px;
+  font-size: 13px;
   text-align: left;
 }
 
@@ -3903,7 +3904,7 @@ details[open] > summary .settings-disclosure-chevron {
   background: var(--surface);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .provider-form input,
@@ -3925,7 +3926,7 @@ details[open] > summary .settings-disclosure-chevron {
   justify-content: space-between;
   gap: 16px;
   color: var(--subtle);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .system-prompt-meta span:first-child {
@@ -3948,7 +3949,7 @@ details[open] > summary .settings-disclosure-chevron {
   min-width: 0;
   overflow: hidden;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3959,7 +3960,7 @@ details[open] > summary .settings-disclosure-chevron {
   color: #3f3f3f;
   background: #f4f4f4;
   border-left: 2px solid #777777;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .settings-saved-toast,
@@ -3978,7 +3979,7 @@ details[open] > summary .settings-disclosure-chevron {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
   pointer-events: none;
   transform: translateX(-50%);
@@ -4026,7 +4027,7 @@ details[open] > summary .settings-disclosure-chevron {
   align-items: center;
   justify-content: space-between;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .skill-install {
@@ -4041,13 +4042,13 @@ details[open] > summary .settings-disclosure-chevron {
 }
 
 .skill-install-copy strong {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
 }
 
 .skill-install-copy span {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .skill-install-input {
@@ -4086,7 +4087,7 @@ details[open] > summary .settings-disclosure-chevron {
   background: transparent;
   border: 0;
   outline: 0;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .skill-url-row button {
@@ -4096,7 +4097,7 @@ details[open] > summary .settings-disclosure-chevron {
   background: #2563eb;
   border: 0;
   border-radius: var(--radius-md);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
 }
 
@@ -4107,7 +4108,7 @@ details[open] > summary .settings-disclosure-chevron {
 
 .skill-install-error {
   color: #555555;
-  font-size: 10px;
+  font-size: 11px;
   overflow-wrap: anywhere;
 }
 
@@ -4135,7 +4136,7 @@ details[open] > summary .settings-disclosure-chevron {
 }
 
 .integration-main strong {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
 }
 
@@ -4144,7 +4145,7 @@ details[open] > summary .settings-disclosure-chevron {
   min-width: 0;
   overflow: hidden;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -4157,7 +4158,7 @@ details[open] > summary .settings-disclosure-chevron {
 
 .integration-controls .checkbox-row {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .tool-runner textarea {
@@ -4212,7 +4213,7 @@ details[open] > summary .settings-disclosure-chevron {
 
 .rag-stats strong {
   overflow: hidden;
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -4241,7 +4242,7 @@ details[open] > summary .settings-disclosure-chevron {
 
 .rag-stats span {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .button-row {
@@ -4263,7 +4264,7 @@ details[open] > summary .settings-disclosure-chevron {
 .retrieval-trace-details > summary > span {
   margin-left: auto;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .knowledge-graph {
@@ -4278,7 +4279,7 @@ details[open] > summary .settings-disclosure-chevron {
   align-items: center;
   gap: 12px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .knowledge-graph-canvas {
@@ -4296,22 +4297,6 @@ details[open] > summary .settings-disclosure-chevron {
   height: auto;
   min-height: 280px;
   max-height: 420px;
-}
-
-.knowledge-graph-details[open] .knowledge-graph-scene {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: knowledge-graph-float 8s ease-in-out infinite alternate;
-}
-
-@keyframes knowledge-graph-float {
-  from {
-    transform: translate(-0.5px, 1px);
-  }
-
-  to {
-    transform: translate(0.5px, -1px);
-  }
 }
 
 .knowledge-graph-edges line {
@@ -4334,6 +4319,7 @@ details[open] > summary .settings-disclosure-chevron {
 .knowledge-graph-node {
   cursor: pointer;
   outline: none;
+  will-change: transform;
   transition: opacity 150ms ease-out;
 }
 
@@ -4359,7 +4345,7 @@ details[open] > summary .settings-disclosure-chevron {
   opacity: 0;
   fill: #606060;
   font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 520;
   paint-order: stroke;
   pointer-events: none;
@@ -4408,7 +4394,7 @@ details[open] > summary .settings-disclosure-chevron {
 
 .knowledge-graph-selection strong,
 .knowledge-graph-selection span {
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .knowledge-graph-selection span,
@@ -4419,7 +4405,7 @@ details[open] > summary .settings-disclosure-chevron {
 .knowledge-graph-selection small {
   overflow: hidden;
   grid-column: 1 / -1;
-  font-size: 9px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -4431,7 +4417,7 @@ details[open] > summary .settings-disclosure-chevron {
   background: #fafafa;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  font-size: 10px;
+  font-size: 11px;
   place-items: center;
 }
 
@@ -4460,7 +4446,7 @@ details[open] > summary .settings-disclosure-chevron {
 
 .retrieval-channel-row strong {
   overflow: hidden;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   text-overflow: ellipsis;
   text-transform: capitalize;
@@ -4471,7 +4457,7 @@ details[open] > summary .settings-disclosure-chevron {
 .retrieval-channel-row time,
 .retrieval-channel-row small {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .retrieval-channel-row small {
@@ -4484,7 +4470,7 @@ details[open] > summary .settings-disclosure-chevron {
   color: #4b4b4b;
   background: #f5f5f5;
   border-left: 2px solid #777777;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .knowledge-answer,
@@ -4495,7 +4481,7 @@ details[open] > summary .settings-disclosure-chevron {
 
 .knowledge-answer > strong,
 .knowledge-results > strong {
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .knowledge-result {
@@ -4515,7 +4501,7 @@ details[open] > summary .settings-disclosure-chevron {
 
 .knowledge-result header strong {
   overflow: hidden;
-  font-size: 10px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -4523,14 +4509,14 @@ details[open] > summary .settings-disclosure-chevron {
 .knowledge-result header span,
 .knowledge-result small {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .knowledge-result p {
   display: -webkit-box;
   overflow: hidden;
   color: #444444;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.45;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
@@ -4538,7 +4524,7 @@ details[open] > summary .settings-disclosure-chevron {
 
 .registered-tools-details summary strong {
   color: var(--subtle);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
 }
 
@@ -4564,13 +4550,13 @@ details[open] > summary .settings-disclosure-chevron {
 }
 
 .registered-tool-row strong {
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .registered-tool-row small,
 .registered-tool-row em {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
   font-style: normal;
 }
 
@@ -4601,7 +4587,7 @@ details[open] > summary .settings-disclosure-chevron {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.45;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
@@ -4613,7 +4599,7 @@ details[open] > summary .settings-disclosure-chevron {
 }
 
 .tool-schema strong {
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .audit-meta {
@@ -4622,7 +4608,7 @@ details[open] > summary .settings-disclosure-chevron {
   gap: 7px;
   flex-wrap: wrap;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .permission-review-heading {
@@ -4635,7 +4621,7 @@ details[open] > summary .settings-disclosure-chevron {
 .permission-review-heading > span {
   min-width: 24px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
   text-align: right;
 }
@@ -4648,7 +4634,7 @@ details[open] > summary .settings-disclosure-chevron {
   padding: 12px 0;
   color: var(--muted);
   border-top: 1px solid var(--border);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .permission-review-empty svg {
@@ -4694,7 +4680,7 @@ details[open] > summary .settings-disclosure-chevron {
 .permission-review-row > header strong,
 .permission-review-context strong {
   overflow: hidden;
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -4703,14 +4689,14 @@ details[open] > summary .settings-disclosure-chevron {
 .permission-review-context span {
   overflow: hidden;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .permission-review-row > header em {
   color: #555555;
-  font-size: 9px;
+  font-size: 10px;
   font-style: normal;
   text-transform: capitalize;
 }
@@ -4722,7 +4708,7 @@ details[open] > summary .settings-disclosure-chevron {
 
 .permission-review-row > p {
   color: #444444;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.45;
 }
 
@@ -4735,7 +4721,7 @@ details[open] > summary .settings-disclosure-chevron {
   min-width: 0;
   grid-template-columns: 48px minmax(0, 1fr);
   gap: 8px;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .permission-review-meta dt {
@@ -4756,7 +4742,7 @@ details[open] > summary .settings-disclosure-chevron {
   gap: 6px;
   color: var(--muted);
   cursor: pointer;
-  font-size: 9px;
+  font-size: 10px;
   list-style: none;
 }
 
@@ -4774,7 +4760,7 @@ details[open] > summary .settings-disclosure-chevron {
   background: #f3f3f3;
   border-radius: var(--radius-md);
   font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
-  font-size: 9px;
+  font-size: 10px;
   line-height: 1.45;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
@@ -4798,7 +4784,7 @@ details[open] > summary .settings-disclosure-chevron {
   background: #ffffff;
   border: 1px solid #d8d8d8;
   border-radius: var(--radius-md);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
 }
 
@@ -4865,12 +4851,12 @@ details[open] > summary .settings-disclosure-chevron {
 }
 
 .permission-ignored-row strong {
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .permission-ignored-row small {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 /* Inspector */
@@ -4957,7 +4943,7 @@ details[open] > summary .settings-disclosure-chevron {
 
 .inspector-debug-session > span {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .inspector-debug-session code {
@@ -4965,7 +4951,7 @@ details[open] > summary .settings-disclosure-chevron {
   overflow: hidden;
   color: #444444;
   font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
-  font-size: 9px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -5016,14 +5002,14 @@ details[open] > summary .settings-disclosure-chevron {
 }
 
 .inspector-outputs h2 {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
 }
 
 .inspector-output-count {
   margin-left: -2px;
   color: var(--subtle);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .inspector-output-toggle {
@@ -5061,7 +5047,7 @@ details[open] > summary .settings-disclosure-chevron {
 .inspector-output-empty {
   padding: 20px 8px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.45;
   text-align: center;
 }
@@ -5123,7 +5109,7 @@ details[open] > summary .settings-disclosure-chevron {
   min-width: 0;
   overflow: hidden;
   color: #333333;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -5133,7 +5119,7 @@ details[open] > summary .settings-disclosure-chevron {
   flex: 0 0 auto;
   padding: 1px 4px;
   color: #717171;
-  font-size: 7px;
+  font-size: 8px;
   font-weight: 650;
   line-height: 1.2;
   background: #eeeeee;
@@ -5207,12 +5193,12 @@ details[open] > summary .settings-disclosure-chevron {
 }
 
 .inspector-output-detail-copy strong {
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .inspector-output-detail-copy span {
   color: var(--muted);
-  font-size: 8px;
+  font-size: 9px;
 }
 
 .inspector-output-actions {
@@ -5230,7 +5216,7 @@ details[open] > summary .settings-disclosure-chevron {
   color: #444444;
   background: #f4f4f4;
   border-bottom: 1px solid #dddddd;
-  font-size: 9px;
+  font-size: 10px;
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
@@ -5277,7 +5263,7 @@ details[open] > summary .settings-disclosure-chevron {
   color: #333333;
   background: #ffffff;
   font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.5;
   white-space: pre-wrap;
 }
@@ -5287,7 +5273,7 @@ details[open] > summary .settings-disclosure-chevron {
   min-height: 220px;
   padding: 16px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   place-items: center;
   text-align: center;
 }
@@ -5399,7 +5385,7 @@ details[open] > summary .settings-disclosure-chevron {
 
 .inspector-debug-toggle strong {
   display: block;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
   line-height: 13px;
 }
@@ -5516,7 +5502,7 @@ details[open] > summary .settings-disclosure-chevron {
 
 .inspector-review p {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .detail-list {
@@ -5530,7 +5516,7 @@ details[open] > summary .settings-disclosure-chevron {
   gap: 8px;
   padding: 5px 0;
   border-bottom: 1px solid #ededed;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .detail-list dt {
@@ -5552,7 +5538,7 @@ details[open] > summary .settings-disclosure-chevron {
   border: 1px solid #dddddd;
   border-radius: var(--radius);
   font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.45;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
@@ -5561,7 +5547,7 @@ details[open] > summary .settings-disclosure-chevron {
 .inspector-path {
   color: var(--muted);
   font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
-  font-size: 9px;
+  font-size: 10px;
   overflow-wrap: anywhere;
 }
 
@@ -5575,7 +5561,7 @@ details[open] > summary .settings-disclosure-chevron {
   color: var(--muted);
   cursor: pointer;
   font: inherit;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .metadata-details-toggle:hover {
@@ -5681,7 +5667,7 @@ details[open] > summary .settings-disclosure-chevron {
 .artifact-row header strong {
   min-width: 0;
   overflow: hidden;
-  font-size: 10px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -5689,7 +5675,7 @@ details[open] > summary .settings-disclosure-chevron {
 .artifact-row header span,
 .artifact-row p {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
   overflow-wrap: anywhere;
 }
 
@@ -5699,7 +5685,7 @@ details[open] > summary .settings-disclosure-chevron {
   gap: 7px;
   padding: 18px 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .inspector-empty svg {

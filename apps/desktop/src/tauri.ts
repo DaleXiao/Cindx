@@ -123,6 +123,7 @@ export type SessionView = {
   projectId: string;
   name: string;
   detail: string;
+  effort: AgentEffort;
   status: string;
   active: boolean;
   archived: boolean;
@@ -674,6 +675,7 @@ let browserProjectSessionState: ProjectSessionState = {
       projectId: "project-cindx",
       name: "Runtime Session",
       detail: "timeline + chat",
+      effort: "auto",
       status: "Active",
       active: true,
       archived: false,
@@ -1275,6 +1277,7 @@ export async function createProject(name: string, root: string): Promise<Project
             projectId,
             name: `${name} Session`,
             detail: "timeline + chat",
+            effort: "auto",
             status: "Ready",
             active: false,
             archived: false,
@@ -1313,6 +1316,7 @@ export async function createSession(
             projectId: activeProjectId,
             name,
             detail: "timeline + chat",
+            effort: "auto",
             status: "Ready",
             active: false,
             archived: false,
@@ -1396,6 +1400,7 @@ export async function forkSession(sessionId: string): Promise<ProjectSessionStat
       id: `session-fork-${now}`,
       name: `${source.name} Fork`,
       detail: `Fork of ${source.name}`,
+      effort: "auto" as AgentEffort,
       status: "Ready",
       active: false,
       archived: false,
@@ -1436,6 +1441,25 @@ export async function renameSession(
         session.id === sessionId
           ? { ...session, name: normalizedName, updatedAtMs: now }
           : session
+      )
+    };
+    return browserProjectSessionState;
+  }
+}
+
+export async function setSessionEffort(
+  sessionId: string,
+  effort: AgentEffort
+): Promise<ProjectSessionState> {
+  try {
+    return await invoke<ProjectSessionState>("set_session_effort", {
+      input: { sessionId, effort }
+    });
+  } catch {
+    browserProjectSessionState = {
+      ...browserProjectSessionState,
+      sessions: browserProjectSessionState.sessions.map((session) =>
+        session.id === sessionId ? { ...session, effort } : session
       )
     };
     return browserProjectSessionState;
@@ -1540,6 +1564,7 @@ function ensureBrowserOpenSession(
     projectId,
     name: "New Session",
     detail: "timeline + chat",
+    effort: "auto",
     status: "Ready",
     active: false,
     archived: false,
