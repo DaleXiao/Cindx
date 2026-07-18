@@ -518,6 +518,17 @@ function SettingsCategoryIcon({ category }: { category: SettingsCategory }) {
   return <Info aria-hidden="true" />;
 }
 
+function SettingsChevron({ action = false }: { action?: boolean }) {
+  return (
+    <span
+      className={action ? "settings-action-chevron" : "settings-disclosure-chevron"}
+      aria-hidden="true"
+    >
+      <ChevronRight />
+    </span>
+  );
+}
+
 export function App() {
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [activeView, setActiveView] = useState<WorkspaceView>("timeline");
@@ -2956,7 +2967,10 @@ export function App() {
               onLinkOpenError={setComposerError}
             />
 
-            <div className="composer-stack">
+            <div
+              className="composer-stack"
+              data-has-queued={Boolean(activeAgentState?.queuedMessages.length)}
+            >
               <QueuedMessages
                 messages={activeAgentState?.queuedMessages ?? []}
                 busyId={queuedMessageBusyId}
@@ -3708,7 +3722,7 @@ export function App() {
                           <details className="permission-review-input">
                             <summary>
                               <span>Request details</span>
-                              <ChevronRight className="settings-disclosure-chevron" aria-hidden="true" />
+                              <SettingsChevron />
                             </summary>
                             <pre>{review.input}</pre>
                           </details>
@@ -3766,7 +3780,7 @@ export function App() {
                 <details className="permission-ignored-reviews">
                   <summary>
                     <span>Ignored for now ({ignoredPermissionReviews.length})</span>
-                    <ChevronRight className="settings-disclosure-chevron" aria-hidden="true" />
+                    <SettingsChevron />
                   </summary>
                   <div>
                     {ignoredPermissionReviews.map((review) => (
@@ -3842,7 +3856,7 @@ export function App() {
               <details className="advanced-settings knowledge-graph-details">
                 <summary>
                   <strong>Graph Explorer</strong>
-                  <ChevronRight className="settings-disclosure-chevron" aria-hidden="true" />
+                  <SettingsChevron />
                   <span>
                     {phase7?.graph.totalNodes ?? 0} nodes · {phase7?.graph.totalEdges ?? 0} edges
                   </span>
@@ -3898,7 +3912,7 @@ export function App() {
                 <details className="advanced-settings retrieval-trace-details">
                   <summary>
                     <strong>Retrieval trace</strong>
-                    <ChevronRight className="settings-disclosure-chevron" aria-hidden="true" />
+                    <SettingsChevron />
                     <span>
                       {phase7.retrievalTrace.selectedCount} selected · {phase7.retrievalTrace.durationMs} ms · {phase7.retrievalTrace.indexCacheHit
                         ? "index cached"
@@ -4015,7 +4029,7 @@ export function App() {
               <details className="advanced-settings registered-tools-details">
                 <summary>
                   <span>Registered tools</span>
-                  <ChevronRight className="settings-disclosure-chevron" aria-hidden="true" />
+                  <SettingsChevron />
                   <strong>{phase5?.tools.length ?? runtime?.registeredTools.length ?? 0}</strong>
                 </summary>
                 <div className="registered-tool-list">
@@ -4041,7 +4055,7 @@ export function App() {
               <details className="advanced-settings">
                 <summary>
                   <span>Manual browser controls</span>
-                  <ChevronRight className="settings-disclosure-chevron" aria-hidden="true" />
+                  <SettingsChevron />
                 </summary>
                 <div className="tool-runner">
                 <label>
@@ -4174,7 +4188,7 @@ export function App() {
               <details className="advanced-settings">
                 <summary>
                   <span>Manual tool runner</span>
-                  <ChevronRight className="settings-disclosure-chevron" aria-hidden="true" />
+                  <SettingsChevron />
                 </summary>
                 <div className="tool-runner">
                 <label>
@@ -4244,7 +4258,7 @@ export function App() {
                   onClick={handleRunTool}
                 >
                   <span>{toolBusy ? "Running" : "Run tool"}</span>
-                  <ChevronRight className="settings-action-chevron" aria-hidden="true" />
+                  <SettingsChevron action />
                 </button>
                 </div>
               </details>
@@ -4333,7 +4347,7 @@ export function App() {
               <details className="advanced-settings">
                 <summary>
                   <span>Add stdio server</span>
-                  <ChevronRight className="settings-disclosure-chevron" aria-hidden="true" />
+                  <SettingsChevron />
                 </summary>
                 <div className="provider-form">
                   <div className="role-grid">

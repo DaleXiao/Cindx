@@ -1,4 +1,5 @@
 import {
+  ArrowRight,
   CalendarClock,
   CheckCircle2,
   CircleAlert,
@@ -325,7 +326,10 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
         </div>
       )}
 
-      <div className="schedule-layout">
+      <div
+        className="schedule-layout"
+        data-empty={!state || state.schedules.length === 0}
+      >
         <div className="schedule-list" aria-label="Scheduled tasks">
           {!state ? (
             <div className="schedule-empty">Loading</div>
@@ -670,10 +674,12 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
                 <div className="schedule-history-title">
                   <h4>Run history</h4>
                   <button
+                    className="secondary-button schedule-open-task"
                     type="button"
                     onClick={() => onOpenSession(selected.sessionId)}
                   >
-                    Open task
+                    <span>Open task</span>
+                    <ArrowRight aria-hidden="true" />
                   </button>
                 </div>
                 {selected.runs.length === 0 ? (
@@ -699,12 +705,7 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
                 )}
               </section>
             </div>
-          ) : (
-            <button className="schedule-empty-action schedule-detail-empty" type="button" onClick={beginNew}>
-              <Plus aria-hidden="true" />
-              <span>New schedule</span>
-            </button>
-          )}
+          ) : null}
         </div>
       </div>
 
