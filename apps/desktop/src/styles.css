@@ -5335,21 +5335,20 @@ details[open] > summary .settings-disclosure-chevron {
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
-  transform: translateY(12px) scale(0.994);
-  transform-origin: bottom center;
+  clip-path: inset(100% 0 0 0);
   transition:
-    transform 150ms var(--ease-out-quart),
+    clip-path 190ms var(--ease-out-quart),
     opacity 105ms ease-out,
-    visibility 0s linear 150ms;
+    visibility 0s linear 190ms;
 }
 
 .inspector-debug[data-open="true"] .inspector-debug-body {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
-  transform: translateY(0) scale(1);
+  clip-path: inset(0);
   transition:
-    transform 230ms var(--ease-out-quart),
+    clip-path 230ms var(--ease-out-quart),
     opacity 145ms ease-out,
     visibility 0s linear 0s;
 }

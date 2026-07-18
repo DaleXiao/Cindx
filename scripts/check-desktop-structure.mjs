@@ -1146,7 +1146,9 @@ assert(
 assert(
   /\.inspector-debug::before \{[\s\S]*?height: calc\(var\(--inspector-debug-panel-height\) \+ 44px\);[\s\S]*?clip-path: inset\(calc\(100% - 44px\) 0 0 0\);[\s\S]*?backdrop-filter: blur\(18px\) saturate\(1\.08\);/.test(styles) &&
     /\.inspector-debug\[data-open="true"\]::before \{[\s\S]*?clip-path: inset\(0\);/.test(styles) &&
-    /\.inspector-debug-body \{[\s\S]*?right: 0;[\s\S]*?bottom: 44px;[\s\S]*?left: 0;[\s\S]*?background: transparent;[\s\S]*?border: 0;/.test(styles) &&
+    /\.inspector-debug-body \{[\s\S]*?right: 0;[\s\S]*?bottom: 44px;[\s\S]*?left: 0;[\s\S]*?background: transparent;[\s\S]*?border: 0;[\s\S]*?clip-path: inset\(100% 0 0 0\);[\s\S]*?clip-path 190ms/.test(styles) &&
+    /\.inspector-debug\[data-open="true"\] \.inspector-debug-body \{[\s\S]*?clip-path: inset\(0\);[\s\S]*?clip-path 230ms/.test(styles) &&
+    !/\.inspector-debug-body \{[^}]*transform:/.test(styles) &&
     inspectorSource.includes('data-state={debugOpen ? "expanded" : "collapsed"}') &&
     inspectorSource.includes("<ChevronDown />") &&
     !inspectorSource.includes("ChevronUp") &&
@@ -1162,7 +1164,7 @@ assert(
     /\.inspector-debug-toggle \{[\s\S]*?grid-template-columns: 13px max-content 11px;[\s\S]*?align-items: center;/.test(
       styles
     ),
-  "The debug drawer must attach to its bar with a centered, state-correct trailing chevron"
+  "The debug drawer must open as one synchronized surface with a centered, state-correct trailing chevron"
 );
 assert(
   tauriBridge.includes('invoke<string>("read_artifact_image"') &&
