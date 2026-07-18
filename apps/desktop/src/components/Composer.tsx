@@ -162,7 +162,7 @@ export function Composer({
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       setEffortMenuOpen(false);
-      effortTriggerRef.current?.focus();
+      effortTriggerRef.current?.focus({ preventScroll: true });
     };
     document.addEventListener("pointerdown", closeOnPointerDown);
     document.addEventListener("keydown", closeOnEscape);
@@ -374,10 +374,15 @@ export function Composer({
                           aria-selected={option.value === effort}
                           data-selected={option.value === effort}
                           key={option.value}
-                          onClick={() => {
+                          onClick={(event) => {
+                            const restoreKeyboardFocus = event.detail === 0;
                             onEffortChange(option.value);
                             setEffortMenuOpen(false);
-                            effortTriggerRef.current?.focus();
+                            if (restoreKeyboardFocus) {
+                              window.requestAnimationFrame(() =>
+                                effortTriggerRef.current?.focus({ preventScroll: true })
+                              );
+                            }
                           }}
                         >
                           <span>

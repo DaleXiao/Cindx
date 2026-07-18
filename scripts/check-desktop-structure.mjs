@@ -461,9 +461,13 @@ assert(
 assert(
   sessionThreadSource.includes("LATEST_OUTPUT_THRESHOLD") &&
     sessionThreadSource.includes("followLatestRef") &&
+    sessionThreadSource.includes("historyScrollIntentRef") &&
     sessionThreadSource.includes("lastScrollTopRef") &&
     sessionThreadSource.includes("const pinLatestOutput = useCallback") &&
     sessionThreadSource.includes("const movedTowardHistory =") &&
+    sessionThreadSource.includes("const handleWheel = (event: WheelEvent)") &&
+    sessionThreadSource.includes('thread.addEventListener("wheel", handleWheel') &&
+    sessionThreadSource.includes("historyScrollIntent || (movedTowardHistory && !atLatest)") &&
     sessionThreadSource.includes("if (followLatestRef.current) pinLatestOutput()") &&
     sessionThreadSource.includes('className="thread-jump-latest"') &&
     sessionThreadSource.includes('aria-label="Jump to latest output"') &&
@@ -679,6 +683,17 @@ assert(
     styles.includes('.composer-effort-control[data-open="true"] .composer-effort-trigger > svg') &&
     styles.includes("transform: rotate(180deg)"),
   "The upward-opening effort menu must point up when closed and down when open"
+);
+assert(
+  composerSource.includes("const restoreKeyboardFocus = event.detail === 0") &&
+    composerSource.includes("focus({ preventScroll: true })") &&
+    /\.composer-toolbar-actions \{[\s\S]*?display: grid;[\s\S]*?width: 148px;[\s\S]*?grid-template-columns: 104px 36px;/.test(
+      styles
+    ) &&
+    /\.composer-primary-button \{[\s\S]*?width: 36px;[\s\S]*?min-width: 36px;[\s\S]*?max-width: 36px;/.test(
+      styles
+    ),
+  "Effort selection must preserve keyboard focus without shifting the fixed primary action"
 );
 assert(
   tauriBridge.includes("attachments?: AgentAttachment[]") &&
