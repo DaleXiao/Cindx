@@ -381,7 +381,7 @@ export function Sidebar({
 
       <nav className="sidebar-primary-nav" aria-label="Workspace views">
         <button
-          className={`nav-item sidebar-schedule-item ${
+          className={`sidebar-schedule-item ${
             activeView === "schedule" ? "active" : ""
           }`}
           type="button"

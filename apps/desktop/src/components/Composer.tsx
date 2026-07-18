@@ -133,8 +133,10 @@ export function Composer({
   const composingRef = useRef(false);
   const compositionJustEndedRef = useRef(false);
   const [effortMenuOpen, setEffortMenuOpen] = useState(false);
-  const canSend =
-    !pendingApproval && !attachmentBusy && Boolean(value.trim() || attachments.length);
+  const hasInput = Boolean(value.trim() || attachments.length);
+  const agentActive = working || canStop;
+  const showStop = agentActive && !hasInput;
+  const canSend = !pendingApproval && !attachmentBusy && hasInput;
   const canRetryError = canRetry && Boolean(error) && !working && !canStop && !pendingApproval;
   const canContinueRun = canContinue && !working && !canStop && !pendingApproval;
   const activeEffort = EFFORT_OPTIONS.find((option) => option.value === effort)!;
@@ -345,23 +347,6 @@ export function Composer({
                 )}
               </button>
               <div className="composer-toolbar-actions">
-                <button
-                  className="composer-stop-button"
-                  data-visible={canStop || undefined}
-                  type="button"
-                  aria-label="Stop agent"
-                  title="Stop"
-                  tabIndex={canStop ? 0 : -1}
-                  disabled={!canStop}
-                  onClick={onCancel}
-                >
-                  <span className="composer-stop-icon" data-working={working}>
-                    {working && (
-                      <LoaderCircle className="composer-working-ring" aria-hidden="true" />
-                    )}
-                    <Square className="composer-stop-square" aria-hidden="true" />
-                  </span>
-                </button>
                 <div
                   className="composer-effort-control"
                   data-open={effortMenuOpen}
@@ -412,13 +397,24 @@ export function Composer({
                   )}
                 </div>
                 <button
-                  type="submit"
+                  type={showStop ? "button" : "submit"}
                   className="send-button composer-primary-button"
-                  aria-label={working || canStop ? "Queue message" : "Send message"}
-                  title={working || canStop ? "Queue" : "Send"}
-                  disabled={!canSend}
+                  data-mode={showStop ? "stop" : "send"}
+                  aria-label={showStop ? "Stop agent" : agentActive ? "Queue message" : "Send message"}
+                  title={showStop ? "Stop" : agentActive ? "Queue" : "Send"}
+                  disabled={showStop ? !canStop : !canSend}
+                  onClick={showStop ? onCancel : undefined}
                 >
-                  <Send aria-hidden="true" />
+                  {showStop ? (
+                    <span className="composer-stop-icon" data-working={working}>
+                      {working && (
+                        <LoaderCircle className="composer-working-ring" aria-hidden="true" />
+                      )}
+                      <Square className="composer-stop-square" aria-hidden="true" />
+                    </span>
+                  ) : (
+                    <Send aria-hidden="true" />
+                  )}
                 </button>
               </div>
             </div>

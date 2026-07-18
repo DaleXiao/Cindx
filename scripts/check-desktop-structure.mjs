@@ -630,15 +630,14 @@ assert(
 );
 assert(
   /\.app-shell\[data-active-view="settings"\] \{[\s\S]*?transition: none;/.test(styles) &&
-    /\.app-shell\[data-active-view="settings"\] \.window-toolbar \{[\s\S]*?background: var\(--bg\);/.test(
-      styles
-    ) &&
+    /\.app-shell\[data-active-view="settings"\] \.window-toolbar,\s*\.app-shell\[data-active-view="schedule"\] \.window-toolbar \{[\s\S]*?background: transparent;/.test(styles) &&
+    /\.app-shell\[data-active-view="settings"\] \.window-workspace-header,\s*\.app-shell\[data-active-view="schedule"\] \.window-workspace-header \{[\s\S]*?background: var\(--bg\);/.test(styles) &&
     /\.settings-view \{[\s\S]*?overflow-y: auto;[\s\S]*?scrollbar-gutter: stable;/.test(
       styles
     ) &&
     styles.includes("--scrollbar-size: 6px") &&
     styles.includes("*::-webkit-scrollbar-thumb"),
-  "Settings must scroll only when needed and use the shared compact scrollbar"
+  "Settings must keep the sidebar material continuous through the titlebar and use the shared compact scrollbar"
 );
 assert(composerSource.includes('event.key !== "Enter"'), "Composer must support Enter to send");
 assert(composerSource.includes("event.shiftKey"), "Composer must reserve Shift+Enter for a new line");
@@ -656,10 +655,13 @@ assert(
 );
 assert(
   !composerSource.includes('if (working || canStop) return;') &&
-    composerSource.includes('aria-label={working || canStop ? "Queue message" : "Send message"}') &&
-    composerSource.includes('className="composer-stop-button"') &&
+    composerSource.includes("const showStop = agentActive && !hasInput") &&
+    composerSource.includes('type={showStop ? "button" : "submit"}') &&
+    composerSource.includes('data-mode={showStop ? "stop" : "send"}') &&
+    composerSource.includes('onClick={showStop ? onCancel : undefined}') &&
+    !composerSource.includes('className="composer-stop-button"') &&
     !composerSource.includes('disabled={working || canStop}\n              aria-keyshortcuts="Enter"'),
-  "Composer must remain editable and queue new input while preserving a separate stop action"
+  "Composer must remain editable and use one adaptive send-or-stop primary action"
 );
 assert(
   composerSource.includes("onCompositionStart") &&
@@ -698,7 +700,7 @@ assert(
 assert(
   composerSource.includes("const restoreKeyboardFocus = event.detail === 0") &&
     composerSource.includes("focus({ preventScroll: true })") &&
-    /\.composer-toolbar-actions \{[\s\S]*?display: grid;[\s\S]*?width: 188px;[\s\S]*?grid-template-columns: 32px 104px 36px;/.test(
+    /\.composer-toolbar-actions \{[\s\S]*?display: grid;[\s\S]*?width: 148px;[\s\S]*?grid-template-columns: 104px 36px;/.test(
       styles
     ) &&
     /\.composer-primary-button \{[\s\S]*?width: 36px;[\s\S]*?min-width: 36px;[\s\S]*?max-width: 36px;/.test(
@@ -838,18 +840,20 @@ assert(
     (sessionThreadSource.match(/<DisclosureTriangle/g)?.length ?? 0) >= 2 &&
     !inspectorSource.includes("DisclosureTriangle") &&
     !appSource.includes("DisclosureTriangle") &&
-    (appSource.match(/className="settings-disclosure-chevron"/g)?.length ?? 0) === 8 &&
-    (appSource.match(/className="settings-action-chevron"/g)?.length ?? 0) === 1 &&
+    appSource.includes("function SettingsChevron") &&
+    (appSource.match(/<SettingsChevron/g)?.length ?? 0) === 9 &&
+    appSource.includes('className={action ? "settings-action-chevron" : "settings-disclosure-chevron"}') &&
     (inspectorSource.match(/<ChevronRight/g)?.length ?? 0) >= 1 &&
     inspectorSource.includes('className="inspector-debug-chevron"') &&
     !styles.includes("advanced-settings summary::before") &&
     styles.includes("details[open] > summary .disclosure-triangle") &&
-    styles.includes("details[open] > summary .settings-disclosure-chevron") &&
+    styles.includes("details[open] > summary .settings-disclosure-chevron > svg") &&
     styles.includes(".settings-action-chevron") &&
+    styles.includes("place-items: center") &&
     styles.includes("vertical-align: middle") &&
     styles.includes("transform-box: fill-box") &&
     styles.includes("transition: transform 180ms") &&
-    styles.includes(".secondary-button:hover:not(:disabled) .settings-action-chevron"),
+    styles.includes(".secondary-button:hover:not(:disabled) .settings-action-chevron > svg"),
   "Settings and Inspector must use trailing animated chevrons while thread disclosures retain the shared marker"
 );
 assert(
@@ -905,9 +909,9 @@ assert(
     styles.includes("width: 36px;") &&
     styles.includes("height: 36px;") &&
     styles.includes("border-radius: var(--radius-round);") &&
-    /\.composer-stop-button:hover:not\(:disabled\) \{[\s\S]*?background: #e05b5b;[\s\S]*?filter: none;/.test(styles) &&
-    styles.includes('.composer-stop-button:hover .composer-working-ring'),
-  "Composer controls must keep fixed send and stop slots in the bottom toolbar"
+    /\.composer-primary-button\[data-mode="stop"\]:hover:not\(:disabled\) \{[\s\S]*?background: #e05b5b;[\s\S]*?filter: none;/.test(styles) &&
+    styles.includes('.composer-primary-button[data-mode="stop"]:hover .composer-working-ring'),
+  "Composer controls must keep one fixed primary slot that switches between send and stop"
 );
 assert(
   rustLib.includes("struct QueuedAgentMessageView") &&
@@ -931,7 +935,9 @@ assert(
     queuedMessagesSource.includes("onDelete") &&
     styles.includes(".queued-message-stack") &&
     styles.includes("bottom: calc(100% - 12px)") &&
-    styles.includes(".composer-stack > .composer"),
+    styles.includes(".composer-stack > .composer") &&
+    appSource.includes("data-has-queued={Boolean(activeAgentState?.queuedMessages.length)}") &&
+    styles.includes('.composer-stack[data-has-queued="true"] > .composer'),
   "Session-scoped queued messages must persist, drain safely, and expose Steer, Edit, and Delete"
 );
 assert(sidebarSource.includes("session-branch"), "Tasks must be nested below the active project");
@@ -1114,9 +1120,8 @@ assert(
     sidebarSource.includes('title="Create project"') &&
     inspectorSource.includes('aria-label={`Preview ${artifactName(displayPath)}${') &&
     inspectorSource.includes('title={`Preview ${artifactName(displayPath)}${') &&
-    composerSource.includes('aria-label="Stop agent"') &&
-    composerSource.includes('aria-label={working || canStop ? "Queue message" : "Send message"}') &&
-    composerSource.includes('title={working || canStop ? "Queue" : "Send"}'),
+    composerSource.includes('aria-label={showStop ? "Stop agent" : agentActive ? "Queue message" : "Send message"}') &&
+    composerSource.includes('title={showStop ? "Stop" : agentActive ? "Queue" : "Send"}'),
   "Icon-only operations must expose accessible hover labels"
 );
 assert(
@@ -1432,7 +1437,7 @@ assert(
 );
 assert(
   styles.includes(".advanced-settings summary::-webkit-details-marker") &&
-    appSource.includes('className="settings-disclosure-chevron"') &&
+    appSource.includes("function SettingsChevron") &&
     styles.includes(".settings-disclosure-chevron"),
   "Expandable settings must use a consistent trailing chevron"
 );
@@ -2167,14 +2172,21 @@ assert(
 assert(
   sidebarSource.includes('onViewChange("schedule")') &&
     sidebarSource.indexOf("sidebar-schedule-item") < sidebarSource.indexOf('className="project-tree"') &&
+    !sidebarSource.includes("nav-item sidebar-schedule-item") &&
     appSource.includes('activeView === "schedule"') &&
     appSource.includes("<ScheduleView") &&
     scheduleViewSource.includes("New schedule") &&
     scheduleViewSource.includes("Run history") &&
+    scheduleViewSource.includes('data-empty={!state || state.schedules.length === 0}') &&
+    scheduleViewSource.includes('className="secondary-button schedule-open-task"') &&
+    !scheduleViewSource.includes("schedule-empty-action") &&
     scheduleViewSource.includes("cancelScheduleRun") &&
     styles.includes(".schedule-layout") &&
-    styles.includes(".sidebar-schedule-item"),
-  "Schedule must be a first-class workspace above Projects with configuration and run history"
+    styles.includes(".sidebar-schedule-item") &&
+    /\.sidebar-schedule-item \{[\s\S]*?height: 22px;[\s\S]*?font-size: 11px;[\s\S]*?text-transform: uppercase;/.test(styles) &&
+    styles.includes('.schedule-layout[data-empty="true"]') &&
+    styles.includes(".schedule-history-title .schedule-open-task"),
+  "Schedule must align with Projects and expose one polished creation path plus consistent run controls"
 );
 assert(
   cargoToml.includes('chrono-tz = "0.10"') &&
