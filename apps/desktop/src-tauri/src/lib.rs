@@ -85,8 +85,8 @@ mod schedule;
 
 use run_control::{AgentRunControl, RunBudget, RunControlSnapshot};
 use schedule::{
-    initial_next_run_at_ms, next_occurrence_after_ms, timestamp_ms_from_local, ScheduleCadence,
-    ScheduleConfig, ScheduleRecord, ScheduleRunRecord,
+    initial_next_run_at_ms, next_occurrence_after_ms, normalized_weekly_days,
+    timestamp_ms_from_local, ScheduleCadence, ScheduleConfig, ScheduleRecord, ScheduleRunRecord,
 };
 
 const PHASE3_TASK_ID: &str = "phase-3-demo";
@@ -136,6 +136,7 @@ const SCHEDULE_DISPATCH_RETRY_MS: u64 = 60_000;
 const SCHEDULE_MAX_DISPATCH_ATTEMPTS: u32 = 3;
 const SCHEDULE_MAX_NAME_CHARS: usize = 80;
 const SCHEDULE_MAX_PROMPT_CHARS: usize = 32_000;
+const SCHEDULE_EXECUTION_SESSION_DETAIL: &str = "schedule automation";
 const EVENT_REDACTION_MARKER_FILE: &str = "events-redaction-v1.complete";
 const OPENAI_DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
 const DASHSCOPE_DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-v4";
@@ -523,6 +524,10 @@ struct SessionRecord {
     archived_at_ms: Option<u64>,
 }
 
+fn is_schedule_execution_session(session: &SessionRecord) -> bool {
+    session.detail == SCHEDULE_EXECUTION_SESSION_DETAIL
+}
+
 impl ProjectSessionConfig {
     fn default_for_root(root: &Path) -> Self {
         let now = current_time_millis();
@@ -576,7 +581,9 @@ impl ProjectSessionConfig {
             .sessions
             .iter()
             .any(|session| {
-                session.project_id == self.active_project_id && session.archived_at_ms.is_none()
+                session.project_id == self.active_project_id
+                    && session.archived_at_ms.is_none()
+                    && !is_schedule_execution_session(session)
             })
         {
             let now = current_time_millis();
@@ -604,7 +611,9 @@ impl ProjectSessionConfig {
             .sessions
             .iter()
             .any(|session| {
-                session.id == self.active_session_id && session.archived_at_ms.is_none()
+                session.id == self.active_session_id
+                    && session.archived_at_ms.is_none()
+                    && !is_schedule_execution_session(session)
             })
         {
             self.active_session_id = self
@@ -613,11 +622,15 @@ impl ProjectSessionConfig {
                 .find(|session| {
                     session.project_id == self.active_project_id
                         && session.archived_at_ms.is_none()
+                        && !is_schedule_execution_session(session)
                 })
                 .or_else(|| {
                     self.sessions
                         .iter()
-                        .find(|session| session.archived_at_ms.is_none())
+                        .find(|session| {
+                            session.archived_at_ms.is_none()
+                                && !is_schedule_execution_session(session)
+                        })
                 })
                 .map(|session| session.id.clone())
                 .unwrap_or_default();
@@ -677,15 +690,17 @@ struct ScheduleStateView {
 struct ScheduleView {
     id: String,
     name: String,
-    project_id: String,
+    project_id: Option<String>,
     project_name: String,
-    session_id: String,
+    session_id: Option<String>,
     session_name: String,
     prompt: String,
     effort: String,
     timezone: String,
     cadence: String,
     anchor_at_ms: u64,
+    weekly_days: Vec<u8>,
+    ends_at_ms: Option<u64>,
     catch_up: bool,
     enabled: bool,
     next_run_at_ms: Option<u64>,
@@ -748,13 +763,16 @@ struct CreateSessionInput {
 struct UpsertScheduleInput {
     id: Option<String>,
     name: String,
-    project_id: String,
-    session_id: String,
+    project_id: Option<String>,
+    session_id: Option<String>,
     prompt: String,
     effort: String,
     timezone: String,
     cadence: String,
     anchor_local: String,
+    #[serde(default)]
+    weekly_days: Vec<u8>,
+    ends_local: Option<String>,
     catch_up: bool,
     enabled: bool,
 }
@@ -2214,13 +2232,34 @@ fn upsert_schedule(
     let timezone = input.timezone.trim().to_string();
     schedule::parse_timezone(&timezone)?;
     let anchor_at_ms = timestamp_ms_from_local(&input.anchor_local, &timezone)?;
-    validate_schedule_target(&state, &input.project_id, &input.session_id)?;
+    let project_id = input
+        .project_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let session_id = input
+        .session_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    validate_schedule_target(&state, project_id.as_deref(), session_id.as_deref())?;
+    let weekly_days = normalized_weekly_days(anchor_at_ms, &timezone, &input.weekly_days)?;
+    let ends_at_ms = input
+        .ends_local
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| timestamp_ms_from_local(value, &timezone))
+        .transpose()?;
+    if ends_at_ms.is_some_and(|ends_at_ms| ends_at_ms < anchor_at_ms) {
+        return Err("schedule end must be after its start".to_string());
+    }
     let now = current_time_millis();
     let next_run_at_ms = if input.enabled {
         initial_next_run_at_ms(
             anchor_at_ms,
             cadence,
             &timezone,
+            &weekly_days,
+            ends_at_ms,
             input.catch_up,
             now,
         )?
@@ -2228,7 +2267,7 @@ fn upsert_schedule(
         None
     };
     if input.enabled && next_run_at_ms.is_none() {
-        return Err("a one-time schedule needs a future start time".to_string());
+        return Err("schedule needs a future occurrence before it can be enabled".to_string());
     }
 
     let mut config = state
@@ -2264,24 +2303,38 @@ fn upsert_schedule(
                     .collect::<Vec<_>>(),
             )
         });
-    let (created_at_ms, runs) = existing_index
+    let (created_at_ms, runs, existing_execution_session_id) = existing_index
         .map(|index| {
             (
                 config.schedules[index].created_at_ms,
                 config.schedules[index].runs.clone(),
+                Some(config.schedules[index].execution_session_id.clone()),
             )
         })
-        .unwrap_or((now, Vec::new()));
+        .unwrap_or((now, Vec::new(), None));
+    let effort = AgentEffort::parse(&input.effort).label().to_string();
+    let execution_session_id = ensure_schedule_execution_session(
+        &state,
+        &id,
+        &name,
+        &effort,
+        project_id.as_deref(),
+        session_id.as_deref(),
+        existing_execution_session_id.as_deref(),
+    )?;
     let record = ScheduleRecord {
         id,
         name,
-        project_id: input.project_id,
-        session_id: input.session_id,
+        project_id,
+        session_id,
+        execution_session_id,
         prompt,
-        effort: AgentEffort::parse(&input.effort).label().to_string(),
+        effort,
         timezone,
         cadence,
         anchor_at_ms,
+        weekly_days,
+        ends_at_ms,
         catch_up: input.catch_up,
         enabled: input.enabled,
         next_run_at_ms,
@@ -2317,12 +2370,22 @@ fn set_schedule_enabled(
         .position(|schedule| schedule.id == input.schedule_id)
         .ok_or_else(|| "schedule not found".to_string())?;
     let schedule = &config.schedules[schedule_index];
-    validate_schedule_target(&state, &schedule.project_id, &schedule.session_id)?;
+    let execution_session_id = ensure_schedule_execution_session(
+        &state,
+        &schedule.id,
+        &schedule.name,
+        &schedule.effort,
+        schedule.project_id.as_deref(),
+        schedule.session_id.as_deref(),
+        Some(schedule.execution_session_id.as_str()),
+    )?;
     let next_run_at_ms = if input.enabled {
         initial_next_run_at_ms(
             schedule.anchor_at_ms,
             schedule.cadence,
             &schedule.timezone,
+            &schedule.weekly_days,
+            schedule.ends_at_ms,
             schedule.catch_up,
             now,
         )?
@@ -2330,9 +2393,10 @@ fn set_schedule_enabled(
         None
     };
     if input.enabled && next_run_at_ms.is_none() {
-        return Err("edit the one-time start before enabling this schedule".to_string());
+        return Err("schedule needs a future occurrence before it can be enabled".to_string());
     }
     let schedule = &mut config.schedules[schedule_index];
+    schedule.execution_session_id = execution_session_id;
     schedule.enabled = input.enabled;
     schedule.next_run_at_ms = next_run_at_ms;
     schedule.updated_at_ms = now;
@@ -2407,7 +2471,7 @@ fn cancel_schedule_run(
             .active_run()
             .ok_or_else(|| "schedule has no active run".to_string())?;
         (
-            schedule.session_id.clone(),
+            schedule.execution_session_id.clone(),
             run.queue_id
                 .clone()
                 .ok_or_else(|| "scheduled run is still preparing".to_string())?,
@@ -2465,26 +2529,113 @@ fn cancel_schedule_run(
 
 fn validate_schedule_target(
     state: &tauri::State<'_, AppState>,
-    project_id: &str,
-    session_id: &str,
+    project_id: Option<&str>,
+    session_id: Option<&str>,
 ) -> Result<(), String> {
     let config = state
         .project_session_config
         .lock()
         .map_err(|error| format!("project session config lock poisoned: {error}"))?;
-    if !config.projects.iter().any(|project| project.id == project_id) {
-        return Err("schedule project not found".to_string());
+    if let Some(project_id) = project_id {
+        if !config.projects.iter().any(|project| project.id == project_id) {
+            return Err("schedule project not found".to_string());
+        }
     }
-    let Some(session) = config.sessions.iter().find(|session| session.id == session_id) else {
-        return Err("schedule session not found".to_string());
-    };
-    if session.project_id != project_id {
-        return Err("schedule session does not belong to the selected project".to_string());
-    }
-    if session.archived_at_ms.is_some() {
-        return Err("schedule session is archived".to_string());
+    if let Some(session_id) = session_id {
+        let project_id = project_id
+            .ok_or_else(|| "choose a project before linking a task".to_string())?;
+        let Some(session) = config.sessions.iter().find(|session| session.id == session_id) else {
+            return Err("schedule session not found".to_string());
+        };
+        if session.project_id != project_id {
+            return Err("schedule session does not belong to the selected project".to_string());
+        }
+        if session.archived_at_ms.is_some() {
+            return Err("schedule session is archived".to_string());
+        }
     }
     Ok(())
+}
+
+fn ensure_schedule_execution_session(
+    state: &tauri::State<'_, AppState>,
+    schedule_id: &str,
+    schedule_name: &str,
+    effort: &str,
+    project_id: Option<&str>,
+    session_id: Option<&str>,
+    existing_execution_session_id: Option<&str>,
+) -> Result<String, String> {
+    validate_schedule_target(state, project_id, session_id)?;
+    if let Some(session_id) = session_id {
+        return Ok(session_id.to_string());
+    }
+
+    let mut config = state
+        .project_session_config
+        .lock()
+        .map_err(|error| format!("project session config lock poisoned: {error}"))?;
+    let execution_project_id = project_id
+        .map(str::to_string)
+        .or_else(|| {
+            config
+                .projects
+                .iter()
+                .any(|project| project.id == config.active_project_id)
+                .then(|| config.active_project_id.clone())
+        })
+        .or_else(|| config.projects.first().map(|project| project.id.clone()))
+        .ok_or_else(|| "create a project before enabling a standalone schedule".to_string())?;
+
+    if let Some(session) = existing_execution_session_id.and_then(|session_id| {
+        config.sessions.iter_mut().find(|session| {
+            session.id == session_id
+                && session.archived_at_ms.is_none()
+                && is_schedule_execution_session(session)
+        })
+    }) {
+        let next_name = format!("{} · Schedule", schedule_name.trim());
+        let next_effort = AgentEffort::parse(effort).label().to_string();
+        let execution_session_id = session.id.clone();
+        let mut changed = false;
+        if session.name != next_name
+            || session.effort != next_effort
+            || session.project_id != execution_project_id
+        {
+            session.name = next_name;
+            session.effort = next_effort;
+            session.project_id = execution_project_id.clone();
+            session.updated_at_ms = current_time_millis();
+            changed = true;
+        }
+        if changed {
+            save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+        }
+        return Ok(execution_session_id);
+    }
+
+    let execution_session_id = unique_config_id(
+        "schedule-session",
+        schedule_id,
+        &config
+            .sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>(),
+    );
+    let now = current_time_millis();
+    config.sessions.push(SessionRecord {
+        id: execution_session_id.clone(),
+        project_id: execution_project_id,
+        name: format!("{} · Schedule", schedule_name.trim()),
+        detail: SCHEDULE_EXECUTION_SESSION_DETAIL.to_string(),
+        effort: AgentEffort::parse(effort).label().to_string(),
+        created_at_ms: now,
+        updated_at_ms: now,
+        archived_at_ms: None,
+    });
+    save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+    Ok(execution_session_id)
 }
 
 fn schedule_state_view(state: &tauri::State<'_, AppState>) -> Result<ScheduleStateView, String> {
@@ -2502,18 +2653,28 @@ fn schedule_state_view(state: &tauri::State<'_, AppState>) -> Result<ScheduleSta
         .schedules
         .into_iter()
         .map(|schedule| {
-            let project_name = project_sessions
-                .projects
-                .iter()
-                .find(|project| project.id == schedule.project_id)
-                .map(|project| project.name.clone())
-                .unwrap_or_else(|| "Missing project".to_string());
-            let session_name = project_sessions
-                .sessions
-                .iter()
-                .find(|session| session.id == schedule.session_id)
-                .map(|session| session.name.clone())
-                .unwrap_or_else(|| "Missing session".to_string());
+            let project_name = schedule.project_id.as_deref().map_or_else(
+                || "No project".to_string(),
+                |project_id| {
+                    project_sessions
+                        .projects
+                        .iter()
+                        .find(|project| project.id == project_id)
+                        .map(|project| project.name.clone())
+                        .unwrap_or_else(|| "Missing project".to_string())
+                },
+            );
+            let session_name = schedule.session_id.as_deref().map_or_else(
+                || "Standalone".to_string(),
+                |session_id| {
+                    project_sessions
+                        .sessions
+                        .iter()
+                        .find(|session| session.id == session_id)
+                        .map(|session| session.name.clone())
+                        .unwrap_or_else(|| "Missing task".to_string())
+                },
+            );
             ScheduleView {
                 id: schedule.id,
                 name: schedule.name,
@@ -2526,6 +2687,8 @@ fn schedule_state_view(state: &tauri::State<'_, AppState>) -> Result<ScheduleSta
                 timezone: schedule.timezone,
                 cadence: schedule.cadence.label().to_string(),
                 anchor_at_ms: schedule.anchor_at_ms,
+                weekly_days: schedule.weekly_days,
+                ends_at_ms: schedule.ends_at_ms,
                 catch_up: schedule.catch_up,
                 enabled: schedule.enabled,
                 next_run_at_ms: schedule.next_run_at_ms,
@@ -2673,7 +2836,7 @@ fn reconcile_schedule_runs(state: &tauri::State<'_, AppState>) -> Result<(), Str
                 schedule.active_run().map(|run| {
                     (
                         schedule.id.clone(),
-                        schedule.session_id.clone(),
+                        schedule.execution_session_id.clone(),
                         run.id.clone(),
                         run.queue_id.clone(),
                         run.queued_at_ms,
@@ -2775,8 +2938,16 @@ fn trigger_schedule_run(
     if schedule.active_run().is_some() {
         return Err("schedule already has an active run".to_string());
     }
-    validate_schedule_target(state, &schedule.project_id, &schedule.session_id)?;
-    let session_id = schedule.session_id.clone();
+    let session_id = ensure_schedule_execution_session(
+        state,
+        &schedule.id,
+        &schedule.name,
+        &schedule.effort,
+        schedule.project_id.as_deref(),
+        schedule.session_id.as_deref(),
+        Some(schedule.execution_session_id.as_str()),
+    )?;
+    schedule.execution_session_id = session_id.clone();
     let queue_input = QueueAgentMessageInput {
         session_id: session_id.clone(),
         prompt: schedule.prompt.clone(),
@@ -2809,8 +2980,13 @@ fn trigger_schedule_run(
                 schedule.anchor_at_ms,
                 schedule.cadence,
                 &schedule.timezone,
+                &schedule.weekly_days,
+                schedule.ends_at_ms,
                 now,
             )?;
+            if schedule.next_run_at_ms.is_none() {
+                schedule.enabled = false;
+            }
         } else {
             schedule.enabled = false;
             schedule.next_run_at_ms = None;
@@ -2870,6 +3046,13 @@ fn poll_schedules(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
             if !schedule.enabled || schedule.active_run().is_some() {
                 continue;
             }
+            if schedule.ends_at_ms.is_some_and(|ends_at_ms| now > ends_at_ms) {
+                schedule.enabled = false;
+                schedule.next_run_at_ms = None;
+                schedule.updated_at_ms = now;
+                changed = true;
+                continue;
+            }
             let Some(next_run_at_ms) = schedule.next_run_at_ms else {
                 continue;
             };
@@ -2897,8 +3080,13 @@ fn poll_schedules(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
                         schedule.anchor_at_ms,
                         schedule.cadence,
                         &schedule.timezone,
+                        &schedule.weekly_days,
+                        schedule.ends_at_ms,
                         now,
                     )?;
+                    if schedule.next_run_at_ms.is_none() {
+                        schedule.enabled = false;
+                    }
                 } else {
                     schedule.enabled = false;
                     schedule.next_run_at_ms = None;
@@ -2929,7 +3117,7 @@ fn poll_schedules(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
         .map_err(|error| format!("schedule config lock poisoned: {error}"))?;
     for schedule in &config.schedules {
         if schedule.active_run().is_some_and(|run| run.status == "queued") {
-            sessions.insert(schedule.session_id.clone());
+            sessions.insert(schedule.execution_session_id.clone());
         }
     }
     Ok(sessions.into_iter().collect())
@@ -2976,7 +3164,7 @@ fn dispatch_scheduled_session(app: &tauri::AppHandle, session_id: &str) -> Resul
             .lock()
             .map_err(|error| format!("schedule config lock poisoned: {error}"))?;
         let Some((schedule, run)) = config.schedules.iter().find_map(|schedule| {
-            (schedule.session_id == session_id).then(|| {
+            (schedule.execution_session_id == session_id).then(|| {
                 schedule
                     .active_run()
                     .filter(|run| {
@@ -3919,13 +4107,16 @@ fn select_project(
             session.id == config.active_session_id
                 && session.project_id == project.id
                 && session.archived_at_ms.is_none()
+                && !is_schedule_execution_session(session)
         })
     {
         config.active_session_id = config
             .sessions
             .iter()
             .find(|session| {
-                session.project_id == project.id && session.archived_at_ms.is_none()
+                session.project_id == project.id
+                    && session.archived_at_ms.is_none()
+                    && !is_schedule_execution_session(session)
             })
             .map(|session| session.id.clone())
             .unwrap_or_else(|| {
@@ -20780,6 +20971,7 @@ fn project_session_state(
         sessions: config
             .sessions
             .iter()
+            .filter(|session| !is_schedule_execution_session(session))
             .map(|session| SessionView {
                 id: session.id.clone(),
                 project_id: session.project_id.clone(),
@@ -20843,6 +21035,7 @@ fn remove_project_from_config(
         session.id == config.active_session_id
             && session.project_id == config.active_project_id
             && session.archived_at_ms.is_none()
+            && !is_schedule_execution_session(session)
     });
     if !active_session_is_valid {
         let active_project_id = config.active_project_id.clone();
@@ -20859,7 +21052,11 @@ fn ensure_open_session_for_project(
     if let Some(session) = config
         .sessions
         .iter()
-        .find(|session| session.project_id == project_id && session.archived_at_ms.is_none())
+        .find(|session| {
+            session.project_id == project_id
+                && session.archived_at_ms.is_none()
+                && !is_schedule_execution_session(session)
+        })
     {
         return session.id.clone();
     }
@@ -27050,6 +27247,33 @@ mod tests {
         assert_eq!(state.sessions[0].effort, "auto");
         assert_eq!(state.active_project_id, "project-cindx");
         assert_eq!(state.active_session_id, "session-runtime");
+    }
+
+    #[test]
+    fn schedule_execution_sessions_stay_out_of_the_task_sidebar() {
+        let root = temp_test_root("hidden-schedule-session");
+        let mut config = ProjectSessionConfig::default_for_root(&root);
+        config.sessions.push(SessionRecord {
+            id: "schedule-session-review".to_string(),
+            project_id: "project-cindx".to_string(),
+            name: "Review · Schedule".to_string(),
+            detail: SCHEDULE_EXECUTION_SESSION_DETAIL.to_string(),
+            effort: "auto".to_string(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+            archived_at_ms: None,
+        });
+
+        let state = project_session_state(&config, None);
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].id, "session-runtime");
+
+        config.sessions.retain(is_schedule_execution_session);
+        let replacement = ensure_open_session_for_project(&mut config, "project-cindx");
+        assert_ne!(replacement, "schedule-session-review");
+        assert!(config.sessions.iter().any(|session| {
+            session.id == replacement && !is_schedule_execution_session(session)
+        }));
     }
 
     #[test]

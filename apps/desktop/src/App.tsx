@@ -7,6 +7,7 @@ import {
   Bug,
   Cable,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   Database,
   Dna,
@@ -524,7 +525,7 @@ function SettingsChevron({ action = false }: { action?: boolean }) {
       className={action ? "settings-action-chevron" : "settings-disclosure-chevron"}
       aria-hidden="true"
     >
-      <ChevronRight />
+      {action ? <ChevronRight /> : <ChevronDown />}
     </span>
   );
 }
@@ -532,6 +533,7 @@ function SettingsChevron({ action = false }: { action?: boolean }) {
 export function App() {
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [activeView, setActiveView] = useState<WorkspaceView>("timeline");
+  const [selectedScheduleId, setSelectedScheduleId] = useState<string | null>(null);
   const [workspaceViewBeforeSettings, setWorkspaceViewBeforeSettings] =
     useState<Exclude<WorkspaceView, "settings">>("timeline");
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -2826,14 +2828,19 @@ export function App() {
       <header className="window-toolbar" data-tauri-drag-region>
         <span className="window-toolbar-panel window-toolbar-panel-left" aria-hidden="true" />
         <span className="window-toolbar-panel window-toolbar-panel-right" aria-hidden="true" />
-        {activeView !== "settings" && (
-          <div className="window-workspace-header">
-            <div className="topbar-title">
-              <div>
-                <h1>{activeView === "schedule" ? "Schedule" : activeSession?.name ?? "Session"}</h1>
-              </div>
+        <div className="window-workspace-header">
+          <div className="topbar-title">
+            <div>
+              <h1>
+                {activeView === "settings"
+                  ? "Settings"
+                  : activeView === "schedule"
+                    ? "Schedule"
+                    : activeSession?.name ?? "Session"}
+              </h1>
             </div>
-            {activeView === "timeline" && <div className="topbar-actions">
+          </div>
+          {activeView === "timeline" && <div className="topbar-actions">
               <div
                 className="context-usage"
                 title={`${activeAgentState?.contextTokensUsed ?? 0} of ${
@@ -2859,9 +2866,8 @@ export function App() {
                 <CheckCircle2 size={16} aria-hidden="true" />
                 <span>{statusText}</span>
               </div>
-            </div>}
-          </div>
-        )}
+          </div>}
+        </div>
         <button
           className="window-pane-toggle sidebar-pane-toggle"
           type="button"
@@ -2925,9 +2931,11 @@ export function App() {
         busy={projectSessionBusy}
         searchOpen={sidebarSearchOpen}
         searchQuery={sidebarQuery}
+        selectedScheduleId={selectedScheduleId}
         projectCreateOpen={projectCreateOpen}
         projectName={newProjectName}
         onViewChange={handleWorkspaceViewChange}
+        onScheduleSelect={setSelectedScheduleId}
         onSearchToggle={() => {
           setSidebarSearchOpen((open) => !open);
           if (sidebarSearchOpen) setSidebarQuery("");
@@ -3010,6 +3018,9 @@ export function App() {
             projects={projectSessionState?.projects ?? []}
             sessions={projectSessionState?.sessions ?? []}
             onOpenSession={(sessionId) => void handleOpenScheduledSession(sessionId)}
+            onBack={showTimelineView}
+            requestedScheduleId={selectedScheduleId}
+            onScheduleSelect={setSelectedScheduleId}
           />
         ) : (
           <section
@@ -3855,9 +3866,11 @@ export function App() {
               </button>
               <details className="advanced-settings knowledge-graph-details">
                 <summary>
-                  <strong>Graph Explorer</strong>
-                  <SettingsChevron />
-                  <span>
+                  <span className="settings-summary-label">
+                    <strong>Graph Explorer</strong>
+                    <SettingsChevron />
+                  </span>
+                  <span className="settings-summary-meta">
                     {phase7?.graph.totalNodes ?? 0} nodes · {phase7?.graph.totalEdges ?? 0} edges
                   </span>
                 </summary>
@@ -3911,9 +3924,11 @@ export function App() {
               {phase7?.retrievalTrace && (
                 <details className="advanced-settings retrieval-trace-details">
                   <summary>
-                    <strong>Retrieval trace</strong>
-                    <SettingsChevron />
-                    <span>
+                    <span className="settings-summary-label">
+                      <strong>Retrieval trace</strong>
+                      <SettingsChevron />
+                    </span>
+                    <span className="settings-summary-meta">
                       {phase7.retrievalTrace.selectedCount} selected · {phase7.retrievalTrace.durationMs} ms · {phase7.retrievalTrace.indexCacheHit
                         ? "index cached"
                         : `index ${phase7.retrievalTrace.indexDurationMs} ms`}

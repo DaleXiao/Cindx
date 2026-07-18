@@ -636,7 +636,10 @@ assert(
       styles
     ) &&
     styles.includes("--scrollbar-size: 6px") &&
-    styles.includes("*::-webkit-scrollbar-thumb"),
+    styles.includes("*::-webkit-scrollbar-thumb") &&
+    appSource.includes('activeView === "settings"') &&
+    appSource.includes('? "Settings"') &&
+    !appSource.includes('{activeView !== "settings" && ('),
   "Settings must keep the sidebar material continuous through the titlebar and use the shared compact scrollbar"
 );
 assert(composerSource.includes('event.key !== "Enter"'), "Composer must support Enter to send");
@@ -2177,20 +2180,32 @@ assert(
     appSource.includes("<ScheduleView") &&
     scheduleViewSource.includes("New schedule") &&
     scheduleViewSource.includes("Run history") &&
-    scheduleViewSource.includes('data-empty={!state || state.schedules.length === 0}') &&
+    scheduleViewSource.includes('data-empty={!editing && (!state || state.schedules.length === 0)}') &&
+    scheduleViewSource.includes('data-editing-empty={editing && (!state || state.schedules.length === 0)}') &&
     scheduleViewSource.includes('className="secondary-button schedule-open-task"') &&
     !scheduleViewSource.includes("schedule-empty-action") &&
     scheduleViewSource.includes("cancelScheduleRun") &&
+    scheduleViewSource.includes("No project") &&
+    scheduleViewSource.includes("No task") &&
+    scheduleViewSource.includes("Ends (optional)") &&
+    scheduleViewSource.includes("weekdayOptions") &&
+    scheduleViewSource.includes("Back to App") &&
+    sidebarSource.includes("const [scheduleExpanded, setScheduleExpanded] = useState(false)") &&
+    sidebarSource.includes('aria-label={scheduleExpanded ? "Collapse schedules" : "Expand schedules"}') &&
     styles.includes(".schedule-layout") &&
     styles.includes(".sidebar-schedule-item") &&
     /\.sidebar-schedule-item \{[\s\S]*?height: 22px;[\s\S]*?font-size: 11px;[\s\S]*?text-transform: uppercase;/.test(styles) &&
     styles.includes('.schedule-layout[data-empty="true"]') &&
+    styles.includes('.schedule-layout[data-editing-empty="true"]') &&
     styles.includes(".schedule-history-title .schedule-open-task"),
   "Schedule must align with Projects and expose one polished creation path plus consistent run controls"
 );
 assert(
   cargoToml.includes('chrono-tz = "0.10"') &&
     scheduleSource.includes("daily_schedule_keeps_local_time_across_dst") &&
+    scheduleSource.includes("weekly_schedule_accepts_multiple_weekdays") &&
+    scheduleSource.includes("recurring_schedule_stops_after_end_time") &&
+    scheduleSource.includes("legacy_schedule_targets_migrate_to_execution_sessions") &&
     scheduleSource.includes("file.sync_all()") &&
     scheduleSource.includes("Permissions::from_mode(0o600)") &&
     rustLib.includes("start_schedule_runner(app.handle().clone())") &&
@@ -2198,6 +2213,8 @@ assert(
     rustLib.includes("SCHEDULE_MAX_DISPATCH_ATTEMPTS") &&
     rustLib.includes("fn reconcile_schedule_runs(") &&
     rustLib.includes("fn trigger_schedule_run(") &&
+    rustLib.includes("fn ensure_schedule_execution_session(") &&
+    rustLib.includes("schedule_execution_sessions_stay_out_of_the_task_sidebar") &&
     rustLib.includes("get_schedule_state,") &&
     rustLib.includes("upsert_schedule,") &&
     rustLib.includes("run_schedule_now,") &&

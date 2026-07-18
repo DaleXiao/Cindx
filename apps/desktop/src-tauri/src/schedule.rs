@@ -1,11 +1,12 @@
 use chrono::{Datelike, Duration, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-const CONFIG_VERSION: u32 = 1;
+const CONFIG_VERSION: u32 = 2;
 pub const RUN_HISTORY_LIMIT: usize = 16;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -74,13 +75,21 @@ impl ScheduleRunRecord {
 pub struct ScheduleRecord {
     pub id: String,
     pub name: String,
-    pub project_id: String,
-    pub session_id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub execution_session_id: String,
     pub prompt: String,
     pub effort: String,
     pub timezone: String,
     pub cadence: ScheduleCadence,
     pub anchor_at_ms: u64,
+    #[serde(default)]
+    pub weekly_days: Vec<u8>,
+    #[serde(default)]
+    pub ends_at_ms: Option<u64>,
     pub catch_up: bool,
     pub enabled: bool,
     pub next_run_at_ms: Option<u64>,
@@ -142,27 +151,49 @@ pub fn initial_next_run_at_ms(
     anchor_at_ms: u64,
     cadence: ScheduleCadence,
     timezone: &str,
+    weekly_days: &[u8],
+    ends_at_ms: Option<u64>,
     catch_up: bool,
     now_ms: u64,
 ) -> Result<Option<u64>, String> {
     parse_timezone(timezone)?;
+    if ends_at_ms.is_some_and(|ends_at_ms| anchor_at_ms > ends_at_ms) {
+        return Ok(None);
+    }
+    if ends_at_ms.is_some_and(|ends_at_ms| ends_at_ms <= now_ms && anchor_at_ms <= now_ms) {
+        return Ok(None);
+    }
     if anchor_at_ms > now_ms || catch_up {
         return Ok(Some(anchor_at_ms));
     }
     if !cadence.recurring() {
         return Ok(None);
     }
-    next_occurrence_after_ms(anchor_at_ms, cadence, timezone, now_ms)
+    next_occurrence_after_ms(
+        anchor_at_ms,
+        cadence,
+        timezone,
+        weekly_days,
+        ends_at_ms,
+        now_ms,
+    )
 }
 
 pub fn next_occurrence_after_ms(
     anchor_at_ms: u64,
     cadence: ScheduleCadence,
     timezone: &str,
+    weekly_days: &[u8],
+    ends_at_ms: Option<u64>,
     after_ms: u64,
 ) -> Result<Option<u64>, String> {
+    if ends_at_ms.is_some_and(|ends_at_ms| after_ms >= ends_at_ms) {
+        return Ok(None);
+    }
     if !cadence.recurring() {
-        return Ok((anchor_at_ms > after_ms).then_some(anchor_at_ms));
+        return Ok((anchor_at_ms > after_ms
+            && ends_at_ms.map_or(true, |ends_at_ms| anchor_at_ms <= ends_at_ms))
+        .then_some(anchor_at_ms));
     }
 
     let timezone = parse_timezone(timezone)?;
@@ -177,7 +208,7 @@ pub fn next_occurrence_after_ms(
         .ok_or_else(|| "schedule comparison time is out of range".to_string())?
         .with_timezone(&timezone);
     let anchor_time = anchor.time();
-    let anchor_weekday = anchor.weekday();
+    let weekly_days = normalized_weekly_days(anchor_at_ms, timezone.name(), weekly_days)?;
 
     for day_offset in 0..=14 {
         let Some(date) = after
@@ -190,7 +221,9 @@ pub fn next_occurrence_after_ms(
             ScheduleCadence::Once => false,
             ScheduleCadence::Daily => true,
             ScheduleCadence::Weekdays => date.weekday().number_from_monday() <= 5,
-            ScheduleCadence::Weekly => date.weekday() == anchor_weekday,
+            ScheduleCadence::Weekly => {
+                weekly_days.contains(&(date.weekday().number_from_monday() as u8))
+            }
         };
         if !eligible {
             continue;
@@ -200,11 +233,38 @@ pub fn next_occurrence_after_ms(
         };
         let candidate_ms = candidate.timestamp_millis();
         if candidate_ms >= 0 && candidate_ms as u64 > after_ms {
+            if ends_at_ms.is_some_and(|ends_at_ms| candidate_ms as u64 > ends_at_ms) {
+                return Ok(None);
+            }
             return Ok(Some(candidate_ms as u64));
         }
     }
 
     Err("could not calculate the next schedule occurrence".to_string())
+}
+
+pub fn normalized_weekly_days(
+    anchor_at_ms: u64,
+    timezone: &str,
+    weekly_days: &[u8],
+) -> Result<Vec<u8>, String> {
+    let timezone = parse_timezone(timezone)?;
+    let anchor = Utc
+        .timestamp_millis_opt(anchor_at_ms as i64)
+        .single()
+        .ok_or_else(|| "schedule start time is out of range".to_string())?
+        .with_timezone(&timezone);
+    let mut days = weekly_days
+        .iter()
+        .copied()
+        .filter(|day| (1..=7).contains(day))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if days.is_empty() {
+        days.push(anchor.weekday().number_from_monday() as u8);
+    }
+    Ok(days)
 }
 
 fn resolve_local_datetime(
@@ -236,6 +296,14 @@ pub fn load(path: &Path) -> Result<ScheduleConfig, String> {
         .map_err(|error| format!("failed to decode schedules: {error}"))?;
     config.version = CONFIG_VERSION;
     for schedule in &mut config.schedules {
+        if schedule.execution_session_id.trim().is_empty() {
+            schedule.execution_session_id = schedule.session_id.clone().unwrap_or_default();
+        }
+        schedule.weekly_days = normalized_weekly_days(
+            schedule.anchor_at_ms,
+            &schedule.timezone,
+            &schedule.weekly_days,
+        )?;
         if schedule.runs.len() > RUN_HISTORY_LIMIT {
             schedule
                 .runs
@@ -294,9 +362,16 @@ mod tests {
         let timezone: Tz = "America/New_York".parse().unwrap();
         let anchor = local_ms(timezone, 2026, 3, 7, 9);
         let after = local_ms(timezone, 2026, 3, 8, 8);
-        let next = next_occurrence_after_ms(anchor, ScheduleCadence::Daily, timezone.name(), after)
-            .unwrap()
-            .unwrap();
+        let next = next_occurrence_after_ms(
+            anchor,
+            ScheduleCadence::Daily,
+            timezone.name(),
+            &[],
+            None,
+            after,
+        )
+        .unwrap()
+        .unwrap();
         let next = Utc
             .timestamp_millis_opt(next as i64)
             .single()
@@ -314,10 +389,16 @@ mod tests {
         let timezone: Tz = "Asia/Shanghai".parse().unwrap();
         let anchor = local_ms(timezone, 2026, 7, 17, 9);
         let after = local_ms(timezone, 2026, 7, 17, 10);
-        let next =
-            next_occurrence_after_ms(anchor, ScheduleCadence::Weekdays, timezone.name(), after)
-                .unwrap()
-                .unwrap();
+        let next = next_occurrence_after_ms(
+            anchor,
+            ScheduleCadence::Weekdays,
+            timezone.name(),
+            &[],
+            None,
+            after,
+        )
+        .unwrap()
+        .unwrap();
         let next = Utc
             .timestamp_millis_opt(next as i64)
             .single()
@@ -341,6 +422,50 @@ mod tests {
     }
 
     #[test]
+    fn weekly_schedule_accepts_multiple_weekdays() {
+        let timezone: Tz = "Asia/Shanghai".parse().unwrap();
+        let anchor = local_ms(timezone, 2026, 7, 20, 9);
+        let after = local_ms(timezone, 2026, 7, 20, 10);
+        let next = next_occurrence_after_ms(
+            anchor,
+            ScheduleCadence::Weekly,
+            timezone.name(),
+            &[1, 3, 5],
+            None,
+            after,
+        )
+        .unwrap()
+        .unwrap();
+        let next = Utc
+            .timestamp_millis_opt(next as i64)
+            .single()
+            .unwrap()
+            .with_timezone(&timezone);
+        assert_eq!(next.weekday().number_from_monday(), 3);
+        assert_eq!(next.hour(), 9);
+    }
+
+    #[test]
+    fn recurring_schedule_stops_after_end_time() {
+        let timezone: Tz = "Asia/Shanghai".parse().unwrap();
+        let anchor = local_ms(timezone, 2026, 7, 20, 9);
+        let end = local_ms(timezone, 2026, 7, 21, 8);
+        let after = local_ms(timezone, 2026, 7, 20, 10);
+        assert_eq!(
+            next_occurrence_after_ms(
+                anchor,
+                ScheduleCadence::Daily,
+                timezone.name(),
+                &[],
+                Some(end),
+                after,
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn config_round_trip_keeps_private_schedule_data() {
         let root = std::env::temp_dir().join(format!(
             "cindx-schedule-test-{}-{}",
@@ -354,13 +479,16 @@ mod tests {
             schedules: vec![ScheduleRecord {
                 id: "schedule-one".to_string(),
                 name: "Daily review".to_string(),
-                project_id: "project-one".to_string(),
-                session_id: "session-one".to_string(),
+                project_id: Some("project-one".to_string()),
+                session_id: Some("session-one".to_string()),
+                execution_session_id: "session-one".to_string(),
                 prompt: "Summarize the workspace".to_string(),
                 effort: "auto".to_string(),
                 timezone: "Asia/Shanghai".to_string(),
                 cadence: ScheduleCadence::Daily,
                 anchor_at_ms: 1_800_000_000_000,
+                weekly_days: vec![1],
+                ends_at_ms: None,
                 catch_up: true,
                 enabled: true,
                 next_run_at_ms: Some(1_800_000_000_000),
@@ -379,6 +507,47 @@ mod tests {
                 0o600
             );
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_schedule_targets_migrate_to_execution_sessions() {
+        let root = std::env::temp_dir().join(format!(
+            "cindx-schedule-migration-test-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("schedules.json");
+        let payload = serde_json::json!({
+            "version": 1,
+            "schedules": [{
+                "id": "schedule-legacy",
+                "name": "Legacy",
+                "projectId": "project-one",
+                "sessionId": "session-one",
+                "prompt": "Review",
+                "effort": "auto",
+                "timezone": "Asia/Shanghai",
+                "cadence": "weekly",
+                "anchorAtMs": 1_800_000_000_000u64,
+                "catchUp": true,
+                "enabled": true,
+                "nextRunAtMs": 1_800_000_000_000u64,
+                "createdAtMs": 1,
+                "updatedAtMs": 1,
+                "runs": []
+            }]
+        });
+        fs::write(&path, serde_json::to_vec_pretty(&payload).unwrap()).unwrap();
+
+        let loaded = load(&path).unwrap();
+        let schedule = &loaded.schedules[0];
+        assert_eq!(schedule.project_id.as_deref(), Some("project-one"));
+        assert_eq!(schedule.session_id.as_deref(), Some("session-one"));
+        assert_eq!(schedule.execution_session_id, "session-one");
+        assert_eq!(schedule.weekly_days.len(), 1);
+
         fs::remove_dir_all(root).unwrap();
     }
 }
