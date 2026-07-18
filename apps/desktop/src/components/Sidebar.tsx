@@ -15,7 +15,12 @@ import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { Menu } from "@tauri-apps/api/menu";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { ProjectView, SessionView } from "../tauri";
+import {
+  getScheduleState,
+  type ProjectView,
+  type ScheduleView,
+  type SessionView
+} from "../tauri";
 
 const appIconUrl = new URL("../../src-tauri/icons/icon.png", import.meta.url).href;
 
@@ -95,9 +100,11 @@ type SidebarProps = {
   busy: boolean;
   searchOpen: boolean;
   searchQuery: string;
+  selectedScheduleId: string | null;
   projectCreateOpen: boolean;
   projectName: string;
   onViewChange: (view: WorkspaceView) => void;
+  onScheduleSelect: (scheduleId: string) => void;
   onSearchToggle: () => void;
   onSearchQueryChange: (query: string) => void;
   onProjectCreateToggle: () => void;
@@ -121,9 +128,11 @@ export function Sidebar({
   busy,
   searchOpen,
   searchQuery,
+  selectedScheduleId,
   projectCreateOpen,
   projectName,
   onViewChange,
+  onScheduleSelect,
   onSearchToggle,
   onSearchQueryChange,
   onProjectCreateToggle,
@@ -143,6 +152,8 @@ export function Sidebar({
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(
     () => new Set()
   );
+  const [scheduleExpanded, setScheduleExpanded] = useState(false);
+  const [schedules, setSchedules] = useState<ScheduleView[]>([]);
   const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
   const [projectRenameDraft, setProjectRenameDraft] = useState("");
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
@@ -152,6 +163,25 @@ export function Sidebar({
   const deleteCancelRef = useRef<HTMLButtonElement>(null);
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const searchActive = searchOpen && Boolean(searchQuery.trim());
+
+  useEffect(() => {
+    if (!scheduleExpanded) return;
+    let disposed = false;
+    const refresh = async () => {
+      try {
+        const next = await getScheduleState();
+        if (!disposed) setSchedules(next.schedules);
+      } catch {
+        return;
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 5_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [scheduleExpanded]);
 
   useEffect(() => {
     if (!deleteTarget) return;
@@ -380,17 +410,59 @@ export function Sidebar({
       )}
 
       <nav className="sidebar-primary-nav" aria-label="Workspace views">
-        <button
-          className={`sidebar-schedule-item ${
-            activeView === "schedule" ? "active" : ""
-          }`}
-          type="button"
-          aria-current={activeView === "schedule" ? "page" : undefined}
-          onClick={() => onViewChange("schedule")}
-        >
-          <CalendarClock aria-hidden="true" />
-          <span>Schedule</span>
-        </button>
+        <div className="sidebar-schedule-node">
+          <div className={`sidebar-schedule-row ${activeView === "schedule" ? "active" : ""}`}>
+            <button
+              className="sidebar-schedule-item"
+              type="button"
+              aria-current={activeView === "schedule" ? "page" : undefined}
+              onClick={() => onViewChange("schedule")}
+            >
+              <CalendarClock aria-hidden="true" />
+              <span>Schedule</span>
+            </button>
+            <button
+              className="schedule-disclosure"
+              type="button"
+              aria-label={scheduleExpanded ? "Collapse schedules" : "Expand schedules"}
+              aria-expanded={scheduleExpanded}
+              title={scheduleExpanded ? "Collapse schedules" : "Expand schedules"}
+              onClick={() => setScheduleExpanded((expanded) => !expanded)}
+            >
+              <ChevronRight className="project-disclosure-chevron" aria-hidden="true" />
+            </button>
+          </div>
+          {scheduleExpanded && (
+            <div className="sidebar-schedule-list">
+              {schedules.length === 0 ? (
+                <div className="nav-empty">No schedules</div>
+              ) : (
+                schedules.map((schedule) => (
+                  <button
+                    className={`sidebar-schedule-entry ${
+                      activeView === "schedule" && selectedScheduleId === schedule.id
+                        ? "active"
+                        : ""
+                    }`}
+                    type="button"
+                    key={schedule.id}
+                    title={
+                      schedule.projectId
+                        ? `${schedule.name} · ${schedule.projectName}`
+                        : schedule.name
+                    }
+                    onClick={() => {
+                      onScheduleSelect(schedule.id);
+                      onViewChange("schedule");
+                    }}
+                  >
+                    <span>{schedule.name}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          )}
+        </div>
       </nav>
 
       <section className="project-tree" aria-label="Project tree">

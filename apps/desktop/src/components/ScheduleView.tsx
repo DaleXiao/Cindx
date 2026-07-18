@@ -1,4 +1,5 @@
 import {
+  ArrowLeft,
   ArrowRight,
   CalendarClock,
   CheckCircle2,
@@ -40,6 +41,8 @@ type ScheduleDraft = {
   timezone: string;
   cadence: ScheduleCadence;
   startLocal: string;
+  weeklyDays: number[];
+  endsLocal: string;
   catchUp: boolean;
   enabled: boolean;
 };
@@ -57,6 +60,16 @@ const effortOptions: Array<{ value: AgentEffort; label: string }> = [
   { value: "pro", label: "Pro" }
 ];
 
+const weekdayOptions = [
+  { value: 1, label: "Mon" },
+  { value: 2, label: "Tue" },
+  { value: 3, label: "Wed" },
+  { value: 4, label: "Thu" },
+  { value: 5, label: "Fri" },
+  { value: 6, label: "Sat" },
+  { value: 7, label: "Sun" }
+];
+
 const activeRunStatuses = new Set([
   "preparing",
   "queued",
@@ -72,24 +85,6 @@ function localDateTimeValue(timestampMs: number) {
   )}:${pad(date.getMinutes())}`;
 }
 
-function zonedDateTimeValue(timestampMs: number, timezone: string) {
-  try {
-    const parts = new Intl.DateTimeFormat("en-CA", {
-      timeZone: timezone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      hourCycle: "h23"
-    }).formatToParts(new Date(timestampMs));
-    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-    return `${values.year}-${values.month}-${values.day}T${values.hour}:${values.minute}`;
-  } catch {
-    return localDateTimeValue(timestampMs);
-  }
-}
-
 function defaultStartValue() {
   const date = new Date(Date.now() + 5 * 60_000);
   date.setSeconds(0, 0);
@@ -100,33 +95,16 @@ function currentTimeZone() {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
-function timeZoneOptions() {
-  return Array.from(
-    new Set([
-      currentTimeZone(),
-      "UTC",
-      "Asia/Shanghai",
-      "Asia/Tokyo",
-      "Europe/London",
-      "Europe/Paris",
-      "America/New_York",
-      "America/Chicago",
-      "America/Los_Angeles"
-    ])
-  );
+function currentWeekday() {
+  return ((new Date().getDay() + 6) % 7) + 1;
 }
 
-function formatTime(timestampMs: number | null, timezone: string) {
+function formatTime(timestampMs: number | null) {
   if (!timestampMs) return "Not scheduled";
-  try {
-    return new Intl.DateTimeFormat(undefined, {
-      dateStyle: "medium",
-      timeStyle: "short",
-      timeZone: timezone
-    }).format(new Date(timestampMs));
-  } catch {
-    return new Date(timestampMs).toLocaleString();
-  }
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short"
+  }).format(new Date(timestampMs));
 }
 
 function runStatusLabel(status: string) {
@@ -134,26 +112,19 @@ function runStatusLabel(status: string) {
   return status.charAt(0).toUpperCase() + status.slice(1);
 }
 
-function draftForNew(projects: ProjectView[], sessions: SessionView[]): ScheduleDraft {
-  const project = projects.find((candidate) => candidate.active) ?? projects[0];
-  const session =
-    sessions.find(
-      (candidate) =>
-        candidate.projectId === project?.id && candidate.active && !candidate.archived
-    ) ??
-    sessions.find(
-      (candidate) => candidate.projectId === project?.id && !candidate.archived
-    );
+function draftForNew(): ScheduleDraft {
   return {
     id: null,
     name: "",
-    projectId: project?.id ?? "",
-    sessionId: session?.id ?? "",
+    projectId: "",
+    sessionId: "",
     prompt: "",
     effort: "auto",
     timezone: currentTimeZone(),
     cadence: "once",
     startLocal: defaultStartValue(),
+    weeklyDays: [currentWeekday()],
+    endsLocal: "",
     catchUp: true,
     enabled: true
   };
@@ -163,13 +134,15 @@ function draftForSchedule(schedule: ScheduleRecord): ScheduleDraft {
   return {
     id: schedule.id,
     name: schedule.name,
-    projectId: schedule.projectId,
-    sessionId: schedule.sessionId,
+    projectId: schedule.projectId ?? "",
+    sessionId: schedule.sessionId ?? "",
     prompt: schedule.prompt,
     effort: schedule.effort,
-    timezone: schedule.timezone,
+    timezone: currentTimeZone(),
     cadence: schedule.cadence,
-    startLocal: zonedDateTimeValue(schedule.anchorAtMs, schedule.timezone),
+    startLocal: localDateTimeValue(schedule.anchorAtMs),
+    weeklyDays: schedule.weeklyDays.length ? schedule.weeklyDays : [currentWeekday()],
+    endsLocal: schedule.endsAtMs ? localDateTimeValue(schedule.endsAtMs) : "",
     catchUp: schedule.catchUp,
     enabled: schedule.enabled
   };
@@ -179,12 +152,22 @@ type ScheduleViewProps = {
   projects: ProjectView[];
   sessions: SessionView[];
   onOpenSession: (sessionId: string) => void;
+  onBack: () => void;
+  requestedScheduleId: string | null;
+  onScheduleSelect: (scheduleId: string | null) => void;
 };
 
-export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleViewProps) {
+export function ScheduleView({
+  projects,
+  sessions,
+  onOpenSession,
+  onBack,
+  requestedScheduleId,
+  onScheduleSelect
+}: ScheduleViewProps) {
   const [state, setState] = useState<ScheduleState | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [draft, setDraft] = useState<ScheduleDraft>(() => draftForNew(projects, sessions));
+  const [selectedId, setSelectedId] = useState<string | null>(requestedScheduleId);
+  const [draft, setDraft] = useState<ScheduleDraft>(draftForNew);
   const [editing, setEditing] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -218,12 +201,12 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
   }, []);
 
   useEffect(() => {
-    if (!editing || draft.id) return;
-    setDraft((current) => {
-      if (current.projectId && current.sessionId) return current;
-      return draftForNew(projects, sessions);
-    });
-  }, [draft.id, editing, projects, sessions]);
+    if (!requestedScheduleId) return;
+    if (state?.schedules.some((schedule) => schedule.id === requestedScheduleId)) {
+      setSelectedId(requestedScheduleId);
+      setEditing(false);
+    }
+  }, [requestedScheduleId, state]);
 
   const selected =
     state?.schedules.find((schedule) => schedule.id === selectedId) ?? null;
@@ -236,13 +219,14 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
   );
 
   function beginNew() {
-    setDraft(draftForNew(projects, sessions));
+    setDraft(draftForNew());
     setEditing(true);
     setError(null);
   }
 
   function beginEdit(schedule: ScheduleRecord) {
     setSelectedId(schedule.id);
+    onScheduleSelect(schedule.id);
     setDraft(draftForSchedule(schedule));
     setEditing(true);
     setError(null);
@@ -268,16 +252,29 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
       setError("Choose a valid start time.");
       return;
     }
+    if (
+      draft.endsLocal &&
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(draft.endsLocal)
+    ) {
+      setError("Choose a valid end time.");
+      return;
+    }
+    if (draft.cadence === "weekly" && draft.weeklyDays.length === 0) {
+      setError("Choose at least one day for a weekly schedule.");
+      return;
+    }
     const input: UpsertScheduleInput = {
       id: draft.id,
       name: draft.name,
-      projectId: draft.projectId,
-      sessionId: draft.sessionId,
+      projectId: draft.projectId || null,
+      sessionId: draft.sessionId || null,
       prompt: draft.prompt,
       effort: draft.effort,
       timezone: draft.timezone,
       cadence: draft.cadence,
       anchorLocal: draft.startLocal,
+      weeklyDays: draft.weeklyDays,
+      endsLocal: draft.endsLocal || null,
       catchUp: draft.catchUp,
       enabled: draft.enabled
     };
@@ -288,10 +285,12 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
       : [...next.schedules]
           .filter(
             (schedule) =>
-              schedule.name === draft.name.trim() && schedule.sessionId === draft.sessionId
+              schedule.name === draft.name.trim() &&
+              schedule.sessionId === (draft.sessionId || null)
           )
           .sort((left, right) => right.updatedAtMs - left.updatedAtMs)[0];
     setSelectedId(saved?.id ?? next.schedules[0]?.id ?? null);
+    onScheduleSelect(saved?.id ?? next.schedules[0]?.id ?? null);
     setEditing(false);
   }
 
@@ -301,10 +300,20 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
   return (
     <section className="schedule-view" aria-label="Schedule">
       <header className="schedule-toolbar">
-        <div className="schedule-title">
-          <CalendarClock aria-hidden="true" />
-          <h2>Scheduled tasks</h2>
-          <span>{state?.schedules.length ?? 0}</span>
+        <div className="schedule-toolbar-leading">
+          <button
+            className="workspace-return-button schedule-app-return"
+            type="button"
+            onClick={onBack}
+          >
+            <ArrowLeft aria-hidden="true" />
+            <span>Back to App</span>
+          </button>
+          <div className="schedule-title">
+            <CalendarClock aria-hidden="true" />
+            <h2>Scheduled tasks</h2>
+            <span>{state?.schedules.length ?? 0}</span>
+          </div>
         </div>
         <button
           className="secondary-button schedule-new-button"
@@ -328,7 +337,8 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
 
       <div
         className="schedule-layout"
-        data-empty={!state || state.schedules.length === 0}
+        data-empty={!editing && (!state || state.schedules.length === 0)}
+        data-editing-empty={editing && (!state || state.schedules.length === 0)}
       >
         <div className="schedule-list" aria-label="Scheduled tasks">
           {!state ? (
@@ -345,6 +355,7 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
                   key={schedule.id}
                   onClick={() => {
                     setSelectedId(schedule.id);
+                    onScheduleSelect(schedule.id);
                     setEditing(false);
                   }}
                 >
@@ -362,7 +373,7 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
                     {run && activeRunStatuses.has(run.status)
                       ? runStatusLabel(run.status)
                       : schedule.enabled
-                        ? formatTime(schedule.nextRunAtMs, schedule.timezone)
+                        ? formatTime(schedule.nextRunAtMs)
                         : "Paused"}
                   </span>
                 </button>
@@ -410,17 +421,13 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
                 <label className="schedule-field">
                   <span>Project</span>
                   <select
-                    required
                     value={draft.projectId}
                     onChange={(event) => {
                       const projectId = event.target.value;
-                      const sessionId =
-                        sessions.find(
-                          (session) => session.projectId === projectId && !session.archived
-                        )?.id ?? "";
-                      setDraft((current) => ({ ...current, projectId, sessionId }));
+                      setDraft((current) => ({ ...current, projectId, sessionId: "" }));
                     }}
                   >
+                    <option value="">No project</option>
                     {projects.map((project) => (
                       <option value={project.id} key={project.id}>
                         {project.name}
@@ -431,12 +438,13 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
                 <label className="schedule-field">
                   <span>Task</span>
                   <select
-                    required
+                    disabled={!draft.projectId}
                     value={draft.sessionId}
                     onChange={(event) =>
                       setDraft((current) => ({ ...current, sessionId: event.target.value }))
                     }
                   >
+                    <option value="">No task</option>
                     {projectSessions.map((session) => (
                       <option value={session.id} key={session.id}>
                         {session.name}
@@ -458,8 +466,8 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
                 />
               </label>
 
-              <fieldset className="schedule-field schedule-segment-field">
-                <legend>Repeat</legend>
+              <div className="schedule-field schedule-segment-field">
+                <span>Repeat</span>
                 <div className="schedule-segmented">
                   {cadenceOptions.map((option) => (
                     <button
@@ -468,14 +476,50 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
                       key={option.value}
                       aria-pressed={draft.cadence === option.value}
                       onClick={() =>
-                        setDraft((current) => ({ ...current, cadence: option.value }))
+                        setDraft((current) => ({
+                          ...current,
+                          cadence: option.value,
+                          weeklyDays:
+                            option.value === "weekly" && current.weeklyDays.length === 0
+                              ? [currentWeekday()]
+                              : current.weeklyDays
+                        }))
                       }
                     >
                       {option.label}
                     </button>
                   ))}
                 </div>
-              </fieldset>
+              </div>
+
+              {draft.cadence === "weekly" && (
+                <div className="schedule-field schedule-weekday-field">
+                  <span>Runs on</span>
+                  <div className="schedule-weekdays" aria-label="Weekly days">
+                    {weekdayOptions.map((day) => {
+                      const selected = draft.weeklyDays.includes(day.value);
+                      return (
+                        <button
+                          className={selected ? "active" : ""}
+                          type="button"
+                          key={day.value}
+                          aria-pressed={selected}
+                          onClick={() =>
+                            setDraft((current) => ({
+                              ...current,
+                              weeklyDays: selected
+                                ? current.weeklyDays.filter((value) => value !== day.value)
+                                : [...current.weeklyDays, day.value].sort((a, b) => a - b)
+                            }))
+                          }
+                        >
+                          {day.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               <div className="schedule-field-grid">
                 <label className="schedule-field">
@@ -490,24 +534,20 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
                   />
                 </label>
                 <label className="schedule-field">
-                  <span>Time zone</span>
-                  <select
-                    value={draft.timezone}
+                  <span>Ends (optional)</span>
+                  <input
+                    type="datetime-local"
+                    min={draft.startLocal}
+                    value={draft.endsLocal}
                     onChange={(event) =>
-                      setDraft((current) => ({ ...current, timezone: event.target.value }))
+                      setDraft((current) => ({ ...current, endsLocal: event.target.value }))
                     }
-                  >
-                    {timeZoneOptions().map((timezone) => (
-                      <option value={timezone} key={timezone}>
-                        {timezone}
-                      </option>
-                    ))}
-                  </select>
+                  />
                 </label>
               </div>
 
-              <fieldset className="schedule-field schedule-segment-field">
-                <legend>Effort</legend>
+              <div className="schedule-field schedule-segment-field">
+                <span>Effort</span>
                 <div className="schedule-segmented schedule-effort-segmented">
                   {effortOptions.map((option) => (
                     <button
@@ -523,7 +563,7 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
                     </button>
                   ))}
                 </div>
-              </fieldset>
+              </div>
 
               <div className="schedule-switches">
                 <label className="settings-switch">
@@ -565,9 +605,8 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
                   disabled={
                     busyAction === "save" ||
                     !draft.name.trim() ||
-                    !draft.projectId ||
-                    !draft.sessionId ||
-                    !draft.prompt.trim()
+                    !draft.prompt.trim() ||
+                    (draft.cadence === "weekly" && draft.weeklyDays.length === 0)
                   }
                 >
                   <Save aria-hidden="true" />
@@ -581,7 +620,11 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
                 <div>
                   <span className="schedule-eyebrow">{selected.cadence}</span>
                   <h3>{selected.name}</h3>
-                  <p>{selected.projectName} · {selected.sessionName}</p>
+                  <p>
+                    {selected.projectId
+                      ? `${selected.projectName} · ${selected.sessionName}`
+                      : "Standalone schedule"}
+                  </p>
                 </div>
                 <div className="schedule-summary-actions">
                   {activeRun ? (
@@ -639,11 +682,11 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
               <div className="schedule-status-band">
                 <div>
                   <span>Next</span>
-                  <strong>{formatTime(selected.nextRunAtMs, selected.timezone)}</strong>
+                  <strong>{formatTime(selected.nextRunAtMs)}</strong>
                 </div>
                 <div>
-                  <span>Time zone</span>
-                  <strong>{selected.timezone}</strong>
+                  <span>Ends</span>
+                  <strong>{selected.endsAtMs ? formatTime(selected.endsAtMs) : "No end"}</strong>
                 </div>
                 <div>
                   <span>Effort</span>
@@ -673,14 +716,18 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
               <section className="schedule-history" aria-label="Run history">
                 <div className="schedule-history-title">
                   <h4>Run history</h4>
-                  <button
-                    className="secondary-button schedule-open-task"
-                    type="button"
-                    onClick={() => onOpenSession(selected.sessionId)}
-                  >
-                    <span>Open task</span>
-                    <ArrowRight aria-hidden="true" />
-                  </button>
+                  {selected.sessionId && (
+                    <button
+                      className="secondary-button schedule-open-task"
+                      type="button"
+                      onClick={() => {
+                        if (selected.sessionId) onOpenSession(selected.sessionId);
+                      }}
+                    >
+                      <span>Open task</span>
+                      <ArrowRight aria-hidden="true" />
+                    </button>
+                  )}
                 </div>
                 {selected.runs.length === 0 ? (
                   <div className="schedule-history-empty">No runs</div>
@@ -698,7 +745,7 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
                         <strong>{runStatusLabel(run.status)}</strong>
                         <small>{run.source === "manual" ? "Manual" : "Scheduled"}</small>
                       </span>
-                      <time>{formatTime(run.scheduledForMs, selected.timezone)}</time>
+                      <time>{formatTime(run.scheduledForMs)}</time>
                       {run.error && <p>{run.error}</p>}
                     </div>
                   ))
@@ -738,6 +785,7 @@ export function ScheduleView({ projects, sessions, onOpenSession }: ScheduleView
                     void perform(`delete-${scheduleId}`, async () => {
                       const next = await deleteSchedule(scheduleId);
                       setSelectedId(next.schedules[0]?.id ?? null);
+                      onScheduleSelect(next.schedules[0]?.id ?? null);
                       return next;
                     });
                   }}

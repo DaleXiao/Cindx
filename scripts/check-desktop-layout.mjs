@@ -51,10 +51,11 @@ assert(
 assert(
     appSource.includes('className="sidebar-resize-handle"') &&
     appSource.includes('aria-label="Resize sidebar"') &&
-    css.includes("left: calc(var(--sidebar-layout-width) - 3px)") &&
-    css.includes("-1px 0 3px rgba(0, 0, 0, 0.075)") &&
-    css.includes("-8px 0 18px rgba(0, 0, 0, 0.028)"),
-  "Sidebar divider must expose a resize edge and subtle left-facing depth"
+    css.includes("left: calc(var(--sidebar-layout-width) - 7px)") &&
+    css.includes("width: 7px") &&
+    css.includes("rgba(0, 0, 0, 0.012) 58%") &&
+    css.includes("rgba(0, 0, 0, 0.07) 100%"),
+  "Sidebar divider must expose a clean single-layer left-facing depth"
 );
 assert(
   css.includes(".window-workspace-header") &&

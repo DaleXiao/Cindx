@@ -167,15 +167,17 @@ export type ScheduleRun = {
 export type ScheduleView = {
   id: string;
   name: string;
-  projectId: string;
+  projectId: string | null;
   projectName: string;
-  sessionId: string;
+  sessionId: string | null;
   sessionName: string;
   prompt: string;
   effort: AgentEffort;
   timezone: string;
   cadence: ScheduleCadence;
   anchorAtMs: number;
+  weeklyDays: number[];
+  endsAtMs: number | null;
   catchUp: boolean;
   enabled: boolean;
   nextRunAtMs: number | null;
@@ -192,13 +194,15 @@ export type ScheduleState = {
 export type UpsertScheduleInput = {
   id?: string | null;
   name: string;
-  projectId: string;
-  sessionId: string;
+  projectId: string | null;
+  sessionId: string | null;
   prompt: string;
   effort: AgentEffort;
   timezone: string;
   cadence: ScheduleCadence;
   anchorLocal: string;
+  weeklyDays: number[];
+  endsLocal: string | null;
   catchUp: boolean;
   enabled: boolean;
 };
@@ -1379,8 +1383,8 @@ function browserScheduleTarget(input: UpsertScheduleInput) {
     (candidate) => candidate.id === input.sessionId
   );
   return {
-    projectName: project?.name ?? "Missing project",
-    sessionName: session?.name ?? "Missing session"
+    projectName: project?.name ?? "No project",
+    sessionName: session?.name ?? "Standalone"
   };
 }
 
@@ -1407,6 +1411,8 @@ export async function upsertSchedule(input: UpsertScheduleInput): Promise<Schedu
       timezone: input.timezone,
       cadence: input.cadence,
       anchorAtMs,
+      weeklyDays: input.weeklyDays,
+      endsAtMs: input.endsLocal ? new Date(input.endsLocal).getTime() : null,
       catchUp: input.catchUp,
       enabled: input.enabled,
       nextRunAtMs: input.enabled ? anchorAtMs : null,

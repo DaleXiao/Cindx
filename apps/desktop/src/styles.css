@@ -162,14 +162,16 @@ pre {
   z-index: 45;
   top: 0;
   bottom: 0;
-  left: calc(var(--sidebar-layout-width) - 1px);
-  width: 1px;
+  left: calc(var(--sidebar-layout-width) - 7px);
+  width: 7px;
   content: "";
   pointer-events: none;
-  background: var(--border);
-  box-shadow:
-    -1px 0 3px rgba(0, 0, 0, 0.075),
-    -8px 0 18px rgba(0, 0, 0, 0.028);
+  background: linear-gradient(
+    90deg,
+    rgba(0, 0, 0, 0) 0%,
+    rgba(0, 0, 0, 0.012) 58%,
+    rgba(0, 0, 0, 0.07) 100%
+  );
   opacity: 1;
   transition:
     left 180ms var(--ease-out-quart),
@@ -642,10 +644,25 @@ pre {
   min-height: 22px;
 }
 
+.sidebar-schedule-node {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.sidebar-schedule-row {
+  display: flex;
+  min-width: 0;
+  height: 22px;
+  align-items: center;
+  border-radius: var(--radius-sm);
+}
+
 .sidebar-schedule-item {
   display: inline-flex;
-  width: 100%;
+  min-width: 0;
   height: 22px;
+  flex: 1;
   align-items: center;
   justify-content: flex-start;
   gap: 5px;
@@ -669,11 +686,69 @@ pre {
   font-weight: 750;
 }
 
+.sidebar-schedule-row.active .sidebar-schedule-item {
+  color: var(--text);
+  font-weight: 750;
+}
+
 .sidebar-schedule-item svg {
   width: 12px;
   height: 12px;
   flex: 0 0 auto;
   stroke-width: 1.7;
+}
+
+.schedule-disclosure {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  padding: 0;
+  place-items: center;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+}
+
+.schedule-disclosure:hover {
+  color: var(--text);
+}
+
+.schedule-disclosure[aria-expanded="true"] .project-disclosure-chevron {
+  transform: rotate(90deg);
+}
+
+.sidebar-schedule-list {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding-left: 17px;
+}
+
+.sidebar-schedule-entry {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  overflow: hidden;
+  color: var(--text);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.sidebar-schedule-entry:hover {
+  background: var(--surface-hover);
+}
+
+.sidebar-schedule-entry.active {
+  background: var(--session-selection);
 }
 
 .project-tree {
@@ -3549,6 +3624,18 @@ textarea::placeholder {
   border-bottom: 1px solid var(--border);
 }
 
+.schedule-toolbar-leading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 20px;
+}
+
+.schedule-app-return {
+  flex: 0 0 auto;
+  margin-left: -8px;
+}
+
 .schedule-title {
   display: flex;
   min-width: 0;
@@ -3632,6 +3719,14 @@ textarea::placeholder {
 }
 
 .schedule-layout[data-empty="true"] .schedule-detail {
+  display: none;
+}
+
+.schedule-layout[data-editing-empty="true"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.schedule-layout[data-editing-empty="true"] .schedule-list {
   display: none;
 }
 
@@ -3839,14 +3934,48 @@ textarea::placeholder {
 
 .schedule-segmented {
   display: grid;
+  width: fit-content;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   padding: 2px;
   background: #f1f1f1;
   border-radius: var(--radius-md);
 }
 
+.schedule-segmented:not(.schedule-effort-segmented) {
+  grid-template-columns: repeat(4, 76px);
+}
+
 .schedule-effort-segmented {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(3, 72px);
+}
+
+.schedule-weekdays {
+  display: grid;
+  width: fit-content;
+  grid-template-columns: repeat(7, 44px);
+  gap: 4px;
+}
+
+.schedule-weekdays button {
+  height: 30px;
+  padding: 0;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.schedule-weekdays button:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.schedule-weekdays button.active {
+  color: var(--accent);
+  background: rgba(37, 99, 235, 0.07);
+  border-color: rgba(37, 99, 235, 0.24);
 }
 
 .schedule-segmented button {
@@ -4546,6 +4675,7 @@ textarea::placeholder {
   color: var(--muted);
   cursor: pointer;
   font-size: 11px;
+  line-height: 20px;
   list-style: none;
 }
 
@@ -4560,9 +4690,9 @@ textarea::placeholder {
 .settings-disclosure-chevron,
 .settings-action-chevron {
   display: inline-grid;
-  width: 16px;
+  width: 14px;
   height: 20px;
-  flex: 0 0 16px;
+  flex: 0 0 14px;
   align-self: center;
   place-items: center;
   vertical-align: middle;
@@ -4586,7 +4716,14 @@ textarea::placeholder {
 }
 
 details[open] > summary .settings-disclosure-chevron > svg {
-  transform: rotate(90deg);
+  transform: rotate(180deg);
+}
+
+.advanced-settings summary > span,
+.advanced-settings summary > strong,
+.permission-review-input summary > span,
+.permission-ignored-reviews summary > span {
+  line-height: 20px;
 }
 
 .advanced-settings[open] summary {
@@ -5063,8 +5200,14 @@ details[open] > summary .settings-disclosure-chevron > svg {
   width: 100%;
 }
 
-.knowledge-graph-details > summary > span:last-child,
-.retrieval-trace-details > summary > span:last-child {
+.settings-summary-label {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 3px;
+}
+
+.settings-summary-meta {
   margin-left: auto;
   color: var(--muted);
   font-size: 10px;
@@ -5547,6 +5690,7 @@ details[open] > summary .settings-disclosure-chevron > svg {
   color: var(--muted);
   cursor: pointer;
   font-size: 10px;
+  line-height: 20px;
   list-style: none;
 }
 
