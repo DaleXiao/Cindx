@@ -322,10 +322,12 @@ assert(
     runControlSource.includes("DeadlineExceeded") &&
     rustLib.includes("request_agent_run_cancel") &&
     rustLib.includes("emit_agent_stream_delta") &&
-    appSource.includes("payload.sessionId !== activeSessionIdRef.current") &&
-    appSource.includes("if (payload.reset)") &&
-    appSource.includes("streamBuffer += payload.delta") &&
-    appSource.includes("window.setTimeout(flushStreamBuffer, 80)") &&
+    appSource.includes("<LiveSessionThread") &&
+    !appSource.includes("subscribeToModelStream") &&
+    sessionThreadSource.includes("payload.sessionId ?? activeSessionIdRef.current") &&
+    sessionThreadSource.includes("if (payload.reset) clearStream()") &&
+    sessionThreadSource.includes("streamBufferRef.current += payload.delta") &&
+    sessionThreadSource.includes("window.setTimeout(flush, 80)") &&
     appSource.includes("markSessionBusy(sessionId, false)") &&
     tauriBridge.includes("sessionId: string | null") &&
     tauriBridge.includes("reset: boolean"),
@@ -722,11 +724,16 @@ assert(
   "Minimap must index only sparse, substantive user and model output anchors"
 );
 assert(
-  packageJson.dependencies["@tanstack/react-virtual"] &&
+    packageJson.dependencies["@tanstack/react-virtual"] &&
     sessionThreadSource.includes('import { useVirtualizer } from "@tanstack/react-virtual"') &&
     sessionThreadSource.includes("const rowVirtualizer = useVirtualizer") &&
     sessionThreadSource.includes("const virtualRows = rowVirtualizer.getVirtualItems()") &&
-    sessionThreadSource.includes("ref={rowVirtualizer.measureElement}") &&
+    sessionThreadSource.includes("const rowMeasurementRevision = useMemo") &&
+    sessionThreadSource.includes("const measureRenderedRows = useCallback") &&
+    sessionThreadSource.includes("rowVirtualizer.resizeItem(") &&
+    sessionThreadSource.includes("element.getBoundingClientRect().height") &&
+    sessionThreadSource.includes("useAnimationFrameWithResizeObserver: false") &&
+    sessionThreadSource.includes("ref={measureThreadRow}") &&
     sessionThreadSource.includes('className="thread-virtual-list"') &&
     sessionThreadSource.includes('className="thread-virtual-row"') &&
     styles.includes(".thread-virtual-list") &&
@@ -916,6 +923,10 @@ assert(
 assert(
   sidebarSource.includes('if (!state || (active && state !== "working")) return null;') &&
     sidebarSource.includes('<LoaderCircle aria-hidden="true" />') &&
+    sidebarSource.includes('"approval required"') &&
+    sidebarSource.includes('"waiting_for_input"') &&
+    sidebarSource.includes('"paused"') &&
+    sidebarSource.includes('"interrupted"') &&
     styles.includes(".session-status-working svg") &&
     styles.includes("animation: spin 900ms linear infinite") &&
     /\.session-status \{[\s\S]*?right: 3px;[\s\S]*?width: 26px;[\s\S]*?height: 28px;/.test(
@@ -957,6 +968,8 @@ assert(
     styles.includes(".session-status-working") &&
     styles.includes(".session-status-complete") &&
     styles.includes(".session-status-attention") &&
+    styles.includes(".session-status-complete > span") &&
+    styles.includes(".session-status-complete > span,\n  .session-status-attention > span") &&
     sidebarSource.includes('if (!state || (active && state !== "working")) return null;') &&
     sidebarSource.includes("active={session.active}") &&
     sidebarSource.includes('className="session-name"') &&
@@ -964,8 +977,9 @@ assert(
     styles.includes(".session-name") &&
     appSource.includes("trackedSessionTaskIdsRef") &&
     appSource.includes("markSessionTaskStarted(sessionId)") &&
-    appSource.includes('nextStatus = "Completed"') &&
-    appSource.includes('nextStatus = "Blocked"'),
+    appSource.includes('canContinue ? "Paused" : "Completed"') &&
+    appSource.includes('nextStatus = "Error"') &&
+    appSource.includes('nextStatus = "Interrupted"'),
   "Sidebar rows must show normal-weight titles and only icon-only background task state"
 );
 assert(
@@ -1298,6 +1312,9 @@ assert(
     appSource.includes("provider-endpoint-check") &&
     appSource.includes("validateImageEndpoint") &&
     appSource.includes('emptyLabel="Not configured"') &&
+    styles.includes("grid-template-columns: minmax(0, 1fr) 18px") &&
+    styles.includes(".provider-endpoint-check") &&
+    !/\.provider-endpoint-check \{[^}]*position: absolute;/.test(styles) &&
     tauriBridge.includes("imageModel: string") &&
     tauriBridge.includes("imageEndpoint: string") &&
     tauriBridge.includes('invoke<ImageEndpointValidationState>("validate_image_endpoint"') &&
@@ -1309,6 +1326,14 @@ assert(
     modelProviderSource.includes("pub fn validate_endpoint") &&
     modelProviderSource.includes("DashScopeMultimodal"),
   "Models settings must persist an image model and expose the image.generate agent tool"
+);
+assert(
+  rustLib.includes("DASHSCOPE_DEFAULT_EMBEDDING_MODEL") &&
+    rustLib.includes("fn embedding_model_for_provider(") &&
+    rustLib.includes("fn index_workspace_with_cloud_fallback(") &&
+    rustLib.includes('"local-fallback".to_string()') &&
+    rustLib.includes('"embedding_fallback_error"'),
+  "Workspace indexing must migrate incompatible embedding defaults and retain a local fallback"
 );
 assert(
   appSource.includes("Pending Reviews") &&
@@ -1352,7 +1377,9 @@ assert(
   styles.includes(".lucide-check") &&
     styles.includes(".lucide-circle-check") &&
     styles.includes("color: var(--accent) !important") &&
-    styles.includes("--sidebar-glass: rgba(255, 255, 255, 0.92)") &&
+    styles.includes("--sidebar-glass: linear-gradient(") &&
+    styles.includes("rgba(255, 255, 255, 0.91) 0%") &&
+    styles.includes("rgba(255, 255, 255, 0.8) 100%") &&
     styles.includes("background: var(--sidebar-glass)") &&
     !/\.window-toolbar-panel-left \{[^}]*backdrop-filter:/.test(styles) &&
     !/\.sidebar \{[^}]*backdrop-filter:/.test(styles) &&
@@ -1366,8 +1393,8 @@ assert(
     appSource.includes("setSidebarMaterialWidth(sidebarOpen ? sidebarWidth : 0)") &&
     styles.includes("--project-selection: rgba(210, 211, 214, 0.78)") &&
     styles.includes("--session-selection: rgba(220, 221, 224, 0.82)") &&
-    /\.project-row\.active \{[^}]*box-shadow: 0 1px 3px/.test(styles) &&
-    /\.session-item\.active \{[^}]*box-shadow: 0 1px 2px/.test(styles) &&
+    !/\.project-row\.active \{[^}]*box-shadow:/.test(styles) &&
+    !/\.session-item\.active \{[^}]*box-shadow:/.test(styles) &&
     inspectorSource.includes("PackageOpen") &&
     inspectorSource.includes("<PackageOpen aria-hidden=\"true\" />"),
   "Checkmarks, native sidebar material, and the Outputs heading icon must retain their visual treatment"
@@ -1745,6 +1772,12 @@ assert(
   "RAG indexing must exclude local credential files"
 );
 assert(
+  ragSource.includes("DEFAULT_EMBEDDING_BATCH_SIZE: usize = 20") &&
+    ragSource.includes("texts.chunks(DEFAULT_EMBEDDING_BATCH_SIZE)") &&
+    ragSource.includes("external_embeddings_are_requested_in_provider_safe_batches"),
+  "RAG cloud embeddings must stay within the provider-safe batch limit"
+);
+assert(
   rustLib.includes("run_parallel_retrieval(") &&
     rustLib.includes('timed_retrieval_channel("semantic_rag"') &&
     rustLib.includes('timed_retrieval_channel("graph_recall"') &&
@@ -1765,10 +1798,17 @@ assert(
     knowledgeGraphSource.includes("forceSimulation(positioned)") &&
     knowledgeGraphSource.includes("forceLink<PositionedNode, SimulationEdge>") &&
     knowledgeGraphSource.includes("graph.edges.filter") &&
-    knowledgeGraphSource.includes('data-muted={Boolean(activeId)') &&
+    knowledgeGraphSource.includes("Math.min(6.6") &&
+    knowledgeGraphSource.includes('className="knowledge-graph-scene"') &&
+    knowledgeGraphSource.includes("data-muted={Boolean(activeId) && !active") &&
+    !knowledgeGraphSource.includes("data-highlighted") &&
+    !knowledgeGraphSource.includes("knowledge-graph-node-halo") &&
     styles.includes(".knowledge-graph-node-label") &&
-    styles.includes('.knowledge-graph-edges line[data-muted="true"]'),
-  "Knowledge settings must expose an Obsidian-style force-directed graph backed by graph state"
+    styles.includes('.knowledge-graph-edges line[data-muted="true"]') &&
+    styles.includes(".knowledge-graph-details[open] .knowledge-graph-scene") &&
+    styles.includes("animation: knowledge-graph-float 8s ease-in-out infinite alternate") &&
+    !/\.knowledge-graph-node\[data-active="true"\][\s\S]*?transform: scale/.test(styles),
+  "Knowledge settings must expose a restrained force-directed graph with flat focus and subtle motion"
 );
 assert(
   rustLib.includes("context_checkpoint_path_for_session") &&

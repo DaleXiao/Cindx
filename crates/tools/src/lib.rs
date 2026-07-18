@@ -1384,6 +1384,8 @@ fn image_output_path(
 
 const BROWSER_CONTROL_REQUEST_SCHEMA: &str = "cindx.browser-control.v2";
 const BROWSER_CONTROL_RESPONSE_SCHEMA: &str = "cindx.browser-control-result.v2";
+const COMPUTER_CONTROL_REQUEST_SCHEMA: &str = "cindx.computer-control.v1";
+const COMPUTER_CONTROL_RESPONSE_SCHEMA: &str = "cindx.computer-control-result.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrowserToolKind {
@@ -1864,6 +1866,187 @@ impl ComputerTool {
             kind: ComputerActionKind::Scroll,
         }
     }
+
+    fn execute_inner(
+        &self,
+        invocation: ToolInvocation,
+        control: &ToolExecutionControl,
+    ) -> Result<ToolResult, ToolError> {
+        if control.should_cancel() {
+            return Ok(ToolResult::text(
+                invocation.id,
+                ToolOutcomeStatus::Cancelled,
+                "Computer action cancelled before it started.",
+                Metadata::new(),
+            ));
+        }
+        let input = parse_input(&invocation.input_json);
+        validate_computer_action_input(self.kind, &input)?;
+        let output_dir = input
+            .get("output_dir")
+            .cloned()
+            .unwrap_or_else(|| ".cindx/computer-actions".to_string());
+        let resolved_dir = resolve_workspace_path(&self.workspace_root, &output_dir)?;
+        fs::create_dir_all(&resolved_dir).map_err(|error| {
+            ToolError::new(format!(
+                "failed to create computer action directory: {error}"
+            ))
+        })?;
+
+        let action_id = format!(
+            "computer-{}-{}",
+            current_time_millis(),
+            stable_hash(&invocation.input_json)
+        );
+        let request_path = resolved_dir.join(format!(".{action_id}-request.json"));
+        let request_json = computer_action_request_json(&action_id, self.kind, &input);
+        write_private_file(&request_path, request_json.as_bytes())?;
+
+        let sidecar_configured = env::var("CINDX_COMPUTER_SIDECAR")
+            .ok()
+            .is_some_and(|path| !path.trim().is_empty());
+        if !sidecar_configured {
+            let result = if self.kind == ComputerActionKind::Screenshot {
+                execute_native_computer_screenshot(
+                    invocation.id,
+                    &self.workspace_root,
+                    &output_dir,
+                    &action_id,
+                    &input,
+                )
+            } else {
+                Err(ToolError::new(
+                    "computer sidecar is not configured; the desktop action was not executed",
+                ))
+            };
+            let _ = fs::remove_file(&request_path);
+            return result;
+        }
+
+        let sidecar = run_json_sidecar_controlled(
+            "CINDX_COMPUTER_SIDECAR",
+            &request_path,
+            control,
+            Duration::from_secs(20),
+        );
+        let _ = fs::remove_file(&request_path);
+        let sidecar = sidecar?;
+        if sidecar.cancelled {
+            return Ok(ToolResult::text(
+                invocation.id,
+                ToolOutcomeStatus::Cancelled,
+                "Computer action cancelled.",
+                [("action".to_string(), self.kind.action().to_string())]
+                    .into_iter()
+                    .collect(),
+            ));
+        }
+        if sidecar.timed_out {
+            return Err(ToolError::new("computer sidecar exceeded 20000 ms"));
+        }
+
+        let response: serde_json::Value =
+            serde_json::from_str(&sidecar.stdout).map_err(|error| {
+                ToolError::new(format!("invalid computer sidecar response: {error}"))
+            })?;
+        if response.get("schema").and_then(serde_json::Value::as_str)
+            != Some(COMPUTER_CONTROL_RESPONSE_SCHEMA)
+        {
+            return Err(ToolError::new(
+                "computer sidecar returned an unsupported schema",
+            ));
+        }
+        let output = response
+            .get("output")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("computer action completed")
+            .to_string();
+        if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(ToolError::new(output));
+        }
+
+        let artifacts = response
+            .get("artifacts")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|artifact| {
+                let path = artifact.get("path")?.as_str()?;
+                let relative = workspace_relative_path(&self.workspace_root, path)?;
+                Some(ToolArtifact {
+                    path: relative,
+                    mime_type: artifact
+                        .get("mime_type")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    title: artifact
+                        .get("title")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                })
+            })
+            .collect::<Vec<_>>();
+        if self.kind == ComputerActionKind::Screenshot {
+            let screenshot = artifacts
+                .iter()
+                .find(|artifact| artifact.mime_type.as_deref() == Some("image/png"))
+                .ok_or_else(|| {
+                    ToolError::new("computer screenshot completed without a PNG artifact")
+                })?;
+            let screenshot_path = resolve_workspace_path(&self.workspace_root, &screenshot.path)?;
+            if !screenshot_path.is_file()
+                || screenshot_path
+                    .metadata()
+                    .map(|metadata| metadata.len() == 0)
+                    .unwrap_or(true)
+            {
+                return Err(ToolError::new(
+                    "computer screenshot completed without readable pixels",
+                ));
+            }
+        }
+
+        let mut metadata = Metadata::new();
+        metadata.insert("action".to_string(), self.kind.action().to_string());
+        metadata.insert("controller".to_string(), "native_macos".to_string());
+        metadata.insert(
+            "destructive".to_string(),
+            input_is_true(&input, "destructive").to_string(),
+        );
+        if let Some(duration) = response
+            .get("duration_ms")
+            .and_then(serde_json::Value::as_u64)
+        {
+            metadata.insert("duration_ms".to_string(), duration.to_string());
+        }
+        if let Some(artifact) = artifacts.first() {
+            metadata.insert("artifact_path".to_string(), artifact.path.clone());
+        }
+        if self.kind == ComputerActionKind::Screenshot {
+            let manifest = write_computer_redaction_manifest(
+                &self.workspace_root,
+                &output_dir,
+                &action_id,
+                artifacts
+                    .first()
+                    .map(|artifact| artifact.path.as_str())
+                    .unwrap_or_default(),
+                &input,
+                "captured",
+            )?;
+            metadata.insert("redaction_manifest_path".to_string(), manifest);
+        }
+
+        let mut result = ToolResult::text(
+            invocation.id,
+            ToolOutcomeStatus::Succeeded,
+            output,
+            metadata,
+        );
+        result.structured_output_json = Some(sidecar.stdout);
+        result.artifacts = artifacts;
+        Ok(result)
+    }
 }
 
 impl Tool for ComputerTool {
@@ -1902,71 +2085,15 @@ impl Tool for ComputerTool {
     }
 
     fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
-        let input = parse_input(&invocation.input_json);
-        validate_computer_action_input(self.kind, &input)?;
-        let output_dir = input
-            .get("output_dir")
-            .cloned()
-            .unwrap_or_else(|| ".cindx/computer-actions".to_string());
-        let resolved_dir = resolve_workspace_path(&self.workspace_root, &output_dir)?;
-        fs::create_dir_all(&resolved_dir).map_err(|error| {
-            ToolError::new(format!(
-                "failed to create computer action directory: {error}"
-            ))
-        })?;
+        self.execute_inner(invocation, &ToolExecutionControl::never_cancelled())
+    }
 
-        let action_id = format!(
-            "computer-{}-{}",
-            current_time_millis(),
-            stable_hash(&invocation.input_json)
-        );
-        let request_relative = format!("{output_dir}/{action_id}.json");
-        let request_path = resolve_workspace_path(&self.workspace_root, &request_relative)?;
-        let request_json = computer_action_request_json(&action_id, self.kind, &input);
-        fs::write(&request_path, request_json.as_bytes()).map_err(|error| {
-            ToolError::new(format!("failed to write computer action request: {error}"))
-        })?;
-
-        if self.kind == ComputerActionKind::Screenshot {
-            return execute_computer_screenshot(
-                invocation.id,
-                &self.workspace_root,
-                &output_dir,
-                &action_id,
-                &request_relative,
-                &request_path,
-                &input,
-            );
-        }
-
-        let sidecar_output = run_json_sidecar("CINDX_COMPUTER_SIDECAR", &request_path)?;
-        let controller = if sidecar_output.is_some() {
-            "sidecar"
-        } else {
-            "artifact"
-        };
-        let mut metadata = Metadata::new();
-        metadata.insert("action".to_string(), self.kind.action().to_string());
-        metadata.insert("artifact_path".to_string(), request_relative.clone());
-        metadata.insert("controller".to_string(), controller.to_string());
-        metadata.insert(
-            "destructive".to_string(),
-            input_is_true(&input, "destructive").to_string(),
-        );
-
-        let output = sidecar_output.unwrap_or_else(|| {
-            format!(
-                "computer action queued for sidecar\ncontroller=artifact\naction={}\nrequest={request_relative}",
-                self.kind.action()
-            )
-        });
-
-        Ok(tool_result(
-            invocation.id,
-            ToolOutcomeStatus::Succeeded,
-            output,
-            metadata,
-        ))
+    fn execute_with_control(
+        &self,
+        invocation: ToolInvocation,
+        control: &ToolExecutionControl,
+    ) -> Result<ToolResult, ToolError> {
+        self.execute_inner(invocation, control)
     }
 }
 
@@ -2580,6 +2707,7 @@ fn computer_action_request_json(
     input: &BTreeMap<String, String>,
 ) -> String {
     let mut fields = vec![
+        json_field("schema", COMPUTER_CONTROL_REQUEST_SCHEMA),
         json_field("id", action_id),
         json_field("namespace", "computer"),
         json_field("action", kind.action()),
@@ -2610,75 +2738,86 @@ fn computer_action_request_json(
     format!("{{{}}}\n", fields.join(","))
 }
 
-fn execute_computer_screenshot(
-    invocation_id: ToolCallId,
+fn write_computer_redaction_manifest(
     workspace_root: &Path,
     output_dir: &str,
     action_id: &str,
-    request_relative: &str,
-    request_path: &Path,
+    artifact_relative: &str,
     input: &BTreeMap<String, String>,
-) -> Result<ToolResult, ToolError> {
-    let screenshot_relative = format!("{output_dir}/{action_id}.png");
-    let screenshot_path = resolve_workspace_path(workspace_root, &screenshot_relative)?;
-    let redaction_manifest_relative = format!("{output_dir}/{action_id}.redaction.json");
-    let redaction_manifest_path =
-        resolve_workspace_path(workspace_root, &redaction_manifest_relative)?;
+    status: &str,
+) -> Result<String, ToolError> {
+    let manifest_relative = format!("{output_dir}/{action_id}.redaction.json");
+    let manifest_path = resolve_workspace_path(workspace_root, &manifest_relative)?;
     let redaction = input
         .get("redaction")
         .cloned()
         .unwrap_or_else(|| "manual".to_string());
-    let sidecar_output = run_json_sidecar("CINDX_COMPUTER_SIDECAR", request_path)?;
-    let (controller, artifact_relative, output) = if let Some(output) = sidecar_output {
-        ("sidecar".to_string(), screenshot_relative.clone(), output)
-    } else if try_native_screenshot(&screenshot_path)? {
-        (
-            "native_macos".to_string(),
-            screenshot_relative.clone(),
-            format!("desktop screenshot captured\nscreenshot={screenshot_relative}"),
-        )
-    } else {
-        let placeholder_relative = format!("{output_dir}/{action_id}.txt");
-        let placeholder_path = resolve_workspace_path(workspace_root, &placeholder_relative)?;
-        fs::write(
-            &placeholder_path,
-            "Screenshot request recorded. Enable screen recording permission, install a sidecar, or set CINDX_COMPUTER_SIDECAR to capture pixels.\n",
-        )
-        .map_err(|error| ToolError::new(format!("failed to write screenshot placeholder: {error}")))?;
-        (
-            "artifact".to_string(),
-            placeholder_relative.clone(),
-            format!("desktop screenshot request recorded\nartifact={placeholder_relative}"),
-        )
-    };
-
     let manifest = format!(
-        "{{{},{},{},{}}}\n",
-        json_field("screenshot_request", request_relative),
-        json_field("artifact_path", &artifact_relative),
+        "{{{},{},{}}}\n",
+        json_field("artifact_path", artifact_relative),
         json_field("redaction", &redaction),
-        json_field("status", "pending_review")
+        json_field("status", status)
     );
-    fs::write(&redaction_manifest_path, manifest.as_bytes())
-        .map_err(|error| ToolError::new(format!("failed to write redaction manifest: {error}")))?;
+    write_private_file(&manifest_path, manifest.as_bytes())?;
+    Ok(manifest_relative)
+}
+
+fn execute_native_computer_screenshot(
+    invocation_id: ToolCallId,
+    workspace_root: &Path,
+    output_dir: &str,
+    action_id: &str,
+    input: &BTreeMap<String, String>,
+) -> Result<ToolResult, ToolError> {
+    let screenshot_relative = format!("{output_dir}/{action_id}.png");
+    let screenshot_path = resolve_workspace_path(workspace_root, &screenshot_relative)?;
+    let redaction = input
+        .get("redaction")
+        .cloned()
+        .unwrap_or_else(|| "manual".to_string());
+    if !try_native_screenshot(&screenshot_path)?
+        || !screenshot_path.is_file()
+        || screenshot_path
+            .metadata()
+            .map(|metadata| metadata.len() == 0)
+            .unwrap_or(true)
+    {
+        return Err(ToolError::new(
+            "desktop screenshot failed; grant Screen Recording permission or configure the computer sidecar",
+        ));
+    }
+    let redaction_manifest_relative = write_computer_redaction_manifest(
+        workspace_root,
+        output_dir,
+        action_id,
+        &screenshot_relative,
+        input,
+        "captured",
+    )?;
 
     let mut metadata = Metadata::new();
     metadata.insert("action".to_string(), "screenshot".to_string());
-    metadata.insert("artifact_path".to_string(), request_relative.to_string());
-    metadata.insert("screenshot_path".to_string(), artifact_relative);
+    metadata.insert("artifact_path".to_string(), screenshot_relative.clone());
+    metadata.insert("screenshot_path".to_string(), screenshot_relative.clone());
     metadata.insert(
         "redaction_manifest_path".to_string(),
         redaction_manifest_relative,
     );
     metadata.insert("redaction".to_string(), redaction);
-    metadata.insert("controller".to_string(), controller);
+    metadata.insert("controller".to_string(), "native_macos".to_string());
 
-    Ok(tool_result(
+    let mut result = tool_result(
         invocation_id,
         ToolOutcomeStatus::Succeeded,
-        output,
+        format!("desktop screenshot captured\nscreenshot={screenshot_relative}"),
         metadata,
-    ))
+    );
+    result.artifacts.push(ToolArtifact {
+        path: screenshot_relative,
+        mime_type: Some("image/png".to_string()),
+        title: Some("Desktop screenshot".to_string()),
+    });
+    Ok(result)
 }
 
 fn try_native_screenshot(path: &Path) -> Result<bool, ToolError> {
@@ -2940,46 +3079,6 @@ fn json_escape(value: &str) -> String {
     escaped
 }
 
-fn run_json_sidecar(env_key: &str, request_path: &Path) -> Result<Option<String>, ToolError> {
-    let Ok(sidecar) = env::var(env_key) else {
-        return Ok(None);
-    };
-    if sidecar.trim().is_empty() {
-        return Ok(None);
-    }
-
-    let sidecar_path = PathBuf::from(&sidecar);
-    let mut command = if sidecar_path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        == Some("js")
-    {
-        let mut command =
-            Command::new(env::var("CINDX_NODE").unwrap_or_else(|_| "node".to_string()));
-        command.arg(&sidecar_path);
-        command
-    } else {
-        Command::new(&sidecar_path)
-    };
-    let output = command
-        .arg(request_path)
-        .output()
-        .map_err(|error| ToolError::new(format!("failed to run sidecar: {error}")))?;
-    if !output.status.success() {
-        return Err(ToolError::new(format!(
-            "sidecar failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(Some(if stdout.is_empty() {
-        "sidecar executed action".to_string()
-    } else {
-        stdout
-    }))
-}
-
 struct ControlledSidecarOutput {
     stdout: String,
     cancelled: bool,
@@ -2999,7 +3098,7 @@ fn run_json_sidecar_controlled(
     let sidecar_path = PathBuf::from(&sidecar);
     if !sidecar_path.is_file() {
         return Err(ToolError::new(format!(
-            "browser sidecar does not exist: {sidecar}"
+            "sidecar does not exist: {sidecar}"
         )));
     }
     let mut command = if sidecar_path
@@ -3024,7 +3123,7 @@ fn run_json_sidecar_controlled(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| ToolError::new(format!("failed to start browser sidecar: {error}")))?;
+        .map_err(|error| ToolError::new(format!("failed to start sidecar: {error}")))?;
     let process_id = child.id();
     let started = Instant::now();
     let (cancelled, timed_out) = loop {
@@ -3044,7 +3143,7 @@ fn run_json_sidecar_controlled(
         }
         if child
             .try_wait()
-            .map_err(|error| ToolError::new(format!("failed to poll browser sidecar: {error}")))?
+            .map_err(|error| ToolError::new(format!("failed to poll sidecar: {error}")))?
             .is_some()
         {
             break (false, false);
@@ -3057,10 +3156,10 @@ fn run_json_sidecar_controlled(
     }
     let output = child
         .wait_with_output()
-        .map_err(|error| ToolError::new(format!("failed to collect browser sidecar: {error}")))?;
+        .map_err(|error| ToolError::new(format!("failed to collect sidecar: {error}")))?;
     if !cancelled && !timed_out && !output.status.success() {
         return Err(ToolError::new(format!(
-            "browser sidecar failed: {}",
+            "sidecar failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
@@ -3669,46 +3768,39 @@ mod tests {
     }
 
     #[test]
-    fn computer_action_writes_sidecar_request_artifact() {
+    fn computer_action_requires_a_configured_sidecar() {
         let _guard = ENV_LOCK.lock().expect("env lock should be available");
         env::remove_var("CINDX_COMPUTER_SIDECAR");
         let root = temp_workspace();
         let tool = ComputerTool::click(root.clone());
 
-        let result = tool
+        let error = tool
             .execute(invocation(
                 "computer.click",
                 encode_input(&[
-                    ("x", "120"),
-                    ("y", "240"),
+                    ("x", "0"),
+                    ("y", "0"),
                     ("output_dir", ".cindx/computer-actions"),
                 ]),
             ))
-            .expect("computer action should be recorded");
-        let artifact = result
-            .metadata
-            .get("artifact_path")
-            .expect("artifact should be recorded");
-        let request = fs::read_to_string(root.join(artifact)).expect("request should exist");
+            .expect_err("computer action must not pretend it ran without a controller");
 
-        assert_eq!(
-            result.metadata.get("controller").map(String::as_str),
-            Some("artifact")
-        );
-        assert!(request.contains("\"namespace\":\"computer\""));
-        assert!(request.contains("\"action\":\"click\""));
-        assert!(request.contains("\"x\":\"120\""));
+        assert!(error.message.contains("computer sidecar is not configured"));
+        assert!(fs::read_dir(root.join(".cindx/computer-actions"))
+            .expect("computer action directory should exist")
+            .next()
+            .is_none());
     }
 
     #[test]
-    fn computer_screenshot_writes_redaction_manifest_when_native_disabled() {
+    fn computer_screenshot_does_not_report_a_placeholder_as_success() {
         let _guard = ENV_LOCK.lock().expect("env lock should be available");
         env::remove_var("CINDX_COMPUTER_SIDECAR");
         env::set_var("CINDX_DISABLE_NATIVE_SCREENSHOT", "1");
         let root = temp_workspace();
         let tool = ComputerTool::screenshot(root.clone());
 
-        let result = tool
+        let error = tool
             .execute(invocation(
                 "computer.screenshot",
                 encode_input(&[
@@ -3716,20 +3808,92 @@ mod tests {
                     ("output_dir", ".cindx/computer-actions"),
                 ]),
             ))
-            .expect("screenshot request should be recorded");
-        let manifest = result
-            .metadata
-            .get("redaction_manifest_path")
-            .expect("manifest should be recorded");
-        let manifest_text = fs::read_to_string(root.join(manifest)).expect("manifest should exist");
+            .expect_err("missing screenshot pixels must be an error");
         env::remove_var("CINDX_DISABLE_NATIVE_SCREENSHOT");
 
+        assert!(error.message.contains("desktop screenshot failed"));
+    }
+
+    #[test]
+    fn computer_action_executes_configured_sidecar() {
+        let _guard = ENV_LOCK.lock().expect("env lock should be available");
+        let root = temp_workspace();
+        let sidecar = root.join("computer-sidecar-test.sh");
+        fs::write(
+            &sidecar,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+                serde_json::json!({
+                    "schema": COMPUTER_CONTROL_RESPONSE_SCHEMA,
+                    "ok": true,
+                    "output": "computer-sidecar-test-ok",
+                    "controller": "native_macos",
+                    "artifacts": [],
+                    "duration_ms": 1
+                })
+            ),
+        )
+        .expect("sidecar should write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o700))
+                .expect("sidecar should be executable");
+        }
+        env::set_var("CINDX_COMPUTER_SIDECAR", &sidecar);
+        let tool = ComputerTool::click(root);
+
+        let result = tool
+            .execute(invocation(
+                "computer.click",
+                encode_input(&[("x", "0"), ("y", "0")]),
+            ))
+            .expect("configured computer sidecar should execute");
+        env::remove_var("CINDX_COMPUTER_SIDECAR");
+
+        assert_eq!(result.status, ToolOutcomeStatus::Succeeded);
+        assert_eq!(result.output, "computer-sidecar-test-ok");
         assert_eq!(
             result.metadata.get("controller").map(String::as_str),
-            Some("artifact")
+            Some("native_macos")
         );
-        assert!(manifest_text.contains("\"redaction\":\"manual\""));
-        assert!(manifest_text.contains("\"status\":\"pending_review\""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn computer_action_cancellation_stops_the_sidecar_promptly() {
+        let _guard = ENV_LOCK.lock().expect("env lock should be available");
+        let root = temp_workspace();
+        let sidecar = root.join("computer-sidecar-cancel.sh");
+        fs::write(&sidecar, "#!/bin/sh\nsleep 30\n").expect("sidecar should write");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o700))
+            .expect("sidecar should be executable");
+        env::set_var("CINDX_COMPUTER_SIDECAR", &sidecar);
+        let tool = ComputerTool::click(root);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancellation = Arc::clone(&cancelled);
+        let control = ToolExecutionControl::new(move || cancellation.load(Ordering::SeqCst));
+        let trigger = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(120));
+            cancelled.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+
+        let result = tool
+            .execute_with_control(
+                invocation(
+                    "computer.click",
+                    encode_input(&[("x", "20"), ("y", "30")]),
+                ),
+                &control,
+            )
+            .expect("computer cancellation should return a tool result");
+        trigger.join().expect("cancellation trigger should finish");
+        env::remove_var("CINDX_COMPUTER_SIDECAR");
+
+        assert_eq!(result.status, ToolOutcomeStatus::Cancelled);
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

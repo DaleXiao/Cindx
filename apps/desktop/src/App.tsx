@@ -50,7 +50,7 @@ import { Composer } from "./components/Composer";
 import { KnowledgeGraph } from "./components/KnowledgeGraph";
 import { Sidebar, type WorkspaceView } from "./components/Sidebar";
 import {
-  SessionThread,
+  LiveSessionThread,
   type SessionThreadSelection
 } from "./components/SessionThread";
 import {
@@ -139,8 +139,7 @@ import {
   selectSession,
   SidecarState,
   WebSearchConfigState,
-  stageAgentAttachments,
-  subscribeToModelStream
+  stageAgentAttachments
 } from "./tauri";
 
 const appIconUrl = new URL("../src-tauri/icons/icon.png", import.meta.url).href;
@@ -565,7 +564,7 @@ export function App() {
     () => new Set()
   );
   const [composerFocusRequest, setComposerFocusRequest] = useState(0);
-  const [streamAnswer, setStreamAnswer] = useState("");
+  const [streamResetVersion, setStreamResetVersion] = useState(0);
   const [providerModels, setProviderModels] = useState<string[]>([]);
   const [providerModelsBusy, setProviderModelsBusy] = useState(false);
   const [providerModelsRefreshTurn, setProviderModelsRefreshTurn] = useState(0);
@@ -678,7 +677,10 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    void setSidebarMaterialWidth(sidebarOpen ? sidebarWidth : 0).catch(() => {});
+    const frame = window.requestAnimationFrame(() => {
+      void setSidebarMaterialWidth(sidebarOpen ? sidebarWidth : 0).catch(() => {});
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [sidebarOpen, sidebarWidth]);
 
   useEffect(
@@ -694,45 +696,6 @@ export function App() {
     let disposed = false;
     let deferredLoadTimer: number | null = null;
     let deferredIdleCallback: number | null = null;
-    let streamFlushTimer: number | null = null;
-    let streamBuffer = "";
-    let streamSessionId: string | null = null;
-    let unlisten = () => {};
-
-    const flushStreamBuffer = () => {
-      if (streamFlushTimer !== null) window.clearTimeout(streamFlushTimer);
-      streamFlushTimer = null;
-      if (!streamBuffer) return;
-      const delta = streamBuffer;
-      streamBuffer = "";
-      if (streamSessionId && streamSessionId !== activeSessionIdRef.current) return;
-      setStreamAnswer((current) => `${current}${delta}`);
-    };
-
-    subscribeToModelStream((payload) => {
-      if (payload.sessionId && payload.sessionId !== activeSessionIdRef.current) return;
-      streamSessionId = payload.sessionId;
-      if (payload.reset) {
-        streamBuffer = "";
-        if (streamFlushTimer !== null) window.clearTimeout(streamFlushTimer);
-        streamFlushTimer = null;
-        setStreamAnswer("");
-      }
-      if (payload.done) {
-        flushStreamBuffer();
-        if (payload.error) setComposerError(payload.error);
-        return;
-      }
-      if (payload.delta) {
-        streamBuffer += payload.delta;
-        if (streamFlushTimer === null) {
-          streamFlushTimer = window.setTimeout(flushStreamBuffer, 80);
-        }
-      }
-    }).then((handler) => {
-      if (disposed) handler();
-      else unlisten = handler;
-    });
 
     const coreRequests = [
       getRuntimeStatus().then((state) => {
@@ -759,7 +722,9 @@ export function App() {
         }
         setAgentState(state);
         setSessionLoadingId(null);
-        if (state.sessionId) updateSessionStatus(state.sessionId, state.status);
+        if (state.sessionId) {
+          updateSessionStatus(state.sessionId, state.status, state.canContinue);
+        }
         setComposerError((current) => current ?? state.lastError);
       })
     ];
@@ -831,8 +796,6 @@ export function App() {
       disposed = true;
       if (deferredLoadTimer !== null) window.clearTimeout(deferredLoadTimer);
       if (deferredIdleCallback !== null) window.cancelIdleCallback(deferredIdleCallback);
-      if (streamFlushTimer !== null) window.clearTimeout(streamFlushTimer);
-      unlisten();
     };
   }, []);
 
@@ -996,23 +959,30 @@ export function App() {
 
   const sessionPrefetchKey = useMemo(() => {
     if (!projectSessionState?.activeProjectId) return "";
-    return projectSessionState.sessions
-      .filter(
-        (session) =>
-          session.projectId === projectSessionState.activeProjectId &&
-          !session.archived &&
-          session.id !== projectSessionState.activeSessionId
-      )
-      .slice(0, 8)
+    const sessions = projectSessionState.sessions.filter(
+      (session) =>
+        session.projectId === projectSessionState.activeProjectId && !session.archived
+    );
+    const activeIndex = sessions.findIndex(
+      (session) => session.id === projectSessionState.activeSessionId
+    );
+    const nearby = activeIndex >= 0
+      ? [sessions[activeIndex - 1], sessions[activeIndex + 1]].filter(
+          (session): session is (typeof sessions)[number] => Boolean(session)
+        )
+      : sessions.slice(0, 2);
+    return nearby
       .map((session) => session.id)
       .join("|");
   }, [projectSessionState]);
 
   useEffect(() => {
-    if (!sessionPrefetchKey) return;
+    if (!sessionPrefetchKey || activeSessionBusy) return;
     let disposed = false;
+    let idleCallback: number | null = null;
+    let fallbackTimer: number | null = null;
     const sessionIds = sessionPrefetchKey.split("|");
-    const timer = window.setTimeout(() => {
+    const prefetch = () => {
       void (async () => {
         for (const sessionId of sessionIds) {
           if (disposed) return;
@@ -1020,12 +990,18 @@ export function App() {
           await requestSessionAgentState(sessionId).catch(() => null);
         }
       })();
-    }, 900);
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      idleCallback = window.requestIdleCallback(prefetch, { timeout: 2_000 });
+    } else {
+      fallbackTimer = window.setTimeout(prefetch, 1_200);
+    }
     return () => {
       disposed = true;
-      window.clearTimeout(timer);
+      if (idleCallback !== null) window.cancelIdleCallback(idleCallback);
+      if (fallbackTimer !== null) window.clearTimeout(fallbackTimer);
     };
-  }, [sessionPrefetchKey]);
+  }, [activeSessionBusy, sessionPrefetchKey]);
 
   useEffect(() => {
     const sessionId = activeSession?.id;
@@ -1038,7 +1014,7 @@ export function App() {
       inFlight = true;
       try {
         const now = Date.now();
-        const refreshTrace = now - lastTraceRefreshAt >= 3_000;
+        const refreshTrace = inspectorOpen && now - lastTraceRefreshAt >= 3_000;
         if (refreshTrace) lastTraceRefreshAt = now;
         const revision = await getAgentStateRevision(sessionId);
         const previousRevision = agentStateRevisionsRef.current.get(sessionId);
@@ -1062,7 +1038,11 @@ export function App() {
               const next = mergeAgentStateDelta(current, nextDelta);
               return agentStateUnchanged(current, next) ? current : next;
             });
-            updateSessionStatus(sessionId, nextDelta.state.status);
+            updateSessionStatus(
+              sessionId,
+              nextDelta.state.status,
+              nextDelta.state.canContinue
+            );
           }
           if (nextTrace) {
             setAgentTraceState((current) =>
@@ -1084,7 +1064,32 @@ export function App() {
       disposed = true;
       window.clearInterval(interval);
     };
-  }, [activeSession?.id, activeSessionBusy]);
+  }, [activeSession?.id, activeSessionBusy, inspectorOpen]);
+
+  useEffect(() => {
+    const sessionId = activeSession?.id;
+    if (!inspectorOpen || !sessionId || activeSessionBusy) return;
+    let disposed = false;
+    void Promise.all([getAgentTraceState(sessionId), getContextState(sessionId)])
+      .then(([nextTrace, nextContext]) => {
+        if (disposed || activeSessionIdRef.current !== sessionId) return;
+        rememberSessionState(agentTraceCacheRef.current, sessionId, nextTrace);
+        rememberSessionState(contextStateCacheRef.current, sessionId, nextContext);
+        startTransition(() => {
+          setAgentTraceState((current) =>
+            agentTraceUnchanged(current, nextTrace) ? current : nextTrace
+          );
+          setContextState(nextContext);
+        });
+        setSelectedTraceStepId(latestTraceStep(nextTrace.turns)?.id ?? null);
+      })
+      .catch((error) => {
+        if (!disposed) setComposerError(error instanceof Error ? error.message : String(error));
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [activeSession?.id, activeSessionBusy, inspectorOpen]);
 
   const composerDraft = activeSession ? composerDrafts[activeSession.id] ?? "" : "";
   const composerAttachments = activeSession ? attachmentDrafts[activeSession.id] ?? [] : [];
@@ -1279,26 +1284,42 @@ export function App() {
 
   function acknowledgeSessionResult(sessionId: string) {
     setSessionStatusOverrides((current) => {
-      if (!["Completed", "Blocked", "Attention"].includes(current[sessionId])) return current;
+      if (
+        ![
+          "Completed",
+          "Approval required",
+          "Paused",
+          "Error",
+          "Interrupted",
+          "Blocked",
+          "Attention"
+        ].includes(current[sessionId])
+      ) {
+        return current;
+      }
       const next = { ...current };
       delete next[sessionId];
       return next;
     });
   }
 
-  function updateSessionStatus(sessionId: string, status: AgentState["status"]) {
+  function updateSessionStatus(
+    sessionId: string,
+    status: AgentState["status"],
+    canContinue = false
+  ) {
     const tracked = trackedSessionTaskIdsRef.current.has(sessionId);
     const isTerminal = ["completed", "failed", "cancelled", "idle"].includes(status);
     if (isTerminal) trackedSessionTaskIdsRef.current.delete(sessionId);
 
     setSessionStatusOverrides((current) => {
       let nextStatus: string | undefined;
-      if (tracked && status === "waiting_for_permission") nextStatus = "Review";
+      if (tracked && status === "waiting_for_permission") nextStatus = "Approval required";
       else if (tracked && status === "running") nextStatus = "Working";
       else if (tracked && activeSessionIdRef.current !== sessionId) {
-        if (status === "completed") nextStatus = "Completed";
-        else if (status === "failed") nextStatus = "Blocked";
-        else if (status === "cancelled") nextStatus = "Attention";
+        if (status === "completed") nextStatus = canContinue ? "Paused" : "Completed";
+        else if (status === "failed") nextStatus = "Error";
+        else if (status === "cancelled") nextStatus = "Interrupted";
       }
 
       if (nextStatus === undefined) {
@@ -1537,7 +1558,7 @@ export function App() {
     setProjectSessionState(nextState);
     setComposerError(nextState.lastError);
     setSelectedThreadItem(null);
-    setStreamAnswer("");
+    setStreamResetVersion((version) => version + 1);
     if (nextWorkspaceRoot) {
       setWorkspaceDraft(nextWorkspaceRoot);
       setRuntime((current) =>
@@ -1575,27 +1596,8 @@ export function App() {
         return agentStateUnchanged(current, merged) ? current : merged;
       });
     });
-    updateSessionStatus(sessionId, nextAgentState.status);
+    updateSessionStatus(sessionId, nextAgentState.status, nextAgentState.canContinue);
 
-    void getAgentTraceState(sessionId)
-      .then((nextTraceState) => {
-        if (!isCurrentRequest()) return;
-        rememberSessionState(agentTraceCacheRef.current, sessionId, nextTraceState);
-        startTransition(() => {
-          setAgentTraceState((current) =>
-            agentTraceUnchanged(current, nextTraceState) ? current : nextTraceState
-          );
-        });
-        setSelectedTraceStepId(latestTraceStep(nextTraceState.turns)?.id ?? null);
-      })
-      .catch(reportBackgroundError);
-    void getContextState(sessionId)
-      .then((nextContextState) => {
-        if (!isCurrentRequest()) return;
-        rememberSessionState(contextStateCacheRef.current, sessionId, nextContextState);
-        startTransition(() => setContextState(nextContextState));
-      })
-      .catch(reportBackgroundError);
     if (workspaceChanged) refreshWorkspaceScopedState();
   }
 
@@ -1740,7 +1742,7 @@ export function App() {
     }
     setSelectedTraceStepId(null);
     setSelectedThreadItem(null);
-    setStreamAnswer("");
+    setStreamResetVersion((version) => version + 1);
     try {
       const next = await enqueueProjectSessionSelection(() => selectProject(projectId));
       if (selectionRequest !== sessionSelectionRequestRef.current) return;
@@ -1780,7 +1782,7 @@ export function App() {
     restoreCachedSessionState(sessionId);
     setSelectedTraceStepId(null);
     setSelectedThreadItem(null);
-    setStreamAnswer("");
+    setStreamResetVersion((version) => version + 1);
     try {
       const next = await enqueueProjectSessionSelection(() => selectSession(sessionId));
       if (selectionRequest !== sessionSelectionRequestRef.current) return;
@@ -2145,7 +2147,7 @@ export function App() {
           : current
       );
     }
-    setStreamAnswer("");
+    setStreamResetVersion((version) => version + 1);
     setComposerError(null);
     setAttachmentDrafts((current) => ({ ...current, [sessionId]: [] }));
     markSessionTaskStarted(sessionId);
@@ -2188,11 +2190,11 @@ export function App() {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       const next = await runAgentTask(nextPrompt, sessionId, attachments, agentEffort);
       acknowledgeOptimisticUserMessage(sessionId, next.messages);
-      updateSessionStatus(sessionId, next.status);
+      updateSessionStatus(sessionId, next.status, next.canContinue);
       if (activeSessionIdRef.current === sessionId) {
         setAgentState((current) => mergeAgentStateSnapshot(current, next));
         setComposerError(next.lastError);
-        setStreamAnswer("");
+        setStreamResetVersion((version) => version + 1);
       }
       setProjectSessionState(await getProjectSessionState());
       const firstRoundAnswer = [...next.messages]
@@ -2228,12 +2230,12 @@ export function App() {
   async function handleCancelAgentTask() {
     const sessionId = activeSession?.id;
     if (!sessionId) return;
-    setStreamAnswer("");
+    setStreamResetVersion((version) => version + 1);
     setComposerError(null);
     try {
       const next = await cancelAgentTask(sessionId);
       acknowledgeOptimisticUserMessage(sessionId, next.messages);
-      updateSessionStatus(sessionId, next.status);
+      updateSessionStatus(sessionId, next.status, next.canContinue);
       markSessionBusy(sessionId, false);
       if (activeSessionIdRef.current === sessionId) {
         setAgentState((current) => mergeAgentStateSnapshot(current, next));
@@ -2248,13 +2250,13 @@ export function App() {
   async function handleRetryAgentTask() {
     const sessionId = activeSession?.id;
     if (!sessionId || busySessionIds.has(sessionId)) return;
-    setStreamAnswer("");
+    setStreamResetVersion((version) => version + 1);
     setComposerError(null);
     markSessionTaskStarted(sessionId);
     markSessionBusy(sessionId, true);
     try {
       const next = await retryAgentTask(sessionId);
-      updateSessionStatus(sessionId, next.status);
+      updateSessionStatus(sessionId, next.status, next.canContinue);
       if (activeSessionIdRef.current === sessionId) {
         setAgentState((current) => mergeAgentStateSnapshot(current, next));
         setComposerError(next.lastError);
@@ -2462,7 +2464,7 @@ export function App() {
     }
     try {
       const next = await resolveAgentPermission(requestId, decision, sessionId);
-      updateSessionStatus(sessionId, next.status);
+      updateSessionStatus(sessionId, next.status, next.canContinue);
       if (activeSessionIdRef.current === sessionId) {
         setAgentState((current) => mergeAgentStateSnapshot(current, next));
         setComposerError(next.lastError);
@@ -2666,12 +2668,12 @@ export function App() {
       <section className="workspace" data-view={activeView} aria-label="Agent workspace">
         {activeView === "timeline" ? (
           <>
-            <SessionThread
+            <LiveSessionThread
               sessionId={activeSession?.id ?? null}
               loading={sessionLoadingId === activeSession?.id && !activeAgentState}
               messages={visibleAgentMessages}
               timeline={activeAgentState?.timeline ?? []}
-              streamAnswer={streamAnswer}
+              streamResetVersion={streamResetVersion}
               status={activeAgentState?.status ?? "idle"}
               runStartedAtMs={activeAgentState?.runStartedAtMs ?? 0}
               hasOlderHistory={activeAgentState?.hasOlderHistory ?? false}

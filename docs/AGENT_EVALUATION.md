@@ -52,6 +52,8 @@ Correctness, evidence, completion, and safety use a 0–5 rubric. A run passes q
 
 Use human review or an explicitly requested judge-model run for release claims. Runtime Genetic Pareto evaluation is a separate, visible feature: it runs only when the user-facing setting is enabled and a request already enters adaptive Auto/Pro collaboration, publishes paired/replay evidence in Settings, and never turns Fast or lightweight single-model requests into hidden multi-model work.
 
+Pairwise evaluation waits until all foreground agent runs have finished and the app has remained idle briefly. A new foreground request cancels an in-flight evaluation so learning cannot compete with interactive responses. Token and estimated-cost telemetry remain observable, but model price and token volume do not participate in Pareto dominance; selection prioritizes quality, safety, generalization, task coverage, and latency.
+
 ## Runtime Harness Evolution
 
 Genetic Pareto evolves the bounded Conductor harness, not provider model weights. A genome controls workflow depth, verification strength, context selection, branch width, tool access, retry policy, and per-step attempt budget. Learned mutations may change only those validated genes and a bounded custom directive.

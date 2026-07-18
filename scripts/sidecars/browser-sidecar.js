@@ -2,7 +2,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { spawn } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 
 const REQUEST_SCHEMA = "cindx.browser-control.v2";
 const RESPONSE_SCHEMA = "cindx.browser-control-result.v2";
@@ -147,7 +147,73 @@ async function launchBrowser(request, profileDir, statePath, timeoutMs) {
     if (await endpointIsAlive(endpoint)) return endpoint;
     await sleep(50);
   }
+  terminateProcessTree(child.pid, "SIGTERM");
+  await sleep(100);
+  terminateProcessTree(child.pid, "SIGKILL");
   throw new Error(`browser CDP endpoint did not start within ${timeoutMs}ms`);
+}
+
+function processIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function terminateProcessTree(pid, signal) {
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  if (process.platform === "win32") {
+    if (signal === "SIGKILL") {
+      spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" });
+    }
+    return;
+  }
+  try {
+    process.kill(-pid, signal);
+  } catch {}
+  try {
+    process.kill(pid, signal);
+  } catch {}
+}
+
+async function closeBrowserSession(runtime) {
+  const state = sessionState(runtime.statePath);
+  const browserPid = Number(state.browser_pid);
+  await Promise.race([
+    runtime.browser.close().catch(() => {}),
+    sleep(1_000)
+  ]);
+
+  if (processIsAlive(browserPid) || (await endpointIsAlive(runtime.endpoint))) {
+    terminateProcessTree(browserPid, "SIGTERM");
+  }
+  const gracefulDeadline = Date.now() + 2_000;
+  while (
+    Date.now() < gracefulDeadline &&
+    (processIsAlive(browserPid) || (await endpointIsAlive(runtime.endpoint)))
+  ) {
+    await sleep(50);
+  }
+  if (processIsAlive(browserPid) || (await endpointIsAlive(runtime.endpoint))) {
+    terminateProcessTree(browserPid, "SIGKILL");
+  }
+  const forcedDeadline = Date.now() + 1_000;
+  while (
+    Date.now() < forcedDeadline &&
+    (processIsAlive(browserPid) || (await endpointIsAlive(runtime.endpoint)))
+  ) {
+    await sleep(50);
+  }
+
+  const sessionDir = path.dirname(runtime.statePath);
+  fs.rmSync(path.join(sessionDir, "profile", "DevToolsActivePort"), { force: true });
+  fs.rmSync(runtime.statePath, { force: true });
+  if (processIsAlive(browserPid) || (await endpointIsAlive(runtime.endpoint))) {
+    throw new Error(`browser process ${browserPid || "unknown"} did not stop`);
+  }
 }
 
 async function connectBrowser(request) {
@@ -306,7 +372,7 @@ async function runAction(request, runtime) {
   debug(`running action ${request.action}`);
   const { context, statePath, timeoutMs } = runtime;
   if (request.action === "close") {
-    await runtime.browser.close();
+    await closeBrowserSession(runtime);
     return { output: "browser session closed", page: null, artifacts: [] };
   }
 

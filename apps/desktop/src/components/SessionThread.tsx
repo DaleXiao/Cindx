@@ -32,7 +32,12 @@ import {
 } from "react";
 import Markdown from "markdown-to-jsx";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { openArtifact, openExternalUrl, readArtifactPreview } from "../tauri";
+import {
+  openArtifact,
+  openExternalUrl,
+  readArtifactPreview,
+  subscribeToModelStream
+} from "../tauri";
 import type { AgentAttachment, AgentState, ChatMessageView, TimelineEntry } from "../tauri";
 import { DisclosureTriangle } from "./DisclosureTriangle";
 import { TraceStatusIcon } from "./TraceStatusIcon";
@@ -64,6 +69,10 @@ type SessionThreadProps = {
   onSelect: (selection: SessionThreadSelection) => void;
   onEditMessage: (content: string) => void;
   onLinkOpenError: (message: string) => void;
+};
+
+type LiveSessionThreadProps = Omit<SessionThreadProps, "streamAnswer"> & {
+  streamResetVersion: number;
 };
 
 type ThreadFindProps = {
@@ -385,6 +394,25 @@ function estimateThreadRowSize(row: ThreadRow) {
   return 48 + Math.min(48, lineCount) * 20;
 }
 
+function threadItemMeasurementKey(item: SessionThreadSelection) {
+  if (item.type === "event") {
+    return `${item.id}:${item.event.label.length}:${item.event.detail.length}:${item.event.state}`;
+  }
+  const attachmentKey = (item.message.attachments ?? [])
+    .map((attachment) => `${attachment.id}:${attachment.name}:${attachment.mimeType}`)
+    .join(",");
+  return `${item.id}:${item.message.role}:${item.message.content.length}:${
+    item.message.content.split("\n").length
+  }:${attachmentKey}`;
+}
+
+function threadRowMeasurementKey(row: ThreadRow) {
+  if (row.type === "tool-chain") {
+    return `${row.id}:${row.items.map(threadItemMeasurementKey).join(";")}`;
+  }
+  return threadItemMeasurementKey(row.item);
+}
+
 const MESSAGE_ATTACHMENT_PREVIEW_CACHE_LIMIT = 8;
 const messageAttachmentPreviewCache = new Map<string, string>();
 
@@ -687,20 +715,59 @@ function MarkdownCodeBlock({ children, onCopyCode, ...props }: MarkdownCodeBlock
   );
 }
 
-const AgentMarkdown = memo(function AgentMarkdown({
+const STREAMING_MARKDOWN_CHUNK_TARGET = 1_600;
+
+function splitStreamingMarkdown(content: string) {
+  if (content.length <= STREAMING_MARKDOWN_CHUNK_TARGET) return [content];
+  const chunks: string[] = [];
+  let start = 0;
+  let offset = 0;
+  let fenceCharacter = "";
+  let fenceLength = 0;
+  for (const line of content.match(/.*(?:\n|$)/g) ?? []) {
+    if (!line) continue;
+    const trimmed = line.replace(/\n$/, "").trim();
+    const fence = trimmed.match(/^(`{3,}|~{3,})/);
+    if (fence) {
+      const marker = fence[1];
+      if (!fenceCharacter) {
+        fenceCharacter = marker[0];
+        fenceLength = marker.length;
+      } else if (marker[0] === fenceCharacter && marker.length >= fenceLength) {
+        fenceCharacter = "";
+        fenceLength = 0;
+      }
+    }
+    offset += line.length;
+    if (
+      !fenceCharacter &&
+      trimmed === "" &&
+      offset - start >= STREAMING_MARKDOWN_CHUNK_TARGET
+    ) {
+      chunks.push(content.slice(start, offset));
+      start = offset;
+    }
+  }
+  if (start < content.length) chunks.push(content.slice(start));
+  return chunks.length > 0 ? chunks : [content];
+}
+
+const MarkdownChunk = memo(function MarkdownChunk({
   content,
-  streaming = false,
+  streaming,
+  className,
   onOpenError,
   onCopyCode
 }: {
   content: string;
-  streaming?: boolean;
+  streaming: boolean;
+  className: string;
   onOpenError: (message: string) => void;
   onCopyCode: (content: string) => void;
 }) {
   return (
     <Markdown
-      className="thread-markdown"
+      className={className}
       options={{
         disableParsingRawHTML: true,
         enforceAtxHeadings: true,
@@ -722,6 +789,48 @@ const AgentMarkdown = memo(function AgentMarkdown({
     >
       {content || "Tool request"}
     </Markdown>
+  );
+});
+
+const AgentMarkdown = memo(function AgentMarkdown({
+  content,
+  streaming = false,
+  onOpenError,
+  onCopyCode
+}: {
+  content: string;
+  streaming?: boolean;
+  onOpenError: (message: string) => void;
+  onCopyCode: (content: string) => void;
+}) {
+  const streamingChunks = useMemo(
+    () => (streaming ? splitStreamingMarkdown(content) : []),
+    [content, streaming]
+  );
+  if (streaming) {
+    return (
+      <div className="thread-markdown thread-markdown-stream">
+        {streamingChunks.map((chunk, index) => (
+          <MarkdownChunk
+            key={index}
+            content={chunk}
+            streaming={index === streamingChunks.length - 1}
+            className="thread-markdown-chunk"
+            onOpenError={onOpenError}
+            onCopyCode={onCopyCode}
+          />
+        ))}
+      </div>
+    );
+  }
+  return (
+    <MarkdownChunk
+      className="thread-markdown"
+      content={content}
+      streaming={false}
+      onOpenError={onOpenError}
+      onCopyCode={onCopyCode}
+    />
   );
 });
 
@@ -872,6 +981,10 @@ export const SessionThread = memo(function SessionThread({
       .map((item) => item.id);
   }, [items, threadFindQuery]);
   const threadRows = useMemo(() => groupThreadItems(items), [items]);
+  const rowMeasurementRevision = useMemo(
+    () => threadRows.map(threadRowMeasurementKey).join("|"),
+    [threadRows]
+  );
   const rowIndexByItemId = useMemo(() => {
     const indexes = new Map<string, number>();
     threadRows.forEach((row, rowIndex) => {
@@ -892,9 +1005,35 @@ export const SessionThread = memo(function SessionThread({
     overscan: 6,
     anchorTo: "end",
     followOnAppend: "auto",
-    useAnimationFrameWithResizeObserver: true
+    useAnimationFrameWithResizeObserver: false
   });
   const virtualRows = rowVirtualizer.getVirtualItems();
+  const measureRenderedRows = useCallback(
+    (resetCache = false) => {
+      if (resetCache) rowVirtualizer.measure();
+      threadContentRef.current
+        ?.querySelectorAll<HTMLElement>(".thread-virtual-row")
+        .forEach((element) => {
+          const index = Number(element.dataset.index);
+          if (!Number.isInteger(index)) return;
+          rowVirtualizer.resizeItem(
+            index,
+            Math.ceil(element.getBoundingClientRect().height)
+          );
+        });
+    },
+    [rowVirtualizer]
+  );
+  const measureThreadRow = useCallback(
+    (element: HTMLDivElement | null) => {
+      rowVirtualizer.measureElement(element);
+      if (!element) return;
+      const index = Number(element.dataset.index);
+      if (!Number.isInteger(index)) return;
+      rowVirtualizer.resizeItem(index, Math.ceil(element.getBoundingClientRect().height));
+    },
+    [rowMeasurementRevision, rowVirtualizer]
+  );
   const runProgress = useMemo(
     () => activeRunProgress(timeline, runStartedAtMs),
     [runStartedAtMs, timeline]
@@ -1088,25 +1227,24 @@ export const SessionThread = memo(function SessionThread({
   }, [hoveredMinimapIndex, minimapDragging]);
 
   useLayoutEffect(() => {
-    rowVirtualizer.measure();
-  }, [rowVirtualizer, sessionId]);
-
-  useLayoutEffect(() => {
     setContentReady(false);
   }, [sessionId]);
 
   useLayoutEffect(() => {
-    if (loading || contentReady) return;
+    if (loading) return;
     let secondFrame = 0;
     const firstFrame = window.requestAnimationFrame(() => {
-      rowVirtualizer.measure();
-      secondFrame = window.requestAnimationFrame(() => setContentReady(true));
+      measureRenderedRows(true);
+      secondFrame = window.requestAnimationFrame(() => {
+        measureRenderedRows();
+        setContentReady(true);
+      });
     });
     return () => {
       window.cancelAnimationFrame(firstFrame);
       if (secondFrame) window.cancelAnimationFrame(secondFrame);
     };
-  }, [contentReady, items.length, loading, rowVirtualizer, sessionId]);
+  }, [loading, measureRenderedRows, rowMeasurementRevision, sessionId]);
 
   useLayoutEffect(() => {
     const thread = threadRef.current;
@@ -1321,7 +1459,7 @@ export const SessionThread = memo(function SessionThread({
               className="thread-virtual-row"
               data-index={virtualRow.index}
               key={virtualRow.key}
-              ref={rowVirtualizer.measureElement}
+              ref={measureThreadRow}
               style={{ transform: `translateY(${virtualRow.start}px)` }}
             >
             {(() => {
@@ -1604,5 +1742,86 @@ export const SessionThread = memo(function SessionThread({
         </div>
       )}
     </div>
+  );
+});
+
+export const LiveSessionThread = memo(function LiveSessionThread({
+  sessionId,
+  streamResetVersion,
+  onLinkOpenError,
+  ...props
+}: LiveSessionThreadProps) {
+  const activeSessionIdRef = useRef(sessionId);
+  const streamBufferRef = useRef("");
+  const streamSessionIdRef = useRef<string | null>(null);
+  const flushTimerRef = useRef<number | null>(null);
+  const [streamState, setStreamState] = useState({
+    sessionId: null as string | null,
+    answer: ""
+  });
+  activeSessionIdRef.current = sessionId;
+
+  const clearStream = useCallback(() => {
+    streamBufferRef.current = "";
+    streamSessionIdRef.current = null;
+    if (flushTimerRef.current !== null) window.clearTimeout(flushTimerRef.current);
+    flushTimerRef.current = null;
+    setStreamState({ sessionId: null, answer: "" });
+  }, []);
+
+  useEffect(clearStream, [clearStream, sessionId, streamResetVersion]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten = () => {};
+    const flush = () => {
+      if (flushTimerRef.current !== null) window.clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+      const delta = streamBufferRef.current;
+      const targetSessionId = streamSessionIdRef.current ?? activeSessionIdRef.current;
+      streamBufferRef.current = "";
+      if (!delta || !targetSessionId || targetSessionId !== activeSessionIdRef.current) return;
+      setStreamState((current) => ({
+        sessionId: targetSessionId,
+        answer: current.sessionId === targetSessionId ? `${current.answer}${delta}` : delta
+      }));
+    };
+
+    void subscribeToModelStream((payload) => {
+      const targetSessionId = payload.sessionId ?? activeSessionIdRef.current;
+      if (targetSessionId && targetSessionId !== activeSessionIdRef.current) return;
+      streamSessionIdRef.current = targetSessionId;
+      if (payload.reset) clearStream();
+      if (payload.done) {
+        flush();
+        if (payload.error) onLinkOpenError(payload.error);
+        return;
+      }
+      if (payload.delta) {
+        streamBufferRef.current += payload.delta;
+        if (flushTimerRef.current === null) {
+          flushTimerRef.current = window.setTimeout(flush, 80);
+        }
+      }
+    }).then((handler) => {
+      if (disposed) handler();
+      else unlisten = handler;
+    });
+
+    return () => {
+      disposed = true;
+      if (flushTimerRef.current !== null) window.clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+      unlisten();
+    };
+  }, [clearStream, onLinkOpenError]);
+
+  return (
+    <SessionThread
+      {...props}
+      sessionId={sessionId}
+      streamAnswer={streamState.sessionId === sessionId ? streamState.answer : ""}
+      onLinkOpenError={onLinkOpenError}
+    />
   );
 });
