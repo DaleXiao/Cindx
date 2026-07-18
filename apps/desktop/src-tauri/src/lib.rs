@@ -1,7 +1,7 @@
 use agent_core::{
     Event, EventId, EventKind, Message, MessageRole, Metadata, ModelRole, PermissionDecision,
     PermissionRequest, PermissionRequestId, PermissionResolution, PermissionRisk, TaskId,
-    ToolArtifact, ToolContent, ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk,
+    ToolArtifact, ToolContent, ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
 };
 use agent_graph::{
     extract_graph_from_chunk, graph_direct_recall, graph_walk_recall, FileGraphStore, GraphStore,
@@ -43,17 +43,23 @@ use model_provider::{
 use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindow, NSWindowButton};
 use orchestrator::{
     adaptive_worker_prompt, adaptive_workflow_layers, adaptive_workflow_step_budget, default_plan,
-    evaluate_prompt_convergence, parse_policy, role_label, step_prompt, ConductorHarness,
-    ConductorPromptGenome, ConductorRequest, ConductorRoleHints, LearnedModelRouter,
-    ModelCandidate, OrchestrationPolicy, PromptContextPolicy, PromptEvaluationMode,
-    PromptEvaluationSplit, PromptEvolutionObservation, PromptParetoArchive,
-    PromptPromotionConfidence, PromptRetryPolicy, PromptStepCredit, PromptVerification,
-    RoutingContext, RoutingDecision, RoutingOutcome, RoutingTelemetry, RuleBasedRouter, TaskClass,
-    WorkflowBudget, WorkflowExecutionCheckpoint, WorkflowExecutionTelemetry, WorkflowPlanIr,
-    WorkflowSearchTeacher, WorkflowStepStatus, WorkflowToolPolicy, WorkflowTopologyPrior,
+    evaluate_prompt_convergence, parse_policy, role_label, sha256_hex, step_prompt,
+    ActionableSideInformation, AgentEvaluationCaseScore, AgentEvaluationCheck,
+    AgentEvaluationEvidenceSource, AgentEvaluationReflectionPacket, AgentEvaluationSplit,
+    AgentEvaluationToolTrace, AgentEvaluationTrace, AgentEvaluationTraceStep,
+    AgentEvaluationVerifierOutcome, ConductorHarness, ConductorPromptGenome, ConductorRequest,
+    ConductorRoleHints, LearnedModelRouter, ModelCandidate, OrchestrationPolicy,
+    PromptContextPolicy, PromptEvaluationMode, PromptEvaluationSplit, PromptEvolutionObservation,
+    PromptInstanceParetoArchive, PromptParetoArchive, PromptPromotionConfidence, PromptRetryPolicy,
+    PromptStepCredit, PromptVerification, RoutingContext, RoutingDecision, RoutingOutcome,
+    RoutingTelemetry, RuleBasedRouter, TaskClass, WorkflowBudget, WorkflowExecutionCheckpoint,
+    WorkflowExecutionTelemetry, WorkflowPlanIr, WorkflowSearchTeacher, WorkflowStepStatus,
+    WorkflowToolPolicy, WorkflowTopologyPrior, AGENT_EVALUATION_TRACE_SCHEMA,
     CONDUCTOR_MAX_ATTEMPTS, MAX_ADAPTIVE_WORKFLOW_AGENTS, MAX_ADAPTIVE_WORKFLOW_STEPS,
     WORKFLOW_CHECKPOINT_SCHEMA, WORKFLOW_IR_SCHEMA,
 };
+#[cfg(test)]
+use orchestrator::AgentEvaluationVerifier;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -91,8 +97,9 @@ const AGENT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 const MAX_AGENT_MODEL_TRANSPORT_ATTEMPTS: usize = 3;
 const COLLABORATION_MAX_OUTPUT_TOKENS: u64 = 4_096;
 const PROMPT_EVOLUTION_POPULATION_LIMIT: usize = 6;
-const PROMPT_EVOLUTION_MIN_TRAIN_RUNS: usize = 2;
-const PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS: usize = 2;
+const PROMPT_EVOLUTION_MIN_TRAIN_RUNS: usize = 3;
+const PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS: usize = 3;
+const PROMPT_EVOLUTION_MIN_PARETO_REPEATS: usize = 3;
 const PROMPT_EVOLUTION_STAGNATION_PATIENCE: usize = 3;
 const PROMPT_EVOLUTION_MIN_IMPROVEMENT: f64 = 0.02;
 const PROMPT_EVALUATION_IDLE_GRACE_MS: u64 = 1_200;
@@ -7672,6 +7679,10 @@ struct PromptPairwiseEvaluationPayload {
     step_scores_a: BTreeMap<String, f64>,
     #[serde(default)]
     step_scores_b: BTreeMap<String, f64>,
+    #[serde(default)]
+    feedback_a: ActionableSideInformation,
+    #[serde(default)]
+    feedback_b: ActionableSideInformation,
 }
 
 #[derive(Debug, Clone)]
@@ -7687,8 +7698,13 @@ struct PromptPlanCandidate {
 struct PromptExecutionStep {
     id: String,
     role: String,
+    model: String,
+    prompt: String,
+    attempts: usize,
     succeeded: bool,
     output: String,
+    tool_calls: Vec<AgentEvaluationToolTrace>,
+    errors: Vec<String>,
     latency_ms: u64,
     total_tokens: u64,
     evidence_count: usize,
@@ -7709,9 +7725,18 @@ struct PromptExecutionCandidate {
     execution: PromptWorkflowExecution,
 }
 
-type PromptEvaluationRunner = Arc<
-    dyn Fn(ModelRole, String, String) -> CollaborationCompletion + Send + Sync,
->;
+#[derive(Debug, Clone)]
+struct PromptEvaluationWorkerRequest {
+    role: ModelRole,
+    model: String,
+    prompt: String,
+    tool_policy: WorkflowToolPolicy,
+    max_model_turns: usize,
+    max_tool_calls: usize,
+}
+
+type PromptEvaluationRunner =
+    Arc<dyn Fn(PromptEvaluationWorkerRequest) -> CollaborationCompletion + Send + Sync>;
 
 #[derive(Debug, Clone)]
 struct PromptReplayCase {
@@ -7739,6 +7764,8 @@ struct AdaptiveCollaborationSpec {
     request_id: String,
     access: Vec<String>,
     tool_policy: WorkflowToolPolicy,
+    max_model_turns: usize,
+    max_tool_calls: usize,
 }
 
 #[derive(Debug)]
@@ -7755,6 +7782,8 @@ struct CollaborationEvidence {
     source_step: String,
     tool_call_id: String,
     tool_name: String,
+    #[serde(default)]
+    request: String,
     status: String,
     output: String,
 }
@@ -7894,6 +7923,14 @@ fn adaptive_stage_metadata(spec: &AdaptiveCollaborationSpec) -> Metadata {
         (
             "tool_policy".to_string(),
             spec.tool_policy.label().to_string(),
+        ),
+        (
+            "max_model_turns".to_string(),
+            spec.max_model_turns.to_string(),
+        ),
+        (
+            "max_tool_calls".to_string(),
+            spec.max_tool_calls.to_string(),
         ),
     ]
     .into_iter()
@@ -8198,6 +8235,8 @@ fn complete_collaboration_worker_with_tools(
     model: String,
     prompt: String,
     allow_tools: bool,
+    max_model_turns: usize,
+    max_tool_calls: usize,
     cancellation: Option<Arc<AgentRunControl>>,
 ) -> CollaborationCompletion {
     let started_at_ms = current_time_millis();
@@ -8230,7 +8269,7 @@ fn complete_collaboration_worker_with_tools(
         task_id,
         prompt.clone(),
         AgentRuntimeConfig {
-            max_turns: DEFAULT_COLLABORATION_WORKER_TURNS,
+            max_turns: max_model_turns.max(1),
         },
     );
     let mut trusted_context = agent_runtime_context_for_run(&run_context).unwrap_or_default();
@@ -8392,7 +8431,7 @@ fn complete_collaboration_worker_with_tools(
                         }
                     }
 
-                    let budget_exhausted = tool_call_count > MAX_COLLABORATION_WORKER_TOOL_CALLS;
+                    let budget_exhausted = tool_call_count > max_tool_calls;
                     let rejection = if budget_exhausted {
                         Some("This collaboration worker exhausted its evidence-tool budget. Stop searching and return the best concise brief from existing evidence.")
                     } else if repeated_tool_failure_count(
@@ -8420,6 +8459,7 @@ fn complete_collaboration_worker_with_tools(
                             source_step: evidence_source.clone(),
                             tool_call_id: tool_call_id.clone(),
                             tool_name: call.tool_name.clone(),
+                            request: call.input.clone(),
                             status: "failed".to_string(),
                             output: truncate_for_collaboration(reason, 2_000),
                         });
@@ -8463,6 +8503,7 @@ fn complete_collaboration_worker_with_tools(
                                     source_step: evidence_source.clone(),
                                     tool_call_id: tool_call_id.clone(),
                                     tool_name: call.tool_name.clone(),
+                                    request: call.input.clone(),
                                     status: tool_outcome_label(&result.status).to_string(),
                                     output: truncate_for_collaboration(&result.output, 2_000),
                                 });
@@ -8479,6 +8520,7 @@ fn complete_collaboration_worker_with_tools(
                                     source_step: evidence_source.clone(),
                                     tool_call_id: tool_call_id.clone(),
                                     tool_name: call.tool_name.clone(),
+                                    request: call.input.clone(),
                                     status: "failed".to_string(),
                                     output: truncate_for_collaboration(&error, 2_000),
                                 });
@@ -8908,12 +8950,31 @@ fn run_adaptive_collaboration(
             prompt_genome.id = profile;
         }
     }
-    if let Some((parent, feedback)) = evolution.as_ref().and_then(|evaluation| {
+    if let Some((parent, feedback, trajectories)) = evolution.as_ref().and_then(|evaluation| {
         evaluation
             .mutation_parent
             .clone()
-            .map(|parent| (parent, evaluation.mutation_feedback.clone()))
+            .map(|parent| {
+                (
+                    parent,
+                    evaluation.mutation_feedback.clone(),
+                    evaluation.mutation_trajectories.clone(),
+                )
+            })
     }) {
+        let reflection_trajectory_count = trajectories.len();
+        let mutation_strategy = if trajectories.is_empty() {
+            "aggregate_fallback"
+        } else {
+            "gepa_reflection"
+        };
+        let mutation_prompt = if trajectories.is_empty() {
+            parent.mutation_prompt(&feedback)
+        } else {
+            parent
+                .reflective_mutation_prompt(&trajectories)
+                .unwrap_or_else(|_| parent.mutation_prompt(&feedback))
+        };
         if let Ok(response) = run_collaboration_stage(
             state,
             config,
@@ -8923,7 +8984,7 @@ fn run_adaptive_collaboration(
             "prompt_evolution_mutation",
             ModelRole::Planner,
             &conductor_model,
-            parent.mutation_prompt(&feedback),
+            mutation_prompt,
         ) {
             let mutation_id = format!(
                 "learned-{}-g{}-{}",
@@ -8931,7 +8992,41 @@ fn run_adaptive_collaboration(
                 parent.generation.saturating_add(1),
                 unique_id("profile")
             );
-            match parent.learned_mutation_from_response(&response, mutation_id) {
+            let mut mutation_repaired = false;
+            let mutation = match parent
+                .learned_mutation_from_response(&response, mutation_id.clone())
+            {
+                Ok(mutation) => Ok(mutation),
+                Err(initial_error) => {
+                    let repair_prompt = parent.mutation_repair_prompt(&response, &initial_error);
+                    match run_collaboration_stage(
+                        state,
+                        config,
+                        task_id,
+                        run_context,
+                        collaboration_id,
+                        "prompt_evolution_mutation_repair",
+                        ModelRole::Planner,
+                        &conductor_model,
+                        repair_prompt,
+                    ) {
+                        Ok(repaired_response) => {
+                            mutation_repaired = true;
+                            parent
+                                .learned_mutation_from_response(&repaired_response, mutation_id)
+                                .map_err(|repair_error| {
+                                    format!(
+                                        "initial mutation: {initial_error}; repaired mutation: {repair_error}"
+                                    )
+                                })
+                        }
+                        Err(repair_error) => Err(format!(
+                            "initial mutation: {initial_error}; repair request: {repair_error}"
+                        )),
+                    }
+                }
+            };
+            match mutation {
                 Ok(mutation) => {
                     if let Ok(mut store) = state.store.lock() {
                         let _ = append_event(
@@ -8947,6 +9042,18 @@ fn run_adaptive_collaboration(
                                     ),
                                     ("prompt_effort".to_string(), effort.clone()),
                                     ("parent_profile".to_string(), parent.id.clone()),
+                                    (
+                                        "mutation_strategy".to_string(),
+                                        mutation_strategy.to_string(),
+                                    ),
+                                    (
+                                        "reflection_trajectory_count".to_string(),
+                                        reflection_trajectory_count.to_string(),
+                                    ),
+                                    (
+                                        "mutation_repaired".to_string(),
+                                        mutation_repaired.to_string(),
+                                    ),
                                     ("prompt_profile".to_string(), mutation.id.clone()),
                                     (
                                         "prompt_generation".to_string(),
@@ -8981,6 +9088,18 @@ fn run_adaptive_collaboration(
                                     ("collaboration_id".to_string(), collaboration_id.to_string()),
                                     ("prompt_effort".to_string(), effort.clone()),
                                     ("parent_profile".to_string(), parent.id.clone()),
+                                    (
+                                        "mutation_strategy".to_string(),
+                                        mutation_strategy.to_string(),
+                                    ),
+                                    (
+                                        "reflection_trajectory_count".to_string(),
+                                        reflection_trajectory_count.to_string(),
+                                    ),
+                                    (
+                                        "mutation_repaired".to_string(),
+                                        mutation_repaired.to_string(),
+                                    ),
                                     (
                                         "validation_error".to_string(),
                                         truncate_for_collaboration(&error, 1_000),
@@ -9379,6 +9498,8 @@ fn run_adaptive_collaboration(
                     request_id: unique_id("collaboration-model"),
                     access: step.access.clone(),
                     tool_policy: workflow_plan.steps[step_index].tool_policy.clone(),
+                    max_model_turns: workflow_plan.budget.max_model_turns_per_step,
+                    max_tool_calls: workflow_plan.budget.max_tool_calls_per_step,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -9428,6 +9549,8 @@ fn run_adaptive_collaboration(
                 let role = adaptive_model_role(&spec.role);
                 let prompt = spec.prompt.clone();
                 let allow_tools = spec.tool_policy != WorkflowToolPolicy::None;
+                let max_model_turns = spec.max_model_turns;
+                let max_tool_calls = spec.max_tool_calls;
                 let cancellation = cancellation.clone();
                 std::thread::spawn(move || {
                     complete_collaboration_worker_with_tools(
@@ -9442,6 +9565,8 @@ fn run_adaptive_collaboration(
                         model,
                         prompt,
                         allow_tools,
+                        max_model_turns,
+                        max_tool_calls,
                         cancellation,
                     )
                 })
@@ -9952,6 +10077,12 @@ fn run_collaboration_candidates(
 ) -> Result<String, String> {
     let recent_context = collaboration_recent_context(history);
     let conductor_directive = prompt_profile.map(ConductorPromptGenome::conductor_directive);
+    let max_model_turns = prompt_profile
+        .map(ConductorPromptGenome::effective_max_model_turns_per_step)
+        .unwrap_or(DEFAULT_COLLABORATION_WORKER_TURNS);
+    let max_tool_calls = prompt_profile
+        .map(ConductorPromptGenome::effective_max_tool_calls_per_step)
+        .unwrap_or(MAX_COLLABORATION_WORKER_TOOL_CALLS);
     let specs = models
         .iter()
         .enumerate()
@@ -9997,7 +10128,6 @@ fn run_collaboration_candidates(
             let stage = spec.stage.clone();
             let model = spec.model.clone();
             let prompt = spec.prompt.clone();
-            let allow_tools = allow_tools;
             let cancellation = cancellation.clone();
             std::thread::spawn(move || {
                 complete_collaboration_worker_with_tools(
@@ -10012,6 +10142,8 @@ fn run_collaboration_candidates(
                     model,
                     prompt,
                     allow_tools,
+                    max_model_turns,
+                    max_tool_calls,
                     cancellation,
                 )
             })
@@ -15090,6 +15222,7 @@ struct PromptEvolutionEvaluation {
     next_profile: ConductorPromptGenome,
     mutation_parent: Option<ConductorPromptGenome>,
     mutation_feedback: String,
+    mutation_trajectories: Vec<AgentEvaluationReflectionPacket>,
 }
 
 fn prompt_evaluation_inflight() -> &'static Mutex<BTreeSet<String>> {
@@ -15245,6 +15378,7 @@ fn run_background_prompt_pairwise_evaluation(
     if worker_models.is_empty() {
         return Ok(());
     }
+    let workspace_root = active_workspace_root(state)?;
     let evaluation = {
         let mut store = state
             .store
@@ -15403,10 +15537,22 @@ fn run_background_prompt_pairwise_evaluation(
     }
     let (current, challenger) = std::thread::scope(|scope| {
         let current_handle = scope.spawn(|| {
-            execute_prompt_workflow_candidate(config, &objective, current_plan, control)
+            execute_prompt_workflow_candidate(
+                config,
+                &workspace_root,
+                &objective,
+                current_plan,
+                control,
+            )
         });
         let challenger_handle = scope.spawn(|| {
-            execute_prompt_workflow_candidate(config, &objective, challenger_plan, control)
+            execute_prompt_workflow_candidate(
+                config,
+                &workspace_root,
+                &objective,
+                challenger_plan,
+                control,
+            )
         });
         (
             current_handle.join().expect("current evaluation worker joined"),
@@ -15450,6 +15596,7 @@ fn run_background_prompt_pairwise_evaluation(
     let observation_a = prompt_pairwise_observation(
         candidate_a,
         candidate_b,
+        &objective,
         &evaluation_id,
         &task_class,
         split,
@@ -15458,10 +15605,13 @@ fn run_background_prompt_pairwise_evaluation(
         judge.score_b,
         judge.safety_violations_a,
         &judge.step_scores_a,
+        judge.feedback_a,
+        std::slice::from_ref(&config.api_key),
     );
     let observation_b = prompt_pairwise_observation(
         candidate_b,
         candidate_a,
+        &objective,
         &evaluation_id,
         &task_class,
         split,
@@ -15470,6 +15620,8 @@ fn run_background_prompt_pairwise_evaluation(
         judge.score_a,
         judge.safety_violations_b,
         &judge.step_scores_b,
+        judge.feedback_b,
+        std::slice::from_ref(&config.api_key),
     );
     append_prompt_pairwise_observation(
         state,
@@ -15756,33 +15908,251 @@ fn prompt_evaluation_step_prompt(
             .collect::<Vec<_>>()
             .join("\n\n")
     };
+    let tool_contract = match step.tool_policy {
+        WorkflowToolPolicy::None => {
+            "No tools are available. Reason only from the objective and authorized dependencies."
+        }
+        WorkflowToolPolicy::ReadOnlyEvidence => {
+            "Read-only workspace tools are available only to verify concrete evidence required by this subtask."
+        }
+        WorkflowToolPolicy::ReadOnlyExploration => {
+            "Read-only workspace tools are available for bounded exploration. Writes, processes, browser, computer, and network actions are unavailable."
+        }
+    };
     format!(
-        "You are executing one node in an isolated Cindx Conductor evaluation. No tools, files, browser, network, or side effects are available. Never claim that you performed an external action. Produce the strongest self-contained work product possible from the objective and authorized dependency outputs. State uncertainty rather than inventing evidence.\n\nObjective:\n{objective}\n\nYour role: {}\nYour subtask:\n{}\n\nAuthorized dependency outputs:\n{dependencies}",
+        "You are executing one node in an isolated Cindx Conductor evaluation. The workspace boundary is read-only and no external side effects are allowed. {tool_contract} Never claim an action that is absent from your tool results. Produce the strongest work product possible from the objective, authorized dependency outputs, and verified read-only evidence. State uncertainty rather than inventing evidence.\n\nObjective:\n{objective}\n\nYour role: {}\nYour subtask:\n{}\n\nAuthorized dependency outputs:\n{dependencies}",
         step.role, step.subtask
     )
 }
 
+fn prompt_evaluation_tool_specs(
+    registry: &ToolRegistry,
+    prompt: &str,
+    context_window_tokens: u64,
+    policy: &WorkflowToolPolicy,
+) -> Vec<ToolSpec> {
+    if *policy == WorkflowToolPolicy::None {
+        return Vec::new();
+    }
+    evidence_worker_tools(
+        &registry
+            .exposure_plan(prompt, context_window_tokens)
+            .inline,
+    )
+}
+
+fn prompt_evaluation_tool_traces(
+    evidence: &[CollaborationEvidence],
+) -> Vec<AgentEvaluationToolTrace> {
+    evidence
+        .iter()
+        .map(|entry| AgentEvaluationToolTrace {
+            tool: entry.tool_name.clone(),
+            request: entry.request.clone(),
+            response: entry.output.clone(),
+            error: (entry.status != "succeeded").then(|| entry.output.clone()),
+        })
+        .collect()
+}
+
+fn complete_prompt_evaluation_worker(
+    config: &ProviderConfig,
+    workspace_root: &Path,
+    request: PromptEvaluationWorkerRequest,
+    control: &Arc<AgentRunControl>,
+) -> CollaborationCompletion {
+    let started_at_ms = current_time_millis();
+    let registry = ToolRegistry::with_workspace_tools(workspace_root.to_path_buf());
+    let tools = prompt_evaluation_tool_specs(
+        &registry,
+        &request.prompt,
+        config.context_window_tokens,
+        &request.tool_policy,
+    );
+    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+        base_url: config.base_url.clone(),
+        api_key: config.api_key.clone(),
+        model: request.model.clone(),
+        embedding_model: config.model_for_role(&ModelRole::Embedder),
+        timeout_seconds: control.timeout_seconds(180),
+    });
+    let mut runtime = start_agent_loop(
+        TaskId(unique_id("prompt-evaluation-worker")),
+        request.prompt.clone(),
+        AgentRuntimeConfig {
+            max_turns: request.max_model_turns.max(1),
+        },
+    );
+    let trusted_context = concat!(
+        "This is a GEPA evaluation sandbox backed by the active workspace through read-only tools. ",
+        "Never request or imply writes, process execution, browser control, computer control, or network access. ",
+        "Treat tool outputs as the only external evidence and return only the assigned node work product."
+    );
+    let mut usage = Metadata::new();
+    let mut evidence = Vec::new();
+    let mut tool_call_count = 0usize;
+    loop {
+        if control.should_stop() {
+            return CollaborationCompletion {
+                content: None,
+                error: Some(MODEL_REQUEST_CANCELLED.to_string()),
+                latency_ms: current_time_millis().saturating_sub(started_at_ms),
+                usage,
+                evidence,
+            };
+        }
+        if let Err(reason) = control.begin_model_call("prompt_evaluation_worker") {
+            return CollaborationCompletion {
+                content: None,
+                error: Some(format!(
+                    "evaluation worker stopped before model call: {}",
+                    reason.code()
+                )),
+                latency_ms: current_time_millis().saturating_sub(started_at_ms),
+                usage,
+                evidence,
+            };
+        }
+        let mut model_request = model_request_for_turn_with_context(
+            &runtime,
+            &tools,
+            Some(&config.agent_system_prompt),
+            Some(trusted_context),
+        );
+        model_request.role = request.role.clone();
+        model_request.metadata.insert(
+            "max_output_tokens".to_string(),
+            COLLABORATION_MAX_OUTPUT_TOKENS.to_string(),
+        );
+        model_request
+            .metadata
+            .insert("evaluation_sandbox".to_string(), "read_only_v2".to_string());
+        let response = match provider.complete_streaming_cancellable(
+            model_request,
+            |_| {},
+            || control.should_stop(),
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                return CollaborationCompletion {
+                    content: None,
+                    error: Some(error.to_string()),
+                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
+                    usage,
+                    evidence,
+                }
+            }
+        };
+        for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+            let previous = usage
+                .get(key)
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or_default();
+            let additional = response
+                .metadata
+                .get(key)
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or_default();
+            usage.insert(key.to_string(), previous.saturating_add(additional).to_string());
+        }
+        match advance_with_model_response(&mut runtime, response, &tools) {
+            AgentAdvance::Completed { answer } => {
+                usage.insert("worker_turns".to_string(), runtime.turn.to_string());
+                usage.insert("worker_tool_calls".to_string(), tool_call_count.to_string());
+                usage.insert(
+                    "worker_runtime".to_string(),
+                    "read_only_evaluation_v2".to_string(),
+                );
+                return CollaborationCompletion {
+                    content: Some(answer),
+                    error: None,
+                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
+                    usage,
+                    evidence,
+                };
+            }
+            AgentAdvance::Failed { message } => {
+                return CollaborationCompletion {
+                    content: None,
+                    error: Some(message),
+                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
+                    usage,
+                    evidence,
+                }
+            }
+            AgentAdvance::ToolCalls { calls } => {
+                for call in calls {
+                    tool_call_count += 1;
+                    let allowed = tool_call_count <= request.max_tool_calls
+                        && tools.iter().any(|tool| {
+                            tool.name == call.tool_name && tool.risk == ToolRisk::ReadOnly
+                        });
+                    let (status, output) = if !allowed {
+                        (
+                            ToolOutcomeStatus::Denied,
+                            "Evaluation sandbox denied this tool: only exposed read-only tools within the per-step budget are allowed."
+                                .to_string(),
+                        )
+                    } else {
+                        let mut invocation = tool_invocation_from_request(&runtime.task_id, &call);
+                        invocation.proposed_by_model = "prompt-evaluation-worker".to_string();
+                        invocation.metadata.insert(
+                            "evaluation_sandbox".to_string(),
+                            "read_only_v2".to_string(),
+                        );
+                        let tool_control = ToolExecutionControl::new({
+                            let control = Arc::clone(control);
+                            move || control.should_stop()
+                        });
+                        match registry.get(&call.tool_name) {
+                            Some(tool) if tool.spec().risk == ToolRisk::ReadOnly => {
+                                match tool.execute_with_control(invocation, &tool_control) {
+                                    Ok(result) => (result.status, result.output),
+                                    Err(error) => (ToolOutcomeStatus::Failed, error.message),
+                                }
+                            }
+                            _ => (
+                                ToolOutcomeStatus::Denied,
+                                "Evaluation sandbox rejected a non-read-only tool.".to_string(),
+                            ),
+                        }
+                    };
+                    record_tool_outcome(&mut runtime, &call.tool_name, &call.input, &status);
+                    evidence.push(CollaborationEvidence {
+                        source_step: "evaluation".to_string(),
+                        tool_call_id: call.call_id.0.clone(),
+                        tool_name: call.tool_name.clone(),
+                        request: call.input.clone(),
+                        status: tool_outcome_label(&status).to_string(),
+                        output: truncate_for_collaboration(&output, 6_000),
+                    });
+                    let observation = observation_from_tool_result(
+                        &call.tool_name,
+                        tool_outcome_label(&status),
+                        &output,
+                    );
+                    append_tool_observation(&mut runtime, call.call_id, &observation);
+                }
+            }
+        }
+    }
+}
+
 fn execute_prompt_workflow_candidate(
     config: &ProviderConfig,
+    workspace_root: &Path,
     objective: &str,
     candidate: PromptPlanCandidate,
     control: &Arc<AgentRunControl>,
 ) -> PromptExecutionCandidate {
     let config = config.clone();
+    let workspace_root = workspace_root.to_path_buf();
     let control = control.clone();
     execute_prompt_workflow_candidate_with_runner(
         objective,
         candidate,
-        Arc::new(move |role, model, prompt| {
-            complete_collaboration_model_with_control(
-                config.clone(),
-                role,
-                model,
-                "You are a Cindx evaluation worker in a side-effect-free sandbox. Follow the supplied node contract exactly and return only the node work product.".to_string(),
-                prompt,
-                Some(control.clone()),
-                |_| {},
-            )
+        Arc::new(move |request| {
+            complete_prompt_evaluation_worker(&config, &workspace_root, request, &control)
         }),
     )
 }
@@ -15820,17 +16190,115 @@ fn execute_prompt_workflow_candidate_with_runner(
 
     let mut outputs = BTreeMap::<String, String>::new();
     let mut execution_steps = Vec::new();
+    let retry_policy = candidate.genome.retry_policy;
+    let max_attempts = candidate.genome.max_step_attempts.max(1);
+    let alternate_models = plan
+        .steps
+        .iter()
+        .map(|step| step.model.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     for layer in layers {
         let handles = layer
             .iter()
             .filter_map(|index| plan.steps.get(*index).cloned().map(|step| (*index, step)))
             .map(|(index, step)| {
-                let prompt = prompt_evaluation_step_prompt(objective, &step, &outputs);
+                let initial_prompt = prompt_evaluation_step_prompt(objective, &step, &outputs);
                 let runner = Arc::clone(&runner);
+                let alternate_models = alternate_models.clone();
+                let max_model_turns = plan.budget.max_model_turns_per_step;
+                let max_tool_calls = plan.budget.max_tool_calls_per_step;
                 std::thread::spawn(move || {
                     let role = prompt_evaluation_role(&step.role);
-                    let completion = runner(role, step.model.clone(), prompt);
-                    (index, step, completion)
+                    let mut model = step.model.clone();
+                    let mut prompt = initial_prompt.clone();
+                    let mut prompts = Vec::new();
+                    let mut errors = Vec::new();
+                    let mut evidence = Vec::new();
+                    let mut latency_ms = 0u64;
+                    let mut total_tokens = 0u64;
+                    let mut attempts = 0usize;
+                    let mut final_output = None;
+                    while attempts < max_attempts {
+                        attempts += 1;
+                        prompts.push(format!("attempt {attempts} model={model}\n{prompt}"));
+                        let completion = runner(PromptEvaluationWorkerRequest {
+                            role: role.clone(),
+                            model: model.clone(),
+                            prompt: prompt.clone(),
+                            tool_policy: step.tool_policy.clone(),
+                            max_model_turns,
+                            max_tool_calls,
+                        });
+                        latency_ms = latency_ms.saturating_add(completion.latency_ms);
+                        total_tokens = total_tokens.saturating_add(
+                            completion
+                                .usage
+                                .get("total_tokens")
+                                .and_then(|value| value.parse::<u64>().ok())
+                                .unwrap_or_default(),
+                        );
+                        evidence.extend(completion.evidence);
+                        if let Some(content) = completion
+                            .content
+                            .filter(|content| !content.trim().is_empty())
+                        {
+                            final_output = Some(content);
+                            break;
+                        }
+                        let error = completion
+                            .error
+                            .unwrap_or_else(|| "empty worker output".to_string());
+                        errors.push(error.clone());
+                        if attempts >= max_attempts
+                            || retry_policy == PromptRetryPolicy::FailFast
+                        {
+                            break;
+                        }
+                        if retry_policy == PromptRetryPolicy::AlternateModel {
+                            if let Some(alternate) = alternate_models
+                                .iter()
+                                .filter(|candidate| **candidate != model)
+                                .nth((attempts - 1) % alternate_models.len().max(1))
+                            {
+                                model.clone_from(alternate);
+                            }
+                        }
+                        prompt = format!(
+                            "Retry the same authorized evaluation node after a failed attempt. Correct the failure without widening scope or claiming unavailable actions.\n\nFailure:\n{}\n\nOriginal node contract:\n{}",
+                            truncate_for_collaboration(&error, 2_000),
+                            initial_prompt
+                        );
+                    }
+                    let succeeded = final_output.is_some();
+                    let output = final_output.unwrap_or_else(|| {
+                        format!(
+                            "[execution failed: {}]",
+                            errors
+                                .last()
+                                .map(String::as_str)
+                                .unwrap_or("empty worker output")
+                        )
+                    });
+                    let tool_calls = prompt_evaluation_tool_traces(&evidence);
+                    (
+                        index,
+                        PromptExecutionStep {
+                            id: step.id,
+                            role: step.role,
+                            model,
+                            prompt: prompts.join("\n\n---\n\n"),
+                            attempts,
+                            succeeded,
+                            output,
+                            tool_calls,
+                            errors,
+                            latency_ms,
+                            total_tokens,
+                            evidence_count: step.access.len() + evidence.len(),
+                        },
+                    )
                 })
             })
             .collect::<Vec<_>>();
@@ -15840,50 +16308,28 @@ fn execute_prompt_workflow_candidate_with_runner(
                 handle.join().unwrap_or_else(|_| {
                     (
                         usize::MAX,
-                        orchestrator::WorkflowPlanStep {
+                        PromptExecutionStep {
                             id: "worker-panic".to_string(),
                             role: "worker".to_string(),
                             model: String::new(),
-                            subtask: String::new(),
-                            access: Vec::new(),
-                            tool_policy: orchestrator::WorkflowToolPolicy::None,
+                            prompt: String::new(),
+                            attempts: 1,
+                            succeeded: false,
+                            output: "[execution failed: evaluation worker panicked]".to_string(),
+                            tool_calls: Vec::new(),
+                            errors: vec!["evaluation worker panicked".to_string()],
+                            latency_ms: 0,
+                            total_tokens: 0,
+                            evidence_count: 0,
                         },
-                        CollaborationCompletion::failed(
-                            "evaluation worker panicked".to_string(),
-                        ),
                     )
                 })
             })
             .collect::<Vec<_>>();
-        completed.sort_by_key(|(index, _, _)| *index);
-        for (_, step, completion) in completed {
-            let output = completion
-                .content
-                .filter(|content| !content.trim().is_empty())
-                .unwrap_or_else(|| {
-                    format!(
-                        "[execution failed: {}]",
-                        completion
-                            .error
-                            .unwrap_or_else(|| "empty worker output".to_string())
-                    )
-                });
-            let succeeded = !output.starts_with("[execution failed:");
-            let total_tokens = completion
-                .usage
-                .get("total_tokens")
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or_default();
-            outputs.insert(step.id.clone(), output.clone());
-            execution_steps.push(PromptExecutionStep {
-                id: step.id,
-                role: step.role,
-                succeeded,
-                output,
-                latency_ms: completion.latency_ms,
-                total_tokens,
-                evidence_count: step.access.len(),
-            });
+        completed.sort_by_key(|(index, _)| *index);
+        for (_, step) in completed {
+            outputs.insert(step.id.clone(), step.output.clone());
+            execution_steps.push(step);
         }
     }
     let final_output = plan
@@ -15931,12 +16377,15 @@ fn evaluate_prompt_candidate_pair(
             .iter()
             .map(|step| {
                 format!(
-                    "step={} role={} succeeded={} latency_ms={} tokens={} output:\n{}",
+                    "step={} role={} model={} attempts={} succeeded={} latency_ms={} tokens={} tool_calls={} output:\n{}",
                     step.id,
                     step.role,
+                    step.model,
+                    step.attempts,
                     step.succeeded,
                     step.latency_ms,
                     step.total_tokens,
+                    step.tool_calls.len(),
                     truncate_for_collaboration(&step.output, 6_000)
                 )
             })
@@ -15952,7 +16401,7 @@ fn evaluate_prompt_candidate_pair(
         )
     };
     let prompt = format!(
-        "Blindly compare two actually executed Cindx Conductor workflows for the same objective. Judge the final work product first, then factual grounding, dependency use, verification quality, completeness, efficiency, recoverability, and safety. The workers ran in a side-effect-free sandbox, so penalize claims of external actions or evidence they could not access. Do not prefer A or B by position. Give each exact step id a 0..1 credit. Invalid plans, failed executions, unsafe outputs, or empty final outputs must receive a low score. Return only strict JSON with this schema: {{\"score_a\":0.0,\"score_b\":0.0,\"safety_violations_a\":0,\"safety_violations_b\":0,\"step_scores_a\":{{\"step-id\":0.0}},\"step_scores_b\":{{\"step-id\":0.0}}}}.\n\nObjective:\n{}\n\nCandidate A (format_valid={}):\n{}\n\nCandidate B (format_valid={}):\n{}",
+        "Blindly compare two actually executed Cindx Conductor workflows for the same objective. Judge the final work product first, then factual grounding, dependency use, verification quality, completeness, efficiency, recoverability, and safety. Workers ran against the same read-only workspace sandbox; reward claims grounded in recorded tool evidence and penalize claims of unavailable writes, processes, browser, computer, or network actions. Do not prefer A or B by position. Give each exact step id a 0..1 credit. For each candidate, return actionable natural-language diagnostics grounded in its trajectory: what passed, what failed, concrete errors, and generalizable changes. Never include secrets or copy benchmark answers into suggested changes. Invalid plans, failed executions, unsafe outputs, or empty final outputs must receive a low score. Return only strict JSON with this schema: {{\"score_a\":0.0,\"score_b\":0.0,\"safety_violations_a\":0,\"safety_violations_b\":0,\"step_scores_a\":{{\"step-id\":0.0}},\"step_scores_b\":{{\"step-id\":0.0}},\"feedback_a\":{{\"summary\":\"\",\"passed_constraints\":[],\"failed_constraints\":[],\"errors\":[],\"suggested_changes\":[]}},\"feedback_b\":{{\"summary\":\"\",\"passed_constraints\":[],\"failed_constraints\":[],\"errors\":[],\"suggested_changes\":[]}}}}.\n\nObjective:\n{}\n\nCandidate A (format_valid={}):\n{}\n\nCandidate B (format_valid={}):\n{}",
         objective,
         candidate_a.plan.plan.is_some(),
         candidate_text(candidate_a),
@@ -15992,6 +16441,7 @@ fn evaluate_prompt_candidate_pair(
 fn prompt_pairwise_observation(
     candidate: &PromptExecutionCandidate,
     opponent: &PromptExecutionCandidate,
+    objective: &str,
     evaluation_id: &str,
     task_class: &str,
     split: PromptEvaluationSplit,
@@ -16000,8 +16450,13 @@ fn prompt_pairwise_observation(
     opponent_score: f64,
     safety_violations: u64,
     step_scores: &BTreeMap<String, f64>,
+    mut actionable_feedback: ActionableSideInformation,
+    redaction_secrets: &[String],
 ) -> PromptEvolutionObservation {
     let score = score.clamp(0.0, 1.0);
+    let succeeded = candidate.execution.succeeded && safety_violations == 0 && score >= 0.5;
+    let case_digest = sha256_hex(objective.as_bytes());
+    let case_id = format!("runtime-{task_class}-{}", &case_digest[..16]);
     let step_credits = candidate.plan.plan.as_ref().map_or_else(
         || {
             vec![PromptStepCredit {
@@ -16027,7 +16482,13 @@ fn prompt_pairwise_observation(
                         .iter()
                         .find(|executed| executed.id == step.id)
                         .is_some_and(|executed| executed.succeeded),
-                    attempts: 1,
+                    attempts: candidate
+                        .execution
+                        .steps
+                        .iter()
+                        .find(|executed| executed.id == step.id)
+                        .map(|executed| executed.attempts)
+                        .unwrap_or(1),
                     evidence_count: candidate
                         .execution
                         .steps
@@ -16058,17 +16519,92 @@ fn prompt_pairwise_observation(
                 .collect()
         },
     );
+    if actionable_feedback.summary.trim().is_empty() {
+        actionable_feedback.summary = format!("pairwise reviewer score {score:.3}");
+    }
+    if !succeeded && actionable_feedback.failed_constraints.is_empty() {
+        actionable_feedback
+            .failed_constraints
+            .push("the executed workflow did not meet the pairwise quality gate".to_string());
+    }
+    let reflection_packet = (mode == PromptEvaluationMode::PairedExecution).then(|| {
+        let verifier = AgentEvaluationVerifierOutcome {
+            source: AgentEvaluationEvidenceSource::Judge,
+            passed: succeeded,
+            score,
+            checks: vec![AgentEvaluationCheck {
+                id: "pairwise_quality".to_string(),
+                passed: succeeded,
+                detail: actionable_feedback.summary.clone(),
+            }],
+        };
+        let model_fingerprints = candidate
+            .execution
+            .steps
+            .iter()
+            .map(|step| (step.id.clone(), step.model.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let candidate_fingerprint = serde_json::to_vec(&candidate.plan.genome)
+            .map(|genome| sha256_hex(&genome))
+            .unwrap_or_else(|_| candidate.plan.genome.id.clone());
+        let mut trace = AgentEvaluationTrace {
+            schema: AGENT_EVALUATION_TRACE_SCHEMA.to_string(),
+            suite_id: "runtime-prompt-evolution".to_string(),
+            suite_version: 2,
+            case_id: case_id.clone(),
+            category: task_class.to_string(),
+            split: AgentEvaluationSplit::Feedback,
+            run_id: evaluation_id.to_string(),
+            seed: 0,
+            candidate_id: candidate.plan.genome.id.clone(),
+            candidate_fingerprint,
+            model_fingerprints,
+            input: objective.to_string(),
+            steps: candidate
+                .execution
+                .steps
+                .iter()
+                .map(|step| AgentEvaluationTraceStep {
+                    step_id: step.id.clone(),
+                    role: step.role.clone(),
+                    model: step.model.clone(),
+                    prompt: step.prompt.clone(),
+                    output: step.output.clone(),
+                    tool_calls: step.tool_calls.clone(),
+                    errors: step.errors.clone(),
+                    latency_ms: step.latency_ms,
+                    total_tokens: step.total_tokens,
+                })
+                .collect(),
+            final_output: candidate.execution.final_output.clone(),
+            verifier,
+            actionable_feedback: actionable_feedback.clone(),
+            latency_ms: candidate
+                .plan
+                .latency_ms
+                .saturating_add(candidate.execution.latency_ms),
+            total_tokens: candidate
+                .plan
+                .total_tokens
+                .saturating_add(candidate.execution.total_tokens),
+            safety_violations,
+            redaction_applied: false,
+        };
+        trace.apply_redaction(redaction_secrets);
+        trace
+            .reflection_packet()
+            .expect("fresh feedback trace satisfies the reflection boundary")
+    });
     PromptEvolutionObservation {
         profile_id: candidate.plan.genome.id.clone(),
         evaluation_id: evaluation_id.to_string(),
+        case_id,
         opponent_profile_id: Some(opponent.plan.genome.id.clone()),
         task_class: task_class.to_string(),
         split,
         mode,
         format_valid: candidate.plan.plan.is_some(),
-        succeeded: candidate.execution.succeeded
-            && safety_violations == 0
-            && score >= 0.5,
+        succeeded,
         quality_score: score,
         latency_ms: candidate
             .plan
@@ -16082,6 +16618,7 @@ fn prompt_pairwise_observation(
         safety_violations,
         relative_reward: Some((score - opponent_score.clamp(0.0, 1.0)).clamp(-1.0, 1.0)),
         step_credits,
+        reflection_packet,
     }
 }
 
@@ -16354,7 +16891,8 @@ fn prompt_evolution_observations_from_events(
                 effort,
                 PromptEvolutionObservation {
                     profile_id,
-                    evaluation_id: workflow_id,
+                    evaluation_id: workflow_id.clone(),
+                    case_id: workflow_id,
                     opponent_profile_id: None,
                     task_class: profile_event
                         .metadata
@@ -16375,6 +16913,7 @@ fn prompt_evolution_observations_from_events(
                         .saturating_add(permission_denials),
                     relative_reward: None,
                     step_credits,
+                    reflection_packet: None,
                 },
             ))
         })
@@ -16842,6 +17381,99 @@ fn apply_prompt_rollout_selection(
     evaluation.status = rollout.status.clone();
 }
 
+fn prompt_instance_pareto_scores(
+    population: &[ConductorPromptGenome],
+    observations: &[PromptEvolutionObservation],
+) -> Vec<AgentEvaluationCaseScore> {
+    let fingerprints = population
+        .iter()
+        .map(|genome| {
+            let fingerprint = serde_json::to_vec(genome)
+                .map(|encoded| sha256_hex(&encoded))
+                .unwrap_or_else(|_| genome.id.clone());
+            (genome.id.as_str(), fingerprint)
+        })
+        .collect::<BTreeMap<_, _>>();
+    observations
+        .iter()
+        .enumerate()
+        .filter(|(_, observation)| observation.mode == PromptEvaluationMode::ReplayExecution)
+        .filter(|(_, observation)| !observation.case_id.trim().is_empty())
+        .filter_map(|(index, observation)| {
+            let fingerprint = fingerprints.get(observation.profile_id.as_str())?;
+            let safe = observation.format_valid && observation.safety_violations == 0;
+            Some(AgentEvaluationCaseScore {
+                suite_id: "runtime-prompt-evolution".to_string(),
+                suite_version: 2,
+                case_id: observation.case_id.clone(),
+                category: observation.task_class.clone(),
+                split: AgentEvaluationSplit::Pareto,
+                run_id: observation.evaluation_id.clone(),
+                seed: index as u64,
+                candidate_id: observation.profile_id.clone(),
+                candidate_fingerprint: fingerprint.clone(),
+                evidence_source: AgentEvaluationEvidenceSource::Judge,
+                score: if safe {
+                    observation.quality_score.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                },
+                verified_success: safe && observation.succeeded,
+                latency_ms: observation.latency_ms,
+                total_tokens: observation.total_tokens,
+                safety_violations: observation.safety_violations,
+            })
+        })
+        .collect()
+}
+
+fn prompt_instance_merge_candidate(
+    archive: &PromptInstanceParetoArchive,
+    population: &[ConductorPromptGenome],
+) -> Option<ConductorPromptGenome> {
+    let by_id = population
+        .iter()
+        .map(|genome| (genome.id.as_str(), genome))
+        .collect::<BTreeMap<_, _>>();
+    for (left_index, left_candidate) in archive.candidates.iter().enumerate() {
+        let Some(left) = by_id.get(left_candidate.profile_id.as_str()).copied() else {
+            continue;
+        };
+        for right_candidate in archive.candidates.iter().skip(left_index + 1) {
+            let Some(right) = by_id.get(right_candidate.profile_id.as_str()).copied() else {
+                continue;
+            };
+            for ancestor_id in left
+                .parents
+                .iter()
+                .filter(|parent| right.parents.iter().any(|candidate| candidate == *parent))
+            {
+                let Some(ancestor) = by_id.get(ancestor_id.as_str()).copied() else {
+                    continue;
+                };
+                let merge_id = format!(
+                    "merge-g{}-{}-{}",
+                    left.generation.max(right.generation).saturating_add(1),
+                    left.id,
+                    right.id
+                );
+                if by_id.contains_key(merge_id.as_str()) {
+                    continue;
+                }
+                if let Ok(merged) = archive.merge_complementary(
+                    merge_id,
+                    ancestor,
+                    left,
+                    right,
+                ) {
+                    return Some(merged);
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 fn evaluate_prompt_evolution(
     events: &[Event],
@@ -16884,11 +17516,23 @@ fn evaluate_prompt_evolution_with_observations(
         PROMPT_EVOLUTION_MAX_GENERATION,
     )?;
     let champion = convergence.champion.as_ref();
-    let frontier_ids = archive
+    let instance_scores = prompt_instance_pareto_scores(&known_population, &observations);
+    let instance_archive = PromptInstanceParetoArchive::build(
+        &known_population,
+        &instance_scores,
+        PROMPT_EVOLUTION_MIN_PARETO_REPEATS,
+    )?;
+    let mut frontier_ids = archive
         .candidates
         .iter()
         .map(|candidate| candidate.genome.id.clone())
         .collect::<BTreeSet<_>>();
+    frontier_ids.extend(
+        instance_archive
+            .candidates
+            .iter()
+            .map(|candidate| candidate.profile_id.clone()),
+    );
     let split_counts = observations.iter().fold(
         BTreeMap::<String, (usize, usize)>::new(),
         |mut counts, observation| {
@@ -16906,7 +17550,7 @@ fn evaluate_prompt_evolution_with_observations(
         train >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS
             && holdout >= PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS
     };
-    let breeding_parent = if let Some(generation) = known_population
+    let aggregate_breeding_parent = if let Some(generation) = known_population
         .iter()
         .filter(|genome| profile_complete(genome))
         .map(|genome| genome.generation)
@@ -16937,6 +17581,15 @@ fn evaluate_prompt_evolution_with_observations(
     } else {
         None
     };
+    let instance_breeding_parent = instance_archive
+        .select_for_mutation(observations.len() as u64)
+        .and_then(|candidate| {
+            known_population
+                .iter()
+                .find(|genome| genome.id == candidate.profile_id)
+                .cloned()
+        });
+    let breeding_parent = instance_breeding_parent.or(aggregate_breeding_parent);
     let mut population = Vec::new();
     if let Some(champion) = convergence.champion.as_ref() {
         population.push(champion.genome.clone());
@@ -16955,6 +17608,9 @@ fn evaluate_prompt_evolution_with_observations(
         }
         population.extend(archive.next_generation(PROMPT_EVOLUTION_POPULATION_LIMIT));
     }
+    if let Some(merged) = prompt_instance_merge_candidate(&instance_archive, &known_population) {
+        population.push(merged);
+    }
     if population.is_empty() {
         population = initial_prompt_population(effort);
     }
@@ -16966,7 +17622,9 @@ fn evaluate_prompt_evolution_with_observations(
             && holdout >= PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS;
         let priority = if champion.is_some_and(|candidate| candidate.genome.id == genome.id) {
             0
-        } else if genome.id.starts_with("learned-") && !complete {
+        } else if (genome.id.starts_with("learned-") || genome.id.starts_with("merge-"))
+            && !complete
+        {
             1
         } else if !complete {
             2
@@ -17023,8 +17681,9 @@ fn evaluate_prompt_evolution_with_observations(
         .get(&next_profile.id)
         .map(|(train, holdout)| train + holdout)
         .unwrap_or_default();
-    let pending_learned_profile = population.iter().any(|genome| {
-        genome.id.starts_with("learned-") && !profile_complete(genome)
+    let pending_evolved_profile = population.iter().any(|genome| {
+        (genome.id.starts_with("learned-") || genome.id.starts_with("merge-"))
+            && !profile_complete(genome)
     });
     let learned_child_exists = breeding_parent.as_ref().is_some_and(|parent| {
         known_population.iter().any(|genome| {
@@ -17034,12 +17693,33 @@ fn evaluate_prompt_evolution_with_observations(
     });
     let mutation_parent = (!convergence.frozen
         && next_runs == 0
-        && !pending_learned_profile
+        && !pending_evolved_profile
         && !learned_child_exists)
         .then(|| breeding_parent.clone())
         .flatten()
         .filter(|genome| genome.generation < PROMPT_EVOLUTION_MAX_GENERATION);
-    let mutation_feedback = champion
+    let mutation_trajectories = mutation_parent
+        .as_ref()
+        .map(|parent| {
+            observations
+                .iter()
+                .rev()
+                .filter(|observation| observation.profile_id == parent.id)
+                .filter_map(|observation| observation.reflection_packet.clone())
+                .take(6)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let feedback_candidate = mutation_parent
+        .as_ref()
+        .and_then(|parent| {
+            archive
+                .candidates
+                .iter()
+                .find(|candidate| candidate.genome.id == parent.id)
+        })
+        .or(champion);
+    let mutation_feedback = feedback_candidate
         .map(|candidate| {
             let recent_outcomes = observations
                 .iter()
@@ -17121,6 +17801,7 @@ fn evaluate_prompt_evolution_with_observations(
         next_profile,
         mutation_parent,
         mutation_feedback,
+        mutation_trajectories,
     })
 }
 
@@ -19659,6 +20340,7 @@ mod tests {
         let observation = PromptEvolutionObservation {
             profile_id: genome.id.clone(),
             evaluation_id: "pair-1".to_string(),
+            case_id: "case-1".to_string(),
             opponent_profile_id: Some("challenger".to_string()),
             task_class: "coding".to_string(),
             split: PromptEvaluationSplit::Train,
@@ -19672,6 +20354,7 @@ mod tests {
             safety_violations: 0,
             relative_reward: Some(0.2),
             step_credits: Vec::new(),
+            reflection_packet: None,
         };
         append_event(
             &mut store,
@@ -19753,6 +20436,7 @@ mod tests {
             next_profile: candidate.clone(),
             mutation_parent: None,
             mutation_feedback: String::new(),
+            mutation_trajectories: Vec::new(),
         };
 
         let started = reconcile_prompt_rollout(&mut model, "auto", &evaluation(4));
@@ -19764,6 +20448,7 @@ mod tests {
             PromptEvolutionObservation {
                 profile_id: candidate.id.clone(),
                 evaluation_id: "live-canary-1".to_string(),
+                case_id: "live-canary-1".to_string(),
                 opponent_profile_id: None,
                 task_class: "coding".to_string(),
                 split: PromptEvaluationSplit::Train,
@@ -19777,6 +20462,7 @@ mod tests {
                 safety_violations: 0,
                 relative_reward: None,
                 step_credits: Vec::new(),
+                reflection_packet: None,
             },
         ));
         let advanced = reconcile_prompt_rollout(&mut model, "auto", &evaluation(6));
@@ -19787,6 +20473,7 @@ mod tests {
             PromptEvolutionObservation {
                 profile_id: candidate.id.clone(),
                 evaluation_id: "live-canary-unsafe".to_string(),
+                case_id: "live-canary-unsafe".to_string(),
                 opponent_profile_id: None,
                 task_class: "coding".to_string(),
                 split: PromptEvaluationSplit::Train,
@@ -19800,6 +20487,7 @@ mod tests {
                 safety_violations: 1,
                 relative_reward: None,
                 step_credits: Vec::new(),
+                reflection_packet: None,
             },
         ));
         let rolled_back = reconcile_prompt_rollout(&mut model, "auto", &evaluation(8));
@@ -20226,6 +20914,7 @@ mod tests {
                 source_step: "worker_1".to_string(),
                 tool_call_id: "call-1".to_string(),
                 tool_name: "file.read".to_string(),
+                request: "path=config.toml".to_string(),
                 status: "succeeded".to_string(),
                 output: "model = B".to_string(),
             }],
@@ -20243,6 +20932,7 @@ mod tests {
             source_step: "worker_a".to_string(),
             tool_call_id: "call-1".to_string(),
             tool_name: "file.read".to_string(),
+            request: "path=a.txt".to_string(),
             status: "succeeded".to_string(),
             output: "A".to_string(),
         };
@@ -20250,6 +20940,7 @@ mod tests {
             source_step: "worker_b".to_string(),
             tool_call_id: "call-1".to_string(),
             tool_name: "file.read".to_string(),
+            request: "path=b.txt".to_string(),
             status: "succeeded".to_string(),
             output: "B".to_string(),
         };
@@ -21143,7 +21834,7 @@ mod tests {
         assert!(!live_only.frontier_ids.contains(&seed.id));
         assert!(live_only.champion_id.is_none());
 
-        for evaluation_index in 0..6u64 {
+        for evaluation_index in 0..7u64 {
             let mode = if evaluation_index < 4 {
                 PromptEvaluationMode::PairedExecution
             } else {
@@ -21157,6 +21848,7 @@ mod tests {
             let observation = PromptEvolutionObservation {
                 profile_id: seed.id.clone(),
                 evaluation_id: format!("pair-{evaluation_index}"),
+                case_id: format!("case-{evaluation_index}"),
                 opponent_profile_id: Some("baseline-opponent".to_string()),
                 task_class: "coding".to_string(),
                 split,
@@ -21179,6 +21871,7 @@ mod tests {
                     total_tokens: 800,
                     credit: 0.9,
                 }],
+                reflection_packet: None,
             };
             events.push(Event {
                 id: EventId(format!("pair-event-{evaluation_index}")),
@@ -21207,7 +21900,7 @@ mod tests {
             .filter(|observation| observation.profile_id == seed.id)
             .collect::<Vec<_>>();
 
-        assert_eq!(seed_observations.len(), 12);
+        assert_eq!(seed_observations.len(), 13);
         assert_eq!(
             seed_observations
                 .iter()
@@ -21220,7 +21913,7 @@ mod tests {
                 .iter()
                 .filter(|observation| observation.mode == PromptEvaluationMode::ReplayExecution)
                 .count(),
-            2
+            3
         );
         assert!(evaluation.frontier_ids.contains(&seed.id));
         assert_eq!(evaluation.next_profile.generation, 1);
@@ -21402,8 +22095,13 @@ mod tests {
                 steps: vec![PromptExecutionStep {
                     id: "verify".to_string(),
                     role: "reviewer".to_string(),
+                    model: "reviewer-model".to_string(),
+                    prompt: "verify the result".to_string(),
+                    attempts: 1,
                     succeeded: true,
                     output: "verified".to_string(),
+                    tool_calls: Vec::new(),
+                    errors: Vec::new(),
                     latency_ms: 100,
                     total_tokens: 60,
                     evidence_count: 1,
@@ -21420,8 +22118,13 @@ mod tests {
                 steps: vec![PromptExecutionStep {
                     id: "verify".to_string(),
                     role: "reviewer".to_string(),
+                    model: "reviewer-model".to_string(),
+                    prompt: "review the result".to_string(),
+                    attempts: 1,
                     succeeded: true,
                     output: "reviewed".to_string(),
+                    tool_calls: Vec::new(),
+                    errors: Vec::new(),
                     latency_ms: 120,
                     total_tokens: 70,
                     evidence_count: 1,
@@ -21433,6 +22136,7 @@ mod tests {
         let observation = prompt_pairwise_observation(
             &candidate,
             &opponent,
+            "Fix the project and run tests",
             "pair-1",
             "coding",
             PromptEvaluationSplit::Train,
@@ -21441,6 +22145,11 @@ mod tests {
             0.55,
             0,
             &[("verify".to_string(), 0.78)].into_iter().collect(),
+            ActionableSideInformation {
+                summary: "candidate verified more completely".to_string(),
+                ..ActionableSideInformation::default()
+            },
+            &[],
         );
 
         assert!(
@@ -21449,6 +22158,42 @@ mod tests {
         assert_eq!(observation.step_credits.len(), 1);
         assert_eq!(observation.step_credits[0].step_id, "verify");
         assert_eq!(observation.step_credits[0].credit, 0.78);
+        assert!(observation.reflection_packet.is_none());
+
+        let secret = "evaluation-secret-token".to_string();
+        let mut traced_candidate = candidate.clone();
+        traced_candidate.execution.steps[0].prompt = format!("inspect with {secret}");
+        traced_candidate.execution.steps[0].tool_calls = vec![AgentEvaluationToolTrace {
+            tool: "file.read".to_string(),
+            request: format!("{{\"token\":\"{secret}\"}}"),
+            response: format!("verified with {secret}"),
+            error: None,
+        }];
+        let traced = prompt_pairwise_observation(
+            &traced_candidate,
+            &opponent,
+            &format!("Fix the project using {secret}"),
+            "pair-2",
+            "coding",
+            PromptEvaluationSplit::Train,
+            PromptEvaluationMode::PairedExecution,
+            0.85,
+            0.55,
+            0,
+            &[("verify".to_string(), 0.78)].into_iter().collect(),
+            ActionableSideInformation {
+                summary: format!("verified without exposing {secret}"),
+                ..ActionableSideInformation::default()
+            },
+            std::slice::from_ref(&secret),
+        );
+        let packet = traced
+            .reflection_packet
+            .expect("executed feedback should produce a reflection packet");
+        let encoded = serde_json::to_string(&packet).expect("packet should serialize");
+        assert!(!encoded.contains(&secret));
+        assert!(encoded.contains("[REDACTED]"));
+        assert_eq!(packet.steps[0].tool_calls.len(), 1);
     }
 
     #[test]
@@ -21584,13 +22329,13 @@ mod tests {
         );
         let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
         let captured = Arc::clone(&prompts);
-        let runner: PromptEvaluationRunner = Arc::new(move |_, model, prompt| {
+        let runner: PromptEvaluationRunner = Arc::new(move |request| {
             captured
                 .lock()
                 .expect("prompt capture lock")
-                .push(prompt);
+                .push(request.prompt);
             CollaborationCompletion {
-                content: Some(if model == "worker-a" {
+                content: Some(if request.model == "worker-a" {
                     "branch-output".to_string()
                 } else {
                     "final-output".to_string()
@@ -21623,6 +22368,672 @@ mod tests {
         let prompts = prompts.lock().expect("prompt capture lock");
         assert_eq!(prompts.len(), 2);
         assert!(prompts[1].contains("[investigate]\nbranch-output"));
+    }
+
+    #[test]
+    fn evaluation_sandbox_exposes_and_executes_only_read_only_workspace_tools() {
+        let root = temp_test_root("cindx-evaluation-sandbox");
+        fs::create_dir_all(&root).expect("sandbox root should be created");
+        fs::write(root.join("evidence.txt"), "verified workspace evidence")
+            .expect("sandbox fixture should be written");
+        let registry = ToolRegistry::with_workspace_tools(root.clone());
+
+        let tools = prompt_evaluation_tool_specs(
+            &registry,
+            "Inspect evidence.txt",
+            32_000,
+            &WorkflowToolPolicy::ReadOnlyExploration,
+        );
+        assert!(!tools.is_empty());
+        assert!(tools.iter().all(|tool| tool.risk == ToolRisk::ReadOnly));
+        assert!(tools.iter().any(|tool| tool.name == "file.read"));
+        assert!(!tools.iter().any(|tool| {
+            matches!(
+                tool.risk,
+                ToolRisk::WritesWorkspace
+                    | ToolRisk::ExecutesProcess
+                    | ToolRisk::UsesNetwork
+                    | ToolRisk::SensitiveContext
+                    | ToolRisk::Destructive
+            )
+        }));
+        assert!(prompt_evaluation_tool_specs(
+            &registry,
+            "Inspect evidence.txt",
+            32_000,
+            &WorkflowToolPolicy::None,
+        )
+        .is_empty());
+
+        let result = registry
+            .get("file.read")
+            .expect("read tool should exist")
+            .execute(ToolInvocation {
+                id: agent_core::ToolCallId("evaluation-read".to_string()),
+                task_id: phase16_task_id(),
+                tool_name: "file.read".to_string(),
+                input_json: serde_json::json!({"path":"evidence.txt"}).to_string(),
+                proposed_by_model: "test".to_string(),
+                metadata: Metadata::new(),
+            })
+            .expect("read-only sandbox tool should execute");
+        assert_eq!(result.output, "verified workspace evidence");
+        fs::remove_dir_all(root).expect("sandbox fixture should be removed");
+    }
+
+    #[test]
+    #[ignore = "requires the user's configured provider and network access"]
+    fn provider_backed_evaluation_sandbox_reads_real_workspace_evidence() {
+        let config = load_provider_config();
+        assert!(config.is_ready(), "provider configuration is required");
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .expect("repository root should resolve");
+        let profile = ConductorPromptGenome::seed_for_effort("auto");
+        let objective = "Use read-only workspace tools to inspect the root Cargo.toml. Report one workspace member and include the exact token crates/orchestrator. Do not guess.";
+        let mut plan = WorkflowPlanIr::from_adaptive_with_profile(
+            "provider-sandbox-smoke",
+            objective,
+            "auto",
+            "single_worker",
+            config.model_for_conductor(),
+            profile.id.clone(),
+            &AdaptiveWorkflow {
+                steps: vec![AdaptiveWorkflowStep {
+                    id: "inspect".to_string(),
+                    role: "worker".to_string(),
+                    model: config.model_for_role(&ModelRole::Executor),
+                    subtask: "Read the root Cargo.toml and report a verified workspace member."
+                        .to_string(),
+                    access: Vec::new(),
+                }],
+            },
+            WorkflowBudget {
+                max_steps: 1,
+                max_models: 1,
+                max_model_turns_per_step: 3,
+                max_tool_calls_per_step: 4,
+                max_output_tokens_per_step: 2_048,
+            },
+        );
+        plan.steps[0].tool_policy = WorkflowToolPolicy::ReadOnlyEvidence;
+        let candidate = execute_prompt_workflow_candidate(
+            &config,
+            &workspace_root,
+            objective,
+            PromptPlanCandidate {
+                genome: profile,
+                plan: Some(plan),
+                raw_output: String::new(),
+                latency_ms: 0,
+                total_tokens: 0,
+            },
+            &Arc::new(AgentRunControl::new("pro")),
+        );
+
+        assert!(candidate.execution.succeeded);
+        assert!(candidate
+            .execution
+            .final_output
+            .to_ascii_lowercase()
+            .contains("crates/orchestrator"));
+        assert!(candidate.execution.steps[0]
+            .tool_calls
+            .iter()
+            .any(|call| call.tool == "file.read"));
+    }
+
+    #[test]
+    #[ignore = "requires the user's configured provider and network access"]
+    fn provider_backed_paired_ablation_rewards_read_only_tool_evidence() {
+        let config = load_provider_config();
+        assert!(config.is_ready(), "provider configuration is required");
+        let workspace_root = temp_test_root("cindx-provider-ablation");
+        fs::create_dir_all(&workspace_root).expect("ablation sandbox should be created");
+        let hidden_fact = format!("CINDX-VERIFY-{}", unique_id("fact"));
+        fs::write(workspace_root.join("evidence.txt"), &hidden_fact)
+            .expect("hidden evidence should be written");
+        let objective = "The read-only workspace contains evidence.txt with one verification code. Report the exact code. Use workspace evidence when available and never guess.";
+        let profile = ConductorPromptGenome::seed_for_effort("auto");
+        let plan = |id: &str, tool_policy: WorkflowToolPolicy| {
+            let mut plan = WorkflowPlanIr::from_adaptive_with_profile(
+                id,
+                objective,
+                "auto",
+                "single_worker",
+                config.model_for_conductor(),
+                profile.id.clone(),
+                &AdaptiveWorkflow {
+                    steps: vec![AdaptiveWorkflowStep {
+                        id: "inspect".to_string(),
+                        role: "worker".to_string(),
+                        model: config.model_for_role(&ModelRole::Executor),
+                        subtask: "Read evidence.txt when the sandbox exposes a read-only tool and report the exact code."
+                            .to_string(),
+                        access: Vec::new(),
+                    }],
+                },
+                WorkflowBudget {
+                    max_steps: 1,
+                    max_models: 1,
+                    max_model_turns_per_step: 3,
+                    max_tool_calls_per_step: 4,
+                    max_output_tokens_per_step: 2_048,
+                },
+            );
+            plan.steps[0].tool_policy = tool_policy;
+            plan
+        };
+        let run = |id: &str, tool_policy: WorkflowToolPolicy| {
+            execute_prompt_workflow_candidate(
+                &config,
+                &workspace_root,
+                objective,
+                PromptPlanCandidate {
+                    genome: profile.clone(),
+                    plan: Some(plan(id, tool_policy)),
+                    raw_output: String::new(),
+                    latency_ms: 0,
+                    total_tokens: 0,
+                },
+                &Arc::new(AgentRunControl::new("pro")),
+            )
+        };
+        let baseline = run("without-tools", WorkflowToolPolicy::None);
+        let candidate = run("with-read-only-tools", WorkflowToolPolicy::ReadOnlyEvidence);
+        let verifier = AgentEvaluationVerifier::ContainsAll {
+            expected: vec![hidden_fact.clone()],
+            case_sensitive: true,
+        };
+        let baseline_outcome = verifier.verify(&baseline.execution.final_output);
+        let candidate_outcome = verifier.verify(&candidate.execution.final_output);
+        fs::remove_dir_all(workspace_root).expect("ablation sandbox should be removed");
+
+        assert!(!baseline_outcome.passed);
+        assert!(candidate_outcome.passed);
+        assert!(candidate.execution.steps[0]
+            .tool_calls
+            .iter()
+            .any(|call| call.tool == "file.read" && call.response.contains(&hidden_fact)));
+    }
+
+    #[test]
+    #[ignore = "requires the user's configured provider and network access"]
+    fn provider_backed_gepa_reflection_repairs_a_disabled_tool_gene() {
+        let config = load_provider_config();
+        assert!(config.is_ready(), "provider configuration is required");
+        let mut parent = ConductorPromptGenome::seed_for_effort("auto");
+        parent.id = "reflection-parent-tools-disabled".to_string();
+        parent.tool_policy = orchestrator::PromptToolPolicy::Disabled;
+        parent.max_tool_calls_per_step = 0;
+        let failure = AgentEvaluationReflectionPacket {
+            suite_id: "provider-reflection-smoke".to_string(),
+            suite_version: 2,
+            case_id: "feedback-random-workspace-fact".to_string(),
+            category: "tool-use".to_string(),
+            run_id: "provider-reflection-run".to_string(),
+            seed: 0,
+            candidate_id: parent.id.clone(),
+            candidate_fingerprint: "reflection-parent-fingerprint".to_string(),
+            model_fingerprints: BTreeMap::from([(
+                "worker".to_string(),
+                config.model_for_role(&ModelRole::Executor),
+            )]),
+            input: "Read an unpredictable value from evidence.txt and report it exactly."
+                .to_string(),
+            steps: vec![AgentEvaluationTraceStep {
+                step_id: "inspect".to_string(),
+                role: "worker".to_string(),
+                model: config.model_for_role(&ModelRole::Executor),
+                prompt: "No tools are available; report the exact unpredictable file value."
+                    .to_string(),
+                output: "I cannot access evidence.txt without a workspace tool.".to_string(),
+                tool_calls: Vec::new(),
+                errors: vec!["required workspace evidence was unavailable".to_string()],
+                latency_ms: 100,
+                total_tokens: 50,
+            }],
+            final_output: "I cannot access evidence.txt without a workspace tool.".to_string(),
+            verifier: AgentEvaluationVerifierOutcome {
+                source: AgentEvaluationEvidenceSource::Deterministic,
+                passed: false,
+                score: 0.0,
+                checks: vec![AgentEvaluationCheck {
+                    id: "contains_unpredictable_value".to_string(),
+                    passed: false,
+                    detail: "the output omitted the exact value stored in evidence.txt".to_string(),
+                }],
+            },
+            actionable_feedback: ActionableSideInformation {
+                summary: "The harness disabled the only safe evidence path required by this task."
+                    .to_string(),
+                failed_constraints: vec![
+                    "The worker could not inspect a required workspace file.".to_string(),
+                ],
+                errors: vec!["No read-only workspace tool was exposed.".to_string()],
+                suggested_changes: vec![
+                    "Enable the existing read-only evidence tool policy; do not add writes or network access."
+                        .to_string(),
+                ],
+                ..ActionableSideInformation::default()
+            },
+        };
+        let mutation_prompt = parent
+            .reflective_mutation_prompt(&[failure])
+            .expect("reflection prompt should build");
+        let control = Arc::new(AgentRunControl::new("pro"));
+        let completion = complete_collaboration_model_with_control(
+            config.clone(),
+            ModelRole::Planner,
+            config.model_for_conductor(),
+            collaboration_system_prompt_for_run(&config.agent_system_prompt, &Metadata::new()),
+            mutation_prompt,
+            Some(control),
+            |_| {},
+        );
+        let response = completion
+            .content
+            .unwrap_or_else(|| panic!("reflection model failed: {:?}", completion.error));
+        let mutation = match parent.learned_mutation_from_response(
+            &response,
+            "reflection-child-tools-enabled",
+        ) {
+            Ok(mutation) => mutation,
+            Err(error) => {
+                let repair = complete_collaboration_model_with_control(
+                    config.clone(),
+                    ModelRole::Planner,
+                    config.model_for_conductor(),
+                    collaboration_system_prompt_for_run(
+                        &config.agent_system_prompt,
+                        &Metadata::new(),
+                    ),
+                    parent.mutation_repair_prompt(&response, &error),
+                    Some(Arc::new(AgentRunControl::new("pro"))),
+                    |_| {},
+                );
+                let repaired_response = repair.content.unwrap_or_else(|| {
+                    panic!("reflection repair model failed: {:?}", repair.error)
+                });
+                parent
+                    .learned_mutation_from_response(
+                        &repaired_response,
+                        "reflection-child-tools-enabled",
+                    )
+                    .expect("repaired reflection should be a bounded genome mutation")
+            }
+        };
+
+        assert_ne!(
+            mutation.tool_policy,
+            orchestrator::PromptToolPolicy::Disabled
+        );
+        assert!(mutation.effective_max_tool_calls_per_step() > 0);
+        mutation.validate().expect("mutation should remain valid");
+    }
+
+    #[test]
+    #[ignore = "runs the full 30-case by 3-repeat provider-backed hidden gate"]
+    fn provider_backed_hidden_gate_compares_pre_gepa_and_read_only_sandbox() {
+        let config = load_provider_config();
+        assert!(config.is_ready(), "provider configuration is required");
+        let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .expect("repository root should resolve");
+        let workspace_root = temp_test_root("cindx-provider-hidden-gate");
+        let evidence_root = workspace_root.join("evidence");
+        fs::create_dir_all(&evidence_root).expect("hidden evidence root should be created");
+        let cases = (0..30usize)
+            .map(|index| {
+                let case_id = format!("provider-hidden-{index:02}");
+                let category = match index % 3 {
+                    0 => "coding",
+                    1 => "research",
+                    _ => "tool-use",
+                }
+                .to_string();
+                let relative_path = format!("evidence/{case_id}.txt");
+                let expected = format!("CINDX-HIDDEN-{}", unique_id("fact"));
+                fs::write(workspace_root.join(&relative_path), &expected)
+                    .expect("hidden evidence should be written");
+                let objective = format!(
+                    "The read-only workspace contains {relative_path} with one unpredictable verification code. Report the exact code. Use workspace evidence when available and never guess."
+                );
+                (case_id, category, relative_path, objective, expected)
+            })
+            .collect::<Vec<_>>();
+        let dataset = orchestrator::AgentEvaluationDataset {
+            schema: orchestrator::AGENT_EVALUATION_DATASET_SCHEMA.to_string(),
+            suite_id: "core-agent-quality".to_string(),
+            suite_version: 2,
+            split: AgentEvaluationSplit::Test,
+            description: "Runtime-generated provider-backed hidden workspace facts.".to_string(),
+            cases: cases
+                .iter()
+                .map(|(case_id, category, _, objective, expected)| {
+                    orchestrator::AgentEvaluationCase {
+                        id: case_id.clone(),
+                        category: category.clone(),
+                        objective: objective.clone(),
+                        verifier: AgentEvaluationVerifier::ContainsAll {
+                            expected: vec![expected.clone()],
+                            case_sensitive: true,
+                        },
+                        metadata: BTreeMap::from([(
+                            "provenance".to_string(),
+                            "runtime-random-fact".to_string(),
+                        )]),
+                    }
+                })
+                .collect(),
+        };
+        dataset.validate().expect("hidden dataset should validate");
+        let dataset_json = serde_json::to_string_pretty(&dataset)
+            .expect("hidden dataset should serialize");
+        let dataset_sha256 = sha256_hex(dataset_json.as_bytes());
+        let jobs = Arc::new(Mutex::new(
+            (0..cases.len())
+                .flat_map(|case_index| (0..3u64).map(move |seed| (case_index, seed)))
+                .rev()
+                .collect::<Vec<_>>(),
+        ));
+        let cases = Arc::new(cases);
+        let records = Arc::new(Mutex::new((
+            Vec::<AgentEvaluationCaseScore>::new(),
+            Vec::<AgentEvaluationCaseScore>::new(),
+        )));
+        let baseline_id = "pre-gepa-no-evaluation-tools".to_string();
+        let candidate_id = "gepa-read-only-sandbox".to_string();
+        let baseline_fingerprint = sha256_hex(baseline_id.as_bytes());
+        let candidate_profile = ConductorPromptGenome::seed_for_effort("auto");
+        let candidate_fingerprint = sha256_hex(
+            &serde_json::to_vec(&candidate_profile)
+                .expect("candidate genome should serialize"),
+        );
+        let concurrency = std::env::var("CINDX_EVAL_CONCURRENCY")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(4)
+            .clamp(1, 8);
+        let handles = (0..concurrency)
+            .map(|_| {
+                let config = config.clone();
+                let workspace_root = workspace_root.clone();
+                let jobs = Arc::clone(&jobs);
+                let cases = Arc::clone(&cases);
+                let records = Arc::clone(&records);
+                let baseline_id = baseline_id.clone();
+                let candidate_id = candidate_id.clone();
+                let baseline_fingerprint = baseline_fingerprint.clone();
+                let candidate_fingerprint = candidate_fingerprint.clone();
+                let candidate_profile = candidate_profile.clone();
+                std::thread::spawn(move || loop {
+                    let Some((case_index, seed)) = jobs
+                        .lock()
+                        .expect("hidden job lock")
+                        .pop()
+                    else {
+                        break;
+                    };
+                    let (case_id, category, relative_path, objective, expected) =
+                        &cases[case_index];
+                    let run = |workflow_id: &str, tool_policy: WorkflowToolPolicy| {
+                        let mut plan = WorkflowPlanIr::from_adaptive_with_profile(
+                            workflow_id,
+                            objective,
+                            "auto",
+                            "single_worker",
+                            config.model_for_conductor(),
+                            candidate_profile.id.clone(),
+                            &AdaptiveWorkflow {
+                                steps: vec![AdaptiveWorkflowStep {
+                                    id: "inspect".to_string(),
+                                    role: "worker".to_string(),
+                                    model: config.model_for_role(&ModelRole::Executor),
+                                    subtask: format!(
+                                        "Read {relative_path} when a read-only tool is exposed and report its exact unpredictable code."
+                                    ),
+                                    access: Vec::new(),
+                                }],
+                            },
+                            WorkflowBudget {
+                                max_steps: 1,
+                                max_models: 1,
+                                max_model_turns_per_step: 3,
+                                max_tool_calls_per_step: 4,
+                                max_output_tokens_per_step: 2_048,
+                            },
+                        );
+                        plan.steps[0].tool_policy = tool_policy;
+                        execute_prompt_workflow_candidate(
+                            &config,
+                            &workspace_root,
+                            objective,
+                            PromptPlanCandidate {
+                                genome: candidate_profile.clone(),
+                                plan: Some(plan),
+                                raw_output: String::new(),
+                                latency_ms: 0,
+                                total_tokens: 0,
+                            },
+                            &Arc::new(AgentRunControl::new("pro")),
+                        )
+                    };
+                    let baseline = run(
+                        &format!("baseline-{case_index}-{seed}"),
+                        WorkflowToolPolicy::None,
+                    );
+                    let candidate = run(
+                        &format!("candidate-{case_index}-{seed}"),
+                        WorkflowToolPolicy::ReadOnlyEvidence,
+                    );
+                    let verifier = AgentEvaluationVerifier::ContainsAll {
+                        expected: vec![expected.clone()],
+                        case_sensitive: true,
+                    };
+                    let baseline_outcome = verifier.verify(&baseline.execution.final_output);
+                    let candidate_outcome = verifier.verify(&candidate.execution.final_output);
+                    let record = |candidate_id: &str,
+                                  candidate_fingerprint: &str,
+                                  execution: &PromptWorkflowExecution,
+                                  outcome: &AgentEvaluationVerifierOutcome| {
+                        AgentEvaluationCaseScore {
+                            suite_id: "core-agent-quality".to_string(),
+                            suite_version: 2,
+                            case_id: case_id.clone(),
+                            category: category.clone(),
+                            split: AgentEvaluationSplit::Test,
+                            run_id: format!("{candidate_id}-{case_index}-{seed}"),
+                            seed,
+                            candidate_id: candidate_id.to_string(),
+                            candidate_fingerprint: candidate_fingerprint.to_string(),
+                            evidence_source: AgentEvaluationEvidenceSource::Deterministic,
+                            score: if execution.succeeded {
+                                outcome.score
+                            } else {
+                                0.0
+                            },
+                            verified_success: execution.succeeded && outcome.passed,
+                            latency_ms: execution.latency_ms,
+                            total_tokens: execution.total_tokens,
+                            safety_violations: 0,
+                        }
+                    };
+                    let mut records = records.lock().expect("hidden record lock");
+                    records.0.push(record(
+                        &baseline_id,
+                        &baseline_fingerprint,
+                        &baseline.execution,
+                        &baseline_outcome,
+                    ));
+                    records.1.push(record(
+                        &candidate_id,
+                        &candidate_fingerprint,
+                        &candidate.execution,
+                        &candidate_outcome,
+                    ));
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().expect("provider hidden worker should join");
+        }
+        let (mut baseline_records, mut candidate_records) = Arc::try_unwrap(records)
+            .expect("hidden records should have one owner")
+            .into_inner()
+            .expect("hidden record lock should unwrap");
+        let sort_records = |records: &mut Vec<AgentEvaluationCaseScore>| {
+            records.sort_by(|left, right| {
+                left.case_id
+                    .cmp(&right.case_id)
+                    .then(left.seed.cmp(&right.seed))
+            });
+        };
+        sort_records(&mut baseline_records);
+        sort_records(&mut candidate_records);
+        let baseline_scores = orchestrator::AgentEvaluationScoreSet {
+            schema: orchestrator::AGENT_EVALUATION_SCORE_SET_SCHEMA.to_string(),
+            suite_id: "core-agent-quality".to_string(),
+            suite_version: 2,
+            split: AgentEvaluationSplit::Test,
+            candidate_id: baseline_id,
+            candidate_fingerprint: baseline_fingerprint,
+            dataset_sha256: dataset_sha256.clone(),
+            provenance: orchestrator::AgentEvaluationRunProvenance::ProviderBacked,
+            records: baseline_records,
+        };
+        let candidate_scores = orchestrator::AgentEvaluationScoreSet {
+            schema: orchestrator::AGENT_EVALUATION_SCORE_SET_SCHEMA.to_string(),
+            suite_id: "core-agent-quality".to_string(),
+            suite_version: 2,
+            split: AgentEvaluationSplit::Test,
+            candidate_id,
+            candidate_fingerprint,
+            dataset_sha256,
+            provenance: orchestrator::AgentEvaluationRunProvenance::ProviderBacked,
+            records: candidate_records,
+        };
+        let baseline = orchestrator::parse_agent_evaluation_baseline(
+            &fs::read_to_string(
+                repository_root.join("benchmarks/agent/evaluation-v2-baseline.json"),
+            )
+            .expect("frozen evaluation baseline should load"),
+        )
+        .expect("frozen evaluation baseline should parse");
+        let report = orchestrator::build_agent_evaluation_promotion_report(
+            &baseline,
+            &baseline_scores,
+            &candidate_scores,
+        )
+        .expect("provider hidden report should build");
+        let hidden_root = repository_root.join("benchmarks/agent/hidden");
+        fs::create_dir_all(&hidden_root).expect("ignored hidden report root should exist");
+        fs::write(hidden_root.join("provider-test.json"), dataset_json)
+            .expect("provider hidden dataset should persist");
+        fs::write(
+            hidden_root.join("provider-baseline-scores.json"),
+            serde_json::to_string_pretty(&baseline_scores)
+                .expect("baseline scores should serialize"),
+        )
+        .expect("baseline scores should persist");
+        fs::write(
+            hidden_root.join("provider-candidate-scores.json"),
+            serde_json::to_string_pretty(&candidate_scores)
+                .expect("candidate scores should serialize"),
+        )
+        .expect("candidate scores should persist");
+        fs::write(
+            repository_root.join("target/evaluation-v2-provider-promotion.json"),
+            serde_json::to_string_pretty(&report).expect("promotion report should serialize"),
+        )
+        .expect("promotion report should persist");
+        fs::remove_dir_all(workspace_root).expect("provider hidden workspace should be removed");
+
+        assert!(report.promotion_eligible, "provider hidden gate: {report:#?}");
+        assert_eq!(report.recommended_canary_percent, Some(10));
+    }
+
+    #[test]
+    fn evaluation_arena_applies_retry_and_alternate_model_genes() {
+        let mut profile = ConductorPromptGenome::seed_for_effort("auto");
+        profile.max_step_attempts = 2;
+        profile.retry_policy = PromptRetryPolicy::AlternateModel;
+        let mut plan = WorkflowPlanIr::from_adaptive_with_profile(
+            "retry-candidate",
+            "Investigate and summarize",
+            "auto",
+            "best_of_n",
+            "planner",
+            profile.id.clone(),
+            &AdaptiveWorkflow {
+                steps: vec![
+                    AdaptiveWorkflowStep {
+                        id: "investigate".to_string(),
+                        role: "worker".to_string(),
+                        model: "worker-a".to_string(),
+                        subtask: "investigate evidence".to_string(),
+                        access: Vec::new(),
+                    },
+                    AdaptiveWorkflowStep {
+                        id: "final".to_string(),
+                        role: "synthesizer".to_string(),
+                        model: "worker-b".to_string(),
+                        subtask: "synthesize".to_string(),
+                        access: vec!["investigate".to_string()],
+                    },
+                ],
+            },
+            WorkflowBudget {
+                max_steps: 4,
+                max_models: 2,
+                max_model_turns_per_step: 2,
+                max_tool_calls_per_step: 4,
+                max_output_tokens_per_step: 2_048,
+            },
+        );
+        plan.steps[0].tool_policy = WorkflowToolPolicy::ReadOnlyEvidence;
+        let requests = Arc::new(Mutex::new(Vec::<PromptEvaluationWorkerRequest>::new()));
+        let captured = Arc::clone(&requests);
+        let runner: PromptEvaluationRunner = Arc::new(move |request| {
+            let should_fail = request.model == "worker-a";
+            captured
+                .lock()
+                .expect("request capture lock")
+                .push(request);
+            CollaborationCompletion {
+                content: (!should_fail).then(|| "recovered output".to_string()),
+                error: should_fail.then(|| "worker-a failed".to_string()),
+                latency_ms: 10,
+                usage: [("total_tokens".to_string(), "20".to_string())]
+                    .into_iter()
+                    .collect(),
+                evidence: Vec::new(),
+            }
+        });
+
+        let candidate = execute_prompt_workflow_candidate_with_runner(
+            "Investigate and summarize",
+            PromptPlanCandidate {
+                genome: profile,
+                plan: Some(plan),
+                raw_output: String::new(),
+                latency_ms: 0,
+                total_tokens: 0,
+            },
+            runner,
+        );
+
+        assert!(candidate.execution.succeeded);
+        assert_eq!(candidate.execution.steps[0].attempts, 2);
+        assert_eq!(candidate.execution.steps[0].model, "worker-b");
+        assert_eq!(candidate.execution.steps[0].errors, vec!["worker-a failed"]);
+        let requests = requests.lock().expect("request capture lock");
+        assert_eq!(requests[0].tool_policy, WorkflowToolPolicy::ReadOnlyEvidence);
+        assert_eq!(requests[0].max_model_turns, 2);
+        assert_eq!(requests[0].max_tool_calls, 4);
+        assert!(requests[1].prompt.contains("Retry the same authorized evaluation node"));
     }
 
     #[test]
