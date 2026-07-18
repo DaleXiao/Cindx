@@ -148,6 +148,17 @@ export type AgentAttachment = {
   sizeBytes: number;
 };
 
+export type QueuedAgentMessage = {
+  id: string;
+  sessionId: string;
+  prompt: string;
+  attachments: AgentAttachment[];
+  effort: AgentEffort;
+  mode: "queue" | "steer";
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
 export type AttachmentUpload = {
   name: string;
   mimeType: string;
@@ -523,6 +534,7 @@ export type AgentState = {
   timeline: TimelineEntry[];
   messages: ChatMessageView[];
   pendingApprovals: ToolApprovalView[];
+  queuedMessages: QueuedAgentMessage[];
   latestAnswer: string | null;
   lastError: string | null;
 };
@@ -952,6 +964,7 @@ let browserAgentState: AgentState = {
   timeline: [],
   messages: [],
   pendingApprovals: [],
+  queuedMessages: [],
   latestAnswer: null,
   lastError: null
 };
@@ -2055,6 +2068,155 @@ export async function runAgentTask(
         }
       ],
       lastError: "Browser preview cannot run the Rust agent loop. Open the Tauri app to execute tools."
+    };
+    return browserAgentState;
+  }
+}
+
+export async function queueAgentMessage(
+  prompt: string,
+  sessionId: string,
+  attachments: AgentAttachment[] = [],
+  effort: AgentEffort = "auto"
+): Promise<AgentState> {
+  try {
+    return await invoke<AgentState>("queue_agent_message", {
+      input: { prompt, sessionId, currentTime: currentAgentTimeContext(), effort, attachments }
+    });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    const now = Date.now();
+    const visiblePrompt =
+      prompt.trim() || `Review attached ${attachments.map((attachment) => attachment.name).join(", ")}`;
+    browserAgentState = {
+      ...browserAgentState,
+      sessionId,
+      eventCount: browserAgentState.eventCount + 1,
+      latestSequence: browserAgentState.latestSequence + 1,
+      queuedMessages: [
+        ...browserAgentState.queuedMessages,
+        {
+          id: `agent-queue-${now}`,
+          sessionId,
+          prompt: visiblePrompt,
+          attachments,
+          effort,
+          mode: "queue",
+          createdAtMs: now,
+          updatedAtMs: now
+        }
+      ]
+    };
+    return browserAgentState;
+  }
+}
+
+export async function editQueuedAgentMessage(
+  sessionId: string,
+  queueId: string,
+  prompt: string
+): Promise<AgentState> {
+  try {
+    return await invoke<AgentState>("edit_queued_agent_message", {
+      input: { sessionId, queueId, prompt }
+    });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    const now = Date.now();
+    browserAgentState = {
+      ...browserAgentState,
+      eventCount: browserAgentState.eventCount + 1,
+      latestSequence: browserAgentState.latestSequence + 1,
+      queuedMessages: browserAgentState.queuedMessages.map((message) =>
+        message.id === queueId ? { ...message, prompt: prompt.trim(), updatedAtMs: now } : message
+      )
+    };
+    return browserAgentState;
+  }
+}
+
+export async function deleteQueuedAgentMessage(
+  sessionId: string,
+  queueId: string
+): Promise<AgentState> {
+  try {
+    return await invoke<AgentState>("delete_queued_agent_message", {
+      input: { sessionId, queueId }
+    });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    browserAgentState = {
+      ...browserAgentState,
+      eventCount: browserAgentState.eventCount + 1,
+      latestSequence: browserAgentState.latestSequence + 1,
+      queuedMessages: browserAgentState.queuedMessages.filter((message) => message.id !== queueId)
+    };
+    return browserAgentState;
+  }
+}
+
+export async function steerQueuedAgentMessage(
+  sessionId: string,
+  queueId: string
+): Promise<AgentState> {
+  try {
+    return await invoke<AgentState>("steer_queued_agent_message", {
+      input: { sessionId, queueId }
+    });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    const now = Date.now();
+    browserAgentState = {
+      ...browserAgentState,
+      status: browserAgentState.canCancel ? "cancelled" : browserAgentState.status,
+      canCancel: false,
+      eventCount: browserAgentState.eventCount + 1,
+      latestSequence: browserAgentState.latestSequence + 1,
+      queuedMessages: browserAgentState.queuedMessages
+        .map((message) =>
+          message.id === queueId
+            ? { ...message, mode: "steer" as const, updatedAtMs: now }
+            : message
+        )
+        .sort((left, right) => {
+          if (left.mode !== right.mode) return left.mode === "steer" ? -1 : 1;
+          return left.createdAtMs - right.createdAtMs;
+        })
+    };
+    return browserAgentState;
+  }
+}
+
+export async function runNextQueuedAgentMessage(sessionId: string): Promise<AgentState | null> {
+  try {
+    return await invoke<AgentState | null>("run_next_queued_agent_message", {
+      input: { sessionId }
+    });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    const queued = browserAgentState.queuedMessages[0];
+    if (!queued) return null;
+    const now = Date.now();
+    browserAgentState = {
+      ...browserAgentState,
+      status: "failed",
+      canCancel: false,
+      canRetry: true,
+      canContinue: false,
+      eventCount: browserAgentState.eventCount + 1,
+      latestSequence: browserAgentState.latestSequence + 1,
+      queuedMessages: browserAgentState.queuedMessages.slice(1),
+      timeline: [
+        ...browserAgentState.timeline,
+        {
+          label: "Error",
+          detail: "Browser preview cannot run queued Rust agent work. Open the Tauri app to execute tools.",
+          kind: "message",
+          state: "pending",
+          timestampMs: now
+        }
+      ],
+      lastError: "Browser preview cannot run queued Rust agent work. Open the Tauri app to execute tools."
     };
     return browserAgentState;
   }
