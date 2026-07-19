@@ -682,7 +682,7 @@ assert(
   "Composer must not submit macOS IME candidate-selection keystrokes"
 );
 assert(
-  /\.composer-stack > \.composer \{[^}]*width: min\(100%, 960px\);[^}]*margin-inline: auto;/.test(
+  /\.composer-stack > \.composer \{[^}]*width: min\(100%, 796px\);[^}]*margin-inline: auto;/.test(
     styles
   ),
   "Composer must stay centered and bounded when either workspace pane is collapsed"
