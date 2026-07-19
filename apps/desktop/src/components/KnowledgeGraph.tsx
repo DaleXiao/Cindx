@@ -162,6 +162,7 @@ function layoutGraph(nodes: GraphNodeView[], edges: GraphEdgeView[]) {
 
 export function KnowledgeGraph({ graph }: KnowledgeGraphProps) {
   const sceneRef = useRef<SVGGElement>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
   const layout = useMemo(
     () => layoutGraph(graph.nodes, graph.edges.filter((edge) => edge.from !== edge.to)),
     [graph.edges, graph.nodes]
@@ -183,7 +184,14 @@ export function KnowledgeGraph({ graph }: KnowledgeGraphProps) {
 
   useEffect(() => {
     const scene = sceneRef.current;
-    if (!scene || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const canvas = canvasRef.current;
+    if (
+      !scene ||
+      !canvas ||
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      return;
+    }
     const nodeElements = Array.from(
       scene.querySelectorAll<SVGGElement>(".knowledge-graph-node")
     );
@@ -205,14 +213,24 @@ export function KnowledgeGraph({ graph }: KnowledgeGraphProps) {
       };
     });
     const positions = layout.nodes.map((node) => ({ x: node.x, y: node.y }));
-    const startedAt = performance.now();
+    let elapsedMs = 0;
+    let previousTimestamp = 0;
     let previousFrame = 0;
     let animationFrame = 0;
+    let canvasVisible = !("IntersectionObserver" in window);
+    let documentVisible = document.visibilityState !== "hidden";
 
     const update = (timestamp: number) => {
+      if (!canvasVisible || !documentVisible) {
+        animationFrame = 0;
+        previousTimestamp = 0;
+        return;
+      }
+      if (previousTimestamp > 0) elapsedMs += timestamp - previousTimestamp;
+      previousTimestamp = timestamp;
       if (timestamp - previousFrame >= 32) {
         previousFrame = timestamp;
-        const elapsed = (timestamp - startedAt) / 1000;
+        const elapsed = elapsedMs / 1000;
         layout.nodes.forEach((node, index) => {
           const drift = motion[index];
           const x = node.x + Math.sin(elapsed * drift.speed + drift.phase) * drift.amplitudeX;
@@ -236,10 +254,40 @@ export function KnowledgeGraph({ graph }: KnowledgeGraphProps) {
       }
       animationFrame = window.requestAnimationFrame(update);
     };
-    animationFrame = window.requestAnimationFrame(update);
+
+    const syncAnimation = () => {
+      if (canvasVisible && documentVisible && animationFrame === 0) {
+        animationFrame = window.requestAnimationFrame(update);
+      } else if ((!canvasVisible || !documentVisible) && animationFrame !== 0) {
+        window.cancelAnimationFrame(animationFrame);
+        animationFrame = 0;
+        previousTimestamp = 0;
+      }
+    };
+    const handleVisibilityChange = () => {
+      documentVisible = document.visibilityState !== "hidden";
+      syncAnimation();
+    };
+    const observer =
+      "IntersectionObserver" in window
+        ? new IntersectionObserver(
+            (entries) => {
+              canvasVisible = entries.some(
+                (entry) => entry.target === canvas && entry.isIntersecting
+              );
+              syncAnimation();
+            },
+            { threshold: 0.01 }
+          )
+        : null;
+    observer?.observe(canvas);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    syncAnimation();
 
     return () => {
-      window.cancelAnimationFrame(animationFrame);
+      if (animationFrame !== 0) window.cancelAnimationFrame(animationFrame);
+      observer?.disconnect();
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       layout.nodes.forEach((node, index) => {
         nodeElements[index]?.setAttribute("transform", `translate(${node.x} ${node.y})`);
       });
@@ -257,7 +305,7 @@ export function KnowledgeGraph({ graph }: KnowledgeGraphProps) {
         <span>{graph.totalEdges} links</span>
         <span>{layout.nodes.filter((node) => node.focused).length} recalled</span>
       </div>
-      <div className="knowledge-graph-canvas">
+      <div className="knowledge-graph-canvas" ref={canvasRef}>
         <svg
           role="img"
           aria-label="Workspace knowledge graph"

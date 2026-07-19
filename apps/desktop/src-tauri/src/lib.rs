@@ -10141,15 +10141,6 @@ fn synthesize_agent_answer(
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
     let answer = answer?;
-    emit_agent_stream_delta(
-        app,
-        &stream_request_id,
-        session_id,
-        "",
-        true,
-        false,
-        None,
-    );
     let answer = answer.trim().to_string();
     if answer.is_empty() {
         Err("synthesizer returned an empty answer".to_string())
@@ -12998,15 +12989,6 @@ fn continue_agent_loop(
                                 false,
                                 None,
                             );
-                            emit_agent_stream_delta(
-                                app,
-                                &request_id,
-                                session_id,
-                                "",
-                                true,
-                                false,
-                                None,
-                            );
                             answer.clone()
                         }
                     }
@@ -13022,17 +13004,9 @@ fn continue_agent_loop(
                             None,
                         );
                     }
-                    emit_agent_stream_delta(
-                        app,
-                        &request_id,
-                        session_id,
-                        "",
-                        true,
-                        false,
-                        None,
-                    );
                     answer.clone()
                 };
+                let completion_progress = cancellation.progress();
                 let mut store = state
                     .store
                     .lock()
@@ -13070,6 +13044,22 @@ fn continue_agent_loop(
                                 "collaboration".to_string(),
                                 collaboration.is_some().to_string(),
                             ),
+                            (
+                                "elapsed_ms".to_string(),
+                                completion_progress.elapsed.as_millis().to_string(),
+                            ),
+                            (
+                                "model_calls".to_string(),
+                                completion_progress.model_calls.to_string(),
+                            ),
+                            (
+                                "tool_calls".to_string(),
+                                completion_progress.tool_calls.to_string(),
+                            ),
+                            (
+                                "last_stage".to_string(),
+                                completion_progress.stage,
+                            ),
                         ]
                             .into_iter()
                             .collect(),
@@ -13081,8 +13071,19 @@ fn continue_agent_loop(
                 {
                     eprintln!("project memory checkpoint unavailable: {error}");
                 }
-                return agent_state_for_session(&store, None, session_id)
-                    .map_err(|error| error.to_string());
+                let completed_state = agent_state_for_session(&store, None, session_id)
+                    .map_err(|error| error.to_string())?;
+                drop(store);
+                emit_agent_stream_delta(
+                    app,
+                    &request_id,
+                    session_id,
+                    "",
+                    true,
+                    false,
+                    None,
+                );
+                return Ok(completed_state);
             }
             AgentAdvance::Failed { message } => {
                 clear_suspended_agent_run_for_context(state, &run_context)?;
