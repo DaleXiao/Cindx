@@ -685,6 +685,14 @@ impl PromptEvaluationMode {
     pub fn is_execution(self) -> bool {
         matches!(self, Self::PairedExecution | Self::ReplayExecution)
     }
+
+    pub fn is_paired_execution(self) -> bool {
+        self == Self::PairedExecution
+    }
+
+    pub fn is_replay_execution(self) -> bool {
+        self == Self::ReplayExecution
+    }
 }
 
 fn default_evaluation_mode() -> PromptEvaluationMode {
@@ -755,6 +763,32 @@ impl PromptEvolutionObservation {
         }
         self.relative_reward.unwrap_or_default().clamp(-1.0, 1.0)
     }
+}
+
+pub fn prompt_reflection_packets(
+    observations: &[PromptEvolutionObservation],
+    profile_id: &str,
+    limit: usize,
+) -> Vec<AgentEvaluationReflectionPacket> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let mut seen_runs = BTreeSet::new();
+    observations
+        .iter()
+        .rev()
+        .filter(|observation| {
+            observation.profile_id == profile_id
+                && observation.split == PromptEvaluationSplit::Train
+                && observation.mode == PromptEvaluationMode::PairedExecution
+        })
+        .filter_map(|observation| observation.reflection_packet.as_ref())
+        .filter(|packet| packet.candidate_id == profile_id)
+        .filter(|packet| seen_runs.insert((packet.run_id.clone(), packet.case_id.clone())))
+        .take(limit)
+        .cloned()
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1639,6 +1673,100 @@ mod tests {
         assert!(prompt.contains("shell.run"));
         assert!(prompt.contains("cargo test must pass"));
         assert!(prompt.contains("Fix the parser"));
+    }
+
+    #[test]
+    fn reflection_selection_uses_only_unique_paired_feedback_executions() {
+        let profile_id = "seed-auto-v1";
+        let packet = |run_id: &str, candidate_id: &str| AgentEvaluationReflectionPacket {
+            suite_id: "feedback-suite".to_string(),
+            suite_version: 2,
+            case_id: "shared-case".to_string(),
+            category: "coding".to_string(),
+            run_id: run_id.to_string(),
+            seed: 0,
+            candidate_id: candidate_id.to_string(),
+            candidate_fingerprint: "fingerprint".to_string(),
+            model_fingerprints: BTreeMap::new(),
+            input: "Fix the parser".to_string(),
+            steps: Vec::new(),
+            final_output: "done".to_string(),
+            verifier: crate::AgentEvaluationVerifierOutcome {
+                source: crate::AgentEvaluationEvidenceSource::Judge,
+                passed: true,
+                score: 1.0,
+                checks: Vec::new(),
+            },
+            actionable_feedback: crate::ActionableSideInformation::default(),
+        };
+        let observation = |evaluation_id: &str,
+                           split: PromptEvaluationSplit,
+                           mode: PromptEvaluationMode,
+                           reflection_packet: Option<AgentEvaluationReflectionPacket>| {
+            PromptEvolutionObservation {
+                profile_id: profile_id.to_string(),
+                evaluation_id: evaluation_id.to_string(),
+                case_id: "shared-case".to_string(),
+                opponent_profile_id: Some("challenger".to_string()),
+                task_class: "coding".to_string(),
+                split,
+                mode,
+                format_valid: true,
+                succeeded: true,
+                quality_score: 1.0,
+                latency_ms: 10,
+                total_tokens: 20,
+                estimated_cost_microusd: 0,
+                safety_violations: 0,
+                relative_reward: Some(0.5),
+                step_credits: Vec::new(),
+                reflection_packet,
+            }
+        };
+        let observations = vec![
+            observation(
+                "feedback-1",
+                PromptEvaluationSplit::Train,
+                PromptEvaluationMode::PairedExecution,
+                Some(packet("feedback-1", profile_id)),
+            ),
+            observation(
+                "feedback-1-duplicate",
+                PromptEvaluationSplit::Train,
+                PromptEvaluationMode::PairedExecution,
+                Some(packet("feedback-1", profile_id)),
+            ),
+            observation(
+                "holdout",
+                PromptEvaluationSplit::Holdout,
+                PromptEvaluationMode::ReplayExecution,
+                Some(packet("holdout", profile_id)),
+            ),
+            observation(
+                "legacy-shadow",
+                PromptEvaluationSplit::Train,
+                PromptEvaluationMode::PairedShadow,
+                Some(packet("legacy-shadow", profile_id)),
+            ),
+            observation(
+                "wrong-candidate",
+                PromptEvaluationSplit::Train,
+                PromptEvaluationMode::PairedExecution,
+                Some(packet("wrong-candidate", "other-profile")),
+            ),
+            observation(
+                "feedback-2",
+                PromptEvaluationSplit::Train,
+                PromptEvaluationMode::PairedExecution,
+                Some(packet("feedback-2", profile_id)),
+            ),
+        ];
+
+        let selected = prompt_reflection_packets(&observations, profile_id, 6);
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].run_id, "feedback-2");
+        assert_eq!(selected[1].run_id, "feedback-1");
     }
 
     #[test]
