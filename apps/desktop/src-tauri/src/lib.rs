@@ -16482,12 +16482,41 @@ fn redact_metadata(metadata: &Metadata) -> Metadata {
         .map(|(key, value)| {
             let redacted = if is_sensitive_assignment_key(key) {
                 "[REDACTED]".to_string()
+            } else if key == "raw_tool_calls_json" {
+                redact_structured_json(value).unwrap_or_else(|| redact_sensitive_text(value))
             } else {
                 redact_sensitive_text(value)
             };
             (key.clone(), redacted)
         })
         .collect()
+}
+
+fn redact_structured_json(value: &str) -> Option<String> {
+    let mut parsed = serde_json::from_str::<serde_json::Value>(value).ok()?;
+    redact_json_value(&mut parsed);
+    serde_json::to_string(&parsed).ok()
+}
+
+fn redact_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            values.iter_mut().for_each(redact_json_value);
+        }
+        serde_json::Value::Object(values) => {
+            for (key, value) in values {
+                if is_sensitive_assignment_key(key) {
+                    *value = serde_json::Value::String("[REDACTED]".to_string());
+                } else {
+                    redact_json_value(value);
+                }
+            }
+        }
+        serde_json::Value::String(text) => {
+            *text = redact_structured_json(text).unwrap_or_else(|| redact_sensitive_text(text));
+        }
+        _ => {}
+    }
 }
 
 fn redact_event(mut event: Event) -> Event {
@@ -24352,6 +24381,48 @@ mod tests {
         assert!(!rendered.contains("1234567890abcdef"));
         assert!(!rendered.contains("old-secret"));
         assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redacting_tool_call_metadata_preserves_nested_json() {
+        let arguments = serde_json::json!({
+            "command": "cat provider.conf | sed -E 's/(key|token|secret|api[_-]?key)=.*/[REDACTED]/g'",
+            "api_key": "secret-value"
+        })
+        .to_string();
+        let raw_tool_calls = serde_json::json!([{
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "shell_run",
+                "arguments": arguments
+            }
+        }])
+        .to_string();
+        let metadata = [(
+            "raw_tool_calls_json".to_string(),
+            raw_tool_calls,
+        )]
+        .into_iter()
+        .collect();
+
+        let redacted = redact_metadata(&metadata);
+        let parsed: serde_json::Value = serde_json::from_str(
+            redacted
+                .get("raw_tool_calls_json")
+                .expect("tool calls should remain present"),
+        )
+        .expect("tool calls should remain valid JSON");
+        let nested: serde_json::Value = serde_json::from_str(
+            parsed[0]["function"]["arguments"]
+                .as_str()
+                .expect("arguments should remain a JSON string"),
+        )
+        .expect("tool arguments should remain valid JSON");
+
+        assert_eq!(nested["api_key"], "[REDACTED]");
+        assert!(nested["command"].as_str().is_some());
+        assert!(!redacted["raw_tool_calls_json"].contains("secret-value"));
     }
 
     #[test]
