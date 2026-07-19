@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "cindx-desktop"
-version = "0.0.9"
+version = "0.1.1"
 dependencies = [
  "agent-core",
  "agent-graph",
