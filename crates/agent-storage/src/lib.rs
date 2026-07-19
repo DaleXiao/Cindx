@@ -410,13 +410,32 @@ impl SqliteStore {
         value: &str,
         after_sequence: u64,
     ) -> Result<Vec<Event>, StorageError> {
+        self.list_by_task_and_metadata_after_with_tool_metadata_limit(
+            task_id,
+            key,
+            value,
+            after_sequence,
+            usize::MAX,
+        )
+    }
+
+    pub fn list_by_task_and_metadata_after_with_tool_metadata_limit(
+        &self,
+        task_id: &TaskId,
+        key: &str,
+        value: &str,
+        after_sequence: u64,
+        max_tool_metadata_bytes: usize,
+    ) -> Result<Vec<Event>, StorageError> {
+        let max_tool_metadata_bytes = max_tool_metadata_bytes.min(i64::MAX as usize) as i64;
         if let Some(column) = event_scope_column(key) {
             let mut statement = self.prepare(&format!(
-                "select id, task_id, sequence, timestamp_ms, kind, summary, metadata_text\n                 from events\n                 where task_id = ?1 and {column} = ?2 and sequence > ?3\n                 order by sequence asc"
+                "select id, task_id, sequence, timestamp_ms, kind, summary,\n                        case when kind = 'tool_call_finished' and length(metadata_text) > ?4\n                             then '' else metadata_text end\n                 from events\n                 where task_id = ?1 and {column} = ?2 and sequence > ?3\n                 order by sequence asc"
             ))?;
             statement.bind_text(1, &task_id.0)?;
             statement.bind_text(2, value)?;
             statement.bind_i64(3, after_sequence as i64)?;
+            statement.bind_i64(4, max_tool_metadata_bytes)?;
             return events_from_statement(&mut statement);
         }
         let row = format!(
@@ -426,7 +445,9 @@ impl SqliteStore {
         );
         let mut statement = self.prepare(
             "
-            select id, task_id, sequence, timestamp_ms, kind, summary, metadata_text
+            select id, task_id, sequence, timestamp_ms, kind, summary,
+                   case when kind = 'tool_call_finished' and length(metadata_text) > ?4
+                        then '' else metadata_text end
             from events
             where task_id = ?1
               and sequence > ?2
@@ -437,6 +458,7 @@ impl SqliteStore {
         statement.bind_text(1, &task_id.0)?;
         statement.bind_i64(2, after_sequence as i64)?;
         statement.bind_text(3, &row)?;
+        statement.bind_i64(4, max_tool_metadata_bytes)?;
         events_from_statement(&mut statement)
     }
 
@@ -448,15 +470,36 @@ impl SqliteStore {
         before_sequence: u64,
         limit: usize,
     ) -> Result<Vec<Event>, StorageError> {
+        self.list_by_task_and_metadata_before_with_tool_metadata_limit(
+            task_id,
+            key,
+            value,
+            before_sequence,
+            limit,
+            usize::MAX,
+        )
+    }
+
+    pub fn list_by_task_and_metadata_before_with_tool_metadata_limit(
+        &self,
+        task_id: &TaskId,
+        key: &str,
+        value: &str,
+        before_sequence: u64,
+        limit: usize,
+        max_tool_metadata_bytes: usize,
+    ) -> Result<Vec<Event>, StorageError> {
         let limit = limit.clamp(1, 2_000) as i64;
+        let max_tool_metadata_bytes = max_tool_metadata_bytes.min(i64::MAX as usize) as i64;
         let mut events = if let Some(column) = event_scope_column(key) {
             let mut statement = self.prepare(&format!(
-                "select id, task_id, sequence, timestamp_ms, kind, summary, metadata_text\n                 from events\n                 where task_id = ?1 and {column} = ?2 and sequence < ?3\n                 order by sequence desc limit ?4"
+                "select id, task_id, sequence, timestamp_ms, kind, summary,\n                        case when kind = 'tool_call_finished' and length(metadata_text) > ?5\n                             then '' else metadata_text end\n                 from events\n                 where task_id = ?1 and {column} = ?2 and sequence < ?3\n                 order by sequence desc limit ?4"
             ))?;
             statement.bind_text(1, &task_id.0)?;
             statement.bind_text(2, value)?;
             statement.bind_i64(3, before_sequence.min(i64::MAX as u64) as i64)?;
             statement.bind_i64(4, limit)?;
+            statement.bind_i64(5, max_tool_metadata_bytes)?;
             events_from_statement(&mut statement)?
         } else {
             let row = format!(
@@ -466,7 +509,9 @@ impl SqliteStore {
             );
             let mut statement = self.prepare(
                 "
-                select id, task_id, sequence, timestamp_ms, kind, summary, metadata_text
+                select id, task_id, sequence, timestamp_ms, kind, summary,
+                       case when kind = 'tool_call_finished' and length(metadata_text) > ?5
+                            then '' else metadata_text end
                 from events
                 where task_id = ?1
                   and sequence < ?2
@@ -478,6 +523,7 @@ impl SqliteStore {
             statement.bind_i64(2, before_sequence.min(i64::MAX as u64) as i64)?;
             statement.bind_text(3, &row)?;
             statement.bind_i64(4, limit)?;
+            statement.bind_i64(5, max_tool_metadata_bytes)?;
             events_from_statement(&mut statement)?
         };
         events.reverse();
@@ -700,6 +746,33 @@ impl SqliteStore {
             });
         }
         Ok(events)
+    }
+
+    pub fn oversized_tool_event_ids(
+        &self,
+        min_metadata_bytes: usize,
+    ) -> Result<Vec<String>, StorageError> {
+        let mut statement = self.prepare(
+            "select id from events
+             where kind = 'tool_call_finished' and length(metadata_text) > ?1
+             order by timestamp_ms asc, task_id asc, sequence asc",
+        )?;
+        statement.bind_i64(1, min_metadata_bytes.min(i64::MAX as usize) as i64)?;
+        let mut ids = Vec::new();
+        while statement.step()? == StepResult::Row {
+            ids.push(statement.column_text(0)?);
+        }
+        Ok(ids)
+    }
+
+    pub fn event_by_id(&self, event_id: &str) -> Result<Option<Event>, StorageError> {
+        let mut statement = self.prepare(
+            "select id, task_id, sequence, timestamp_ms, kind, summary, metadata_text
+             from events where id = ?1",
+        )?;
+        statement.bind_text(1, event_id)?;
+        let mut events = events_from_statement(&mut statement)?;
+        Ok(events.pop())
     }
 
     pub fn update_event_content(&mut self, event: &Event) -> Result<(), StorageError> {
@@ -2002,6 +2075,76 @@ mod tests {
         assert_eq!(
             older.iter().map(|event| event.sequence).collect::<Vec<_>>(),
             vec![3, 4, 5]
+        );
+    }
+
+    #[test]
+    fn bounded_history_omits_only_oversized_tool_metadata() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("task-bounded-history".to_string());
+        for (sequence, kind, content) in [
+            (1, EventKind::MessageAdded, "message content".to_string()),
+            (2, EventKind::ToolCallFinished, "x".repeat(4_096)),
+        ] {
+            store
+                .append(Event {
+                    id: EventId(format!("event-{sequence}")),
+                    task_id: task_id.clone(),
+                    sequence,
+                    timestamp_ms: sequence * 100,
+                    kind,
+                    summary: "history event".to_string(),
+                    metadata: [
+                        ("session_id".to_string(), "session-a".to_string()),
+                        ("content".to_string(), content),
+                    ]
+                    .into_iter()
+                    .collect(),
+                })
+                .expect("event should append");
+        }
+
+        let events = store
+            .list_by_task_and_metadata_before_with_tool_metadata_limit(
+                &task_id,
+                "session_id",
+                "session-a",
+                u64::MAX,
+                10,
+                1_024,
+            )
+            .expect("bounded history should load");
+        let delta = store
+            .list_by_task_and_metadata_after_with_tool_metadata_limit(
+                &task_id,
+                "session_id",
+                "session-a",
+                1,
+                1_024,
+            )
+            .expect("bounded delta should load");
+
+        assert_eq!(
+            events[0].metadata.get("content").map(String::as_str),
+            Some("message content")
+        );
+        assert!(events[1].metadata.is_empty());
+        assert!(delta[0].metadata.is_empty());
+        assert_eq!(
+            store
+                .oversized_tool_event_ids(1_024)
+                .expect("oversized ids should load"),
+            vec!["event-2".to_string()]
+        );
+        assert_eq!(
+            store
+                .event_by_id("event-2")
+                .expect("event should load")
+                .expect("event should exist")
+                .metadata
+                .get("content")
+                .map(String::len),
+            Some(4_096)
         );
     }
 

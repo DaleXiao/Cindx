@@ -168,7 +168,7 @@ const appIconUrl = new URL("../src-tauri/icons/icon.png", import.meta.url).href;
 const DEBUG_ALWAYS_VISIBLE_STORAGE_KEY = "cindx.debug.always-visible";
 const IGNORED_PERMISSION_REVIEWS_STORAGE_KEY = "cindx.permissions.ignored";
 const APPEARANCE_STORAGE_KEY = "cindx.appearance";
-const SESSION_STATE_CACHE_LIMIT = 12;
+const SESSION_STATE_CACHE_LIMIT = 24;
 const FOREGROUND_AGENT_POLL_INTERVAL_MS = 1_000;
 const BACKGROUND_AGENT_POLL_INTERVAL_MS = 5_000;
 
@@ -758,6 +758,43 @@ export function App() {
     return request;
   }
 
+  function applySelectedSessionAgentState(
+    sessionId: string,
+    selectionRequest: number,
+    request: Promise<AgentState>
+  ) {
+    void request
+      .then((nextAgentState) => {
+        if (
+          selectionRequest !== sessionSelectionRequestRef.current ||
+          activeSessionIdRef.current !== sessionId
+        ) {
+          return;
+        }
+        setSessionLoadingId(null);
+        acknowledgeOptimisticUserMessage(sessionId, nextAgentState.messages);
+        startTransition(() => {
+          setAgentState((current) => {
+            const merged = preserveOptimisticQueuedMessages(
+              sessionId,
+              mergeAgentStateSnapshot(current, nextAgentState)
+            );
+            return agentStateUnchanged(current, merged) ? current : merged;
+          });
+        });
+        updateSessionStatus(sessionId, nextAgentState.status, nextAgentState.canContinue);
+      })
+      .catch((error) => {
+        if (
+          selectionRequest === sessionSelectionRequestRef.current &&
+          activeSessionIdRef.current === sessionId
+        ) {
+          setSessionLoadingId(null);
+          setComposerError(error instanceof Error ? error.message : String(error));
+        }
+      });
+  }
+
   function restoreCachedSessionState(sessionId: string) {
     const cachedAgentState = readSessionState(agentStateCacheRef.current, sessionId);
     const cachedTraceState = readSessionState(agentTraceCacheRef.current, sessionId);
@@ -991,10 +1028,17 @@ export function App() {
   useEffect(() => {
     if (activeView !== "settings" || settingsCategory !== "permissions") return;
     let disposed = false;
+    let inFlight = false;
     const refresh = () => {
-      void getPermissionReviewState().then((next) => {
-        if (!disposed) setPermissionReviewState(next);
-      });
+      if (disposed || inFlight) return;
+      inFlight = true;
+      void getPermissionReviewState()
+        .then((next) => {
+          if (!disposed) setPermissionReviewState(next);
+        })
+        .finally(() => {
+          inFlight = false;
+        });
     };
     refresh();
     const timer = window.setInterval(refresh, 2_000);
@@ -1157,13 +1201,12 @@ export function App() {
     let fallbackTimer: number | null = null;
     const sessionIds = sessionPrefetchKey.split("|");
     const prefetch = () => {
-      void (async () => {
-        for (const sessionId of sessionIds) {
-          if (disposed) return;
-          if (agentStateCacheRef.current.has(sessionId)) continue;
-          await requestSessionAgentState(sessionId).catch(() => null);
-        }
-      })();
+      if (disposed) return;
+      void Promise.all(
+        sessionIds
+          .filter((sessionId) => !agentStateCacheRef.current.has(sessionId))
+          .map((sessionId) => requestSessionAgentState(sessionId).catch(() => null))
+      );
     };
     if (typeof window.requestIdleCallback === "function") {
       idleCallback = window.requestIdleCallback(prefetch, { timeout: 2_000 });
@@ -1196,7 +1239,8 @@ export function App() {
       if (document.visibilityState === "hidden") lastBackgroundRefreshAt = now;
       inFlight = true;
       try {
-        const refreshTrace = inspectorOpen && now - lastTraceRefreshAt >= 3_000;
+        const refreshTrace =
+          activeView === "timeline" && inspectorOpen && now - lastTraceRefreshAt >= 3_000;
         if (refreshTrace) lastTraceRefreshAt = now;
         const revision = await getAgentStateRevision(sessionId);
         const previousRevision = agentStateRevisionsRef.current.get(sessionId);
@@ -1250,14 +1294,16 @@ export function App() {
     document.addEventListener("visibilitychange", handleVisibilityChange);
     const interval = window.setInterval(
       () => void refresh(),
-      FOREGROUND_AGENT_POLL_INTERVAL_MS
+      activeView === "timeline"
+        ? FOREGROUND_AGENT_POLL_INTERVAL_MS
+        : BACKGROUND_AGENT_POLL_INTERVAL_MS
     );
     return () => {
       disposed = true;
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.clearInterval(interval);
     };
-  }, [activeSession?.id, activeSessionBusy, inspectorOpen]);
+  }, [activeSession?.id, activeSessionBusy, activeView, inspectorOpen]);
 
   useEffect(() => {
     const sessionId = activeSession?.id;
@@ -1420,16 +1466,35 @@ export function App() {
   const agentCanRetry = Boolean(activeAgentState?.canRetry);
   const agentCanContinue = Boolean(activeAgentState?.canContinue);
   const agentWorking = Boolean(activeSessionBusy || activeAgentState?.status === "running");
-  const traceTurns = agentTraceState?.turns ?? [];
-  const traceSteps = traceTurns.flatMap((turn) => turn.steps);
-  const activeSessionTraceSteps =
-    activeSession && agentTraceState?.sessionId === activeSession.id ? traceSteps : [];
-  const visibleAgentMessages = messagesWithOptimisticUserMessage(
-    activeAgentState?.messages ?? [],
-    activeSession ? optimisticUserMessagesRef.current.get(activeSession.id) : undefined
+  const traceTurns = useMemo(
+    () => (activeView === "timeline" ? agentTraceState?.turns ?? [] : []),
+    [activeView, agentTraceState?.turns]
   );
-  const selectedTraceStep =
-    traceSteps.find((step) => step.id === selectedTraceStepId) ?? null;
+  const traceSteps = useMemo(
+    () => traceTurns.flatMap((turn) => turn.steps),
+    [traceTurns]
+  );
+  const activeSessionTraceSteps = useMemo(
+    () =>
+      activeSession && agentTraceState?.sessionId === activeSession.id ? traceSteps : [],
+    [activeSession, agentTraceState?.sessionId, traceSteps]
+  );
+  const visibleAgentMessages = useMemo(
+    () =>
+      activeView === "timeline"
+        ? messagesWithOptimisticUserMessage(
+            activeAgentState?.messages ?? [],
+            activeSession
+              ? optimisticUserMessagesRef.current.get(activeSession.id)
+              : undefined
+          )
+        : [],
+    [activeAgentState?.messages, activeSession, activeView]
+  );
+  const selectedTraceStep = useMemo(
+    () => traceSteps.find((step) => step.id === selectedTraceStepId) ?? null,
+    [selectedTraceStepId, traceSteps]
+  );
   const providerModelOptions = useMemo(() => {
     const configured = providerDraft
       ? [
@@ -1477,17 +1542,7 @@ export function App() {
 
   function acknowledgeSessionResult(sessionId: string) {
     setSessionStatusOverrides((current) => {
-      if (
-        ![
-          "Completed",
-          "Approval required",
-          "Paused",
-          "Error",
-          "Interrupted",
-          "Blocked",
-          "Attention"
-        ].includes(current[sessionId])
-      ) {
+      if (current[sessionId] !== "Completed") {
         return current;
       }
       const next = { ...current };
@@ -1507,14 +1562,13 @@ export function App() {
 
     setSessionStatusOverrides((current) => {
       let nextStatus: string | undefined;
-      if (tracked && status === "waiting_for_permission") nextStatus = "Approval required";
-      else if (tracked && status === "running") nextStatus = "Working";
-      else if (tracked && activeSessionIdRef.current !== sessionId) {
-        if (status === "paused") nextStatus = "Paused";
-        else if (status === "completed") nextStatus = canContinue ? "Paused" : "Completed";
-        else if (status === "failed") nextStatus = "Error";
-        else if (status === "cancelled") nextStatus = "Interrupted";
-      }
+      if (status === "waiting_for_permission") nextStatus = "Approval required";
+      else if (status === "running") nextStatus = "Working";
+      else if (status === "paused" || (status === "completed" && canContinue)) {
+        nextStatus = "Paused";
+      } else if (status === "failed") nextStatus = "Error";
+      else if (status === "cancelled") nextStatus = "Interrupted";
+      else if (tracked && status === "completed") nextStatus = "Completed";
 
       if (nextStatus === undefined) {
         if (!(sessionId in current)) return current;
@@ -1771,7 +1825,10 @@ export function App() {
     }
   }
 
-  async function refreshWorkspaceAfterProjectSession(nextState: ProjectSessionState) {
+  async function refreshWorkspaceAfterProjectSession(
+    nextState: ProjectSessionState,
+    prefetchedAgentState?: { sessionId: string; request: Promise<AgentState> }
+  ) {
     const refreshRequest = ++sessionRefreshRequestRef.current;
     const previousSessionId = activeSessionIdRef.current;
     const sessionId = nextState.activeSessionId || null;
@@ -1843,7 +1900,11 @@ export function App() {
 
     let nextAgentState: AgentState;
     try {
-      nextAgentState = await requestSessionAgentState(sessionId);
+      nextAgentState = await (
+        prefetchedAgentState?.sessionId === sessionId
+          ? prefetchedAgentState.request
+          : requestSessionAgentState(sessionId)
+      );
     } catch (error) {
       reportBackgroundError(error);
       return;
@@ -2017,10 +2078,21 @@ export function App() {
     setSelectedTraceStepId(null);
     setSelectedThreadItem(null);
     setStreamResetVersion((version) => version + 1);
+    const agentStateRequest = targetSession
+      ? requestSessionAgentState(targetSession.id)
+      : null;
+    if (targetSession && agentStateRequest) {
+      applySelectedSessionAgentState(targetSession.id, selectionRequest, agentStateRequest);
+    }
     try {
       const next = await enqueueProjectSessionSelection(() => selectProject(projectId));
       if (selectionRequest !== sessionSelectionRequestRef.current) return;
-      await refreshWorkspaceAfterProjectSession(next);
+      await refreshWorkspaceAfterProjectSession(
+        next,
+        targetSession && agentStateRequest
+          ? { sessionId: targetSession.id, request: agentStateRequest }
+          : undefined
+      );
     } catch (error) {
       if (selectionRequest === sessionSelectionRequestRef.current) {
         setComposerError(error instanceof Error ? error.message : String(error));
@@ -2057,10 +2129,15 @@ export function App() {
     setSelectedTraceStepId(null);
     setSelectedThreadItem(null);
     setStreamResetVersion((version) => version + 1);
+    const agentStateRequest = requestSessionAgentState(sessionId);
+    applySelectedSessionAgentState(sessionId, selectionRequest, agentStateRequest);
     try {
       const next = await enqueueProjectSessionSelection(() => selectSession(sessionId));
       if (selectionRequest !== sessionSelectionRequestRef.current) return;
-      await refreshWorkspaceAfterProjectSession(next);
+      await refreshWorkspaceAfterProjectSession(next, {
+        sessionId,
+        request: agentStateRequest
+      });
     } catch (error) {
       if (selectionRequest === sessionSelectionRequestRef.current) {
         setComposerError(error instanceof Error ? error.message : String(error));
@@ -3521,6 +3598,8 @@ export function App() {
             </aside>
 
             <div className="settings-detail">
+            {settingsCategory === "runtime" && (
+              <>
             <section className="settings-section" data-settings-group="runtime">
               <div className="section-title">
                 <LayoutDashboard size={17} aria-hidden="true" />
@@ -3680,7 +3759,10 @@ export function App() {
                 <span>Always show Debug</span>
               </label>
             </section>
+              </>
+            )}
 
+            {settingsCategory === "knowledge" && (
             <section className="settings-section" data-settings-group="knowledge">
               <div className="section-title">
                 <Database size={17} aria-hidden="true" />
@@ -3717,7 +3799,9 @@ export function App() {
                 <span>{contextBusy ? "Compacting" : "Compact context"}</span>
               </button>
             </section>
+            )}
 
+            {settingsCategory === "sessions" && (
             <section className="settings-section" data-settings-group="sessions">
               <div className="section-title">
                 <ArchiveRestore aria-hidden="true" />
@@ -3754,7 +3838,10 @@ export function App() {
                 </div>
               )}
             </section>
+            )}
 
+            {settingsCategory === "models" && (
+              <>
             <section className="settings-section" data-settings-group="models">
               <div className="section-title">
                 <KeyRound size={17} aria-hidden="true" />
@@ -4106,7 +4193,10 @@ export function App() {
                 </table>
               </div>
             </section>
+              </>
+            )}
 
+            {settingsCategory === "agent" && (
             <section className="settings-section" data-settings-group="agent">
               <div className="section-title">
                 <Bot size={17} aria-hidden="true" />
@@ -4149,7 +4239,9 @@ export function App() {
                 </div>
               )}
             </section>
+            )}
 
+            {settingsCategory === "permissions" && (
             <section className="settings-section" data-settings-group="permissions">
               <div className="permission-review-heading">
                 <div className="section-title">
@@ -4281,7 +4373,9 @@ export function App() {
                 </details>
               )}
             </section>
+            )}
 
+            {settingsCategory === "knowledge" && (
             <section className="settings-section" data-settings-group="knowledge">
               <div className="section-title">
                 <Database size={17} aria-hidden="true" />
@@ -4457,7 +4551,10 @@ export function App() {
                 </section>
               )}
             </section>
+            )}
 
+            {settingsCategory === "tools" && (
+              <>
             <section className="settings-section" data-settings-group="tools">
               <div className="section-title">
                 <Globe2 size={17} aria-hidden="true" />
@@ -4757,7 +4854,10 @@ export function App() {
                 </div>
               </details>
             </section>
+              </>
+            )}
 
+            {settingsCategory === "mcp" && (
             <section className="settings-section" data-settings-group="mcp">
               <div className="section-title">
                 <Cable size={17} aria-hidden="true" />
@@ -4908,7 +5008,9 @@ export function App() {
                 </div>
               </details>
             </section>
+            )}
 
+            {settingsCategory === "skills" && (
             <section className="settings-section" data-settings-group="skills">
               <div className="section-title">
                 <BookOpen size={17} aria-hidden="true" />
@@ -5035,7 +5137,10 @@ export function App() {
                 )}
               </div>
             </section>
+            )}
 
+            {settingsCategory === "personalization" && (
+              <>
             <section className="settings-section" data-settings-group="personalization">
               <div className="section-title">
                 <UserRound size={17} aria-hidden="true" />
@@ -5139,7 +5244,10 @@ export function App() {
                 ))}
               </div>
             </section>
+              </>
+            )}
 
+            {settingsCategory === "about" && (
             <section className="settings-section about-settings" data-settings-group="about">
               <div className="about-app">
                 <img src={appIconUrl} alt="" />
@@ -5163,6 +5271,7 @@ export function App() {
                 </div>
               </dl>
             </section>
+            )}
             </div>
           </section>
         )}
