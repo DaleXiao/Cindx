@@ -14,6 +14,12 @@ export type RuntimeStatus = {
   registeredTools: string[];
 };
 
+export type PersonalizationConfig = {
+  preferredName: string;
+  responseTone: "natural" | "warm" | "professional" | "direct";
+  responseLength: "concise" | "balanced" | "detailed";
+};
+
 export type SidecarEndpointState = {
   path: string;
   exists: boolean;
@@ -761,6 +767,12 @@ let browserWebSearchConfig: WebSearchConfigState = {
   configured: false
 };
 
+let browserPersonalizationConfig: PersonalizationConfig = {
+  preferredName: "",
+  responseTone: "natural",
+  responseLength: "balanced"
+};
+
 let browserProjectSessionState: ProjectSessionState = {
   projects: [
     {
@@ -1146,6 +1158,27 @@ export async function getRuntimeStatus(): Promise<RuntimeStatus> {
         "computer.scroll"
       ]
     };
+  }
+}
+
+export async function getPersonalizationConfig(): Promise<PersonalizationConfig> {
+  try {
+    return await invoke<PersonalizationConfig>("get_personalization_config");
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    return browserPersonalizationConfig;
+  }
+}
+
+export async function savePersonalizationConfig(
+  input: PersonalizationConfig
+): Promise<PersonalizationConfig> {
+  try {
+    return await invoke<PersonalizationConfig>("save_personalization_config", { input });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    browserPersonalizationConfig = { ...input };
+    return browserPersonalizationConfig;
   }
 }
 

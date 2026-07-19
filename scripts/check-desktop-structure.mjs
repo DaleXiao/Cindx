@@ -619,8 +619,10 @@ assert(
     appSource.includes("window-toolbar-panel-right") &&
     appSource.includes("data-active-view={activeView}") &&
     appSource.includes("data-view={activeView}") &&
-    styles.includes("background: rgba(255, 255, 255, 0.96)") &&
+    styles.includes("--toolbar-solid: rgba(255, 255, 255, 0.96)") &&
+    styles.includes("background: var(--toolbar-solid)") &&
     styles.includes('.workspace[data-view="timeline"]') &&
+    styles.includes("--toolbar-glass: rgba(255, 255, 255, 0.76)") &&
     styles.includes("backdrop-filter: saturate(145%) blur(18px)") &&
     /\.window-toolbar-panel \{[\s\S]*?background: var\(--panel\);/.test(styles) &&
     tauriConfig.app.macOSPrivateApi === true &&
@@ -629,7 +631,7 @@ assert(
   "Timeline content must scroll beneath the translucent titlebar glass surface"
 );
 assert(
-  /\.app-shell\[data-active-view="settings"\] \{[\s\S]*?transition: none;/.test(styles) &&
+  /\.app-shell\[data-active-view="settings"\] \{[\s\S]*?--sidebar-layout-width: 0px;[\s\S]*?grid-template-columns: 0 minmax\(0, 1fr\) 0;[\s\S]*?transition: none;/.test(styles) &&
     /\.app-shell\[data-active-view="settings"\] \.window-toolbar,\s*\.app-shell\[data-active-view="schedule"\] \.window-toolbar \{[\s\S]*?background: transparent;/.test(styles) &&
     /\.app-shell\[data-active-view="settings"\] \.window-workspace-header,\s*\.app-shell\[data-active-view="schedule"\] \.window-workspace-header \{[\s\S]*?background: var\(--bg\);/.test(styles) &&
     /\.settings-view \{[\s\S]*?overflow-y: auto;[\s\S]*?scrollbar-gutter: stable;/.test(
@@ -639,8 +641,9 @@ assert(
     styles.includes("*::-webkit-scrollbar-thumb") &&
     appSource.includes('activeView === "settings"') &&
     appSource.includes('? "Settings"') &&
-    !appSource.includes('{activeView !== "settings" && ('),
-  "Settings must keep the sidebar material continuous through the titlebar and use the shared compact scrollbar"
+    appSource.includes('{activeView !== "settings" && (') &&
+    appSource.includes('open={activeView === "timeline" && inspectorOpen}'),
+  "Settings must use a full-page stage while preserving the shared compact scrollbar"
 );
 assert(composerSource.includes('event.key !== "Enter"'), "Composer must support Enter to send");
 assert(composerSource.includes("event.shiftKey"), "Composer must reserve Shift+Enter for a new line");
@@ -669,9 +672,20 @@ assert(
 assert(
   composerSource.includes("onCompositionStart") &&
     composerSource.includes("onCompositionEnd") &&
-    composerSource.includes("compositionJustEndedRef") &&
-    composerSource.includes("nativeEvent.keyCode === 229"),
+    composerSource.includes("IME_POST_COMPOSITION_ENTER_GUARD_MS = 120") &&
+    composerSource.includes("imeEnterSeenDuringCompositionRef") &&
+    composerSource.includes("suppressImeEnterUntilRef") &&
+    composerSource.includes("nativeEvent.keyCode === 229") &&
+    composerSource.includes("textareaRef.current?.value ?? value") &&
+    !composerSource.includes("compositionJustEndedRef") &&
+    !composerSource.includes("window.setTimeout"),
   "Composer must not submit macOS IME candidate-selection keystrokes"
+);
+assert(
+  /\.composer-stack > \.composer \{[^}]*width: min\(100%, 960px\);[^}]*margin-inline: auto;/.test(
+    styles
+  ),
+  "Composer must stay centered and bounded when either workspace pane is collapsed"
 );
 assert(
   composerSource.includes("onPaste={(event) =>") &&
@@ -1147,6 +1161,75 @@ assert(
   "Settings must expose an About page with the packaged runtime version"
 );
 assert(
+  appSource.indexOf('id: "personalization"') < appSource.indexOf('id: "about"') &&
+    appSource.includes('data-settings-group="personalization"') &&
+    appSource.includes("What should Cindx call you?") &&
+    appSource.includes("Response tone") &&
+    appSource.includes("Response length") &&
+    appSource.includes("Appearance") &&
+    appSource.includes('["light", "Light", Sun]') &&
+    appSource.includes('["dark", "Dark", Moon]') &&
+    appSource.includes('["system", "System", Monitor]') &&
+    tauriBridge.includes("getPersonalizationConfig") &&
+    tauriBridge.includes("savePersonalizationConfig") &&
+    rustLib.includes("personalized_agent_instructions") &&
+    rustLib.includes('app_data_root().join("personalization.json")'),
+  "Personalization must persist and affect agent prompts before About"
+);
+assert(
+  appSource.includes("personalizationSaveQueueRef") &&
+    appSource.includes("updatePersonalizationDraft") &&
+    appSource.includes("flushPersonalization(false)") &&
+    rustLib.includes("The user's preferred name is") &&
+    rustLib.includes("If the user asks what their name is"),
+  "Personalization changes must auto-save and expose the preferred name as agent identity context"
+);
+assert(
+  styles.includes('.app-shell[data-sidebar-open="false"] .sidebar-pane-toggle') &&
+    styles.includes(':root[data-theme="dark"] .skill-url-row') &&
+    styles.includes(':root[data-theme="dark"] .integration-row') &&
+    styles.includes(':root[data-theme="dark"] .tool-schema') &&
+    styles.includes(':root[data-theme="dark"] .source-preview') &&
+    styles.includes(':root[data-theme="dark"] .knowledge-graph-canvas'),
+  "Collapsed navigation and Settings surfaces must remain visible in dark mode"
+);
+assert(
+  /\.composer-input-shell \{[^}]*background-clip: padding-box;[^}]*border: 1px solid var\(--border\);[^}]*border-radius: 24px;[^}]*box-shadow: none;[^}]*\}/.test(
+    styles
+  ) &&
+    /\.composer textarea \{[^}]*background: transparent;[^}]*border-radius: 0;[^}]*\}/.test(styles) &&
+    !/\.composer-toolbar \{[^}]*border-radius:/.test(styles) &&
+    !styles.includes(".composer-input-shell > textarea:first-child") &&
+    !styles.includes(':root[data-theme="dark"] .composer-input-shell'),
+  "Composer must use one crisp 24px shell instead of stitched child corners"
+);
+assert(
+  /\.settings-view,\s*\.schedule-view \{[^}]*--form-control-radius: 10px;[^}]*--form-control-focus-ring: 0 0 0 2px rgb\(37 99 235 \/ 14%\);/.test(
+    styles
+  ) &&
+    /\.schedule-field input,[\s\S]*?\.schedule-field textarea \{[^}]*background-clip: padding-box;[^}]*border-radius: var\(--form-control-radius\);[^}]*box-shadow: none;/.test(
+      styles
+    ) &&
+    /\.provider-form input,[\s\S]*?\.tool-runner textarea \{[^}]*background-clip: padding-box;[^}]*border-radius: var\(--form-control-radius\);[^}]*outline: 0;[^}]*box-shadow: none;/.test(
+      styles
+    ) &&
+    /\.skill-url-row:focus-within \{[^}]*border-color: var\(--accent\);[^}]*box-shadow: var\(--form-control-focus-ring\);/.test(
+      styles
+    ),
+  "Settings and Schedule fields must share one crisp rounded shell and blue focus treatment"
+);
+assert(
+  styles.includes("--settings-element-radius: var(--form-control-radius)") &&
+    /\.settings-view button \{[^}]*border-radius: var\(--settings-element-radius\);/.test(styles) &&
+    /\.settings-view :is\([\s\S]*?\.workspace-folder-selector,[\s\S]*?\.tool-output,[\s\S]*?\.settings-inline-error[\s\S]*?\) \{[^}]*border-radius: var\(--settings-element-radius\);/.test(
+      styles
+    ) &&
+    /\.settings-view \.about-app img,\s*\.settings-saved-toast \{[^}]*border-radius: 10px;/.test(
+      styles
+    ),
+  "Settings rectangular controls and surfaces must share one rounded geometry"
+);
+assert(
   appSource.includes('className="settings-saved-toast"') &&
     appSource.includes("showSettingsSaved();") &&
     (appSource.match(/showSettingsSaved\(\);/g)?.length ?? 0) === 5 &&
@@ -1489,7 +1572,7 @@ assert(
     rustLib.includes("MACOS_SIDEBAR_MATERIAL_TAG") &&
     rustLib.includes("set_sidebar_material_width") &&
     tauriBridge.includes('invoke<void>("set_sidebar_material_width"') &&
-    appSource.includes("setSidebarMaterialWidth(sidebarOpen ? sidebarWidth : 0)") &&
+    appSource.includes('activeView === "settings" || !sidebarOpen ? 0 : sidebarWidth') &&
     styles.includes("--project-selection: rgba(210, 211, 214, 0.78)") &&
     styles.includes("--session-selection: rgba(220, 221, 224, 0.82)") &&
     !/\.project-row\.active \{[^}]*box-shadow:/.test(styles) &&

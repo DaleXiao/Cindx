@@ -31,10 +31,9 @@ assert(
 assert(css.includes("@media (max-width: 1180px)"), "Compact desktop breakpoint is missing");
 assert(css.includes('position: fixed;\n    z-index: 20;'), "Compact inspector must become an overlay");
 assert(
-  /@media \(max-width: 1180px\)[\s\S]*?\.window-workspace-header \{[\s\S]*?right: var\(--inspector-layout-width\);/.test(
-    css
-  ),
-  "Compact titlebar must preserve the inspector surface above the overlay"
+  /\.window-workspace-header \{[\s\S]*?grid-column: 2;[\s\S]*?grid-row: 1;/.test(css) &&
+    appSource.indexOf('</header>') < appSource.indexOf('<div className="window-workspace-header">'),
+  "Workspace title and content must share the same responsive grid column"
 );
 assert(css.includes('.app-shell[data-inspector-open="false"]'), "Inspector must support a collapsed layout");
 assert(css.includes('.app-shell[data-sidebar-open="false"]'), "Sidebar must support a collapsed layout");
@@ -51,15 +50,18 @@ assert(
 assert(
     appSource.includes('className="sidebar-resize-handle"') &&
     appSource.includes('aria-label="Resize sidebar"') &&
-    css.includes("left: calc(var(--sidebar-layout-width) - 7px)") &&
-    css.includes("width: 7px") &&
-    css.includes("rgba(0, 0, 0, 0.012) 58%") &&
-    css.includes("rgba(0, 0, 0, 0.07) 100%"),
-  "Sidebar divider must expose a clean single-layer left-facing depth"
+    css.includes("left: calc(var(--sidebar-layout-width) - 4px)") &&
+    css.includes("rgba(0, 0, 0, 0.008) 68%") &&
+    css.includes("rgba(0, 0, 0, 0.028) 100%") &&
+    /\.sidebar-resize-handle::after \{[^}]*left: calc\(50% - 0\.5px\);[^}]*width: 0\.5px;[^}]*background: var\(--border-strong\);/.test(
+      css
+    ),
+  "Sidebar divider must separate a crisp half-pixel edge from its subtle left-facing depth"
 );
 assert(
   css.includes(".window-workspace-header") &&
-    css.includes("box-shadow: inset 0 -1px 0 var(--border)"),
+    css.includes("box-shadow: inset 0 -1px 0 var(--border)") &&
+    !/\.window-workspace-header \{[^}]*left: var\(--sidebar-layout-width\)/.test(css),
   "Workspace metadata and its lower divider must live in the titlebar"
 );
 assert(!css.includes(".topbar {"), "Workspace must not retain a second header row");

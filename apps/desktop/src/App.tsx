@@ -19,6 +19,8 @@ import {
   KeyRound,
   LayoutDashboard,
   Link2,
+  Monitor,
+  Moon,
   PackagePlus,
   PanelLeftClose,
   PanelLeftOpen,
@@ -30,9 +32,11 @@ import {
   Send,
   Settings,
   ShieldCheck,
+  Sun,
   TerminalSquare,
   Trash2,
   TriangleAlert,
+  UserRound,
   Wrench,
   XCircle
 } from "lucide-react";
@@ -40,6 +44,7 @@ import {
   startTransition,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -93,6 +98,7 @@ import {
   generateSessionTitle,
   editQueuedAgentMessage,
   getMcpState,
+  getPersonalizationConfig,
   getSkillState,
   installSkillPackage,
   installSkillUrl,
@@ -110,6 +116,7 @@ import {
   ProviderConfigState,
   PermissionReviewItem,
   PermissionReviewState,
+  PersonalizationConfig,
   ProjectSessionState,
   revealArtifact,
   revealMainWindow,
@@ -130,6 +137,7 @@ import {
   runTool,
   pickWorkspaceFolder,
   saveProviderConfig,
+  savePersonalizationConfig,
   setPromptEvolutionEnabled,
   saveSidecarConfig,
   saveWebSearchConfig,
@@ -155,7 +163,16 @@ import {
 const appIconUrl = new URL("../src-tauri/icons/icon.png", import.meta.url).href;
 const DEBUG_ALWAYS_VISIBLE_STORAGE_KEY = "cindx.debug.always-visible";
 const IGNORED_PERMISSION_REVIEWS_STORAGE_KEY = "cindx.permissions.ignored";
+const APPEARANCE_STORAGE_KEY = "cindx.appearance";
 const SESSION_STATE_CACHE_LIMIT = 12;
+
+type AppearanceMode = "light" | "dark" | "system";
+
+const DEFAULT_PERSONALIZATION: PersonalizationConfig = {
+  preferredName: "",
+  responseTone: "natural",
+  responseLength: "balanced"
+};
 
 function rememberSessionState<Value>(cache: Map<string, Value>, sessionId: string, value: Value) {
   cache.delete(sessionId);
@@ -216,6 +233,17 @@ function loadIgnoredPermissionReviewIds() {
   } catch {
     return new Set<string>();
   }
+}
+
+function loadAppearanceMode(): AppearanceMode {
+  if (typeof window === "undefined") return "system";
+  try {
+    const stored = window.localStorage.getItem(APPEARANCE_STORAGE_KEY);
+    if (stored === "light" || stored === "dark") return stored;
+  } catch {
+    // Fall back to the system appearance when storage is unavailable.
+  }
+  return "system";
 }
 
 function normalizedSessionEffort(effort: string | undefined): AgentEffort {
@@ -497,6 +525,7 @@ const settingsCategories = [
   { id: "mcp", label: "MCP" },
   { id: "skills", label: "Skills" },
   { id: "permissions", label: "Pending Reviews" },
+  { id: "personalization", label: "Personalization" },
   { id: "about", label: "About" }
 ] as const;
 
@@ -516,6 +545,7 @@ function SettingsCategoryIcon({ category }: { category: SettingsCategory }) {
   if (category === "mcp") return <Cable aria-hidden="true" />;
   if (category === "skills") return <BookOpen aria-hidden="true" />;
   if (category === "permissions") return <ShieldCheck aria-hidden="true" />;
+  if (category === "personalization") return <UserRound aria-hidden="true" />;
   return <Info aria-hidden="true" />;
 }
 
@@ -540,6 +570,11 @@ export function App() {
   const [sidebarWidth, setSidebarWidth] = useState(236);
   const [sidebarResizing, setSidebarResizing] = useState(false);
   const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>("runtime");
+  const [personalizationDraft, setPersonalizationDraft] =
+    useState<PersonalizationConfig>(DEFAULT_PERSONALIZATION);
+  const [personalizationBusy, setPersonalizationBusy] = useState(false);
+  const [personalizationError, setPersonalizationError] = useState<string | null>(null);
+  const [appearanceMode, setAppearanceMode] = useState<AppearanceMode>(loadAppearanceMode);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("details");
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorOpenBeforeSettings, setInspectorOpenBeforeSettings] = useState(false);
@@ -648,6 +683,10 @@ export function App() {
   const startupWindowRevealRequestedRef = useRef(false);
   const skillPackageInputRef = useRef<HTMLInputElement>(null);
   const settingsToastTimerRef = useRef<number | null>(null);
+  const personalizationSaveTimerRef = useRef<number | null>(null);
+  const personalizationSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const personalizationRevisionRef = useRef(0);
+  const personalizationDraftRef = useRef<PersonalizationConfig>(DEFAULT_PERSONALIZATION);
   const [composerError, setComposerError] = useState<string | null>(null);
   const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
   const [webSearchError, setWebSearchError] = useState<string | null>(null);
@@ -703,15 +742,39 @@ export function App() {
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
-      void setSidebarMaterialWidth(sidebarOpen ? sidebarWidth : 0).catch(() => {});
+      void setSidebarMaterialWidth(
+        activeView === "settings" || !sidebarOpen ? 0 : sidebarWidth
+      ).catch(() => {});
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [sidebarOpen, sidebarWidth]);
+  }, [activeView, sidebarOpen, sidebarWidth]);
+
+  useLayoutEffect(() => {
+    const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyAppearance = () => {
+      const resolved =
+        appearanceMode === "system"
+          ? systemTheme.matches
+            ? "dark"
+            : "light"
+          : appearanceMode;
+      document.documentElement.dataset.appearance = appearanceMode;
+      document.documentElement.dataset.theme = resolved;
+      document.documentElement.style.colorScheme = resolved;
+    };
+    applyAppearance();
+    if (appearanceMode !== "system") return;
+    systemTheme.addEventListener("change", applyAppearance);
+    return () => systemTheme.removeEventListener("change", applyAppearance);
+  }, [appearanceMode]);
 
   useEffect(
     () => () => {
       if (settingsToastTimerRef.current !== null) {
         window.clearTimeout(settingsToastTimerRef.current);
+      }
+      if (personalizationSaveTimerRef.current !== null) {
+        window.clearTimeout(personalizationSaveTimerRef.current);
       }
     },
     []
@@ -751,6 +814,10 @@ export function App() {
           updateSessionStatus(state.sessionId, state.status, state.canContinue);
         }
         setComposerError((current) => current ?? state.lastError);
+      }),
+      getPersonalizationConfig().then((state) => {
+        personalizationDraftRef.current = state;
+        setPersonalizationDraft(state);
       })
     ];
 
@@ -1448,6 +1515,74 @@ export function App() {
       setSettingsToast(null);
       settingsToastTimerRef.current = null;
     }, 1800);
+  }
+
+  function handleAppearanceModeChange(mode: AppearanceMode) {
+    setAppearanceMode(mode);
+    try {
+      window.localStorage.setItem(APPEARANCE_STORAGE_KEY, mode);
+    } catch {
+      // Keep the preference for this app session when storage is unavailable.
+    }
+    showSettingsSaved("Appearance updated");
+  }
+
+  function persistPersonalization(
+    next: PersonalizationConfig,
+    revision: number,
+    notify: boolean
+  ) {
+    setPersonalizationBusy(true);
+    setPersonalizationError(null);
+    const save = personalizationSaveQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const saved = await savePersonalizationConfig(next);
+        if (revision !== personalizationRevisionRef.current) return;
+        personalizationDraftRef.current = saved;
+        setPersonalizationDraft(saved);
+        if (notify) showSettingsSaved("Personalization saved");
+      })
+      .catch((error) => {
+        if (revision !== personalizationRevisionRef.current) return;
+        setPersonalizationError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        if (revision === personalizationRevisionRef.current) {
+          setPersonalizationBusy(false);
+        }
+      });
+    personalizationSaveQueueRef.current = save;
+    return save;
+  }
+
+  function updatePersonalizationDraft(next: PersonalizationConfig) {
+    personalizationDraftRef.current = next;
+    setPersonalizationDraft(next);
+    setPersonalizationError(null);
+    const revision = personalizationRevisionRef.current + 1;
+    personalizationRevisionRef.current = revision;
+    if (personalizationSaveTimerRef.current !== null) {
+      window.clearTimeout(personalizationSaveTimerRef.current);
+    }
+    personalizationSaveTimerRef.current = window.setTimeout(() => {
+      personalizationSaveTimerRef.current = null;
+      void persistPersonalization(next, revision, false);
+    }, 220);
+  }
+
+  function flushPersonalization(notify: boolean) {
+    if (personalizationSaveTimerRef.current !== null) {
+      window.clearTimeout(personalizationSaveTimerRef.current);
+      personalizationSaveTimerRef.current = null;
+    }
+    const revision = personalizationRevisionRef.current + 1;
+    personalizationRevisionRef.current = revision;
+    return persistPersonalization(personalizationDraftRef.current, revision, notify);
+  }
+
+  async function handleSavePersonalization() {
+    await flushPersonalization(true);
   }
 
   async function handleSaveProviderConfig() {
@@ -2828,60 +2963,22 @@ export function App() {
       <header className="window-toolbar" data-tauri-drag-region>
         <span className="window-toolbar-panel window-toolbar-panel-left" aria-hidden="true" />
         <span className="window-toolbar-panel window-toolbar-panel-right" aria-hidden="true" />
-        <div className="window-workspace-header">
-          <div className="topbar-title">
-            <div>
-              <h1>
-                {activeView === "settings"
-                  ? "Settings"
-                  : activeView === "schedule"
-                    ? "Schedule"
-                    : activeSession?.name ?? "Session"}
-              </h1>
-            </div>
-          </div>
-          {activeView === "timeline" && <div className="topbar-actions">
-              <div
-                className="context-usage"
-                title={`${activeAgentState?.contextTokensUsed ?? 0} of ${
-                  activeAgentState?.contextWindowTokens ??
-                  phase4?.provider.contextWindowTokens ??
-                  128000
-                } context tokens${activeAgentState?.contextUsageEstimated ? " (estimated)" : ""}`}
-              >
-                <span>
-                  {activeAgentState?.contextUsageEstimated ? "~" : ""}
-                  {formatTokenCount(activeAgentState?.contextTokensUsed ?? 0)} tokens
-                </span>
-                <strong>
-                  {Math.round(activeAgentState?.contextRemainingPercent ?? 100)}% left
-                </strong>
-                <progress
-                  max={100}
-                  value={activeAgentState?.contextRemainingPercent ?? 100}
-                  aria-label="Context window remaining"
-                />
-              </div>
-              <div className={`runtime-pill ${statusText === "Ready" ? "ready" : ""}`}>
-                <CheckCircle2 size={16} aria-hidden="true" />
-                <span>{statusText}</span>
-              </div>
-          </div>}
-        </div>
-        <button
-          className="window-pane-toggle sidebar-pane-toggle"
-          type="button"
-          aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
-          aria-pressed={sidebarOpen}
-          data-open={sidebarOpen}
-          title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
-          onClick={() => setSidebarOpen((open) => !open)}
-        >
-          <span className="window-pane-toggle-icon" aria-hidden="true">
-            <PanelLeftClose className="pane-icon-open" />
-            <PanelLeftOpen className="pane-icon-closed" />
-          </span>
-        </button>
+        {activeView !== "settings" && (
+          <button
+            className="window-pane-toggle sidebar-pane-toggle"
+            type="button"
+            aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+            aria-pressed={sidebarOpen}
+            data-open={sidebarOpen}
+            title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+            onClick={() => setSidebarOpen((open) => !open)}
+          >
+            <span className="window-pane-toggle-icon" aria-hidden="true">
+              <PanelLeftClose className="pane-icon-open" />
+              <PanelLeftOpen className="pane-icon-closed" />
+            </span>
+          </button>
+        )}
         {activeView === "timeline" && (
           <button
             className="window-pane-toggle inspector-pane-toggle"
@@ -2900,7 +2997,48 @@ export function App() {
         )}
       </header>
 
-      {sidebarOpen && (
+      <div className="window-workspace-header">
+        <div className="topbar-title">
+          <div>
+            <h1>
+              {activeView === "settings"
+                ? "Settings"
+                : activeView === "schedule"
+                  ? "Schedule"
+                  : activeSession?.name ?? "Session"}
+            </h1>
+          </div>
+        </div>
+        {activeView === "timeline" && <div className="topbar-actions">
+            <div
+              className="context-usage"
+              title={`${activeAgentState?.contextTokensUsed ?? 0} of ${
+                activeAgentState?.contextWindowTokens ??
+                phase4?.provider.contextWindowTokens ??
+                128000
+              } context tokens${activeAgentState?.contextUsageEstimated ? " (estimated)" : ""}`}
+            >
+              <span>
+                {activeAgentState?.contextUsageEstimated ? "~" : ""}
+                {formatTokenCount(activeAgentState?.contextTokensUsed ?? 0)} tokens
+              </span>
+              <strong>
+                {Math.round(activeAgentState?.contextRemainingPercent ?? 100)}% left
+              </strong>
+              <progress
+                max={100}
+                value={activeAgentState?.contextRemainingPercent ?? 100}
+                aria-label="Context window remaining"
+              />
+            </div>
+            <div className={`runtime-pill ${statusText === "Ready" ? "ready" : ""}`}>
+              <CheckCircle2 size={16} aria-hidden="true" />
+              <span>{statusText}</span>
+            </div>
+        </div>}
+      </div>
+
+      {activeView !== "settings" && sidebarOpen && (
         <div
           className="sidebar-resize-handle"
           role="separator"
@@ -2924,36 +3062,38 @@ export function App() {
         />
       )}
 
-      <Sidebar
-        activeView={activeView}
-        projects={projects}
-        sessions={sessions}
-        busy={projectSessionBusy}
-        searchOpen={sidebarSearchOpen}
-        searchQuery={sidebarQuery}
-        selectedScheduleId={selectedScheduleId}
-        projectCreateOpen={projectCreateOpen}
-        projectName={newProjectName}
-        onViewChange={handleWorkspaceViewChange}
-        onScheduleSelect={setSelectedScheduleId}
-        onSearchToggle={() => {
-          setSidebarSearchOpen((open) => !open);
-          if (sidebarSearchOpen) setSidebarQuery("");
-        }}
-        onSearchQueryChange={setSidebarQuery}
-        onProjectCreateToggle={() => setProjectCreateOpen((open) => !open)}
-        onProjectNameChange={setNewProjectName}
-        onProjectCreate={() => void handleCreateProject()}
-        onSessionCreate={() => void handleCreateSession()}
-        onProjectSelect={(projectId) => void handleSelectProject(projectId)}
-        onProjectRename={(projectId, name) => void handleRenameProject(projectId, name)}
-        onProjectDelete={(projectId) => void handleDeleteProject(projectId)}
-        onSessionSelect={(sessionId) => void handleSelectSession(sessionId)}
-        onSessionRename={(sessionId, name) => void handleRenameSession(sessionId, name)}
-        onSessionFork={(sessionId) => void handleForkSession(sessionId)}
-        onSessionArchive={(sessionId) => void handleArchiveSession(sessionId)}
-        onSessionDelete={(sessionId) => void handleDeleteSession(sessionId)}
-      />
+      {activeView !== "settings" && (
+        <Sidebar
+          activeView={activeView}
+          projects={projects}
+          sessions={sessions}
+          busy={projectSessionBusy}
+          searchOpen={sidebarSearchOpen}
+          searchQuery={sidebarQuery}
+          selectedScheduleId={selectedScheduleId}
+          projectCreateOpen={projectCreateOpen}
+          projectName={newProjectName}
+          onViewChange={handleWorkspaceViewChange}
+          onScheduleSelect={setSelectedScheduleId}
+          onSearchToggle={() => {
+            setSidebarSearchOpen((open) => !open);
+            if (sidebarSearchOpen) setSidebarQuery("");
+          }}
+          onSearchQueryChange={setSidebarQuery}
+          onProjectCreateToggle={() => setProjectCreateOpen((open) => !open)}
+          onProjectNameChange={setNewProjectName}
+          onProjectCreate={() => void handleCreateProject()}
+          onSessionCreate={() => void handleCreateSession()}
+          onProjectSelect={(projectId) => void handleSelectProject(projectId)}
+          onProjectRename={(projectId, name) => void handleRenameProject(projectId, name)}
+          onProjectDelete={(projectId) => void handleDeleteProject(projectId)}
+          onSessionSelect={(sessionId) => void handleSelectSession(sessionId)}
+          onSessionRename={(sessionId, name) => void handleRenameSession(sessionId, name)}
+          onSessionFork={(sessionId) => void handleForkSession(sessionId)}
+          onSessionArchive={(sessionId) => void handleArchiveSession(sessionId)}
+          onSessionDelete={(sessionId) => void handleDeleteSession(sessionId)}
+        />
+      )}
 
       <section className="workspace" data-view={activeView} aria-label="Agent workspace">
         {activeView === "timeline" ? (
@@ -4557,6 +4697,110 @@ export function App() {
               </div>
             </section>
 
+            <section className="settings-section" data-settings-group="personalization">
+              <div className="section-title">
+                <UserRound size={17} aria-hidden="true" />
+                <h2>You and Cindx</h2>
+              </div>
+              <div className="provider-form personalization-form">
+                <label>
+                  <span>What should Cindx call you?</span>
+                  <input
+                    value={personalizationDraft.preferredName}
+                    maxLength={80}
+                    autoComplete="name"
+                    placeholder="Name or preferred form of address"
+                    onBlur={() => void flushPersonalization(false)}
+                    onChange={(event) =>
+                      updatePersonalizationDraft({
+                        ...personalizationDraft,
+                        preferredName: event.target.value
+                      })
+                    }
+                  />
+                </label>
+                <label className="personalization-select-field">
+                  <span>Response tone</span>
+                  <select
+                    value={personalizationDraft.responseTone}
+                    onChange={(event) =>
+                      updatePersonalizationDraft({
+                        ...personalizationDraft,
+                        responseTone: event.target.value as PersonalizationConfig["responseTone"]
+                      })
+                    }
+                  >
+                    <option value="natural">Natural</option>
+                    <option value="warm">Warm</option>
+                    <option value="professional">Professional</option>
+                    <option value="direct">Direct</option>
+                  </select>
+                </label>
+                <fieldset className="settings-choice-field">
+                  <legend>Response length</legend>
+                  <div className="settings-segmented" role="group" aria-label="Response length">
+                    {([
+                      ["concise", "Concise"],
+                      ["balanced", "Balanced"],
+                      ["detailed", "Detailed"]
+                    ] as const).map(([value, label]) => (
+                      <button
+                        className={personalizationDraft.responseLength === value ? "active" : ""}
+                        type="button"
+                        key={value}
+                        aria-pressed={personalizationDraft.responseLength === value}
+                        onClick={() =>
+                          updatePersonalizationDraft({
+                            ...personalizationDraft,
+                            responseLength: value
+                          })
+                        }
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </fieldset>
+                {personalizationError && (
+                  <div className="settings-inline-error">{personalizationError}</div>
+                )}
+                <button
+                  className="secondary-button personalization-save"
+                  type="button"
+                  disabled={personalizationBusy}
+                  onClick={() => void handleSavePersonalization()}
+                >
+                  <Save size={17} aria-hidden="true" />
+                  <span>{personalizationBusy ? "Saving" : "Save personalization"}</span>
+                </button>
+              </div>
+            </section>
+
+            <section className="settings-section" data-settings-group="personalization">
+              <div className="section-title">
+                <Monitor size={17} aria-hidden="true" />
+                <h2>Appearance</h2>
+              </div>
+              <div className="appearance-options" role="group" aria-label="Appearance">
+                {([
+                  ["light", "Light", Sun],
+                  ["dark", "Dark", Moon],
+                  ["system", "System", Monitor]
+                ] as const).map(([value, label, Icon]) => (
+                  <button
+                    className={appearanceMode === value ? "active" : ""}
+                    type="button"
+                    key={value}
+                    aria-pressed={appearanceMode === value}
+                    onClick={() => handleAppearanceModeChange(value)}
+                  >
+                    <Icon aria-hidden="true" />
+                    <span>{label}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+
             <section className="settings-section about-settings" data-settings-group="about">
               <div className="about-app">
                 <img src={appIconUrl} alt="" />
@@ -4586,7 +4830,7 @@ export function App() {
       </section>
 
       <Inspector
-        open={inspectorOpen}
+        open={activeView === "timeline" && inspectorOpen}
         showDebug={debugAlwaysVisible}
         width={inspectorWidth}
         tab={inspectorTab}
