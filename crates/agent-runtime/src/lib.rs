@@ -5,6 +5,12 @@ use agent_core::{
 use model_provider::{tool_function_name, ModelCallMode, ModelRequest, ModelResponse};
 use std::collections::BTreeMap;
 
+mod control;
+
+pub use control::{
+    AgentRunControl, RunBudget, RunControlSnapshot, RunProgressSnapshot, RunStopReason,
+};
+
 pub const DEFAULT_MAX_AGENT_TURNS: usize = 24;
 pub const DEFAULT_COLLABORATION_WORKER_TURNS: usize = 5;
 pub const MAX_COLLABORATION_WORKER_TOOL_CALLS: usize = 6;

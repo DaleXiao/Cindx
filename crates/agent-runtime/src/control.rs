@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 const PARTIAL_OUTPUT_MAX_CHARS: usize = 24_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RunStopReason {
+pub enum RunStopReason {
     UserCancelled,
     DeadlineExceeded,
     ModelCallBudgetExceeded,
@@ -16,7 +16,7 @@ pub(crate) enum RunStopReason {
 }
 
 impl RunStopReason {
-    pub(crate) fn code(self) -> &'static str {
+    pub fn code(self) -> &'static str {
         match self {
             Self::UserCancelled => "user_cancelled",
             Self::DeadlineExceeded => "deadline_exceeded",
@@ -27,22 +27,22 @@ impl RunStopReason {
         }
     }
 
-    pub(crate) fn is_user_cancelled(self) -> bool {
+    pub fn is_user_cancelled(self) -> bool {
         self == Self::UserCancelled
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RunBudget {
-    pub(crate) max_duration: Duration,
-    pub(crate) max_model_calls: usize,
-    pub(crate) max_tool_calls: usize,
-    pub(crate) no_progress_timeout: Duration,
-    pub(crate) max_identical_actions: usize,
+pub struct RunBudget {
+    pub max_duration: Duration,
+    pub max_model_calls: usize,
+    pub max_tool_calls: usize,
+    pub no_progress_timeout: Duration,
+    pub max_identical_actions: usize,
 }
 
 impl RunBudget {
-    pub(crate) fn for_effort(effort: &str) -> Self {
+    pub fn for_effort(effort: &str) -> Self {
         match effort {
             "fast" => Self {
                 max_duration: Duration::from_secs(3 * 60),
@@ -70,7 +70,7 @@ impl RunBudget {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct RunControlSnapshot {
+pub struct RunControlSnapshot {
     budget: RunBudget,
     elapsed_active: Duration,
     model_calls: usize,
@@ -80,13 +80,13 @@ pub(crate) struct RunControlSnapshot {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct RunProgressSnapshot {
-    pub(crate) stage: String,
-    pub(crate) detail: String,
-    pub(crate) elapsed: Duration,
-    pub(crate) remaining: Duration,
-    pub(crate) model_calls: usize,
-    pub(crate) tool_calls: usize,
+pub struct RunProgressSnapshot {
+    pub stage: String,
+    pub detail: String,
+    pub elapsed: Duration,
+    pub remaining: Duration,
+    pub model_calls: usize,
+    pub tool_calls: usize,
 }
 
 #[derive(Debug)]
@@ -101,7 +101,7 @@ struct RunMutableState {
 }
 
 #[derive(Debug)]
-pub(crate) struct AgentRunControl {
+pub struct AgentRunControl {
     budget: RunBudget,
     user_cancelled: AtomicBool,
     model_calls: AtomicUsize,
@@ -110,7 +110,7 @@ pub(crate) struct AgentRunControl {
 }
 
 impl AgentRunControl {
-    pub(crate) fn new(effort: &str) -> Self {
+    pub fn new(effort: &str) -> Self {
         Self::with_budget(RunBudget::for_effort(effort))
     }
 
@@ -133,7 +133,7 @@ impl AgentRunControl {
         }
     }
 
-    pub(crate) fn from_snapshot(snapshot: RunControlSnapshot) -> Self {
+    pub fn from_snapshot(snapshot: RunControlSnapshot) -> Self {
         let now = Instant::now();
         let started_at = now.checked_sub(snapshot.elapsed_active).unwrap_or(now);
         Self {
@@ -153,7 +153,7 @@ impl AgentRunControl {
         }
     }
 
-    pub(crate) fn snapshot(&self) -> RunControlSnapshot {
+    pub fn snapshot(&self) -> RunControlSnapshot {
         let state = self.state.lock().expect("run control state poisoned");
         RunControlSnapshot {
             budget: self.budget,
@@ -165,12 +165,12 @@ impl AgentRunControl {
         }
     }
 
-    pub(crate) fn request_cancel(&self) {
+    pub fn request_cancel(&self) {
         self.user_cancelled.store(true, Ordering::SeqCst);
         self.set_stop_reason(RunStopReason::UserCancelled);
     }
 
-    pub(crate) fn stop_reason(&self) -> Option<RunStopReason> {
+    pub fn stop_reason(&self) -> Option<RunStopReason> {
         if self.user_cancelled.load(Ordering::SeqCst) {
             self.set_stop_reason(RunStopReason::UserCancelled);
         }
@@ -186,11 +186,11 @@ impl AgentRunControl {
         state.stop_reason
     }
 
-    pub(crate) fn should_stop(&self) -> bool {
+    pub fn should_stop(&self) -> bool {
         self.stop_reason().is_some()
     }
 
-    pub(crate) fn begin_model_call(&self, stage: &str) -> Result<usize, RunStopReason> {
+    pub fn begin_model_call(&self, stage: &str) -> Result<usize, RunStopReason> {
         if let Some(reason) = self.stop_reason() {
             return Err(reason);
         }
@@ -203,7 +203,7 @@ impl AgentRunControl {
         Ok(call)
     }
 
-    pub(crate) fn begin_tool_call(
+    pub fn begin_tool_call(
         &self,
         scope: &str,
         tool_name: &str,
@@ -239,7 +239,7 @@ impl AgentRunControl {
         Ok(call)
     }
 
-    pub(crate) fn mark_progress(&self, stage: &str, detail: &str) {
+    pub fn mark_progress(&self, stage: &str, detail: &str) {
         let mut state = self.state.lock().expect("run control state poisoned");
         if state.stop_reason.is_some() {
             return;
@@ -249,7 +249,7 @@ impl AgentRunControl {
         state.last_progress_at = Instant::now();
     }
 
-    pub(crate) fn record_partial_output(&self, output: &str) {
+    pub fn record_partial_output(&self, output: &str) {
         let output = output.trim();
         if output.is_empty() {
             return;
@@ -267,7 +267,7 @@ impl AgentRunControl {
         state.last_progress_at = Instant::now();
     }
 
-    pub(crate) fn partial_output(&self) -> String {
+    pub fn partial_output(&self) -> String {
         self.state
             .lock()
             .expect("run control state poisoned")
@@ -275,7 +275,7 @@ impl AgentRunControl {
             .clone()
     }
 
-    pub(crate) fn timeout_seconds(&self, cap_seconds: u64) -> u64 {
+    pub fn timeout_seconds(&self, cap_seconds: u64) -> u64 {
         let state = self.state.lock().expect("run control state poisoned");
         let remaining = self
             .budget
@@ -284,7 +284,7 @@ impl AgentRunControl {
         remaining.as_secs().max(1).min(cap_seconds.max(1))
     }
 
-    pub(crate) fn progress(&self) -> RunProgressSnapshot {
+    pub fn progress(&self) -> RunProgressSnapshot {
         let state = self.state.lock().expect("run control state poisoned");
         let elapsed = state.started_at.elapsed().min(self.budget.max_duration);
         RunProgressSnapshot {
@@ -297,7 +297,7 @@ impl AgentRunControl {
         }
     }
 
-    pub(crate) fn budget(&self) -> RunBudget {
+    pub fn budget(&self) -> RunBudget {
         self.budget
     }
 
