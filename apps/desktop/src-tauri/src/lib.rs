@@ -139,6 +139,7 @@ const SCHEDULE_MAX_NAME_CHARS: usize = 80;
 const SCHEDULE_MAX_PROMPT_CHARS: usize = 32_000;
 const PERSONALIZATION_MAX_NAME_CHARS: usize = 80;
 const SCHEDULE_EXECUTION_SESSION_DETAIL: &str = "schedule automation";
+const AGENT_RECOVERY_SCHEMA: &str = "cindx.agent-recovery.v1";
 const EVENT_REDACTION_MARKER_FILE: &str = "events-redaction-v1.complete";
 const OPENAI_DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
 const DASHSCOPE_DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-v4";
@@ -193,6 +194,29 @@ struct SuspendedAgentRun {
     workspace_root: PathBuf,
     collaboration: Option<AgentCollaboration>,
     run_control: RunControlSnapshot,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct AgentRecoveryEnvelope {
+    schema: String,
+    resume_key: String,
+    project_id: Option<String>,
+    session_id: String,
+    source_run_id: String,
+    user_turn_sequence: u64,
+    prompt_fingerprint: String,
+    effort: String,
+    policy: String,
+    queue_id: Option<String>,
+    workflow_resume_key: Option<String>,
+    state: String,
+    reason: String,
+    attempts: u32,
+    model_calls: usize,
+    tool_calls: usize,
+    created_at_ms: u64,
+    updated_at_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -2801,13 +2825,14 @@ fn schedule_queue_progress(events: &[Event], queue_id: &str) -> Option<ScheduleQ
         let next_status = match event.summary.as_str() {
             "Agent task started" | "Agent task retry started" => Some("running"),
             "Agent task waiting for permission" => Some("waiting_for_permission"),
+            "Agent task paused" => Some("paused"),
             "Agent task completed" => Some("completed"),
             "Agent task failed" => Some("failed"),
             "Agent task cancelled" => Some("cancelled"),
             _ => None,
         };
         if let Some(status) = next_status {
-            let terminal = matches!(status, "completed" | "failed" | "cancelled");
+            let terminal = matches!(status, "paused" | "completed" | "failed" | "cancelled");
             let started_at_ms = progress
                 .as_ref()
                 .and_then(|progress| progress.started_at_ms)
@@ -2840,7 +2865,10 @@ fn latest_unfinished_agent_queue_id(events: &[Event]) -> Option<String> {
         }
         if matches!(
             event.summary.as_str(),
-            "Agent task completed" | "Agent task failed" | "Agent task cancelled"
+            "Agent task paused"
+                | "Agent task completed"
+                | "Agent task failed"
+                | "Agent task cancelled"
         ) && event.metadata.get("queue_id") == active.as_ref()
         {
             active = None;
@@ -4970,9 +4998,10 @@ fn begin_agent_run_control_for_effort(
         .agent_run_controls
         .lock()
         .map_err(|error| format!("agent run control lock poisoned: {error}"))?;
-    if let Some(previous) = controls.insert(session_id.to_string(), control.clone()) {
-        previous.request_cancel();
+    if controls.contains_key(session_id) {
+        return Err("agent run is already active for this session".to_string());
     }
+    controls.insert(session_id.to_string(), control.clone());
     Ok(control)
 }
 
@@ -5399,27 +5428,33 @@ fn finish_agent_run_for_control_stop(
         metadata,
     )
     .map_err(|error| error.to_string())?;
+    let events = agent_events_for_session(&store, &phase16_task_id(), session_id)
+        .map_err(|error| error.to_string())?;
+    let active_events = active_agent_events_for_session(&events, session_id);
+    let recovery_metadata = agent_recovery_metadata(
+        &active_events,
+        run_context,
+        "paused",
+        reason.code(),
+        [
+            ("completion".to_string(), "partial".to_string()),
+            ("stop_reason".to_string(), reason.code().to_string()),
+            (
+                "elapsed_ms".to_string(),
+                progress.elapsed.as_millis().to_string(),
+            ),
+            ("last_stage".to_string(), progress.stage),
+            ("last_detail".to_string(), progress.detail),
+        ]
+        .into_iter()
+        .collect(),
+    )?;
     append_event(
         &mut store,
         &phase16_task_id(),
         EventKind::TaskStatusChanged,
-        "Agent task completed",
-        metadata_with_context(
-            [
-                ("completion".to_string(), "partial".to_string()),
-                ("continuation_available".to_string(), "true".to_string()),
-                ("stop_reason".to_string(), reason.code().to_string()),
-                (
-                    "elapsed_ms".to_string(),
-                    progress.elapsed.as_millis().to_string(),
-                ),
-                ("last_stage".to_string(), progress.stage),
-                ("last_detail".to_string(), progress.detail),
-            ]
-            .into_iter()
-            .collect(),
-            run_context,
-        ),
+        "Agent task paused",
+        recovery_metadata,
     )
     .map_err(|error| error.to_string())?;
     drop(store);
@@ -6631,6 +6666,32 @@ fn resume_suspended_agent_run(
             "Provider config is incomplete",
         );
     }
+    let recovery = {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        claim_agent_recovery_envelope(
+            &mut store,
+            &run_context,
+            &["paused"],
+            "user_continued",
+        )?
+    };
+    if let Some(recovery) = recovery {
+        run_context.insert(
+            "recovery_resume_key".to_string(),
+            recovery.resume_key,
+        );
+        run_context.insert(
+            "recovery_attempts".to_string(),
+            recovery.attempts.to_string(),
+        );
+        run_context.insert("continuation".to_string(), "true".to_string());
+        if let Some(queue_id) = recovery.queue_id {
+            run_context.insert("queue_id".to_string(), queue_id);
+        }
+    }
     run_context.insert("agent_run_id".to_string(), unique_id("agent-run"));
     run_context.insert(
         "current_time".to_string(),
@@ -6686,7 +6747,6 @@ fn retry_agent_task_blocking_inner(
 ) -> Result<AgentState, String> {
     clear_suspended_agent_run(&state, &input.session_id)?;
     let mut run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
-    run_context.insert("agent_run_id".to_string(), unique_id("agent-run"));
     run_context.insert(
         "current_time".to_string(),
         normalized_current_time_context(""),
@@ -6705,8 +6765,8 @@ fn retry_agent_task_blocking_inner(
         .unwrap_or(active_workspace_root(&state)?);
     let session_id = run_context.get("session_id").cloned();
     let task_id = phase16_task_id();
-    let (prompt, effort) = {
-        let store = state
+    let (prompt, effort, recovery) = {
+        let mut store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
@@ -6716,8 +6776,34 @@ fn retry_agent_task_blocking_inner(
         let active_events = active_agent_events_for_session(&events, session_id.as_deref());
         let prompt = latest_agent_prompt_from_active_events(&active_events)
             .ok_or_else(|| "No previous agent prompt to retry".to_string())?;
-        (prompt, agent_effort_from_active_events(&active_events))
+        let effort = agent_effort_from_active_events(&active_events);
+        let recovery = claim_agent_recovery_envelope(
+            &mut store,
+            &run_context,
+            &["paused"],
+            "user_continued",
+        )?;
+        (prompt, effort, recovery)
     };
+    if let Some(recovery) = recovery.as_ref() {
+        run_context.insert(
+            "recovery_resume_key".to_string(),
+            recovery.resume_key.clone(),
+        );
+        run_context.insert(
+            "recovery_attempts".to_string(),
+            recovery.attempts.to_string(),
+        );
+        run_context.insert(
+            "source_agent_run_id".to_string(),
+            recovery.source_run_id.clone(),
+        );
+        run_context.insert("continuation".to_string(), "true".to_string());
+        if let Some(queue_id) = recovery.queue_id.as_ref() {
+            run_context.insert("queue_id".to_string(), queue_id.clone());
+        }
+    }
+    run_context.insert("agent_run_id".to_string(), unique_id("agent-run"));
     let requested_policy = effort.requested_policy();
     let mut routing_context =
         RoutingContext::from_prompt(&prompt, model_candidates_for_config(&config));
@@ -6804,12 +6890,14 @@ fn retry_agent_task_blocking_inner(
             router_examples,
         )
         .map_err(|error| error.to_string())?;
+        let mut continuation_metadata = run_context.clone();
+        continuation_metadata.insert("continuation_replay".to_string(), "true".to_string());
         append_message_event_with_metadata(
             &mut store,
             &task_id,
             MessageRole::User,
             &prompt,
-            run_context.clone(),
+            continuation_metadata,
         )
             .map_err(|error| error.to_string())?;
     }
@@ -6826,10 +6914,7 @@ fn retry_agent_task_blocking_inner(
             .as_deref()
             .map(|session_id| agent_session_events(&events, session_id))
             .unwrap_or_default();
-        let mut messages = session_events
-            .iter()
-            .filter_map(message_from_event)
-            .collect::<Vec<_>>();
+        let mut messages = recovery_safe_transcript(&session_events);
         if messages
             .last()
             .map(|message| {
@@ -6996,10 +7081,24 @@ fn resolve_agent_permission_blocking(
     session_id: String,
 ) -> Result<AgentState, String> {
     let snapshot = suspended_agent_run_control_snapshot(&state, &session_id)?;
+    let effort = if snapshot.is_some() {
+        AgentEffort::Auto
+    } else {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .get_permission_request(&PermissionRequestId(request_id.clone()))
+            .map_err(|error| error.to_string())?
+            .and_then(|request| request.metadata.get("agent_effort").cloned())
+            .map(|effort| AgentEffort::parse(&effort))
+            .unwrap_or(AgentEffort::Auto)
+    };
     let cancellation = begin_agent_run_control_for_effort(
         &state,
         &session_id,
-        AgentEffort::Auto.label(),
+        effort.label(),
         snapshot,
     )?;
     let result = resolve_agent_permission_blocking_inner(
@@ -7064,6 +7163,9 @@ fn resolve_agent_permission_blocking_inner(
         "current_time",
         "task_class",
         "collaboration_profile",
+        "queue_id",
+        "recovery_resume_key",
+        "recovery_attempts",
         "image_generation_required",
         "configured_image_model",
         "configured_image_endpoint",
@@ -7072,7 +7174,8 @@ fn resolve_agent_permission_blocking_inner(
             run_context.insert(key.to_string(), value.clone());
         }
     }
-    let session_id = run_context.get("session_id").map(String::as_str);
+    let session_id_owned = run_context.get("session_id").cloned();
+    let session_id = session_id_owned.as_deref();
 
     if request.task_id != phase16_task_id() {
         return agent_state_for_session(
@@ -7156,6 +7259,26 @@ fn resolve_agent_permission_blocking_inner(
             .map_err(|error| error.to_string());
     }
 
+    if let Some(recovery) = claim_agent_recovery_envelope(
+        &mut store,
+        &run_context,
+        &["blocked"],
+        "permission_resolved",
+    )? {
+        run_context.insert(
+            "recovery_resume_key".to_string(),
+            recovery.resume_key,
+        );
+        run_context.insert(
+            "recovery_attempts".to_string(),
+            recovery.attempts.to_string(),
+        );
+        run_context.insert("continuation".to_string(), "true".to_string());
+        if let Some(queue_id) = recovery.queue_id {
+            run_context.insert("queue_id".to_string(), queue_id);
+        }
+    }
+
     append_event(
         &mut store,
         &request.task_id,
@@ -7187,6 +7310,9 @@ fn resolve_agent_permission_blocking_inner(
     if let Some(session_id) = session_id {
         if let Some(mut suspended) = take_suspended_agent_run(&state, session_id)? {
             extend_agent_runtime_budget(&mut suspended.runtime, cancellation);
+            for (key, value) in &run_context {
+                suspended.run_context.insert(key.clone(), value.clone());
+            }
             return continue_agent_loop(
                 app,
                 &state,
@@ -10918,6 +11044,19 @@ fn stable_workflow_resume_key(value: &str) -> String {
     format!("workflow-resume-{hash:016x}")
 }
 
+fn latest_external_user_turn_event(events: &[Event]) -> Option<&Event> {
+    events.iter().rev().find(|event| {
+        event.kind == EventKind::MessageAdded
+            && event.metadata.get("role").map(String::as_str) == Some("user")
+            && event
+                .metadata
+                .get("continuation_replay")
+                .map(String::as_str)
+                != Some("true")
+            && event.metadata.get("internal").map(String::as_str) != Some("true")
+    })
+}
+
 fn workflow_resume_key_from_events(
     events: &[Event],
     session_id: Option<&str>,
@@ -10925,13 +11064,7 @@ fn workflow_resume_key_from_events(
     effort: &str,
     policy: &str,
 ) -> String {
-    let user_sequence = events
-        .iter()
-        .rev()
-        .find(|event| {
-            event.kind == EventKind::MessageAdded
-                && event.metadata.get("role").map(String::as_str) == Some("user")
-        })
+    let user_sequence = latest_external_user_turn_event(events)
         .map(|event| event.sequence)
         .unwrap_or_default();
     stable_workflow_resume_key(&format!(
@@ -13385,12 +13518,26 @@ fn continue_agent_loop(
                         .store
                         .lock()
                         .map_err(|error| format!("store lock poisoned: {error}"))?;
+                    let events = agent_events_for_session(
+                        &store,
+                        &phase16_task_id(),
+                        session_id,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    let active_events = active_agent_events_for_session(&events, session_id);
+                    let recovery_metadata = agent_recovery_metadata(
+                        &active_events,
+                        &run_context,
+                        "blocked",
+                        "waiting_for_permission",
+                        Metadata::new(),
+                    )?;
                     append_event(
                         &mut store,
                         &runtime.task_id,
                         EventKind::TaskStatusChanged,
                         "Agent task waiting for permission",
-                        run_context.clone(),
+                        recovery_metadata,
                     )
                     .map_err(|error| error.to_string())?;
                     remember_suspended_agent_run(
@@ -13673,8 +13820,9 @@ fn agent_state_from_events(
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or_default();
     let can_cancel = matches!(status.as_str(), "running" | "waiting_for_permission");
-    let can_continue = status == "completed"
-        && active_events
+    let can_continue = status == "paused"
+        || (status == "completed"
+            && active_events
             .iter()
             .rev()
             .find(|event| {
@@ -13684,8 +13832,8 @@ fn agent_state_from_events(
             .is_some_and(|event| {
                 event.summary == "Agent task completed"
                     && event.metadata.get("completion").map(String::as_str) == Some("partial")
-            });
-    let can_retry = matches!(status.as_str(), "completed" | "failed" | "cancelled")
+            }));
+    let can_retry = matches!(status.as_str(), "paused" | "completed" | "failed" | "cancelled")
         && latest_agent_prompt_from_active_events(&active_events).is_some();
 
     Ok(AgentState {
@@ -13916,6 +14064,10 @@ fn apply_event_to_agent_session_read_model(
             "Agent task waiting for permission" => {
                 model.state.status = "waiting_for_permission".to_string()
             }
+            "Agent task paused" => {
+                model.state.status = "paused".to_string();
+                model.state.can_continue = true;
+            }
             "Agent task cancelled" => {
                 model.state.status = "cancelled".to_string();
                 model.state.can_continue = false;
@@ -13950,7 +14102,7 @@ fn apply_event_to_agent_session_read_model(
     );
     model.state.can_retry = matches!(
         model.state.status.as_str(),
-        "completed" | "failed" | "cancelled"
+        "paused" | "completed" | "failed" | "cancelled"
     ) && model.has_user_prompt;
 }
 
@@ -14395,11 +14547,296 @@ fn agent_task_is_cancelled(
         .unwrap_or(false))
 }
 
-fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Result<usize, StorageError> {
-    let events = store.list_by_task(&phase16_task_id())?;
+fn latest_agent_recovery_envelope(events: &[Event]) -> Option<AgentRecoveryEnvelope> {
+    events.iter().rev().find_map(|event| {
+        let encoded = event.metadata.get("recovery_envelope")?;
+        let envelope = serde_json::from_str::<AgentRecoveryEnvelope>(encoded).ok()?;
+        (envelope.schema == AGENT_RECOVERY_SCHEMA).then_some(envelope)
+    })
+}
+
+fn agent_recovery_identity(
+    events: &[Event],
+    run_context: &Metadata,
+) -> Option<(String, String, u64, String, String)> {
+    let session_id = run_context.get("session_id")?.clone();
+    let source_run_id = events
+        .iter()
+        .find(|event| is_agent_run_start_event(event))
+        .and_then(|event| event.metadata.get("agent_run_id"))
+        .cloned()
+        .or_else(|| run_context.get("agent_run_id").cloned())
+        .unwrap_or_default();
+    let user_turn_sequence = latest_external_user_turn_event(events)
+        .map(|event| event.sequence)
+        .unwrap_or_default();
+    let prompt = latest_agent_prompt_from_active_events(events)?;
+    let prompt_fingerprint = sha256_hex(prompt.as_bytes());
+    let project_id = run_context.get("project_id").cloned().unwrap_or_default();
+    let resume_key = format!(
+        "agent-resume-{}",
+        &sha256_hex(
+            format!(
+                "{project_id}\n{session_id}\n{source_run_id}\n{user_turn_sequence}\n{prompt_fingerprint}"
+            )
+            .as_bytes()
+        )[..24]
+    );
+    Some((
+        resume_key,
+        source_run_id,
+        user_turn_sequence,
+        prompt_fingerprint,
+        prompt,
+    ))
+}
+
+fn build_agent_recovery_envelope(
+    events: &[Event],
+    run_context: &Metadata,
+    state: &str,
+    reason: &str,
+    now_ms: u64,
+) -> Option<AgentRecoveryEnvelope> {
+    let (resume_key, source_run_id, user_turn_sequence, prompt_fingerprint, _) =
+        agent_recovery_identity(events, run_context)?;
+    let prior = latest_agent_recovery_envelope(events)
+        .filter(|envelope| envelope.resume_key == resume_key);
+    let workflow_resume_key = events.iter().rev().find_map(|event| {
+        event
+            .metadata
+            .get("workflow_resume_key")
+            .filter(|value| !value.trim().is_empty())
+            .cloned()
+    });
+    Some(AgentRecoveryEnvelope {
+        schema: AGENT_RECOVERY_SCHEMA.to_string(),
+        resume_key,
+        project_id: run_context.get("project_id").cloned(),
+        session_id: run_context.get("session_id")?.clone(),
+        source_run_id,
+        user_turn_sequence,
+        prompt_fingerprint,
+        effort: run_context
+            .get("agent_effort")
+            .cloned()
+            .unwrap_or_else(|| "auto".to_string()),
+        policy: run_context
+            .get("collaboration_policy")
+            .or_else(|| run_context.get("requested_policy"))
+            .cloned()
+            .unwrap_or_else(|| "auto_router".to_string()),
+        queue_id: run_context.get("queue_id").cloned(),
+        workflow_resume_key,
+        state: state.to_string(),
+        reason: reason.to_string(),
+        attempts: prior.as_ref().map(|envelope| envelope.attempts).unwrap_or_default(),
+        model_calls: events
+            .iter()
+            .filter(|event| event.kind == EventKind::ModelRequestFinished)
+            .count(),
+        tool_calls: events
+            .iter()
+            .filter(|event| event.kind == EventKind::ToolCallFinished)
+            .count(),
+        created_at_ms: prior
+            .as_ref()
+            .map(|envelope| envelope.created_at_ms)
+            .unwrap_or(now_ms),
+        updated_at_ms: now_ms,
+    })
+}
+
+fn agent_recovery_metadata(
+    events: &[Event],
+    run_context: &Metadata,
+    state: &str,
+    reason: &str,
+    mut metadata: Metadata,
+) -> Result<Metadata, String> {
+    let envelope = build_agent_recovery_envelope(
+        events,
+        run_context,
+        state,
+        reason,
+        current_time_millis(),
+    )
+    .ok_or_else(|| "agent recovery checkpoint is missing a durable session prompt".to_string())?;
+    metadata.insert("recovery_schema".to_string(), AGENT_RECOVERY_SCHEMA.to_string());
+    metadata.insert("recovery_resume_key".to_string(), envelope.resume_key.clone());
+    metadata.insert("recovery_state".to_string(), envelope.state.clone());
+    metadata.insert("recovery_reason".to_string(), envelope.reason.clone());
+    metadata.insert("recovery_attempts".to_string(), envelope.attempts.to_string());
+    metadata.insert(
+        "source_agent_run_id".to_string(),
+        envelope.source_run_id.clone(),
+    );
+    metadata.insert(
+        "user_turn_sequence".to_string(),
+        envelope.user_turn_sequence.to_string(),
+    );
+    metadata.insert(
+        "continuation_available".to_string(),
+        (state == "paused").to_string(),
+    );
+    metadata.insert(
+        "recovery_envelope".to_string(),
+        serde_json::to_string(&envelope)
+            .map_err(|error| format!("failed to encode agent recovery checkpoint: {error}"))?,
+    );
+    Ok(metadata_with_context(metadata, run_context))
+}
+
+fn recovery_envelope_matches_active_turn(
+    envelope: &AgentRecoveryEnvelope,
+    events: &[Event],
+    run_context: &Metadata,
+) -> bool {
+    let Some((resume_key, source_run_id, user_turn_sequence, prompt_fingerprint, _)) =
+        agent_recovery_identity(events, run_context)
+    else {
+        return false;
+    };
+    envelope.schema == AGENT_RECOVERY_SCHEMA
+        && envelope.resume_key == resume_key
+        && envelope.source_run_id == source_run_id
+        && envelope.user_turn_sequence == user_turn_sequence
+        && envelope.prompt_fingerprint == prompt_fingerprint
+        && run_context.get("session_id") == Some(&envelope.session_id)
+        && run_context.get("project_id") == envelope.project_id.as_ref()
+}
+
+fn claim_agent_recovery_envelope(
+    store: &mut SqliteStore,
+    run_context: &Metadata,
+    allowed_states: &[&str],
+    reason: &str,
+) -> Result<Option<AgentRecoveryEnvelope>, String> {
+    let session_id = run_context
+        .get("session_id")
+        .ok_or_else(|| "agent recovery requires a session".to_string())?;
+    let events = agent_events_for_session(store, &phase16_task_id(), Some(session_id))
+        .map_err(|error| error.to_string())?;
+    let active_events = active_agent_events_for_session(&events, Some(session_id));
+    let Some(mut envelope) = latest_agent_recovery_envelope(&active_events) else {
+        return Ok(None);
+    };
+    let latest_status = active_events.iter().rev().find(|event| {
+        event.kind == EventKind::TaskStatusChanged && !is_agent_queue_event(event)
+    });
+    let recoverable_status = latest_status.is_some_and(|event| {
+        matches!(
+            event.summary.as_str(),
+            "Agent task paused" | "Agent task waiting for permission"
+        )
+    });
+    if !recoverable_status {
+        if envelope.state == "resuming" {
+            return Err("agent recovery checkpoint is already claimed".to_string());
+        }
+        return Ok(None);
+    }
+    if !allowed_states.contains(&envelope.state.as_str()) {
+        return Err(format!(
+            "agent recovery checkpoint is {}, not resumable",
+            envelope.state
+        ));
+    }
+    if !recovery_envelope_matches_active_turn(&envelope, &active_events, run_context) {
+        return Err("agent recovery checkpoint is stale for the latest user turn".to_string());
+    }
+    envelope.state = "resuming".to_string();
+    envelope.reason = reason.to_string();
+    envelope.attempts = envelope.attempts.saturating_add(1);
+    envelope.updated_at_ms = current_time_millis();
+    append_event(
+        store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Recovery resume claimed",
+        metadata_with_context(
+            [
+                ("recovery_schema".to_string(), AGENT_RECOVERY_SCHEMA.to_string()),
+                ("recovery_resume_key".to_string(), envelope.resume_key.clone()),
+                ("recovery_state".to_string(), envelope.state.clone()),
+                ("recovery_reason".to_string(), envelope.reason.clone()),
+                ("recovery_attempts".to_string(), envelope.attempts.to_string()),
+                (
+                    "agent_run_id".to_string(),
+                    envelope.source_run_id.clone(),
+                ),
+                (
+                    "recovery_envelope".to_string(),
+                    serde_json::to_string(&envelope).map_err(|error| {
+                        format!("failed to encode claimed recovery checkpoint: {error}")
+                    })?,
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            run_context,
+        ),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(Some(envelope))
+}
+
+fn recovery_safe_transcript(events: &[Event]) -> Vec<Message> {
+    let resolved_tool_calls = events
+        .iter()
+        .filter(|event| {
+            event.kind == EventKind::MessageAdded
+                && event.metadata.get("role").map(String::as_str) == Some("tool")
+        })
+        .filter_map(|event| event.metadata.get("tool_call_id").cloned())
+        .collect::<BTreeSet<_>>();
+    let mut synthetic = BTreeSet::new();
+    let mut messages = Vec::new();
+    for message in events.iter().filter_map(message_from_event) {
+        let unresolved = if message.role == MessageRole::Assistant {
+            message
+                .metadata
+                .get("tool_call_ids")
+                .map(|ids| {
+                    ids.split(',')
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .filter(|id| !resolved_tool_calls.contains(*id))
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        messages.push(message);
+        for tool_call_id in unresolved {
+            if !synthetic.insert(tool_call_id.clone()) {
+                continue;
+            }
+            messages.push(Message {
+                role: MessageRole::Tool,
+                content: "The prior tool call was interrupted before a durable result was recorded. Treat its outcome as unknown. Inspect current state before retrying, and request permission again for any write or destructive action.".to_string(),
+                metadata: [
+                    ("tool_call_id".to_string(), tool_call_id),
+                    ("status".to_string(), "interrupted".to_string()),
+                    ("kind".to_string(), "recovery_observation".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            });
+        }
+    }
+    messages
+}
+
+fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Result<usize, String> {
+    let events = store
+        .list_by_task(&phase16_task_id())
+        .map_err(|error| error.to_string())?;
     let mut active_runs = BTreeMap::<String, Metadata>::new();
 
-    for event in events {
+    for event in &events {
         let session_key = event
             .metadata
             .get("session_id")
@@ -14409,35 +14846,73 @@ fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Result<usize, St
             active_runs.insert(session_key, event.metadata.clone());
             continue;
         }
+        if event.summary == "Recovery resume claimed"
+            && event.metadata.get("recovery_state").map(String::as_str) == Some("resuming")
+        {
+            active_runs.insert(session_key, event.metadata.clone());
+            continue;
+        }
         let terminal = matches!(event.kind, EventKind::Error)
             || matches!(
                 event.summary.as_str(),
-                "Agent task completed" | "Agent task cancelled" | "Agent task failed"
+                "Agent task completed"
+                    | "Agent task cancelled"
+                    | "Agent task failed"
+                    | "Agent task paused"
             );
         if terminal {
             active_runs.remove(&session_key);
         }
     }
 
-    let recovered = active_runs.len();
-    for (_, run_context) in active_runs {
+    let mut recovered = 0;
+    for (session_key, run_context) in active_runs {
+        let session_id = (session_key != "__default__").then_some(session_key.as_str());
+        let active_events = active_agent_events_for_session(&events, session_id);
+        let already_recovered_wait = active_events.last().is_some_and(|event| {
+            event.summary == "Agent task waiting for permission"
+                && event.metadata.get("recovery_state").map(String::as_str) == Some("blocked")
+        });
+        if already_recovered_wait {
+            continue;
+        }
+        let pending_permissions = pending_agent_permissions_for_run(
+            store,
+            session_id,
+            run_context.get("agent_run_id").map(String::as_str),
+        )
+        .map_err(|error| error.to_string())?;
+        let (summary, recovery_state, recovery_reason) = if pending_permissions.is_empty() {
+            ("Agent task paused", "paused", "app_restarted")
+        } else {
+            (
+                "Agent task waiting for permission",
+                "blocked",
+                "app_restarted_waiting_for_permission",
+            )
+        };
+        let metadata = agent_recovery_metadata(
+            &active_events,
+            &run_context,
+            recovery_state,
+            recovery_reason,
+            [
+                ("completion".to_string(), "partial".to_string()),
+                ("stop_reason".to_string(), "app_restarted".to_string()),
+                ("recovery_code".to_string(), "run_interrupted".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        )?;
         append_event(
             store,
             &phase16_task_id(),
             EventKind::TaskStatusChanged,
-            "Agent task completed",
-            metadata_with_context(
-                [
-                    ("completion".to_string(), "partial".to_string()),
-                    ("continuation_available".to_string(), "true".to_string()),
-                    ("stop_reason".to_string(), "app_restarted".to_string()),
-                    ("recovery_code".to_string(), "run_interrupted".to_string()),
-                ]
-                .into_iter()
-                .collect(),
-                &run_context,
-            ),
-        )?;
+            summary,
+            metadata,
+        )
+        .map_err(|error| error.to_string())?;
+        recovered += 1;
     }
     Ok(recovered)
 }
@@ -14518,6 +14993,7 @@ fn agent_status_from_events(
     {
         match status_event.summary.as_str() {
             "Agent task cancelled" => return "cancelled".to_string(),
+            "Agent task paused" => return "paused".to_string(),
             "Agent task completed" => return "completed".to_string(),
             "Agent task waiting for permission" => return "waiting_for_permission".to_string(),
             _ => {}
@@ -14534,16 +15010,7 @@ fn agent_status_from_events(
 }
 
 fn latest_agent_prompt_from_active_events(active_events: &[Event]) -> Option<String> {
-    active_events
-        .iter()
-        .find(|event| {
-            matches!(event.kind, EventKind::MessageAdded)
-                && event
-                    .metadata
-                    .get("role")
-                    .map(|role| role == "user")
-                    .unwrap_or(false)
-        })
+    latest_external_user_turn_event(active_events)
         .and_then(|event| event.metadata.get("content").cloned())
         .or_else(|| {
             active_events
@@ -14874,7 +15341,10 @@ fn agent_trace_state_from_events(
         .first()
         .map(|event| event.timestamp_ms)
         .unwrap_or_default();
-    let finished_at_ms = if matches!(status.as_str(), "completed" | "failed" | "cancelled") {
+    let finished_at_ms = if matches!(
+        status.as_str(),
+        "paused" | "completed" | "failed" | "cancelled"
+    ) {
         active_events.last().map(|event| event.timestamp_ms)
     } else {
         None
@@ -15140,6 +15610,7 @@ fn trace_step_status(event: &Event, audits: &[PermissionAuditRecord]) -> String 
             .unwrap_or_else(|| "done".to_string()),
         EventKind::TaskStatusChanged => match event.summary.as_str() {
             "Agent task waiting for permission" => "waiting".to_string(),
+            "Agent task paused" => "paused".to_string(),
             "Agent task completed" => "completed".to_string(),
             "Agent task cancelled" => "cancelled".to_string(),
             _ => "done".to_string(),
@@ -15206,6 +15677,8 @@ fn trace_turn_status(steps: &[AgentTraceStepView]) -> String {
         "running".to_string()
     } else if steps.iter().any(|step| step.status == "cancelled") {
         "cancelled".to_string()
+    } else if steps.iter().any(|step| step.status == "paused") {
+        "paused".to_string()
     } else if steps.iter().any(|step| step.status == "completed") {
         "completed".to_string()
     } else {
@@ -25095,9 +25568,34 @@ mod tests {
         .is_none());
 
         events.push(Event {
-            id: EventId("user-2".to_string()),
+            id: EventId("continuation-replay".to_string()),
             task_id: phase16_task_id(),
             sequence: 4,
+            timestamp_ms: 155,
+            kind: EventKind::MessageAdded,
+            summary: "user message".to_string(),
+            metadata: [
+                ("session_id".to_string(), "session-a".to_string()),
+                ("role".to_string(), "user".to_string()),
+                ("content".to_string(), prompt.to_string()),
+                ("continuation_replay".to_string(), "true".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        });
+        let continuation_key = workflow_resume_key_from_events(
+            &events,
+            Some("session-a"),
+            prompt,
+            "pro",
+            "best_of_n",
+        );
+        assert_eq!(resume_key, continuation_key);
+
+        events.push(Event {
+            id: EventId("user-2".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 5,
             timestamp_ms: 160,
             kind: EventKind::MessageAdded,
             summary: "user message".to_string(),
@@ -26573,10 +27071,17 @@ mod tests {
         assert_eq!(waiting.started_at_ms, Some(200));
         assert_eq!(latest_unfinished_agent_queue_id(&events).as_deref(), Some(queue_id));
 
-        events.push(event(5, "Agent task completed", None));
+        events.push(event(5, "Agent task paused", None));
+        let paused = schedule_queue_progress(&events, queue_id).unwrap();
+        assert_eq!(paused.status, "paused");
+        assert_eq!(paused.finished_at_ms, Some(500));
+        assert!(latest_unfinished_agent_queue_id(&events).is_none());
+
+        events.push(event(6, "Agent task retry started", None));
+        events.push(event(7, "Agent task completed", None));
         let completed = schedule_queue_progress(&events, queue_id).unwrap();
         assert_eq!(completed.status, "completed");
-        assert_eq!(completed.finished_at_ms, Some(500));
+        assert_eq!(completed.finished_at_ms, Some(700));
         assert!(latest_unfinished_agent_queue_id(&events).is_none());
     }
 
@@ -27152,14 +27657,377 @@ mod tests {
             .expect("interrupted state should load");
 
         assert_eq!(completed.status, "completed");
-        assert_eq!(interrupted.status, "completed");
+        assert_eq!(interrupted.status, "paused");
         assert!(interrupted.can_retry);
         assert!(interrupted.can_continue);
+        assert!(!interrupted.can_cancel);
         assert!(interrupted.last_error.is_none());
+        let interrupted_events = store
+            .list_by_task_and_metadata_or_unscoped(
+                &phase16_task_id(),
+                "session_id",
+                "session-b",
+            )
+            .expect("interrupted events should load");
+        let envelope = latest_agent_recovery_envelope(&interrupted_events)
+            .expect("recovery envelope should persist");
+        assert_eq!(envelope.schema, AGENT_RECOVERY_SCHEMA);
+        assert_eq!(envelope.state, "paused");
+        assert_eq!(envelope.reason, "app_restarted");
+        assert_eq!(envelope.source_run_id, "run-b");
         assert_eq!(
             reconcile_interrupted_agent_runs(&mut store).expect("recovery should be idempotent"),
             0
         );
+    }
+
+    #[test]
+    fn startup_recovery_preserves_pending_permission_as_blocked() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let context = [
+            ("project_id".to_string(), "project-a".to_string()),
+            ("session_id".to_string(), "session-a".to_string()),
+            ("agent_run_id".to_string(), "run-a".to_string()),
+            ("agent_effort".to_string(), "pro".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        let mut start = context.clone();
+        start.insert("prompt".to_string(), "write the report".to_string());
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task started",
+            start,
+        )
+        .expect("run should start");
+        append_message_event_with_metadata(
+            &mut store,
+            &phase16_task_id(),
+            MessageRole::User,
+            "write the report",
+            context.clone(),
+        )
+        .expect("user message should append");
+
+        let invocation = ToolInvocation {
+            id: agent_core::ToolCallId("call-write".to_string()),
+            task_id: phase16_task_id(),
+            tool_name: "file.write".to_string(),
+            input_json: encode_input(&[("path", "report.md"), ("content", "draft")]),
+            proposed_by_model: "agent-loop".to_string(),
+            metadata: context.clone(),
+        };
+        let registry = ToolRegistry::with_workspace_tools(workspace_root());
+        let mut request = registry
+            .get("file.write")
+            .expect("write tool should exist")
+            .permission_request(&invocation)
+            .expect("write should require permission");
+        request.id = PermissionRequestId("permission-write".to_string());
+        request.task_id = phase16_task_id();
+        request.metadata.extend(context.clone());
+        request
+            .metadata
+            .insert("tool_call_id".to_string(), "call-write".to_string());
+        request
+            .metadata
+            .insert("tool_name".to_string(), "file.write".to_string());
+        store
+            .save_permission_request(request, current_time_millis())
+            .expect("permission should persist");
+
+        assert_eq!(
+            reconcile_interrupted_agent_runs(&mut store).expect("recovery should succeed"),
+            1
+        );
+        let state = agent_state_for_session(&store, None, Some("session-a"))
+            .expect("blocked state should load");
+        assert_eq!(state.status, "waiting_for_permission");
+        assert_eq!(state.pending_approvals.len(), 1);
+        assert!(!state.can_continue);
+        let events = store
+            .list_by_task_and_metadata_or_unscoped(
+                &phase16_task_id(),
+                "session_id",
+                "session-a",
+            )
+            .expect("events should load");
+        let envelope = latest_agent_recovery_envelope(&events)
+            .expect("blocked recovery envelope should persist");
+        assert_eq!(envelope.state, "blocked");
+        assert_eq!(envelope.effort, "pro");
+        assert_eq!(
+            reconcile_interrupted_agent_runs(&mut store).expect("recovery should be idempotent"),
+            0
+        );
+    }
+
+    #[test]
+    fn recovery_envelope_is_bound_to_the_latest_external_user_turn() {
+        let context = [
+            ("project_id".to_string(), "project-a".to_string()),
+            ("session_id".to_string(), "session-a".to_string()),
+            ("agent_run_id".to_string(), "run-a".to_string()),
+            ("agent_effort".to_string(), "auto".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        let mut events = vec![
+            Event {
+                id: EventId("start".to_string()),
+                task_id: phase16_task_id(),
+                sequence: 1,
+                timestamp_ms: 10,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Agent task started".to_string(),
+                metadata: metadata_with_context(
+                    [("prompt".to_string(), "finish alpha".to_string())]
+                        .into_iter()
+                        .collect(),
+                    &context,
+                ),
+            },
+            Event {
+                id: EventId("user-alpha".to_string()),
+                task_id: phase16_task_id(),
+                sequence: 2,
+                timestamp_ms: 20,
+                kind: EventKind::MessageAdded,
+                summary: "user message".to_string(),
+                metadata: metadata_with_context(
+                    [
+                        ("role".to_string(), "user".to_string()),
+                        ("content".to_string(), "finish alpha".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    &context,
+                ),
+            },
+        ];
+        let envelope = build_agent_recovery_envelope(
+            &events,
+            &context,
+            "paused",
+            "deadline_exceeded",
+            30,
+        )
+        .expect("envelope should build");
+        assert!(recovery_envelope_matches_active_turn(
+            &envelope,
+            &events,
+            &context
+        ));
+
+        events.push(Event {
+            id: EventId("replay".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 3,
+            timestamp_ms: 30,
+            kind: EventKind::MessageAdded,
+            summary: "user message".to_string(),
+            metadata: metadata_with_context(
+                [
+                    ("role".to_string(), "user".to_string()),
+                    ("content".to_string(), "finish alpha".to_string()),
+                    ("continuation_replay".to_string(), "true".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                &context,
+            ),
+        });
+        assert!(recovery_envelope_matches_active_turn(
+            &envelope,
+            &events,
+            &context
+        ));
+
+        events.push(Event {
+            id: EventId("user-beta".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 4,
+            timestamp_ms: 40,
+            kind: EventKind::MessageAdded,
+            summary: "user message".to_string(),
+            metadata: metadata_with_context(
+                [
+                    ("role".to_string(), "user".to_string()),
+                    ("content".to_string(), "start beta".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                &context,
+            ),
+        });
+        assert!(!recovery_envelope_matches_active_turn(
+            &envelope,
+            &events,
+            &context
+        ));
+    }
+
+    #[test]
+    fn recovery_claim_is_single_use_and_recovered_if_restart_interrupts_claim() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let context = [
+            ("project_id".to_string(), "project-a".to_string()),
+            ("session_id".to_string(), "session-a".to_string()),
+            ("agent_run_id".to_string(), "run-a".to_string()),
+            ("agent_effort".to_string(), "pro".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task started",
+            metadata_with_context(
+                [("prompt".to_string(), "finish alpha".to_string())]
+                    .into_iter()
+                    .collect(),
+                &context,
+            ),
+        )
+        .expect("run should start");
+        append_message_event_with_metadata(
+            &mut store,
+            &phase16_task_id(),
+            MessageRole::User,
+            "finish alpha",
+            context.clone(),
+        )
+        .expect("user message should append");
+        let events = store
+            .list_by_task_and_metadata_or_unscoped(
+                &phase16_task_id(),
+                "session_id",
+                "session-a",
+            )
+            .expect("events should load");
+        let recovery_metadata = agent_recovery_metadata(
+            &events,
+            &context,
+            "paused",
+            "deadline_exceeded",
+            [("completion".to_string(), "partial".to_string())]
+                .into_iter()
+                .collect(),
+        )
+        .expect("recovery metadata should build");
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task paused",
+            recovery_metadata,
+        )
+        .expect("pause should persist");
+
+        let claimed = claim_agent_recovery_envelope(
+            &mut store,
+            &context,
+            &["paused"],
+            "user_continued",
+        )
+        .expect("claim should succeed")
+        .expect("checkpoint should exist");
+        assert_eq!(claimed.attempts, 1);
+        let duplicate = claim_agent_recovery_envelope(
+            &mut store,
+            &context,
+            &["paused"],
+            "user_continued",
+        )
+        .expect_err("a claimed recovery must not be claimed twice");
+        assert!(duplicate.contains("already claimed"));
+
+        assert_eq!(
+            reconcile_interrupted_agent_runs(&mut store)
+                .expect("a restart should pause an interrupted claim"),
+            1
+        );
+        let state = agent_state_for_session(&store, None, Some("session-a"))
+            .expect("recovered state should load");
+        assert_eq!(state.status, "paused");
+        let events = store
+            .list_by_task_and_metadata_or_unscoped(
+                &phase16_task_id(),
+                "session_id",
+                "session-a",
+            )
+            .expect("events should reload");
+        let recovered = latest_agent_recovery_envelope(&events)
+            .expect("recovered checkpoint should persist");
+        assert_eq!(recovered.state, "paused");
+        assert_eq!(recovered.attempts, 1);
+    }
+
+    #[test]
+    fn recovery_transcript_marks_unfinished_tool_calls_unknown() {
+        let mut events = vec![
+            Event {
+                id: EventId("user".to_string()),
+                task_id: phase16_task_id(),
+                sequence: 1,
+                timestamp_ms: 10,
+                kind: EventKind::MessageAdded,
+                summary: "user message".to_string(),
+                metadata: [
+                    ("role".to_string(), "user".to_string()),
+                    ("content".to_string(), "update report".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            Event {
+                id: EventId("assistant-tool".to_string()),
+                task_id: phase16_task_id(),
+                sequence: 2,
+                timestamp_ms: 20,
+                kind: EventKind::MessageAdded,
+                summary: "assistant message".to_string(),
+                metadata: [
+                    ("role".to_string(), "assistant".to_string()),
+                    ("content".to_string(), String::new()),
+                    ("tool_call_ids".to_string(), "call-write".to_string()),
+                    ("raw_tool_calls_json".to_string(), "[]".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        ];
+        let interrupted = recovery_safe_transcript(&events);
+        assert_eq!(interrupted.len(), 3);
+        assert_eq!(interrupted[2].role, MessageRole::Tool);
+        assert_eq!(
+            interrupted[2].metadata.get("status").map(String::as_str),
+            Some("interrupted")
+        );
+        assert!(interrupted[2].content.contains("outcome as unknown"));
+
+        events.push(Event {
+            id: EventId("tool-result".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 3,
+            timestamp_ms: 30,
+            kind: EventKind::MessageAdded,
+            summary: "tool message".to_string(),
+            metadata: [
+                ("role".to_string(), "tool".to_string()),
+                ("content".to_string(), "write completed".to_string()),
+                ("tool_call_id".to_string(), "call-write".to_string()),
+                ("status".to_string(), "succeeded".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        });
+        let resolved = recovery_safe_transcript(&events);
+        assert_eq!(resolved.len(), 3);
+        assert_eq!(resolved[2].content, "write completed");
     }
 
     #[test]
