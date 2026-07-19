@@ -1,3 +1,4 @@
+use crate::{AgentLoopState, AgentRuntimeConfig};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -11,6 +12,7 @@ pub enum RunStopReason {
     DeadlineExceeded,
     ModelCallBudgetExceeded,
     ToolCallBudgetExceeded,
+    TurnBudgetExhausted,
     NoProgress,
     RepeatedAction,
 }
@@ -22,6 +24,7 @@ impl RunStopReason {
             Self::DeadlineExceeded => "deadline_exceeded",
             Self::ModelCallBudgetExceeded => "model_call_budget_exceeded",
             Self::ToolCallBudgetExceeded => "tool_call_budget_exceeded",
+            Self::TurnBudgetExhausted => "turn_budget_exhausted",
             Self::NoProgress => "no_progress",
             Self::RepeatedAction => "repeated_action",
         }
@@ -170,6 +173,10 @@ impl AgentRunControl {
         self.set_stop_reason(RunStopReason::UserCancelled);
     }
 
+    pub fn request_stop(&self, reason: RunStopReason) {
+        self.set_stop_reason(reason);
+    }
+
     pub fn stop_reason(&self) -> Option<RunStopReason> {
         if self.user_cancelled.load(Ordering::SeqCst) {
             self.set_stop_reason(RunStopReason::UserCancelled);
@@ -301,6 +308,18 @@ impl AgentRunControl {
         self.budget
     }
 
+    pub fn runtime_config(&self) -> AgentRuntimeConfig {
+        AgentRuntimeConfig {
+            max_turns: self.budget.max_model_calls.max(1),
+        }
+    }
+
+    pub fn extend_runtime_budget(&self, runtime: &mut AgentLoopState) {
+        runtime.max_turns = runtime
+            .turn
+            .saturating_add(self.budget.max_model_calls.max(1));
+    }
+
     fn set_stop_reason(&self, reason: RunStopReason) {
         let mut state = self.state.lock().expect("run control state poisoned");
         state.stop_reason.get_or_insert(reason);
@@ -329,6 +348,21 @@ mod tests {
         assert_eq!(budget.max_model_calls, 96);
         assert_eq!(budget.max_tool_calls, 180);
         assert_eq!(budget.no_progress_timeout, Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn runtime_turn_budget_comes_from_the_same_control_budget() {
+        let control = AgentRunControl::new("pro");
+        assert_eq!(control.runtime_config().max_turns, 96);
+
+        let mut runtime = crate::start_agent_loop(
+            agent_core::TaskId("resume".to_string()),
+            "continue",
+            AgentRuntimeConfig { max_turns: 6 },
+        );
+        runtime.turn = 23;
+        control.extend_runtime_budget(&mut runtime);
+        assert_eq!(runtime.max_turns, 119);
     }
 
     #[test]

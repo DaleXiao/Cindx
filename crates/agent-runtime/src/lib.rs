@@ -52,6 +52,11 @@ pub struct AgentToolRequest {
 pub enum AgentAdvance {
     Completed { answer: String },
     ToolCalls { calls: Vec<AgentToolRequest> },
+    TurnBudgetExhausted {
+        completed_turns: usize,
+        max_turns: usize,
+        partial_answer: Option<String>,
+    },
     Failed { message: String },
 }
 
@@ -206,8 +211,10 @@ pub fn advance_with_model_response(
     }
 
     if state.turn > state.max_turns {
-        return AgentAdvance::Failed {
-            message: format!("agent exceeded max turn limit: {}", state.max_turns),
+        return AgentAdvance::TurnBudgetExhausted {
+            completed_turns: state.turn,
+            max_turns: state.max_turns,
+            partial_answer: (!content.is_empty()).then_some(content),
         };
     }
 
@@ -636,6 +643,37 @@ mod tests {
 
         assert!(matches!(advance, AgentAdvance::Completed { .. }));
         assert!(state.messages.iter().any(|message| message.content.contains("Tool observation")));
+    }
+
+    #[test]
+    fn turn_budget_exhaustion_is_recoverable_control_flow() {
+        let mut state = start_agent_loop(
+            TaskId("budget".to_string()),
+            "continue the task",
+            AgentRuntimeConfig { max_turns: 1 },
+        );
+        state.turn = 1;
+        let response = ModelResponse {
+            message: Message {
+                role: MessageRole::Assistant,
+                content: "verified partial result".to_string(),
+                metadata: Metadata::new(),
+            },
+            raw_tool_calls_json: None,
+            tool_calls: Vec::new(),
+            metadata: Metadata::new(),
+        };
+
+        let advance = advance_with_model_response(&mut state, response, &[]);
+
+        assert_eq!(
+            advance,
+            AgentAdvance::TurnBudgetExhausted {
+                completed_turns: 2,
+                max_turns: 1,
+                partial_answer: Some("verified partial result".to_string()),
+            }
+        );
     }
 
     #[test]

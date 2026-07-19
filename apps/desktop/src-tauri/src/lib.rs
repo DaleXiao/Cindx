@@ -31,8 +31,9 @@ use agent_runtime::{
     record_tool_outcome, repeated_tool_failure_count,
     resume_agent_loop_from_messages, start_agent_loop, start_agent_loop_with_history,
     tool_invocation_from_request, AgentAdvance, AgentLoopState, AgentRunControl,
-    AgentRuntimeConfig, RunBudget, RunControlSnapshot, DEFAULT_COLLABORATION_WORKER_TURNS,
-    MAX_COLLABORATION_WORKER_TOOL_CALLS, MAX_IDENTICAL_TOOL_FAILURES,
+    AgentRuntimeConfig, RunBudget, RunControlSnapshot, RunStopReason,
+    DEFAULT_COLLABORATION_WORKER_TURNS, MAX_COLLABORATION_WORKER_TOOL_CALLS,
+    MAX_IDENTICAL_TOOL_FAILURES,
 };
 use agent_storage::{EventStore, PermissionAuditRecord, PermissionStore, SqliteStore, StorageError};
 use base64::Engine;
@@ -4992,21 +4993,6 @@ fn cancel_background_prompt_evaluations(
     Ok(())
 }
 
-fn agent_runtime_config_for_control(control: &AgentRunControl) -> AgentRuntimeConfig {
-    AgentRuntimeConfig {
-        max_turns: control.budget().max_model_calls.max(1),
-    }
-}
-
-fn extend_agent_runtime_budget(
-    runtime: &mut agent_runtime::AgentLoopState,
-    control: &AgentRunControl,
-) {
-    runtime.max_turns = runtime
-        .turn
-        .saturating_add(control.budget().max_model_calls.max(1));
-}
-
 fn active_agent_run_control(
     state: &tauri::State<'_, AppState>,
     session_id: Option<&str>,
@@ -6440,7 +6426,7 @@ fn run_agent_task_blocking_inner(
 
     cancellation.mark_progress("executor", "Starting execution");
     append_agent_progress_event(&state, &task_id, &run_context, "Starting execution")?;
-    let runtime_config = agent_runtime_config_for_control(cancellation);
+    let runtime_config = cancellation.runtime_config();
     let mut runtime = if history.is_empty() {
         start_agent_loop(task_id, prompt.clone(), runtime_config.clone())
     } else {
@@ -6623,7 +6609,7 @@ fn resume_suspended_agent_run(
         normalized_current_time_context(""),
     );
     add_agent_run_budget_metadata(&mut run_context, cancellation);
-    extend_agent_runtime_budget(&mut runtime, cancellation);
+    cancellation.extend_runtime_budget(&mut runtime);
     cancellation.mark_progress("continuation", "Resuming saved execution state");
     {
         let mut store = state
@@ -6959,7 +6945,7 @@ fn retry_agent_task_blocking_inner(
     }
     cancellation.mark_progress("executor", "Starting execution");
     append_agent_progress_event(&state, &task_id, &run_context, "Starting execution")?;
-    let runtime_config = agent_runtime_config_for_control(cancellation);
+    let runtime_config = cancellation.runtime_config();
     let runtime = if history.is_empty() {
         start_agent_loop(task_id, prompt.clone(), runtime_config.clone())
     } else {
@@ -7234,7 +7220,7 @@ fn resolve_agent_permission_blocking_inner(
 
     if let Some(session_id) = session_id {
         if let Some(mut suspended) = take_suspended_agent_run(&state, session_id)? {
-            extend_agent_runtime_budget(&mut suspended.runtime, cancellation);
+            cancellation.extend_runtime_budget(&mut suspended.runtime);
             for (key, value) in &run_context {
                 suspended.run_context.insert(key.clone(), value.clone());
             }
@@ -7256,9 +7242,9 @@ fn resolve_agent_permission_blocking_inner(
         phase16_task_id(),
         prompt.clone(),
         transcript,
-        agent_runtime_config_for_control(cancellation),
+        cancellation.runtime_config(),
     );
-    extend_agent_runtime_budget(&mut runtime, cancellation);
+    cancellation.extend_runtime_budget(&mut runtime);
     continue_agent_loop(
         app,
         &state,
@@ -10665,6 +10651,21 @@ fn complete_collaboration_worker_with_tools(
                     evidence,
                 };
             }
+            AgentAdvance::TurnBudgetExhausted {
+                completed_turns,
+                max_turns,
+                ..
+            } => {
+                return CollaborationCompletion {
+                    content: None,
+                    error: Some(format!(
+                        "worker_turn_budget_exhausted: completed {completed_turns} turns with a {max_turns}-turn budget"
+                    )),
+                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
+                    usage,
+                    evidence,
+                }
+            }
             AgentAdvance::Failed { message } => {
                 return CollaborationCompletion {
                     content: None,
@@ -13417,6 +13418,22 @@ fn continue_agent_loop(
                     None,
                 );
                 return Ok(completed_state);
+            }
+            AgentAdvance::TurnBudgetExhausted { partial_answer, .. } => {
+                if let Some(partial_answer) = partial_answer {
+                    cancellation.record_partial_output(&partial_answer);
+                }
+                cancellation.request_stop(RunStopReason::TurnBudgetExhausted);
+                return pause_agent_loop_for_control_stop(
+                    app,
+                    state,
+                    workspace_root,
+                    &runtime,
+                    &prompt,
+                    &run_context,
+                    collaboration,
+                    cancellation,
+                );
             }
             AgentAdvance::Failed { message } => {
                 clear_suspended_agent_run_for_context(state, &run_context)?;
@@ -19256,6 +19273,21 @@ fn complete_prompt_evaluation_worker(
                     usage,
                     evidence,
                 };
+            }
+            AgentAdvance::TurnBudgetExhausted {
+                completed_turns,
+                max_turns,
+                ..
+            } => {
+                return CollaborationCompletion {
+                    content: None,
+                    error: Some(format!(
+                        "evaluation_turn_budget_exhausted: completed {completed_turns} turns with a {max_turns}-turn budget"
+                    )),
+                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
+                    usage,
+                    evidence,
+                }
             }
             AgentAdvance::Failed { message } => {
                 return CollaborationCompletion {
@@ -26032,12 +26064,12 @@ mod tests {
     #[test]
     fn agent_runtime_turn_budget_tracks_effort_and_extends_on_resume() {
         let control = AgentRunControl::new("pro");
-        let config = agent_runtime_config_for_control(&control);
+        let config = control.runtime_config();
         assert_eq!(config.max_turns, 96);
 
         let mut runtime = start_agent_loop(phase16_task_id(), "continue", config);
         runtime.turn = 23;
-        extend_agent_runtime_budget(&mut runtime, &control);
+        control.extend_runtime_budget(&mut runtime);
 
         assert_eq!(runtime.max_turns, 119);
     }
