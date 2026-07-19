@@ -30,9 +30,9 @@ use agent_runtime::{
     observation_from_tool_result,
     record_tool_outcome, repeated_tool_failure_count,
     resume_agent_loop_from_messages, start_agent_loop, start_agent_loop_with_history,
-    tool_invocation_from_request, AgentAdvance, AgentLoopState, AgentRuntimeConfig,
-    DEFAULT_COLLABORATION_WORKER_TURNS, MAX_COLLABORATION_WORKER_TOOL_CALLS,
-    MAX_IDENTICAL_TOOL_FAILURES,
+    tool_invocation_from_request, AgentAdvance, AgentLoopState, AgentRunControl,
+    AgentRuntimeConfig, RunBudget, RunControlSnapshot, DEFAULT_COLLABORATION_WORKER_TURNS,
+    MAX_COLLABORATION_WORKER_TOOL_CALLS, MAX_IDENTICAL_TOOL_FAILURES,
 };
 use agent_storage::{EventStore, PermissionAuditRecord, PermissionStore, SqliteStore, StorageError};
 use base64::Engine;
@@ -81,11 +81,9 @@ use tools::{
     WebSearchConfig,
 };
 
-mod run_control;
 mod run_lifecycle;
 mod schedule;
 
-use run_control::{AgentRunControl, RunBudget, RunControlSnapshot};
 use run_lifecycle::{AgentRunEvent, AgentRunStatus};
 use schedule::{
     initial_next_run_at_ms, next_occurrence_after_ms, normalized_weekly_days,
