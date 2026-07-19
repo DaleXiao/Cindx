@@ -3728,6 +3728,8 @@ export function App() {
                 <span><strong>{phase4?.promptEvolution?.observedRuns ?? 0}</strong> observed</span>
                 <span><strong>{phase4?.promptEvolution?.pairedRuns ?? 0}</strong> paired</span>
                 <span><strong>{phase4?.promptEvolution?.replayRuns ?? 0}</strong> replay</span>
+                <span><strong>{phase4?.promptEvolution?.reflectionPackets ?? 0}</strong> reflections</span>
+                <span><strong>{phase4?.promptEvolution?.learnedProfiles ?? 0}</strong> learned</span>
                 <span><strong>{phase4?.promptEvolution?.populationSize ?? 0}</strong> profiles</span>
                 <span><strong>{phase4?.promptEvolution?.generation ?? 0}</strong> generation</span>
                 <span><strong>{phase4?.promptEvolution?.frontierProfiles ?? 0}</strong> frontier</span>
@@ -3758,7 +3760,9 @@ export function App() {
                             {promptEvolutionEffortStatus(effort)}
                           </span>
                         </td>
-                        <td>{effort.pairedRuns}/2 · {effort.replayRuns}/2</td>
+                        <td title={`${effort.reflectionPackets} feedback reflections · ${effort.learnedProfiles} learned profiles`}>
+                          {effort.pairedRuns}/3 · {effort.replayRuns}/3 · R{effort.reflectionPackets}
+                        </td>
                         <td>{effort.championScore === null ? "-" : `${Math.round(effort.championScore * 100)}%`}</td>
                         <td>{effort.promotionConfidence === null ? "-" : `${Math.round(effort.promotionConfidence * 100)}%`}</td>
                         <td title={`Ready ${effort.readyProfiles} · Stagnant ${effort.stagnantGenerations}/3`}>
@@ -3795,7 +3799,9 @@ export function App() {
                             <strong>{promptEvolutionProfileLabel(profile.effort)}</strong>
                             <small>{profile.learned ? "Learned" : "Genetic"} · Gen {profile.generation}</small>
                           </th>
-                          <td>{profile.trainRuns} / {profile.holdoutRuns}</td>
+                          <td title={`${profile.reflectionRuns} feedback reflections`}>
+                            {profile.trainRuns} / {profile.holdoutRuns} · R{profile.reflectionRuns}
+                          </td>
                           <td>{profile.runs ? `${Math.round(profile.successRate * 100)}%` : "-"}</td>
                           <td>{profile.averageQuality === null ? "-" : `${Math.round(profile.averageQuality * 100)}%`}</td>
                           <td>{profile.averageReward === null ? "-" : `${Math.round(profile.averageReward * 100)}%`}</td>

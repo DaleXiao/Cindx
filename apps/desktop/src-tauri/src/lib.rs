@@ -46,6 +46,7 @@ use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindow, NSWindowButton}
 use orchestrator::{
     adaptive_worker_prompt, adaptive_workflow_layers, adaptive_workflow_step_budget, default_plan,
     evaluate_prompt_convergence, parse_policy, role_label, sha256_hex, step_prompt,
+    prompt_reflection_packets,
     ActionableSideInformation, AgentEvaluationCaseScore, AgentEvaluationCheck,
     AgentEvaluationEvidenceSource, AgentEvaluationReflectionPacket, AgentEvaluationSplit,
     AgentEvaluationToolTrace, AgentEvaluationTrace, AgentEvaluationTraceStep,
@@ -1094,6 +1095,7 @@ struct PromptEvolutionProfileState {
     runs: usize,
     train_runs: usize,
     holdout_runs: usize,
+    reflection_runs: usize,
     success_rate: f64,
     average_reward: Option<f64>,
     average_relative_reward: Option<f64>,
@@ -1121,6 +1123,8 @@ struct PromptEvolutionEffortState {
     next_mode: String,
     paired_runs: usize,
     replay_runs: usize,
+    reflection_packets: usize,
+    learned_profiles: usize,
     ready_profiles: usize,
     evaluation_inflight: bool,
     stable_profile_id: String,
@@ -1141,6 +1145,8 @@ struct PromptEvolutionState {
     frontier_profiles: usize,
     paired_runs: usize,
     replay_runs: usize,
+    reflection_packets: usize,
+    learned_profiles: usize,
     evaluation_inflight: bool,
     efforts: Vec<PromptEvolutionEffortState>,
     profiles: Vec<PromptEvolutionProfileState>,
@@ -11033,171 +11039,6 @@ fn run_adaptive_collaboration(
             prompt_genome.id = profile;
         }
     }
-    if let Some((parent, feedback, trajectories)) = evolution.as_ref().and_then(|evaluation| {
-        evaluation
-            .mutation_parent
-            .clone()
-            .map(|parent| {
-                (
-                    parent,
-                    evaluation.mutation_feedback.clone(),
-                    evaluation.mutation_trajectories.clone(),
-                )
-            })
-    }) {
-        let reflection_trajectory_count = trajectories.len();
-        let mutation_strategy = if trajectories.is_empty() {
-            "aggregate_fallback"
-        } else {
-            "gepa_reflection"
-        };
-        let mutation_prompt = if trajectories.is_empty() {
-            parent.mutation_prompt(&feedback)
-        } else {
-            parent
-                .reflective_mutation_prompt(&trajectories)
-                .unwrap_or_else(|_| parent.mutation_prompt(&feedback))
-        };
-        if let Ok(response) = run_collaboration_stage(
-            state,
-            config,
-            task_id,
-            run_context,
-            collaboration_id,
-            "prompt_evolution_mutation",
-            ModelRole::Planner,
-            &conductor_model,
-            mutation_prompt,
-        ) {
-            let mutation_id = format!(
-                "learned-{}-g{}-{}",
-                effort,
-                parent.generation.saturating_add(1),
-                unique_id("profile")
-            );
-            let mut mutation_repaired = false;
-            let mutation = match parent
-                .learned_mutation_from_response(&response, mutation_id.clone())
-            {
-                Ok(mutation) => Ok(mutation),
-                Err(initial_error) => {
-                    let repair_prompt = parent.mutation_repair_prompt(&response, &initial_error);
-                    match run_collaboration_stage(
-                        state,
-                        config,
-                        task_id,
-                        run_context,
-                        collaboration_id,
-                        "prompt_evolution_mutation_repair",
-                        ModelRole::Planner,
-                        &conductor_model,
-                        repair_prompt,
-                    ) {
-                        Ok(repaired_response) => {
-                            mutation_repaired = true;
-                            parent
-                                .learned_mutation_from_response(&repaired_response, mutation_id)
-                                .map_err(|repair_error| {
-                                    format!(
-                                        "initial mutation: {initial_error}; repaired mutation: {repair_error}"
-                                    )
-                                })
-                        }
-                        Err(repair_error) => Err(format!(
-                            "initial mutation: {initial_error}; repair request: {repair_error}"
-                        )),
-                    }
-                }
-            };
-            match mutation {
-                Ok(mutation) => {
-                    if let Ok(mut store) = state.store.lock() {
-                        let _ = append_event(
-                            &mut store,
-                            task_id,
-                            EventKind::TaskStatusChanged,
-                            "Conductor prompt mutation generated",
-                            metadata_with_context(
-                                [
-                                    (
-                                        "collaboration_id".to_string(),
-                                        collaboration_id.to_string(),
-                                    ),
-                                    ("prompt_effort".to_string(), effort.clone()),
-                                    ("parent_profile".to_string(), parent.id.clone()),
-                                    (
-                                        "mutation_strategy".to_string(),
-                                        mutation_strategy.to_string(),
-                                    ),
-                                    (
-                                        "reflection_trajectory_count".to_string(),
-                                        reflection_trajectory_count.to_string(),
-                                    ),
-                                    (
-                                        "mutation_repaired".to_string(),
-                                        mutation_repaired.to_string(),
-                                    ),
-                                    ("prompt_profile".to_string(), mutation.id.clone()),
-                                    (
-                                        "prompt_generation".to_string(),
-                                        mutation.generation.to_string(),
-                                    ),
-                                    (
-                                        "prompt_genome".to_string(),
-                                        serde_json::to_string(&mutation)
-                                            .unwrap_or_else(|_| "{}".to_string()),
-                                    ),
-                                    (
-                                        "promotion_status".to_string(),
-                                        "evaluation_required".to_string(),
-                                    ),
-                                ]
-                                .into_iter()
-                                .collect(),
-                                run_context,
-                            ),
-                        );
-                    }
-                }
-                Err(error) => {
-                    if let Ok(mut store) = state.store.lock() {
-                        let _ = append_event(
-                            &mut store,
-                            task_id,
-                            EventKind::TaskStatusChanged,
-                            "Conductor prompt mutation rejected",
-                            metadata_with_context(
-                                [
-                                    ("collaboration_id".to_string(), collaboration_id.to_string()),
-                                    ("prompt_effort".to_string(), effort.clone()),
-                                    ("parent_profile".to_string(), parent.id.clone()),
-                                    (
-                                        "mutation_strategy".to_string(),
-                                        mutation_strategy.to_string(),
-                                    ),
-                                    (
-                                        "reflection_trajectory_count".to_string(),
-                                        reflection_trajectory_count.to_string(),
-                                    ),
-                                    (
-                                        "mutation_repaired".to_string(),
-                                        mutation_repaired.to_string(),
-                                    ),
-                                    (
-                                        "validation_error".to_string(),
-                                        truncate_for_collaboration(&error, 1_000),
-                                    ),
-                                ]
-                                .into_iter()
-                                .collect(),
-                                run_context,
-                            ),
-                        );
-                    }
-                }
-            }
-        }
-    }
     let prompt_genome_json = serde_json::to_string(&prompt_genome)
         .map_err(|error| format!("failed to serialize prompt genome: {error}"))?;
     {
@@ -17726,6 +17567,7 @@ struct PromptEvolutionAccumulator {
     runs: usize,
     train_runs: usize,
     holdout_runs: usize,
+    reflection_runs: usize,
     succeeded: usize,
     reward_total: f64,
     relative_reward_total: f64,
@@ -17751,7 +17593,6 @@ struct PromptEvolutionEvaluation {
     next_mode: String,
     next_profile: ConductorPromptGenome,
     mutation_parent: Option<ConductorPromptGenome>,
-    mutation_feedback: String,
     mutation_trajectories: Vec<AgentEvaluationReflectionPacket>,
 }
 
@@ -17802,6 +17643,253 @@ fn finish_prompt_evaluation_control(
     if let Ok(mut inflight) = prompt_evaluation_inflight().lock() {
         inflight.remove(lease_key);
     }
+}
+
+fn run_background_prompt_mutation_stage(
+    state: &tauri::State<'_, AppState>,
+    config: &ProviderConfig,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    mutation_id: &str,
+    stage: &str,
+    prompt: String,
+    control: &Arc<AgentRunControl>,
+) -> Result<String, String> {
+    if control.should_stop() {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
+    let role = ModelRole::Planner;
+    let model = config.model_for_conductor();
+    let request_id = unique_id("prompt-mutation-model");
+    record_collaboration_stage_started(
+        state,
+        task_id,
+        run_context,
+        mutation_id,
+        stage,
+        &role,
+        &model,
+        &request_id,
+        &Metadata::new(),
+    )?;
+    let completion = complete_collaboration_model_with_control(
+        config.clone(),
+        role.clone(),
+        model.clone(),
+        collaboration_system_prompt_for_run(&config.agent_system_prompt, run_context),
+        prompt,
+        Some(control.clone()),
+        |_| {},
+    );
+    record_collaboration_stage_finished(
+        state,
+        task_id,
+        run_context,
+        mutation_id,
+        stage,
+        &role,
+        &model,
+        &request_id,
+        &completion,
+        &Metadata::new(),
+    )?;
+    completion.content.ok_or_else(|| {
+        completion
+            .error
+            .unwrap_or_else(|| "prompt mutation model returned no content".to_string())
+    })
+}
+
+fn append_prompt_mutation_status(
+    state: &tauri::State<'_, AppState>,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    summary: &str,
+    metadata: Metadata,
+) -> Result<(), String> {
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    append_event(
+        &mut store,
+        task_id,
+        EventKind::TaskStatusChanged,
+        summary,
+        metadata_with_context(metadata, run_context),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn generate_background_prompt_mutation(
+    state: &tauri::State<'_, AppState>,
+    config: &ProviderConfig,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    effort: &str,
+    parent: &ConductorPromptGenome,
+    trajectories: &[AgentEvaluationReflectionPacket],
+    control: &Arc<AgentRunControl>,
+) -> Result<bool, String> {
+    if trajectories.is_empty() || control.should_stop() {
+        return Ok(false);
+    }
+    let mutation_run_id = unique_id("prompt-mutation");
+    let reflection_trajectory_count = trajectories.len();
+    let mutation_prompt = parent.reflective_mutation_prompt(trajectories)?;
+    let response = match run_background_prompt_mutation_stage(
+        state,
+        config,
+        task_id,
+        run_context,
+        &mutation_run_id,
+        "prompt_evolution_mutation",
+        mutation_prompt,
+        control,
+    ) {
+        Ok(response) => response,
+        Err(error) => {
+            if error == MODEL_REQUEST_CANCELLED {
+                return Ok(false);
+            }
+            append_prompt_mutation_status(
+                state,
+                task_id,
+                run_context,
+                "Conductor prompt mutation failed",
+                [
+                    ("background_evaluation".to_string(), "true".to_string()),
+                    ("collaboration_id".to_string(), mutation_run_id),
+                    ("prompt_effort".to_string(), effort.to_string()),
+                    ("parent_profile".to_string(), parent.id.clone()),
+                    ("mutation_strategy".to_string(), "gepa_reflection".to_string()),
+                    (
+                        "reflection_trajectory_count".to_string(),
+                        reflection_trajectory_count.to_string(),
+                    ),
+                    (
+                        "error".to_string(),
+                        truncate_for_collaboration(&error, 1_000),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            )?;
+            return Ok(true);
+        }
+    };
+    let mutation_id = format!(
+        "learned-{}-g{}-{}",
+        effort,
+        parent.generation.saturating_add(1),
+        unique_id("profile")
+    );
+    let mut mutation_repaired = false;
+    let mutation = match parent.learned_mutation_from_response(&response, mutation_id.clone()) {
+        Ok(mutation) => Ok(mutation),
+        Err(initial_error) => {
+            let repair_prompt = parent.mutation_repair_prompt(&response, &initial_error);
+            match run_background_prompt_mutation_stage(
+                state,
+                config,
+                task_id,
+                run_context,
+                &mutation_run_id,
+                "prompt_evolution_mutation_repair",
+                repair_prompt,
+                control,
+            ) {
+                Ok(repaired_response) => {
+                    mutation_repaired = true;
+                    parent
+                        .learned_mutation_from_response(&repaired_response, mutation_id)
+                        .map_err(|repair_error| {
+                            format!(
+                                "initial mutation: {initial_error}; repaired mutation: {repair_error}"
+                            )
+                        })
+                }
+                Err(repair_error) => Err(format!(
+                    "initial mutation: {initial_error}; repair request: {repair_error}"
+                )),
+            }
+        }
+    };
+    match mutation {
+        Ok(mutation) => {
+            append_prompt_mutation_status(
+                state,
+                task_id,
+                run_context,
+                "Conductor prompt mutation generated",
+                [
+                    ("background_evaluation".to_string(), "true".to_string()),
+                    ("collaboration_id".to_string(), mutation_run_id),
+                    ("prompt_effort".to_string(), effort.to_string()),
+                    ("parent_profile".to_string(), parent.id.clone()),
+                    ("mutation_strategy".to_string(), "gepa_reflection".to_string()),
+                    ("reflection_split".to_string(), "feedback".to_string()),
+                    (
+                        "reflection_trajectory_count".to_string(),
+                        reflection_trajectory_count.to_string(),
+                    ),
+                    (
+                        "mutation_repaired".to_string(),
+                        mutation_repaired.to_string(),
+                    ),
+                    ("prompt_profile".to_string(), mutation.id.clone()),
+                    (
+                        "prompt_generation".to_string(),
+                        mutation.generation.to_string(),
+                    ),
+                    (
+                        "prompt_genome".to_string(),
+                        serde_json::to_string(&mutation).unwrap_or_else(|_| "{}".to_string()),
+                    ),
+                    (
+                        "promotion_status".to_string(),
+                        "evaluation_required".to_string(),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            )?;
+        }
+        Err(error) => {
+            if error.contains(MODEL_REQUEST_CANCELLED) {
+                return Ok(false);
+            }
+            append_prompt_mutation_status(
+                state,
+                task_id,
+                run_context,
+                "Conductor prompt mutation rejected",
+                [
+                    ("background_evaluation".to_string(), "true".to_string()),
+                    ("collaboration_id".to_string(), mutation_run_id),
+                    ("prompt_effort".to_string(), effort.to_string()),
+                    ("parent_profile".to_string(), parent.id.clone()),
+                    ("mutation_strategy".to_string(), "gepa_reflection".to_string()),
+                    ("reflection_split".to_string(), "feedback".to_string()),
+                    (
+                        "reflection_trajectory_count".to_string(),
+                        reflection_trajectory_count.to_string(),
+                    ),
+                    (
+                        "mutation_repaired".to_string(),
+                        mutation_repaired.to_string(),
+                    ),
+                    (
+                        "validation_error".to_string(),
+                        truncate_for_collaboration(&error, 1_000),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            )?;
+        }
+    }
+    Ok(true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -17918,6 +18006,20 @@ fn run_background_prompt_pairwise_evaluation(
             .map_err(|error| error.to_string())?;
         evaluate_prompt_evolution_read_model(&model, effort)?
     };
+    if let Some(parent) = evaluation.mutation_parent.as_ref() {
+        if generate_background_prompt_mutation(
+            state,
+            config,
+            task_id,
+            run_context,
+            effort,
+            parent,
+            &evaluation.mutation_trajectories,
+            control,
+        )? {
+            return Ok(());
+        }
+    }
     let current_task_class = run_context
         .get("task_class")
         .map(String::as_str)
@@ -17947,7 +18049,7 @@ fn run_background_prompt_pairwise_evaluation(
             evaluation
                 .observations
                 .iter()
-                .filter(|observation| observation.mode.is_replay())
+                .filter(|observation| observation.mode.is_replay_execution())
                 .count(),
         )
     } else {
@@ -18171,6 +18273,27 @@ fn run_background_prompt_pairwise_evaluation(
         &observation_b,
         &candidate_b.plan.genome,
     )?;
+    let next_evaluation = {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let model = load_prompt_evolution_read_model(&mut store)
+            .map_err(|error| error.to_string())?;
+        evaluate_prompt_evolution_read_model(&model, effort)?
+    };
+    if let Some(parent) = next_evaluation.mutation_parent.as_ref() {
+        let _ = generate_background_prompt_mutation(
+            state,
+            config,
+            task_id,
+            run_context,
+            effort,
+            parent,
+            &next_evaluation.mutation_trajectories,
+            control,
+        )?;
+    }
     Ok(())
 }
 
@@ -18181,9 +18304,9 @@ fn prompt_profile_evidence_counts(
     observations.iter().filter(|observation| observation.profile_id == profile_id).fold(
         (0, 0),
         |(paired, replay), observation| {
-            if observation.mode.is_paired() {
+            if observation.mode.is_paired_execution() {
                 (paired + 1, replay)
-            } else if observation.mode.is_replay() {
+            } else if observation.mode.is_replay_execution() {
                 (paired, replay + 1)
             } else {
                 (paired, replay)
@@ -18967,6 +19090,44 @@ fn evaluate_prompt_candidate_pair(
     Ok(payload)
 }
 
+fn redact_prompt_evaluation_trace(
+    trace: &mut AgentEvaluationTrace,
+    redaction_secrets: &[String],
+) {
+    trace.input = redact_sensitive_text(&trace.input);
+    trace.final_output = redact_sensitive_text(&trace.final_output);
+    trace.actionable_feedback.summary =
+        redact_sensitive_text(&trace.actionable_feedback.summary);
+    for entry in trace
+        .actionable_feedback
+        .passed_constraints
+        .iter_mut()
+        .chain(trace.actionable_feedback.failed_constraints.iter_mut())
+        .chain(trace.actionable_feedback.errors.iter_mut())
+        .chain(trace.actionable_feedback.suggested_changes.iter_mut())
+    {
+        *entry = redact_sensitive_text(entry);
+    }
+    for check in &mut trace.verifier.checks {
+        check.detail = redact_sensitive_text(&check.detail);
+    }
+    for step in &mut trace.steps {
+        step.prompt = redact_sensitive_text(&step.prompt);
+        step.output = redact_sensitive_text(&step.output);
+        for error in &mut step.errors {
+            *error = redact_sensitive_text(error);
+        }
+        for call in &mut step.tool_calls {
+            call.request = redact_sensitive_text(&call.request);
+            call.response = redact_sensitive_text(&call.response);
+            if let Some(error) = &mut call.error {
+                *error = redact_sensitive_text(error);
+            }
+        }
+    }
+    trace.apply_redaction(redaction_secrets);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prompt_pairwise_observation(
     candidate: &PromptExecutionCandidate,
@@ -19120,7 +19281,7 @@ fn prompt_pairwise_observation(
             safety_violations,
             redaction_applied: false,
         };
-        trace.apply_redaction(redaction_secrets);
+        redact_prompt_evaluation_trace(&mut trace, redaction_secrets);
         trace
             .reflection_packet()
             .expect("fresh feedback trace satisfies the reflection boundary")
@@ -20067,9 +20228,9 @@ fn evaluate_prompt_evolution_with_observations(
         BTreeMap::<String, (usize, usize)>::new(),
         |mut counts, observation| {
             let entry = counts.entry(observation.profile_id.clone()).or_default();
-            if observation.mode.is_paired() {
+            if observation.mode.is_paired_execution() {
                 entry.0 += 1;
-            } else if observation.mode.is_replay() {
+            } else if observation.mode.is_replay_execution() {
                 entry.1 += 1;
             }
             counts
@@ -20221,101 +20382,18 @@ fn evaluate_prompt_evolution_with_observations(
                 && genome.parents.iter().any(|candidate| candidate == &parent.id)
         })
     });
-    let mutation_parent = (!convergence.frozen
+    let mutation_candidate = (!convergence.frozen
         && next_runs == 0
         && !pending_evolved_profile
         && !learned_child_exists)
         .then(|| breeding_parent.clone())
         .flatten()
         .filter(|genome| genome.generation < PROMPT_EVOLUTION_MAX_GENERATION);
-    let mutation_trajectories = mutation_parent
+    let mutation_trajectories = mutation_candidate
         .as_ref()
-        .map(|parent| {
-            observations
-                .iter()
-                .rev()
-                .filter(|observation| observation.profile_id == parent.id)
-                .filter_map(|observation| observation.reflection_packet.clone())
-                .take(6)
-                .collect::<Vec<_>>()
-        })
+        .map(|parent| prompt_reflection_packets(&observations, &parent.id, 6))
         .unwrap_or_default();
-    let feedback_candidate = mutation_parent
-        .as_ref()
-        .and_then(|parent| {
-            archive
-                .candidates
-                .iter()
-                .find(|candidate| candidate.genome.id == parent.id)
-        })
-        .or(champion);
-    let mutation_feedback = feedback_candidate
-        .map(|candidate| {
-            let recent_outcomes = observations
-                .iter()
-                .rev()
-                .filter(|observation| observation.profile_id == candidate.genome.id)
-                .take(6)
-                .map(|observation| {
-                    let split = match observation.split {
-                        PromptEvaluationSplit::Train => "train",
-                        PromptEvaluationSplit::Holdout => "holdout",
-                    };
-                    let mode = match observation.mode {
-                        PromptEvaluationMode::Live => "live",
-                        PromptEvaluationMode::PairedShadow => "paired",
-                        PromptEvaluationMode::ReplayHoldout => "replay",
-                        PromptEvaluationMode::PairedExecution => "paired_execution",
-                        PromptEvaluationMode::ReplayExecution => "replay_execution",
-                    };
-                    let average_step_credit = observation
-                        .step_credits
-                        .iter()
-                        .map(|step| step.credit.clamp(0.0, 1.0))
-                        .sum::<f64>()
-                        / observation.step_credits.len().max(1) as f64;
-                    let weak_steps = observation
-                        .step_credits
-                        .iter()
-                        .filter(|step| step.credit < 0.55)
-                        .map(|step| format!("{}:{:.2}", step.step_id, step.credit))
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    format!(
-                        "{} {} {} success={} reward={:.3} relative={:.3} step_credit={:.3} weak_steps={} valid={} latency_ms={} tokens={} safety={}",
-                        split,
-                        mode,
-                        observation.task_class,
-                        observation.succeeded,
-                        observation.reward(),
-                        observation.group_relative_reward(),
-                        average_step_credit,
-                        if weak_steps.is_empty() { "none" } else { weak_steps.as_str() },
-                        observation.format_valid,
-                        observation.latency_ms,
-                        observation.total_tokens,
-                        observation.safety_violations,
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("; ");
-            format!(
-                "Current holdout reward {:.3}, quality {:.3}, success {:.1}%, latency {:.0} ms, tokens {:.0}, generalization gap {:.3}. Recent measured outcomes: {}. Improve end-to-end reward by at least {:.2} without adding safety violations or unnecessary branches.",
-                candidate.holdout.average_reward,
-                candidate.holdout.average_quality,
-                candidate.holdout.success_rate * 100.0,
-                candidate.holdout.average_latency_ms,
-                candidate.holdout.average_total_tokens,
-                candidate.quality_generalization_gap,
-                if recent_outcomes.is_empty() {
-                    "none"
-                } else {
-                    recent_outcomes.as_str()
-                },
-                PROMPT_EVOLUTION_MIN_IMPROVEMENT,
-            )
-        })
-        .unwrap_or_default();
+    let mutation_parent = mutation_candidate.filter(|_| !mutation_trajectories.is_empty());
     Ok(PromptEvolutionEvaluation {
         population,
         observations,
@@ -20330,7 +20408,6 @@ fn evaluate_prompt_evolution_with_observations(
         next_mode: next_mode.to_string(),
         next_profile,
         mutation_parent,
-        mutation_feedback,
         mutation_trajectories,
     })
 }
@@ -20422,6 +20499,8 @@ fn prompt_evolution_state(
     let mut frontier_profiles = 0usize;
     let mut paired_runs = 0usize;
     let mut replay_runs = 0usize;
+    let mut reflection_packets = 0usize;
+    let mut learned_profiles = 0usize;
     let inflight_efforts = prompt_evaluation_inflight()
         .lock()
         .map(|inflight| inflight.clone())
@@ -20439,15 +20518,31 @@ fn prompt_evolution_state(
         let effort_paired_runs = evaluation
             .observations
             .iter()
-            .filter(|observation| observation.mode.is_paired())
+            .filter(|observation| observation.mode.is_paired_execution())
             .count();
         let effort_replay_runs = evaluation
             .observations
             .iter()
-            .filter(|observation| observation.mode.is_replay())
+            .filter(|observation| observation.mode.is_replay_execution())
+            .count();
+        let effort_reflection_packets = evaluation
+            .observations
+            .iter()
+            .filter(|observation| {
+                observation.split == PromptEvaluationSplit::Train
+                    && observation.mode.is_paired_execution()
+                    && observation.reflection_packet.is_some()
+            })
+            .count();
+        let effort_learned_profiles = evaluation
+            .population
+            .iter()
+            .filter(|genome| genome.id.starts_with("learned-"))
             .count();
         paired_runs += effort_paired_runs;
         replay_runs += effort_replay_runs;
+        reflection_packets += effort_reflection_packets;
+        learned_profiles += effort_learned_profiles;
         let ready_profiles = evaluation.frontier_ids.len();
         let rollout = rollouts
             .get(effort)
@@ -20469,6 +20564,8 @@ fn prompt_evolution_state(
             next_mode: evaluation.next_mode.clone(),
             paired_runs: effort_paired_runs,
             replay_runs: effort_replay_runs,
+            reflection_packets: effort_reflection_packets,
+            learned_profiles: effort_learned_profiles,
             ready_profiles,
             evaluation_inflight: inflight_efforts.contains(effort),
             stable_profile_id: rollout.stable_profile_id,
@@ -20501,10 +20598,16 @@ fn prompt_evolution_state(
                 .filter(|observation| observation.profile_id == genome.id)
             {
                 profile.runs += 1;
-                if observation.mode.is_paired() {
+                if observation.mode.is_paired_execution() {
                     profile.train_runs += 1;
-                } else if observation.mode.is_replay() {
+                } else if observation.mode.is_replay_execution() {
                     profile.holdout_runs += 1;
+                }
+                if observation.split == PromptEvaluationSplit::Train
+                    && observation.mode.is_paired_execution()
+                    && observation.reflection_packet.is_some()
+                {
+                    profile.reflection_runs += 1;
                 }
                 profile.succeeded += usize::from(observation.succeeded);
                 profile.reward_total += observation.reward();
@@ -20531,6 +20634,7 @@ fn prompt_evolution_state(
                 runs: profile.runs,
                 train_runs: profile.train_runs,
                 holdout_runs: profile.holdout_runs,
+                reflection_runs: profile.reflection_runs,
                 success_rate: if profile.runs == 0 {
                     0.0
                 } else {
@@ -20575,6 +20679,8 @@ fn prompt_evolution_state(
         frontier_profiles,
         paired_runs,
         replay_runs,
+        reflection_packets,
+        learned_profiles,
         evaluation_inflight: !inflight_efforts.is_empty(),
         efforts: effort_rows,
         profiles: profile_rows,
@@ -23213,6 +23319,47 @@ mod tests {
     }
 
     #[test]
+    fn prompt_evolution_evidence_counts_ignore_legacy_plan_only_modes() {
+        let profile_id = "seed-auto-v1";
+        let observation = |evaluation_id: &str, mode: PromptEvaluationMode| {
+            PromptEvolutionObservation {
+                profile_id: profile_id.to_string(),
+                evaluation_id: evaluation_id.to_string(),
+                case_id: evaluation_id.to_string(),
+                opponent_profile_id: Some("challenger".to_string()),
+                task_class: "coding".to_string(),
+                split: if mode.is_replay() {
+                    PromptEvaluationSplit::Holdout
+                } else {
+                    PromptEvaluationSplit::Train
+                },
+                mode,
+                format_valid: true,
+                succeeded: true,
+                quality_score: 0.9,
+                latency_ms: 100,
+                total_tokens: 100,
+                estimated_cost_microusd: 0,
+                safety_violations: 0,
+                relative_reward: Some(0.2),
+                step_credits: Vec::new(),
+                reflection_packet: None,
+            }
+        };
+        let observations = vec![
+            observation("legacy-paired", PromptEvaluationMode::PairedShadow),
+            observation("legacy-replay", PromptEvaluationMode::ReplayHoldout),
+            observation("train", PromptEvaluationMode::PairedExecution),
+            observation("holdout", PromptEvaluationMode::ReplayExecution),
+        ];
+
+        assert_eq!(
+            prompt_profile_evidence_counts(&observations, profile_id),
+            (1, 1)
+        );
+    }
+
+    #[test]
     fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
         let stable = ConductorPromptGenome::seed_for_effort("auto");
         let mut candidate = stable.clone();
@@ -23247,7 +23394,6 @@ mod tests {
             next_mode: "explore".to_string(),
             next_profile: candidate.clone(),
             mutation_parent: None,
-            mutation_feedback: String::new(),
             mutation_trajectories: Vec::new(),
         };
 
@@ -24703,6 +24849,32 @@ mod tests {
             } else {
                 PromptEvaluationSplit::Train
             };
+            let reflection_packet = (mode == PromptEvaluationMode::PairedExecution).then(|| {
+                AgentEvaluationReflectionPacket {
+                    suite_id: "runtime-prompt-evolution".to_string(),
+                    suite_version: 2,
+                    case_id: format!("case-{evaluation_index}"),
+                    category: "coding".to_string(),
+                    run_id: format!("pair-{evaluation_index}"),
+                    seed: evaluation_index,
+                    candidate_id: seed.id.clone(),
+                    candidate_fingerprint: "seed-fingerprint".to_string(),
+                    model_fingerprints: BTreeMap::new(),
+                    input: "Implement and verify a change".to_string(),
+                    steps: Vec::new(),
+                    final_output: "verified".to_string(),
+                    verifier: AgentEvaluationVerifierOutcome {
+                        source: AgentEvaluationEvidenceSource::Judge,
+                        passed: true,
+                        score: 0.9,
+                        checks: Vec::new(),
+                    },
+                    actionable_feedback: ActionableSideInformation {
+                        summary: "preserve verification coverage".to_string(),
+                        ..ActionableSideInformation::default()
+                    },
+                }
+            });
             let observation = PromptEvolutionObservation {
                 profile_id: seed.id.clone(),
                 evaluation_id: format!("pair-{evaluation_index}"),
@@ -24729,7 +24901,7 @@ mod tests {
                     total_tokens: 800,
                     credit: 0.9,
                 }],
-                reflection_packet: None,
+                reflection_packet,
             };
             events.push(Event {
                 id: EventId(format!("pair-event-{evaluation_index}")),
@@ -24776,6 +24948,18 @@ mod tests {
         assert!(evaluation.frontier_ids.contains(&seed.id));
         assert_eq!(evaluation.next_profile.generation, 1);
         assert_ne!(evaluation.next_profile.id, seed.id);
+        assert_eq!(
+            evaluation
+                .mutation_parent
+                .as_ref()
+                .map(|genome| genome.id.as_str()),
+            Some(seed.id.as_str())
+        );
+        assert_eq!(evaluation.mutation_trajectories.len(), 4);
+        assert!(evaluation
+            .mutation_trajectories
+            .iter()
+            .all(|packet| packet.candidate_id == seed.id));
     }
 
     #[test]
@@ -25019,12 +25203,14 @@ mod tests {
         assert!(observation.reflection_packet.is_none());
 
         let secret = "evaluation-secret-token".to_string();
+        let bearer = "Bearer runtime-reflection-token";
         let mut traced_candidate = candidate.clone();
-        traced_candidate.execution.steps[0].prompt = format!("inspect with {secret}");
+        traced_candidate.execution.steps[0].prompt =
+            format!("inspect with {secret}\nAuthorization: {bearer}");
         traced_candidate.execution.steps[0].tool_calls = vec![AgentEvaluationToolTrace {
             tool: "file.read".to_string(),
             request: format!("{{\"token\":\"{secret}\"}}"),
-            response: format!("verified with {secret}"),
+            response: format!("verified with {secret}\n{bearer}"),
             error: None,
         }];
         let traced = prompt_pairwise_observation(
@@ -25050,6 +25236,7 @@ mod tests {
             .expect("executed feedback should produce a reflection packet");
         let encoded = serde_json::to_string(&packet).expect("packet should serialize");
         assert!(!encoded.contains(&secret));
+        assert!(!encoded.contains("runtime-reflection-token"));
         assert!(encoded.contains("[REDACTED]"));
         assert_eq!(packet.steps[0].tool_calls.len(), 1);
     }

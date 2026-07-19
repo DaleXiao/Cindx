@@ -371,6 +371,7 @@ export type PromptEvolutionProfileState = {
   runs: number;
   trainRuns: number;
   holdoutRuns: number;
+  reflectionRuns: number;
   successRate: number;
   averageReward: number | null;
   averageRelativeReward: number | null;
@@ -396,6 +397,8 @@ export type PromptEvolutionEffortState = {
   nextMode: string;
   pairedRuns: number;
   replayRuns: number;
+  reflectionPackets: number;
+  learnedProfiles: number;
   readyProfiles: number;
   evaluationInflight: boolean;
   stableProfileId: string;
@@ -414,6 +417,8 @@ export type PromptEvolutionState = {
   frontierProfiles: number;
   pairedRuns: number;
   replayRuns: number;
+  reflectionPackets: number;
+  learnedProfiles: number;
   evaluationInflight: boolean;
   efforts: PromptEvolutionEffortState[];
   profiles: PromptEvolutionProfileState[];
@@ -838,6 +843,8 @@ let browserPhase4State: Phase4State = {
     frontierProfiles: 0,
     pairedRuns: 0,
     replayRuns: 0,
+    reflectionPackets: 0,
+    learnedProfiles: 0,
     evaluationInflight: false,
     efforts: ["fast", "auto", "pro"].map((effort) => ({
       effort,
@@ -851,6 +858,8 @@ let browserPhase4State: Phase4State = {
       nextMode: "explore",
       pairedRuns: 0,
       replayRuns: 0,
+      reflectionPackets: 0,
+      learnedProfiles: 0,
       readyProfiles: 0,
       evaluationInflight: false,
       stableProfileId: `seed-${effort}-v1`,
@@ -867,6 +876,7 @@ let browserPhase4State: Phase4State = {
       runs: 0,
       trainRuns: 0,
       holdoutRuns: 0,
+      reflectionRuns: 0,
       successRate: 0,
       averageReward: null,
       averageRelativeReward: null,
