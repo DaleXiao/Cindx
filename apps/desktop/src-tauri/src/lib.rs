@@ -148,6 +148,9 @@ const PROMPT_EVOLUTION_READ_MODEL_NAMESPACE: &str = "prompt-evolution-v1";
 const PROMPT_EVOLUTION_READ_MODEL_KEY: &str = "global";
 const AGENT_HISTORY_INITIAL_PAGE_SIZE: usize = 120;
 const AGENT_HISTORY_MAX_PAGE_SIZE: usize = 600;
+const AGENT_HISTORY_MAX_TOOL_METADATA_BYTES: usize = 512 * 1024;
+const PERSISTED_TOOL_EVENT_METADATA_VALUE_LIMIT: usize = 64 * 1024;
+const PERSISTED_TOOL_EVENT_OUTPUT_PREVIEW_BYTES: usize = 16 * 1024;
 const CONTEXT_COMPACTION_TRIGGER_PERCENT: u64 = 65;
 const CONTEXT_RECENT_TARGET_PERCENT: u64 = 28;
 const CONTEXT_RECENT_MAX_TOKENS: u64 = 48_000;
@@ -165,6 +168,7 @@ const PERSONALIZATION_MAX_NAME_CHARS: usize = 80;
 const SCHEDULE_EXECUTION_SESSION_DETAIL: &str = "schedule automation";
 const AGENT_RECOVERY_SCHEMA: &str = "cindx.agent-recovery.v1";
 const EVENT_REDACTION_MARKER_FILE: &str = "events-redaction-v1.complete";
+const TOOL_EVENT_METADATA_COMPACTION_MARKER_FILE: &str = "events-tool-metadata-v1.complete";
 const OPENAI_DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
 const DASHSCOPE_DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-v4";
 const LEGACY_AGENT_SYSTEM_PROMPT: &str = "You are Cindx, a desktop-first assistant. Work carefully, be direct, and ask for clarification when the task is ambiguous.";
@@ -4359,20 +4363,21 @@ fn get_phase3_state(state: tauri::State<'_, AppState>) -> Result<Phase3State, St
 }
 
 #[tauri::command]
-fn get_permission_review_state(
-    state: tauri::State<'_, AppState>,
+async fn get_permission_review_state(
+    app: tauri::AppHandle,
 ) -> Result<PermissionReviewState, String> {
-    let project_sessions = state
-        .project_session_config
-        .lock()
-        .map_err(|error| format!("project session config lock poisoned: {error}"))?
-        .clone();
-    let store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-
-    permission_review_state(&store, &project_sessions).map_err(|error| error.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let project_sessions = state
+            .project_session_config
+            .lock()
+            .map_err(|error| format!("project session config lock poisoned: {error}"))?
+            .clone();
+        let store = open_app_read_store()?;
+        permission_review_state(&store, &project_sessions).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("permission review load failed to join: {error}"))?
 }
 
 #[tauri::command]
@@ -4745,12 +4750,13 @@ async fn get_agent_state(
         };
         let store = open_app_read_store()?;
         let history = store
-            .list_by_task_and_metadata_before(
+            .list_by_task_and_metadata_before_with_tool_metadata_limit(
                 &phase16_task_id(),
                 "session_id",
                 &session_id,
                 u64::MAX,
                 AGENT_HISTORY_INITIAL_PAGE_SIZE,
+                AGENT_HISTORY_MAX_TOOL_METADATA_BYTES,
             )
             .map_err(|error| error.to_string())?;
         agent_state_from_read_model(&store, &model, &session_id, &run_context, history)
@@ -4801,19 +4807,21 @@ async fn get_agent_state_delta(
         let latest_sequence = model.revision;
         let reset = after_sequence == 0 || after_sequence > latest_sequence;
         let events = if reset {
-            store.list_by_task_and_metadata_before(
+            store.list_by_task_and_metadata_before_with_tool_metadata_limit(
                 &phase16_task_id(),
                 "session_id",
                 &session_id,
                 u64::MAX,
                 AGENT_HISTORY_INITIAL_PAGE_SIZE,
+                AGENT_HISTORY_MAX_TOOL_METADATA_BYTES,
             )
         } else {
-            store.list_by_task_and_metadata_after(
+            store.list_by_task_and_metadata_after_with_tool_metadata_limit(
                 &phase16_task_id(),
                 "session_id",
                 &session_id,
                 after_sequence,
+                AGENT_HISTORY_MAX_TOOL_METADATA_BYTES,
             )
         }
         .map_err(|error| error.to_string())?;
@@ -4844,7 +4852,7 @@ async fn get_agent_history_page(
     tauri::async_runtime::spawn_blocking(move || {
         let store = open_app_read_store()?;
         let events = store
-            .list_by_task_and_metadata_before(
+            .list_by_task_and_metadata_before_with_tool_metadata_limit(
                 &phase16_task_id(),
                 "session_id",
                 &session_id,
@@ -4852,6 +4860,7 @@ async fn get_agent_history_page(
                 limit
                     .unwrap_or(AGENT_HISTORY_INITIAL_PAGE_SIZE)
                     .clamp(1, AGENT_HISTORY_MAX_PAGE_SIZE),
+                AGENT_HISTORY_MAX_TOOL_METADATA_BYTES,
             )
             .map_err(|error| error.to_string())?;
         let oldest_sequence = events
@@ -8597,6 +8606,7 @@ pub fn run() {
             }
             schedule_main_window_reveal_fallback(app.handle().clone());
             start_schedule_runner(app.handle().clone());
+            start_tool_event_metadata_compaction();
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -15931,6 +15941,7 @@ fn append_tool_finished_event(
     if let Some(context) = run_context {
         metadata = metadata_with_context(metadata, context);
     }
+    compact_tool_event_metadata(&mut metadata);
 
     append_event(
         store,
@@ -15939,6 +15950,44 @@ fn append_tool_finished_event(
         format!("Tool call finished: {tool_name}"),
         metadata,
     )
+}
+
+fn compact_tool_event_metadata(metadata: &mut Metadata) -> usize {
+    let oversized_keys = metadata
+        .iter()
+        .filter(|(_, value)| value.len() > PERSISTED_TOOL_EVENT_METADATA_VALUE_LIMIT)
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+
+    for key in &oversized_keys {
+        let Some(value) = metadata.remove(key) else {
+            continue;
+        };
+        let value_length = value.len();
+        metadata
+            .entry(format!("{key}_length"))
+            .or_insert_with(|| value_length.to_string());
+        metadata.insert(format!("{key}_omitted"), "true".to_string());
+        let replacement = if key == "output" {
+            truncate_utf8_bytes(&value, PERSISTED_TOOL_EVENT_OUTPUT_PREVIEW_BYTES)
+        } else {
+            format!("[omitted: {value_length}-byte tool metadata]")
+        };
+        metadata.insert(key.clone(), replacement);
+    }
+
+    oversized_keys.len()
+}
+
+fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &value[..end])
 }
 
 fn phase4_state_with_error(
@@ -16154,6 +16203,74 @@ fn mark_event_redaction_complete(root: &Path) -> Result<(), String> {
     secure_private_file(&path)
         .map_err(|error| format!("failed to secure event redaction marker: {error}"))?;
     Ok(())
+}
+
+fn tool_event_metadata_compaction_marker_path(root: &Path) -> PathBuf {
+    root.join(TOOL_EVENT_METADATA_COMPACTION_MARKER_FILE)
+}
+
+fn tool_event_metadata_compaction_complete(root: &Path) -> bool {
+    tool_event_metadata_compaction_marker_path(root).is_file()
+}
+
+fn mark_tool_event_metadata_compaction_complete(root: &Path) -> Result<(), String> {
+    fs::create_dir_all(root).map_err(|error| {
+        format!("failed to create tool metadata compaction marker directory: {error}")
+    })?;
+    secure_directory(root).map_err(|error| {
+        format!("failed to secure tool metadata compaction marker directory: {error}")
+    })?;
+    let path = tool_event_metadata_compaction_marker_path(root);
+    fs::write(&path, b"events-tool-metadata-v1\n")
+        .map_err(|error| format!("failed to write tool metadata compaction marker: {error}"))?;
+    secure_private_file(&path)
+        .map_err(|error| format!("failed to secure tool metadata compaction marker: {error}"))?;
+    Ok(())
+}
+
+fn compact_persisted_tool_event_metadata(
+    store: &mut SqliteStore,
+) -> Result<usize, StorageError> {
+    let event_ids = store.oversized_tool_event_ids(AGENT_HISTORY_MAX_TOOL_METADATA_BYTES)?;
+    let mut updated = 0;
+    for event_id in event_ids {
+        let Some(mut event) = store.event_by_id(&event_id)? else {
+            continue;
+        };
+        if compact_tool_event_metadata(&mut event.metadata) == 0 {
+            continue;
+        }
+        store.update_event_content(&event)?;
+        updated += 1;
+    }
+    Ok(updated)
+}
+
+fn start_tool_event_metadata_compaction() {
+    let root = app_data_root();
+    if tool_event_metadata_compaction_complete(&root) {
+        return;
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        std::thread::sleep(Duration::from_secs(2));
+        let result = open_app_store().and_then(|mut store| {
+            compact_persisted_tool_event_metadata(&mut store)
+        });
+        match result {
+            Ok(updated) => {
+                if let Err(error) = mark_tool_event_metadata_compaction_complete(&root) {
+                    append_startup_log(&error);
+                } else {
+                    append_startup_log(&format!(
+                        "compacted {updated} oversized tool event metadata records"
+                    ));
+                }
+            }
+            Err(error) => append_startup_log(&format!(
+                "tool event metadata compaction failed: {error}"
+            )),
+        }
+    });
 }
 
 fn redact_existing_text_artifact(path: &Path) -> Result<bool, String> {
@@ -24142,6 +24259,71 @@ mod tests {
             "events-redaction-v1\n"
         );
         fs::remove_dir_all(root).expect("marker fixture should be removed");
+    }
+
+    #[test]
+    fn tool_event_metadata_is_compacted_before_persistence() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        append_tool_finished_event(
+            &mut store,
+            &phase16_task_id(),
+            "call-large",
+            "browser.capture",
+            "completed",
+            &"output".repeat(20_000),
+            [(
+                "structured_output".to_string(),
+                "structured".repeat(20_000),
+            )]
+            .into_iter()
+            .collect(),
+            None,
+        )
+        .expect("tool event should append");
+
+        let event = store
+            .list_by_task(&phase16_task_id())
+            .expect("events should load")
+            .pop()
+            .expect("tool event should exist");
+        assert!(event.metadata["output"].len() <= PERSISTED_TOOL_EVENT_OUTPUT_PREVIEW_BYTES + 3);
+        assert_eq!(event.metadata["output_omitted"], "true");
+        assert_eq!(event.metadata["result_structured_output_omitted"], "true");
+        assert!(event.metadata["result_structured_output"].starts_with("[omitted:"));
+    }
+
+    #[test]
+    fn persisted_tool_event_compaction_rewrites_legacy_payloads() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        store
+            .append(Event {
+                id: EventId("legacy-large-tool-event".to_string()),
+                task_id: phase16_task_id(),
+                sequence: 1,
+                timestamp_ms: 1,
+                kind: EventKind::ToolCallFinished,
+                summary: "legacy tool output".to_string(),
+                metadata: [
+                    ("session_id".to_string(), "session-a".to_string()),
+                    ("output".to_string(), "legacy-output".repeat(30_000)),
+                ]
+                .into_iter()
+                .collect(),
+            })
+            .expect("legacy event should append");
+
+        assert_eq!(
+            compact_persisted_tool_event_metadata(&mut store)
+                .expect("legacy metadata should compact"),
+            1
+        );
+        let event = store
+            .event_by_id("legacy-large-tool-event")
+            .expect("event should load")
+            .expect("event should exist");
+        assert_eq!(event.metadata["session_id"], "session-a");
+        assert_eq!(event.metadata["output_omitted"], "true");
+        assert!(event.metadata["output"].len() <= PERSISTED_TOOL_EVENT_OUTPUT_PREVIEW_BYTES + 3);
     }
 
     #[test]

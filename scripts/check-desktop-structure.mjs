@@ -381,11 +381,14 @@ assert(
   "Session switching must prioritize chat state and defer workspace-wide refreshes"
 );
 assert(
-  appSource.includes("SESSION_STATE_CACHE_LIMIT = 12") &&
+  appSource.includes("SESSION_STATE_CACHE_LIMIT = 24") &&
     appSource.includes("agentStateCacheRef") &&
     appSource.includes("agentTraceCacheRef") &&
     appSource.includes("contextStateCacheRef") &&
     appSource.includes("requestSessionAgentState(sessionId)") &&
+    appSource.includes("applySelectedSessionAgentState") &&
+    appSource.includes("prefetchedAgentState") &&
+    appSource.includes("void Promise.all(") &&
     appSource.includes("restoreCachedSessionState(sessionId)") &&
     appSource.includes("startTransition(() =>") &&
     !appSource.includes("onSessionPrefetch") &&
@@ -1058,7 +1061,7 @@ assert(
   "Settings must rotate once per click and respect reduced-motion preferences"
 );
 assert(
-  sidebarSource.includes('if (!state || (active && state !== "working")) return null;') &&
+  sidebarSource.includes('if (!state || (active && state === "complete")) return null;') &&
     sidebarSource.includes('<LoaderCircle aria-hidden="true" />') &&
     sidebarSource.includes('"approval required"') &&
     sidebarSource.includes('"waiting_for_input"') &&
@@ -1124,14 +1127,16 @@ assert(
     styles.includes(".session-status-attention") &&
     styles.includes(".session-status-complete > span") &&
     styles.includes(".session-status-complete > span,\n  .session-status-attention > span") &&
-    sidebarSource.includes('if (!state || (active && state !== "working")) return null;') &&
+    sidebarSource.includes('if (!state || (active && state === "complete")) return null;') &&
     sidebarSource.includes("active={session.active}") &&
     sidebarSource.includes('className="session-name"') &&
     !sidebarSource.includes("<strong>{session.name}</strong>") &&
     styles.includes(".session-name") &&
     appSource.includes("trackedSessionTaskIdsRef") &&
     appSource.includes("markSessionTaskStarted(sessionId)") &&
-    appSource.includes('canContinue ? "Paused" : "Completed"') &&
+    appSource.includes('status === "paused" || (status === "completed" && canContinue)') &&
+    appSource.includes('status === "waiting_for_permission"') &&
+    appSource.includes('tracked && status === "completed"') &&
     appSource.includes('nextStatus = "Error"') &&
     appSource.includes('nextStatus = "Interrupted"'),
   "Sidebar rows must show normal-weight titles and only icon-only background task state"
@@ -1574,7 +1579,9 @@ assert(
     appSource.includes("handleIgnorePermissionReview") &&
     appSource.includes("review.sessionName") &&
     tauriBridge.includes("getPermissionReviewState") &&
-    rustLib.includes("fn get_permission_review_state(") &&
+    rustLib.includes("async fn get_permission_review_state(") &&
+    rustLib.includes("let store = open_app_read_store()?") &&
+    appSource.includes("let inFlight = false;") &&
     rustLib.includes("struct PermissionReviewItem"),
   "Permission settings must present actionable reviews with source session context"
 );
@@ -1587,6 +1594,9 @@ assert(
 assert(
   appSource.includes('className="settings-sidebar"') &&
     appSource.includes('className="settings-detail"') &&
+    appSource.includes('{settingsCategory === "skills" && (') &&
+    appSource.includes('{settingsCategory === "permissions" && (') &&
+    appSource.includes('{settingsCategory === "knowledge" && (') &&
     !appSource.includes("settings-index") &&
     styles.includes("grid-template-columns: 168px minmax(0, 760px)") &&
     /\.settings-app-return \{[\s\S]*?top: -12px;/.test(styles),

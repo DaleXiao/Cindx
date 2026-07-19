@@ -66,7 +66,7 @@ function sessionVisualState(status: string): SessionVisualState {
 
 function SessionStatusIndicator({ status, active }: { status: string; active: boolean }) {
   const state = sessionVisualState(status);
-  if (!state || (active && state !== "working")) return null;
+  if (!state || (active && state === "complete")) return null;
 
   const label =
     state === "working"
