@@ -17,6 +17,8 @@ Responsibilities:
 - Render persisted project and session navigation in the left sidebar.
 - Call Rust commands exposed by the agent kernel.
 - Manage provider, workspace, sidecar, project/session, and memory settings.
+- Adapt Tauri commands to the queue, session projection, runtime, orchestration,
+  permission, and persistence boundaries.
 
 Non-responsibilities:
 
@@ -83,7 +85,9 @@ Responsibilities:
   observations for model turns.
 - Normalize provider tool calls into local tool invocations.
 - Preserve canonical assistant/tool transcript messages for resume.
-- Track loop states such as completed, tool requested, and failed.
+- Own run budgets, cancellation, no-progress and repeated-action guards.
+- Track loop states such as completed, tool requested, recoverable turn-budget
+  exhaustion, and failed.
 - Keep desktop storage, permission UI, and actual tool execution outside the
   pure runtime core.
 
@@ -115,12 +119,25 @@ Responsibilities:
 - Explain routing decisions and preserve override metadata.
 - Train a table-based learned router from routing telemetry.
 - Compare router decisions against baseline policies.
+- Run the Fugu bounded multi-model workflow engine with dependency isolation,
+  role-aware workers, verification, recovery, and resumable checkpoints.
+- Evaluate and promote GEPA prompt genomes from completed or replayed evidence;
+  never mutate an active runtime loop.
 
 Non-responsibilities:
 
 - Tool execution.
 - Permission decisions.
 - Provider-specific HTTP behavior.
+- Active-run cancellation, permission state, or tool side effects.
+
+## Desktop harness services
+
+`apps/desktop/src-tauri/src/queue_service.rs` owns queue message contracts and
+event reduction. `session_projection.rs` owns the versioned per-session read
+model and incremental projection. `run_lifecycle.rs` is the shared UI-facing
+lifecycle vocabulary. These modules keep Tauri command handlers thin without
+moving desktop-specific persistence or permission behavior into the pure runtime.
 
 ## crates/tools
 
@@ -174,5 +191,5 @@ Responsibilities:
 
 Non-responsibilities:
 
-- Full historical event partitioning by session.
-- Database migration for per-session task ids.
+- Agent loop budgets or orchestration policy.
+- Replaying unrelated sessions to construct the active session view.

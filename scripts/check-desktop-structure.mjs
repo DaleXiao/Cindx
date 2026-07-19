@@ -38,7 +38,11 @@ const localBuildScript = read("scripts/build-local-app.mjs");
 const browserSidecarSource = read("scripts/sidecars/browser-sidecar.js");
 const browserIntegrationTest = read("scripts/test-browser-sidecar.mjs");
 const rustLib = read("apps/desktop/src-tauri/src/lib.rs");
-const runControlSource = read("apps/desktop/src-tauri/src/run_control.rs");
+const queueServiceSource = read("apps/desktop/src-tauri/src/queue_service.rs");
+const runLifecycleSource = read("apps/desktop/src-tauri/src/run_lifecycle.rs");
+const sessionProjectionSource = read(
+  "apps/desktop/src-tauri/src/session_projection.rs"
+);
 const scheduleSource = read("apps/desktop/src-tauri/src/schedule.rs");
 const cargoToml = read("apps/desktop/src-tauri/Cargo.toml");
 const cargoLock = read("apps/desktop/src-tauri/Cargo.lock");
@@ -62,6 +66,7 @@ const ragSource = read("crates/agent-rag/src/lib.rs");
 const graphSource = read("crates/agent-graph/src/lib.rs");
 const agentMemorySource = read("crates/agent-memory/src/lib.rs");
 const agentRuntimeSource = read("crates/agent-runtime/src/lib.rs");
+const runControlSource = read("crates/agent-runtime/src/control.rs");
 const coreAgentPrompt = read("crates/agent-runtime/src/core_prompt.txt");
 const orchestratorSource = read("crates/orchestrator/src/lib.rs");
 const promptEvolutionSource = read("crates/orchestrator/src/prompt_evolution.rs");
@@ -325,6 +330,8 @@ assert(
     rustLib.includes("agent_run_should_stop") &&
     runControlSource.includes("struct AgentRunControl") &&
     runControlSource.includes("DeadlineExceeded") &&
+    runControlSource.includes("TurnBudgetExhausted") &&
+    agentRuntimeSource.includes("AgentAdvance::TurnBudgetExhausted") &&
     rustLib.includes("request_agent_run_cancel") &&
     rustLib.includes("emit_agent_stream_delta") &&
     appSource.includes("<LiveSessionThread") &&
@@ -401,7 +408,13 @@ assert(
     agentStorageSource.includes("list_by_task_and_metadata_after") &&
     agentStorageSource.includes("save_read_model") &&
     rustLib.includes("AGENT_SESSION_READ_MODEL_NAMESPACE") &&
-    rustLib.includes("struct AgentSessionReadModel") &&
+    rustLib.includes("mod queue_service") &&
+    rustLib.includes("mod run_lifecycle") &&
+    rustLib.includes("mod session_projection") &&
+    queueServiceSource.includes("struct QueuedAgentMessagePayload") &&
+    runLifecycleSource.includes("enum AgentRunStatus") &&
+    sessionProjectionSource.includes("struct AgentSessionReadModel") &&
+    sessionProjectionSource.includes("load_agent_session_read_model_with_stats") &&
     rustLib.includes("struct AgentStateDelta") &&
     tauriBridge.includes("export async function getAgentStateDelta") &&
     appSource.includes("function mergeAgentStateDelta") &&
@@ -934,9 +947,9 @@ assert(
   "Composer controls must keep one fixed primary slot that switches between send and stop"
 );
 assert(
-  rustLib.includes("struct QueuedAgentMessageView") &&
-    rustLib.includes("struct QueuedAgentMessageReceipt") &&
-    rustLib.includes("struct QueuedAgentMessageActionReceipt") &&
+  queueServiceSource.includes("struct QueuedAgentMessageView") &&
+    queueServiceSource.includes("struct QueuedAgentMessageReceipt") &&
+    queueServiceSource.includes("struct QueuedAgentMessageActionReceipt") &&
     rustLib.includes("async fn queue_agent_message(") &&
     rustLib.includes("async fn edit_queued_agent_message(") &&
     rustLib.includes("async fn delete_queued_agent_message(") &&
@@ -947,7 +960,7 @@ assert(
         rustLib.indexOf("fn edit_queued_agent_message(")
       )
       .includes("agent_state_for_session") &&
-    rustLib.includes("fn pending_queued_agent_messages(") &&
+    queueServiceSource.includes("fn pending_queued_agent_messages(") &&
     rustLib.includes("fn queued_agent_message_from_read_model(") &&
     !rustLib
       .slice(

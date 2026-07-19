@@ -15,6 +15,12 @@ pub(crate) struct AgentSessionReadModel {
     pub(crate) state: AgentState,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionProjectionLoadStats {
+    events_read: usize,
+    rebuilt: bool,
+}
+
 pub(crate) fn empty_agent_state_for_session(session_id: &str) -> AgentState {
     AgentState {
         task_id: phase16_task_id().0,
@@ -234,6 +240,13 @@ pub(crate) fn load_agent_session_read_model(
     store: &mut SqliteStore,
     session_id: &str,
 ) -> Result<AgentSessionReadModel, StorageError> {
+    load_agent_session_read_model_with_stats(store, session_id).map(|(model, _)| model)
+}
+
+fn load_agent_session_read_model_with_stats(
+    store: &mut SqliteStore,
+    session_id: &str,
+) -> Result<(AgentSessionReadModel, SessionProjectionLoadStats), StorageError> {
     let task_id = phase16_task_id();
     let revision = store.event_revision_by_metadata(&task_id, "session_id", session_id)?;
     let stored = store
@@ -248,7 +261,7 @@ pub(crate) fn load_agent_session_read_model(
                 })
         });
 
-    let (mut model, dirty) = if let Some(mut model) = stored {
+    let (mut model, dirty, stats) = if let Some(mut model) = stored {
         let delta = store.list_by_task_and_metadata_after(
             &task_id,
             "session_id",
@@ -256,29 +269,41 @@ pub(crate) fn load_agent_session_read_model(
             model.revision,
         )?;
         if model.event_count.saturating_add(delta.len() as u64) != revision.event_count {
+            let events = store.list_by_task_and_metadata(&task_id, "session_id", session_id)?;
+            let events_read = events.len();
             (
-                build_agent_session_read_model(
-                    store,
-                    session_id,
-                    store.list_by_task_and_metadata(&task_id, "session_id", session_id)?,
-                )?,
+                build_agent_session_read_model(store, session_id, events)?,
                 true,
+                SessionProjectionLoadStats {
+                    events_read,
+                    rebuilt: true,
+                },
             )
         } else {
             let dirty = !delta.is_empty();
+            let events_read = delta.len();
             for event in &delta {
                 apply_event_to_agent_session_read_model(&mut model, event);
             }
-            (model, dirty)
+            (
+                model,
+                dirty,
+                SessionProjectionLoadStats {
+                    events_read,
+                    rebuilt: false,
+                },
+            )
         }
     } else {
+        let events = store.list_by_task_and_metadata(&task_id, "session_id", session_id)?;
+        let events_read = events.len();
         (
-            build_agent_session_read_model(
-                store,
-                session_id,
-                store.list_by_task_and_metadata(&task_id, "session_id", session_id)?,
-            )?,
+            build_agent_session_read_model(store, session_id, events)?,
             true,
+            SessionProjectionLoadStats {
+                events_read,
+                rebuilt: true,
+            },
         )
     };
     let revision_changed =
@@ -298,7 +323,7 @@ pub(crate) fn load_agent_session_read_model(
             &payload,
         )?;
     }
-    Ok(model)
+    Ok((model, stats))
 }
 
 pub(crate) fn agent_session_audits(
@@ -380,4 +405,65 @@ pub(crate) fn agent_state_from_read_model(
     }
     state.pending_approvals = pending_approvals;
     Ok(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session_context(session_id: &str) -> Metadata {
+        [("session_id".to_string(), session_id.to_string())]
+            .into_iter()
+            .collect()
+    }
+
+    #[test]
+    fn incremental_projection_reads_only_the_target_session_delta() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let target_context = session_context("session-target");
+        let other_context = session_context("session-other");
+
+        for index in 0..1_000 {
+            append_event(
+                &mut store,
+                &phase16_task_id(),
+                EventKind::TaskStatusChanged,
+                format!("Target projection event {index}"),
+                target_context.clone(),
+            )
+            .expect("target event should append");
+        }
+        let (initial, initial_stats) =
+            load_agent_session_read_model_with_stats(&mut store, "session-target")
+                .expect("initial projection should build");
+        assert!(initial_stats.rebuilt);
+        assert_eq!(initial_stats.events_read, 1_000);
+        assert_eq!(initial.event_count, 1_000);
+
+        for index in 0..4_000 {
+            append_event(
+                &mut store,
+                &phase16_task_id(),
+                EventKind::TaskStatusChanged,
+                format!("Unrelated projection event {index}"),
+                other_context.clone(),
+            )
+            .expect("unrelated event should append");
+        }
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Target projection delta",
+            target_context,
+        )
+        .expect("target delta should append");
+
+        let (updated, updated_stats) =
+            load_agent_session_read_model_with_stats(&mut store, "session-target")
+                .expect("incremental projection should load");
+        assert!(!updated_stats.rebuilt);
+        assert_eq!(updated_stats.events_read, 1);
+        assert_eq!(updated.event_count, 1_001);
+    }
 }
