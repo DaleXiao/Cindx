@@ -2592,6 +2592,18 @@ details[open] > summary .disclosure-triangle {
   transform: rotate(90deg);
 }
 
+.thread-tool-chain[open] {
+  background: color-mix(in srgb, var(--surface-hover) 52%, transparent);
+  border-color: transparent;
+  border-radius: var(--radius-lg);
+  box-shadow: 0 3px 12px rgb(0 0 0 / 3.5%);
+}
+
+.thread-tool-chain[open]:hover,
+.thread-tool-chain[open].selected {
+  border-color: transparent;
+}
+
 .thread-tool-chain-items {
   display: grid;
   gap: 1px;
