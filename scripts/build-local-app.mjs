@@ -12,6 +12,7 @@ const args = new Set(process.argv.slice(2));
 const skipTests = args.has("--skip-tests");
 const installApp = !args.has("--no-install");
 const ephemeralTarget = args.has("--ephemeral-target");
+const useSourceVersion = args.has("--source-version");
 const targetRoot = ephemeralTarget
   ? fs.mkdtempSync(path.join(os.tmpdir(), "cindx-build-target-"))
   : path.join(tauriRoot, "target");
@@ -128,7 +129,10 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 }
 
 const buildNumber = nextBuildNumber();
-const version = `0.0.${buildNumber}`;
+const sourceVersion = JSON.parse(
+  originals.get(path.join(tauriRoot, "tauri.conf.json"))
+).version;
+const version = useSourceVersion ? sourceVersion : `0.0.${buildNumber}`;
 const counterPath = path.join(repoRoot, ".cindx", "local-build-number");
 const builtApp = path.join(
   targetRoot,
@@ -143,7 +147,9 @@ const outputApp = path.join(outputRoot, "Cindx.app");
 const outputArchive = path.join(outputRoot, `Cindx-${version}-macOS-arm64.zip`);
 
 try {
-  run(process.execPath, [path.join(repoRoot, "scripts", "stamp-build-version.mjs"), String(buildNumber)]);
+  if (!useSourceVersion) {
+    run(process.execPath, [path.join(repoRoot, "scripts", "stamp-build-version.mjs"), String(buildNumber)]);
+  }
   run(process.execPath, [path.join(repoRoot, "scripts", "check-desktop-structure.mjs")]);
   run(process.execPath, [path.join(repoRoot, "scripts", "check-desktop-layout.mjs")]);
   run("rustup", ["target", "add", targetTriple]);
