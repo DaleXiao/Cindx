@@ -932,6 +932,14 @@ assert(
 );
 assert(
   rustLib.includes("struct QueuedAgentMessageView") &&
+    rustLib.includes("struct QueuedAgentMessageReceipt") &&
+    rustLib.includes("async fn queue_agent_message(") &&
+    !rustLib
+      .slice(
+        rustLib.indexOf("fn enqueue_agent_message_inner("),
+        rustLib.indexOf("fn edit_queued_agent_message(")
+      )
+      .includes("agent_state_for_session") &&
     rustLib.includes("fn pending_queued_agent_messages(") &&
     rustLib.includes("fn append_agent_queue_event(") &&
     rustLib.includes("fn run_next_queued_agent_message_blocking(") &&
@@ -941,6 +949,7 @@ assert(
     rustLib.includes("queue_events_do_not_change_a_terminal_agent_status") &&
     rustLib.includes("queued_messages_preserve_a_permission_waiting_run") &&
     tauriBridge.includes("export type QueuedAgentMessage") &&
+    tauriBridge.includes("export type QueuedAgentMessageReceipt") &&
     tauriBridge.includes("export async function queueAgentMessage(") &&
     tauriBridge.includes("export async function runNextQueuedAgentMessage(") &&
     appSource.includes("async function drainQueuedMessages(sessionId: string)") &&
@@ -951,7 +960,10 @@ assert(
     queuedMessagesSource.includes("onEdit") &&
     queuedMessagesSource.includes("onDelete") &&
     styles.includes(".queued-message-stack") &&
-    styles.includes("bottom: calc(100% - 12px)") &&
+    styles.includes("bottom: calc(100% - 18px)") &&
+    styles.includes("border-radius: var(--radius-lg) var(--radius-lg) 0 0") &&
+    styles.includes(".queued-message + .queued-message") &&
+    appSource.includes("applyQueuedMessageReceiptForSession") &&
     styles.includes(".composer-stack > .composer") &&
     appSource.includes("data-has-queued={Boolean(activeAgentState?.queuedMessages.length)}") &&
     styles.includes('.composer-stack[data-has-queued="true"] > .composer'),

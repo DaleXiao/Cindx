@@ -119,6 +119,8 @@ import {
   PermissionReviewState,
   PersonalizationConfig,
   ProjectSessionState,
+  QueuedAgentMessage,
+  QueuedAgentMessageReceipt,
   revealArtifact,
   revealMainWindow,
   setSidebarMaterialWidth,
@@ -460,6 +462,22 @@ function mergeAgentStateSnapshot(current: AgentState | null, incoming: AgentStat
     timeline: mergeSequencedItems(current.timeline, incoming.timeline),
     messages: mergeSequencedItems(current.messages, incoming.messages)
   };
+}
+
+function mergeQueuedAgentMessage(
+  current: QueuedAgentMessage[],
+  incoming: QueuedAgentMessage
+) {
+  const next = current.filter((message) => message.id !== incoming.id);
+  next.push(incoming);
+  next.sort((left, right) => {
+    if (left.mode !== right.mode) return left.mode === "steer" ? -1 : 1;
+    if (left.mode === "steer") {
+      return right.updatedAtMs - left.updatedAtMs || left.id.localeCompare(right.id);
+    }
+    return left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id);
+  });
+  return next;
 }
 
 function mergeSequencedItems<Item extends { sequence?: number }>(
@@ -2402,6 +2420,37 @@ export function App() {
     }
   }
 
+  function applyQueuedMessageReceiptForSession(
+    sessionId: string,
+    receipt: QueuedAgentMessageReceipt
+  ) {
+    const revision = agentStateRevisionsRef.current.get(sessionId);
+    agentStateRevisionsRef.current.set(sessionId, {
+      eventCount: Math.max(revision?.eventCount ?? 0, receipt.eventCount),
+      latestSequence: Math.max(revision?.latestSequence ?? 0, receipt.latestSequence),
+      latestTimestampMs: Math.max(
+        revision?.latestTimestampMs ?? 0,
+        receipt.latestTimestampMs
+      )
+    });
+    const mergeReceipt = (current: AgentState) => ({
+      ...current,
+      eventCount: Math.max(current.eventCount, receipt.eventCount),
+      latestSequence: Math.max(current.latestSequence, receipt.latestSequence),
+      queuedMessages: mergeQueuedAgentMessage(current.queuedMessages, receipt.message)
+    });
+    const cached = agentStateCacheRef.current.get(sessionId);
+    if (cached) rememberSessionState(agentStateCacheRef.current, sessionId, mergeReceipt(cached));
+    if (activeSessionIdRef.current === sessionId) {
+      setAgentState((current) => {
+        if (!current || current.sessionId !== sessionId) return current;
+        const next = mergeReceipt(current);
+        rememberSessionState(agentStateCacheRef.current, sessionId, next);
+        return next;
+      });
+    }
+  }
+
   async function drainQueuedMessages(sessionId: string) {
     if (
       queueDrainingSessionIdsRef.current.has(sessionId) ||
@@ -2527,9 +2576,9 @@ export function App() {
     ) {
       setComposerError(null);
       try {
-        const next = await queueAgentMessage(nextPrompt, sessionId, attachments, agentEffort);
+        const receipt = await queueAgentMessage(nextPrompt, sessionId, attachments, agentEffort);
         setAttachmentDrafts((current) => ({ ...current, [sessionId]: [] }));
-        applyAgentStateForSession(sessionId, next);
+        applyQueuedMessageReceiptForSession(sessionId, receipt);
       } catch (error) {
         setComposerDrafts((current) => ({
           ...current,
