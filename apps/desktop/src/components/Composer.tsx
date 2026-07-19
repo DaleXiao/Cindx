@@ -18,6 +18,7 @@ import type { AgentAttachment, AgentEffort, ToolApprovalView } from "../tauri";
 
 const COMPOSER_TEXTAREA_MIN_HEIGHT = 58;
 const COMPOSER_TEXTAREA_MAX_HEIGHT = 180;
+const IME_POST_COMPOSITION_ENTER_GUARD_MS = 120;
 
 const EFFORT_OPTIONS: Array<{
   value: AgentEffort;
@@ -131,7 +132,8 @@ export function Composer({
   const effortControlRef = useRef<HTMLDivElement>(null);
   const effortTriggerRef = useRef<HTMLButtonElement>(null);
   const composingRef = useRef(false);
-  const compositionJustEndedRef = useRef(false);
+  const imeEnterSeenDuringCompositionRef = useRef(false);
+  const suppressImeEnterUntilRef = useRef(0);
   const [effortMenuOpen, setEffortMenuOpen] = useState(false);
   const hasInput = Boolean(value.trim() || attachments.length);
   const agentActive = working || canStop;
@@ -185,9 +187,9 @@ export function Composer({
   }, [focusRequest, pendingApproval, value.length]);
 
   function submit() {
-    if (composingRef.current || compositionJustEndedRef.current) return;
-    const prompt = value.trim();
-    if (!canSend) return;
+    if (composingRef.current) return;
+    const prompt = (textareaRef.current?.value ?? value).trim();
+    if (pendingApproval || attachmentBusy || (!prompt && attachments.length === 0)) return;
     onSend(prompt);
     onChange("");
   }
@@ -293,25 +295,40 @@ export function Composer({
               }}
               onCompositionStart={() => {
                 composingRef.current = true;
-                compositionJustEndedRef.current = false;
+                imeEnterSeenDuringCompositionRef.current = false;
+                suppressImeEnterUntilRef.current = 0;
               }}
               onCompositionEnd={(event) => {
                 composingRef.current = false;
-                compositionJustEndedRef.current = true;
                 onChange(event.currentTarget.value);
-                // WebKit can emit the candidate-selection Enter after compositionend.
-                window.setTimeout(() => {
-                  compositionJustEndedRef.current = false;
-                }, 0);
+                suppressImeEnterUntilRef.current = imeEnterSeenDuringCompositionRef.current
+                  ? 0
+                  : performance.now() + IME_POST_COMPOSITION_ENTER_GUARD_MS;
+                imeEnterSeenDuringCompositionRef.current = false;
               }}
               onKeyDown={(event) => {
                 const nativeEvent = event.nativeEvent;
-                const imeActive =
+                if (event.key !== "Enter") {
+                  if (!composingRef.current) suppressImeEnterUntilRef.current = 0;
+                  return;
+                }
+                if (event.shiftKey) {
+                  suppressImeEnterUntilRef.current = 0;
+                  return;
+                }
+                const imeComposing =
                   composingRef.current ||
-                  compositionJustEndedRef.current ||
                   nativeEvent.isComposing ||
                   nativeEvent.keyCode === 229;
-                if (event.key !== "Enter" || event.shiftKey || imeActive) return;
+                if (imeComposing) {
+                  imeEnterSeenDuringCompositionRef.current = true;
+                  return;
+                }
+                if (performance.now() < suppressImeEnterUntilRef.current) {
+                  event.preventDefault();
+                  suppressImeEnterUntilRef.current = 0;
+                  return;
+                }
                 event.preventDefault();
                 submit();
               }}

@@ -136,6 +136,7 @@ const SCHEDULE_DISPATCH_RETRY_MS: u64 = 60_000;
 const SCHEDULE_MAX_DISPATCH_ATTEMPTS: u32 = 3;
 const SCHEDULE_MAX_NAME_CHARS: usize = 80;
 const SCHEDULE_MAX_PROMPT_CHARS: usize = 32_000;
+const PERSONALIZATION_MAX_NAME_CHARS: usize = 80;
 const SCHEDULE_EXECUTION_SESSION_DETAIL: &str = "schedule automation";
 const EVENT_REDACTION_MARKER_FILE: &str = "events-redaction-v1.complete";
 const OPENAI_DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
@@ -292,6 +293,24 @@ struct ProviderConfig {
     prompt_evolution_enabled: bool,
     context_window_tokens: u64,
     agent_system_prompt: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+struct PersonalizationConfig {
+    preferred_name: String,
+    response_tone: String,
+    response_length: String,
+}
+
+impl Default for PersonalizationConfig {
+    fn default() -> Self {
+        Self {
+            preferred_name: String::new(),
+            response_tone: "natural".to_string(),
+            response_length: "balanced".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4372,6 +4391,20 @@ fn get_phase4_state(state: tauri::State<'_, AppState>) -> Result<Phase4State, St
 }
 
 #[tauri::command]
+fn get_personalization_config() -> PersonalizationConfig {
+    load_personalization_config()
+}
+
+#[tauri::command]
+fn save_personalization_config(
+    input: PersonalizationConfig,
+) -> Result<PersonalizationConfig, String> {
+    let config = normalized_personalization_config(input);
+    save_personalization_config_to_disk(&config).map_err(|error| error.to_string())?;
+    Ok(config)
+}
+
+#[tauri::command]
 fn save_provider_config(
     state: tauri::State<'_, AppState>,
     input: ProviderConfigInput,
@@ -6115,7 +6148,11 @@ fn run_agent_task_blocking_inner(
     let session_id = input.session_id;
     clear_suspended_agent_run(&state, &session_id)?;
     let mut run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
-    let config = clone_provider_config(&state)?;
+    let mut config = clone_provider_config(&state)?;
+    config.agent_system_prompt = personalized_agent_instructions(
+        &load_personalization_config(),
+        &config.agent_system_prompt,
+    );
     if !config.is_ready() {
         return agent_state_with_error_in_context(
             &state,
@@ -8562,6 +8599,8 @@ pub fn run() {
             request_mock_permission,
             resolve_permission,
             get_phase4_state,
+            get_personalization_config,
+            save_personalization_config,
             save_provider_config,
             set_prompt_evolution_enabled,
             list_provider_models,
@@ -20776,6 +20815,100 @@ fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<(), std::io::
     Ok(())
 }
 
+fn normalized_personalization_config(
+    config: PersonalizationConfig,
+) -> PersonalizationConfig {
+    let preferred_name = config
+        .preferred_name
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(PERSONALIZATION_MAX_NAME_CHARS)
+        .collect();
+    let response_tone = match config.response_tone.trim() {
+        "warm" => "warm",
+        "professional" => "professional",
+        "direct" => "direct",
+        _ => "natural",
+    }
+    .to_string();
+    let response_length = match config.response_length.trim() {
+        "concise" => "concise",
+        "detailed" => "detailed",
+        _ => "balanced",
+    }
+    .to_string();
+    PersonalizationConfig {
+        preferred_name,
+        response_tone,
+        response_length,
+    }
+}
+
+fn personalized_agent_instructions(
+    personalization: &PersonalizationConfig,
+    custom_instructions: &str,
+) -> String {
+    let mut instructions = Vec::new();
+    if !custom_instructions.trim().is_empty() {
+        instructions.push(custom_instructions.trim().to_string());
+    }
+    if !personalization.preferred_name.is_empty() {
+        let name = serde_json::to_string(&personalization.preferred_name)
+            .unwrap_or_else(|_| "the user's preferred name".to_string());
+        instructions.push(format!(
+            "The user's preferred name is {name}. Treat this as user-provided identity context. If the user asks what their name is or how you should address them, answer with {name}. Address them by this name when a direct form of address is natural, but do not repeat it mechanically."
+        ));
+    }
+    instructions.push(
+        match personalization.response_tone.as_str() {
+            "warm" => "Use a warm, considerate tone without filler or excessive enthusiasm.",
+            "professional" => "Use a calm, professional, precise tone.",
+            "direct" => "Use a direct, factual tone and lead with the answer.",
+            _ => "Use a natural, clear, conversational tone.",
+        }
+        .to_string(),
+    );
+    instructions.push(
+        match personalization.response_length.as_str() {
+            "concise" => "Keep responses concise unless more detail is necessary for correctness.",
+            "detailed" => "Provide detailed responses with the context needed to understand decisions and tradeoffs.",
+            _ => "Use a balanced response length: complete but not unnecessarily verbose.",
+        }
+        .to_string(),
+    );
+    instructions.join("\n")
+}
+
+fn load_personalization_config() -> PersonalizationConfig {
+    let Ok(text) = fs::read_to_string(personalization_config_path()) else {
+        return PersonalizationConfig::default();
+    };
+    serde_json::from_str::<PersonalizationConfig>(&text)
+        .map(normalized_personalization_config)
+        .unwrap_or_default()
+}
+
+fn save_personalization_config_to_disk(
+    config: &PersonalizationConfig,
+) -> Result<(), std::io::Error> {
+    let path = personalization_config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut options = fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&path)?;
+    let payload = serde_json::to_vec_pretty(config)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    file.write_all(&payload)?;
+    #[cfg(unix)]
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
 fn load_workspace_config() -> WorkspaceConfig {
     let mut config = WorkspaceConfig::default();
     let Ok(text) = fs::read_to_string(workspace_config_path()) else {
@@ -21642,6 +21775,10 @@ fn database_path() -> PathBuf {
 
 fn provider_config_path() -> PathBuf {
     app_data_root().join("provider.conf")
+}
+
+fn personalization_config_path() -> PathBuf {
+    app_data_root().join("personalization.json")
 }
 
 fn workspace_config_path() -> PathBuf {
@@ -23686,6 +23823,37 @@ mod tests {
 
         assert_eq!(config_hex_decode(&encoded).as_deref(), Some(prompt));
         assert!(config_hex_decode("not-hex").is_none());
+    }
+
+    #[test]
+    fn personalization_is_normalized_and_applied_to_agent_instructions() {
+        let config = normalized_personalization_config(PersonalizationConfig {
+            preferred_name: "  Dale\nAdmin  ".to_string(),
+            response_tone: "direct".to_string(),
+            response_length: "concise".to_string(),
+        });
+        let instructions = personalized_agent_instructions(&config, "Use Chinese when asked.");
+
+        assert_eq!(config.preferred_name, "DaleAdmin");
+        assert!(instructions.contains("The user's preferred name is \"DaleAdmin\""));
+        assert!(instructions.contains("answer with \"DaleAdmin\""));
+        assert!(instructions.contains("direct, factual tone"));
+        assert!(instructions.contains("Keep responses concise"));
+        assert!(instructions.starts_with("Use Chinese when asked."));
+        assert!(instructions
+            .ends_with("Keep responses concise unless more detail is necessary for correctness."));
+    }
+
+    #[test]
+    fn invalid_personalization_options_fall_back_to_safe_defaults() {
+        let config = normalized_personalization_config(PersonalizationConfig {
+            preferred_name: String::new(),
+            response_tone: "unknown".to_string(),
+            response_length: "unbounded".to_string(),
+        });
+
+        assert_eq!(config.response_tone, "natural");
+        assert_eq!(config.response_length, "balanced");
     }
 
     #[test]
