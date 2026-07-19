@@ -120,6 +120,7 @@ import {
   PersonalizationConfig,
   ProjectSessionState,
   QueuedAgentMessage,
+  QueuedAgentMessageActionReceipt,
   QueuedAgentMessageReceipt,
   revealArtifact,
   revealMainWindow,
@@ -719,6 +720,7 @@ export function App() {
   const trackedSessionTaskIdsRef = useRef<Set<string>>(new Set());
   const optimisticUserMessagesRef = useRef<Map<string, ChatMessageView>>(new Map());
   const optimisticQueuedMessagesRef = useRef<Map<string, QueuedAgentMessage>>(new Map());
+  const optimisticallyDeletedQueuedMessagesRef = useRef<Map<string, string>>(new Map());
   const queueDrainingSessionIdsRef = useRef<Set<string>>(new Set());
   const suppressQueueDrainSessionIdsRef = useRef<Set<string>>(new Set());
   const startupWindowRevealRequestedRef = useRef(false);
@@ -1043,6 +1045,11 @@ export function App() {
 
   function preserveOptimisticQueuedMessages(sessionId: string, state: AgentState) {
     let queuedMessages = state.queuedMessages;
+    optimisticallyDeletedQueuedMessagesRef.current.forEach((targetSessionId, queueId) => {
+      if (targetSessionId === sessionId) {
+        queuedMessages = queuedMessages.filter((message) => message.id !== queueId);
+      }
+    });
     optimisticQueuedMessagesRef.current.forEach((message) => {
       if (message.sessionId === sessionId) {
         queuedMessages = mergeQueuedAgentMessage(queuedMessages, message);
@@ -2477,6 +2484,12 @@ export function App() {
     }
   }
 
+  function queuedMessageForSession(sessionId: string, queueId: string) {
+    const cached = agentStateCacheRef.current.get(sessionId);
+    const state = agentState?.sessionId === sessionId ? agentState : cached;
+    return state?.queuedMessages.find((message) => message.id === queueId) ?? null;
+  }
+
   function applyQueuedMessageReceiptForSession(
     sessionId: string,
     receipt: QueuedAgentMessageReceipt
@@ -2502,6 +2515,45 @@ export function App() {
       setAgentState((current) => {
         if (!current || current.sessionId !== sessionId) return current;
         const next = mergeReceipt(current);
+        rememberSessionState(agentStateCacheRef.current, sessionId, next);
+        return next;
+      });
+    }
+  }
+
+  function applyQueuedMessageActionReceiptForSession(
+    sessionId: string,
+    receipt: QueuedAgentMessageActionReceipt
+  ) {
+    const revision = agentStateRevisionsRef.current.get(sessionId);
+    agentStateRevisionsRef.current.set(sessionId, {
+      eventCount: Math.max(revision?.eventCount ?? 0, receipt.eventCount),
+      latestSequence: Math.max(revision?.latestSequence ?? 0, receipt.latestSequence),
+      latestTimestampMs: Math.max(
+        revision?.latestTimestampMs ?? 0,
+        receipt.latestTimestampMs
+      )
+    });
+    const applyReceipt = (current: AgentState) => {
+      const queuedMessages = receipt.message
+        ? mergeQueuedAgentMessage(current.queuedMessages, receipt.message)
+        : current.queuedMessages.filter((message) => message.id !== receipt.queueId);
+      return {
+        ...current,
+        status: receipt.cancelledActiveRun ? "cancelled" : current.status,
+        canCancel: receipt.cancelledActiveRun ? false : current.canCancel,
+        canRetry: receipt.cancelledActiveRun ? true : current.canRetry,
+        eventCount: Math.max(current.eventCount, receipt.eventCount),
+        latestSequence: Math.max(current.latestSequence, receipt.latestSequence),
+        queuedMessages
+      };
+    };
+    const cached = agentStateCacheRef.current.get(sessionId);
+    if (cached) rememberSessionState(agentStateCacheRef.current, sessionId, applyReceipt(cached));
+    if (activeSessionIdRef.current === sessionId) {
+      setAgentState((current) => {
+        if (!current || current.sessionId !== sessionId) return current;
+        const next = applyReceipt(current);
         rememberSessionState(agentStateCacheRef.current, sessionId, next);
         return next;
       });
@@ -2562,12 +2614,28 @@ export function App() {
   async function handleEditQueuedMessage(queueId: string, prompt: string) {
     const sessionId = activeSessionIdRef.current;
     if (!sessionId) return;
+    const previous = queuedMessageForSession(sessionId, queueId);
+    if (!previous) {
+      const error = new Error("queued message not found");
+      setComposerError(error.message);
+      throw error;
+    }
+    const optimistic = { ...previous, prompt: prompt.trim(), updatedAtMs: Date.now() };
+    optimisticQueuedMessagesRef.current.set(queueId, optimistic);
+    updateQueuedMessagesForSession(sessionId, (messages) =>
+      mergeQueuedAgentMessage(messages, optimistic)
+    );
     setQueuedMessageBusyId(queueId);
     setComposerError(null);
     try {
-      const next = await editQueuedAgentMessage(sessionId, queueId, prompt);
-      applyAgentStateForSession(sessionId, next);
+      const receipt = await editQueuedAgentMessage(sessionId, queueId, prompt);
+      optimisticQueuedMessagesRef.current.delete(queueId);
+      applyQueuedMessageActionReceiptForSession(sessionId, receipt);
     } catch (error) {
+      optimisticQueuedMessagesRef.current.delete(queueId);
+      updateQueuedMessagesForSession(sessionId, (messages) =>
+        mergeQueuedAgentMessage(messages, previous)
+      );
       setComposerError(error instanceof Error ? error.message : String(error));
       throw error;
     } finally {
@@ -2578,12 +2646,23 @@ export function App() {
   async function handleDeleteQueuedMessage(queueId: string) {
     const sessionId = activeSessionIdRef.current;
     if (!sessionId) return;
+    const previous = queuedMessageForSession(sessionId, queueId);
+    if (!previous) return;
+    optimisticallyDeletedQueuedMessagesRef.current.set(queueId, sessionId);
+    updateQueuedMessagesForSession(sessionId, (messages) =>
+      messages.filter((message) => message.id !== queueId)
+    );
     setQueuedMessageBusyId(queueId);
     setComposerError(null);
     try {
-      const next = await deleteQueuedAgentMessage(sessionId, queueId);
-      applyAgentStateForSession(sessionId, next);
+      const receipt = await deleteQueuedAgentMessage(sessionId, queueId);
+      optimisticallyDeletedQueuedMessagesRef.current.delete(queueId);
+      applyQueuedMessageActionReceiptForSession(sessionId, receipt);
     } catch (error) {
+      optimisticallyDeletedQueuedMessagesRef.current.delete(queueId);
+      updateQueuedMessagesForSession(sessionId, (messages) =>
+        mergeQueuedAgentMessage(messages, previous)
+      );
       setComposerError(error instanceof Error ? error.message : String(error));
     } finally {
       setQueuedMessageBusyId(null);
@@ -2593,15 +2672,27 @@ export function App() {
   async function handleSteerQueuedMessage(queueId: string) {
     const sessionId = activeSessionIdRef.current;
     if (!sessionId) return;
+    const previous = queuedMessageForSession(sessionId, queueId);
+    if (!previous) return;
+    const optimistic = { ...previous, mode: "steer" as const, updatedAtMs: Date.now() };
+    optimisticQueuedMessagesRef.current.set(queueId, optimistic);
+    updateQueuedMessagesForSession(sessionId, (messages) =>
+      mergeQueuedAgentMessage(messages, optimistic)
+    );
     const runCommandActive = busySessionIds.has(sessionId);
     suppressQueueDrainSessionIdsRef.current.delete(sessionId);
     setQueuedMessageBusyId(queueId);
     setComposerError(null);
     try {
-      const next = await steerQueuedAgentMessage(sessionId, queueId);
-      applyAgentStateForSession(sessionId, next);
+      const receipt = await steerQueuedAgentMessage(sessionId, queueId);
+      optimisticQueuedMessagesRef.current.delete(queueId);
+      applyQueuedMessageActionReceiptForSession(sessionId, receipt);
       if (!runCommandActive) void drainQueuedMessages(sessionId);
     } catch (error) {
+      optimisticQueuedMessagesRef.current.delete(queueId);
+      updateQueuedMessagesForSession(sessionId, (messages) =>
+        mergeQueuedAgentMessage(messages, previous)
+      );
       setComposerError(error instanceof Error ? error.message : String(error));
     } finally {
       setQueuedMessageBusyId(null);

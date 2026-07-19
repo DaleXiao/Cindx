@@ -936,7 +936,11 @@ assert(
 assert(
   rustLib.includes("struct QueuedAgentMessageView") &&
     rustLib.includes("struct QueuedAgentMessageReceipt") &&
+    rustLib.includes("struct QueuedAgentMessageActionReceipt") &&
     rustLib.includes("async fn queue_agent_message(") &&
+    rustLib.includes("async fn edit_queued_agent_message(") &&
+    rustLib.includes("async fn delete_queued_agent_message(") &&
+    rustLib.includes("async fn steer_queued_agent_message(") &&
     !rustLib
       .slice(
         rustLib.indexOf("fn enqueue_agent_message_inner("),
@@ -944,6 +948,13 @@ assert(
       )
       .includes("agent_state_for_session") &&
     rustLib.includes("fn pending_queued_agent_messages(") &&
+    rustLib.includes("fn queued_agent_message_from_read_model(") &&
+    !rustLib
+      .slice(
+        rustLib.indexOf("async fn edit_queued_agent_message("),
+        rustLib.indexOf("async fn run_next_queued_agent_message(")
+      )
+      .includes("agent_state_for_session") &&
     rustLib.includes("fn append_agent_queue_event(") &&
     rustLib.includes("fn run_next_queued_agent_message_blocking(") &&
     rustLib.includes("queued_agent_messages_are_durable_ordered_and_session_scoped") &&
@@ -953,6 +964,7 @@ assert(
     rustLib.includes("queued_messages_preserve_a_permission_waiting_run") &&
     tauriBridge.includes("export type QueuedAgentMessage") &&
     tauriBridge.includes("export type QueuedAgentMessageReceipt") &&
+    tauriBridge.includes("export type QueuedAgentMessageActionReceipt") &&
     tauriBridge.includes("export async function queueAgentMessage(") &&
     tauriBridge.includes("queueId?: string") &&
     tauriBridge.includes("export async function runNextQueuedAgentMessage(") &&
@@ -968,7 +980,9 @@ assert(
     styles.includes("border-radius: var(--radius-lg) var(--radius-lg) 0 0") &&
     styles.includes(".queued-message + .queued-message") &&
     appSource.includes("applyQueuedMessageReceiptForSession") &&
+    appSource.includes("applyQueuedMessageActionReceiptForSession") &&
     appSource.includes("optimisticQueuedMessagesRef") &&
+    appSource.includes("optimisticallyDeletedQueuedMessagesRef") &&
     styles.includes(".composer-stack > .composer") &&
     appSource.includes("data-has-queued={Boolean(activeAgentState?.queuedMessages.length)}") &&
     styles.includes('.composer-stack[data-has-queued="true"] > .composer'),

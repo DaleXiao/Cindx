@@ -902,6 +902,17 @@ struct QueuedAgentMessageReceipt {
     latest_timestamp_ms: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QueuedAgentMessageActionReceipt {
+    queue_id: String,
+    message: Option<QueuedAgentMessageView>,
+    event_count: u64,
+    latest_sequence: u64,
+    latest_timestamp_ms: u64,
+    cancelled_active_run: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct QueuedAgentMessagePayload {
@@ -5631,34 +5642,83 @@ fn queued_agent_message_id(candidate: Option<&str>) -> String {
         .unwrap_or_else(|| unique_id("agent-queue"))
 }
 
+fn queued_agent_message_from_read_model(
+    store: &mut SqliteStore,
+    session_id: &str,
+    queue_id: &str,
+) -> Result<(Option<QueuedAgentMessageView>, bool), String> {
+    let model = load_agent_session_read_model(store, session_id)
+        .map_err(|error| error.to_string())?;
+    let can_cancel = model.state.can_cancel;
+    let message = model
+        .state
+        .queued_messages
+        .into_iter()
+        .find(|message| message.id == queue_id);
+    Ok((message, can_cancel))
+}
+
+fn queued_agent_message_action_receipt(
+    store: &SqliteStore,
+    session_id: &str,
+    queue_id: &str,
+    mut message: Option<QueuedAgentMessageView>,
+    cancelled_active_run: bool,
+) -> Result<QueuedAgentMessageActionReceipt, String> {
+    let revision = store
+        .event_revision_by_metadata(&phase16_task_id(), "session_id", session_id)
+        .map_err(|error| error.to_string())?;
+    if let Some(message) = message.as_mut() {
+        message.updated_at_ms = revision.latest_timestamp_ms;
+    }
+    Ok(QueuedAgentMessageActionReceipt {
+        queue_id: queue_id.to_string(),
+        message,
+        event_count: revision.event_count,
+        latest_sequence: revision.latest_sequence,
+        latest_timestamp_ms: revision.latest_timestamp_ms,
+        cancelled_active_run,
+    })
+}
+
 #[tauri::command]
-fn edit_queued_agent_message(
+async fn edit_queued_agent_message(
     app: tauri::AppHandle,
     input: EditQueuedAgentMessageInput,
-) -> Result<AgentState, String> {
-    let state = app.state::<AppState>();
-    let run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
+) -> Result<QueuedAgentMessageActionReceipt, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        edit_queued_agent_message_blocking(&state, input)
+    })
+    .await
+    .map_err(|error| format!("queued message edit failed to join: {error}"))?
+}
+
+fn edit_queued_agent_message_blocking(
+    state: &tauri::State<'_, AppState>,
+    input: EditQueuedAgentMessageInput,
+) -> Result<QueuedAgentMessageActionReceipt, String> {
+    let run_context = project_session_metadata_for_session(state, Some(&input.session_id))?;
     let mut store = state
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let events = agent_events_for_session(&store, &phase16_task_id(), Some(&input.session_id))
-        .map_err(|error| error.to_string())?;
-    let Some(mut queued) = pending_queued_agent_messages(&events, &input.session_id)
-        .into_iter()
-        .find(|message| message.view.id == input.queue_id)
-    else {
+    let (queued, _) = queued_agent_message_from_read_model(
+        &mut store,
+        &input.session_id,
+        &input.queue_id,
+    )?;
+    let Some(mut queued) = queued else {
         return Err("queued message not found".to_string());
     };
     let prompt = input.prompt.trim();
-    if prompt.is_empty() && queued.payload.attachments.is_empty() {
+    if prompt.is_empty() && queued.attachments.is_empty() {
         return Err("queued message is empty".to_string());
     }
-    queued.payload.prompt = if prompt.is_empty() {
+    let edited_prompt = if prompt.is_empty() {
         format!(
             "Review attached {}",
             queued
-                .payload
                 .attachments
                 .iter()
                 .map(|attachment| attachment.name.as_str())
@@ -5668,73 +5728,121 @@ fn edit_queued_agent_message(
     } else {
         prompt.to_string()
     };
+    let payload = QueuedAgentMessagePayload {
+        prompt: edited_prompt.clone(),
+        attachments: queued.attachments.clone(),
+        effort: queued.effort.clone(),
+        current_time: normalized_current_time_context(""),
+    };
     append_agent_queue_event(
         &mut store,
         &run_context,
         "edit",
-        &queued.view.id,
-        &queued.view.mode,
-        queued.view.created_at_ms,
-        Some(&queued.payload),
+        &queued.id,
+        &queued.mode,
+        queued.created_at_ms,
+        Some(&payload),
     )?;
-    agent_state_for_session(&store, None, Some(&input.session_id))
-        .map_err(|error| error.to_string())
+    queued.prompt = edited_prompt;
+    queued_agent_message_action_receipt(
+        &store,
+        &input.session_id,
+        &input.queue_id,
+        Some(queued),
+        false,
+    )
 }
 
 #[tauri::command]
-fn delete_queued_agent_message(
+async fn delete_queued_agent_message(
     app: tauri::AppHandle,
     input: QueuedAgentMessageActionInput,
-) -> Result<AgentState, String> {
-    let state = app.state::<AppState>();
-    let run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
+) -> Result<QueuedAgentMessageActionReceipt, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        delete_queued_agent_message_blocking(&state, input)
+    })
+    .await
+    .map_err(|error| format!("queued message delete failed to join: {error}"))?
+}
+
+fn delete_queued_agent_message_blocking(
+    state: &tauri::State<'_, AppState>,
+    input: QueuedAgentMessageActionInput,
+) -> Result<QueuedAgentMessageActionReceipt, String> {
+    let run_context = project_session_metadata_for_session(state, Some(&input.session_id))?;
     let mut store = state
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let events = agent_events_for_session(&store, &phase16_task_id(), Some(&input.session_id))
-        .map_err(|error| error.to_string())?;
-    let Some(queued) = pending_queued_agent_messages(&events, &input.session_id)
-        .into_iter()
-        .find(|message| message.view.id == input.queue_id)
-    else {
-        return agent_state_for_session(&store, None, Some(&input.session_id))
-            .map_err(|error| error.to_string());
+    let (queued, _) = queued_agent_message_from_read_model(
+        &mut store,
+        &input.session_id,
+        &input.queue_id,
+    )?;
+    let Some(queued) = queued else {
+        return queued_agent_message_action_receipt(
+            &store,
+            &input.session_id,
+            &input.queue_id,
+            None,
+            false,
+        );
     };
     append_agent_queue_event(
         &mut store,
         &run_context,
         "delete",
-        &queued.view.id,
-        &queued.view.mode,
-        queued.view.created_at_ms,
+        &queued.id,
+        &queued.mode,
+        queued.created_at_ms,
         None,
     )?;
-    agent_state_for_session(&store, None, Some(&input.session_id))
-        .map_err(|error| error.to_string())
+    queued_agent_message_action_receipt(
+        &store,
+        &input.session_id,
+        &input.queue_id,
+        None,
+        false,
+    )
 }
 
 #[tauri::command]
-fn steer_queued_agent_message(
+async fn steer_queued_agent_message(
     app: tauri::AppHandle,
     input: QueuedAgentMessageActionInput,
-) -> Result<AgentState, String> {
-    let state = app.state::<AppState>();
-    let run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
-    let queued = {
-        let store = state
+) -> Result<QueuedAgentMessageActionReceipt, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        steer_queued_agent_message_blocking(&app, &state, input)
+    })
+    .await
+    .map_err(|error| format!("queued message steer failed to join: {error}"))?
+}
+
+fn steer_queued_agent_message_blocking(
+    app: &tauri::AppHandle,
+    state: &tauri::State<'_, AppState>,
+    input: QueuedAgentMessageActionInput,
+) -> Result<QueuedAgentMessageActionReceipt, String> {
+    let run_context = project_session_metadata_for_session(state, Some(&input.session_id))?;
+    let (mut queued, persisted_can_cancel) = {
+        let mut store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        let events = agent_events_for_session(&store, &phase16_task_id(), Some(&input.session_id))
-            .map_err(|error| error.to_string())?;
-        pending_queued_agent_messages(&events, &input.session_id)
-            .into_iter()
-            .find(|message| message.view.id == input.queue_id)
-            .ok_or_else(|| "queued message not found".to_string())?
+        let (queued, can_cancel) = queued_agent_message_from_read_model(
+            &mut store,
+            &input.session_id,
+            &input.queue_id,
+        )?;
+        (
+            queued.ok_or_else(|| "queued message not found".to_string())?,
+            can_cancel,
+        )
     };
-    let active_run_cancelled = request_agent_run_cancel(&state, &input.session_id)?;
-    clear_suspended_agent_run(&state, &input.session_id)?;
+    let active_run_cancelled = request_agent_run_cancel(state, &input.session_id)?;
+    clear_suspended_agent_run(state, &input.session_id)?;
     let mut store = state
         .store
         .lock()
@@ -5743,14 +5851,13 @@ fn steer_queued_agent_message(
         &mut store,
         &run_context,
         "steer",
-        &queued.view.id,
+        &queued.id,
         "steer",
-        queued.view.created_at_ms,
+        queued.created_at_ms,
         None,
     )?;
-    let current = agent_state_for_session(&store, None, Some(&input.session_id))
-        .map_err(|error| error.to_string())?;
-    if current.can_cancel || active_run_cancelled {
+    let cancelled_active_run = persisted_can_cancel || active_run_cancelled;
+    if cancelled_active_run {
         append_event(
             &mut store,
             &phase16_task_id(),
@@ -5759,7 +5866,7 @@ fn steer_queued_agent_message(
             metadata_with_context(
                 [
                     ("reason".to_string(), "steered".to_string()),
-                    ("steer_queue_id".to_string(), queued.view.id.clone()),
+                    ("steer_queue_id".to_string(), queued.id.clone()),
                 ]
                 .into_iter()
                 .collect(),
@@ -5768,7 +5875,7 @@ fn steer_queued_agent_message(
         )
         .map_err(|error| error.to_string())?;
         emit_agent_stream_delta(
-            &app,
+            app,
             "agent-steered",
             Some(&input.session_id),
             "",
@@ -5777,8 +5884,14 @@ fn steer_queued_agent_message(
             None,
         );
     }
-    agent_state_for_session(&store, None, Some(&input.session_id))
-        .map_err(|error| error.to_string())
+    queued.mode = "steer".to_string();
+    queued_agent_message_action_receipt(
+        &store,
+        &input.session_id,
+        &input.queue_id,
+        Some(queued),
+        cancelled_active_run,
+    )
 }
 
 #[tauri::command]
@@ -28800,6 +28913,22 @@ mod tests {
         let edited = load_agent_session_read_model(&mut store, session_id)
             .expect("queue edit should apply incrementally");
         assert_eq!(edited.state.queued_messages[0].prompt, "edited version");
+        let (queued, can_cancel) =
+            queued_agent_message_from_read_model(&mut store, session_id, "queue-a")
+                .expect("queue action lookup should use the read model");
+        let receipt = queued_agent_message_action_receipt(
+            &store,
+            session_id,
+            "queue-a",
+            queued,
+            can_cancel,
+        )
+        .expect("queue action receipt should use the compact revision");
+        assert_eq!(
+            receipt.message.as_ref().map(|message| message.prompt.as_str()),
+            Some("edited version")
+        );
+        assert!(!receipt.cancelled_active_run);
 
         append_agent_queue_event(
             &mut store,
