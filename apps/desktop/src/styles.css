@@ -2549,7 +2549,7 @@ details[open] > summary .disclosure-triangle {
 .thread-tool-chain > summary {
   display: flex;
   gap: 6px;
-  padding-inline: 2px;
+  padding-inline: 10px;
 }
 
 .thread-tool-message > summary > svg:not(.disclosure-triangle) {
