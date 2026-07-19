@@ -2736,7 +2736,7 @@ details[open] > summary .disclosure-triangle {
 .composer-stack > .composer {
   position: relative;
   z-index: 2;
-  width: min(100%, 960px);
+  width: min(100%, 796px);
   margin-inline: auto;
 }
 

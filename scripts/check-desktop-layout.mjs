@@ -48,6 +48,11 @@ assert(
   "Pane dividers must extend through the titlebar"
 );
 assert(
+  /\.thread-message \{[\s\S]*?width: min\(100%, 760px\);/.test(css) &&
+    /\.composer-stack > \.composer \{[\s\S]*?width: min\(100%, 796px\);/.test(css),
+  "Composer shell must remain inside the 760px conversation rail"
+);
+assert(
     appSource.includes('className="sidebar-resize-handle"') &&
     appSource.includes('aria-label="Resize sidebar"') &&
     css.includes("left: calc(var(--sidebar-layout-width) - 4px)") &&
