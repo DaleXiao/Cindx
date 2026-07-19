@@ -136,8 +136,11 @@ Non-responsibilities:
 `apps/desktop/src-tauri/src/queue_service.rs` owns queue message contracts and
 event reduction. `session_projection.rs` owns the versioned per-session read
 model and incremental projection. `run_lifecycle.rs` is the shared UI-facing
-lifecycle vocabulary. These modules keep Tauri command handlers thin without
-moving desktop-specific persistence or permission behavior into the pure runtime.
+lifecycle vocabulary. `permission_service.rs` owns indexed session permission
+lookup and permission labels. `collaboration_service.rs` owns the desktop-facing
+Fugu worker contracts, continuation budgets, evidence envelopes, and reserved
+final-answer turn policy. These modules keep Tauri command handlers thin while
+leaving provider calls, tool side effects, and persistence in the desktop adapter.
 
 ## crates/tools
 
