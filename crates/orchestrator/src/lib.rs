@@ -489,6 +489,17 @@ impl WorkflowExecutionCheckpoint {
             .budget
             .max_model_turns_per_step
             .saturating_add(self.additional_model_turns_per_step);
+        self.begin_step_with_attempt_limit(step_id, model, attempt_limit, now_ms)
+    }
+
+    pub fn begin_step_with_attempt_limit(
+        &mut self,
+        step_id: &str,
+        model: &str,
+        attempt_limit: usize,
+        now_ms: u64,
+    ) -> Result<(), String> {
+        let attempt_limit = attempt_limit.max(1);
         let step = self
             .steps
             .get_mut(step_id)
@@ -3235,6 +3246,25 @@ mod tests {
         checkpoint.begin_step("approach_a", "planner", 2_050).unwrap();
         assert_eq!(checkpoint.continuations, 1);
         assert_eq!(checkpoint.steps["approach_a"].attempts, 2);
+    }
+
+    #[test]
+    fn workflow_checkpoint_accepts_an_explicit_attempt_budget() {
+        let mut plan = workflow_plan("workflow-attempt-budget", false);
+        plan.budget.max_model_turns_per_step = 1;
+        let mut checkpoint = WorkflowExecutionCheckpoint::new("attempt-budget", plan, 3_000);
+
+        checkpoint
+            .begin_step_with_attempt_limit("approach_a", "planner", 2, 3_010)
+            .unwrap();
+        checkpoint.fail_step("approach_a", "retry", 3_020).unwrap();
+        checkpoint
+            .begin_step_with_attempt_limit("approach_a", "planner", 2, 3_030)
+            .unwrap();
+        assert!(checkpoint
+            .begin_step_with_attempt_limit("approach_a", "planner", 2, 3_040)
+            .unwrap_err()
+            .contains("exhausted"));
     }
 
     #[test]
