@@ -1691,16 +1691,20 @@ assert(
   "Long sessions must avoid full-state polling and repeated offscreen rendering"
 );
 assert(
-  agentMemorySource.includes('MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v2"') &&
+  agentMemorySource.includes('MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v3"') &&
     agentMemorySource.includes("extract_durable_memories") &&
     agentMemorySource.includes("merge_memory_records") &&
     agentMemorySource.includes("recall_memories_at") &&
+    agentMemorySource.includes("record_memory_observed_uses") &&
+    agentMemorySource.includes("observed_use_count") &&
     agentMemorySource.includes("Memory does not override the current user request") &&
     rustLib.includes('AGENT_MEMORY_READ_MODEL_NAMESPACE: &str = "agent-memory-v1"') &&
     rustLib.includes("load_project_memory_ledger") &&
     rustLib.includes("recall_project_memory_for_prompt") &&
     rustLib.includes("MemoryStatsView") &&
     rustLib.includes('"Project memory recalled"') &&
+    rustLib.includes('"Project memory utilization measured"') &&
+    rustLib.includes("should_recall_agent_memory") &&
     rustLib.includes("delete_project_memory") &&
     appSource.includes('aria-label="Project memory stats"'),
   "Project memory must be durable, deduplicated, explainable, trust-scoped, and deleted with its project"

@@ -9,8 +9,8 @@ use agent_graph::{
 use agent_memory::{
     build_restore_context_pack, build_session_checkpoint_at, conversation_memory_to_markdown,
     extract_durable_memories, memory_recalls_to_markdown, merge_memory_records,
-    recall_memories_at, record_memory_recalls, CheckpointOptions, MemoryKind, MemoryLedger,
-    RestoreContextPack, SessionCheckpoint, MEMORY_LEDGER_SCHEMA,
+    recall_memories_at, record_memory_observed_uses, record_memory_recalls, CheckpointOptions,
+    MemoryKind, MemoryLedger, RestoreContextPack, SessionCheckpoint, MEMORY_LEDGER_SCHEMA,
 };
 use agent_mcp::{McpCatalogService, McpServerConfig, McpTransportConfig};
 use agent_rag::{
@@ -1245,6 +1245,7 @@ struct MemoryStatsView {
     outcomes: usize,
     evidence: usize,
     recalls: u64,
+    observed_uses: u64,
     updated_at_ms: u64,
 }
 
@@ -6338,7 +6339,18 @@ fn run_agent_task_blocking_inner(
     if should_recall_agent_memory(&routing_context, &prompt) {
         cancellation.mark_progress("memory", "Recalling relevant project memory");
         match recall_project_memory_for_prompt(&state, &task_id, &run_context, &prompt) {
-            Ok(Some(memory_context)) => history.push(memory_context),
+            Ok(Some(memory_context)) => {
+                if let Some(memory_ids) = memory_context.metadata.get("memory_ids") {
+                    run_context.insert("memory_ids".to_string(), memory_ids.clone());
+                }
+                if let Some(selected_count) = memory_context.metadata.get("selected_count") {
+                    run_context.insert(
+                        "memory_selected_count".to_string(),
+                        selected_count.clone(),
+                    );
+                }
+                history.push(memory_context);
+            }
             Ok(None) => {}
             Err(error) => eprintln!("project memory recall unavailable: {error}"),
         }
@@ -13115,6 +13127,14 @@ fn continue_agent_loop(
                     ),
                 )
                 .map_err(|error| error.to_string())?;
+                if let Err(error) = record_project_memory_observed_use(
+                    &mut store,
+                    &runtime.task_id,
+                    &run_context,
+                    &final_answer,
+                ) {
+                    eprintln!("project memory utilization unavailable: {error}");
+                }
                 if let Err(error) = refresh_project_memory_after_completion(&mut store, &run_context)
                 {
                     eprintln!("project memory checkpoint unavailable: {error}");
@@ -17411,6 +17431,11 @@ fn project_memory_stats(
             .filter(|record| record.kind == MemoryKind::Evidence)
             .count(),
         recalls: ledger.records.iter().map(|record| record.recall_count).sum(),
+        observed_uses: ledger
+            .records
+            .iter()
+            .map(|record| record.observed_use_count)
+            .sum(),
         updated_at_ms: ledger
             .records
             .iter()
@@ -17424,8 +17449,7 @@ fn should_recall_agent_memory(context: &RoutingContext, prompt: &str) -> bool {
     if context.needs_tools
         || context.needs_retrieval
         || context.needs_multi_model
-        || context.complexity_score > 0
-        || !matches!(context.task_class, TaskClass::General)
+        || context.complexity_score >= 2
     {
         return true;
     }
@@ -17535,6 +17559,14 @@ fn recall_project_memory_for_prompt(
             ("internal".to_string(), "true".to_string()),
             ("kind".to_string(), "project_memory".to_string()),
             ("selected_count".to_string(), recalls.len().to_string()),
+            (
+                "memory_ids".to_string(),
+                recalls
+                    .iter()
+                    .map(|recall| recall.record.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
         ]
         .into_iter()
         .collect(),
@@ -17549,6 +17581,62 @@ fn refresh_project_memory_after_completion(
         return Ok(0);
     };
     load_project_memory_ledger(store, project_id).map(|ledger| ledger.records.len())
+}
+
+fn record_project_memory_observed_use(
+    store: &mut SqliteStore,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    output: &str,
+) -> Result<usize, StorageError> {
+    let (Some(project_id), Some(memory_ids)) = (
+        run_context.get("project_id"),
+        run_context.get("memory_ids"),
+    ) else {
+        return Ok(0);
+    };
+    let memory_ids = memory_ids
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if memory_ids.is_empty() {
+        return Ok(0);
+    }
+    let observed_at_ms = current_time_millis();
+    let mut ledger = load_project_memory_ledger(store, project_id)?;
+    let used_ids = record_memory_observed_uses(
+        &mut ledger,
+        &memory_ids,
+        output,
+        observed_at_ms,
+    );
+    append_event(
+        store,
+        task_id,
+        EventKind::RetrievalPerformed,
+        "Project memory utilization measured",
+        metadata_with_context(
+            [
+                ("action".to_string(), "memory_use".to_string()),
+                (
+                    "selected_count".to_string(),
+                    memory_ids.len().to_string(),
+                ),
+                ("used_count".to_string(), used_ids.len().to_string()),
+                ("used_memory_ids".to_string(), used_ids.join(",")),
+            ]
+            .into_iter()
+            .collect(),
+            run_context,
+        ),
+    )?;
+    let revision = store.event_revision(task_id)?;
+    ledger.revision = revision.latest_sequence;
+    ledger.event_count = revision.event_count;
+    save_project_memory_ledger(store, &ledger)?;
+    Ok(used_ids.len())
 }
 
 fn load_routing_telemetry_read_model(
@@ -23278,11 +23366,39 @@ mod tests {
             .find(|record| record.kind == agent_memory::MemoryKind::Requirement)
             .expect("requirement memory should exist");
         assert_eq!(requirement.source_session_ids.len(), 2);
+        let requirement_id = requirement.id.clone();
         let persisted = store
             .load_read_model(AGENT_MEMORY_READ_MODEL_NAMESPACE, "project-memory")
             .expect("memory read model should load")
             .expect("memory read model should exist");
         assert_eq!(persisted.revision, ledger.revision);
+
+        let use_context = [
+            ("project_id".to_string(), "project-memory".to_string()),
+            ("session_id".to_string(), "session-memory-c".to_string()),
+            ("agent_run_id".to_string(), "run-memory-c".to_string()),
+            ("memory_ids".to_string(), requirement_id.clone()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        let used = record_project_memory_observed_use(
+            &mut store,
+            &phase16_task_id(),
+            &use_context,
+            "Kept effort selection scoped to each session.",
+        )
+        .expect("memory utilization should persist");
+        assert_eq!(used, 1);
+        let updated = load_project_memory_ledger(&mut store, "project-memory")
+            .expect("updated memory ledger should load");
+        assert_eq!(
+            updated
+                .records
+                .iter()
+                .find(|record| record.id == requirement_id)
+                .map(|record| record.observed_use_count),
+            Some(1)
+        );
     }
 
     #[test]
@@ -23299,7 +23415,7 @@ mod tests {
             &mut store,
             &phase16_task_id(),
             MessageRole::User,
-            "Use sk-1234567890abcdef only for this request",
+            "Always use sk-1234567890abcdef for this project",
             context.clone(),
         )
         .expect("redacted message should append");
@@ -26527,6 +26643,15 @@ mod tests {
         assert!(!should_run_agent_knowledge_retrieval(&greeting));
         assert!(!should_run_agent_knowledge_retrieval(&capability_question));
         assert!(should_run_agent_knowledge_retrieval(&retrieval));
+        assert!(!should_recall_agent_memory(&greeting, "你好"));
+        assert!(!should_recall_agent_memory(
+            &capability_question,
+            "你会不会写代码"
+        ));
+        assert!(should_recall_agent_memory(
+            &RoutingContext::from_prompt("继续上次的侧边栏修改", Vec::new()),
+            "继续上次的侧边栏修改"
+        ));
     }
 
     #[test]

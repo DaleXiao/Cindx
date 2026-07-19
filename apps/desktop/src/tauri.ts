@@ -487,6 +487,7 @@ export type MemoryStatsView = {
   outcomes: number;
   evidence: number;
   recalls: number;
+  observedUses: number;
   updatedAtMs: number;
 };
 
@@ -1037,6 +1038,7 @@ let browserPhase7State: Phase7State = {
     outcomes: 0,
     evidence: 0,
     recalls: 0,
+    observedUses: 0,
     updatedAtMs: 0
   },
   sources: [],
