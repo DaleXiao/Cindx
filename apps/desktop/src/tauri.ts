@@ -233,6 +233,13 @@ export type QueuedAgentMessage = {
   updatedAtMs: number;
 };
 
+export type QueuedAgentMessageReceipt = {
+  message: QueuedAgentMessage;
+  eventCount: number;
+  latestSequence: number;
+  latestTimestampMs: number;
+};
+
 export type AttachmentUpload = {
   name: string;
   mimeType: string;
@@ -2409,9 +2416,9 @@ export async function queueAgentMessage(
   sessionId: string,
   attachments: AgentAttachment[] = [],
   effort: AgentEffort = "auto"
-): Promise<AgentState> {
+): Promise<QueuedAgentMessageReceipt> {
   try {
-    return await invoke<AgentState>("queue_agent_message", {
+    return await invoke<QueuedAgentMessageReceipt>("queue_agent_message", {
       input: { prompt, sessionId, currentTime: currentAgentTimeContext(), effort, attachments }
     });
   } catch (error) {
@@ -2419,26 +2426,29 @@ export async function queueAgentMessage(
     const now = Date.now();
     const visiblePrompt =
       prompt.trim() || `Review attached ${attachments.map((attachment) => attachment.name).join(", ")}`;
+    const message: QueuedAgentMessage = {
+      id: `agent-queue-${now}`,
+      sessionId,
+      prompt: visiblePrompt,
+      attachments,
+      effort,
+      mode: "queue",
+      createdAtMs: now,
+      updatedAtMs: now
+    };
     browserAgentState = {
       ...browserAgentState,
       sessionId,
       eventCount: browserAgentState.eventCount + 1,
       latestSequence: browserAgentState.latestSequence + 1,
-      queuedMessages: [
-        ...browserAgentState.queuedMessages,
-        {
-          id: `agent-queue-${now}`,
-          sessionId,
-          prompt: visiblePrompt,
-          attachments,
-          effort,
-          mode: "queue",
-          createdAtMs: now,
-          updatedAtMs: now
-        }
-      ]
+      queuedMessages: [...browserAgentState.queuedMessages, message]
     };
-    return browserAgentState;
+    return {
+      message,
+      eventCount: browserAgentState.eventCount,
+      latestSequence: browserAgentState.latestSequence,
+      latestTimestampMs: now
+    };
   }
 }
 

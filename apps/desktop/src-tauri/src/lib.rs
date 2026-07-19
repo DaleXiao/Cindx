@@ -893,6 +893,15 @@ struct QueuedAgentMessageView {
     updated_at_ms: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QueuedAgentMessageReceipt {
+    message: QueuedAgentMessageView,
+    event_count: u64,
+    latest_sequence: u64,
+    latest_timestamp_ms: u64,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct QueuedAgentMessagePayload {
@@ -5521,18 +5530,22 @@ async fn run_agent_task(
 }
 
 #[tauri::command]
-fn queue_agent_message(
+async fn queue_agent_message(
     app: tauri::AppHandle,
     input: QueueAgentMessageInput,
-) -> Result<AgentState, String> {
-    let state = app.state::<AppState>();
-    enqueue_agent_message_inner(&state, input).map(|(agent, _)| agent)
+) -> Result<QueuedAgentMessageReceipt, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        enqueue_agent_message_inner(&state, input).map(|(receipt, _)| receipt)
+    })
+    .await
+    .map_err(|error| format!("queued message failed to join: {error}"))?
 }
 
 fn enqueue_agent_message_inner(
     state: &tauri::State<'_, AppState>,
     input: QueueAgentMessageInput,
-) -> Result<(AgentState, String), String> {
+) -> Result<(QueuedAgentMessageReceipt, String), String> {
     let run_context = project_session_metadata_for_session(state, Some(&input.session_id))?;
     let root = run_context
         .get("project_root")
@@ -5577,9 +5590,28 @@ fn enqueue_agent_message_inner(
         created_at_ms,
         Some(&payload),
     )?;
-    let agent = agent_state_for_session(&store, None, Some(&input.session_id))
+    let revision = store
+        .event_revision_by_metadata(&phase16_task_id(), "session_id", &input.session_id)
         .map_err(|error| error.to_string())?;
-    Ok((agent, queue_id))
+    let message = QueuedAgentMessageView {
+        id: queue_id.clone(),
+        session_id: input.session_id,
+        prompt: payload.prompt,
+        attachments: payload.attachments,
+        effort: payload.effort,
+        mode: "queue".to_string(),
+        created_at_ms,
+        updated_at_ms: revision.latest_timestamp_ms,
+    };
+    Ok((
+        QueuedAgentMessageReceipt {
+            message,
+            event_count: revision.event_count,
+            latest_sequence: revision.latest_sequence,
+            latest_timestamp_ms: revision.latest_timestamp_ms,
+        },
+        queue_id,
+    ))
 }
 
 #[tauri::command]
