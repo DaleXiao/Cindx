@@ -82,9 +82,11 @@ use tools::{
 };
 
 mod run_control;
+mod run_lifecycle;
 mod schedule;
 
 use run_control::{AgentRunControl, RunBudget, RunControlSnapshot};
+use run_lifecycle::{AgentRunEvent, AgentRunStatus};
 use schedule::{
     initial_next_run_at_ms, next_occurrence_after_ms, normalized_weekly_days,
     timestamp_ms_from_local, ScheduleCadence, ScheduleConfig, ScheduleRecord, ScheduleRunRecord,
@@ -2849,26 +2851,18 @@ fn schedule_queue_progress(events: &[Event], queue_id: &str) -> Option<ScheduleQ
                 _ => {}
             }
         }
-        let next_status = match event.summary.as_str() {
-            "Agent task started" | "Agent task retry started" => Some("running"),
-            "Agent task waiting for permission" => Some("waiting_for_permission"),
-            "Agent task paused" => Some("paused"),
-            "Agent task completed" => Some("completed"),
-            "Agent task failed" => Some("failed"),
-            "Agent task cancelled" => Some("cancelled"),
-            _ => None,
-        };
+        let next_status = AgentRunEvent::from_event(event).map(AgentRunEvent::status);
         if let Some(status) = next_status {
-            let terminal = matches!(status, "paused" | "completed" | "failed" | "cancelled");
+            let terminal = status == AgentRunStatus::Paused || status.is_terminal();
             let started_at_ms = progress
                 .as_ref()
                 .and_then(|progress| progress.started_at_ms)
                 .or((!terminal).then_some(event.timestamp_ms));
             progress = Some(ScheduleQueueProgress {
-                status: status.to_string(),
+                status: status.label().to_string(),
                 started_at_ms,
                 finished_at_ms: terminal.then_some(event.timestamp_ms),
-                error: if status == "failed" {
+                error: if status == AgentRunStatus::Failed {
                     event
                         .metadata
                         .get("error")
@@ -14173,8 +14167,13 @@ fn agent_state_from_events(
                 .unwrap_or(false)
         })
         .and_then(|event| event.metadata.get("content").cloned());
-    let status = agent_status_from_events(&active_events, !pending_approvals.is_empty(), last_error.as_ref());
-    if matches!(status.as_str(), "cancelled" | "completed" | "failed") {
+    let run_status = AgentRunStatus::from_events(
+        &active_events,
+        !pending_approvals.is_empty(),
+        last_error.is_some(),
+    );
+    let status = run_status.label().to_string();
+    if run_status.is_terminal() {
         pending_approvals.clear();
     }
     let transcript_messages = agent_transcript_from_active_events(&thread_events).len();
@@ -14227,22 +14226,18 @@ fn agent_state_from_events(
         .and_then(|event| event.metadata.get("run_tool_call_budget"))
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or_default();
-    let can_cancel = matches!(status.as_str(), "running" | "waiting_for_permission");
-    let can_continue = status == "paused"
-        || (status == "completed"
-            && active_events
-            .iter()
-            .rev()
-            .find(|event| {
-                matches!(event.kind, EventKind::TaskStatusChanged)
-                    && !is_agent_queue_event(event)
-            })
-            .is_some_and(|event| {
-                event.summary == "Agent task completed"
-                    && event.metadata.get("completion").map(String::as_str) == Some("partial")
-            }));
-    let can_retry = matches!(status.as_str(), "paused" | "completed" | "failed" | "cancelled")
-        && latest_agent_prompt_from_active_events(&active_events).is_some();
+    let partial_completion = active_events
+        .iter()
+        .rev()
+        .find_map(|event| {
+            (AgentRunEvent::from_event(event) == Some(AgentRunEvent::Completed))
+                .then(|| event.metadata.get("completion").map(String::as_str) == Some("partial"))
+        })
+        .unwrap_or(false);
+    let has_user_prompt = latest_agent_prompt_from_active_events(&active_events).is_some();
+    let can_cancel = run_status.can_cancel();
+    let can_continue = run_status.can_continue(partial_completion);
+    let can_retry = run_status.can_retry(has_user_prompt);
 
     Ok(AgentState {
         task_id: task_id.0,
@@ -14475,39 +14470,19 @@ fn apply_event_to_agent_session_read_model(
     }
 
     if event.kind == EventKind::Error {
-        model.state.status = "failed".to_string();
         model.state.last_error = event
             .metadata
             .get("error")
             .cloned()
             .or_else(|| Some(event.summary.clone()));
-        model.state.can_continue = false;
-    } else if event.kind == EventKind::TaskStatusChanged && model.state.last_error.is_none() {
-        match event.summary.as_str() {
-            "Agent task waiting for permission" => {
-                model.state.status = "waiting_for_permission".to_string()
-            }
-            "Agent task paused" => {
-                model.state.status = "paused".to_string();
-                model.state.can_continue = true;
-            }
-            "Agent task cancelled" => {
-                model.state.status = "cancelled".to_string();
-                model.state.can_continue = false;
-            }
-            "Agent task completed" => {
-                model.state.status = "completed".to_string();
-                model.state.can_continue =
-                    event.metadata.get("completion").map(String::as_str) == Some("partial");
-            }
-            "Agent task failed" => {
-                model.state.status = "failed".to_string();
-                model.state.can_continue = false;
-            }
-            summary if summary.starts_with("Agent task ") => {
-                model.state.status = "running".to_string();
-            }
-            _ => {}
+    }
+    if event.kind == EventKind::Error || model.state.last_error.is_none() {
+        if let Some(run_event) = AgentRunEvent::from_event(event) {
+            let run_status = run_event.status();
+            let partial_completion = event.metadata.get("completion").map(String::as_str)
+                == Some("partial");
+            model.state.status = run_status.label().to_string();
+            model.state.can_continue = run_status.can_continue(partial_completion);
         }
     }
 
@@ -14519,14 +14494,9 @@ fn apply_event_to_agent_session_read_model(
             / model.state.context_window_tokens.max(1) as f64
             * 100.0)
             .clamp(0.0, 100.0);
-    model.state.can_cancel = matches!(
-        model.state.status.as_str(),
-        "running" | "waiting_for_permission"
-    );
-    model.state.can_retry = matches!(
-        model.state.status.as_str(),
-        "paused" | "completed" | "failed" | "cancelled"
-    ) && model.has_user_prompt;
+    let run_status = AgentRunStatus::parse(&model.state.status);
+    model.state.can_cancel = run_status.can_cancel();
+    model.state.can_retry = run_status.can_retry(model.has_user_prompt);
 }
 
 fn load_agent_session_read_model(
@@ -14665,11 +14635,13 @@ fn agent_state_from_read_model(
         .filter_map(tool_approval_from_audit)
         .collect::<Vec<_>>();
     pending_approvals.reverse();
-    if !pending_approvals.is_empty() && state.status == "running" {
-        state.status = "waiting_for_permission".to_string();
-        state.can_cancel = true;
+    let mut run_status = AgentRunStatus::parse(&state.status);
+    if !pending_approvals.is_empty() && run_status == AgentRunStatus::Running {
+        run_status = AgentRunStatus::WaitingForPermission;
+        state.status = run_status.label().to_string();
+        state.can_cancel = run_status.can_cancel();
     }
-    if matches!(state.status.as_str(), "cancelled" | "completed" | "failed") {
+    if run_status.is_terminal() {
         pending_approvals.clear();
     }
     state.pending_approvals = pending_approvals;
@@ -14962,7 +14934,8 @@ fn agent_task_is_cancelled(
     session_id: Option<&str>,
 ) -> Result<bool, StorageError> {
     if let Some(session_id) = session_id {
-        return Ok(load_agent_session_read_model(store, session_id)?.state.status == "cancelled");
+        let status = load_agent_session_read_model(store, session_id)?.state.status;
+        return Ok(AgentRunStatus::parse(&status) == AgentRunStatus::Cancelled);
     }
     let events = agent_events_for_session(store, &phase16_task_id(), session_id)?;
     Ok(active_agent_events_for_session(&events, session_id)
@@ -15397,44 +15370,6 @@ fn pending_agent_permissions_for_run(
     Ok(requests)
 }
 
-fn agent_status_from_events(
-    events: &[Event],
-    has_pending_approval: bool,
-    last_error: Option<&String>,
-) -> String {
-    if last_error.is_some()
-        || events
-            .iter()
-            .any(|event| matches!(event.kind, EventKind::Error))
-    {
-        return "failed".to_string();
-    }
-
-    if let Some(status_event) = events
-        .iter()
-        .rev()
-        .find(|event| {
-            matches!(event.kind, EventKind::TaskStatusChanged) && !is_agent_queue_event(event)
-        })
-    {
-        match status_event.summary.as_str() {
-            "Agent task cancelled" => return "cancelled".to_string(),
-            "Agent task paused" => return "paused".to_string(),
-            "Agent task completed" => return "completed".to_string(),
-            "Agent task waiting for permission" => return "waiting_for_permission".to_string(),
-            _ => {}
-        }
-    }
-
-    if has_pending_approval {
-        "waiting_for_permission".to_string()
-    } else if events.is_empty() {
-        "idle".to_string()
-    } else {
-        "running".to_string()
-    }
-}
-
 fn latest_agent_prompt_from_active_events(active_events: &[Event]) -> Option<String> {
     latest_external_user_turn_event(active_events)
         .and_then(|event| event.metadata.get("content").cloned())
@@ -15744,7 +15679,13 @@ fn agent_trace_state_from_events(
         })
         .collect::<Vec<_>>();
     let has_pending_approval = audits.iter().any(|audit| audit.resolution.is_none());
-    let status = agent_status_from_events(&active_events, has_pending_approval, last_error.as_ref());
+    let status = AgentRunStatus::from_events(
+        &active_events,
+        has_pending_approval,
+        last_error.is_some(),
+    )
+    .label()
+    .to_string();
     let turns = agent_trace_turns_from_events(&active_events, &audits);
     let step_count = turns.iter().map(|turn| turn.steps.len()).sum::<usize>();
     let tool_call_count = turns
@@ -16230,11 +16171,7 @@ fn agent_run_time_bounds(events: &[Event], active_events: &[Event]) -> (Option<u
 }
 
 fn is_agent_run_start_event(event: &Event) -> bool {
-    matches!(event.kind, EventKind::TaskStatusChanged)
-        && matches!(
-            event.summary.as_str(),
-            "Agent task started" | "Agent task retry started"
-        )
+    AgentRunEvent::from_event(event).is_some_and(AgentRunEvent::is_start)
 }
 
 fn phase8_state_with_error(
