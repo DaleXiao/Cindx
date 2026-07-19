@@ -1691,6 +1691,17 @@ assert(
   "Long sessions must avoid full-state polling and repeated offscreen rendering"
 );
 assert(
+  rustLib.includes('AGENT_RECOVERY_SCHEMA: &str = "cindx.agent-recovery.v1"') &&
+    rustLib.includes("AgentRecoveryEnvelope") &&
+    rustLib.includes("claim_agent_recovery_envelope") &&
+    rustLib.includes("recovery_safe_transcript") &&
+    rustLib.includes('"Agent task paused"') &&
+    rustLib.includes('"continuation_replay"') &&
+    rustLib.includes('"app_restarted_waiting_for_permission"') &&
+    tauriBridge.includes('| "paused"'),
+  "Long agent runs must recover durably without replaying unknown tool outcomes"
+);
+assert(
   agentMemorySource.includes('MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v3"') &&
     agentMemorySource.includes("extract_durable_memories") &&
     agentMemorySource.includes("merge_memory_records") &&

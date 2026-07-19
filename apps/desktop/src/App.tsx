@@ -1447,7 +1447,7 @@ export function App() {
     canContinue = false
   ) {
     const tracked = trackedSessionTaskIdsRef.current.has(sessionId);
-    const isTerminal = ["completed", "failed", "cancelled", "idle"].includes(status);
+    const isTerminal = ["paused", "completed", "failed", "cancelled", "idle"].includes(status);
     if (isTerminal) trackedSessionTaskIdsRef.current.delete(sessionId);
 
     setSessionStatusOverrides((current) => {
@@ -1455,7 +1455,8 @@ export function App() {
       if (tracked && status === "waiting_for_permission") nextStatus = "Approval required";
       else if (tracked && status === "running") nextStatus = "Working";
       else if (tracked && activeSessionIdRef.current !== sessionId) {
-        if (status === "completed") nextStatus = canContinue ? "Paused" : "Completed";
+        if (status === "paused") nextStatus = "Paused";
+        else if (status === "completed") nextStatus = canContinue ? "Paused" : "Completed";
         else if (status === "failed") nextStatus = "Error";
         else if (status === "cancelled") nextStatus = "Interrupted";
       }

@@ -163,6 +163,7 @@ export type ScheduleRun = {
     | "queued"
     | "running"
     | "waiting_for_permission"
+    | "paused"
     | "completed"
     | "failed"
     | "cancelled"
@@ -604,7 +605,14 @@ export type AgentState = {
   projectName: string | null;
   sessionId: string | null;
   sessionName: string | null;
-  status: "idle" | "running" | "waiting_for_permission" | "completed" | "failed" | "cancelled";
+  status:
+    | "idle"
+    | "running"
+    | "waiting_for_permission"
+    | "paused"
+    | "completed"
+    | "failed"
+    | "cancelled";
   turnCount: number;
   maxTurns: number;
   transcriptMessages: number;
