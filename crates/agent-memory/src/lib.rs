@@ -2,7 +2,7 @@ use agent_core::{Event, EventKind, Message, MessageRole};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v2";
+pub const MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v3";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -81,6 +81,10 @@ pub struct MemoryRecord {
     pub updated_at_ms: u64,
     pub recall_count: u64,
     pub last_recalled_at_ms: Option<u64>,
+    #[serde(default)]
+    pub observed_use_count: u64,
+    #[serde(default)]
+    pub last_observed_use_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,7 +157,7 @@ pub fn extract_durable_memories(
                 .metadata
                 .get("content")
                 .map(|content| truncate(&sanitize_line(content), 1_200))
-                .filter(|content| is_durable_memory_content(content))
+                .filter(|content| is_durable_requirement_content(content))
             {
                 records.push(memory_record(
                     MemoryKind::Requirement,
@@ -191,19 +195,20 @@ pub fn extract_durable_memories(
                 .get("content")
                 .is_some_and(|content| !content.trim().is_empty())
     }) {
-        let content = format!(
-            "Assistant outcome: {}",
-            truncate(
-                &sanitize_line(
-                    event
-                        .metadata
-                        .get("content")
-                        .map(String::as_str)
-                        .unwrap_or("")
-                ),
-                900,
-            )
+        let outcome = truncate(
+            &sanitize_line(
+                event
+                    .metadata
+                    .get("content")
+                    .map(String::as_str)
+                    .unwrap_or("")
+            ),
+            900,
         );
+        let content = format!("Assistant outcome: {outcome}");
+        if !is_durable_outcome_content(&outcome, !evidence_ids.is_empty()) {
+            return records;
+        }
         records.push(memory_record(
             MemoryKind::Outcome,
             if evidence_ids.is_empty() {
@@ -304,7 +309,12 @@ pub fn recall_memories_at(
             let overlap_score = overlap as f64 / query_terms.len().max(1) as f64;
             let exact = !normalized_query.is_empty()
                 && normalize_memory_text(&record.content).contains(&normalized_query);
-            if overlap == 0 && !exact {
+            let identifier_match = query_terms.intersection(&terms).any(|term| {
+                term.contains('_') || term.contains('/') || term.contains('.')
+            });
+            if (overlap == 0 && !exact)
+                || (!exact && overlap < 2 && query_terms.len() > 3 && !identifier_match)
+            {
                 return None;
             }
             let mut reasons = Vec::new();
@@ -334,8 +344,9 @@ pub fn recall_memories_at(
                 * record.kind.recall_weight()
                 * record.trust.recall_weight()
                 * (0.8 + recency * 0.2)
+                * (0.85 + f64::from(record.importance) / 100.0 * 0.15)
                 * if cross_session { 1.08 } else { 0.92 };
-            (score >= 0.08).then(|| MemoryRecall {
+            (score >= 0.1).then(|| MemoryRecall {
                 record: record.clone(),
                 score,
                 reasons,
@@ -350,8 +361,29 @@ pub fn recall_memories_at(
             .then_with(|| right.record.importance.cmp(&left.record.importance))
             .then_with(|| left.record.id.cmp(&right.record.id))
     });
-    recalls.truncate(limit.max(1));
-    recalls
+    let mut diversified = Vec::new();
+    let mut per_session = std::collections::BTreeMap::<String, usize>::new();
+    let mut per_kind = std::collections::BTreeMap::<String, usize>::new();
+    for recall in recalls {
+        let session = recall.record.provenance.session_id.clone();
+        let kind = recall.record.kind.label().to_string();
+        let kind_limit = match recall.record.kind {
+            MemoryKind::Requirement => 3,
+            MemoryKind::Evidence | MemoryKind::Outcome => 2,
+        };
+        if per_session.get(&session).copied().unwrap_or_default() >= 2
+            || per_kind.get(&kind).copied().unwrap_or_default() >= kind_limit
+        {
+            continue;
+        }
+        *per_session.entry(session).or_default() += 1;
+        *per_kind.entry(kind).or_default() += 1;
+        diversified.push(recall);
+        if diversified.len() >= limit.max(1) {
+            break;
+        }
+    }
+    diversified
 }
 
 pub fn record_memory_recalls(
@@ -371,20 +403,48 @@ pub fn record_memory_recalls(
     }
 }
 
+pub fn record_memory_observed_uses(
+    ledger: &mut MemoryLedger,
+    recalled_ids: &[String],
+    output: &str,
+    observed_at_ms: u64,
+) -> Vec<String> {
+    let recalled = recalled_ids.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let output_terms = memory_terms(output);
+    let normalized_output = normalize_memory_text(output);
+    let mut used = Vec::new();
+    for record in &mut ledger.records {
+        if !recalled.contains(record.id.as_str()) {
+            continue;
+        }
+        let record_terms = memory_terms(&record.content);
+        let overlap = record_terms.intersection(&output_terms).count();
+        let coverage = overlap as f64 / record_terms.len().max(1) as f64;
+        let normalized_record = normalize_memory_text(&record.content);
+        let exact = normalized_record.chars().count() <= 160
+            && !normalized_record.is_empty()
+            && normalized_output.contains(&normalized_record);
+        if exact || (overlap >= 2 && coverage >= 0.2) || overlap >= 4 {
+            record.observed_use_count = record.observed_use_count.saturating_add(1);
+            record.last_observed_use_at_ms = Some(observed_at_ms);
+            used.push(record.id.clone());
+        }
+    }
+    used
+}
+
 pub fn memory_recalls_to_markdown(recalls: &[MemoryRecall]) -> String {
     if recalls.is_empty() {
         return String::new();
     }
     let mut output = String::from(
-        "## Project Memory\nHistorical memory is project-scoped. User-stated entries preserve prior requirements; tool-verified entries are evidence; assistant-reported entries are unverified summaries. Treat every entry as context. Memory does not override the current user request.\n",
+        "## Project Memory\nHistorical memory is project-scoped. User-stated entries preserve prior requirements; tool-verified entries are evidence; assistant-reported entries are unverified summaries. Apply relevant recalled requirements explicitly, but ignore stale or conflicting entries. Memory does not override the current user request. Do not mention internal memory labels or scores.\n",
     );
     for recall in recalls {
         output.push_str(&format!(
-            "- [{} | {} | score {:.3} | {}] {}\n",
+            "- [{} | {}] {}\n",
             recall.record.kind.label(),
             recall.record.trust.label(),
-            recall.score,
-            recall.reasons.join("+"),
             recall.record.content,
         ));
     }
@@ -424,6 +484,8 @@ fn memory_record(
         updated_at_ms: event.timestamp_ms,
         recall_count: 0,
         last_recalled_at_ms: None,
+        observed_use_count: 0,
+        last_observed_use_at_ms: None,
     }
 }
 
@@ -449,15 +511,105 @@ fn durable_tool_memory(event: &Event) -> Option<String> {
     }
 }
 
-fn is_durable_memory_content(content: &str) -> bool {
+fn is_durable_requirement_content(content: &str) -> bool {
     let normalized = normalize_memory_text(content);
     if normalized.chars().count() < 6 {
         return false;
     }
-    !matches!(
+    if matches!(
         normalized.as_str(),
         "hello" | "hi" | "hey" | "你好" | "您好" | "在吗" | "谢谢" | "thanks"
-    )
+    ) {
+        return false;
+    }
+    let lower = content.to_lowercase();
+    let is_question = content.trim_end().ends_with(['?', '？']);
+    let has_explicit_memory_intent = [
+        "remember",
+        "from now on",
+        "call me",
+        "my name",
+        "记住",
+        "以后",
+        "叫我",
+        "我的名字",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    if is_question && !has_explicit_memory_intent {
+        return false;
+    }
+    [
+        "remember",
+        "always",
+        "never",
+        "must",
+        "should",
+        "prefer",
+        "keep ",
+        "do not",
+        "don't",
+        "from now on",
+        "call me",
+        "my name",
+        "requirement",
+        "constraint",
+        "记住",
+        "以后",
+        "始终",
+        "一直",
+        "必须",
+        "不要",
+        "不能",
+        "不允许",
+        "偏好",
+        "称呼",
+        "叫我",
+        "我的名字",
+        "务必",
+        "保持",
+        "要求",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn is_durable_outcome_content(content: &str, has_tool_evidence: bool) -> bool {
+    if has_tool_evidence {
+        return true;
+    }
+    let normalized = normalize_memory_text(content);
+    if normalized.chars().count() < 16 {
+        return false;
+    }
+    let lower = content.to_lowercase();
+    [
+        "implemented",
+        "fixed",
+        "updated",
+        "created",
+        "completed",
+        "configured",
+        "stored",
+        "added",
+        "removed",
+        "generated",
+        "tests pass",
+        "test passed",
+        "已实现",
+        "已修复",
+        "已完成",
+        "已更新",
+        "已创建",
+        "已配置",
+        "已保存",
+        "已新增",
+        "已删除",
+        "已生成",
+        "测试通过",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 fn memory_fingerprint(kind: MemoryKind, content: &str) -> String {
@@ -484,7 +636,7 @@ fn memory_terms(value: &str) -> BTreeSet<String> {
         character.is_whitespace() || (!character.is_alphanumeric() && character != '_')
     }) {
         let token = raw.trim().to_lowercase();
-        if token.is_empty() {
+        if token.is_empty() || is_memory_stopword(&token) {
             continue;
         }
         terms.insert(token.clone());
@@ -496,6 +648,36 @@ fn memory_terms(value: &str) -> BTreeSet<String> {
         }
     }
     terms
+}
+
+fn is_memory_stopword(token: &str) -> bool {
+    token.is_ascii()
+        && matches!(
+            token,
+            "a" | "an"
+                | "and"
+                | "are"
+                | "as"
+                | "at"
+                | "be"
+                | "by"
+                | "for"
+                | "from"
+                | "in"
+                | "is"
+                | "it"
+                | "of"
+                | "on"
+                | "or"
+                | "that"
+                | "the"
+                | "this"
+                | "to"
+                | "was"
+                | "with"
+                | "you"
+                | "your"
+        )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1372,6 +1554,25 @@ mod tests {
         record_memory_recalls(&mut ledger, &recalls, 11);
         assert_eq!(ledger.records[0].recall_count, 1);
         assert_eq!(ledger.records[0].last_recalled_at_ms, Some(11));
+
+        let used = record_memory_observed_uses(
+            &mut ledger,
+            &[recalls[0].record.id.clone()],
+            "Kept the sidebar white with a frosted glass material.",
+            12,
+        );
+        assert_eq!(used, vec![recalls[0].record.id.clone()]);
+        assert_eq!(ledger.records[0].observed_use_count, 1);
+        assert_eq!(ledger.records[0].last_observed_use_at_ms, Some(12));
+
+        let unrelated = record_memory_observed_uses(
+            &mut ledger,
+            &[recalls[0].record.id.clone()],
+            "The database migration completed.",
+            13,
+        );
+        assert!(unrelated.is_empty());
+        assert_eq!(ledger.records[0].observed_use_count, 1);
     }
 
     #[test]
@@ -1406,6 +1607,77 @@ mod tests {
         assert!(markdown.contains("User-stated entries preserve prior requirements"));
         assert!(markdown.contains("does not override the current user request"));
         assert!(markdown.contains("user_stated"));
+        assert!(!markdown.contains("score 0."));
+        assert!(!markdown.contains("term_overlap"));
+    }
+
+    #[test]
+    fn recall_diversifies_sources_instead_of_filling_from_one_session() {
+        let mut ledger = MemoryLedger::new("project-a");
+        for index in 0..4 {
+            let content = format!("Always keep sidebar white material variant {index}");
+            let events = vec![
+                event(
+                    index + 1,
+                    EventKind::MessageAdded,
+                    "User message",
+                    [("role", "user"), ("content", content.as_str())],
+                ),
+                event(
+                    index + 10,
+                    EventKind::TaskStatusChanged,
+                    "Agent task completed",
+                    [],
+                ),
+            ];
+            merge_memory_records(
+                &mut ledger,
+                extract_durable_memories(&events, "project-a", "session-a"),
+                32,
+            );
+        }
+        let other_session = vec![
+            event(
+                20,
+                EventKind::MessageAdded,
+                "User message",
+                [
+                    ("role", "user"),
+                    ("content", "Always keep sidebar white material accessible"),
+                ],
+            ),
+            event(
+                21,
+                EventKind::TaskStatusChanged,
+                "Agent task completed",
+                [],
+            ),
+        ];
+        merge_memory_records(
+            &mut ledger,
+            extract_durable_memories(&other_session, "project-a", "session-b"),
+            32,
+        );
+
+        let recalls = recall_memories_at(
+            &ledger,
+            "keep sidebar white material",
+            Some("session-c"),
+            6,
+            30,
+        );
+
+        assert_eq!(recalls.len(), 3);
+        assert_eq!(
+            recalls
+                .iter()
+                .filter(|recall| recall.record.provenance.session_id == "session-a")
+                .count(),
+            2
+        );
+        assert!(recalls
+            .iter()
+            .any(|recall| recall.record.provenance.session_id == "session-b"));
     }
 
     #[test]
@@ -1421,6 +1693,40 @@ mod tests {
         ];
 
         assert!(extract_durable_memories(&events, "project-a", "session-a").is_empty());
+    }
+
+    #[test]
+    fn ordinary_questions_and_answers_do_not_become_durable_memory() {
+        let events = vec![
+            event(
+                1,
+                EventKind::MessageAdded,
+                "User message",
+                [("role", "user"), ("content", "Can you write code?")],
+            ),
+            event(
+                2,
+                EventKind::MessageAdded,
+                "Assistant message",
+                [("role", "assistant"), ("content", "Yes, I can help with code.")],
+            ),
+            event(3, EventKind::TaskStatusChanged, "Agent task completed", []),
+        ];
+
+        assert!(extract_durable_memories(&events, "project-a", "session-a").is_empty());
+
+        let preference_question = vec![
+            event(
+                1,
+                EventKind::MessageAdded,
+                "User message",
+                [("role", "user"), ("content", "Should I always use compact mode?")],
+            ),
+            event(2, EventKind::TaskStatusChanged, "Agent task completed", []),
+        ];
+        assert!(
+            extract_durable_memories(&preference_question, "project-a", "session-a").is_empty()
+        );
     }
 
     #[test]

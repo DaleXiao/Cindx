@@ -4043,8 +4043,8 @@ export function App() {
                   <span>Evidence</span>
                 </div>
                 <div>
-                  <strong>{phase7?.memory.recalls ?? 0}</strong>
-                  <span>Recalls</span>
+                  <strong>{phase7?.memory.recalls ?? 0} / {phase7?.memory.observedUses ?? 0}</strong>
+                  <span>Recall / use</span>
                 </div>
               </div>
               <button
