@@ -2,7 +2,7 @@ use agent_core::{Message, MessageRole, Metadata, ModelRole, ToolSpec};
 use base64::Engine;
 use futures_util::{Stream, StreamExt};
 use reqwest::{header, Client, RequestBuilder, Response, StatusCode};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::future::Future;
 use std::path::Path;
@@ -1310,21 +1310,23 @@ fn build_chat_request_json_with_tools_and_output_limit(
     tools: &[ToolSpec],
     max_output_tokens: Option<u64>,
 ) -> Result<String, ModelError> {
+    let mut declared_tool_calls = BTreeSet::new();
     let messages_json = messages
         .iter()
-        .map(|message| match message.role {
+        .filter_map(|message| match message.role {
             MessageRole::Assistant => {
                 if let Some(tool_calls_json) = assistant_tool_calls_json(message) {
-                    format!(
+                    declared_tool_calls.extend(tool_call_ids_from_json(&tool_calls_json));
+                    Some(format!(
                         "{{\"role\":\"assistant\",\"content\":\"{}\",\"tool_calls\":{}}}",
                         json_escape(&message.content),
                         tool_calls_json
-                    )
+                    ))
                 } else {
-                    format!(
+                    Some(format!(
                         "{{\"role\":\"assistant\",\"content\":\"{}\"}}",
                         json_escape(&message.content)
-                    )
+                    ))
                 }
             }
             MessageRole::Tool => {
@@ -1333,17 +1335,20 @@ fn build_chat_request_json_with_tools_and_output_limit(
                     .get("tool_call_id")
                     .map(String::as_str)
                     .unwrap_or("tool-call");
-                format!(
+                if !declared_tool_calls.remove(tool_call_id) {
+                    return None;
+                }
+                Some(format!(
                     "{{\"role\":\"tool\",\"tool_call_id\":\"{}\",\"content\":\"{}\"}}",
                     json_escape(tool_call_id),
                     json_escape(&message.content)
-                )
+                ))
             }
-            _ => format!(
+            _ => Some(format!(
                 "{{\"role\":\"{}\",\"content\":{}}}",
                 json_escape(message_role_to_str(&message.role)),
                 message_content_json(model, message)
-            ),
+            )),
         })
         .collect::<Vec<_>>();
     let tools_json = if tools.is_empty() {
@@ -1737,17 +1742,48 @@ fn tool_spec_json(tool: &ToolSpec) -> String {
     )
 }
 
-fn assistant_tool_calls_json(message: &Message) -> Option<&str> {
+fn assistant_tool_calls_json(message: &Message) -> Option<String> {
     let raw = message
         .metadata
         .get("raw_tool_calls_json")
         .map(String::as_str)?
         .trim();
-    if raw.starts_with('[') && raw.ends_with(']') {
-        Some(raw)
-    } else {
-        None
-    }
+    let parsed = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    let calls = parsed.as_array()?;
+    (!calls.is_empty() && calls.iter().all(valid_tool_call_value))
+        .then(|| serde_json::to_string(&parsed).ok())
+        .flatten()
+}
+
+fn valid_tool_call_value(value: &serde_json::Value) -> bool {
+    value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty())
+        && value
+            .get("function")
+            .and_then(|function| function.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|name| !name.trim().is_empty())
+        && value
+            .get("function")
+            .and_then(|function| function.get("arguments"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|arguments| serde_json::from_str::<serde_json::Value>(arguments).is_ok())
+}
+
+fn tool_call_ids_from_json(raw: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|call| {
+            call.get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 fn json_escape(value: &str) -> String {
@@ -2351,11 +2387,57 @@ mod tests {
             &[],
         )
         .expect("body should encode");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("valid request JSON");
 
         assert!(body.contains("\"role\":\"assistant\""));
-        assert!(body.contains("\"tool_calls\":[{\"id\":\"call_1\""));
+        assert_eq!(value["messages"][0]["tool_calls"][0]["id"], "call_1");
         assert!(body.contains("\"role\":\"tool\""));
         assert!(body.contains("\"tool_call_id\":\"call_1\""));
+    }
+
+    #[test]
+    fn request_json_drops_corrupt_tool_calls_and_orphan_tool_messages() {
+        let mut assistant_metadata = Metadata::new();
+        assistant_metadata.insert(
+            "raw_tool_calls_json".to_string(),
+            r#"[{"id":"call_broken","type":"function","function":{"name":"shell_run","arguments":"{\"command\":\"api_key=[REDACTED]"}}]"#.to_string(),
+        );
+        let mut tool_metadata = Metadata::new();
+        tool_metadata.insert("tool_call_id".to_string(), "call_broken".to_string());
+
+        let body = build_chat_request_json_with_tools(
+            "model-a",
+            &[
+                Message {
+                    role: MessageRole::Assistant,
+                    content: "Inspecting configuration.".to_string(),
+                    metadata: assistant_metadata,
+                },
+                Message {
+                    role: MessageRole::Tool,
+                    content: "tool=shell.run\nstatus=succeeded".to_string(),
+                    metadata: tool_metadata,
+                },
+                Message {
+                    role: MessageRole::User,
+                    content: "continue".to_string(),
+                    metadata: Metadata::new(),
+                },
+            ],
+            false,
+            &[],
+        )
+        .expect("body should encode");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("valid request JSON");
+        let messages = value["messages"]
+            .as_array()
+            .expect("messages should be an array");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert!(messages[0].get("tool_calls").is_none());
+        assert_eq!(messages[1]["role"], "user");
+        assert!(!body.contains("call_broken"));
     }
 
     #[test]
