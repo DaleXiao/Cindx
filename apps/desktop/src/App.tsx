@@ -41,7 +41,9 @@ import {
   XCircle
 } from "lucide-react";
 import {
+  lazy,
   startTransition,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -53,7 +55,6 @@ import {
 } from "react";
 import { Inspector, type InspectorTab } from "./components/Inspector";
 import { Composer } from "./components/Composer";
-import { KnowledgeGraph } from "./components/KnowledgeGraph";
 import { QueuedMessages } from "./components/QueuedMessages";
 import { ScheduleView } from "./components/ScheduleView";
 import { Sidebar, type WorkspaceView } from "./components/Sidebar";
@@ -165,6 +166,14 @@ const DEBUG_ALWAYS_VISIBLE_STORAGE_KEY = "cindx.debug.always-visible";
 const IGNORED_PERMISSION_REVIEWS_STORAGE_KEY = "cindx.permissions.ignored";
 const APPEARANCE_STORAGE_KEY = "cindx.appearance";
 const SESSION_STATE_CACHE_LIMIT = 12;
+const FOREGROUND_AGENT_POLL_INTERVAL_MS = 1_000;
+const BACKGROUND_AGENT_POLL_INTERVAL_MS = 5_000;
+
+const KnowledgeGraph = lazy(() =>
+  import("./components/KnowledgeGraph").then((module) => ({
+    default: module.KnowledgeGraph
+  }))
+);
 
 type AppearanceMode = "light" | "dark" | "system";
 
@@ -633,6 +642,7 @@ export function App() {
   const [selectedTool, setSelectedTool] = useState("file.list");
   const [toolInput, setToolInput] = useState("path=.");
   const [ragQuery, setRagQuery] = useState("What is the Cindx MVP scope?");
+  const [knowledgeGraphOpen, setKnowledgeGraphOpen] = useState(false);
   const [browserUrl, setBrowserUrl] = useState("https://example.com");
   const [browserTarget, setBrowserTarget] = useState("body");
   const [browserText, setBrowserText] = useState("hello");
@@ -1040,6 +1050,25 @@ export function App() {
     activeSessionIdRef.current = activeSession?.id ?? null;
   }, [activeSession?.id]);
 
+  const handleAgentStreamDone = useCallback((sessionId: string) => {
+    if (activeSessionIdRef.current !== sessionId) return;
+    void requestSessionAgentState(sessionId)
+      .then((next) => {
+        if (activeSessionIdRef.current !== sessionId) return;
+        acknowledgeOptimisticUserMessage(sessionId, next.messages);
+        setAgentState((current) => {
+          const merged = mergeAgentStateSnapshot(current, next);
+          return agentStateUnchanged(current, merged) ? current : merged;
+        });
+        updateSessionStatus(sessionId, next.status, next.canContinue);
+      })
+      .catch((error) => {
+        if (activeSessionIdRef.current === sessionId) {
+          setComposerError(error instanceof Error ? error.message : String(error));
+        }
+      });
+  }, []);
+
   useEffect(() => {
     if (!agentState?.sessionId) return;
     rememberSessionState(agentStateCacheRef.current, agentState.sessionId, agentState);
@@ -1102,11 +1131,19 @@ export function App() {
     let disposed = false;
     let inFlight = false;
     let lastTraceRefreshAt = 0;
+    let lastBackgroundRefreshAt = 0;
     const refresh = async () => {
       if (inFlight) return;
+      const now = Date.now();
+      if (
+        document.visibilityState === "hidden" &&
+        now - lastBackgroundRefreshAt < BACKGROUND_AGENT_POLL_INTERVAL_MS
+      ) {
+        return;
+      }
+      if (document.visibilityState === "hidden") lastBackgroundRefreshAt = now;
       inFlight = true;
       try {
-        const now = Date.now();
         const refreshTrace = inspectorOpen && now - lastTraceRefreshAt >= 3_000;
         if (refreshTrace) lastTraceRefreshAt = now;
         const revision = await getAgentStateRevision(sessionId);
@@ -1151,10 +1188,18 @@ export function App() {
         inFlight = false;
       }
     };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
     void refresh();
-    const interval = window.setInterval(() => void refresh(), 1000);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    const interval = window.setInterval(
+      () => void refresh(),
+      FOREGROUND_AGENT_POLL_INTERVAL_MS
+    );
     return () => {
       disposed = true;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.clearInterval(interval);
     };
   }, [activeSession?.id, activeSessionBusy, inspectorOpen]);
@@ -3113,6 +3158,7 @@ export function App() {
               onSelect={handleThreadSelection}
               onEditMessage={handleThreadMessageEdit}
               onLinkOpenError={setComposerError}
+              onStreamDone={handleAgentStreamDone}
             />
 
             <div
@@ -4004,7 +4050,10 @@ export function App() {
                 <Database size={17} aria-hidden="true" />
                 <span>{ragBusy ? "Working" : "Index workspace"}</span>
               </button>
-              <details className="advanced-settings knowledge-graph-details">
+              <details
+                className="advanced-settings knowledge-graph-details"
+                onToggle={(event) => setKnowledgeGraphOpen(event.currentTarget.open)}
+              >
                 <summary>
                   <span className="settings-summary-label">
                     <strong>Graph Explorer</strong>
@@ -4014,16 +4063,24 @@ export function App() {
                     {phase7?.graph.totalNodes ?? 0} nodes · {phase7?.graph.totalEdges ?? 0} edges
                   </span>
                 </summary>
-                <KnowledgeGraph
-                  graph={
-                    phase7?.graph ?? {
-                      totalNodes: 0,
-                      totalEdges: 0,
-                      nodes: [],
-                      edges: []
+                {knowledgeGraphOpen ? (
+                  <Suspense
+                    fallback={
+                      <div className="knowledge-graph-empty">Loading graph...</div>
                     }
-                  }
-                />
+                  >
+                    <KnowledgeGraph
+                      graph={
+                        phase7?.graph ?? {
+                          totalNodes: 0,
+                          totalEdges: 0,
+                          nodes: [],
+                          edges: []
+                        }
+                      }
+                    />
+                  </Suspense>
+                ) : null}
               </details>
               <div className="tool-runner knowledge-query">
                 <label>

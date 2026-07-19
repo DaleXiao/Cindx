@@ -2025,6 +2025,10 @@ assert(
     knowledgeGraphSource.includes("graph.edges.filter") &&
     knowledgeGraphSource.includes("Math.min(6.6") &&
     knowledgeGraphSource.includes('className="knowledge-graph-scene" ref={sceneRef}') &&
+    knowledgeGraphSource.includes('ref={canvasRef}') &&
+    knowledgeGraphSource.includes('"IntersectionObserver" in window') &&
+    knowledgeGraphSource.includes('document.visibilityState !== "hidden"') &&
+    knowledgeGraphSource.includes("observer?.disconnect()") &&
     knowledgeGraphSource.includes("const activeNodeIds = useMemo") &&
     knowledgeGraphSource.includes("window.requestAnimationFrame(update)") &&
     knowledgeGraphSource.includes('line.setAttribute("x1", String(source.x))') &&
@@ -2044,6 +2048,29 @@ assert(
     !styles.includes("animation: knowledge-graph-float") &&
     !/\.knowledge-graph-node\[data-active="true"\][\s\S]*?transform: scale/.test(styles),
   "Knowledge settings must expose a restrained force-directed graph with connected ambient node motion"
+);
+assert(
+  appSource.includes("const KnowledgeGraph = lazy(() =>") &&
+    appSource.includes("knowledgeGraphOpen ? (") &&
+    appSource.includes("BACKGROUND_AGENT_POLL_INTERVAL_MS = 5_000") &&
+    appSource.includes('document.visibilityState === "hidden"') &&
+    appSource.includes('document.addEventListener("visibilitychange"'),
+  "Heavy graph code and active-session polling must pause or defer while their surfaces are not visible"
+);
+assert(
+  appSource.includes("onStreamDone={handleAgentStreamDone}") &&
+    sessionThreadSource.includes("onStreamDone: (sessionId: string) => void") &&
+    sessionThreadSource.includes("if (targetSessionId) onStreamDone(targetSessionId)") &&
+    rustLib.includes("let completed_state = agent_state_for_session") &&
+    rustLib.includes("return Ok(completed_state)"),
+  "A committed terminal stream event must refresh the active session without waiting for polling"
+);
+assert(
+  rustLib.includes('"elapsed_ms".to_string()') &&
+    rustLib.includes('"model_calls".to_string()') &&
+    rustLib.includes('"tool_calls".to_string()') &&
+    rustLib.includes('"last_stage".to_string()'),
+  "Completed agent runs must persist performance counters for regression analysis"
 );
 assert(
   sessionThreadSource.includes('event.label === "Model started"') &&

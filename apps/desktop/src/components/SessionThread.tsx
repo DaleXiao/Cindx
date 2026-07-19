@@ -73,6 +73,7 @@ type SessionThreadProps = {
 
 type LiveSessionThreadProps = Omit<SessionThreadProps, "streamAnswer"> & {
   streamResetVersion: number;
+  onStreamDone: (sessionId: string) => void;
 };
 
 type ThreadFindProps = {
@@ -1882,6 +1883,7 @@ export const SessionThread = memo(function SessionThread({
 export const LiveSessionThread = memo(function LiveSessionThread({
   sessionId,
   streamResetVersion,
+  onStreamDone,
   onLinkOpenError,
   ...props
 }: LiveSessionThreadProps) {
@@ -1929,6 +1931,7 @@ export const LiveSessionThread = memo(function LiveSessionThread({
       if (payload.done) {
         flush();
         if (payload.error) onLinkOpenError(payload.error);
+        if (targetSessionId) onStreamDone(targetSessionId);
         return;
       }
       if (payload.delta) {
@@ -1948,7 +1951,7 @@ export const LiveSessionThread = memo(function LiveSessionThread({
       flushTimerRef.current = null;
       unlisten();
     };
-  }, [clearStream, onLinkOpenError]);
+  }, [clearStream, onLinkOpenError, onStreamDone]);
 
   return (
     <SessionThread
