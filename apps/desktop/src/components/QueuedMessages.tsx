@@ -14,6 +14,7 @@ import type { QueuedAgentMessage } from "../tauri";
 type QueuedMessagesProps = {
   messages: QueuedAgentMessage[];
   busyId: string | null;
+  persistingIds: ReadonlySet<string>;
   onSteer: (queueId: string) => Promise<void>;
   onEdit: (queueId: string, prompt: string) => Promise<void>;
   onDelete: (queueId: string) => Promise<void>;
@@ -22,6 +23,7 @@ type QueuedMessagesProps = {
 export function QueuedMessages({
   messages,
   busyId,
+  persistingIds,
   onSteer,
   onEdit,
   onDelete
@@ -78,7 +80,7 @@ export function QueuedMessages({
     <section className="queued-message-stack" aria-label="Queued messages" ref={rootRef}>
       {messages.map((message) => {
         const editing = editingId === message.id;
-        const busy = busyId === message.id;
+        const busy = busyId === message.id || persistingIds.has(message.id);
         return (
           <div className="queued-message" data-mode={message.mode} key={message.id}>
             <span
@@ -155,7 +157,7 @@ export function QueuedMessages({
                   aria-haspopup="menu"
                   aria-expanded={openMenuId === message.id}
                   title="Queued message actions"
-                  disabled={Boolean(busyId)}
+                  disabled={Boolean(busyId) || persistingIds.has(message.id)}
                   onClick={() =>
                     setOpenMenuId((current) => (current === message.id ? null : message.id))
                   }

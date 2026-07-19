@@ -967,6 +967,8 @@ struct QueueAgentMessageInput {
     session_id: String,
     prompt: String,
     current_time: String,
+    #[serde(default)]
+    queue_id: Option<String>,
     #[serde(default = "default_agent_effort")]
     effort: String,
     #[serde(default)]
@@ -3016,6 +3018,7 @@ fn trigger_schedule_run(
         session_id: session_id.clone(),
         prompt: schedule.prompt.clone(),
         current_time: normalized_current_time_context(""),
+        queue_id: None,
         effort: schedule.effort.clone(),
         attachments: Vec::new(),
     };
@@ -5575,7 +5578,7 @@ fn enqueue_agent_message_inner(
         effort: AgentEffort::parse(&input.effort).label().to_string(),
         current_time: normalized_current_time_context(&input.current_time),
     };
-    let queue_id = unique_id("agent-queue");
+    let queue_id = queued_agent_message_id(input.queue_id.as_deref());
     let created_at_ms = current_time_millis();
     let mut store = state
         .store
@@ -5612,6 +5615,20 @@ fn enqueue_agent_message_inner(
         },
         queue_id,
     ))
+}
+
+fn queued_agent_message_id(candidate: Option<&str>) -> String {
+    candidate
+        .map(str::trim)
+        .filter(|value| {
+            value.starts_with("agent-queue-client-")
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| unique_id("agent-queue"))
 }
 
 #[tauri::command]
@@ -28455,6 +28472,17 @@ mod tests {
         let resolved = recovery_safe_transcript(&events);
         assert_eq!(resolved.len(), 3);
         assert_eq!(resolved[2].content, "write completed");
+    }
+
+    #[test]
+    fn queued_agent_message_ids_accept_only_bounded_client_ids() {
+        assert_eq!(
+            queued_agent_message_id(Some(" agent-queue-client-abc-123 ")),
+            "agent-queue-client-abc-123"
+        );
+        assert!(!queued_agent_message_id(Some("queue-client-abc")).starts_with("queue-client-"));
+        assert!(!queued_agent_message_id(Some("agent-queue-client-bad/id"))
+            .contains("bad/id"));
     }
 
     #[test]

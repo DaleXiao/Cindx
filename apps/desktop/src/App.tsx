@@ -171,6 +171,15 @@ const SESSION_STATE_CACHE_LIMIT = 12;
 const FOREGROUND_AGENT_POLL_INTERVAL_MS = 1_000;
 const BACKGROUND_AGENT_POLL_INTERVAL_MS = 5_000;
 
+function queuedMessageClientId() {
+  const randomId =
+    typeof globalThis.crypto !== "undefined" &&
+    typeof globalThis.crypto.randomUUID === "function"
+      ? globalThis.crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `agent-queue-client-${randomId}`;
+}
+
 const KnowledgeGraph = lazy(() =>
   import("./components/KnowledgeGraph").then((module) => ({
     default: module.KnowledgeGraph
@@ -690,6 +699,9 @@ export function App() {
   const [projectSessionBusy, setProjectSessionBusy] = useState(false);
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(() => new Set());
   const [queuedMessageBusyId, setQueuedMessageBusyId] = useState<string | null>(null);
+  const [persistingQueuedMessageIds, setPersistingQueuedMessageIds] = useState<Set<string>>(
+    () => new Set()
+  );
   const [sessionStatusOverrides, setSessionStatusOverrides] = useState<Record<string, string>>({});
   const activeSessionIdRef = useRef<string | null>(null);
   const agentStateRevisionsRef = useRef<
@@ -706,6 +718,7 @@ export function App() {
   const sessionRefreshRequestRef = useRef(0);
   const trackedSessionTaskIdsRef = useRef<Set<string>>(new Set());
   const optimisticUserMessagesRef = useRef<Map<string, ChatMessageView>>(new Map());
+  const optimisticQueuedMessagesRef = useRef<Map<string, QueuedAgentMessage>>(new Map());
   const queueDrainingSessionIdsRef = useRef<Set<string>>(new Set());
   const suppressQueueDrainSessionIdsRef = useRef<Set<string>>(new Set());
   const startupWindowRevealRequestedRef = useRef(false);
@@ -1028,6 +1041,16 @@ export function App() {
     activeSession && agentState?.sessionId === activeSession.id ? agentState : null;
   const activeSessionBusy = Boolean(activeSession && busySessionIds.has(activeSession.id));
 
+  function preserveOptimisticQueuedMessages(sessionId: string, state: AgentState) {
+    let queuedMessages = state.queuedMessages;
+    optimisticQueuedMessagesRef.current.forEach((message) => {
+      if (message.sessionId === sessionId) {
+        queuedMessages = mergeQueuedAgentMessage(queuedMessages, message);
+      }
+    });
+    return queuedMessages === state.queuedMessages ? state : { ...state, queuedMessages };
+  }
+
   const loadOlderAgentHistory = useCallback(async () => {
     const sessionId = activeAgentState?.sessionId;
     if (
@@ -1075,7 +1098,10 @@ export function App() {
         if (activeSessionIdRef.current !== sessionId) return;
         acknowledgeOptimisticUserMessage(sessionId, next.messages);
         setAgentState((current) => {
-          const merged = mergeAgentStateSnapshot(current, next);
+          const merged = preserveOptimisticQueuedMessages(
+            sessionId,
+            mergeAgentStateSnapshot(current, next)
+          );
           return agentStateUnchanged(current, merged) ? current : merged;
         });
         updateSessionStatus(sessionId, next.status, next.canContinue);
@@ -1183,7 +1209,10 @@ export function App() {
           if (nextDelta) {
             acknowledgeOptimisticUserMessage(sessionId, nextDelta.state.messages);
             setAgentState((current) => {
-              const next = mergeAgentStateDelta(current, nextDelta);
+              const next = preserveOptimisticQueuedMessages(
+                sessionId,
+                mergeAgentStateDelta(current, nextDelta)
+              );
               return agentStateUnchanged(current, next) ? current : next;
             });
             updateSessionStatus(
@@ -1816,7 +1845,10 @@ export function App() {
     acknowledgeOptimisticUserMessage(sessionId, nextAgentState.messages);
     startTransition(() => {
       setAgentState((current) => {
-        const merged = mergeAgentStateSnapshot(current, nextAgentState);
+        const merged = preserveOptimisticQueuedMessages(
+          sessionId,
+          mergeAgentStateSnapshot(current, nextAgentState)
+        );
         return agentStateUnchanged(current, merged) ? current : merged;
       });
     });
@@ -2407,16 +2439,41 @@ export function App() {
   }
 
   function applyAgentStateForSession(sessionId: string, next: AgentState) {
+    const effectiveNext = preserveOptimisticQueuedMessages(sessionId, next);
     agentStateRevisionsRef.current.set(sessionId, {
-      eventCount: next.eventCount,
-      latestSequence: next.latestSequence,
+      eventCount: effectiveNext.eventCount,
+      latestSequence: effectiveNext.latestSequence,
       latestTimestampMs: 0
     });
-    rememberSessionState(agentStateCacheRef.current, sessionId, next);
-    acknowledgeOptimisticUserMessage(sessionId, next.messages);
-    updateSessionStatus(sessionId, next.status, next.canContinue);
+    rememberSessionState(agentStateCacheRef.current, sessionId, effectiveNext);
+    acknowledgeOptimisticUserMessage(sessionId, effectiveNext.messages);
+    updateSessionStatus(sessionId, effectiveNext.status, effectiveNext.canContinue);
     if (activeSessionIdRef.current === sessionId) {
-      setAgentState((current) => mergeAgentStateSnapshot(current, next));
+      setAgentState((current) => mergeAgentStateSnapshot(current, effectiveNext));
+    }
+  }
+
+  function updateQueuedMessagesForSession(
+    sessionId: string,
+    update: (messages: QueuedAgentMessage[]) => QueuedAgentMessage[]
+  ) {
+    const updateState = (current: AgentState) => {
+      const queuedMessages = update(current.queuedMessages);
+      return queuedMessages === current.queuedMessages
+        ? current
+        : { ...current, queuedMessages };
+    };
+    const cached = agentStateCacheRef.current.get(sessionId);
+    if (cached) {
+      rememberSessionState(agentStateCacheRef.current, sessionId, updateState(cached));
+    }
+    if (activeSessionIdRef.current === sessionId) {
+      setAgentState((current) => {
+        if (!current || current.sessionId !== sessionId) return current;
+        const next = updateState(current);
+        rememberSessionState(agentStateCacheRef.current, sessionId, next);
+        return next;
+      });
     }
   }
 
@@ -2575,16 +2632,62 @@ export function App() {
       sessionAgentState?.canCancel
     ) {
       setComposerError(null);
+      const queueId = queuedMessageClientId();
+      const queuedAt = Date.now();
+      const optimisticMessage: QueuedAgentMessage = {
+        id: queueId,
+        sessionId,
+        prompt: visiblePrompt,
+        attachments,
+        effort: agentEffort,
+        mode: "queue",
+        createdAtMs: queuedAt,
+        updatedAtMs: queuedAt
+      };
+      optimisticQueuedMessagesRef.current.set(queueId, optimisticMessage);
+      setPersistingQueuedMessageIds((current) => {
+        const next = new Set(current);
+        next.add(queueId);
+        return next;
+      });
+      updateQueuedMessagesForSession(sessionId, (messages) =>
+        mergeQueuedAgentMessage(messages, optimisticMessage)
+      );
+      setAttachmentDrafts((current) => ({ ...current, [sessionId]: [] }));
       try {
-        const receipt = await queueAgentMessage(nextPrompt, sessionId, attachments, agentEffort);
-        setAttachmentDrafts((current) => ({ ...current, [sessionId]: [] }));
+        const receipt = await queueAgentMessage(
+          nextPrompt,
+          sessionId,
+          attachments,
+          agentEffort,
+          queueId
+        );
+        optimisticQueuedMessagesRef.current.delete(queueId);
         applyQueuedMessageReceiptForSession(sessionId, receipt);
       } catch (error) {
+        optimisticQueuedMessagesRef.current.delete(queueId);
+        updateQueuedMessagesForSession(sessionId, (messages) =>
+          messages.filter((message) => message.id !== queueId)
+        );
+        if (attachments.length > 0) {
+          setAttachmentDrafts((current) =>
+            (current[sessionId] ?? []).length > 0
+              ? current
+              : { ...current, [sessionId]: attachments }
+          );
+        }
         setComposerDrafts((current) => ({
           ...current,
           [sessionId]: current[sessionId]?.trim() ? current[sessionId] : value
         }));
         setComposerError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setPersistingQueuedMessageIds((current) => {
+          if (!current.has(queueId)) return current;
+          const next = new Set(current);
+          next.delete(queueId);
+          return next;
+        });
       }
       return;
     }
@@ -2655,7 +2758,12 @@ export function App() {
       acknowledgeOptimisticUserMessage(sessionId, next.messages);
       updateSessionStatus(sessionId, next.status, next.canContinue);
       if (activeSessionIdRef.current === sessionId) {
-        setAgentState((current) => mergeAgentStateSnapshot(current, next));
+        setAgentState((current) =>
+          preserveOptimisticQueuedMessages(
+            sessionId,
+            mergeAgentStateSnapshot(current, next)
+          )
+        );
         setComposerError(next.lastError);
         setStreamResetVersion((version) => version + 1);
       }
@@ -2682,7 +2790,12 @@ export function App() {
         setComposerError(error instanceof Error ? error.message : String(error));
         const failedState = await getAgentState(sessionId);
         acknowledgeOptimisticUserMessage(sessionId, failedState.messages);
-        setAgentState((current) => mergeAgentStateSnapshot(current, failedState));
+        setAgentState((current) =>
+          preserveOptimisticQueuedMessages(
+            sessionId,
+            mergeAgentStateSnapshot(current, failedState)
+          )
+        );
       }
     } finally {
       markSessionBusy(sessionId, false);
@@ -2713,7 +2826,12 @@ export function App() {
       updateSessionStatus(sessionId, next.status, next.canContinue);
       markSessionBusy(sessionId, false);
       if (activeSessionIdRef.current === sessionId) {
-        setAgentState((current) => mergeAgentStateSnapshot(current, next));
+        setAgentState((current) =>
+          preserveOptimisticQueuedMessages(
+            sessionId,
+            mergeAgentStateSnapshot(current, next)
+          )
+        );
         setComposerError(next.lastError);
       }
       await refreshAgentTrace(true, sessionId);
@@ -2956,7 +3074,12 @@ export function App() {
       if (activeSessionIdRef.current === sessionId) {
         setComposerError(error instanceof Error ? error.message : String(error));
         const failedState = await getAgentState(sessionId);
-        setAgentState((current) => mergeAgentStateSnapshot(current, failedState));
+        setAgentState((current) =>
+          preserveOptimisticQueuedMessages(
+            sessionId,
+            mergeAgentStateSnapshot(current, failedState)
+          )
+        );
       }
     } finally {
       markSessionBusy(sessionId, false);
@@ -3218,6 +3341,7 @@ export function App() {
               <QueuedMessages
                 messages={activeAgentState?.queuedMessages ?? []}
                 busyId={queuedMessageBusyId}
+                persistingIds={persistingQueuedMessageIds}
                 onSteer={handleSteerQueuedMessage}
                 onEdit={handleEditQueuedMessage}
                 onDelete={handleDeleteQueuedMessage}

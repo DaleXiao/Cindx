@@ -2762,7 +2762,7 @@ details[open] > summary .disclosure-triangle {
 .queued-message-stack {
   position: absolute;
   z-index: 1;
-  bottom: calc(100% - 18px);
+  bottom: calc(100% - 2px);
   left: 50%;
   display: grid;
   width: min(720px, calc(100% - 72px));
