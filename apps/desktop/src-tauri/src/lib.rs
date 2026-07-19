@@ -30,8 +30,8 @@ use agent_runtime::{
     observation_from_tool_result,
     record_tool_outcome, repeated_tool_failure_count,
     resume_agent_loop_from_messages, start_agent_loop, start_agent_loop_with_history,
-    tool_invocation_from_request, AgentAdvance, AgentLoopState, AgentRunControl,
-    AgentRuntimeConfig, RunBudget, RunControlSnapshot, RunStopReason,
+    tool_invocation_from_request, AgentAdvance, AgentRunControl, AgentRuntimeConfig,
+    RunBudget, RunControlSnapshot, RunStopReason,
     DEFAULT_COLLABORATION_WORKER_TURNS, MAX_COLLABORATION_WORKER_TOOL_CALLS,
     MAX_IDENTICAL_TOOL_FAILURES,
 };
@@ -82,11 +82,23 @@ use tools::{
     WebSearchConfig,
 };
 
+mod collaboration_service;
+mod permission_service;
 mod queue_service;
 mod run_lifecycle;
 mod schedule;
 mod session_projection;
 
+use collaboration_service::{
+    collaboration_worker_runtime_turn_limit, effective_workflow_model_turn_budget,
+    effective_workflow_step_attempt_budget, prepare_collaboration_worker_turn,
+    AdaptiveCollaborationSpec, CollaborationCompletion, CollaborationEvidence,
+    WORKFLOW_RESUMABLE_ERROR_PREFIX,
+};
+use permission_service::{
+    agent_session_permission_granted, pending_agent_permissions_for_run,
+    permission_decision_label, permission_decision_past_tense, permission_risk_label,
+};
 use queue_service::{
     apply_queue_event, is_agent_queue_event, pending_queued_agent_messages,
     PendingQueuedAgentMessage, QueuedAgentMessageActionReceipt, QueuedAgentMessagePayload,
@@ -116,7 +128,6 @@ const MAX_ATTACHMENT_TOTAL_BYTES: usize = 50 * 1024 * 1024;
 const AGENT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 const MAX_AGENT_MODEL_TRANSPORT_ATTEMPTS: usize = 3;
 const COLLABORATION_MAX_OUTPUT_TOKENS: u64 = 4_096;
-const COLLABORATION_WORKER_FINALIZATION_TURNS: usize = 1;
 const PROMPT_EVOLUTION_POPULATION_LIMIT: usize = 6;
 const PROMPT_EVOLUTION_MIN_TRAIN_RUNS: usize = 3;
 const PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS: usize = 3;
@@ -7129,6 +7140,7 @@ fn resolve_agent_permission_blocking_inner(
                 .map_err(|error| format!("store lock poisoned: {error}"))?;
             pending_agent_permissions_for_run(
                 &store,
+                &phase16_task_id(),
                 session_id,
                 run_context.get("agent_run_id").map(String::as_str),
             )
@@ -7161,6 +7173,7 @@ fn resolve_agent_permission_blocking_inner(
         .map_err(|error| format!("store lock poisoned: {error}"))?;
     let pending = pending_agent_permissions_for_run(
         &store,
+        &phase16_task_id(),
         session_id,
         run_context.get("agent_run_id").map(String::as_str),
     )
@@ -9867,55 +9880,6 @@ struct CollaborationCandidateSpec {
     request_id: String,
 }
 
-#[derive(Debug)]
-struct AdaptiveCollaborationSpec {
-    step_index: usize,
-    step_id: String,
-    role: String,
-    stage: String,
-    model: String,
-    subtask: String,
-    prompt: String,
-    request_id: String,
-    access: Vec<String>,
-    tool_policy: WorkflowToolPolicy,
-    max_attempts: usize,
-    max_model_turns: usize,
-    max_tool_calls: usize,
-}
-
-#[derive(Debug)]
-struct CollaborationCompletion {
-    content: Option<String>,
-    error: Option<String>,
-    latency_ms: u64,
-    usage: Metadata,
-    evidence: Vec<CollaborationEvidence>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CollaborationEvidence {
-    source_step: String,
-    tool_call_id: String,
-    tool_name: String,
-    #[serde(default)]
-    request: String,
-    status: String,
-    output: String,
-}
-
-impl CollaborationCompletion {
-    fn failed(error: impl Into<String>) -> Self {
-        Self {
-            content: None,
-            error: Some(error.into()),
-            latency_ms: 0,
-            usage: Metadata::new(),
-            evidence: Vec::new(),
-        }
-    }
-}
-
 fn collaboration_recent_context(history: &[Message]) -> String {
     history
         .iter()
@@ -11006,69 +10970,6 @@ fn run_collaboration_stage_with_delta(
             .unwrap_or_else(|| "collaboration model returned no content".to_string())
     })
 }
-
-fn effective_workflow_model_turn_budget(
-    plan: &WorkflowPlanIr,
-    checkpoint: &WorkflowExecutionCheckpoint,
-) -> usize {
-    plan.budget
-        .max_model_turns_per_step
-        .saturating_add(checkpoint.additional_model_turns_per_step)
-        .max(1)
-}
-
-fn effective_workflow_step_attempt_budget(
-    genome: &ConductorPromptGenome,
-    checkpoint: &WorkflowExecutionCheckpoint,
-) -> usize {
-    genome
-        .max_step_attempts
-        .max(1)
-        .saturating_mul(checkpoint.continuations.saturating_add(1))
-}
-
-fn collaboration_worker_runtime_turn_limit(max_model_turns: usize, has_tools: bool) -> usize {
-    max_model_turns.max(1).saturating_add(if has_tools {
-        COLLABORATION_WORKER_FINALIZATION_TURNS
-    } else {
-        0
-    })
-}
-
-fn prepare_collaboration_worker_turn(
-    runtime: &mut AgentLoopState,
-    has_tools: bool,
-    evidence_turn_limit: usize,
-) -> bool {
-    let finalizing = has_tools && runtime.turn >= evidence_turn_limit.max(1);
-    if finalizing
-        && runtime
-            .messages
-            .last()
-            .and_then(|message| message.metadata.get("kind"))
-            .map(String::as_str)
-            != Some("collaboration_worker_finalization")
-    {
-        runtime.messages.push(Message {
-            role: MessageRole::User,
-            content: concat!(
-                "The read-only evidence phase is complete and tools are now unavailable. ",
-                "Do not request more tools. Return the assigned concise work product now, ",
-                "grounded only in the evidence and context already collected."
-            )
-            .to_string(),
-            metadata: [(
-                "kind".to_string(),
-                "collaboration_worker_finalization".to_string(),
-            )]
-            .into_iter()
-            .collect(),
-        });
-    }
-    finalizing
-}
-
-const WORKFLOW_RESUMABLE_ERROR_PREFIX: &str = "workflow checkpoint saved:";
 
 fn stable_workflow_resume_key(value: &str) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
@@ -13561,7 +13462,12 @@ fn continue_agent_loop(
                                 .entry(key.clone())
                                 .or_insert_with(|| value.clone());
                         }
-                        if !agent_session_permission_granted(&store, &request, session_id)
+                        if !agent_session_permission_granted(
+                            &store,
+                            &phase16_task_id(),
+                            &request,
+                            session_id,
+                        )
                             .map_err(|error| error.to_string())?
                         {
                             store
@@ -14659,6 +14565,7 @@ fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Result<usize, St
         }
         let pending_permissions = pending_agent_permissions_for_run(
             store,
+            &phase16_task_id(),
             session_id,
             run_context.get("agent_run_id").map(String::as_str),
         )
@@ -14696,60 +14603,6 @@ fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Result<usize, St
         recovered += 1;
     }
     Ok(recovered)
-}
-
-fn agent_session_permission_granted(
-    store: &SqliteStore,
-    request: &PermissionRequest,
-    session_id: Option<&str>,
-) -> Result<bool, StorageError> {
-    if matches!(&request.risk, PermissionRisk::Destructive) {
-        return Ok(false);
-    }
-    let Some(session_id) = session_id else {
-        return Ok(false);
-    };
-    Ok(store.list_permission_audits()?.iter().any(|audit| {
-        audit.request.task_id == phase16_task_id()
-            && audit.request.metadata.get("session_id").map(String::as_str) == Some(session_id)
-            && audit
-                .resolution
-                .as_ref()
-                .is_some_and(|resolution| {
-                    matches!(&resolution.decision, PermissionDecision::AllowForSession)
-                })
-    }))
-}
-
-fn pending_agent_permissions_for_run(
-    store: &SqliteStore,
-    session_id: Option<&str>,
-    agent_run_id: Option<&str>,
-) -> Result<Vec<PermissionRequest>, StorageError> {
-    let mut requests = store
-        .list_permission_audits()?
-        .into_iter()
-        .filter(|audit| audit.request.task_id == phase16_task_id())
-        .filter(|audit| audit.resolution.is_none())
-        .filter(|audit| {
-            session_id.is_none_or(|session_id| {
-                audit.request.metadata.get("session_id").map(String::as_str) == Some(session_id)
-            })
-        })
-        .filter(|audit| {
-            agent_run_id.is_none_or(|agent_run_id| {
-                audit
-                    .request
-                    .metadata
-                    .get("agent_run_id")
-                    .map(String::as_str)
-                    == Some(agent_run_id)
-            })
-        })
-        .map(|audit| audit.request)
-        .collect::<Vec<_>>();
-    requests.reverse();
-    Ok(requests)
 }
 
 fn latest_agent_prompt_from_active_events(active_events: &[Event]) -> Option<String> {
@@ -23063,32 +22916,6 @@ fn tool_outcome_label(status: &ToolOutcomeStatus) -> &'static str {
     }
 }
 
-fn permission_risk_label(risk: &PermissionRisk) -> &'static str {
-    match risk {
-        PermissionRisk::Read => "read",
-        PermissionRisk::Write => "write",
-        PermissionRisk::Execute => "execute",
-        PermissionRisk::Network => "network",
-        PermissionRisk::Sensitive => "sensitive",
-        PermissionRisk::Destructive => "destructive",
-    }
-}
-
-fn permission_decision_label(decision: &PermissionDecision) -> &'static str {
-    match decision {
-        PermissionDecision::AllowOnce => "allow_once",
-        PermissionDecision::AllowForSession => "allow_for_session",
-        PermissionDecision::Deny => "deny",
-    }
-}
-
-fn permission_decision_past_tense(decision: &PermissionDecision) -> &'static str {
-    match decision {
-        PermissionDecision::AllowOnce | PermissionDecision::AllowForSession => "approved",
-        PermissionDecision::Deny => "denied",
-    }
-}
-
 fn normalized_config_value(value: &str) -> String {
     sanitize_config_value(value.trim())
 }
@@ -28439,18 +28266,38 @@ mod tests {
 
         let mut next = granted.clone();
         next.id = PermissionRequestId("next-request".to_string());
-        assert!(agent_session_permission_granted(&store, &next, Some("session-a"))
-            .expect("matching grant should load"));
-        assert!(!agent_session_permission_granted(&store, &next, Some("session-b"))
-            .expect("other session should load"));
+        assert!(agent_session_permission_granted(
+            &store,
+            &phase16_task_id(),
+            &next,
+            Some("session-a"),
+        )
+        .expect("matching grant should load"));
+        assert!(!agent_session_permission_granted(
+            &store,
+            &phase16_task_id(),
+            &next,
+            Some("session-b"),
+        )
+        .expect("other session should load"));
         next.action = "file.write".to_string();
         next.scope = "crates/tools".to_string();
         next.risk = PermissionRisk::Write;
-        assert!(agent_session_permission_granted(&store, &next, Some("session-a"))
-            .expect("session grant should cover another non-destructive request"));
+        assert!(agent_session_permission_granted(
+            &store,
+            &phase16_task_id(),
+            &next,
+            Some("session-a"),
+        )
+        .expect("session grant should cover another non-destructive request"));
         next.risk = PermissionRisk::Destructive;
-        assert!(!agent_session_permission_granted(&store, &next, Some("session-a"))
-            .expect("destructive grant should not persist"));
+        assert!(!agent_session_permission_granted(
+            &store,
+            &phase16_task_id(),
+            &next,
+            Some("session-a"),
+        )
+        .expect("destructive grant should not persist"));
     }
 
     #[test]
@@ -28480,6 +28327,7 @@ mod tests {
 
         let pending = pending_agent_permissions_for_run(
             &store,
+            &phase16_task_id(),
             Some("session-a"),
             Some("run-new"),
         )

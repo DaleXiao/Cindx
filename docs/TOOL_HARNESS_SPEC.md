@@ -24,6 +24,10 @@ The harness has one lifecycle owner per concern:
 - `queue_service` and `session_projection` own queue reduction and the versioned
   per-session read model. Interactive commands use compact receipts and indexed
   session deltas instead of rebuilding complete application state.
+- `permission_service` owns indexed session-grant and pending-request lookup.
+  `collaboration_service` owns Fugu worker request/result envelopes, continuation
+  budgets, and the reserved final-answer turn; neither service performs provider
+  calls or tool side effects.
 
 All views derive `idle`, `running`, `waiting_for_permission`, `paused`,
 `completed`, `failed`, and `cancelled` from the same typed lifecycle reducer.
@@ -50,6 +54,8 @@ transcript, permission decision, tool result, run budget, or workflow checkpoint
 - A warm session projection reads only events newer than its stored revision.
 - Queue edit, delete, and steer commands return mutation receipts, not full chat
   history.
+- Session permission reuse queries the task/session/run index rather than scanning
+  the global permission audit.
 - Cancellation remains observable during provider streams and sidecar execution.
 - Long-session regression tests verify that unrelated session growth does not
   increase projection work.

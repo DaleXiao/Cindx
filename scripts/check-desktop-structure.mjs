@@ -38,6 +38,12 @@ const localBuildScript = read("scripts/build-local-app.mjs");
 const browserSidecarSource = read("scripts/sidecars/browser-sidecar.js");
 const browserIntegrationTest = read("scripts/test-browser-sidecar.mjs");
 const rustLib = read("apps/desktop/src-tauri/src/lib.rs");
+const collaborationServiceSource = read(
+  "apps/desktop/src-tauri/src/collaboration_service.rs"
+);
+const permissionServiceSource = read(
+  "apps/desktop/src-tauri/src/permission_service.rs"
+);
 const queueServiceSource = read("apps/desktop/src-tauri/src/queue_service.rs");
 const runLifecycleSource = read("apps/desktop/src-tauri/src/run_lifecycle.rs");
 const sessionProjectionSource = read(
@@ -408,6 +414,8 @@ assert(
     agentStorageSource.includes("list_by_task_and_metadata_after") &&
     agentStorageSource.includes("save_read_model") &&
     rustLib.includes("AGENT_SESSION_READ_MODEL_NAMESPACE") &&
+    rustLib.includes("mod collaboration_service") &&
+    rustLib.includes("mod permission_service") &&
     rustLib.includes("mod queue_service") &&
     rustLib.includes("mod run_lifecycle") &&
     rustLib.includes("mod session_projection") &&
@@ -1691,6 +1699,8 @@ assert(
   rustLib.includes(
     "session_permission_grant_covers_non_destructive_requests_in_the_same_session"
   ) &&
+    permissionServiceSource.includes("list_permission_audits_for_session") &&
+    permissionServiceSource.includes("request.risk == PermissionRisk::Destructive") &&
     rustLib.includes(
       ".filter(|pending| !matches!(&pending.risk, PermissionRisk::Destructive))"
     ) &&
@@ -2161,6 +2171,11 @@ assert(
 assert(
   rustLib.includes("synthesize_agent_answer(") &&
     rustLib.includes("run_adaptive_collaboration(") &&
+    collaborationServiceSource.includes("struct AdaptiveCollaborationSpec") &&
+    collaborationServiceSource.includes("struct CollaborationCompletion") &&
+    collaborationServiceSource.includes("fn effective_workflow_model_turn_budget(") &&
+    collaborationServiceSource.includes("fn prepare_collaboration_worker_turn(") &&
+    collaborationServiceSource.includes("collaboration_worker_finalization") &&
     orchestratorSource.includes("pub struct ConductorHarness") &&
     orchestratorSource.includes("pub fn planning_prompt(&self)") &&
     orchestratorSource.includes("pub fn repair_prompt(") &&
