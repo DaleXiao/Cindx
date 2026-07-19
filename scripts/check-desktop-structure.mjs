@@ -847,7 +847,10 @@ assert(
     !sessionThreadSource.includes("toolChainStatus(row.items)") &&
     sessionThreadSource.includes("<ToolChainItem") &&
     styles.includes(".thread-tool-chain-items") &&
-    styles.includes(".thread-tool-chain[open] > summary .thread-tool-chain-chevron"),
+    styles.includes(".thread-tool-chain[open] > summary .thread-tool-chain-chevron") &&
+    /\.thread-tool-chain,\s*\.thread-tool-chain:hover,[\s\S]*?border: 0;[\s\S]*?box-shadow: none;/.test(
+      styles
+    ),
   "All contiguous agent reasoning, collaboration, and tool activity must default to one parent disclosure"
 );
 assert(
