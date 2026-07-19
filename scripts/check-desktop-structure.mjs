@@ -248,6 +248,8 @@ assert(
 );
 assert(
   localBuildScript.includes("local-build-number") &&
+    localBuildScript.includes('args.has("--source-version")') &&
+    localBuildScript.includes("useSourceVersion ? sourceVersion") &&
     localBuildScript.includes('args.has("--ephemeral-target")') &&
     localBuildScript.includes("CARGO_TARGET_DIR: targetRoot") &&
     localBuildScript.includes('path.join(os.homedir(), ".cargo", "bin")') &&
@@ -983,6 +985,9 @@ assert(
     rustLib.includes("queued_agent_messages_update_the_incremental_session_read_model") &&
     rustLib.includes("queue_events_do_not_change_a_terminal_agent_status") &&
     rustLib.includes("queued_messages_preserve_a_permission_waiting_run") &&
+    appSource.includes("steeredQueuedMessageIdsRef") &&
+    appSource.includes("releaseSteeredQueuedMessagesForSession") &&
+    appSource.includes("{ ...receipt, message: null }") &&
     tauriBridge.includes("export type QueuedAgentMessage") &&
     tauriBridge.includes("export type QueuedAgentMessageReceipt") &&
     tauriBridge.includes("export type QueuedAgentMessageActionReceipt") &&
