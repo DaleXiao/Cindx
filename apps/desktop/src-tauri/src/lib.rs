@@ -58,8 +58,8 @@ use orchestrator::{
     RoutingTelemetry, RuleBasedRouter, TaskClass, WorkflowBudget, WorkflowExecutionCheckpoint,
     WorkflowExecutionTelemetry, WorkflowPlanIr, WorkflowSearchTeacher, WorkflowStepStatus,
     WorkflowToolPolicy, WorkflowTopologyPrior, AGENT_EVALUATION_TRACE_SCHEMA,
-    CONDUCTOR_MAX_ATTEMPTS, MAX_ADAPTIVE_WORKFLOW_AGENTS, MAX_ADAPTIVE_WORKFLOW_STEPS,
-    WORKFLOW_CHECKPOINT_SCHEMA, WORKFLOW_IR_SCHEMA,
+    CONDUCTOR_MAX_ATTEMPTS, MAX_ADAPTIVE_WORKFLOW_AGENTS, WORKFLOW_CHECKPOINT_SCHEMA,
+    WORKFLOW_IR_SCHEMA,
 };
 #[cfg(test)]
 use orchestrator::AgentEvaluationVerifier;
@@ -10012,23 +10012,122 @@ fn adaptive_model_role(role: &str) -> ModelRole {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkflowRoleCoverage {
+    aligned_steps: usize,
+    total_steps: usize,
+    independent_models: usize,
+    verifier_steps: usize,
+    synthesizer_steps: usize,
+    cross_reviewed: bool,
+}
+
+fn workflow_role_coverage(
+    workflow: &orchestrator::AdaptiveWorkflow,
+    hints: &ConductorRoleHints,
+) -> WorkflowRoleCoverage {
+    let expected_model = |role: &str| match role {
+        "thinker" => hints.planner.as_str(),
+        "worker" => hints.executor.as_str(),
+        "verifier" => hints.reviewer.as_str(),
+        "synthesizer" => hints.synthesizer.as_str(),
+        _ => "",
+    };
+    let independent_models = workflow
+        .steps
+        .iter()
+        .filter(|step| {
+            step.access.is_empty() && matches!(step.role.as_str(), "thinker" | "worker")
+        })
+        .map(|step| step.model.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    WorkflowRoleCoverage {
+        aligned_steps: workflow
+            .steps
+            .iter()
+            .filter(|step| step.model == expected_model(&step.role))
+            .count(),
+        total_steps: workflow.steps.len(),
+        independent_models,
+        verifier_steps: workflow
+            .steps
+            .iter()
+            .filter(|step| step.role == "verifier")
+            .count(),
+        synthesizer_steps: workflow
+            .steps
+            .iter()
+            .filter(|step| step.role == "synthesizer")
+            .count(),
+        cross_reviewed: workflow
+            .steps
+            .iter()
+            .any(|step| step.role == "verifier" && step.access.len() >= 2),
+    }
+}
+
 fn collaboration_candidate_models(config: &ProviderConfig, candidates: usize) -> Vec<String> {
+    let limit = candidates.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS);
     let mut models = Vec::new();
     for role in [
         ModelRole::Planner,
+        ModelRole::Executor,
         ModelRole::Reviewer,
         ModelRole::Summarizer,
-        ModelRole::Executor,
     ] {
         let model = config.model_for_role(&role);
         if !model.trim().is_empty() && !models.iter().any(|existing| existing == &model) {
             models.push(model);
         }
-        if models.len() >= candidates.max(1) {
+        if models.len() >= limit {
             break;
         }
     }
     models
+}
+
+fn collaboration_role_hints(
+    config: &ProviderConfig,
+    worker_models: &[String],
+) -> ConductorRoleHints {
+    let fallback = |preferred: String, index: usize| {
+        if worker_models.iter().any(|model| model == &preferred) {
+            preferred
+        } else {
+            worker_models
+                .get(index)
+                .or_else(|| worker_models.first())
+                .cloned()
+                .unwrap_or(preferred)
+        }
+    };
+    let planner = fallback(config.model_for_role(&ModelRole::Planner), 0);
+    let mut executor = fallback(config.model_for_role(&ModelRole::Executor), 1);
+    if executor == planner {
+        executor = worker_models
+            .iter()
+            .find(|model| *model != &planner)
+            .cloned()
+            .unwrap_or(executor);
+    }
+    let mut reviewer = fallback(
+        config.model_for_role(&ModelRole::Reviewer),
+        worker_models.len().saturating_sub(1),
+    );
+    if reviewer == planner || reviewer == executor {
+        reviewer = worker_models
+            .iter()
+            .find(|model| *model != &planner && *model != &executor)
+            .cloned()
+            .unwrap_or(reviewer);
+    }
+    ConductorRoleHints {
+        planner: planner.clone(),
+        executor,
+        reviewer,
+        synthesizer: fallback(config.model_for_role(&ModelRole::Summarizer), 0),
+    }
 }
 
 fn collaboration_agent_budget(candidates: usize) -> usize {
@@ -10976,6 +11075,7 @@ fn run_adaptive_collaboration(
     }
     let workflow_started_at_ms = current_time_millis();
     let conductor_model = config.model_for_conductor();
+    let role_hints = collaboration_role_hints(config, models);
     let effort = run_context
         .get("agent_effort")
         .cloned()
@@ -11137,12 +11237,7 @@ fn run_adaptive_collaboration(
             policy: policy.clone(),
             conductor_model: conductor_model.clone(),
             worker_models: models.to_vec(),
-            role_hints: ConductorRoleHints {
-                planner: config.model_for_role(&ModelRole::Planner),
-                executor: config.model_for_role(&ModelRole::Executor),
-                reviewer: config.model_for_role(&ModelRole::Reviewer),
-                synthesizer: config.model_for_role(&ModelRole::Summarizer),
-            },
+            role_hints: role_hints.clone(),
             budget: WorkflowBudget {
                 max_steps: adaptive_workflow_step_budget(agent_budget),
                 max_models: agent_budget.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS),
@@ -11218,6 +11313,7 @@ fn run_adaptive_collaboration(
     };
     let workflow = workflow_plan.adaptive_workflow();
     let layers = adaptive_workflow_layers(&workflow)?;
+    let role_coverage = workflow_role_coverage(&workflow, &role_hints);
     let layer_count = layers.len();
     let workflow_ir = workflow_plan.to_json()?;
     let mut workflow_checkpoint = workflow_checkpoint.take().unwrap_or_else(|| {
@@ -11315,6 +11411,30 @@ fn run_adaptive_collaboration(
                     ("workflow_steps".to_string(), workflow.steps.len().to_string()),
                     ("workflow_layers".to_string(), layers.len().to_string()),
                     ("worker_models".to_string(), unique_models.to_string()),
+                    (
+                        "role_aligned_steps".to_string(),
+                        role_coverage.aligned_steps.to_string(),
+                    ),
+                    (
+                        "role_total_steps".to_string(),
+                        role_coverage.total_steps.to_string(),
+                    ),
+                    (
+                        "independent_branch_models".to_string(),
+                        role_coverage.independent_models.to_string(),
+                    ),
+                    (
+                        "verifier_steps".to_string(),
+                        role_coverage.verifier_steps.to_string(),
+                    ),
+                    (
+                        "synthesizer_steps".to_string(),
+                        role_coverage.synthesizer_steps.to_string(),
+                    ),
+                    (
+                        "cross_reviewed".to_string(),
+                        role_coverage.cross_reviewed.to_string(),
+                    ),
                     (
                         "step_budget".to_string(),
                         adaptive_workflow_step_budget(agent_budget).to_string(),
@@ -11505,7 +11625,7 @@ fn run_adaptive_collaboration(
             })
             .collect::<Vec<_>>();
 
-        for (spec, completion) in specs.iter().zip(&completions) {
+        for (spec, completion) in specs.iter().zip(completions) {
             let metadata = adaptive_stage_metadata(spec);
             let role = adaptive_model_role(&spec.role);
             record_collaboration_stage_finished(
@@ -11517,7 +11637,7 @@ fn run_adaptive_collaboration(
                 &role,
                 &spec.model,
                 &spec.request_id,
-                completion,
+                &completion,
                 &metadata,
             )?;
             if completion.content.as_ref().is_none_or(|content| content.trim().is_empty())
@@ -11542,24 +11662,28 @@ fn run_adaptive_collaboration(
                 )?;
                 continue;
             }
-            let (content, completed_model) = if let Some(content) = completion
+            let (effective_completion, completed_model) = if completion
                 .content
                 .as_ref()
                 .filter(|content| !content.trim().is_empty())
+                .is_some()
             {
-                (content.clone(), spec.model.clone())
+                (completion, spec.model.clone())
             } else {
                 match recover_adaptive_worker(
+                    app,
                     state,
                     config,
                     task_id,
+                    workspace_root,
                     run_context,
                     collaboration_id,
                     prompt,
                     spec,
-                    completion,
+                    &completion,
                     models,
                     prompt_genome.retry_policy,
+                    cancellation.clone(),
                 ) {
                     Ok(recovered) => {
                         workflow_checkpoint.begin_step(
@@ -11592,10 +11716,18 @@ fn run_adaptive_collaboration(
                     }
                 }
             };
+            let content = effective_completion
+                .content
+                .as_ref()
+                .filter(|content| !content.trim().is_empty())
+                .cloned()
+                .ok_or_else(|| {
+                    format!("adaptive step {} completed without content", spec.step_id)
+                })?;
             let shared_evidence = merge_collaboration_evidence(
                 &spec.access,
                 &evidence_by_step,
-                &completion.evidence,
+                &effective_completion.evidence,
             );
             let step_output = collaboration_step_result(
                 &spec.step_id,
@@ -11614,8 +11746,8 @@ fn run_adaptive_collaboration(
             )?;
             workflow_checkpoint.record_step_metrics(
                 &spec.step_id,
-                completion.latency_ms,
-                completion
+                effective_completion.latency_ms,
+                effective_completion
                     .usage
                     .get("total_tokens")
                     .and_then(|value| value.parse::<u64>().ok())
@@ -11649,7 +11781,12 @@ fn run_adaptive_collaboration(
     let final_output = outputs
         .remove(&final_step.id)
         .ok_or_else(|| "adaptive workflow final output is missing".to_string())?;
-    let evidence_count = evidence_by_step.values().map(Vec::len).sum::<usize>();
+    let evidence_count = evidence_by_step
+        .values()
+        .flatten()
+        .map(|evidence| evidence.tool_call_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
     let quality_gate = quality_gate_adaptive_output(
         state,
         config,
@@ -11660,6 +11797,11 @@ fn run_adaptive_collaboration(
         &final_output,
         prompt_genome.verification,
     );
+    let recovered_steps = workflow_checkpoint
+        .steps
+        .values()
+        .filter(|step| step.attempts > 1)
+        .count();
     let step_credits = workflow_checkpoint.assign_step_credits(quality_gate.score);
     let final_output = quality_gate.output;
     workflow_checkpoint.finalize(final_output.clone(), current_time_millis())?;
@@ -11692,6 +11834,23 @@ fn run_adaptive_collaboration(
                     ("workflow_steps".to_string(), workflow_plan.steps.len().to_string()),
                     ("workflow_layers".to_string(), layer_count.to_string()),
                     ("evidence_count".to_string(), evidence_count.to_string()),
+                    ("recovered_steps".to_string(), recovered_steps.to_string()),
+                    (
+                        "role_aligned_steps".to_string(),
+                        role_coverage.aligned_steps.to_string(),
+                    ),
+                    (
+                        "role_total_steps".to_string(),
+                        role_coverage.total_steps.to_string(),
+                    ),
+                    (
+                        "independent_branch_models".to_string(),
+                        role_coverage.independent_models.to_string(),
+                    ),
+                    (
+                        "cross_reviewed".to_string(),
+                        role_coverage.cross_reviewed.to_string(),
+                    ),
                     (
                         "step_credits".to_string(),
                         serde_json::to_string(&step_credits).unwrap_or_else(|_| "[]".to_string()),
@@ -11733,9 +11892,11 @@ fn run_adaptive_collaboration(
 
 #[allow(clippy::too_many_arguments)]
 fn recover_adaptive_worker(
+    app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,
     task_id: &TaskId,
+    workspace_root: &Path,
     run_context: &Metadata,
     collaboration_id: &str,
     user_prompt: &str,
@@ -11743,7 +11904,8 @@ fn recover_adaptive_worker(
     failed: &CollaborationCompletion,
     models: &[String],
     retry_policy: PromptRetryPolicy,
-) -> Result<(String, String), String> {
+    cancellation: Option<Arc<AgentRunControl>>,
+) -> Result<(CollaborationCompletion, String), String> {
     let failure = failed
         .error
         .as_deref()
@@ -11826,24 +11988,69 @@ fn recover_adaptive_worker(
         ),
     )
     .unwrap_or_else(|_| spec.subtask.clone());
-    let recovered = run_collaboration_stage(
+    if cancellation
+        .as_ref()
+        .is_some_and(|control| agent_run_should_stop(control))
+    {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
+    let recovery_stage = format!("recovery_{}", spec.step_index + 1);
+    let recovery_request_id = unique_id("collaboration-recovery");
+    let mut recovery_metadata = adaptive_stage_metadata(spec);
+    recovery_metadata.insert("recovery".to_string(), "true".to_string());
+    recovery_metadata.insert("failed_model".to_string(), spec.model.clone());
+    record_collaboration_stage_started(
         state,
-        config,
         task_id,
         run_context,
         collaboration_id,
-        &format!("recovery_{}", spec.step_index + 1),
-        adaptive_model_role(&spec.role),
+        &recovery_stage,
+        &adaptive_model_role(&spec.role),
         &replacement_model,
+        &recovery_request_id,
+        &recovery_metadata,
+    )?;
+    let recovered = complete_collaboration_worker_with_tools(
+        app.clone(),
+        config.clone(),
+        task_id.clone(),
+        workspace_root.to_path_buf(),
+        run_context.clone(),
+        collaboration_id.to_string(),
+        recovery_stage.clone(),
+        adaptive_model_role(&spec.role),
+        replacement_model.clone(),
         format!(
             "You are the replacement worker for failed adaptive step {}. Complete the work independently and return concrete findings for downstream steps.\n\nRecovery instruction:\n{}\n\nOriginal authorized prompt:\n{}",
             spec.step_id,
             truncate_for_collaboration(&recovery_instruction, 4_000),
             spec.prompt
         ),
+        spec.tool_policy != WorkflowToolPolicy::None,
+        spec.max_model_turns,
+        spec.max_tool_calls,
+        cancellation,
+    );
+    record_collaboration_stage_finished(
+        state,
+        task_id,
+        run_context,
+        collaboration_id,
+        &recovery_stage,
+        &adaptive_model_role(&spec.role),
+        &replacement_model,
+        &recovery_request_id,
+        &recovered,
+        &recovery_metadata,
     )?;
-    if recovered.trim().is_empty() {
-        Err(format!("replacement worker for {} returned no content", spec.step_id))
+    if recovered
+        .content
+        .as_ref()
+        .is_none_or(|content| content.trim().is_empty())
+    {
+        Err(recovered.error.clone().unwrap_or_else(|| {
+            format!("replacement worker for {} returned no content", spec.step_id)
+        }))
     } else {
         Ok((recovered, replacement_model))
     }
@@ -12153,8 +12360,8 @@ fn prepare_agent_collaboration(
         return Ok(None);
     };
     let id = unique_id("collab");
-    let models = collaboration_candidate_models(config, MAX_ADAPTIVE_WORKFLOW_STEPS);
     let agent_budget = collaboration_agent_budget(*candidates);
+    let models = collaboration_candidate_models(config, agent_budget);
     let fallback_models = collaboration_fallback_models(&models, agent_budget);
     let bounded = run_context.get("collaboration_profile").map(String::as_str)
         == Some("bounded");
@@ -18446,12 +18653,7 @@ fn evaluate_conductor_prompt_profile(
         policy: policy.to_string(),
         conductor_model: conductor_model.clone(),
         worker_models: worker_models.to_vec(),
-        role_hints: ConductorRoleHints {
-            planner: config.model_for_role(&ModelRole::Planner),
-            executor: config.model_for_role(&ModelRole::Executor),
-            reviewer: config.model_for_role(&ModelRole::Reviewer),
-            synthesizer: config.model_for_role(&ModelRole::Summarizer),
-        },
+        role_hints: collaboration_role_hints(config, worker_models),
         budget: WorkflowBudget {
             max_steps: adaptive_workflow_step_budget(agent_budget),
             max_models: agent_budget.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS),
@@ -23674,13 +23876,70 @@ mod tests {
             collaboration_candidate_models(&config, 3),
             vec![
                 "planner-a".to_string(),
+                "executor-b".to_string(),
                 "reviewer-c".to_string(),
-                "summary-d".to_string()
             ]
         );
         assert_eq!(config.model_for_conductor(), "conductor-z");
-        assert!(!collaboration_candidate_models(&config, 5)
-            .contains(&"conductor-z".to_string()));
+        let oversized_pool = collaboration_candidate_models(&config, 5);
+        assert_eq!(oversized_pool.len(), MAX_ADAPTIVE_WORKFLOW_AGENTS);
+        assert!(!oversized_pool.contains(&"conductor-z".to_string()));
+
+        let worker_models = collaboration_candidate_models(&config, 3);
+        let hints = collaboration_role_hints(&config, &worker_models);
+        assert_eq!(hints.planner, "planner-a");
+        assert_eq!(hints.executor, "executor-b");
+        assert_eq!(hints.reviewer, "reviewer-c");
+        assert_eq!(hints.synthesizer, "planner-a");
+        assert!([
+            &hints.planner,
+            &hints.executor,
+            &hints.reviewer,
+            &hints.synthesizer,
+        ]
+        .iter()
+        .all(|model| worker_models.contains(model)));
+
+        let coverage = workflow_role_coverage(
+            &AdaptiveWorkflow {
+                steps: vec![
+                    AdaptiveWorkflowStep {
+                        id: "plan".to_string(),
+                        role: "thinker".to_string(),
+                        model: hints.planner.clone(),
+                        subtask: "plan".to_string(),
+                        access: Vec::new(),
+                    },
+                    AdaptiveWorkflowStep {
+                        id: "execute".to_string(),
+                        role: "worker".to_string(),
+                        model: hints.executor.clone(),
+                        subtask: "execute".to_string(),
+                        access: Vec::new(),
+                    },
+                    AdaptiveWorkflowStep {
+                        id: "review".to_string(),
+                        role: "verifier".to_string(),
+                        model: hints.reviewer.clone(),
+                        subtask: "review".to_string(),
+                        access: vec!["plan".to_string(), "execute".to_string()],
+                    },
+                    AdaptiveWorkflowStep {
+                        id: "synthesize".to_string(),
+                        role: "synthesizer".to_string(),
+                        model: hints.synthesizer.clone(),
+                        subtask: "synthesize".to_string(),
+                        access: vec!["plan".to_string(), "execute".to_string(), "review".to_string()],
+                    },
+                ],
+            },
+            &hints,
+        );
+        assert_eq!(coverage.aligned_steps, 4);
+        assert_eq!(coverage.independent_models, 2);
+        assert_eq!(coverage.verifier_steps, 1);
+        assert_eq!(coverage.synthesizer_steps, 1);
+        assert!(coverage.cross_reviewed);
     }
 
     #[test]

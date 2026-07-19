@@ -790,6 +790,8 @@ impl ConductorHarness {
                 "- Preserve listed order: access may reference only earlier step ids.\n",
                 "- Obey the evolved profile's branch and verification policy; do not add decorative agents.\n",
                 "- Keep workers isolated and expose an earlier result only through access.\n",
+                "- Give independent root branches non-overlapping subtasks and use distinct models when the pool permits.\n",
+                "- A verifier must directly access every independent root branch it audits.\n",
                 "- Every branch must reach the final synthesizer; retain dissenting or failed branches.\n",
                 "- Use exact model strings from the worker pool. The Conductor model is not implicitly a worker.\n",
                 "- Do not include markdown fences, commentary, tool calls, or a user-facing answer.\n\n",
@@ -803,6 +805,7 @@ impl ConductorHarness {
                 request.budget.max_models,
                 request.prompt_genome.max_parallel_branches,
                 request.prompt_genome.verification,
+                &request.role_hints,
             ),
             max_steps = request.budget.max_steps,
             max_models = request.budget.max_models,
@@ -943,7 +946,7 @@ impl ConductorHarness {
             .filter(|step| {
                 step.access.is_empty() && matches!(step.role.as_str(), "thinker" | "worker")
             })
-            .count();
+            .collect::<Vec<_>>();
         let branch_limit = self
             .request
             .prompt_genome
@@ -963,7 +966,7 @@ impl ConductorHarness {
             }
             .min(branch_limit)
         };
-        if independent_branches < required_branches {
+        if independent_branches.len() < required_branches {
             return Err(
                 format!(
                     "conductor workflow requires at least {required_branches} independent branch{} for the selected prompt profile",
@@ -971,10 +974,43 @@ impl ConductorHarness {
                 ),
             );
         }
-        if independent_branches > branch_limit {
+        if independent_branches.len() > branch_limit {
             return Err(format!(
                 "conductor workflow exceeds the selected prompt profile's {branch_limit}-branch limit"
             ));
+        }
+        let distinct_available_models = self
+            .request
+            .worker_models
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .len();
+        let required_branch_models = required_branches.min(distinct_available_models);
+        let distinct_branch_models = independent_branches
+            .iter()
+            .map(|step| step.model.as_str())
+            .collect::<BTreeSet<_>>()
+            .len();
+        if required_branch_models >= 2 && distinct_branch_models < required_branch_models {
+            return Err(format!(
+                "conductor workflow requires {required_branch_models} distinct models across independent branches"
+            ));
+        }
+        let distinct_branch_subtasks = independent_branches
+            .iter()
+            .map(|step| {
+                step.subtask
+                    .split_whitespace()
+                    .flat_map(str::chars)
+                    .flat_map(char::to_lowercase)
+                    .collect::<String>()
+            })
+            .collect::<BTreeSet<_>>()
+            .len();
+        if independent_branches.len() >= 2
+            && distinct_branch_subtasks < independent_branches.len()
+        {
+            return Err("conductor independent branches repeat the same subtask".to_string());
         }
         if self.request.prompt_genome.require_final_synthesis
             && workflow
@@ -986,11 +1022,23 @@ impl ConductorHarness {
         }
         if self.request.prompt_genome.verification == PromptVerification::Adversarial
             && self.request.budget.max_steps >= 4
-            && !workflow.steps.iter().any(|step| step.role == "verifier")
         {
-            return Err(
-                "adversarial prompt profile requires a verifier before synthesis".to_string(),
-            );
+            let independent_ids = independent_branches
+                .iter()
+                .map(|step| step.id.as_str())
+                .collect::<BTreeSet<_>>();
+            let verifier_covers_branches = workflow.steps.iter().any(|step| {
+                step.role == "verifier"
+                    && independent_ids
+                        .iter()
+                        .all(|branch_id| step.access.iter().any(|access| access == branch_id))
+            });
+            if !verifier_covers_branches {
+                return Err(
+                    "adversarial prompt profile requires a verifier that directly audits every independent branch"
+                        .to_string(),
+                );
+            }
         }
         if workflow
             .steps
@@ -1007,21 +1055,109 @@ fn conductor_schema_example(
     max_models: usize,
     max_parallel_branches: usize,
     verification: PromptVerification,
-) -> &'static str {
+    role_hints: &ConductorRoleHints,
+) -> String {
+    let branch_executor = if role_hints.executor != role_hints.planner {
+        &role_hints.executor
+    } else if role_hints.reviewer != role_hints.planner {
+        &role_hints.reviewer
+    } else {
+        &role_hints.executor
+    };
     match max_models.min(max_parallel_branches.max(1)) {
-        0 | 1 => {
-            r#"{"steps":[{"id":"synthesize","role":"synthesizer","model":"exact model from pool","subtask":"produce a checkable execution brief","access":[]}]}"#
-        }
-        2 => {
-            r#"{"steps":[{"id":"approach_a","role":"thinker","model":"exact model from pool","subtask":"analyze the strongest approach","access":[]},{"id":"approach_b","role":"worker","model":"exact model from pool","subtask":"develop an independent alternative","access":[]},{"id":"synthesize","role":"synthesizer","model":"reuse an exact model from pool","subtask":"resolve both branches","access":["approach_a","approach_b"]}]}"#
-        }
-        _ if verification == PromptVerification::Adversarial => {
-            r#"{"steps":[{"id":"approach_a","role":"thinker","model":"exact model from pool","subtask":"independent approach","access":[]},{"id":"approach_b","role":"worker","model":"exact model from pool","subtask":"independent alternative","access":[]},{"id":"verify","role":"verifier","model":"exact model from pool","subtask":"cross-check both reports","access":["approach_a","approach_b"]},{"id":"synthesize","role":"synthesizer","model":"reuse an exact model from pool","subtask":"resolve disagreements","access":["approach_a","approach_b","verify"]}]}"#
-        }
-        _ => {
-            r#"{"steps":[{"id":"approach_a","role":"thinker","model":"exact model from pool","subtask":"independent approach","access":[]},{"id":"approach_b","role":"worker","model":"exact model from pool","subtask":"independent alternative","access":[]},{"id":"synthesize","role":"synthesizer","model":"reuse an exact model from pool","subtask":"resolve both branches","access":["approach_a","approach_b"]}]}"#
-        }
+        0 | 1 => serde_json::json!({
+            "steps": [{
+                "id": "synthesize",
+                "role": "synthesizer",
+                "model": role_hints.synthesizer,
+                "subtask": "produce a checkable execution brief",
+                "access": [],
+            }]
+        }),
+        2 => serde_json::json!({
+            "steps": [
+                {
+                    "id": "approach_a",
+                    "role": "thinker",
+                    "model": role_hints.planner,
+                    "subtask": "analyze assumptions and the strongest approach",
+                    "access": [],
+                },
+                {
+                    "id": "approach_b",
+                    "role": "worker",
+                    "model": branch_executor,
+                    "subtask": "develop a concrete independent implementation path",
+                    "access": [],
+                },
+                {
+                    "id": "synthesize",
+                    "role": "synthesizer",
+                    "model": role_hints.synthesizer,
+                    "subtask": "resolve both branches into one execution brief",
+                    "access": ["approach_a", "approach_b"],
+                },
+            ]
+        }),
+        _ if verification == PromptVerification::Adversarial => serde_json::json!({
+            "steps": [
+                {
+                    "id": "approach_a",
+                    "role": "thinker",
+                    "model": role_hints.planner,
+                    "subtask": "analyze assumptions and the strongest approach",
+                    "access": [],
+                },
+                {
+                    "id": "approach_b",
+                    "role": "worker",
+                    "model": branch_executor,
+                    "subtask": "develop a concrete independent implementation path",
+                    "access": [],
+                },
+                {
+                    "id": "verify",
+                    "role": "verifier",
+                    "model": role_hints.reviewer,
+                    "subtask": "cross-check both reports and identify unsupported claims",
+                    "access": ["approach_a", "approach_b"],
+                },
+                {
+                    "id": "synthesize",
+                    "role": "synthesizer",
+                    "model": role_hints.synthesizer,
+                    "subtask": "resolve disagreements into one evidence-grounded execution brief",
+                    "access": ["approach_a", "approach_b", "verify"],
+                },
+            ]
+        }),
+        _ => serde_json::json!({
+            "steps": [
+                {
+                    "id": "approach_a",
+                    "role": "thinker",
+                    "model": role_hints.planner,
+                    "subtask": "analyze assumptions and the strongest approach",
+                    "access": [],
+                },
+                {
+                    "id": "approach_b",
+                    "role": "worker",
+                    "model": branch_executor,
+                    "subtask": "develop a concrete independent implementation path",
+                    "access": [],
+                },
+                {
+                    "id": "synthesize",
+                    "role": "synthesizer",
+                    "model": role_hints.synthesizer,
+                    "subtask": "resolve both branches into one evidence-grounded execution brief",
+                    "access": ["approach_a", "approach_b"],
+                },
+            ]
+        }),
     }
+    .to_string()
 }
 
 fn truncate_conductor_text(value: &str, max_chars: usize) -> String {
@@ -1201,17 +1337,30 @@ pub fn adaptive_worker_prompt(
     outputs: &BTreeMap<String, String>,
 ) -> Option<String> {
     let step = workflow.steps.get(step_index)?;
-    let role_instruction = match step.role.as_str() {
-        "thinker" => "Explore an independent approach, decompose the problem, and expose assumptions.",
-        "verifier" => "Audit supplied work against evidence, identify disagreements, and state exact corrections.",
-        "synthesizer" => "Resolve disagreements and produce one checkable execution brief grounded in the supplied work.",
-        _ => "Produce concrete work for the assigned subtask and report evidence and uncertainty.",
+    let (role_instruction, output_contract) = match step.role.as_str() {
+        "thinker" => (
+            "Explore an independent approach, decompose the problem, and expose assumptions without duplicating implementation work.",
+            "Hypotheses; Assumptions; Recommended path; Failure modes.",
+        ),
+        "verifier" => (
+            "Audit supplied work against evidence, identify disagreements, and state exact corrections without inventing a new unsupported solution.",
+            "Agreements; Disagreements; Evidence verdicts; Required corrections.",
+        ),
+        "synthesizer" => (
+            "Resolve disagreements and produce one checkable execution brief grounded in the supplied work.",
+            "Decision; Integrated execution brief; Evidence basis; Unresolved risks.",
+        ),
+        _ => (
+            "Produce concrete work for the assigned subtask and report evidence and uncertainty rather than repeating the planning branch.",
+            "Work product; Evidence used or needed; Risks; Handoff.",
+        ),
     };
     let mut prompt = format!(
-        "You are isolated {} {} in a Cindx adaptive multi-model workflow. {} Complete only the assigned subtask. Do not assume you can see other agents unless their output is explicitly included below. Use exposed read-only evidence tools when the subtask depends on workspace facts. Return concrete findings for a later agent, not a user-facing answer.\n\nUser request:\n{}\n\nAssigned subtask:\n{}\n\nShared memory from earlier user turns:\n{}",
+        "You are isolated {} {} in a Cindx adaptive multi-model workflow. {} Complete only the assigned subtask. Do not assume you can see other agents unless their output is explicitly included below. Use exposed read-only evidence tools when the subtask depends on workspace facts. Return concrete findings for a later agent, not a user-facing answer. Do not merely restate authorized outputs; transform, test, or reconcile them for your role.\n\nOutput contract:\n{}\n\nUser request:\n{}\n\nAssigned subtask:\n{}\n\nShared memory from earlier user turns:\n{}",
         step.role,
         step.id,
         role_instruction,
+        output_contract,
         user_prompt,
         step.subtask,
         if shared_memory.trim().is_empty() {
@@ -3153,6 +3302,10 @@ mod tests {
         assert!(prompt.contains("Allowed worker pool:\n- planner\n- reviewer"));
         assert!(prompt.contains("Prefer two independent branches"));
         assert!(!prompt.contains("conductor-only"));
+        assert!(prompt.contains(r#""model":"planner""#));
+        assert!(prompt.contains(r#""model":"reviewer""#));
+        assert!(prompt.contains(r#""role":"thinker""#));
+        assert!(prompt.contains(r#""role":"worker""#));
 
         let plan = harness.parse_plan(
             r#"{"steps":[{"id":"a","role":"thinker","model":"planner","subtask":"primary","access":[]},{"id":"b","role":"worker","model":"reviewer","subtask":"alternative","access":[]},{"id":"final","role":"synthesizer","model":"planner","subtask":"merge","access":["a","b"]}]}"#,
@@ -3174,6 +3327,33 @@ mod tests {
         assert!(error.contains("at least 2 independent branches"));
         assert!(repair.contains("deterministic Cindx Harness"));
         assert!(repair.contains(&error));
+    }
+
+    #[test]
+    fn conductor_harness_requires_diverse_root_branches_and_complete_review() {
+        let mut request = conductor_request();
+        request.budget.max_steps = 5;
+        let harness = ConductorHarness::new(request);
+        let same_model = harness
+            .parse_plan(
+                r#"{"steps":[{"id":"a","role":"thinker","model":"planner","subtask":"primary analysis","access":[]},{"id":"b","role":"worker","model":"planner","subtask":"independent implementation","access":[]},{"id":"verify","role":"verifier","model":"reviewer","subtask":"audit both","access":["a","b"]},{"id":"final","role":"synthesizer","model":"planner","subtask":"merge","access":["a","b","verify"]}]}"#,
+            )
+            .expect_err("distinct models should cover independent branches");
+        assert!(same_model.contains("distinct models"), "{same_model}");
+
+        let duplicate_subtask = harness
+            .parse_plan(
+                r#"{"steps":[{"id":"a","role":"thinker","model":"planner","subtask":"Inspect the design","access":[]},{"id":"b","role":"worker","model":"reviewer","subtask":" inspect   THE design ","access":[]},{"id":"verify","role":"verifier","model":"reviewer","subtask":"audit both","access":["a","b"]},{"id":"final","role":"synthesizer","model":"planner","subtask":"merge","access":["a","b","verify"]}]}"#,
+            )
+            .expect_err("duplicate branch assignments should be rejected");
+        assert!(duplicate_subtask.contains("repeat the same subtask"));
+
+        let incomplete_review = harness
+            .parse_plan(
+                r#"{"steps":[{"id":"a","role":"thinker","model":"planner","subtask":"primary analysis","access":[]},{"id":"b","role":"worker","model":"reviewer","subtask":"independent implementation","access":[]},{"id":"verify","role":"verifier","model":"reviewer","subtask":"audit one branch","access":["a"]},{"id":"final","role":"synthesizer","model":"planner","subtask":"merge","access":["a","b","verify"]}]}"#,
+            )
+            .expect_err("adversarial review should cover every root branch");
+        assert!(incomplete_review.contains("directly audits every independent branch"));
     }
 
     #[test]
@@ -3406,6 +3586,16 @@ mod tests {
 
         assert!(prompt.contains("VISIBLE_FINDING"));
         assert!(!prompt.contains("HIDDEN_FINDING"));
+        assert!(prompt.contains("Integrated execution brief"));
+        assert!(prompt.contains("Do not merely restate authorized outputs"));
+
+        let thinker = adaptive_worker_prompt(&workflow, 0, "Investigate", "", &BTreeMap::new())
+            .expect("thinker prompt should build");
+        let worker = adaptive_worker_prompt(&workflow, 1, "Investigate", "", &BTreeMap::new())
+            .expect("worker prompt should build");
+        assert!(thinker.contains("Hypotheses; Assumptions"));
+        assert!(worker.contains("Work product; Evidence used or needed"));
+        assert_ne!(thinker, worker);
     }
 
     #[test]
