@@ -122,6 +122,32 @@ This reproduces Fugu-style dynamic workflow search, isolated worker execution, b
 
 The checked-in CI baseline leaves these thresholds empty because CI has no provider credentials. A controlled evaluation environment can supply its own suite, baseline, and observation files with `--suite`, `--baseline`, and `--observations`.
 
+## Control-Plane Reliability Gate
+
+Provider quality and harness plumbing are evaluated separately. The local Rust
+gate verifies that:
+
+- a warm Session projection reads only its target Session delta even after
+  thousands of unrelated events;
+- queue mutations remain incremental and replay-safe;
+- run, permission, pause, completion, failure, and cancellation use one lifecycle
+  reducer;
+- runtime and run-control budgets share one source;
+- turn-budget exhaustion is typed recoverable control flow rather than a generic
+  agent failure;
+- Fugu workers reserve a tool-free final answer turn and can resume from bounded
+  checkpoints.
+
+Run the deterministic gate with:
+
+```bash
+cargo test -p agent-runtime --locked
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+```
+
+These tests prove control-flow and scaling invariants. They do not replace the
+provider-backed completion, quality, latency, and safety observations above.
+
 ## Release Gate
 
 Before release:

@@ -8,6 +8,52 @@
 - Agent startup never waits for an unavailable MCP server.
 - Skills add scoped instructions and resources without bypassing tool permissions.
 
+## Harness ownership
+
+The harness has one lifecycle owner per concern:
+
+- `agent-runtime` owns `AgentLoopState`, `AgentRunControl`, run budgets,
+  cancellation, no-progress detection, repeated-action detection, and typed turn
+  budget exhaustion.
+- `orchestrator` owns the Fugu execution engine: routing, bounded workflow DAGs,
+  role assignment, worker isolation, verification, recovery attempts, and durable
+  workflow checkpoints.
+- The desktop adapter owns side effects: provider calls, permission prompts, tool
+  execution, event persistence, and Tauri commands. It does not define a second
+  run-control policy.
+- `queue_service` and `session_projection` own queue reduction and the versioned
+  per-session read model. Interactive commands use compact receipts and indexed
+  session deltas instead of rebuilding complete application state.
+
+All views derive `idle`, `running`, `waiting_for_permission`, `paused`,
+`completed`, `failed`, and `cancelled` from the same typed lifecycle reducer.
+Reaching a run or turn budget is recoverable control flow: the runtime preserves
+the transcript and the desktop exposes a continuation instead of recording an
+ordinary agent failure.
+
+## Fugu and GEPA
+
+Fugu is the execution engine inside the harness. It may plan parallel branches,
+reuse a bounded worker pool, authorize dependency outputs, reserve a final answer
+turn, recover a failed worker, and resume from a checkpoint. It is still governed
+by the runtime cancellation and budget contract.
+
+GEPA is an optimizer outside the active loop. It consumes redacted completed or
+replay trajectories, reflects on paired outcomes, and proposes a versioned prompt
+genome. Promotion requires independent evaluation and holdout evidence. A selected
+champion may configure a future Fugu run, but GEPA cannot mutate an in-flight
+transcript, permission decision, tool result, run budget, or workflow checkpoint.
+
+## Performance invariants
+
+- Session interaction paths never scan every event for the shared agent task.
+- A warm session projection reads only events newer than its stored revision.
+- Queue edit, delete, and steer commands return mutation receipts, not full chat
+  history.
+- Cancellation remains observable during provider streams and sidecar execution.
+- Long-session regression tests verify that unrelated session growth does not
+  increase projection work.
+
 ## Tool contract
 
 `ToolSpec` carries a stable wire name, namespace, source, exposure policy, risk,
