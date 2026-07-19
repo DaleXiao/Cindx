@@ -68,11 +68,14 @@ export function QueuedMessages({
 
   const saveEdit = async () => {
     if (!editingId || !editingPrompt.trim() || busyId) return;
+    const queueId = editingId;
+    const prompt = editingPrompt.trim();
+    cancelEdit();
     try {
-      await onEdit(editingId, editingPrompt.trim());
-      cancelEdit();
+      await onEdit(queueId, prompt);
     } catch {
-      // Keep the editor open so the user can retry without losing the draft.
+      setEditingId(queueId);
+      setEditingPrompt(prompt);
     }
   };
 

@@ -240,6 +240,15 @@ export type QueuedAgentMessageReceipt = {
   latestTimestampMs: number;
 };
 
+export type QueuedAgentMessageActionReceipt = {
+  queueId: string;
+  message: QueuedAgentMessage | null;
+  eventCount: number;
+  latestSequence: number;
+  latestTimestampMs: number;
+  cancelledActiveRun: boolean;
+};
+
 export type AttachmentUpload = {
   name: string;
   mimeType: string;
@@ -2464,9 +2473,9 @@ export async function editQueuedAgentMessage(
   sessionId: string,
   queueId: string,
   prompt: string
-): Promise<AgentState> {
+): Promise<QueuedAgentMessageActionReceipt> {
   try {
-    return await invoke<AgentState>("edit_queued_agent_message", {
+    return await invoke<QueuedAgentMessageActionReceipt>("edit_queued_agent_message", {
       input: { sessionId, queueId, prompt }
     });
   } catch (error) {
@@ -2480,41 +2489,57 @@ export async function editQueuedAgentMessage(
         message.id === queueId ? { ...message, prompt: prompt.trim(), updatedAtMs: now } : message
       )
     };
-    return browserAgentState;
+    return {
+      queueId,
+      message: browserAgentState.queuedMessages.find((message) => message.id === queueId) ?? null,
+      eventCount: browserAgentState.eventCount,
+      latestSequence: browserAgentState.latestSequence,
+      latestTimestampMs: now,
+      cancelledActiveRun: false
+    };
   }
 }
 
 export async function deleteQueuedAgentMessage(
   sessionId: string,
   queueId: string
-): Promise<AgentState> {
+): Promise<QueuedAgentMessageActionReceipt> {
   try {
-    return await invoke<AgentState>("delete_queued_agent_message", {
+    return await invoke<QueuedAgentMessageActionReceipt>("delete_queued_agent_message", {
       input: { sessionId, queueId }
     });
   } catch (error) {
     if (isTauriRuntime()) throw error;
+    const now = Date.now();
     browserAgentState = {
       ...browserAgentState,
       eventCount: browserAgentState.eventCount + 1,
       latestSequence: browserAgentState.latestSequence + 1,
       queuedMessages: browserAgentState.queuedMessages.filter((message) => message.id !== queueId)
     };
-    return browserAgentState;
+    return {
+      queueId,
+      message: null,
+      eventCount: browserAgentState.eventCount,
+      latestSequence: browserAgentState.latestSequence,
+      latestTimestampMs: now,
+      cancelledActiveRun: false
+    };
   }
 }
 
 export async function steerQueuedAgentMessage(
   sessionId: string,
   queueId: string
-): Promise<AgentState> {
+): Promise<QueuedAgentMessageActionReceipt> {
   try {
-    return await invoke<AgentState>("steer_queued_agent_message", {
+    return await invoke<QueuedAgentMessageActionReceipt>("steer_queued_agent_message", {
       input: { sessionId, queueId }
     });
   } catch (error) {
     if (isTauriRuntime()) throw error;
     const now = Date.now();
+    const cancelledActiveRun = browserAgentState.canCancel;
     browserAgentState = {
       ...browserAgentState,
       status: browserAgentState.canCancel ? "cancelled" : browserAgentState.status,
@@ -2532,7 +2557,14 @@ export async function steerQueuedAgentMessage(
           return left.createdAtMs - right.createdAtMs;
         })
     };
-    return browserAgentState;
+    return {
+      queueId,
+      message: browserAgentState.queuedMessages.find((message) => message.id === queueId) ?? null,
+      eventCount: browserAgentState.eventCount,
+      latestSequence: browserAgentState.latestSequence,
+      latestTimestampMs: now,
+      cancelledActiveRun
+    };
   }
 }
 
