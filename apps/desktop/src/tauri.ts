@@ -2415,11 +2415,19 @@ export async function queueAgentMessage(
   prompt: string,
   sessionId: string,
   attachments: AgentAttachment[] = [],
-  effort: AgentEffort = "auto"
+  effort: AgentEffort = "auto",
+  queueId?: string
 ): Promise<QueuedAgentMessageReceipt> {
   try {
     return await invoke<QueuedAgentMessageReceipt>("queue_agent_message", {
-      input: { prompt, sessionId, currentTime: currentAgentTimeContext(), effort, attachments }
+      input: {
+        prompt,
+        sessionId,
+        currentTime: currentAgentTimeContext(),
+        effort,
+        attachments,
+        queueId
+      }
     });
   } catch (error) {
     if (isTauriRuntime()) throw error;
@@ -2427,7 +2435,7 @@ export async function queueAgentMessage(
     const visiblePrompt =
       prompt.trim() || `Review attached ${attachments.map((attachment) => attachment.name).join(", ")}`;
     const message: QueuedAgentMessage = {
-      id: `agent-queue-${now}`,
+      id: queueId || `agent-queue-${now}`,
       sessionId,
       prompt: visiblePrompt,
       attachments,

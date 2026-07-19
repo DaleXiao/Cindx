@@ -954,6 +954,7 @@ assert(
     tauriBridge.includes("export type QueuedAgentMessage") &&
     tauriBridge.includes("export type QueuedAgentMessageReceipt") &&
     tauriBridge.includes("export async function queueAgentMessage(") &&
+    tauriBridge.includes("queueId?: string") &&
     tauriBridge.includes("export async function runNextQueuedAgentMessage(") &&
     appSource.includes("async function drainQueuedMessages(sessionId: string)") &&
     appSource.includes("suppressQueueDrainSessionIdsRef") &&
@@ -963,10 +964,11 @@ assert(
     queuedMessagesSource.includes("onEdit") &&
     queuedMessagesSource.includes("onDelete") &&
     styles.includes(".queued-message-stack") &&
-    styles.includes("bottom: calc(100% - 18px)") &&
+    styles.includes("bottom: calc(100% - 2px)") &&
     styles.includes("border-radius: var(--radius-lg) var(--radius-lg) 0 0") &&
     styles.includes(".queued-message + .queued-message") &&
     appSource.includes("applyQueuedMessageReceiptForSession") &&
+    appSource.includes("optimisticQueuedMessagesRef") &&
     styles.includes(".composer-stack > .composer") &&
     appSource.includes("data-has-queued={Boolean(activeAgentState?.queuedMessages.length)}") &&
     styles.includes('.composer-stack[data-has-queued="true"] > .composer'),
