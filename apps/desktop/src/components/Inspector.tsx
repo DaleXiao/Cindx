@@ -117,6 +117,24 @@ type OutputArtifact = AgentOutputArtifactView & {
 const IMAGE_EXTENSIONS = new Set(["avif", "bmp", "gif", "jpeg", "jpg", "png", "webp"]);
 const MARKDOWN_EXTENSIONS = new Set(["md", "mdown", "markdown"]);
 const HTML_EXTENSIONS = new Set(["htm", "html"]);
+const OUTPUT_HISTORY_SESSION_LIMIT = 12;
+const DEBUG_CLOSE_ANIMATION_MS = 230;
+
+function rememberOutputHistory(
+  current: Record<string, OutputArtifact[]>,
+  sessionId: string,
+  artifacts: OutputArtifact[]
+) {
+  const next = { ...current };
+  delete next[sessionId];
+  next[sessionId] = artifacts;
+  const sessionIds = Object.keys(next);
+  while (sessionIds.length > OUTPUT_HISTORY_SESSION_LIMIT) {
+    const oldestSessionId = sessionIds.shift();
+    if (oldestSessionId) delete next[oldestSessionId];
+  }
+  return next;
+}
 
 function artifactName(path: string) {
   const parts = path.split(/[\\/]/).filter(Boolean);
@@ -350,6 +368,7 @@ export function Inspector({
   onReview
 }: InspectorProps) {
   const [debugOpen, setDebugOpen] = useState(false);
+  const [debugBodyMounted, setDebugBodyMounted] = useState(false);
   const [outputsOpen, setOutputsOpen] = useState(true);
   const [metadataOpen, setMetadataOpen] = useState(false);
   const [metadataMotion, setMetadataMotion] = useState<"idle" | "opening" | "closing">(
@@ -366,17 +385,29 @@ export function Inspector({
     "idle" | "copied" | "failed"
   >("idle");
   const sessionCopyTimerRef = useRef<number | null>(null);
+  const debugUnmountTimerRef = useRef<number | null>(null);
+  const debugOpenFrameRef = useRef<number | null>(null);
+  const debugDesiredOpenRef = useRef(false);
   const outputSignaturesBySessionRef = useRef<Map<string, Set<string>>>(new Map());
   const reviewTotal = reviewCounts.agent + reviewCounts.tool + reviewCounts.browser;
   const hasArtifacts = Boolean(ragAnswer || ragSources.length || browserObservations.length || toolResults.length);
   const hasContext = Boolean(
     contextCheckpoint && (contextCheckpoint.eventCount > 0 || contextCheckpoint.path)
   );
-  const traceTurnCount = new Set(sessionTraceSteps.map((step) => step.turnIndex)).size;
-  const traceToolCallCount = sessionTraceSteps.filter((step) => step.kind === "tool").length;
-  const tracePermissionCount = sessionTraceSteps.filter(
-    (step) => step.kind === "permission"
-  ).length;
+  const traceSummary = useMemo(() => {
+    if (!debugBodyMounted) {
+      return { turnCount: 0, toolCallCount: 0, permissionCount: 0 };
+    }
+    const turns = new Set<number>();
+    let toolCallCount = 0;
+    let permissionCount = 0;
+    for (const step of sessionTraceSteps) {
+      turns.add(step.turnIndex);
+      if (step.kind === "tool") toolCallCount += 1;
+      if (step.kind === "permission") permissionCount += 1;
+    }
+    return { turnCount: turns.size, toolCallCount, permissionCount };
+  }, [debugBodyMounted, sessionTraceSteps]);
   const currentRunOutputs = useMemo(
     () => traceOutputArtifacts(sessionTraceSteps, workspaceRoot),
     [sessionTraceSteps, workspaceRoot]
@@ -388,7 +419,7 @@ export function Inspector({
   );
 
   useEffect(() => {
-    if (!sessionId) return;
+    if (!open || !sessionId) return;
     let active = true;
     void getAgentSessionOutputs(sessionId)
       .then((artifacts) => {
@@ -399,21 +430,21 @@ export function Inspector({
         setOutputHistoryBySession((current) => {
           const merged = mergeOutputArtifacts(current[sessionId] ?? [], resolved);
           if (outputArtifactsUnchanged(current[sessionId] ?? [], merged)) return current;
-          return { ...current, [sessionId]: merged };
+          return rememberOutputHistory(current, sessionId, merged);
         });
       })
       .catch(() => undefined);
     return () => {
       active = false;
     };
-  }, [sessionId, workspaceRoot]);
+  }, [open, sessionId, workspaceRoot]);
 
   useEffect(() => {
     if (!sessionId || currentRunOutputs.length === 0) return;
     setOutputHistoryBySession((current) => {
       const merged = mergeOutputArtifacts(current[sessionId] ?? [], currentRunOutputs);
       if (outputArtifactsUnchanged(current[sessionId] ?? [], merged)) return current;
-      return { ...current, [sessionId]: merged };
+      return rememberOutputHistory(current, sessionId, merged);
     });
   }, [currentRunOutputs, sessionId]);
 
@@ -425,9 +456,15 @@ export function Inspector({
     const previous = outputSignaturesBySessionRef.current.get(sessionId);
     if (!previous) {
       outputSignaturesBySessionRef.current.set(sessionId, signatures);
+      while (outputSignaturesBySessionRef.current.size > OUTPUT_HISTORY_SESSION_LIMIT) {
+        const oldestSessionId = outputSignaturesBySessionRef.current.keys().next().value;
+        if (!oldestSessionId) break;
+        outputSignaturesBySessionRef.current.delete(oldestSessionId);
+      }
       return;
     }
     const accumulated = new Set([...previous, ...signatures]);
+    outputSignaturesBySessionRef.current.delete(sessionId);
     outputSignaturesBySessionRef.current.set(sessionId, accumulated);
     if ([...signatures].some((signature) => !previous.has(signature))) {
       onOutputCreated();
@@ -435,8 +472,59 @@ export function Inspector({
   }, [currentRunOutputs, onOutputCreated, sessionId]);
 
   useEffect(() => {
-    if (!showDebug) setDebugOpen(false);
+    if (showDebug) return;
+    debugDesiredOpenRef.current = false;
+    if (debugUnmountTimerRef.current !== null) {
+      window.clearTimeout(debugUnmountTimerRef.current);
+      debugUnmountTimerRef.current = null;
+    }
+    if (debugOpenFrameRef.current !== null) {
+      window.cancelAnimationFrame(debugOpenFrameRef.current);
+      debugOpenFrameRef.current = null;
+    }
+    setDebugOpen(false);
+    setDebugBodyMounted(false);
   }, [showDebug]);
+
+  useEffect(
+    () => () => {
+      if (debugUnmountTimerRef.current !== null) {
+        window.clearTimeout(debugUnmountTimerRef.current);
+      }
+      if (debugOpenFrameRef.current !== null) {
+        window.cancelAnimationFrame(debugOpenFrameRef.current);
+      }
+    },
+    []
+  );
+
+  function toggleDebug() {
+    const nextOpen = !debugDesiredOpenRef.current;
+    debugDesiredOpenRef.current = nextOpen;
+    if (debugUnmountTimerRef.current !== null) {
+      window.clearTimeout(debugUnmountTimerRef.current);
+      debugUnmountTimerRef.current = null;
+    }
+    if (debugOpenFrameRef.current !== null) {
+      window.cancelAnimationFrame(debugOpenFrameRef.current);
+      debugOpenFrameRef.current = null;
+    }
+    if (!nextOpen) {
+      setDebugOpen(false);
+      debugUnmountTimerRef.current = window.setTimeout(() => {
+        debugUnmountTimerRef.current = null;
+        if (debugDesiredOpenRef.current) return;
+        setDebugBodyMounted(false);
+      }, DEBUG_CLOSE_ANIMATION_MS);
+      return;
+    }
+    setDebugBodyMounted(true);
+    debugOpenFrameRef.current = window.requestAnimationFrame(() => {
+      debugOpenFrameRef.current = null;
+      if (!debugDesiredOpenRef.current) return;
+      setDebugOpen(true);
+    });
+  }
 
   useEffect(() => {
     setMetadataOpen(false);
@@ -751,6 +839,7 @@ export function Inspector({
       </div>
 
       <section className="inspector-debug" data-open={debugOpen} hidden={!showDebug}>
+        {debugBodyMounted && (
         <div
           className="inspector-debug-body"
           id="inspector-debug-panel"
@@ -819,7 +908,7 @@ export function Inspector({
                 </div>
                 <div>
                   <dt>Turns</dt>
-                  <dd>{traceTurnCount}</dd>
+                  <dd>{traceSummary.turnCount}</dd>
                 </div>
                 <div>
                   <dt>Steps</dt>
@@ -827,11 +916,11 @@ export function Inspector({
                 </div>
                 <div>
                   <dt>Tools</dt>
-                  <dd>{traceToolCallCount}</dd>
+                  <dd>{traceSummary.toolCallCount}</dd>
                 </div>
                 <div>
                   <dt>Permissions</dt>
-                  <dd>{tracePermissionCount}</dd>
+                  <dd>{traceSummary.permissionCount}</dd>
                 </div>
               </dl>
               {roleSummaries.length > 0 && (
@@ -1174,6 +1263,7 @@ export function Inspector({
           </div>
         )}
         </div>
+        )}
         <button
           className="inspector-debug-toggle"
           type="button"
@@ -1181,7 +1271,7 @@ export function Inspector({
           aria-expanded={debugOpen}
           aria-controls="inspector-debug-panel"
           title={debugOpen ? "Hide debug and trace" : "Show debug and trace"}
-          onClick={() => setDebugOpen((current) => !current)}
+          onClick={toggleDebug}
         >
           <Bug aria-hidden="true" />
           <strong>Debug</strong>

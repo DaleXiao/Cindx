@@ -3592,6 +3592,8 @@ textarea::placeholder {
   grid-template-columns: 20px minmax(0, 1fr);
   align-items: start;
   gap: 5px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 46px;
 }
 
 .trace-sequence-item:not(:last-child)::after {
@@ -6284,6 +6286,8 @@ details[open] > summary .settings-disclosure-chevron > svg {
   grid-template-columns: minmax(0, 1fr) 26px;
   align-items: center;
   border-radius: var(--radius-sm);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 32px;
 }
 
 .inspector-output-row:hover,

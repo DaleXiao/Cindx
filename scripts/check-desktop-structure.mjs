@@ -223,7 +223,9 @@ assert(
     rustLib.includes("tauri::WindowEvent::ThemeChanged(_)") &&
     tauriBridge.includes('invoke<void>("reveal_main_window")') &&
     appSource.includes("startupWindowRevealRequestedRef") &&
-    appSource.includes("await document.fonts.ready") &&
+    appSource.includes("await Promise.race([") &&
+    appSource.includes("document.fonts.ready") &&
+    appSource.includes("window.setTimeout(resolve, 120)") &&
     appSource.includes("await revealMainWindow()") &&
     appSource.includes("!agentStateCacheRef.current.has(state.activeSessionId)") &&
     !appSource.includes("agentState?.sessionId !== projectSessionState.activeSessionId") &&
@@ -375,7 +377,8 @@ assert(
 );
 assert(
   appSource.includes("sessionSelectionRequestRef") &&
-    appSource.includes("sessionSelectionQueueRef") &&
+    appSource.includes("sessionSelectionRunningRef") &&
+    appSource.includes("sessionSelectionPendingRef") &&
     appSource.includes("sessionRefreshRequestRef") &&
     appSource.includes("enqueueProjectSessionSelection") &&
     appSource.includes("if (sessionId === activeSessionIdRef.current) return") &&
@@ -1199,7 +1202,8 @@ assert(
     traceStatusIconSource.includes("XCircle") &&
     inspectorSource.includes('export type InspectorTab = "trace"') &&
     inspectorSource.includes('(["trace", "details", "artifacts", "context"]') &&
-    inspectorSource.includes("sessionTraceSteps.map((step)") &&
+    inspectorSource.includes("sessionTraceSteps.map((step, index)") &&
+    inspectorSource.includes("debugBodyMounted") &&
     inspectorSource.includes("onTraceExport") &&
     styles.includes("grid-template-columns: repeat(4, minmax(0, 1fr));") &&
     inspectorSource.includes("<TraceStatusIcon status={agentStatus}") &&
