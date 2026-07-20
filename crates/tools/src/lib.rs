@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
@@ -562,9 +562,9 @@ impl Tool for ReadFileTool {
     fn spec(&self) -> ToolSpec {
         builtin_tool_spec(
             "file.read",
-            "Read a UTF-8 file inside the workspace.",
+            "Read a bounded UTF-8 byte range inside the workspace. Large files return a continuation offset.",
             ToolRisk::ReadOnly,
-            "path=<workspace-relative-path>",
+            "path=<workspace-relative-path>\noffset_bytes=<optional byte offset, default 0>\nmax_bytes=<optional 1-262144, default 131072>",
         )
     }
 
@@ -575,14 +575,64 @@ impl Tool for ReadFileTool {
     fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
         let input = parse_input(&invocation.input_json);
         let path = required_input(&input, "path")?;
+        let offset_bytes =
+            parse_bounded_usize_input(&input, "offset_bytes", 0, 0, usize::MAX)?;
+        let max_bytes = parse_bounded_usize_input(
+            &input,
+            "max_bytes",
+            DEFAULT_FILE_READ_BYTES,
+            1,
+            MAX_FILE_READ_BYTES,
+        )?;
         let resolved = resolve_workspace_path(&self.workspace_root, &path)?;
         let resolved = resolve_workspace_read_path(&self.workspace_root, &resolved)?;
         reject_sensitive_read_path(&self.workspace_root, &resolved)?;
-        let output = fs::read_to_string(&resolved)
+        let mut file = fs::File::open(&resolved)
             .map_err(|error| ToolError::new(format!("failed to read file: {error}")))?;
+        let total_bytes = file
+            .metadata()
+            .map_err(|error| ToolError::new(format!("failed to inspect file: {error}")))?
+            .len();
+        let offset = (offset_bytes as u64).min(total_bytes);
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|error| ToolError::new(format!("failed to seek file: {error}")))?;
+        let mut bytes = Vec::with_capacity(max_bytes.saturating_add(4));
+        file.take(max_bytes.saturating_add(4) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| ToolError::new(format!("failed to read file range: {error}")))?;
+        let skipped_prefix = bytes
+            .iter()
+            .take(3)
+            .take_while(|byte| **byte & 0b1100_0000 == 0b1000_0000)
+            .count();
+        if skipped_prefix > 0 {
+            bytes.drain(..skipped_prefix);
+        }
+        let offset = offset.saturating_add(skipped_prefix as u64);
+        let end = utf8_page_end(&bytes, max_bytes);
+        bytes.truncate(end);
+        let returned_bytes = bytes.len();
+        let next_offset = offset.saturating_add(returned_bytes as u64);
+        let truncated = next_offset < total_bytes;
+        let mut output = String::from_utf8_lossy(&bytes).to_string();
+        if truncated {
+            if !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str(&format!(
+                "\n[File read bounded at {returned_bytes} bytes. Continue with offset_bytes={next_offset}. Total file size: {total_bytes} bytes.]"
+            ));
+        }
         let mut metadata = Metadata::new();
         metadata.insert("path".to_string(), path);
-        metadata.insert("bytes".to_string(), output.len().to_string());
+        metadata.insert("bytes".to_string(), total_bytes.to_string());
+        metadata.insert("offset_bytes".to_string(), offset.to_string());
+        metadata.insert("returned_bytes".to_string(), returned_bytes.to_string());
+        metadata.insert("next_offset_bytes".to_string(), next_offset.to_string());
+        metadata.insert(
+            "truncated".to_string(),
+            truncated.to_string(),
+        );
 
         Ok(tool_result(
             invocation.id,
@@ -590,6 +640,36 @@ impl Tool for ReadFileTool {
             output,
             metadata,
         ))
+    }
+}
+
+fn utf8_page_end(bytes: &[u8], max_bytes: usize) -> usize {
+    let candidate = bytes.len().min(max_bytes);
+    match std::str::from_utf8(&bytes[..candidate]) {
+        Ok(_) => candidate,
+        Err(error) if error.error_len().is_none() => {
+            let valid = error.valid_up_to();
+            if valid > 0 {
+                return valid;
+            }
+            let width = utf8_sequence_width(bytes.first().copied().unwrap_or_default());
+            if width > 1 && bytes.len() >= width && std::str::from_utf8(&bytes[..width]).is_ok() {
+                width
+            } else {
+                candidate
+            }
+        }
+        Err(_) => candidate,
+    }
+}
+
+fn utf8_sequence_width(first: u8) -> usize {
+    match first {
+        0x00..=0x7f => 1,
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => 1,
     }
 }
 
@@ -829,13 +909,32 @@ pub struct ShellRunTool {
 const DEFAULT_SHELL_TIMEOUT_SECONDS: u64 = 120;
 const MAX_SHELL_TIMEOUT_SECONDS: u64 = 600;
 const SHELL_POLL_INTERVAL: Duration = Duration::from_millis(40);
+const DEFAULT_FILE_READ_BYTES: usize = 128 * 1024;
+const MAX_FILE_READ_BYTES: usize = 256 * 1024;
+const SHELL_STREAM_PREVIEW_BYTES: usize = 64 * 1024;
+const SHELL_STREAM_ARTIFACT_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const WEB_RESPONSE_MAX_BYTES: usize = 8 * 1024 * 1024;
+const WEB_STDERR_MAX_BYTES: usize = 256 * 1024;
+const SEARCH_FILE_SCAN_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const SEARCH_MATCH_PREVIEW_CHARS: usize = 512;
 
 struct ShellCommandOutput {
     status: ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+    stdout: BoundedStreamCapture,
+    stderr: BoundedStreamCapture,
     timed_out: bool,
     cancelled: bool,
+}
+
+#[derive(Default)]
+struct BoundedStreamCapture {
+    preview: Vec<u8>,
+    total_bytes: u64,
+    artifact_bytes: u64,
+    preview_truncated: bool,
+    artifact_truncated: bool,
+    artifact_path: Option<PathBuf>,
+    artifact_error: Option<String>,
 }
 
 #[cfg(unix)]
@@ -853,10 +952,83 @@ fn terminate_process_group(process_id: u32, signal: i32) {
 #[cfg(not(unix))]
 fn terminate_process_group(_process_id: u32, _signal: i32) {}
 
-fn read_process_stream(mut stream: impl Read) -> Vec<u8> {
-    let mut output = Vec::new();
-    let _ = stream.read_to_end(&mut output);
-    output
+fn capture_process_stream(mut stream: impl Read, artifact_path: PathBuf) -> BoundedStreamCapture {
+    let mut artifact = fs::File::create(&artifact_path).ok();
+    let mut artifact_error = artifact
+        .is_none()
+        .then(|| format!("failed to create {}", artifact_path.display()));
+    let head_limit = SHELL_STREAM_PREVIEW_BYTES / 2;
+    let tail_limit = SHELL_STREAM_PREVIEW_BYTES.saturating_sub(head_limit);
+    let mut head = Vec::with_capacity(head_limit);
+    let mut tail = Vec::with_capacity(tail_limit);
+    let mut buffer = [0u8; 16 * 1024];
+    let mut total_bytes = 0u64;
+    let mut artifact_bytes = 0u64;
+
+    loop {
+        let count = match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) => {
+                artifact_error.get_or_insert_with(|| format!("failed to read process stream: {error}"));
+                break;
+            }
+        };
+        let chunk = &buffer[..count];
+        total_bytes = total_bytes.saturating_add(count as u64);
+
+        let mut retained_in_head = 0usize;
+        if head.len() < head_limit {
+            let retained = (head_limit - head.len()).min(chunk.len());
+            head.extend_from_slice(&chunk[..retained]);
+            retained_in_head = retained;
+        }
+        tail.extend_from_slice(&chunk[retained_in_head..]);
+        if tail.len() > tail_limit {
+            let excess = tail.len() - tail_limit;
+            tail.drain(..excess);
+        }
+
+        if let Some(file) = artifact.as_mut() {
+            let remaining = SHELL_STREAM_ARTIFACT_MAX_BYTES.saturating_sub(artifact_bytes);
+            let writable = (remaining as usize).min(chunk.len());
+            if writable > 0 {
+                if let Err(error) = file.write_all(&chunk[..writable]) {
+                    artifact_error = Some(format!("failed to write process artifact: {error}"));
+                    artifact = None;
+                } else {
+                    artifact_bytes = artifact_bytes.saturating_add(writable as u64);
+                }
+            }
+        }
+    }
+
+    if let Some(file) = artifact.as_mut() {
+        if let Err(error) = file.flush() {
+            artifact_error = Some(format!("failed to flush process artifact: {error}"));
+        }
+    }
+    let preview_truncated = total_bytes > (head.len() + tail.len()) as u64;
+    let mut preview = head;
+    if preview_truncated {
+        preview.extend_from_slice(b"\n...[middle output omitted from preview]...\n");
+    }
+    preview.extend_from_slice(&tail);
+    let artifact_truncated = total_bytes > artifact_bytes;
+    let keep_artifact = preview_truncated && artifact_error.is_none() && artifact_bytes > 0;
+    if !keep_artifact {
+        let _ = fs::remove_file(&artifact_path);
+    }
+
+    BoundedStreamCapture {
+        preview,
+        total_bytes,
+        artifact_bytes,
+        preview_truncated,
+        artifact_truncated,
+        artifact_path: keep_artifact.then_some(artifact_path),
+        artifact_error,
+    }
 }
 
 fn run_shell_command(
@@ -864,7 +1036,11 @@ fn run_shell_command(
     cwd: &Path,
     timeout_seconds: u64,
     control: &ToolExecutionControl,
+    artifact_dir: &Path,
 ) -> Result<ShellCommandOutput, ToolError> {
+    fs::create_dir_all(artifact_dir).map_err(|error| {
+        ToolError::new(format!("failed to create shell output directory: {error}"))
+    })?;
     let mut process = Command::new("/bin/zsh");
     process
         .arg("-lc")
@@ -890,8 +1066,10 @@ fn run_shell_command(
         .stderr
         .take()
         .ok_or_else(|| ToolError::new("failed to capture shell stderr"))?;
-    let stdout_reader = thread::spawn(move || read_process_stream(stdout));
-    let stderr_reader = thread::spawn(move || read_process_stream(stderr));
+    let stdout_path = artifact_dir.join("stdout.log");
+    let stderr_path = artifact_dir.join("stderr.log");
+    let stdout_reader = thread::spawn(move || capture_process_stream(stdout, stdout_path));
+    let stderr_reader = thread::spawn(move || capture_process_stream(stderr, stderr_path));
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
     let mut timed_out = false;
     let mut cancelled = false;
@@ -1019,16 +1197,29 @@ impl Tool for ShellRunTool {
         }
         let resolved_cwd = resolve_workspace_path(&self.workspace_root, &cwd)?;
         let resolved_cwd = resolve_workspace_read_path(&self.workspace_root, &resolved_cwd)?;
-        let output = run_shell_command(&command, &resolved_cwd, timeout_seconds, control)?;
+        let artifact_dir = self
+            .workspace_root
+            .join(".cindx")
+            .join("tool-output")
+            .join(format!("{:016x}", stable_hash(&invocation.id.0)));
+        let output = run_shell_command(
+            &command,
+            &resolved_cwd,
+            timeout_seconds,
+            control,
+            &artifact_dir,
+        )?;
 
         let mut combined = String::new();
-        combined.push_str(&String::from_utf8_lossy(&output.stdout));
-        if !output.stderr.is_empty() {
+        combined.push_str(&String::from_utf8_lossy(&output.stdout.preview));
+        if !output.stderr.preview.is_empty() {
             if !combined.is_empty() {
                 combined.push('\n');
             }
-            combined.push_str(&String::from_utf8_lossy(&output.stderr));
+            combined.push_str(&String::from_utf8_lossy(&output.stderr.preview));
         }
+        append_stream_capture_note(&mut combined, "stdout", &output.stdout);
+        append_stream_capture_note(&mut combined, "stderr", &output.stderr);
         if output.timed_out {
             if !combined.is_empty() && !combined.ends_with('\n') {
                 combined.push('\n');
@@ -1050,6 +1241,18 @@ impl Tool for ShellRunTool {
         metadata.insert("timed_out".to_string(), output.timed_out.to_string());
         metadata.insert("cancelled".to_string(), output.cancelled.to_string());
         metadata.insert(
+            "stdout_bytes".to_string(),
+            output.stdout.total_bytes.to_string(),
+        );
+        metadata.insert(
+            "stderr_bytes".to_string(),
+            output.stderr.total_bytes.to_string(),
+        );
+        metadata.insert(
+            "output_truncated".to_string(),
+            (output.stdout.preview_truncated || output.stderr.preview_truncated).to_string(),
+        );
+        metadata.insert(
             "exit_code".to_string(),
             output
                 .status
@@ -1058,7 +1261,7 @@ impl Tool for ShellRunTool {
                 .unwrap_or_else(|| "signal".to_string()),
         );
 
-        Ok(tool_result(
+        let mut result = tool_result(
             invocation.id,
             if output.cancelled {
                 ToolOutcomeStatus::Cancelled
@@ -1069,7 +1272,56 @@ impl Tool for ShellRunTool {
             },
             combined,
             metadata,
-        ))
+        );
+        for (label, capture) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+            if let Some(path) = &capture.artifact_path {
+                result.artifacts.push(ToolArtifact {
+                    path: path.display().to_string(),
+                    mime_type: Some("text/plain".to_string()),
+                    title: Some(format!("Shell {label}")),
+                });
+                result.metadata.insert(
+                    format!("{label}_artifact_path"),
+                    path.display().to_string(),
+                );
+                result.metadata.insert(
+                    format!("{label}_artifact_bytes"),
+                    capture.artifact_bytes.to_string(),
+                );
+                result.metadata.insert(
+                    format!("{label}_artifact_truncated"),
+                    capture.artifact_truncated.to_string(),
+                );
+            }
+        }
+        Ok(result)
+    }
+}
+
+fn append_stream_capture_note(output: &mut String, label: &str, capture: &BoundedStreamCapture) {
+    if !capture.preview_truncated && capture.artifact_error.is_none() {
+        return;
+    }
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    if let Some(path) = &capture.artifact_path {
+        output.push_str(&format!(
+            "\n[{label} preview bounded; {} bytes produced. Captured {} bytes at {}{}]",
+            capture.total_bytes,
+            capture.artifact_bytes,
+            path.display(),
+            if capture.artifact_truncated {
+                "; artifact reached the 32 MB safety limit, rerun a narrower command for omitted data"
+            } else {
+                ""
+            }
+        ));
+    } else if let Some(error) = &capture.artifact_error {
+        output.push_str(&format!(
+            "\n[{label} preview bounded; {} bytes produced; artifact unavailable: {error}]",
+            capture.total_bytes
+        ));
     }
 }
 
@@ -2205,6 +2457,27 @@ fn required_input(input: &BTreeMap<String, String>, key: &str) -> Result<String,
         .ok_or_else(|| ToolError::new(format!("missing required input: {key}")))
 }
 
+fn parse_bounded_usize_input(
+    input: &BTreeMap<String, String>,
+    key: &str,
+    default: usize,
+    minimum: usize,
+    maximum: usize,
+) -> Result<usize, ToolError> {
+    let value = match input.get(key) {
+        Some(value) => value
+            .parse::<usize>()
+            .map_err(|_| ToolError::new(format!("{key} must be an integer")))?,
+        None => default,
+    };
+    if value < minimum || value > maximum {
+        return Err(ToolError::new(format!(
+            "{key} must be between {minimum} and {maximum}"
+        )));
+    }
+    Ok(value)
+}
+
 fn permission_request(
     task_id: &TaskId,
     risk: PermissionRisk,
@@ -2399,20 +2672,36 @@ fn search_file(
     if is_sensitive_workspace_path(workspace_root, path) {
         return Ok(());
     }
-    let Ok(content) = fs::read_to_string(path) else {
+    let Ok(file) = fs::File::open(path) else {
         return Ok(());
     };
     let relative = path.strip_prefix(workspace_root).unwrap_or(path);
-    for (index, line) in content.lines().enumerate() {
+    let mut reader = BufReader::new(file.take(SEARCH_FILE_SCAN_MAX_BYTES));
+    let mut line = String::new();
+    let mut index = 0usize;
+    loop {
         if results.len() >= max_results {
             break;
         }
+        line.clear();
+        let Ok(read) = reader.read_line(&mut line) else {
+            break;
+        };
+        if read == 0 {
+            break;
+        }
+        index += 1;
         if line.contains(query) {
+            let preview: String = line
+                .trim()
+                .chars()
+                .take(SEARCH_MATCH_PREVIEW_CHARS)
+                .collect();
             results.push(format!(
                 "{}:{}:{}",
                 relative.display(),
-                index + 1,
-                line.trim()
+                index,
+                preview
             ));
         }
     }
@@ -2861,7 +3150,8 @@ fn required_url(input: &BTreeMap<String, String>) -> Result<String, ToolError> {
 }
 
 fn fetch_url(url: &str) -> Result<String, ToolError> {
-    let output = Command::new("/usr/bin/curl")
+    let mut command = Command::new("/usr/bin/curl");
+    command
         .arg("-L")
         .arg("--silent")
         .arg("--show-error")
@@ -2869,9 +3159,13 @@ fn fetch_url(url: &str) -> Result<String, ToolError> {
         .arg("25")
         .arg("--user-agent")
         .arg("LocalAgent/0.1")
-        .arg(url)
-        .output()
-        .map_err(|error| ToolError::new(format!("failed to run curl: {error}")))?;
+        .arg(url);
+    let output = run_command_with_limited_output(
+        &mut command,
+        WEB_RESPONSE_MAX_BYTES,
+        WEB_STDERR_MAX_BYTES,
+        "curl",
+    )?;
 
     if !output.status.success() {
         return Err(ToolError::new(format!(
@@ -2935,10 +3229,13 @@ fn fetch_search_api(
                 .to_string(),
             );
     }
-    let output = command
-        .arg(&url)
-        .output()
-        .map_err(|error| ToolError::new(format!("failed to run search API request: {error}")))?;
+    command.arg(&url);
+    let output = run_command_with_limited_output(
+        &mut command,
+        WEB_RESPONSE_MAX_BYTES,
+        WEB_STDERR_MAX_BYTES,
+        "search API request",
+    )?;
     if !output.status.success() {
         return Err(ToolError::new(format!(
             "search API request failed: {}",
@@ -2946,6 +3243,61 @@ fn fetch_search_api(
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+struct LimitedCommandOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn run_command_with_limited_output(
+    command: &mut Command,
+    stdout_max_bytes: usize,
+    stderr_max_bytes: usize,
+    label: &str,
+) -> Result<LimitedCommandOutput, ToolError> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| ToolError::new(format!("failed to run {label}: {error}")))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ToolError::new(format!("{label} stdout is unavailable")))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| ToolError::new(format!("{label} stderr is unavailable")))?;
+    let stdout_reader = thread::spawn(move || capture_stream_limited(stdout, stdout_max_bytes));
+    let stderr_reader = thread::spawn(move || capture_stream_limited(stderr, stderr_max_bytes));
+    let status = child
+        .wait()
+        .map_err(|error| ToolError::new(format!("failed to wait for {label}: {error}")))?;
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| ToolError::new(format!("{label} stdout reader panicked")))?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| ToolError::new(format!("{label} stderr reader panicked")))?;
+    if let Some(error) = stdout.error {
+        return Err(ToolError::new(format!("failed to read {label} stdout: {error}")));
+    }
+    if stdout.truncated {
+        return Err(ToolError::new(format!(
+            "{label} response exceeded the {stdout_max_bytes} byte safety limit ({} bytes produced)",
+            stdout.total_bytes
+        )));
+    }
+    if let Some(error) = stderr.error {
+        return Err(ToolError::new(format!("failed to read {label} stderr: {error}")));
+    }
+    Ok(LimitedCommandOutput {
+        status,
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
+    })
 }
 
 fn html_to_text(html: &str) -> String {
@@ -3085,6 +3437,41 @@ struct ControlledSidecarOutput {
     timed_out: bool,
 }
 
+const SIDECAR_STDOUT_MAX_BYTES: usize = 16 * 1024 * 1024;
+const SIDECAR_STDERR_MAX_BYTES: usize = 256 * 1024;
+
+#[derive(Default)]
+struct LimitedStreamCapture {
+    bytes: Vec<u8>,
+    total_bytes: u64,
+    truncated: bool,
+    error: Option<String>,
+}
+
+fn capture_stream_limited(mut stream: impl Read, max_bytes: usize) -> LimitedStreamCapture {
+    let mut capture = LimitedStreamCapture {
+        bytes: Vec::with_capacity(max_bytes.min(64 * 1024)),
+        ..LimitedStreamCapture::default()
+    };
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        let count = match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) => {
+                capture.error = Some(error.to_string());
+                break;
+            }
+        };
+        capture.total_bytes = capture.total_bytes.saturating_add(count as u64);
+        let remaining = max_bytes.saturating_sub(capture.bytes.len());
+        let retained = remaining.min(count);
+        capture.bytes.extend_from_slice(&buffer[..retained]);
+        capture.truncated |= retained < count;
+    }
+    capture
+}
+
 fn run_json_sidecar_controlled(
     env_key: &str,
     request_path: &Path,
@@ -3125,28 +3512,45 @@ fn run_json_sidecar_controlled(
         .spawn()
         .map_err(|error| ToolError::new(format!("failed to start sidecar: {error}")))?;
     let process_id = child.id();
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ToolError::new("sidecar stdout is unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| ToolError::new("sidecar stderr is unavailable"))?;
+    let stdout_reader =
+        thread::spawn(move || capture_stream_limited(stdout, SIDECAR_STDOUT_MAX_BYTES));
+    let stderr_reader =
+        thread::spawn(move || capture_stream_limited(stderr, SIDECAR_STDERR_MAX_BYTES));
     let started = Instant::now();
-    let (cancelled, timed_out) = loop {
+    let (status, cancelled, timed_out) = loop {
         if control.should_cancel() {
             terminate_process_group(process_id, 15);
             thread::sleep(Duration::from_millis(40));
             terminate_process_group(process_id, 9);
             let _ = child.kill();
-            break (true, false);
+            let status = child
+                .wait()
+                .map_err(|error| ToolError::new(format!("failed to stop sidecar: {error}")))?;
+            break (status, true, false);
         }
         if started.elapsed() >= hard_timeout {
             terminate_process_group(process_id, 15);
             thread::sleep(Duration::from_millis(40));
             terminate_process_group(process_id, 9);
             let _ = child.kill();
-            break (false, true);
+            let status = child.wait().map_err(|error| {
+                ToolError::new(format!("failed to stop timed out sidecar: {error}"))
+            })?;
+            break (status, false, true);
         }
-        if child
+        if let Some(status) = child
             .try_wait()
             .map_err(|error| ToolError::new(format!("failed to poll sidecar: {error}")))?
-            .is_some()
         {
-            break (false, false);
+            break (status, false, false);
         }
         thread::sleep(Duration::from_millis(40));
     };
@@ -3154,17 +3558,32 @@ fn run_json_sidecar_controlled(
         // A sidecar that exits can still leave descendants holding the pipes open.
         terminate_process_group(process_id, 9);
     }
-    let output = child
-        .wait_with_output()
-        .map_err(|error| ToolError::new(format!("failed to collect sidecar: {error}")))?;
-    if !cancelled && !timed_out && !output.status.success() {
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| ToolError::new("sidecar stdout reader panicked"))?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| ToolError::new("sidecar stderr reader panicked"))?;
+    if let Some(error) = stdout.error {
+        return Err(ToolError::new(format!("failed to read sidecar stdout: {error}")));
+    }
+    if stdout.truncated {
         return Err(ToolError::new(format!(
-            "sidecar failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "sidecar response exceeded the {} byte safety limit ({} bytes produced)",
+            SIDECAR_STDOUT_MAX_BYTES, stdout.total_bytes
+        )));
+    }
+    if !cancelled && !timed_out && !status.success() {
+        let mut message = String::from_utf8_lossy(&stderr.bytes).trim().to_string();
+        if stderr.truncated {
+            message.push_str(" [stderr truncated]");
+        }
+        return Err(ToolError::new(format!(
+            "sidecar failed: {message}"
         )));
     }
     Ok(ControlledSidecarOutput {
-        stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        stdout: String::from_utf8_lossy(&stdout.bytes).trim().to_string(),
         cancelled,
         timed_out,
     })
@@ -3433,6 +3852,48 @@ mod tests {
     }
 
     #[test]
+    fn file_read_paginates_utf8_without_splitting_characters() {
+        let root = temp_workspace();
+        fs::write(root.join("multibyte.txt"), "你好吗")
+            .expect("multibyte fixture should be written");
+        let reader = ReadFileTool::new(root);
+
+        let first = reader
+            .execute(invocation(
+                "file.read",
+                encode_input(&[
+                    ("path", "multibyte.txt"),
+                    ("offset_bytes", "0"),
+                    ("max_bytes", "4"),
+                ]),
+            ))
+            .expect("first page should succeed");
+        let second = reader
+            .execute(invocation(
+                "file.read",
+                encode_input(&[
+                    ("path", "multibyte.txt"),
+                    ("offset_bytes", "3"),
+                    ("max_bytes", "4"),
+                ]),
+            ))
+            .expect("second page should succeed");
+
+        assert!(first.output.starts_with('你'));
+        assert!(second.output.starts_with('好'));
+        assert!(!first.output.contains('\u{fffd}'));
+        assert!(!second.output.contains('\u{fffd}'));
+        assert_eq!(
+            first.metadata.get("next_offset_bytes").map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(
+            second.metadata.get("next_offset_bytes").map(String::as_str),
+            Some("6")
+        );
+    }
+
+    #[test]
     fn write_file_preserves_an_immutable_session_output_version() {
         let root = temp_workspace();
         let writer = WriteFileTool::new(root.clone());
@@ -3512,6 +3973,36 @@ mod tests {
         assert_eq!(result.status, ToolOutcomeStatus::Succeeded);
         assert!(result.output.contains("started"));
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_large_output_uses_a_bounded_preview_and_artifact() {
+        let root = temp_workspace();
+        let shell = ShellRunTool::new(root.clone());
+        let result = shell
+            .execute(invocation(
+                "shell.run",
+                encode_input(&[("command", "/usr/bin/yes x | /usr/bin/head -c 100000")]),
+            ))
+            .expect("large shell output should succeed");
+
+        assert_eq!(result.status, ToolOutcomeStatus::Succeeded);
+        assert!(result.output.len() < 70 * 1024);
+        assert_eq!(
+            result.metadata.get("output_truncated").map(String::as_str),
+            Some("true")
+        );
+        let artifact = result
+            .metadata
+            .get("stdout_artifact_path")
+            .expect("large stdout should have an artifact");
+        assert_eq!(
+            fs::metadata(artifact)
+                .expect("stdout artifact should exist")
+                .len(),
+            100_000
+        );
     }
 
     #[cfg(unix)]

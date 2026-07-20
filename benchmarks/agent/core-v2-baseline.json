@@ -1,0 +1,21 @@
+{
+  "schema": "cindx.agent-benchmark-baseline.v1",
+  "suite_id": "core",
+  "suite_version": 2,
+  "minimum_cases": 50,
+  "maximum_cases": 100,
+  "minimum_auto_contract_pass_rate": 1.0,
+  "maximum_auto_over_orchestrated": 0,
+  "maximum_auto_under_orchestrated": 0,
+  "observed_mode_thresholds": {},
+  "required_categories": {
+    "browser_computer": 8,
+    "coding_direct": 8,
+    "coding_workflow": 10,
+    "complex_collaboration": 10,
+    "general_direct": 8,
+    "latency_sensitive": 8,
+    "research_comparison": 10,
+    "retrieval_grounded": 10
+  }
+}

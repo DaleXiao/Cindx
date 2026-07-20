@@ -2333,7 +2333,6 @@ impl RuleBasedRouter {
         );
         let retrieval_mode = match (&context.task_class, context.needs_retrieval) {
             (_, false) => "none".to_string(),
-            (TaskClass::Coding, true) => "semantic_literal_parallel".to_string(),
             (_, true)
                 if context.high_stakes
                     || context.parallelizable
@@ -2668,8 +2667,7 @@ fn is_capability_question(prompt: &str) -> bool {
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect::<String>();
-    let compact =
-        compact.trim_end_matches(|character| matches!(character, '?' | '？' | '。' | '!' | '！'));
+    let compact = compact.trim_end_matches(['?', '？', '。', '!', '！']);
     if [
         "你会不会",
         "你能不能",
@@ -2699,7 +2697,7 @@ fn is_capability_question(prompt: &str) -> bool {
 
     let words = normalized.split_whitespace().collect::<Vec<_>>();
     matches!(
-        normalized.trim_end_matches(|character| matches!(character, '?' | '!' | '.')),
+        normalized.trim_end_matches(['?', '!', '.']),
         "what can you do" | "what are you capable of" | "do you know how to code"
     ) || (words.len() <= 8
         && (normalized.starts_with("can you code")
@@ -4055,7 +4053,7 @@ mod tests {
             decision.policy,
             OrchestrationPolicy::BestOfN { candidates: 2 }
         );
-        assert_eq!(decision.retrieval_mode, "semantic_literal_parallel");
+        assert_eq!(decision.retrieval_mode, "four_way_parallel");
     }
 
     #[test]

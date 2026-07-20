@@ -192,7 +192,7 @@ pub fn next_occurrence_after_ms(
     }
     if !cadence.recurring() {
         return Ok((anchor_at_ms > after_ms
-            && ends_at_ms.map_or(true, |ends_at_ms| anchor_at_ms <= ends_at_ms))
+            && ends_at_ms.is_none_or(|ends_at_ms| anchor_at_ms <= ends_at_ms))
         .then_some(anchor_at_ms));
     }
 

@@ -1,6 +1,7 @@
 use agent_rag::{RagChunk, RagSearchResult};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -173,9 +174,11 @@ impl FileGraphStore {
     }
 
     fn load(&mut self) -> Result<(), GraphError> {
-        let text = fs::read_to_string(&self.path)
+        let file = fs::File::open(&self.path)
             .map_err(|error| GraphError::new(format!("failed to read graph store: {error}")))?;
-        for line in text.lines() {
+        for line in BufReader::new(file).lines() {
+            let line = line
+                .map_err(|error| GraphError::new(format!("failed to read graph row: {error}")))?;
             let parts = line.split('\t').collect::<Vec<_>>();
             match parts.as_slice() {
                 [
@@ -585,7 +588,7 @@ fn encode(value: &str) -> String {
 }
 
 fn decode(value: &str) -> Result<String, GraphError> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err(GraphError::new("hex value has odd length"));
     }
     let mut bytes = Vec::new();

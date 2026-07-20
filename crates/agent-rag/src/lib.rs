@@ -1,8 +1,29 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(feature = "lancedb-store")]
+use arrow_array::{
+    types::Float32Type, Array, ArrayRef, FixedSizeListArray, Float32Array, RecordBatch,
+    RecordBatchIterator, StringArray, UInt64Array,
+};
+#[cfg(feature = "lancedb-store")]
+use arrow_schema::{DataType, Field, Schema};
+#[cfg(feature = "lancedb-store")]
+use futures::TryStreamExt;
+#[cfg(feature = "lancedb-store")]
+use lancedb::{
+    database::CreateTableMode,
+    index::Index,
+    query::{ExecutableQuery, QueryBase},
+    DistanceType,
+};
+#[cfg(feature = "lancedb-store")]
+use std::sync::OnceLock;
 
 const EMBEDDING_DIMS: usize = 64;
 const DEFAULT_MAX_FILE_BYTES: u64 = 512 * 1024;
@@ -10,6 +31,16 @@ const DEFAULT_MAX_FILES: usize = 10_000;
 const DEFAULT_CHUNK_LINES: usize = 80;
 const DEFAULT_CHUNK_OVERLAP: usize = 8;
 const DEFAULT_EMBEDDING_BATCH_SIZE: usize = 20;
+const FILE_SEARCH_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const FILE_SEARCH_MAX_FILES: usize = 20_000;
+const FILE_SEARCH_CONTEXT_LINES: usize = 2;
+#[cfg(feature = "lancedb-store")]
+const LANCEDB_WORKSPACE_TABLE: &str = "workspace_chunks";
+#[cfg(feature = "lancedb-store")]
+const LANCEDB_ANN_MIN_ROWS: usize = 256;
+
+#[cfg(feature = "lancedb-store")]
+static LANCEDB_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 pub const RAG_INDEX_CANCELLED: &str = "RAG indexing cancelled";
 
@@ -115,6 +146,317 @@ pub struct LanceDbRecord {
     pub embedding_dimensions: usize,
 }
 
+#[cfg(feature = "lancedb-store")]
+pub fn lancedb_index_exists(database_path: impl AsRef<Path>) -> bool {
+    database_path
+        .as_ref()
+        .join(format!("{LANCEDB_WORKSPACE_TABLE}.lance"))
+        .exists()
+}
+
+#[cfg(feature = "lancedb-store")]
+pub fn replace_lancedb_index(
+    database_path: impl AsRef<Path>,
+    index: &RagIndex,
+) -> Result<usize, RagError> {
+    let database_path = database_path.as_ref();
+    if index.chunks.is_empty() {
+        if database_path.exists() {
+            fs::remove_dir_all(database_path).map_err(|error| {
+                RagError::new(format!("failed to clear empty LanceDB index: {error}"))
+            })?;
+        }
+        return Ok(0);
+    }
+    let dimensions = index.chunks[0].embedding_dimensions;
+    if dimensions == 0
+        || index.chunks.iter().any(|chunk| {
+            chunk.embedding_dimensions != dimensions || chunk.embedding.len() != dimensions
+        })
+    {
+        return Err(RagError::new(
+            "LanceDB index requires one non-empty embedding dimension",
+        ));
+    }
+    let parent = database_path
+        .parent()
+        .ok_or_else(|| RagError::new("LanceDB path has no parent directory"))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| RagError::new(format!("failed to create LanceDB parent: {error}")))?;
+    let staging = parent.join(format!(
+        ".lancedb-staging-{}-{}",
+        std::process::id(),
+        current_time_millis()
+    ));
+    if staging.exists() {
+        fs::remove_dir_all(&staging)
+            .map_err(|error| RagError::new(format!("failed to reset LanceDB staging: {error}")))?;
+    }
+    let batch = lancedb_record_batch(index, dimensions)?;
+    let row_count = index.chunks.len();
+    lancedb_runtime()?.block_on(async {
+        let database = lancedb::connect(&staging.to_string_lossy())
+            .execute()
+            .await
+            .map_err(|error| RagError::new(format!("failed to open LanceDB staging: {error}")))?;
+        let schema = batch.schema();
+        let reader: Box<dyn arrow_array::RecordBatchReader + Send> =
+            Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema));
+        let table = database
+            .create_table(LANCEDB_WORKSPACE_TABLE, reader)
+            .mode(CreateTableMode::Overwrite)
+            .execute()
+            .await
+            .map_err(|error| RagError::new(format!("failed to replace LanceDB table: {error}")))?;
+        if row_count >= LANCEDB_ANN_MIN_ROWS {
+            table
+                .create_index(&["vector"], Index::Auto)
+                .execute()
+                .await
+                .map_err(|error| RagError::new(format!("failed to build LanceDB ANN index: {error}")))?;
+        }
+        Ok::<(), RagError>(())
+    })?;
+    swap_lancedb_directory(database_path, &staging)?;
+    Ok(row_count)
+}
+
+#[cfg(feature = "lancedb-store")]
+pub fn search_lancedb_index(
+    database_path: impl AsRef<Path>,
+    query_embedding: &[f32],
+    limit: usize,
+) -> Result<Vec<RagSearchResult>, RagError> {
+    if query_embedding.is_empty() {
+        return Err(RagError::new("LanceDB query embedding is empty"));
+    }
+    let database_path = database_path.as_ref();
+    if !lancedb_index_exists(database_path) {
+        return Err(RagError::new("LanceDB workspace index is missing"));
+    }
+    lancedb_runtime()?.block_on(async {
+        let database = lancedb::connect(&database_path.to_string_lossy())
+            .execute()
+            .await
+            .map_err(|error| RagError::new(format!("failed to open LanceDB: {error}")))?;
+        let table = database
+            .open_table(LANCEDB_WORKSPACE_TABLE)
+            .execute()
+            .await
+            .map_err(|error| RagError::new(format!("failed to open LanceDB table: {error}")))?;
+        let batches = table
+            .query()
+            .nearest_to(query_embedding)
+            .map_err(|error| RagError::new(format!("invalid LanceDB vector query: {error}")))?
+            .distance_type(DistanceType::Cosine)
+            .limit(limit.max(1).min(50))
+            .execute()
+            .await
+            .map_err(|error| RagError::new(format!("LanceDB search failed: {error}")))?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|error| RagError::new(format!("failed to collect LanceDB rows: {error}")))?;
+        lancedb_results_from_batches(&batches)
+    })
+}
+
+#[cfg(feature = "lancedb-store")]
+fn lancedb_runtime() -> Result<&'static tokio::runtime::Runtime, RagError> {
+    if let Some(runtime) = LANCEDB_RUNTIME.get() {
+        return Ok(runtime);
+    }
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|error| RagError::new(format!("failed to start LanceDB runtime: {error}")))?;
+    let _ = LANCEDB_RUNTIME.set(runtime);
+    LANCEDB_RUNTIME
+        .get()
+        .ok_or_else(|| RagError::new("failed to initialize LanceDB runtime"))
+}
+
+#[cfg(feature = "lancedb-store")]
+fn lancedb_record_batch(index: &RagIndex, dimensions: usize) -> Result<RecordBatch, RagError> {
+    let vector = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+        index.chunks.iter().map(|chunk| {
+            Some(
+                chunk
+                    .embedding
+                    .iter()
+                    .copied()
+                    .map(Some)
+                    .collect::<Vec<_>>(),
+            )
+        }),
+        i32::try_from(dimensions)
+            .map_err(|_| RagError::new("LanceDB vector dimensions exceed i32"))?,
+    );
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("path", DataType::Utf8, false),
+        Field::new("file_hash", DataType::Utf8, false),
+        Field::new("modified_time_ms", DataType::UInt64, false),
+        Field::new("start_line", DataType::UInt64, false),
+        Field::new("end_line", DataType::UInt64, false),
+        Field::new("indexed_at_ms", DataType::UInt64, false),
+        Field::new("text", DataType::Utf8, false),
+        Field::new("embedding_provider", DataType::Utf8, false),
+        Field::new("embedding_model", DataType::Utf8, false),
+        Field::new("embedding_dimensions", DataType::UInt64, false),
+        Field::new("vector", vector.data_type().clone(), false),
+    ]));
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from_iter_values(
+            index.chunks.iter().map(|chunk| chunk.id.as_str()),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            index.chunks.iter().map(|chunk| chunk.path.as_str()),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            index.chunks.iter().map(|chunk| chunk.file_hash.as_str()),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            index.chunks.iter().map(|chunk| chunk.modified_time_ms),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            index.chunks.iter().map(|chunk| chunk.start_line),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            index.chunks.iter().map(|chunk| chunk.end_line),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            index.chunks.iter().map(|chunk| chunk.indexed_at_ms),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            index.chunks.iter().map(|chunk| chunk.text.as_str()),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            index
+                .chunks
+                .iter()
+                .map(|chunk| chunk.embedding_provider.as_str()),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            index
+                .chunks
+                .iter()
+                .map(|chunk| chunk.embedding_model.as_str()),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            index
+                .chunks
+                .iter()
+                .map(|chunk| chunk.embedding_dimensions as u64),
+        )),
+        Arc::new(vector),
+    ];
+    RecordBatch::try_new(schema, columns)
+        .map_err(|error| RagError::new(format!("failed to build LanceDB record batch: {error}")))
+}
+
+#[cfg(feature = "lancedb-store")]
+fn lancedb_results_from_batches(batches: &[RecordBatch]) -> Result<Vec<RagSearchResult>, RagError> {
+    let mut results = Vec::new();
+    for batch in batches {
+        let ids = lancedb_string_column(batch, "id")?;
+        let paths = lancedb_string_column(batch, "path")?;
+        let file_hashes = lancedb_string_column(batch, "file_hash")?;
+        let modified_times = lancedb_u64_column(batch, "modified_time_ms")?;
+        let start_lines = lancedb_u64_column(batch, "start_line")?;
+        let end_lines = lancedb_u64_column(batch, "end_line")?;
+        let indexed_times = lancedb_u64_column(batch, "indexed_at_ms")?;
+        let texts = lancedb_string_column(batch, "text")?;
+        let providers = lancedb_string_column(batch, "embedding_provider")?;
+        let models = lancedb_string_column(batch, "embedding_model")?;
+        let dimensions = lancedb_u64_column(batch, "embedding_dimensions")?;
+        let vectors = batch
+            .column_by_name("vector")
+            .and_then(|column| column.as_any().downcast_ref::<FixedSizeListArray>())
+            .ok_or_else(|| RagError::new("LanceDB result is missing vector"))?;
+        let distances = batch
+            .column_by_name("_distance")
+            .and_then(|column| column.as_any().downcast_ref::<Float32Array>())
+            .ok_or_else(|| RagError::new("LanceDB result is missing cosine distance"))?;
+        for row in 0..batch.num_rows() {
+            let vector = vectors.value(row);
+            let vector = vector
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| RagError::new("LanceDB vector row is not Float32"))?
+                .values()
+                .to_vec();
+            results.push(RagSearchResult {
+                chunk: RagChunk {
+                    id: ids.value(row).to_string(),
+                    path: paths.value(row).to_string(),
+                    file_hash: file_hashes.value(row).to_string(),
+                    modified_time_ms: modified_times.value(row),
+                    start_line: start_lines.value(row),
+                    end_line: end_lines.value(row),
+                    indexed_at_ms: indexed_times.value(row),
+                    text: texts.value(row).to_string(),
+                    embedding: vector,
+                    embedding_provider: providers.value(row).to_string(),
+                    embedding_model: models.value(row).to_string(),
+                    embedding_dimensions: dimensions.value(row) as usize,
+                },
+                score: (1.0 - distances.value(row)).clamp(0.0, 1.0),
+            });
+        }
+    }
+    Ok(results)
+}
+
+#[cfg(feature = "lancedb-store")]
+fn lancedb_string_column<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> Result<&'a StringArray, RagError> {
+    batch
+        .column_by_name(name)
+        .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+        .ok_or_else(|| RagError::new(format!("LanceDB result is missing {name}")))
+}
+
+#[cfg(feature = "lancedb-store")]
+fn lancedb_u64_column<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> Result<&'a UInt64Array, RagError> {
+    batch
+        .column_by_name(name)
+        .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+        .ok_or_else(|| RagError::new(format!("LanceDB result is missing {name}")))
+}
+
+#[cfg(feature = "lancedb-store")]
+fn swap_lancedb_directory(database_path: &Path, staging: &Path) -> Result<(), RagError> {
+    let parent = database_path
+        .parent()
+        .ok_or_else(|| RagError::new("LanceDB path has no parent directory"))?;
+    let backup = parent.join(format!(
+        ".lancedb-backup-{}-{}",
+        std::process::id(),
+        current_time_millis()
+    ));
+    let had_existing = database_path.exists();
+    if had_existing {
+        fs::rename(database_path, &backup)
+            .map_err(|error| RagError::new(format!("failed to stage old LanceDB: {error}")))?;
+    }
+    if let Err(error) = fs::rename(staging, database_path) {
+        if had_existing {
+            let _ = fs::rename(&backup, database_path);
+        }
+        return Err(RagError::new(format!(
+            "failed to activate LanceDB index: {error}"
+        )));
+    }
+    if had_existing {
+        fs::remove_dir_all(&backup)
+            .map_err(|error| RagError::new(format!("failed to remove old LanceDB: {error}")))?;
+    }
+    Ok(())
+}
+
 pub trait RagAdapter {
     fn replace_all(&mut self, index: RagIndex) -> Result<RagIndexStats, RagError>;
 
@@ -124,7 +466,7 @@ pub trait RagAdapter {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileRagAdapter {
     path: PathBuf,
-    index: RagIndex,
+    index: Arc<RagIndex>,
 }
 
 impl FileRagAdapter {
@@ -136,7 +478,10 @@ impl FileRagAdapter {
             empty_index()
         };
 
-        Ok(Self { path, index })
+        Ok(Self {
+            path,
+            index: Arc::new(index),
+        })
     }
 
     pub fn stats(&self) -> &RagIndexStats {
@@ -145,6 +490,10 @@ impl FileRagAdapter {
 
     pub fn chunks(&self) -> &[RagChunk] {
         &self.index.chunks
+    }
+
+    pub fn index(&self) -> &RagIndex {
+        &self.index
     }
 
     pub fn embedding_profile(&self) -> Option<(&str, &str, usize)> {
@@ -165,7 +514,7 @@ impl RagAdapter for FileRagAdapter {
                 .map_err(|error| RagError::new(format!("failed to create RAG directory: {error}")))?;
         }
         save_index(&self.path, &index)?;
-        self.index = index;
+        self.index = Arc::new(index);
 
         Ok(self.index.stats.clone())
     }
@@ -243,21 +592,49 @@ pub fn index_workspace_with_embedder(
     options: IndexOptions,
     embedder: &mut dyn RagEmbedder,
 ) -> Result<RagIndex, RagError> {
-    let mut index = index_workspace(workspace_root, options)?;
+    index_workspace_with_embedder_cancellable(workspace_root, options, embedder, || false)
+}
+
+pub fn index_workspace_with_embedder_cancellable(
+    workspace_root: impl AsRef<Path>,
+    options: IndexOptions,
+    embedder: &mut dyn RagEmbedder,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<RagIndex, RagError> {
+    let mut index = index_workspace_cancellable(workspace_root, options, &mut should_cancel)?;
+    apply_embeddings_to_index_cancellable(
+        &mut index,
+        embedder,
+        &mut should_cancel,
+    )?;
+    Ok(index)
+}
+
+pub fn apply_embeddings_to_index_cancellable(
+    index: &mut RagIndex,
+    embedder: &mut dyn RagEmbedder,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<(), RagError> {
     let texts = index
         .chunks
         .iter()
         .map(|chunk| chunk.text.clone())
         .collect::<Vec<_>>();
     if texts.is_empty() {
-        return Ok(index);
+        return Ok(());
     }
 
     let mut provider = None;
     let mut model = None;
     let mut vectors = Vec::with_capacity(texts.len());
     for texts_batch in texts.chunks(DEFAULT_EMBEDDING_BATCH_SIZE) {
+        if should_cancel() {
+            return Err(RagError::new(RAG_INDEX_CANCELLED));
+        }
         let batch = embedder.embed_texts(texts_batch)?;
+        if should_cancel() {
+            return Err(RagError::new(RAG_INDEX_CANCELLED));
+        }
         if batch.vectors.len() != texts_batch.len() {
             return Err(RagError::new(format!(
                 "embedding count mismatch: got {}, expected {}",
@@ -288,8 +665,7 @@ pub fn index_workspace_with_embedder(
         chunk.embedding_provider = provider.clone();
         chunk.embedding_model = model.clone();
     }
-
-    Ok(index)
+    Ok(())
 }
 
 pub fn search_chunks(chunks: &[RagChunk], query: &str, limit: usize) -> Vec<RagSearchResult> {
@@ -305,7 +681,7 @@ pub fn search_chunks_semantic(
     query_embedding: &[f32],
     limit: usize,
 ) -> Vec<RagSearchResult> {
-    let limit = limit.max(1).min(50);
+    let limit = limit.clamp(1, 50);
     let mut results = chunks
         .iter()
         .filter(|chunk| chunk.embedding_dimensions == query_embedding.len())
@@ -350,8 +726,33 @@ pub fn search_chunks_literal(
             (score > 0.0).then_some(RagSearchResult { chunk, score })
         })
         .collect::<Vec<_>>();
-    sort_and_truncate_results(&mut results, limit.max(1).min(50));
+    sort_and_truncate_results(&mut results, limit.clamp(1, 50));
     results
+}
+
+pub fn search_workspace_files_cancellable(
+    workspace_root: impl AsRef<Path>,
+    query: &str,
+    limit: usize,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<Vec<RagSearchResult>, RagError> {
+    let normalized_query = query.trim().to_lowercase();
+    if normalized_query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut results = Vec::new();
+    let mut files_scanned = 0usize;
+    search_workspace_path(
+        workspace_root.as_ref(),
+        workspace_root.as_ref(),
+        &normalized_query,
+        &token_counts(&normalized_query),
+        &mut results,
+        &mut files_scanned,
+        &mut should_cancel,
+    )?;
+    sort_and_truncate_results(&mut results, limit.clamp(1, 50));
+    Ok(results)
 }
 
 pub fn search_chunks_with_embedding(
@@ -360,7 +761,7 @@ pub fn search_chunks_with_embedding(
     query_embedding: &[f32],
     limit: usize,
 ) -> Vec<RagSearchResult> {
-    let limit = limit.max(1).min(50);
+    let limit = limit.clamp(1, 50);
     let query_tokens = token_counts(query);
     let mut results = chunks
         .iter()
@@ -482,6 +883,209 @@ pub fn build_grounded_answer_prompt(question: &str, results: &[RagSearchResult])
     }
 
     prompt
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search_workspace_path(
+    workspace_root: &Path,
+    current: &Path,
+    normalized_query: &str,
+    query_tokens: &BTreeMap<String, usize>,
+    results: &mut Vec<RagSearchResult>,
+    files_scanned: &mut usize,
+    should_cancel: &mut dyn FnMut() -> bool,
+) -> Result<(), RagError> {
+    if should_cancel() {
+        return Err(RagError::new(RAG_INDEX_CANCELLED));
+    }
+    if *files_scanned >= FILE_SEARCH_MAX_FILES {
+        return Ok(());
+    }
+    let metadata = match fs::metadata(current) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
+        Err(error) => return Err(RagError::new(format!("failed to stat search path: {error}"))),
+    };
+    if metadata.is_file() {
+        search_workspace_file(
+            workspace_root,
+            current,
+            &metadata,
+            normalized_query,
+            query_tokens,
+            results,
+            files_scanned,
+        )?;
+        return Ok(());
+    }
+
+    let entries = match fs::read_dir(current) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
+        Err(error) => return Err(RagError::new(format!("failed to search directory: {error}"))),
+    };
+    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.path());
+    for entry in entries {
+        if should_cancel() {
+            return Err(RagError::new(RAG_INDEX_CANCELLED));
+        }
+        if *files_scanned >= FILE_SEARCH_MAX_FILES {
+            break;
+        }
+        let path = entry.path();
+        let name = entry.file_name();
+        if should_skip_workspace_entry(workspace_root, current, &name.to_string_lossy()) {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.is_dir() {
+            search_workspace_path(
+                workspace_root,
+                &path,
+                normalized_query,
+                query_tokens,
+                results,
+                files_scanned,
+                should_cancel,
+            )?;
+        } else if metadata.is_file() {
+            search_workspace_file(
+                workspace_root,
+                &path,
+                &metadata,
+                normalized_query,
+                query_tokens,
+                results,
+                files_scanned,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search_workspace_file(
+    workspace_root: &Path,
+    path: &Path,
+    metadata: &fs::Metadata,
+    normalized_query: &str,
+    query_tokens: &BTreeMap<String, usize>,
+    results: &mut Vec<RagSearchResult>,
+    files_scanned: &mut usize,
+) -> Result<(), RagError> {
+    if *files_scanned >= FILE_SEARCH_MAX_FILES
+        || metadata.len() == 0
+        || metadata.len() > FILE_SEARCH_MAX_FILE_BYTES
+    {
+        return Ok(());
+    }
+    let relative = relative_workspace_path(workspace_root, path)?;
+    if is_probably_binary_path(&relative) {
+        return Ok(());
+    }
+    *files_scanned += 1;
+    let Ok(file) = fs::File::open(path) else {
+        return Ok(());
+    };
+    let mut reader = BufReader::new(file.take(FILE_SEARCH_MAX_FILE_BYTES));
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let Ok(read) = reader.read_line(&mut line) else {
+            return Ok(());
+        };
+        if read == 0 {
+            break;
+        }
+        lines.push(line.trim_end_matches(['\r', '\n']).to_string());
+    }
+    if lines.is_empty() {
+        return Ok(());
+    }
+    if lines.iter().any(|line| line.contains('\0')) {
+        return Ok(());
+    }
+
+    let normalized_path = relative.to_lowercase();
+    let path_exact = normalized_path.contains(normalized_query);
+    let path_overlap = lexical_overlap(query_tokens, &token_counts(&normalized_path));
+    let mut exact_matches = 0usize;
+    let mut best_line = None;
+    let mut best_line_overlap = 0.0f32;
+    for (index, source_line) in lines.iter().enumerate() {
+        let normalized_line = source_line.to_lowercase();
+        let matches = normalized_line.matches(normalized_query).count();
+        exact_matches += matches;
+        let overlap = lexical_overlap(query_tokens, &token_counts(&normalized_line));
+        if matches > 0 || overlap > best_line_overlap {
+            best_line = Some(index);
+            best_line_overlap = if matches > 0 { 1.0 } else { overlap };
+        }
+    }
+    let score = if path_exact {
+        1.35 + (exact_matches.min(8) as f32 * 0.04)
+    } else if exact_matches > 0 {
+        1.0 + (exact_matches.min(8) as f32 * 0.05) + (path_overlap * 0.2)
+    } else {
+        (best_line_overlap * 0.8) + (path_overlap * 0.55)
+    };
+    if score <= 0.0 {
+        return Ok(());
+    }
+
+    let focus = best_line.unwrap_or(0);
+    let start = focus.saturating_sub(FILE_SEARCH_CONTEXT_LINES);
+    let end = (focus + FILE_SEARCH_CONTEXT_LINES + 1).min(lines.len());
+    let text = lines[start..end]
+        .iter()
+        .map(|line| truncate_search_line(line, 512))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let file_hash = stable_hash_hex(lines.join("\n").as_bytes());
+    let modified_time_ms = metadata
+        .modified()
+        .ok()
+        .and_then(system_time_millis)
+        .unwrap_or(0);
+    results.push(RagSearchResult {
+        chunk: RagChunk {
+            id: stable_hash_hex(
+                format!("file-search:{relative}:{}:{}:{file_hash}", start + 1, end).as_bytes(),
+            ),
+            path: relative,
+            file_hash,
+            modified_time_ms,
+            start_line: start as u64 + 1,
+            end_line: end as u64,
+            indexed_at_ms: current_time_millis(),
+            embedding: embed_text(&text),
+            embedding_provider: "local".to_string(),
+            embedding_model: format!("local-hash-{EMBEDDING_DIMS}"),
+            embedding_dimensions: EMBEDDING_DIMS,
+            text,
+        },
+        score,
+    });
+    Ok(())
+}
+
+fn truncate_search_line(value: &str, max_chars: usize) -> String {
+    let mut characters = value.chars();
+    let mut truncated = characters.by_ref().take(max_chars).collect::<String>();
+    if characters.next().is_some() {
+        truncated.push_str("...");
+    }
+    truncated
 }
 
 fn collect_chunks(
@@ -701,6 +1305,7 @@ fn inspect_file_freshness(
     Ok(false)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn index_file(
     workspace_root: &Path,
     path: &Path,
@@ -1064,7 +1669,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(value: &str) -> Result<Vec<u8>, RagError> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err(RagError::new("hex value has odd length"));
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
@@ -1312,6 +1917,21 @@ mod tests {
     }
 
     #[test]
+    fn cloning_file_adapter_shares_the_immutable_index_snapshot() {
+        let root = temp_workspace();
+        let index_path = root.join(".cindx").join("rag-index.tsv");
+        fs::write(root.join("readme.md"), "shared retrieval snapshot")
+            .expect("file should write");
+        let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+        let mut adapter = FileRagAdapter::open(&index_path).expect("adapter should open");
+        adapter.replace_all(index).expect("index should save");
+
+        let cloned = adapter.clone();
+
+        assert!(Arc::ptr_eq(&adapter.index, &cloned.index));
+    }
+
+    #[test]
     fn indexes_workspace_with_external_embeddings() {
         let root = temp_workspace();
         fs::write(root.join("a.md"), "cloud embedding vector alpha")
@@ -1374,6 +1994,52 @@ mod tests {
     }
 
     #[test]
+    fn cancellable_external_index_stops_between_embedding_batches() {
+        struct CountingEmbedder {
+            calls: usize,
+        }
+
+        impl RagEmbedder for CountingEmbedder {
+            fn embed_texts(&mut self, texts: &[String]) -> Result<EmbeddingBatch, RagError> {
+                self.calls += 1;
+                Ok(EmbeddingBatch {
+                    provider: "test-provider".to_string(),
+                    model: "test-embedding".to_string(),
+                    vectors: vec![vec![1.0, 0.0]; texts.len()],
+                })
+            }
+        }
+
+        let root = temp_workspace();
+        let content = (0..360)
+            .map(|line| format!("knowledge line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(root.join("many-chunks.md"), content).expect("file should write");
+        let mut embedder = CountingEmbedder { calls: 0 };
+        let options = IndexOptions {
+            chunk_lines: 8,
+            chunk_overlap: 0,
+            ..IndexOptions::default()
+        };
+        let mut checks = 0usize;
+
+        let error = index_workspace_with_embedder_cancellable(
+            &root,
+            options,
+            &mut embedder,
+            || {
+                checks += 1;
+                checks >= 6
+            },
+        )
+        .expect_err("external indexing should stop when cancelled");
+
+        assert_eq!(error.message, RAG_INDEX_CANCELLED);
+        assert!(embedder.calls < 3);
+    }
+
+    #[test]
     fn searches_with_external_query_embedding() {
         let root = temp_workspace();
         fs::write(root.join("a.md"), "alpha").expect("file should write");
@@ -1419,6 +2085,34 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].chunk.path, "a.md");
         assert!(results[0].score >= 1.0);
+    }
+
+    #[test]
+    fn direct_file_search_finds_content_excluded_from_the_rag_index() {
+        let root = temp_workspace();
+        fs::write(root.join("indexed.md"), "ordinary indexed content").expect("file should write");
+        fs::write(
+            root.join("large.log"),
+            format!("{}\nunique direct file evidence\n", "x".repeat(600 * 1024)),
+        )
+        .expect("large file should write");
+        let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+
+        assert!(index
+            .chunks
+            .iter()
+            .all(|chunk| chunk.path != "large.log"));
+        let results = search_workspace_files_cancellable(
+            &root,
+            "unique direct file evidence",
+            4,
+            || false,
+        )
+        .expect("direct file search should succeed");
+
+        assert_eq!(results[0].chunk.path, "large.log");
+        assert!(results[0].chunk.text.contains("unique direct file evidence"));
+        assert!(results[0].chunk.start_line <= results[0].chunk.end_line);
     }
 
     #[test]
@@ -1472,6 +2166,32 @@ mod tests {
         assert!(output.contains("\"embedding_provider\":\"local\""));
     }
 
+    #[cfg(feature = "lancedb-store")]
+    #[test]
+    fn persists_and_searches_a_real_lancedb_index() {
+        let root = temp_workspace();
+        fs::write(root.join("a.md"), "permission audit model traces")
+            .expect("file should write");
+        fs::write(root.join("b.md"), "recipe ingredients cooking notes")
+            .expect("file should write");
+        let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+        let database_path = root.join(".cindx").join("lancedb");
+
+        let rows = replace_lancedb_index(&database_path, &index)
+            .expect("LanceDB index should persist");
+        let results = search_lancedb_index(
+            &database_path,
+            &local_query_embedding("model audit trail"),
+            2,
+        )
+        .expect("LanceDB search should succeed");
+
+        assert_eq!(rows, 2);
+        assert!(lancedb_index_exists(&database_path));
+        assert_eq!(results[0].chunk.path, "a.md");
+        assert!(results[0].score > 0.0);
+    }
+
     #[test]
     fn grounded_prompt_cites_source_ranges() {
         let chunk = RagChunk {
@@ -1496,5 +2216,56 @@ mod tests {
 
         assert!(prompt.contains("[docs/a.md:3-8"));
         assert!(prompt.contains("What matters?"));
+    }
+
+    #[test]
+    #[ignore = "performance diagnostic; run through the quality-gate performance profile"]
+    fn synthetic_rag_search_scaling_diagnostic() {
+        let chunk_count = 20_000usize;
+        let chunks = (0..chunk_count)
+            .map(|index| {
+                let text = format!(
+                    "workspace retrieval chunk {index} with graph memory and file evidence"
+                );
+                RagChunk {
+                    id: format!("chunk-{index}"),
+                    path: format!("src/module-{index}.rs"),
+                    file_hash: format!("hash-{index}"),
+                    modified_time_ms: index as u64,
+                    start_line: 1,
+                    end_line: 8,
+                    indexed_at_ms: 1,
+                    embedding: embed_text(&text),
+                    embedding_provider: "local".to_string(),
+                    embedding_model: format!("local-hash-{EMBEDDING_DIMS}"),
+                    embedding_dimensions: EMBEDDING_DIMS,
+                    text,
+                }
+            })
+            .collect::<Vec<_>>();
+        let estimated_payload_bytes = chunks
+            .iter()
+            .map(|chunk| {
+                chunk.id.len()
+                    + chunk.path.len()
+                    + chunk.file_hash.len()
+                    + chunk.text.len()
+                    + chunk.embedding.len() * std::mem::size_of::<f32>()
+            })
+            .sum::<usize>();
+        let query_embedding = local_query_embedding("graph memory file evidence");
+
+        let semantic_started_at = std::time::Instant::now();
+        let semantic = search_chunks_semantic(&chunks, &query_embedding, 12);
+        let semantic_micros = semantic_started_at.elapsed().as_micros();
+        let literal_started_at = std::time::Instant::now();
+        let literal = search_chunks_literal(&chunks, "graph memory file evidence", 12);
+        let literal_micros = literal_started_at.elapsed().as_micros();
+
+        assert_eq!(semantic.len(), 12);
+        assert_eq!(literal.len(), 12);
+        println!(
+            "{{\"schema\":\"cindx.rag-search-diagnostic.v1\",\"chunks\":{chunk_count},\"dimensions\":{EMBEDDING_DIMS},\"estimated_payload_bytes\":{estimated_payload_bytes},\"semantic_micros\":{semantic_micros},\"literal_micros\":{literal_micros}}}"
+        );
     }
 }

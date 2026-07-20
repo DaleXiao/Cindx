@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -20,6 +20,42 @@ use tools::{Tool, ToolError, ToolExecutionControl};
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+const MCP_HTTP_STDOUT_MAX_BYTES: usize = 16 * 1024 * 1024;
+const MCP_HTTP_STDERR_MAX_BYTES: usize = 256 * 1024;
+const MCP_STDIO_RESPONSE_MAX_BYTES: usize = 16 * 1024 * 1024;
+const MCP_TOOL_PREVIEW_MAX_BYTES: usize = 256 * 1024;
+
+#[derive(Default)]
+struct LimitedRead {
+    bytes: Vec<u8>,
+    total_bytes: u64,
+    truncated: bool,
+    error: Option<String>,
+}
+
+fn read_limited_and_drain(mut stream: impl Read, max_bytes: usize) -> LimitedRead {
+    let mut result = LimitedRead {
+        bytes: Vec::with_capacity(max_bytes.min(64 * 1024)),
+        ..LimitedRead::default()
+    };
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        let count = match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) => {
+                result.error = Some(error.to_string());
+                break;
+            }
+        };
+        result.total_bytes = result.total_bytes.saturating_add(count as u64);
+        let remaining = max_bytes.saturating_sub(result.bytes.len());
+        let retained = remaining.min(count);
+        result.bytes.extend_from_slice(&buffer[..retained]);
+        result.truncated |= retained < count;
+    }
+    result
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpError {
@@ -147,16 +183,10 @@ fn wait_for_child_with_control(
         .stderr
         .take()
         .ok_or_else(|| McpError::new("MCP HTTP stderr is unavailable"))?;
-    let stdout_reader = thread::spawn(move || {
-        let mut output = Vec::new();
-        let _ = stdout.read_to_end(&mut output);
-        output
-    });
-    let stderr_reader = thread::spawn(move || {
-        let mut output = Vec::new();
-        let _ = stderr.read_to_end(&mut output);
-        output
-    });
+    let stdout_reader =
+        thread::spawn(move || read_limited_and_drain(&mut stdout, MCP_HTTP_STDOUT_MAX_BYTES));
+    let stderr_reader =
+        thread::spawn(move || read_limited_and_drain(&mut stderr, MCP_HTTP_STDERR_MAX_BYTES));
     let deadline = Instant::now() + timeout;
     let status = loop {
         if control.is_some_and(ToolExecutionControl::should_cancel) {
@@ -190,10 +220,28 @@ fn wait_for_child_with_control(
             }
         }
     };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| McpError::new("MCP HTTP stdout reader panicked"))?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| McpError::new("MCP HTTP stderr reader panicked"))?;
+    if let Some(error) = stdout.error {
+        return Err(McpError::new(format!("failed to read MCP HTTP stdout: {error}")));
+    }
+    if stdout.truncated {
+        return Err(McpError::new(format!(
+            "MCP HTTP response exceeded the {} byte safety limit ({} bytes produced)",
+            MCP_HTTP_STDOUT_MAX_BYTES, stdout.total_bytes
+        )));
+    }
+    if let Some(error) = stderr.error {
+        return Err(McpError::new(format!("failed to read MCP HTTP stderr: {error}")));
+    }
     Ok(Output {
         status,
-        stdout: stdout_reader.join().unwrap_or_default(),
-        stderr: stderr_reader.join().unwrap_or_default(),
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
     })
 }
 
@@ -228,11 +276,7 @@ impl McpStdioClient {
             .ok_or_else(|| McpError::new("MCP server stdout is unavailable"))?;
         if let Some(stderr) = child.stderr.take() {
             thread::spawn(move || {
-                for line in BufReader::new(stderr).lines() {
-                    if line.is_err() {
-                        break;
-                    }
-                }
+                let _ = io::copy(&mut BufReader::new(stderr), &mut io::sink());
             });
         }
 
@@ -755,10 +799,20 @@ fn parse_tool_descriptors(result: &Value) -> Result<Vec<McpToolDescriptor>, McpE
 }
 
 fn read_responses(stdout: std::process::ChildStdout, shared: Arc<SharedProcess>) {
-    for line in BufReader::new(stdout).lines() {
-        let Ok(line) = line else {
-            break;
+    let mut reader = BufReader::new(stdout);
+    let terminal_error = loop {
+        let (line, truncated) = match read_bounded_line(&mut reader, MCP_STDIO_RESPONSE_MAX_BYTES) {
+            Ok(Some(line)) => line,
+            Ok(None) => break "MCP server closed its stdout".to_string(),
+            Err(error) => break format!("failed to read MCP response: {error}"),
         };
+        if truncated {
+            break format!(
+                "MCP response exceeded the {} byte safety limit",
+                MCP_STDIO_RESPONSE_MAX_BYTES
+            );
+        }
+        let line = String::from_utf8_lossy(&line);
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -781,12 +835,50 @@ fn read_responses(stdout: std::process::ChildStdout, shared: Arc<SharedProcess>)
             };
             let _ = sender.send(result);
         }
-    }
+    };
     shared.alive.store(false, Ordering::SeqCst);
+    if let Ok(mut child) = shared.child.lock() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     if let Ok(mut pending) = shared.pending.lock() {
         let senders = std::mem::take(&mut *pending);
         for (_, sender) in senders {
-            let _ = sender.send(Err(McpError::new("MCP server closed its stdout")));
+            let _ = sender.send(Err(McpError::new(terminal_error.clone())));
+        }
+    }
+}
+
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> io::Result<Option<(Vec<u8>, bool)>> {
+    let mut line = Vec::with_capacity(max_bytes.min(64 * 1024));
+    let mut truncated = false;
+    let mut saw_bytes = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return if saw_bytes {
+                Ok(Some((line, truncated)))
+            } else {
+                Ok(None)
+            };
+        }
+        saw_bytes = true;
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let body_len = newline.unwrap_or(available.len());
+        let remaining = max_bytes.saturating_sub(line.len());
+        let retained = remaining.min(body_len);
+        line.extend_from_slice(&available[..retained]);
+        truncated |= retained < body_len;
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        reader.consume(consumed);
+        if newline.is_some() {
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            return Ok(Some((line, truncated)));
         }
     }
 }
@@ -1072,7 +1164,9 @@ fn mcp_tool_result(
 ) -> ToolResult {
     let is_error = result.get("isError").and_then(Value::as_bool).unwrap_or(false);
     let mut content = Vec::new();
-    let mut text_output = Vec::new();
+    let mut output = String::new();
+    let mut output_bytes = 0u64;
+    let mut output_truncated = false;
     for item in result
         .get("content")
         .and_then(Value::as_array)
@@ -1082,8 +1176,15 @@ fn mcp_tool_result(
         match item.get("type").and_then(Value::as_str) {
             Some("text") => {
                 let text = item.get("text").and_then(Value::as_str).unwrap_or_default();
-                content.push(ToolContent::Text(text.to_string()));
-                text_output.push(text.to_string());
+                let preview = append_mcp_preview(
+                    &mut output,
+                    text,
+                    &mut output_bytes,
+                    &mut output_truncated,
+                );
+                if !preview.is_empty() {
+                    content.push(ToolContent::Text(preview));
+                }
             }
             Some("image") => {
                 content.push(ToolContent::Image {
@@ -1098,7 +1199,12 @@ fn mcp_tool_result(
                         .unwrap_or_default()
                         .to_string(),
                 });
-                text_output.push("[MCP image output]".to_string());
+                append_mcp_preview(
+                    &mut output,
+                    "[MCP image output]",
+                    &mut output_bytes,
+                    &mut output_truncated,
+                );
             }
             Some("resource") => {
                 let resource = item.get("resource").unwrap_or(item);
@@ -1108,23 +1214,44 @@ fn mcp_tool_result(
                     .unwrap_or_default()
                     .to_string();
                 let text = resource.get("text").and_then(Value::as_str).map(str::to_string);
+                let rendered = text.as_deref().unwrap_or(&uri);
+                let preview = append_mcp_preview(
+                    &mut output,
+                    rendered,
+                    &mut output_bytes,
+                    &mut output_truncated,
+                );
                 content.push(ToolContent::Resource {
                     uri: uri.clone(),
-                    text: text.clone(),
+                    text: text.map(|_| preview),
                 });
-                text_output.push(text.unwrap_or(uri));
             }
             _ => {
-                content.push(ToolContent::Text(item.to_string()));
-                text_output.push(item.to_string());
+                let rendered = item.to_string();
+                let preview = append_mcp_preview(
+                    &mut output,
+                    &rendered,
+                    &mut output_bytes,
+                    &mut output_truncated,
+                );
+                if !preview.is_empty() {
+                    content.push(ToolContent::Text(preview));
+                }
             }
         }
     }
-    let output = if text_output.is_empty() {
-        result.to_string()
-    } else {
-        text_output.join("\n")
-    };
+    if output.is_empty() {
+        let rendered = result.to_string();
+        append_mcp_preview(
+            &mut output,
+            &rendered,
+            &mut output_bytes,
+            &mut output_truncated,
+        );
+    }
+    if output_truncated {
+        output.push_str("\n\n[MCP output preview bounded. The complete response is available as a structured artifact.]");
+    }
     let status = if is_error {
         ToolOutcomeStatus::Failed
     } else {
@@ -1133,6 +1260,16 @@ fn mcp_tool_result(
     let mut metadata = Metadata::new();
     metadata.insert("mcp_server_id".to_string(), server.id.clone());
     metadata.insert("mcp_tool_name".to_string(), descriptor.name.clone());
+    metadata.insert("output_bytes".to_string(), output_bytes.to_string());
+    metadata.insert(
+        "output_truncated".to_string(),
+        output_truncated.to_string(),
+    );
+    let structured_output_json = if output_truncated {
+        Some(result.to_string())
+    } else {
+        result.get("structuredContent").map(Value::to_string)
+    };
     ToolResult {
         invocation_id: invocation.id,
         status,
@@ -1142,7 +1279,7 @@ fn mcp_tool_result(
         } else {
             content
         },
-        structured_output_json: result.get("structuredContent").map(Value::to_string),
+        structured_output_json,
         artifacts: Vec::new(),
         failure: is_error.then(|| ToolFailure {
             code: "mcp_tool_error".to_string(),
@@ -1151,6 +1288,30 @@ fn mcp_tool_result(
         }),
         metadata,
     }
+}
+
+fn append_mcp_preview(
+    output: &mut String,
+    value: &str,
+    total_bytes: &mut u64,
+    truncated: &mut bool,
+) -> String {
+    let separator_bytes = (!output.is_empty()) as u64;
+    *total_bytes = total_bytes
+        .saturating_add(separator_bytes)
+        .saturating_add(value.len() as u64);
+    if !output.is_empty() && output.len() < MCP_TOOL_PREVIEW_MAX_BYTES {
+        output.push('\n');
+    }
+    let remaining = MCP_TOOL_PREVIEW_MAX_BYTES.saturating_sub(output.len());
+    let mut end = remaining.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let preview = value[..end].to_string();
+    output.push_str(&preview);
+    *truncated |= end < value.len();
+    preview
 }
 
 fn validate_server_configs(servers: &[McpServerConfig]) -> Result<(), McpError> {
@@ -1307,7 +1468,7 @@ mod tests {
                 env: BTreeMap::new(),
             },
         };
-        assert!(validate_server_configs(&[server.clone()]).is_ok());
+        assert!(validate_server_configs(std::slice::from_ref(&server)).is_ok());
         assert!(validate_server_configs(&[server.clone(), server]).is_err());
     }
 
@@ -1369,5 +1530,71 @@ mod tests {
         let sse = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"tools\":[]}}\n\n";
         let message = parse_sse_response(sse, 7).unwrap();
         assert_eq!(message["result"]["tools"], json!([]));
+    }
+
+    #[test]
+    fn bounded_line_reader_drains_an_oversized_response() {
+        let input = format!("{}\nnext\n", "x".repeat(32));
+        let mut reader = BufReader::new(input.as_bytes());
+
+        let (first, truncated) = read_bounded_line(&mut reader, 8)
+            .expect("first line should read")
+            .expect("first line should exist");
+        let (second, second_truncated) = read_bounded_line(&mut reader, 8)
+            .expect("second line should read")
+            .expect("second line should exist");
+
+        assert_eq!(first, b"xxxxxxxx");
+        assert!(truncated);
+        assert_eq!(second, b"next");
+        assert!(!second_truncated);
+    }
+
+    #[test]
+    fn mcp_large_text_result_keeps_a_bounded_preview_and_raw_artifact_payload() {
+        let server = McpServerConfig {
+            id: "server-1".to_string(),
+            name: "Server".to_string(),
+            enabled: true,
+            require_approval: false,
+            timeout_ms: 1_000,
+            transport: McpTransportConfig::Stdio {
+                command: "server".to_string(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+            },
+        };
+        let descriptor = McpToolDescriptor {
+            name: "large".to_string(),
+            description: "Large result".to_string(),
+            input_schema: empty_object_schema(),
+            output_schema: None,
+        };
+        let invocation = ToolInvocation {
+            id: agent_core::ToolCallId("call-large".to_string()),
+            task_id: agent_core::TaskId("task-1".to_string()),
+            tool_name: "mcp__Server__large".to_string(),
+            input_json: "{}".to_string(),
+            proposed_by_model: "test".to_string(),
+            metadata: Metadata::new(),
+        };
+        let result = mcp_tool_result(
+            invocation,
+            &server,
+            &descriptor,
+            json!({
+                "content": [{ "type": "text", "text": "x".repeat(300 * 1024) }]
+            }),
+        );
+
+        assert!(result.output.len() < MCP_TOOL_PREVIEW_MAX_BYTES + 256);
+        assert_eq!(
+            result.metadata.get("output_truncated").map(String::as_str),
+            Some("true")
+        );
+        assert!(result
+            .structured_output_json
+            .as_deref()
+            .is_some_and(|value| value.len() > 300 * 1024));
     }
 }

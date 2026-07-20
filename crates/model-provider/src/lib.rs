@@ -863,7 +863,7 @@ impl OpenAiCompatibleImageProvider {
             &endpoint,
             &self.config.api_key,
             Some("{}"),
-            self.config.timeout_seconds.min(10).max(1),
+            self.config.timeout_seconds.clamp(1, 10),
             64 * 1024,
         )?;
         if image_endpoint_probe_succeeded(output.status) {

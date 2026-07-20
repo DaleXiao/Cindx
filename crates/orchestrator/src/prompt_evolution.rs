@@ -1886,7 +1886,7 @@ mod tests {
     #[test]
     fn promotion_confidence_requires_more_than_two_lucky_wins() {
         let genome = ConductorPromptGenome::seed_for_effort("auto");
-        let sparse = vec![
+        let sparse = [
             observation(&genome.id, PromptEvaluationSplit::Train, 1.0, 100, 100),
             observation(&genome.id, PromptEvaluationSplit::Holdout, 1.0, 100, 100),
         ];

@@ -1,6 +1,6 @@
 use agent_core::{Event, EventKind, Message, MessageRole};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v3";
 
@@ -386,6 +386,104 @@ pub fn recall_memories_at(
     diversified
 }
 
+pub fn fuse_memory_recalls_at(
+    ledger: &MemoryLedger,
+    lexical_recalls: Vec<MemoryRecall>,
+    semantic_scores: &BTreeMap<String, f64>,
+    current_session_id: Option<&str>,
+    limit: usize,
+    now_ms: u64,
+) -> Vec<MemoryRecall> {
+    let mut fused = lexical_recalls
+        .into_iter()
+        .map(|recall| (recall.record.id.clone(), recall))
+        .collect::<BTreeMap<_, _>>();
+
+    for record in &ledger.records {
+        let Some(semantic_score) = semantic_scores
+            .get(&record.id)
+            .copied()
+            .filter(|score| score.is_finite() && *score >= 0.2)
+        else {
+            continue;
+        };
+        let cross_session = current_session_id.is_some_and(|session_id| {
+            !record
+                .source_session_ids
+                .iter()
+                .any(|source| source == session_id)
+        });
+        let age_days = now_ms
+            .saturating_sub(record.updated_at_ms)
+            .checked_div(86_400_000)
+            .unwrap_or_default()
+            .min(365) as f64;
+        let recency = 1.0 / (1.0 + age_days / 30.0);
+        let semantic_score = semantic_score
+            * record.kind.recall_weight()
+            * record.trust.recall_weight()
+            * (0.8 + recency * 0.2)
+            * (0.85 + f64::from(record.importance) / 100.0 * 0.15)
+            * if cross_session { 1.08 } else { 0.92 };
+
+        if let Some(existing) = fused.get_mut(&record.id) {
+            existing.score = existing.score * 0.7 + semantic_score * 0.3;
+            if !existing.reasons.iter().any(|reason| reason == "semantic_vector") {
+                existing.reasons.push("semantic_vector".to_string());
+            }
+        } else if semantic_score >= 0.18 {
+            let mut reasons = vec![
+                "semantic_vector".to_string(),
+                format!("trust:{}", record.trust.label()),
+            ];
+            if cross_session {
+                reasons.push("cross_session".to_string());
+            }
+            fused.insert(
+                record.id.clone(),
+                MemoryRecall {
+                    record: record.clone(),
+                    score: semantic_score,
+                    reasons,
+                },
+            );
+        }
+    }
+
+    let mut recalls = fused.into_values().collect::<Vec<_>>();
+    recalls.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.record.importance.cmp(&left.record.importance))
+            .then_with(|| left.record.id.cmp(&right.record.id))
+    });
+    let mut diversified = Vec::new();
+    let mut per_session = BTreeMap::<String, usize>::new();
+    let mut per_kind = BTreeMap::<String, usize>::new();
+    for recall in recalls {
+        let session = recall.record.provenance.session_id.clone();
+        let kind = recall.record.kind.label().to_string();
+        let kind_limit = match recall.record.kind {
+            MemoryKind::Requirement => 3,
+            MemoryKind::Evidence | MemoryKind::Outcome => 2,
+        };
+        if per_session.get(&session).copied().unwrap_or_default() >= 2
+            || per_kind.get(&kind).copied().unwrap_or_default() >= kind_limit
+        {
+            continue;
+        }
+        *per_session.entry(session).or_default() += 1;
+        *per_kind.entry(kind).or_default() += 1;
+        diversified.push(recall);
+        if diversified.len() >= limit.max(1) {
+            break;
+        }
+    }
+    diversified
+}
+
 pub fn record_memory_recalls(
     ledger: &mut MemoryLedger,
     recalls: &[MemoryRecall],
@@ -452,6 +550,7 @@ pub fn memory_recalls_to_markdown(recalls: &[MemoryRecall]) -> String {
     output
 }
 
+#[allow(clippy::too_many_arguments)]
 fn memory_record(
     kind: MemoryKind,
     trust: MemoryTrust,
@@ -569,6 +668,7 @@ fn is_durable_requirement_content(content: &str) -> bool {
         "务必",
         "保持",
         "要求",
+        "需要",
     ]
     .iter()
     .any(|marker| lower.contains(marker))
@@ -645,6 +745,8 @@ fn memory_terms(value: &str) -> BTreeSet<String> {
             for pair in chars.windows(2) {
                 terms.insert(pair.iter().collect());
             }
+        } else if token.len() > 3 && token.ends_with('s') && !token.ends_with("ss") {
+            terms.insert(token.trim_end_matches('s').to_string());
         }
     }
     terms
@@ -965,11 +1067,11 @@ fn conversation_memory_line(message: &Message) -> Option<String> {
             truncate(&sanitize_line(&message.content), 800)
         )),
         MessageRole::Assistant
-            if !message
+            if message
                 .metadata
                 .get("tool_call_count")
                 .and_then(|value| value.parse::<usize>().ok())
-                .is_some_and(|count| count > 0) =>
+                .is_none_or(|count| count == 0) =>
         {
             Some(format!(
                 "Assistant outcome: {}",
@@ -1097,7 +1199,7 @@ fn goal_from_event(event: &Event) -> Option<String> {
     }
 
     first_metadata_value(event, &["prompt"])
-        .map(|value| sanitize_line(value))
+        .map(sanitize_line)
         .filter(|value| !value.is_empty())
 }
 
@@ -1573,6 +1675,120 @@ mod tests {
         );
         assert!(unrelated.is_empty());
         assert_eq!(ledger.records[0].observed_use_count, 1);
+    }
+
+    #[test]
+    fn semantic_memory_recall_fills_lexical_blind_spots_without_losing_trust_weighting() {
+        let events = vec![
+            event(
+                1,
+                EventKind::MessageAdded,
+                "User message",
+                [
+                    ("role", "user"),
+                    (
+                        "content",
+                        "Always preserve the frosted translucent title material",
+                    ),
+                ],
+            ),
+            event(2, EventKind::TaskStatusChanged, "Agent task completed", []),
+        ];
+        let mut ledger = MemoryLedger::new("project-a");
+        merge_memory_records(
+            &mut ledger,
+            extract_durable_memories(&events, "project-a", "session-a"),
+            32,
+        );
+        let lexical = recall_memories_at(
+            &ledger,
+            "keep the header visually consistent",
+            Some("session-b"),
+            4,
+            10,
+        );
+        assert!(lexical.is_empty());
+
+        let semantic_scores = [(ledger.records[0].id.clone(), 0.91)]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        let recalls = fuse_memory_recalls_at(
+            &ledger,
+            lexical,
+            &semantic_scores,
+            Some("session-b"),
+            4,
+            10,
+        );
+
+        assert_eq!(recalls.len(), 1);
+        assert!(recalls[0]
+            .reasons
+            .contains(&"semantic_vector".to_string()));
+        assert!(recalls[0]
+            .reasons
+            .contains(&"trust:user_stated".to_string()));
+        assert!(recalls[0]
+            .reasons
+            .contains(&"cross_session".to_string()));
+    }
+
+    #[test]
+    fn durable_memory_recognizes_chinese_need_requirements() {
+        let events = vec![
+            event(
+                1,
+                EventKind::MessageAdded,
+                "User message",
+                [
+                    ("role", "user"),
+                    ("content", "左侧边栏需要白色高不透明度的磨砂玻璃效果"),
+                ],
+            ),
+            event(2, EventKind::TaskStatusChanged, "Agent task completed", []),
+        ];
+
+        let records = extract_durable_memories(&events, "project-a", "session-a");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, MemoryKind::Requirement);
+        assert_eq!(records[0].trust, MemoryTrust::UserStated);
+    }
+
+    #[test]
+    fn recall_matches_simple_english_plural_variants() {
+        let events = vec![
+            event(
+                1,
+                EventKind::MessageAdded,
+                "User message",
+                [
+                    ("role", "user"),
+                    (
+                        "content",
+                        "Do not change the validated macOS traffic light vertical position",
+                    ),
+                ],
+            ),
+            event(2, EventKind::TaskStatusChanged, "Agent task completed", []),
+        ];
+        let mut ledger = MemoryLedger::new("project-a");
+        merge_memory_records(
+            &mut ledger,
+            extract_durable_memories(&events, "project-a", "session-a"),
+            32,
+        );
+
+        let recalls = recall_memories_at(
+            &ledger,
+            "Build without moving the traffic lights",
+            Some("session-b"),
+            3,
+            10,
+        );
+
+        assert_eq!(recalls.len(), 1);
+        assert!(recalls[0].record.content.contains("traffic light vertical position"));
     }
 
     #[test]

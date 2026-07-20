@@ -8,26 +8,29 @@ use agent_graph::{
 };
 use agent_memory::{
     build_restore_context_pack, build_session_checkpoint_at, conversation_memory_to_markdown,
-    extract_durable_memories, memory_recalls_to_markdown, merge_memory_records,
-    recall_memories_at, record_memory_observed_uses, record_memory_recalls, CheckpointOptions,
-    MemoryKind, MemoryLedger, RestoreContextPack, SessionCheckpoint, MEMORY_LEDGER_SCHEMA,
+    extract_durable_memories, fuse_memory_recalls_at, memory_recalls_to_markdown,
+    merge_memory_records, recall_memories_at, record_memory_observed_uses,
+    record_memory_recalls, CheckpointOptions, MemoryKind, MemoryLedger, RestoreContextPack,
+    SessionCheckpoint, MEMORY_LEDGER_SCHEMA,
 };
 use agent_mcp::{McpCatalogService, McpServerConfig, McpTransportConfig};
 use agent_rag::{
-    build_grounded_answer_prompt, export_lancedb_records_jsonl, index_workspace,
-    index_workspace_cancellable, index_workspace_with_embedder, local_query_embedding,
-    search_chunks_literal, search_chunks_semantic, EmbeddingBatch, FileRagAdapter, IndexOptions,
-    workspace_index_is_fresh, RagAdapter, RagChunk, RagEmbedder, RagError, RagIndex,
-    RagIndexStats, RagSearchResult, RAG_INDEX_CANCELLED,
+    apply_embeddings_to_index_cancellable, build_grounded_answer_prompt,
+    export_lancedb_records_jsonl, index_workspace, index_workspace_cancellable,
+    lancedb_index_exists, local_query_embedding, replace_lancedb_index, search_chunks_literal,
+    search_lancedb_index, search_workspace_files_cancellable, EmbeddingBatch, FileRagAdapter,
+    IndexOptions, workspace_index_is_fresh, RagAdapter, RagChunk, RagEmbedder, RagError,
+    RagIndex, RagIndexStats, RagSearchResult, RAG_INDEX_CANCELLED,
 };
 use agent_skills::{
     install_skill_archive as install_skill_archive_package, SkillCatalog, SkillPreference,
     SkillRecord,
 };
 use agent_runtime::{
-    advance_with_model_response, append_tool_observation,
-    compose_agent_system_prompt, evidence_worker_tools, model_request_for_turn_with_context,
-    observation_from_tool_result,
+    advance_with_model_response, append_internal_instruction, append_tool_observation,
+    bounded_max_output_tokens,
+    compose_agent_system_prompt, evidence_worker_tools,
+    model_request_for_turn_with_context_budget, observation_from_tool_result,
     record_tool_outcome, repeated_tool_failure_count,
     resume_agent_loop_from_messages, start_agent_loop, start_agent_loop_with_history,
     tool_invocation_from_request, AgentAdvance, AgentRunControl, AgentRuntimeConfig,
@@ -134,13 +137,17 @@ const PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS: usize = 3;
 const PROMPT_EVOLUTION_MIN_PARETO_REPEATS: usize = 3;
 const PROMPT_EVOLUTION_STAGNATION_PATIENCE: usize = 3;
 const PROMPT_EVOLUTION_MIN_IMPROVEMENT: f64 = 0.02;
-const PROMPT_EVALUATION_IDLE_GRACE_MS: u64 = 1_200;
+const PROMPT_EVALUATION_IDLE_GRACE_MS: u64 = 30_000;
+const PROMPT_EVOLUTION_OFFLINE_MIN_CASES: usize = 3;
+const PROMPT_EVOLUTION_OFFLINE_MAX_CASES: usize = 256;
 const PROMPT_EVOLUTION_MAX_GENERATION: u32 = 12;
 const PROMPT_EVOLUTION_SHADOW_INTERVAL: usize = 10;
 const AGENT_SESSION_READ_MODEL_NAMESPACE: &str = "agent-session-v2";
 const AGENT_MEMORY_READ_MODEL_NAMESPACE: &str = "agent-memory-v1";
 const AGENT_MEMORY_MAX_RECORDS: usize = 256;
 const AGENT_MEMORY_RECALL_LIMIT: usize = 6;
+const MEMORY_VECTOR_MANIFEST_SCHEMA: &str = "cindx.memory-vector.v1";
+const MEMORY_VECTOR_FALLBACK_RETRY_MS: u64 = 5 * 60 * 1_000;
 const ROUTING_TELEMETRY_READ_MODEL_NAMESPACE: &str = "routing-telemetry-v1";
 const ROUTING_TELEMETRY_READ_MODEL_KEY: &str = "global";
 const ROUTING_TELEMETRY_MAX_RUNS: usize = 2_048;
@@ -157,7 +164,10 @@ const CONTEXT_RECENT_MAX_TOKENS: u64 = 48_000;
 const CONTEXT_RECENT_MAX_MESSAGES: usize = 32;
 const CONTEXT_RESTORE_MAX_CHARS: usize = 32_000;
 const CONTEXT_MEMORY_MAX_ITEMS: usize = 12;
+const CONTEXT_CHECKPOINT_MANIFEST_SCHEMA: &str = "cindx.context-checkpoint-coverage.v1";
+const CONTEXT_COMPACTION_VERSION: &str = "hybrid_v3_coverage";
 const WORKSPACE_KNOWLEDGE_CACHE_TTL: Duration = Duration::from_secs(30);
+const WORKSPACE_KNOWLEDGE_CACHE_MAX_ENTRIES: usize = 4;
 const SCHEDULE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const SCHEDULE_MISSED_GRACE_MS: u64 = 90_000;
 const SCHEDULE_DISPATCH_RETRY_MS: u64 = 60_000;
@@ -175,6 +185,7 @@ const LEGACY_AGENT_SYSTEM_PROMPT: &str = "You are Cindx, a desktop-first assista
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static PROMPT_EVALUATIONS_INFLIGHT: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+static MEMORY_VECTOR_REFRESH_INFLIGHT: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
 const MAIN_WINDOW_REVEAL_FALLBACK_MS: u64 = 12_000;
 #[cfg(target_os = "macos")]
 const MACOS_TRAFFIC_LIGHT_X: f64 = 14.0;
@@ -1940,8 +1951,9 @@ fn save_web_search_config(
     input: WebSearchConfigInput,
 ) -> Result<WebSearchConfigState, String> {
     let endpoint = normalized_config_value(&input.endpoint);
-    if !endpoint.is_empty()
-        && !(endpoint.starts_with("https://") || endpoint.starts_with("http://"))
+    if !(endpoint.is_empty()
+        || endpoint.starts_with("https://")
+        || endpoint.starts_with("http://"))
     {
         return Err("web search endpoint must start with http:// or https://".to_string());
     }
@@ -3488,7 +3500,7 @@ fn delete_project(
     state: tauri::State<'_, AppState>,
     input: ProjectActionInput,
 ) -> Result<ProjectSessionState, String> {
-    let (deleted_session_ids, attachment_dirs, context_files, mut next_state) = {
+    let (deleted_session_ids, attachment_dirs, context_files, project_root, mut next_state) = {
         let mut workspace_config = state
             .workspace_config
             .lock()
@@ -3535,6 +3547,7 @@ fn delete_project(
             deleted_session_ids,
             attachment_dirs,
             context_files,
+            PathBuf::from(&project.root),
             project_session_state(&config, None),
         )
     };
@@ -3543,7 +3556,7 @@ fn delete_project(
     if let Err(error) = delete_session_history(&state, &deleted_session_ids) {
         cleanup_errors.push(error);
     }
-    if let Err(error) = delete_project_memory(&state, &input.project_id) {
+    if let Err(error) = delete_project_memory(&state, &project_root, &input.project_id) {
         cleanup_errors.push(error);
     }
     if let Err(error) = remove_staged_attachment_dirs(&attachment_dirs) {
@@ -4083,6 +4096,7 @@ fn delete_session_history(
 
 fn delete_project_memory(
     state: &tauri::State<'_, AppState>,
+    workspace_root: &Path,
     project_id: &str,
 ) -> Result<(), String> {
     state
@@ -4090,7 +4104,17 @@ fn delete_project_memory(
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?
         .delete_read_model(AGENT_MEMORY_READ_MODEL_NAMESPACE, project_id)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    let vector_root = memory_lancedb_root_for(workspace_root, project_id);
+    if let Err(error) = fs::remove_dir_all(&vector_root) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!(
+                "failed to remove project memory vectors at {}: {error}",
+                vector_root.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn remove_staged_attachment_dirs(paths: &[PathBuf]) -> Result<(), String> {
@@ -4444,6 +4468,9 @@ fn save_provider_config(
         save_provider_config_to_disk(&config).map_err(|error| error.to_string())?;
         config.clone()
     };
+    if let Ok(root) = active_workspace_root(&state) {
+        invalidate_workspace_knowledge_cache(&state, &root)?;
+    }
 
     let mut store = state
         .store
@@ -5072,8 +5099,20 @@ fn add_agent_run_budget_metadata(metadata: &mut Metadata, control: &AgentRunCont
         budget.max_model_calls.to_string(),
     );
     metadata.insert(
+        "run_initial_model_calls".to_string(),
+        budget.initial_model_calls.to_string(),
+    );
+    metadata.insert(
         "run_tool_call_budget".to_string(),
         budget.max_tool_calls.to_string(),
+    );
+    metadata.insert(
+        "run_initial_tool_calls".to_string(),
+        budget.initial_tool_calls.to_string(),
+    );
+    metadata.insert(
+        "run_model_timeout_ms".to_string(),
+        budget.model_call_timeout.as_millis().to_string(),
     );
     metadata.insert(
         "run_no_progress_ms".to_string(),
@@ -5199,6 +5238,19 @@ fn finish_agent_run_for_control_stop(
             ),
             ("model_calls".to_string(), progress.model_calls.to_string()),
             ("tool_calls".to_string(), progress.tool_calls.to_string()),
+            (
+                "model_call_limit".to_string(),
+                progress.model_call_limit.to_string(),
+            ),
+            (
+                "tool_call_limit".to_string(),
+                progress.tool_call_limit.to_string(),
+            ),
+            ("checkpoints".to_string(), progress.checkpoints.to_string()),
+            (
+                "budget_extensions".to_string(),
+                progress.budget_extensions.to_string(),
+            ),
             ("last_stage".to_string(), progress.stage.clone()),
             ("last_detail".to_string(), progress.detail.clone()),
         ]
@@ -6304,7 +6356,15 @@ fn run_agent_task_blocking_inner(
     .map_err(|error| format!("context preparation failed: {error}"))?;
     if should_recall_agent_memory(&routing_context, &prompt) {
         cancellation.mark_progress("memory", "Recalling relevant project memory");
-        match recall_project_memory_for_prompt(&state, &task_id, &run_context, &prompt) {
+        match recall_project_memory_for_prompt(
+            &state,
+            &task_id,
+            &run_context,
+            &root,
+            &config,
+            &prompt,
+            cancellation,
+        ) {
             Ok(Some(memory_context)) => {
                 if let Some(memory_ids) = memory_context.metadata.get("memory_ids") {
                     run_context.insert("memory_ids".to_string(), memory_ids.clone());
@@ -6399,7 +6459,7 @@ fn run_agent_task_blocking_inner(
     )?;
     append_single_model_policy_guidance(&mut history, &collaboration_policy);
     let collaboration = match prepare_agent_collaboration(
-        &app,
+        app,
         &state,
         &config,
         &task_id,
@@ -7172,7 +7232,7 @@ fn resolve_agent_permission_blocking_inner(
 
     append_observations_to_suspended_run(
         &state,
-        &session_id.clone().unwrap_or_default(),
+        session_id.unwrap_or_default(),
         &resolved_observations,
     )?;
 
@@ -7877,8 +7937,9 @@ fn index_workspace_with_cloud_fallback(
     embedder: &mut impl RagEmbedder,
     configured_model: &str,
 ) -> Result<(RagIndex, String, String, Option<String>), RagError> {
-    match index_workspace_with_embedder(root, options.clone(), embedder) {
-        Ok(index) => {
+    let mut index = index_workspace(root, options)?;
+    match apply_embeddings_to_index_cancellable(&mut index, embedder, || false) {
+        Ok(()) => {
             let model = index
                 .chunks
                 .first()
@@ -7887,11 +7948,6 @@ fn index_workspace_with_cloud_fallback(
             Ok((index, "cloud".to_string(), model, None))
         }
         Err(cloud_error) => {
-            let index = index_workspace(root, options).map_err(|local_error| {
-                RagError::new(format!(
-                    "cloud embedding failed: {cloud_error}; local indexing also failed: {local_error}"
-                ))
-            })?;
             let model = index
                 .chunks
                 .first()
@@ -7938,8 +7994,11 @@ fn index_workspace_rag(state: tauri::State<'_, AppState>) -> Result<Phase7State,
         (index, "local".to_string(), model, None)
     };
     let lancedb_export_path = lancedb_export_path_for(&root);
-    let lancedb_records =
+    let lancedb_export_records =
         export_lancedb_records_jsonl(&index, &lancedb_export_path).map_err(|error| error.to_string())?;
+    let lancedb_path = lancedb_database_path_for(&root);
+    let lancedb_records =
+        replace_lancedb_index(&lancedb_path, &index).map_err(|error| error.to_string())?;
     let (graph_nodes, graph_edges) = index_graph_chunks(&root, index.chunks.as_slice())?;
     let stats = adapter
         .replace_all(index)
@@ -7960,10 +8019,18 @@ fn index_workspace_rag(state: tauri::State<'_, AppState>) -> Result<Phase7State,
             rag_index_path_for(&root).display().to_string(),
         ),
         (
+            "lancedb_path".to_string(),
+            lancedb_path.display().to_string(),
+        ),
+        ("lancedb_records".to_string(), lancedb_records.to_string()),
+        (
             "lancedb_export_path".to_string(),
             lancedb_export_path.display().to_string(),
         ),
-        ("lancedb_records".to_string(), lancedb_records.to_string()),
+        (
+            "lancedb_export_records".to_string(),
+            lancedb_export_records.to_string(),
+        ),
         ("embedding_backend".to_string(), embedding_backend),
         ("embedding_model".to_string(), embedding_model),
         (
@@ -8277,6 +8344,10 @@ fn compact_context(state: tauri::State<'_, AppState>) -> Result<ContextState, St
         &root,
         run_context.get("session_id").map(String::as_str),
         &pack.text,
+        Some(ContextCheckpointCoverage {
+            history: &messages,
+            covered_messages: messages.len(),
+        }),
     )?;
     let mut metadata = Metadata::new();
     metadata.insert("checkpoint_id".to_string(), pack.checkpoint.id.clone());
@@ -9354,6 +9425,7 @@ fn phase6_state(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn phase7_state(
     store: &SqliteStore,
     adapter: &FileRagAdapter,
@@ -9627,28 +9699,81 @@ fn write_context_checkpoint(
     workspace_root: &Path,
     session_id: Option<&str>,
     text: &str,
+    coverage: Option<ContextCheckpointCoverage<'_>>,
 ) -> Result<PathBuf, String> {
     let path = context_checkpoint_path_for_session(workspace_root, session_id);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create context checkpoint directory: {error}"))?;
+    let redacted_text = redact_sensitive_text(text);
+    write_private_file_atomically(
+        &path,
+        redacted_text.as_bytes(),
+        "context checkpoint",
+    )?;
+
+    let manifest_path = context_checkpoint_manifest_path_for_session(workspace_root, session_id);
+    if let Some(coverage) = coverage {
+        let manifest = ContextCheckpointManifest::new(
+            session_id,
+            coverage.history,
+            coverage.covered_messages,
+            &redacted_text,
+        )?;
+        let manifest_json = serde_json::to_vec_pretty(&manifest)
+            .map_err(|error| format!("failed to encode context checkpoint manifest: {error}"))?;
+        write_private_file_atomically(
+            &manifest_path,
+            &manifest_json,
+            "context checkpoint manifest",
+        )?;
+    } else if let Err(error) = fs::remove_file(&manifest_path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!(
+                "failed to remove stale context checkpoint manifest: {error}"
+            ));
+        }
     }
 
-    let mut options = fs::OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options
-        .open(&path)
-        .map_err(|error| format!("failed to open context checkpoint: {error}"))?;
-    let redacted_text = redact_sensitive_text(text);
-    file.write_all(redacted_text.as_bytes())
-        .map_err(|error| format!("failed to write context checkpoint: {error}"))?;
-    #[cfg(unix)]
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-        .map_err(|error| format!("failed to secure context checkpoint: {error}"))?;
-
     Ok(path)
+}
+
+fn write_private_file_atomically(path: &Path, bytes: &[u8], label: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{label} path has no parent directory"))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create {label} directory: {error}"))?;
+    let file_name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("checkpoint");
+    let temporary_path = parent.join(format!(
+        ".{file_name}.{}.tmp",
+        unique_id("atomic-write")
+    ));
+
+    let result = (|| {
+        let mut options = fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(&temporary_path)
+            .map_err(|error| format!("failed to open temporary {label}: {error}"))?;
+        file.write_all(bytes)
+            .map_err(|error| format!("failed to write temporary {label}: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("failed to sync temporary {label}: {error}"))?;
+        #[cfg(unix)]
+        fs::set_permissions(&temporary_path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("failed to secure temporary {label}: {error}"))?;
+        fs::rename(&temporary_path, path)
+            .map_err(|error| format!("failed to replace {label}: {error}"))?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    result
 }
 
 fn write_agent_trace_jsonl(
@@ -9876,10 +10001,21 @@ struct PromptEvaluationWorkerRequest {
 type PromptEvaluationRunner =
     Arc<dyn Fn(PromptEvaluationWorkerRequest) -> CollaborationCompletion + Send + Sync>;
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct PromptReplayCase {
     objective: String,
     task_class: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptOfflineCase {
+    id: String,
+    objective: String,
+    task_class: String,
+    project_id: String,
+    source_run_id: String,
+    split: PromptEvaluationSplit,
 }
 
 #[derive(Debug)]
@@ -10171,6 +10307,7 @@ fn collaboration_fallback_models(models: &[String], agent_budget: usize) -> Vec<
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn synthesize_agent_answer(
     app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
@@ -10339,7 +10476,7 @@ fn complete_collaboration_model_with_control(
     }
     let timeout_seconds = cancellation
         .as_ref()
-        .map(|control| control.timeout_seconds(180))
+        .map(|control| control.model_call_timeout_seconds())
         .unwrap_or(180);
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
         base_url: config.base_url.clone(),
@@ -10349,6 +10486,7 @@ fn complete_collaboration_model_with_control(
         timeout_seconds,
     });
     let mut partial_output = String::new();
+    let mut stream_progress = ModelStreamProgress::new();
     let mut first_delta_at_ms = None;
     let response = provider.complete_streaming_cancellable(
         ModelRequest {
@@ -10380,15 +10518,14 @@ fn complete_collaboration_model_with_control(
                 partial_output.push_str(delta);
             }
             if let Some(control) = cancellation.as_ref() {
-                control.mark_progress("model_stream", &role_name);
-                control.record_partial_output(&partial_output);
+                stream_progress.observe(control, "model_stream", &role_name, &partial_output);
             }
             on_delta(delta);
         },
         || {
             cancellation
                 .as_ref()
-                .is_some_and(|control| agent_run_should_stop(control))
+                .is_some_and(agent_run_should_stop)
         },
     );
     let latency_ms = current_time_millis().saturating_sub(started_at_ms);
@@ -10408,6 +10545,11 @@ fn complete_collaboration_model_with_control(
             }
             if let Some(control) = cancellation.as_ref() {
                 control.record_partial_output(&response.message.content);
+                control.record_checkpoint(
+                    "model_result",
+                    &role_name,
+                    &response.message.content,
+                );
             }
             CollaborationCompletion {
                 content: Some(response.message.content),
@@ -10463,7 +10605,7 @@ fn complete_collaboration_worker_with_tools(
     let evidence_turn_limit = max_model_turns.max(1);
     let timeout_seconds = cancellation
         .as_ref()
-        .map(|control| control.timeout_seconds(180))
+        .map(|control| control.model_call_timeout_seconds())
         .unwrap_or(180);
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
         base_url: config.base_url.clone(),
@@ -10509,7 +10651,7 @@ fn complete_collaboration_worker_with_tools(
     loop {
         if cancellation
             .as_ref()
-            .is_some_and(|control| agent_run_should_stop(control))
+            .is_some_and(agent_run_should_stop)
         {
             return CollaborationCompletion {
                 content: None,
@@ -10539,11 +10681,17 @@ fn complete_collaboration_worker_with_tools(
         );
         let request_tools: &[ToolSpec] = if finalizing { &[] } else { &tools };
 
-        let mut request = model_request_for_turn_with_context(
+        let max_output_tokens = bounded_max_output_tokens(
+            config.context_window_tokens,
+            COLLABORATION_MAX_OUTPUT_TOKENS,
+        );
+        let (mut request, governor) = model_request_for_turn_with_context_budget(
             &runtime,
             request_tools,
             Some(&config.agent_system_prompt),
             Some(&trusted_context),
+            config.context_window_tokens,
+            max_output_tokens,
         );
         request.role = role.clone();
         request
@@ -10551,9 +10699,18 @@ fn complete_collaboration_worker_with_tools(
             .insert("collaboration_worker".to_string(), "true".to_string());
         request.metadata.insert(
             "max_output_tokens".to_string(),
-            COLLABORATION_MAX_OUTPUT_TOKENS.to_string(),
+            max_output_tokens.to_string(),
+        );
+        usage.insert(
+            "context_governor_applied".to_string(),
+            governor.applied.to_string(),
+        );
+        usage.insert(
+            "context_projected_tokens".to_string(),
+            governor.estimated_projected_tokens.to_string(),
         );
         let mut partial_output = String::new();
+        let mut stream_progress = ModelStreamProgress::new();
         let response = match provider.complete_streaming_cancellable(
             request,
             |delta| {
@@ -10562,14 +10719,13 @@ fn complete_collaboration_worker_with_tools(
                     partial_output.push_str(delta);
                 }
                 if let Some(control) = cancellation.as_ref() {
-                    control.mark_progress("model_stream", &stage);
-                    control.record_partial_output(&partial_output);
+                    stream_progress.observe(control, "model_stream", &stage, &partial_output);
                 }
             },
             || {
                 cancellation
                     .as_ref()
-                    .is_some_and(|control| agent_run_should_stop(control))
+                    .is_some_and(agent_run_should_stop)
             },
         ) {
             Ok(response) => response,
@@ -10598,6 +10754,13 @@ fn complete_collaboration_worker_with_tools(
         let finalization_content = finalizing
             .then(|| response.message.content.trim().to_string())
             .filter(|content| !content.is_empty());
+        if let Some(control) = cancellation.as_ref() {
+            control.record_checkpoint(
+                "model_result",
+                &stage,
+                &model_response_checkpoint_evidence(&response),
+            );
+        }
 
         match advance_with_model_response(&mut runtime, response, request_tools) {
             AgentAdvance::Completed { answer } => {
@@ -10648,6 +10811,10 @@ fn complete_collaboration_worker_with_tools(
                     usage,
                     evidence,
                 }
+            }
+            AgentAdvance::Retry { instruction } => {
+                append_internal_instruction(&mut runtime, "empty_model_retry", &instruction);
+                continue;
             }
             AgentAdvance::ToolCalls { calls } => {
                 if finalizing {
@@ -10937,7 +11104,7 @@ fn run_collaboration_stage_with_delta(
     )?;
     if cancellation
         .as_ref()
-        .is_some_and(|control| agent_run_should_stop(control))
+        .is_some_and(agent_run_should_stop)
     {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
@@ -11068,6 +11235,7 @@ fn load_workflow_checkpoint_for_run(
     Ok((resume_key, checkpoint))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_workflow_checkpoint_event(
     state: &tauri::State<'_, AppState>,
     task_id: &TaskId,
@@ -11148,6 +11316,7 @@ fn checkpoint_evidence_by_step(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_adaptive_collaboration(
     app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
@@ -11744,7 +11913,7 @@ fn run_adaptive_collaboration(
             if completion.content.as_ref().is_none_or(|content| content.trim().is_empty())
                 && cancellation
                     .as_ref()
-                    .is_some_and(|control| agent_run_should_stop(control))
+                    .is_some_and(agent_run_should_stop)
             {
                 workflow_checkpoint.fail_step(
                     &spec.step_id,
@@ -11922,7 +12091,7 @@ fn run_adaptive_collaboration(
         }
         if cancellation
             .as_ref()
-            .is_some_and(|control| agent_run_should_stop(control))
+            .is_some_and(agent_run_should_stop)
         {
             return Err(MODEL_REQUEST_CANCELLED.to_string());
         }
@@ -12033,7 +12202,6 @@ fn run_adaptive_collaboration(
             config.clone(),
             task_id.clone(),
             run_context.clone(),
-            prompt.to_string(),
             effort,
             policy,
             models.to_vec(),
@@ -12161,7 +12329,7 @@ fn recover_adaptive_worker(
     .unwrap_or_else(|_| spec.subtask.clone());
     if cancellation
         .as_ref()
-        .is_some_and(|control| agent_run_should_stop(control))
+        .is_some_and(agent_run_should_stop)
     {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
@@ -12219,6 +12387,7 @@ fn recover_adaptive_worker(
     Ok((recovered, replacement_model))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn quality_gate_adaptive_output(
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,
@@ -12355,6 +12524,7 @@ fn parse_collaboration_quality(response: &str) -> Result<CollaborationQualityPay
         .map_err(|error| format!("quality gate JSON is invalid: {error}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_collaboration_candidates(
     app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
@@ -12453,7 +12623,7 @@ fn run_collaboration_candidates(
         .collect::<Vec<_>>();
     if cancellation
         .as_ref()
-        .is_some_and(|control| agent_run_should_stop(control))
+        .is_some_and(agent_run_should_stop)
     {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
@@ -12508,6 +12678,7 @@ fn run_collaboration_candidates(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_agent_collaboration(
     app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
@@ -12643,9 +12814,9 @@ fn prepare_agent_collaboration(
             if control.as_ref().is_some_and(|control| control.should_stop()) {
                 return Err(error);
             }
-            let fallback_allowed = !control
+            let fallback_allowed = control
                 .as_ref()
-                .is_some_and(|control| control.progress().remaining.as_secs() < 90);
+                .is_none_or(|control| control.progress().remaining.as_secs() >= 90);
             if let Ok(mut store) = state.store.lock() {
                 let _ = append_event(
                     &mut store,
@@ -12701,7 +12872,6 @@ fn prepare_agent_collaboration(
                 config.clone(),
                 task_id.clone(),
                 run_context.clone(),
-                prompt.to_string(),
                 effort,
                 policy_label,
                 models.clone(),
@@ -12831,6 +13001,7 @@ fn merge_collaboration_evidence(
     merged
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pause_agent_loop_for_control_stop(
     app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
@@ -12886,6 +13057,58 @@ fn is_transient_model_transport_error(message: &str) -> bool {
     .any(|needle| message.contains(needle))
 }
 
+fn model_response_checkpoint_evidence(response: &model_provider::ModelResponse) -> String {
+    let mut evidence = response.message.content.clone();
+    for call in &response.tool_calls {
+        evidence.push('\n');
+        evidence.push_str(&call.name);
+        evidence.push(':');
+        evidence.push_str(&call.arguments_json);
+    }
+    evidence
+}
+
+struct ModelStreamProgress {
+    last_progress_at: Instant,
+    last_snapshot_bytes: usize,
+}
+
+impl ModelStreamProgress {
+    fn new() -> Self {
+        Self {
+            last_progress_at: Instant::now(),
+            last_snapshot_bytes: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.last_progress_at = Instant::now();
+        self.last_snapshot_bytes = 0;
+    }
+
+    fn observe(
+        &mut self,
+        control: &AgentRunControl,
+        stage: &str,
+        detail: &str,
+        partial_output: &str,
+    ) {
+        let snapshot_due = partial_output
+            .len()
+            .saturating_sub(self.last_snapshot_bytes)
+            >= 4 * 1024;
+        if snapshot_due {
+            control.record_partial_output(partial_output);
+            self.last_snapshot_bytes = partial_output.len();
+        }
+        if snapshot_due || self.last_progress_at.elapsed() >= Duration::from_millis(500) {
+            control.mark_progress(stage, detail);
+            self.last_progress_at = Instant::now();
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn continue_agent_loop(
     app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
@@ -12904,7 +13127,7 @@ fn continue_agent_loop(
         api_key: config.api_key.clone(),
         model: agent_model.clone(),
         embedding_model: config.model_for_role(&ModelRole::Embedder),
-        timeout_seconds: cancellation.timeout_seconds(180),
+        timeout_seconds: cancellation.model_call_timeout_seconds(),
     });
     let registry = tool_registry_for_state(state, workspace_root)?;
     let tools = registry
@@ -12925,15 +13148,21 @@ fn continue_agent_loop(
                 cancellation,
             );
         }
-        let mut request = model_request_for_turn_with_context(
+        let max_output_tokens = bounded_max_output_tokens(
+            config.context_window_tokens,
+            AGENT_MAX_OUTPUT_TOKENS,
+        );
+        let (mut request, context_governor) = model_request_for_turn_with_context_budget(
             &runtime,
             &tools,
             Some(&config.agent_system_prompt),
             runtime_context.as_deref(),
+            config.context_window_tokens,
+            max_output_tokens,
         );
         request.metadata.insert(
             "max_output_tokens".to_string(),
-            AGENT_MAX_OUTPUT_TOKENS.to_string(),
+            max_output_tokens.to_string(),
         );
         let request_id = unique_id("agent-model");
         let started_at_ms = current_time_millis();
@@ -12955,6 +13184,26 @@ fn continue_agent_loop(
                 ),
                 ("tool_count".to_string(), tools.len().to_string()),
                 ("prompt".to_string(), prompt.clone()),
+                (
+                    "context_governor_applied".to_string(),
+                    context_governor.applied.to_string(),
+                ),
+                (
+                    "context_original_tokens".to_string(),
+                    context_governor.estimated_original_tokens.to_string(),
+                ),
+                (
+                    "context_projected_tokens".to_string(),
+                    context_governor.estimated_projected_tokens.to_string(),
+                ),
+                (
+                    "context_input_budget_tokens".to_string(),
+                    context_governor.input_budget_tokens.to_string(),
+                ),
+                (
+                    "context_omitted_messages".to_string(),
+                    context_governor.omitted_messages.to_string(),
+                ),
             ]
             .into_iter()
             .collect::<Metadata>();
@@ -12977,19 +13226,25 @@ fn continue_agent_loop(
         let visible_stream = collaboration.is_none();
         let mut streamed_output = false;
         let mut partial_stream = String::new();
+        let mut stream_progress = ModelStreamProgress::new();
         let mut first_delta_at_ms = None;
         let mut transport_attempt = 0usize;
         let mut response = loop {
             transport_attempt += 1;
             partial_stream.clear();
+            stream_progress.reset();
             let result = provider.complete_streaming_cancellable(
                 request.clone(),
                 |delta| {
                     if !delta.is_empty() {
                         first_delta_at_ms.get_or_insert_with(current_time_millis);
                         partial_stream.push_str(delta);
-                        cancellation.mark_progress("model_stream", "executor");
-                        cancellation.record_partial_output(&partial_stream);
+                        stream_progress.observe(
+                            cancellation,
+                            "model_stream",
+                            "executor",
+                            &partial_stream,
+                        );
                     }
                     if visible_stream && !delta.is_empty() {
                         streamed_output = true;
@@ -13074,6 +13329,11 @@ fn continue_agent_loop(
         if !response.message.content.trim().is_empty() {
             cancellation.record_partial_output(&response.message.content);
         }
+        cancellation.record_checkpoint(
+            "model_result",
+            "executor",
+            &model_response_checkpoint_evidence(&response),
+        );
         let should_synthesize = collaboration.is_some()
             && response.tool_calls.is_empty()
             && !response.message.content.trim().is_empty();
@@ -13122,6 +13382,23 @@ fn continue_agent_loop(
             }
             metadata.insert("output_length".to_string(), output_length.to_string());
             metadata.insert("tool_calls".to_string(), tool_call_count.to_string());
+            let progress = cancellation.progress();
+            metadata.insert(
+                "run_checkpoints".to_string(),
+                progress.checkpoints.to_string(),
+            );
+            metadata.insert(
+                "run_budget_extensions".to_string(),
+                progress.budget_extensions.to_string(),
+            );
+            metadata.insert(
+                "run_model_call_limit".to_string(),
+                progress.model_call_limit.to_string(),
+            );
+            metadata.insert(
+                "run_tool_call_limit".to_string(),
+                progress.tool_call_limit.to_string(),
+            );
             for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
                 if let Some(value) = response.metadata.get(key) {
                     metadata.insert(key.to_string(), value.clone());
@@ -13294,6 +13571,14 @@ fn continue_agent_loop(
                                 completion_progress.tool_calls.to_string(),
                             ),
                             (
+                                "checkpoints".to_string(),
+                                completion_progress.checkpoints.to_string(),
+                            ),
+                            (
+                                "budget_extensions".to_string(),
+                                completion_progress.budget_extensions.to_string(),
+                            ),
+                            (
                                 "last_stage".to_string(),
                                 completion_progress.stage,
                             ),
@@ -13312,10 +13597,16 @@ fn continue_agent_loop(
                 ) {
                     eprintln!("project memory utilization unavailable: {error}");
                 }
-                if let Err(error) = refresh_project_memory_after_completion(&mut store, &run_context)
-                {
-                    eprintln!("project memory checkpoint unavailable: {error}");
-                }
+                let memory_ledger = match refresh_project_memory_after_completion(
+                    &mut store,
+                    &run_context,
+                ) {
+                    Ok(ledger) => ledger,
+                    Err(error) => {
+                        eprintln!("project memory checkpoint unavailable: {error}");
+                        None
+                    }
+                };
                 let completed_state = agent_state_for_session(&store, None, session_id)
                     .map_err(|error| error.to_string())?;
                 drop(store);
@@ -13328,6 +13619,13 @@ fn continue_agent_loop(
                     false,
                     None,
                 );
+                if let Some(ledger) = memory_ledger {
+                    schedule_project_memory_vector_refresh(
+                        workspace_root.to_path_buf(),
+                        config.clone(),
+                        ledger,
+                    );
+                }
                 return Ok(completed_state);
             }
             AgentAdvance::TurnBudgetExhausted { partial_answer, .. } => {
@@ -13345,6 +13643,25 @@ fn continue_agent_loop(
                     collaboration,
                     cancellation,
                 );
+            }
+            AgentAdvance::Retry { instruction } => {
+                let previous_message_count = runtime.messages.len();
+                append_internal_instruction(&mut runtime, "empty_model_retry", &instruction);
+                let mut store = state
+                    .store
+                    .lock()
+                    .map_err(|error| format!("store lock poisoned: {error}"))?;
+                persist_new_runtime_messages(
+                    &mut store,
+                    &runtime.task_id,
+                    &runtime.messages,
+                    previous_message_count,
+                    &run_context,
+                )
+                .map_err(|error| error.to_string())?;
+                drop(store);
+                cancellation.mark_progress("model_retry", "Empty model response");
+                continue;
             }
             AgentAdvance::Failed { message } => {
                 clear_suspended_agent_run_for_context(state, &run_context)?;
@@ -13805,8 +14122,8 @@ fn agent_state_from_events(
         .collect::<Vec<_>>();
     let mut pending_approvals = audits
         .iter()
-        .cloned()
         .filter(|audit| audit.resolution.is_none())
+        .cloned()
         .filter_map(tool_approval_from_audit)
         .collect::<Vec<_>>();
     pending_approvals.reverse();
@@ -13955,12 +14272,153 @@ struct SessionCompactionPlan {
     should_compact: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ContextCheckpointCoverage<'a> {
+    history: &'a [Message],
+    covered_messages: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ContextCheckpointManifest {
+    schema: String,
+    session_id: Option<String>,
+    compaction_version: String,
+    covered_messages: usize,
+    history_messages: usize,
+    covered_prefix_sha256: String,
+    checkpoint_sha256: String,
+    generated_at_ms: u64,
+}
+
+impl ContextCheckpointManifest {
+    fn new(
+        session_id: Option<&str>,
+        history: &[Message],
+        covered_messages: usize,
+        checkpoint_text: &str,
+    ) -> Result<Self, String> {
+        if covered_messages > history.len() {
+            return Err(format!(
+                "context checkpoint coverage exceeds history: {covered_messages} > {}",
+                history.len()
+            ));
+        }
+        Ok(Self {
+            schema: CONTEXT_CHECKPOINT_MANIFEST_SCHEMA.to_string(),
+            session_id: session_id.map(str::to_string),
+            compaction_version: CONTEXT_COMPACTION_VERSION.to_string(),
+            covered_messages,
+            history_messages: history.len(),
+            covered_prefix_sha256: context_history_prefix_sha256(
+                &history[..covered_messages],
+            ),
+            checkpoint_sha256: sha256_hex(checkpoint_text.as_bytes()),
+            generated_at_ms: current_time_millis(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ValidatedContextCheckpoint {
+    text: String,
+    covered_messages: usize,
+}
+
+fn context_history_prefix_sha256(messages: &[Message]) -> String {
+    let mut encoded = Vec::new();
+    for message in messages {
+        append_fingerprint_field(&mut encoded, message_role_label(&message.role).as_bytes());
+        append_fingerprint_field(&mut encoded, message.content.as_bytes());
+        encoded.extend_from_slice(&(message.metadata.len() as u64).to_le_bytes());
+        for (key, value) in &message.metadata {
+            append_fingerprint_field(&mut encoded, key.as_bytes());
+            append_fingerprint_field(&mut encoded, value.as_bytes());
+        }
+    }
+    sha256_hex(&encoded)
+}
+
+fn append_fingerprint_field(encoded: &mut Vec<u8>, value: &[u8]) {
+    encoded.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    encoded.extend_from_slice(value);
+}
+
+fn read_validated_context_checkpoint(
+    workspace_root: &Path,
+    session_id: Option<&str>,
+    history: &[Message],
+) -> Option<ValidatedContextCheckpoint> {
+    let checkpoint_path = context_checkpoint_path_for_session(workspace_root, session_id);
+    let manifest_path = context_checkpoint_manifest_path_for_session(workspace_root, session_id);
+    let text = fs::read_to_string(&checkpoint_path).ok()?;
+    let manifest_text = fs::read_to_string(&manifest_path).ok()?;
+    let manifest = serde_json::from_str::<ContextCheckpointManifest>(&manifest_text).ok()?;
+    if text.trim().is_empty()
+        || manifest.schema != CONTEXT_CHECKPOINT_MANIFEST_SCHEMA
+        || manifest.compaction_version != CONTEXT_COMPACTION_VERSION
+        || manifest.session_id.as_deref() != session_id
+        || manifest.covered_messages > history.len()
+        || manifest.history_messages < manifest.covered_messages
+        || manifest.history_messages > history.len()
+        || manifest.checkpoint_sha256 != sha256_hex(text.as_bytes())
+        || manifest.covered_prefix_sha256
+            != context_history_prefix_sha256(&history[..manifest.covered_messages])
+    {
+        return None;
+    }
+
+    Some(ValidatedContextCheckpoint {
+        text,
+        covered_messages: manifest.covered_messages,
+    })
+}
+
+fn history_with_context_checkpoint(
+    history: &[Message],
+    checkpoint: ValidatedContextCheckpoint,
+    checkpoint_path: &Path,
+) -> Option<Vec<Message>> {
+    if checkpoint.text.trim().is_empty() || checkpoint.covered_messages > history.len() {
+        return None;
+    }
+    let tail = &history[checkpoint.covered_messages..];
+    let mut compacted = Vec::with_capacity(tail.len() + 1);
+    compacted.push(Message {
+        role: MessageRole::System,
+        content: format!(
+            "Recovered memory for this project and session. Preserve historical user requirements, but treat prior assistant and tool statements as memory that may need verification. Prioritize the recent verbatim messages that follow.\n\n{}",
+            truncate_for_collaboration(&checkpoint.text, CONTEXT_RESTORE_MAX_CHARS)
+        ),
+        metadata: [
+            ("internal".to_string(), "true".to_string()),
+            ("kind".to_string(), "context_restore_pack".to_string()),
+            (
+                "compaction_version".to_string(),
+                CONTEXT_COMPACTION_VERSION.to_string(),
+            ),
+            (
+                "covered_messages".to_string(),
+                checkpoint.covered_messages.to_string(),
+            ),
+            (
+                "context_checkpoint_path".to_string(),
+                checkpoint_path.display().to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    });
+    compacted.extend(tail.iter().cloned());
+    Some(compacted)
+}
+
 fn estimate_message_tokens(message: &Message) -> u64 {
-    let content_tokens = (message.content.len() as u64 + 3) / 4;
+    let content_tokens = (message.content.len() as u64).div_ceil(4);
     let tool_call_tokens = message
         .metadata
         .get("raw_tool_calls_json")
-        .map(|value| (value.len() as u64 + 3) / 4)
+        .map(|value| (value.len() as u64).div_ceil(4))
         .unwrap_or(0);
     content_tokens
         .saturating_add(tool_call_tokens)
@@ -14061,16 +14519,12 @@ fn prepare_session_history_context(
         run_context.get("session_id").map(String::as_str),
     );
     let plan = session_compaction_plan(&history, context_window_tokens);
-    if !plan.should_compact && !checkpoint_path.exists() {
-        return Ok(history);
-    }
-    if plan.recent_start == 0 {
-        return Ok(history);
-    }
-    let older_messages = &history[..plan.recent_start];
-    let recent_messages = history[plan.recent_start..].to_vec();
-
-    let restore_text = if plan.should_compact {
+    let session_id = run_context.get("session_id").map(String::as_str);
+    let checkpoint = if plan.should_compact {
+        if plan.recent_start == 0 {
+            return Ok(history);
+        }
+        let older_messages = &history[..plan.recent_start];
         let mut store = state
             .store
             .lock()
@@ -14088,8 +14542,12 @@ fn prepare_session_history_context(
         ));
         let path = write_context_checkpoint(
             workspace_root,
-            run_context.get("session_id").map(String::as_str),
+            session_id,
             &pack.text,
+            Some(ContextCheckpointCoverage {
+                history: &history,
+                covered_messages: plan.recent_start,
+            }),
         )?;
         append_event(
             &mut store,
@@ -14103,11 +14561,18 @@ fn prepare_session_history_context(
                         "context_checkpoint_path".to_string(),
                         path.display().to_string(),
                     ),
-                    ("compaction_version".to_string(), "hybrid_v2".to_string()),
+                    (
+                        "compaction_version".to_string(),
+                        CONTEXT_COMPACTION_VERSION.to_string(),
+                    ),
                     ("original_messages".to_string(), history.len().to_string()),
                     (
                         "retained_messages".to_string(),
-                        recent_messages.len().to_string(),
+                        history.len().saturating_sub(plan.recent_start).to_string(),
+                    ),
+                    (
+                        "covered_messages".to_string(),
+                        plan.recent_start.to_string(),
                     ),
                     (
                         "original_tokens".to_string(),
@@ -14128,36 +14593,37 @@ fn prepare_session_history_context(
             ),
         )
         .map_err(|error| error.to_string())?;
-        pack.text
+        ValidatedContextCheckpoint {
+            text: pack.text,
+            covered_messages: plan.recent_start,
+        }
     } else {
-        fs::read_to_string(&checkpoint_path)
-            .map_err(|error| format!("failed to restore session context: {error}"))?
+        let Some(checkpoint) = read_validated_context_checkpoint(
+            workspace_root,
+            session_id,
+            &history,
+        ) else {
+            return Ok(history);
+        };
+        checkpoint
     };
-    if restore_text.trim().is_empty() {
+    let covered_messages = checkpoint.covered_messages;
+    let retained_messages = history.len().saturating_sub(covered_messages);
+    let retained_tokens = if plan.should_compact && covered_messages == plan.recent_start {
+        plan.recent_tokens
+    } else {
+        history[covered_messages..]
+            .iter()
+            .map(estimate_message_tokens)
+            .sum()
+    };
+    let Some(compacted) = history_with_context_checkpoint(
+        &history,
+        checkpoint,
+        &checkpoint_path,
+    ) else {
         return Ok(history);
-    }
-
-    let retained_messages = recent_messages.len();
-    let mut compacted = Vec::with_capacity(retained_messages + 1);
-    compacted.push(Message {
-        role: MessageRole::System,
-        content: format!(
-            "Recovered memory for this project and session. Preserve historical user requirements, but treat prior assistant and tool statements as memory that may need verification. Prioritize the recent verbatim messages that follow.\n\n{}",
-            truncate_for_collaboration(&restore_text, CONTEXT_RESTORE_MAX_CHARS)
-        ),
-        metadata: [
-            ("internal".to_string(), "true".to_string()),
-            ("kind".to_string(), "context_restore_pack".to_string()),
-            ("compaction_version".to_string(), "hybrid_v2".to_string()),
-            (
-                "context_checkpoint_path".to_string(),
-                checkpoint_path.display().to_string(),
-            ),
-        ]
-        .into_iter()
-        .collect(),
-    });
-    compacted.extend(recent_messages);
+    };
 
     let mut store = state
         .store
@@ -14176,14 +14642,21 @@ fn prepare_session_history_context(
                     retained_messages.to_string(),
                 ),
                 (
+                    "covered_messages".to_string(),
+                    covered_messages.to_string(),
+                ),
+                (
                     "original_tokens".to_string(),
                     plan.estimated_history_tokens.to_string(),
                 ),
                 (
                     "retained_tokens".to_string(),
-                    plan.recent_tokens.to_string(),
+                    retained_tokens.to_string(),
                 ),
-                ("compaction_version".to_string(), "hybrid_v2".to_string()),
+                (
+                    "compaction_version".to_string(),
+                    CONTEXT_COMPACTION_VERSION.to_string(),
+                ),
                 (
                     "context_checkpoint_path".to_string(),
                     checkpoint_path.display().to_string(),
@@ -14539,7 +15012,7 @@ fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Result<usize, St
             .get("session_id")
             .cloned()
             .unwrap_or_else(|| "__default__".to_string());
-        if is_agent_run_start_event(&event) {
+        if is_agent_run_start_event(event) {
             active_runs.insert(session_key, event.metadata.clone());
             continue;
         }
@@ -15514,6 +15987,7 @@ fn execute_agent_tool_invocation(
     let task_id = invocation.task_id.clone();
     let tool_call_id = invocation.id.0.clone();
     let tool_name = invocation.tool_name.clone();
+    let tool_input = invocation.input_json.clone();
     {
         let mut store = state
             .store
@@ -15586,8 +16060,21 @@ fn execute_agent_tool_invocation(
     if let Some(control) = run_control.as_ref() {
         control.mark_progress("tool_result", &tool_name);
         if matches!(result.status, ToolOutcomeStatus::Succeeded) {
-            control.record_partial_output(&result.output);
+            control.record_checkpoint(
+                "tool_result",
+                &tool_name,
+                &format!("{tool_name}\n{tool_input}\n{}", result.output),
+            );
         }
+        let progress = control.progress();
+        result.metadata.insert(
+            "run_checkpoints".to_string(),
+            progress.checkpoints.to_string(),
+        );
+        result.metadata.insert(
+            "run_budget_extensions".to_string(),
+            progress.budget_extensions.to_string(),
+        );
     }
     materialize_tool_result_artifacts(&mut result, workspace_root)?;
     if mutates_workspace && matches!(result.status, ToolOutcomeStatus::Succeeded) {
@@ -15713,9 +16200,23 @@ fn materialize_tool_result_artifacts(
     result: &mut ToolResult,
     workspace_root: &Path,
 ) -> Result<(), String> {
+    const MAX_INLINE_STRUCTURED_OUTPUT_BYTES: usize = 256 * 1024;
     let output_dir = workspace_root.join(".cindx").join("artifacts");
+    let artifact_stem: String = result
+        .invocation_id
+        .0
+        .chars()
+        .take(96)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
     let mut image_index = 0usize;
-    for content in &result.content {
+    for content in &mut result.content {
         let ToolContent::Image { mime_type, data } = content else {
             continue;
         };
@@ -15727,10 +16228,10 @@ fn materialize_tool_result_artifacts(
             "image/gif" => "gif",
             _ => "png",
         };
-        let filename = format!("{}-{image_index}.{extension}", result.invocation_id.0);
+        let filename = format!("{artifact_stem}-{image_index}.{extension}");
         let path = output_dir.join(&filename);
         let bytes = base64::engine::general_purpose::STANDARD
-            .decode(data)
+            .decode(data.as_bytes())
             .map_err(|error| format!("invalid tool image data: {error}"))?;
         fs::write(&path, bytes)
             .map_err(|error| format!("failed to write tool image artifact: {error}"))?;
@@ -15739,6 +16240,7 @@ fn materialize_tool_result_artifacts(
             mime_type: Some(mime_type.clone()),
             title: Some("MCP image output".to_string()),
         });
+        data.clear();
         image_index += 1;
     }
     for key in ["artifact_path", "screenshot_path", "text_path"] {
@@ -15778,10 +16280,45 @@ fn materialize_tool_result_artifacts(
             title: None,
         });
     }
-    if let Some(structured) = &result.structured_output_json {
-        result
-            .metadata
-            .insert("structured_output".to_string(), structured.clone());
+    if let Some(structured) = result.structured_output_json.take() {
+        if structured.len() > MAX_INLINE_STRUCTURED_OUTPUT_BYTES {
+            fs::create_dir_all(&output_dir)
+                .map_err(|error| format!("failed to create tool artifact directory: {error}"))?;
+            let path = output_dir.join(format!("{artifact_stem}-structured.json"));
+            write_private_file_atomically(
+                &path,
+                structured.as_bytes(),
+                "structured tool output artifact",
+            )?;
+            let reference = serde_json::json!({
+                "schema": "cindx.tool-output-reference.v1",
+                "artifact_path": path.display().to_string(),
+                "bytes": structured.len(),
+            })
+            .to_string();
+            result.artifacts.push(ToolArtifact {
+                path: path.display().to_string(),
+                mime_type: Some("application/json".to_string()),
+                title: Some("Structured tool output".to_string()),
+            });
+            result.metadata.insert(
+                "structured_output_path".to_string(),
+                path.display().to_string(),
+            );
+            result.metadata.insert(
+                "structured_output_bytes".to_string(),
+                structured.len().to_string(),
+            );
+            result
+                .metadata
+                .insert("structured_output".to_string(), reference.clone());
+            result.structured_output_json = Some(reference);
+        } else {
+            result
+                .metadata
+                .insert("structured_output".to_string(), structured.clone());
+            result.structured_output_json = Some(structured);
+        }
     }
     if !result.artifacts.is_empty() {
         result.metadata.insert(
@@ -15818,7 +16355,7 @@ fn execute_tool_invocation_with_result(
         ("tool".to_string(), invocation.tool_name.clone()),
     ]
     .into_iter()
-    .collect();
+    .collect::<Metadata>();
     let metadata = match run_context {
         Some(context) => metadata_with_context(metadata, context),
         None => metadata,
@@ -15919,6 +16456,7 @@ fn append_tool_proposed_event(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_tool_finished_event(
     store: &mut SqliteStore,
     task_id: &TaskId,
@@ -16713,10 +17251,19 @@ struct ParallelRetrievalResult {
     trace: RetrievalTraceView,
 }
 
+#[derive(Debug)]
+struct AutomaticKnowledgeIndexResult {
+    stats: RagIndexStats,
+    embedding_backend: String,
+    embedding_model: String,
+    fallback_error: Option<String>,
+}
+
 fn should_run_agent_knowledge_retrieval(context: &RoutingContext) -> bool {
     context.needs_retrieval
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_agent_knowledge_context(
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,
@@ -16733,6 +17280,7 @@ fn prepare_agent_knowledge_context(
         workspace_root,
         &mut adapter,
         index_cache_hit,
+        config,
         cancellation,
     )?;
     cache_rag_adapter(state, workspace_root, &adapter)?;
@@ -16757,23 +17305,34 @@ fn prepare_agent_knowledge_context(
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        if let Some(stats) = auto_indexed {
+        if let Some(indexed) = auto_indexed {
+            let mut metadata = [
+                ("action".to_string(), "auto_index".to_string()),
+                (
+                    "files_indexed".to_string(),
+                    indexed.stats.files_indexed.to_string(),
+                ),
+                (
+                    "chunks_indexed".to_string(),
+                    indexed.stats.chunks_indexed.to_string(),
+                ),
+                (
+                    "embedding_backend".to_string(),
+                    indexed.embedding_backend,
+                ),
+                ("embedding_model".to_string(), indexed.embedding_model),
+            ]
+            .into_iter()
+            .collect::<Metadata>();
+            if let Some(error) = indexed.fallback_error {
+                metadata.insert("embedding_fallback_error".to_string(), error);
+            }
             append_event(
                 &mut store,
                 task_id,
                 EventKind::RetrievalPerformed,
                 "Workspace knowledge auto-indexed",
-                metadata_with_context(
-                    [
-                        ("action".to_string(), "auto_index".to_string()),
-                        ("files_indexed".to_string(), stats.files_indexed.to_string()),
-                        ("chunks_indexed".to_string(), stats.chunks_indexed.to_string()),
-                        ("embedding_backend".to_string(), "local".to_string()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    run_context,
-                ),
+                metadata_with_context(metadata, run_context),
             )
             .map_err(|error| error.to_string())?;
         }
@@ -16846,16 +17405,31 @@ fn ensure_workspace_knowledge_index(
     workspace_root: &Path,
     adapter: &mut FileRagAdapter,
     cache_hit: bool,
+    config: &ProviderConfig,
     cancellation: &Arc<AgentRunControl>,
-) -> Result<Option<RagIndexStats>, String> {
+) -> Result<Option<AutomaticKnowledgeIndexResult>, String> {
     if agent_run_should_stop(cancellation) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
-    if cache_hit && !adapter.chunks().is_empty() && graph_store_path_for(workspace_root).exists() {
+    if cache_hit
+        && !adapter.chunks().is_empty()
+        && graph_store_path_for(workspace_root).exists()
+        && lancedb_index_exists(lancedb_database_path_for(workspace_root))
+    {
         return Ok(None);
     }
     let options = IndexOptions::default();
-    let index_is_fresh = !adapter.chunks().is_empty()
+    let embedding_profile_matches = adapter
+        .embedding_profile()
+        .is_some_and(|(provider, model, _)| {
+            if config.is_ready() {
+                provider != "local" && model == config.model_for_role(&ModelRole::Embedder)
+            } else {
+                provider == "local"
+            }
+        });
+    let index_is_fresh = embedding_profile_matches
+        && !adapter.chunks().is_empty()
         && workspace_index_is_fresh(workspace_root, adapter.chunks(), options.clone(), || {
             agent_run_should_stop(cancellation)
         })
@@ -16872,19 +17446,48 @@ fn ensure_workspace_knowledge_index(
                 agent_run_should_stop(cancellation)
             })?;
         }
+        if !lancedb_index_exists(lancedb_database_path_for(workspace_root)) {
+            replace_lancedb_index(lancedb_database_path_for(workspace_root), adapter.index())
+                .map_err(|error| error.to_string())?;
+            let (backend, model) = adapter
+                .embedding_profile()
+                .map(|(provider, model, _)| (provider.to_string(), model.to_string()))
+                .unwrap_or_else(|| ("local".to_string(), "local-hash".to_string()));
+            return Ok(Some(AutomaticKnowledgeIndexResult {
+                stats: adapter.stats().clone(),
+                embedding_backend: format!("{backend}-lancedb-migration"),
+                embedding_model: model,
+                fallback_error: None,
+            }));
+        }
         return Ok(None);
     }
 
-    let index = index_workspace_cancellable(workspace_root, options, || {
-        agent_run_should_stop(cancellation)
-    })
-    .map_err(|error| {
-        if error.message == RAG_INDEX_CANCELLED {
-            MODEL_REQUEST_CANCELLED.to_string()
-        } else {
-            error.to_string()
-        }
-    })?;
+    let (index, embedding_backend, embedding_model, fallback_error) = if config.is_ready() {
+        let configured_model = config.model_for_role(&ModelRole::Embedder);
+        let mut embedder = CloudRagEmbedder {
+            config: config.clone(),
+            cancellation: Some(cancellation.clone()),
+        };
+        index_workspace_with_cloud_fallback_cancellable(
+            workspace_root,
+            options,
+            &mut embedder,
+            &configured_model,
+            || agent_run_should_stop(cancellation),
+        )?
+    } else {
+        let index = index_workspace_cancellable(workspace_root, options, || {
+            agent_run_should_stop(cancellation)
+        })
+        .map_err(rag_index_error_for_agent)?;
+        let model = index
+            .chunks
+            .first()
+            .map(|chunk| chunk.embedding_model.clone())
+            .unwrap_or_else(|| "local-hash".to_string());
+        (index, "local".to_string(), model, None)
+    };
     index_graph_chunks_cancellable(workspace_root, &index.chunks, || {
         agent_run_should_stop(cancellation)
     })?;
@@ -16893,10 +17496,62 @@ fn ensure_workspace_knowledge_index(
     }
     export_lancedb_records_jsonl(&index, lancedb_export_path_for(workspace_root))
         .map_err(|error| error.to_string())?;
+    replace_lancedb_index(lancedb_database_path_for(workspace_root), &index)
+        .map_err(|error| error.to_string())?;
     let stats = adapter
         .replace_all(index)
         .map_err(|error| error.to_string())?;
-    Ok(Some(stats))
+    Ok(Some(AutomaticKnowledgeIndexResult {
+        stats,
+        embedding_backend,
+        embedding_model,
+        fallback_error,
+    }))
+}
+
+fn rag_index_error_for_agent(error: RagError) -> String {
+    if error.message == RAG_INDEX_CANCELLED {
+        MODEL_REQUEST_CANCELLED.to_string()
+    } else {
+        error.to_string()
+    }
+}
+
+fn index_workspace_with_cloud_fallback_cancellable(
+    root: &Path,
+    options: IndexOptions,
+    embedder: &mut impl RagEmbedder,
+    configured_model: &str,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<(RagIndex, String, String, Option<String>), String> {
+    let mut index = index_workspace_cancellable(root, options, &mut should_cancel)
+        .map_err(rag_index_error_for_agent)?;
+    match apply_embeddings_to_index_cancellable(&mut index, embedder, &mut should_cancel) {
+        Ok(()) => {
+            let model = index
+                .chunks
+                .first()
+                .map(|chunk| chunk.embedding_model.clone())
+                .unwrap_or_else(|| configured_model.to_string());
+            Ok((index, "cloud".to_string(), model, None))
+        }
+        Err(error) if error.message == RAG_INDEX_CANCELLED => {
+            Err(MODEL_REQUEST_CANCELLED.to_string())
+        }
+        Err(cloud_error) => {
+            let model = index
+                .chunks
+                .first()
+                .map(|chunk| chunk.embedding_model.clone())
+                .unwrap_or_else(|| "local-hash".to_string());
+            Ok((
+                index,
+                "local-fallback".to_string(),
+                model,
+                Some(cloud_error.to_string()),
+            ))
+        }
+    }
 }
 
 fn run_parallel_retrieval(
@@ -16912,121 +17567,89 @@ fn run_parallel_retrieval(
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
     let started_at = Instant::now();
-    let limit = limit.max(1).min(24);
+    let limit = limit.clamp(1, 24);
     let channel_limit = limit.saturating_mul(3).min(50);
-    let chunks = adapter.chunks().to_vec();
+    let chunks = adapter.chunks();
     let include_graph = retrieval_mode == "four_way_parallel";
-
-    let semantic_chunks = chunks.clone();
-    let semantic_query = query.to_string();
-    let semantic_config = config.clone();
-    let semantic_cancellation = cancellation.clone();
-    let semantic_handle = std::thread::spawn(move || {
-        timed_retrieval_channel("semantic_rag", || {
-            let embedding = query_embedding_for_chunks(
-                &semantic_config,
-                &semantic_chunks,
-                &semantic_query,
-                &semantic_cancellation,
-            )?;
-            Ok(search_chunks_semantic(
-                &semantic_chunks,
-                &embedding,
-                channel_limit,
-            ))
-        })
-    });
-
-    let direct_handle = include_graph.then(|| {
-        let direct_chunks = chunks.clone();
-        let direct_query = query.to_string();
-        let direct_root = workspace_root.to_path_buf();
-        let direct_cancellation = cancellation.clone();
-        std::thread::spawn(move || {
-            timed_retrieval_channel("graph_recall", || {
-                if agent_run_should_stop(&direct_cancellation) {
-                    return Err(MODEL_REQUEST_CANCELLED.to_string());
-                }
-                let store = FileGraphStore::open(graph_store_path_for(&direct_root))
-                    .map_err(|error| error.to_string())?;
-                Ok(graph_direct_recall(
-                    &direct_query,
-                    &direct_chunks,
-                    &store,
+    let graph_store = include_graph
+        .then(|| FileGraphStore::open(graph_store_path_for(workspace_root)))
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let channels = std::thread::scope(|scope| {
+        let semantic_handle = scope.spawn(|| {
+            timed_retrieval_channel("semantic_rag", || {
+                let embedding =
+                    query_embedding_for_chunks(config, chunks, query, cancellation)?;
+                search_lancedb_index(
+                    lancedb_database_path_for(workspace_root),
+                    &embedding,
                     channel_limit,
                 )
-                .into_iter()
-                .map(|source| RagSearchResult {
-                    chunk: source.chunk,
-                    score: source.score,
-                })
-                .collect())
+                .map_err(|error| error.to_string())
             })
-        })
-    });
-
-    let walk_handle = include_graph.then(|| {
-        let walk_chunks = chunks.clone();
-        let walk_query = query.to_string();
-        let walk_root = workspace_root.to_path_buf();
-        let walk_cancellation = cancellation.clone();
-        std::thread::spawn(move || {
-            timed_retrieval_channel("graph_walk", || {
-                if agent_run_should_stop(&walk_cancellation) {
-                    return Err(MODEL_REQUEST_CANCELLED.to_string());
-                }
-                let local_embedding = local_query_embedding(&walk_query);
-                let semantic = search_chunks_semantic(
-                    &walk_chunks,
-                    &local_embedding,
-                    channel_limit,
-                );
-                let graph_seeds = if semantic.is_empty() {
-                    search_chunks_literal(&walk_chunks, &walk_query, channel_limit)
+        });
+        let direct_handle = graph_store.as_ref().map(|store| {
+            scope.spawn(move || {
+                timed_retrieval_channel("graph_recall", || {
+                    if agent_run_should_stop(cancellation) {
+                        return Err(MODEL_REQUEST_CANCELLED.to_string());
+                    }
+                    Ok(graph_direct_recall(query, chunks, store, channel_limit)
+                        .into_iter()
+                        .map(|source| RagSearchResult {
+                            chunk: source.chunk,
+                            score: source.score,
+                        })
+                        .collect())
+                })
+            })
+        });
+        let walk_handle = graph_store.as_ref().map(|store| {
+            scope.spawn(move || {
+                timed_retrieval_channel("graph_walk", || {
+                    if agent_run_should_stop(cancellation) {
+                        return Err(MODEL_REQUEST_CANCELLED.to_string());
+                    }
+                    let graph_seeds = search_chunks_literal(chunks, query, channel_limit);
+                    Ok(graph_walk_recall(&graph_seeds, chunks, store, channel_limit)
+                        .into_iter()
+                        .map(|source| RagSearchResult {
+                            chunk: source.chunk,
+                            score: source.score,
+                        })
+                        .collect())
+                })
+            })
+        });
+        let file_handle = scope.spawn(|| {
+            timed_retrieval_channel("file_search", || {
+                if include_graph {
+                    search_workspace_files_cancellable(
+                        workspace_root,
+                        query,
+                        channel_limit,
+                        || agent_run_should_stop(cancellation),
+                    )
+                    .map_err(rag_index_error_for_agent)
                 } else {
-                    semantic
-                };
-                let store = FileGraphStore::open(graph_store_path_for(&walk_root))
-                    .map_err(|error| error.to_string())?;
-                Ok(graph_walk_recall(
-                    &graph_seeds,
-                    &walk_chunks,
-                    &store,
-                    channel_limit,
-                )
-                .into_iter()
-                .map(|source| RagSearchResult {
-                    chunk: source.chunk,
-                    score: source.score,
-                })
-                .collect())
+                    Ok(search_chunks_literal(chunks, query, channel_limit))
+                }
             })
-        })
-    });
+        });
 
-    let literal_query = query.to_string();
-    let literal_cancellation = cancellation.clone();
-    let literal_handle = std::thread::spawn(move || {
-        timed_retrieval_channel("file_search", || {
-            if agent_run_should_stop(&literal_cancellation) {
-                return Err(MODEL_REQUEST_CANCELLED.to_string());
-            }
-            Ok(search_chunks_literal(
-                &chunks,
-                &literal_query,
-                channel_limit,
-            ))
-        })
+        let mut channels = vec![joined_scoped_retrieval_channel(
+            "semantic_rag",
+            semantic_handle,
+        )];
+        if let Some(handle) = direct_handle {
+            channels.push(joined_scoped_retrieval_channel("graph_recall", handle));
+        }
+        if let Some(handle) = walk_handle {
+            channels.push(joined_scoped_retrieval_channel("graph_walk", handle));
+        }
+        channels.push(joined_scoped_retrieval_channel("file_search", file_handle));
+        channels
     });
-
-    let mut channels = vec![joined_retrieval_channel("semantic_rag", semantic_handle)];
-    if let Some(handle) = direct_handle {
-        channels.push(joined_retrieval_channel("graph_recall", handle));
-    }
-    if let Some(handle) = walk_handle {
-        channels.push(joined_retrieval_channel("graph_walk", handle));
-    }
-    channels.push(joined_retrieval_channel("file_search", literal_handle));
     if agent_run_should_stop(cancellation) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
@@ -17082,9 +17705,9 @@ fn timed_retrieval_channel(
     }
 }
 
-fn joined_retrieval_channel(
+fn joined_scoped_retrieval_channel<'scope>(
     name: &str,
-    handle: std::thread::JoinHandle<RetrievalChannelOutcome>,
+    handle: std::thread::ScopedJoinHandle<'scope, RetrievalChannelOutcome>,
 ) -> RetrievalChannelOutcome {
     handle.join().unwrap_or_else(|_| RetrievalChannelOutcome {
         name: name.to_string(),
@@ -17150,14 +17773,30 @@ fn fuse_retrieval_channels(
     channels: &[RetrievalChannelOutcome],
     limit: usize,
 ) -> (Vec<RagSearchResult>, Vec<RagSourceView>) {
-    let mut fused = BTreeMap::<String, (RagSearchResult, f32, Vec<String>)>::new();
+    let mut fused = Vec::<(RagSearchResult, f32, Vec<String>)>::new();
     for channel in channels {
         let weight = retrieval_channel_weight(&channel.name);
+        let raw_ceiling = channel
+            .results
+            .iter()
+            .map(|result| result.score.max(0.0))
+            .fold(0.0f32, f32::max)
+            .max(f32::EPSILON);
         for (rank, result) in channel.results.iter().enumerate() {
-            let contribution = weight / (60.0 + rank as f32 + 1.0);
-            let entry = fused.entry(result.chunk.id.clone()).or_insert_with(|| {
-                (result.clone(), 0.0, Vec::new())
+            let rank_score = weight / (60.0 + rank as f32 + 1.0);
+            let evidence_score = weight * (result.score.max(0.0) / raw_ceiling) * 0.0125;
+            let contribution = rank_score + evidence_score;
+            let existing = fused.iter().position(|(candidate, _, _)| {
+                candidate.chunk.id == result.chunk.id
+                    || (candidate.chunk.path == result.chunk.path
+                        && retrieval_ranges_overlap(&candidate.chunk, &result.chunk))
             });
+            let entry = if let Some(index) = existing {
+                &mut fused[index]
+            } else {
+                fused.push((result.clone(), 0.0, Vec::new()));
+                fused.last_mut().expect("fused result was just inserted")
+            };
             entry.1 += contribution;
             if !entry.2.contains(&channel.name) {
                 entry.2.push(channel.name.clone());
@@ -17167,7 +17806,6 @@ fn fuse_retrieval_channels(
             }
         }
     }
-    let mut fused = fused.into_values().collect::<Vec<_>>();
     fused.sort_by(|left, right| {
         right
             .1
@@ -17176,7 +17814,22 @@ fn fuse_retrieval_channels(
             .then_with(|| left.0.chunk.path.cmp(&right.0.chunk.path))
             .then_with(|| left.0.chunk.start_line.cmp(&right.0.chunk.start_line))
     });
-    fused.truncate(limit.max(1));
+    let mut path_counts = BTreeMap::<String, usize>::new();
+    let mut selected = Vec::new();
+    for candidate in fused {
+        let count = path_counts
+            .entry(candidate.0.chunk.path.clone())
+            .or_default();
+        if *count >= 2 {
+            continue;
+        }
+        *count += 1;
+        selected.push(candidate);
+        if selected.len() >= limit.max(1) {
+            break;
+        }
+    }
+    let fused = selected;
     let max_score = fused.first().map(|item| item.1).unwrap_or(1.0).max(f32::EPSILON);
     let results = fused
         .iter()
@@ -17198,6 +17851,10 @@ fn fuse_retrieval_channels(
         })
         .collect::<Vec<_>>();
     (results, sources)
+}
+
+fn retrieval_ranges_overlap(left: &RagChunk, right: &RagChunk) -> bool {
+    left.start_line <= right.end_line && right.start_line <= left.end_line
 }
 
 #[cfg(test)]
@@ -17348,7 +18005,7 @@ impl RagEmbedder for CloudRagEmbedder {
             timeout_seconds: self
                 .cancellation
                 .as_ref()
-                .map(|control| control.timeout_seconds(180))
+                .map(|control| control.model_call_timeout_seconds())
                 .unwrap_or(180),
         });
         let response = provider
@@ -17361,7 +18018,7 @@ impl RagEmbedder for CloudRagEmbedder {
                 || {
                     self.cancellation
                         .as_ref()
-                        .is_some_and(|control| agent_run_should_stop(control))
+                        .is_some_and(agent_run_should_stop)
                 },
             )
             .map_err(|error| agent_rag::RagError::new(error.to_string()))?;
@@ -17510,6 +18167,19 @@ fn route_with_local_telemetry(
         decision
     };
     Ok((decision, learned_examples))
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct MemoryVectorManifest {
+    schema: String,
+    projection_sha256: String,
+    record_count: usize,
+    embedding_backend: String,
+    embedding_provider: String,
+    embedding_model: String,
+    embedding_dimensions: usize,
+    generated_at_ms: u64,
 }
 
 fn load_project_memory_ledger(
@@ -17686,11 +18356,258 @@ fn should_recall_agent_memory(context: &RoutingContext, prompt: &str) -> bool {
     .any(|needle| normalized.contains(needle))
 }
 
+fn memory_vector_projection_sha256(ledger: &MemoryLedger) -> String {
+    let mut records = ledger
+        .records
+        .iter()
+        .map(|record| format!("{}:{}", record.id, record.fingerprint))
+        .collect::<Vec<_>>();
+    records.sort();
+    sha256_hex(format!("{}\n{}", ledger.project_id, records.join("\n")).as_bytes())
+}
+
+fn memory_vector_manifest_matches(
+    manifest: &MemoryVectorManifest,
+    projection_sha256: &str,
+    config: &ProviderConfig,
+    now_ms: u64,
+) -> bool {
+    if manifest.schema != MEMORY_VECTOR_MANIFEST_SCHEMA
+        || manifest.projection_sha256 != projection_sha256
+    {
+        return false;
+    }
+    if config.is_ready() {
+        let configured_model = config.model_for_role(&ModelRole::Embedder);
+        (manifest.embedding_backend == "cloud" && manifest.embedding_model == configured_model)
+            || (manifest.embedding_backend == "local-fallback"
+                && now_ms.saturating_sub(manifest.generated_at_ms)
+                    < MEMORY_VECTOR_FALLBACK_RETRY_MS)
+    } else {
+        manifest.embedding_backend == "local"
+    }
+}
+
+fn load_memory_vector_manifest(path: &Path) -> Result<Option<MemoryVectorManifest>, String> {
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| format!("failed to decode memory vector manifest: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("failed to read memory vector manifest: {error}")),
+    }
+}
+
+fn memory_rag_index(ledger: &MemoryLedger) -> RagIndex {
+    let indexed_at_ms = current_time_millis();
+    let chunks = ledger
+        .records
+        .iter()
+        .map(|record| {
+            let embedding = local_query_embedding(&record.content);
+            RagChunk {
+                id: record.id.clone(),
+                path: format!(
+                    "memory://{}/{}/{}",
+                    ledger.project_id,
+                    record.kind.label(),
+                    record.id
+                ),
+                file_hash: record.fingerprint.clone(),
+                modified_time_ms: record.updated_at_ms,
+                start_line: 1,
+                end_line: 1,
+                indexed_at_ms,
+                text: record.content.clone(),
+                embedding_dimensions: embedding.len(),
+                embedding,
+                embedding_provider: "local".to_string(),
+                embedding_model: "local-hash".to_string(),
+            }
+        })
+        .collect::<Vec<_>>();
+    RagIndex {
+        stats: RagIndexStats {
+            files_indexed: chunks.len(),
+            chunks_indexed: chunks.len(),
+            indexed_at_ms,
+        },
+        chunks,
+    }
+}
+
+fn refresh_project_memory_vector_index(
+    workspace_root: &Path,
+    config: &ProviderConfig,
+    ledger: &MemoryLedger,
+) -> Result<Option<String>, String> {
+    let projection_sha256 = memory_vector_projection_sha256(ledger);
+    let database_path = memory_lancedb_database_path_for(workspace_root, &ledger.project_id);
+    let manifest_path = memory_lancedb_manifest_path_for(workspace_root, &ledger.project_id);
+    let now_ms = current_time_millis();
+    if lancedb_index_exists(&database_path) {
+        if let Some(manifest) = load_memory_vector_manifest(&manifest_path)? {
+            if memory_vector_manifest_matches(&manifest, &projection_sha256, config, now_ms) {
+                return Ok(None);
+            }
+        }
+    }
+
+    let mut index = memory_rag_index(ledger);
+    let mut embedding_backend = "local".to_string();
+    let mut fallback_error = None;
+    if config.is_ready() && !index.chunks.is_empty() {
+        let mut embedder = CloudRagEmbedder {
+            config: config.clone(),
+            cancellation: None,
+        };
+        match apply_embeddings_to_index_cancellable(&mut index, &mut embedder, || false) {
+            Ok(()) => embedding_backend = "cloud".to_string(),
+            Err(error) => {
+                embedding_backend = "local-fallback".to_string();
+                fallback_error = Some(error.to_string());
+            }
+        }
+    }
+    replace_lancedb_index(&database_path, &index).map_err(|error| error.to_string())?;
+    let (embedding_provider, embedding_model, embedding_dimensions) = index
+        .chunks
+        .first()
+        .map(|chunk| {
+            (
+                chunk.embedding_provider.clone(),
+                chunk.embedding_model.clone(),
+                chunk.embedding_dimensions,
+            )
+        })
+        .unwrap_or_else(|| ("local".to_string(), "local-hash".to_string(), 0));
+    let manifest = MemoryVectorManifest {
+        schema: MEMORY_VECTOR_MANIFEST_SCHEMA.to_string(),
+        projection_sha256,
+        record_count: index.chunks.len(),
+        embedding_backend,
+        embedding_provider,
+        embedding_model,
+        embedding_dimensions,
+        generated_at_ms: now_ms,
+    };
+    let payload = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| format!("failed to encode memory vector manifest: {error}"))?;
+    write_private_file_atomically(&manifest_path, &payload, "memory vector manifest")?;
+    Ok(fallback_error)
+}
+
+fn schedule_project_memory_vector_refresh(
+    workspace_root: PathBuf,
+    config: ProviderConfig,
+    ledger: MemoryLedger,
+) {
+    if ledger.records.is_empty() {
+        return;
+    }
+    let projection_sha256 = memory_vector_projection_sha256(&ledger);
+    let target_model = if config.is_ready() {
+        config.model_for_role(&ModelRole::Embedder)
+    } else {
+        "local-hash".to_string()
+    };
+    let key = format!(
+        "{}:{}:{}",
+        workspace_root.display(),
+        projection_sha256,
+        target_model
+    );
+    let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT.get_or_init(|| Mutex::new(BTreeSet::new()));
+    let Ok(mut active) = inflight.lock() else {
+        return;
+    };
+    if !active.insert(key.clone()) {
+        return;
+    }
+    drop(active);
+    tauri::async_runtime::spawn_blocking(move || {
+        match refresh_project_memory_vector_index(&workspace_root, &config, &ledger) {
+            Ok(Some(error)) => {
+                eprintln!("project memory cloud embedding unavailable; using local vectors: {error}")
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!("project memory vector refresh unavailable: {error}"),
+        }
+        if let Ok(mut active) = MEMORY_VECTOR_REFRESH_INFLIGHT
+            .get_or_init(|| Mutex::new(BTreeSet::new()))
+            .lock()
+        {
+            active.remove(&key);
+        }
+    });
+}
+
+fn project_memory_semantic_scores(
+    workspace_root: &Path,
+    project_id: &str,
+    ledger: &MemoryLedger,
+    config: &ProviderConfig,
+    prompt: &str,
+    cancellation: &Arc<AgentRunControl>,
+) -> Result<(BTreeMap<String, f64>, MemoryVectorManifest), String> {
+    let database_path = memory_lancedb_database_path_for(workspace_root, project_id);
+    let manifest_path = memory_lancedb_manifest_path_for(workspace_root, project_id);
+    let manifest = load_memory_vector_manifest(&manifest_path)?
+        .ok_or_else(|| "memory vector index is not ready".to_string())?;
+    if !lancedb_index_exists(&database_path)
+        || !memory_vector_manifest_matches(
+            &manifest,
+            &memory_vector_projection_sha256(ledger),
+            config,
+            current_time_millis(),
+        )
+    {
+        return Err("memory vector index is stale and is rebuilding".to_string());
+    }
+    let query_embedding = if manifest.embedding_backend == "cloud" {
+        let mut embedder = CloudRagEmbedder {
+            config: config.clone(),
+            cancellation: Some(cancellation.clone()),
+        };
+        embedder
+            .embed_texts(&[prompt.to_string()])
+            .map_err(|error| error.to_string())?
+            .vectors
+            .into_iter()
+            .next()
+            .ok_or_else(|| "memory embedding provider returned no query vector".to_string())?
+    } else {
+        local_query_embedding(prompt)
+    };
+    if query_embedding.len() != manifest.embedding_dimensions {
+        return Err(format!(
+            "memory query embedding has {} dimensions, expected {}",
+            query_embedding.len(), manifest.embedding_dimensions
+        ));
+    }
+    let results = search_lancedb_index(
+        &database_path,
+        &query_embedding,
+        AGENT_MEMORY_RECALL_LIMIT.saturating_mul(4),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok((
+        results
+            .into_iter()
+            .map(|result| (result.chunk.id, f64::from(result.score)))
+            .collect(),
+        manifest,
+    ))
+}
+
 fn recall_project_memory_for_prompt(
     state: &tauri::State<'_, AppState>,
     task_id: &TaskId,
     run_context: &Metadata,
+    workspace_root: &Path,
+    config: &ProviderConfig,
     prompt: &str,
+    cancellation: &Arc<AgentRunControl>,
 ) -> Result<Option<Message>, String> {
     let Some(project_id) = run_context.get("project_id") else {
         return Ok(None);
@@ -17698,15 +18615,44 @@ fn recall_project_memory_for_prompt(
     let session_id = run_context.get("session_id").map(String::as_str);
     let started_at = Instant::now();
     let now_ms = current_time_millis();
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let mut ledger = load_project_memory_ledger(&mut store, project_id)
-        .map_err(|error| error.to_string())?;
-    let mut recalls = recall_memories_at(
+    let ledger = {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        load_project_memory_ledger(&mut store, project_id).map_err(|error| error.to_string())?
+    };
+    if ledger.records.is_empty() {
+        return Ok(None);
+    }
+    schedule_project_memory_vector_refresh(
+        workspace_root.to_path_buf(),
+        config.clone(),
+        ledger.clone(),
+    );
+    let lexical_recalls = recall_memories_at(
         &ledger,
         prompt,
+        session_id,
+        AGENT_MEMORY_RECALL_LIMIT.saturating_mul(2),
+        now_ms,
+    );
+    let (semantic_scores, vector_manifest, vector_error) =
+        match project_memory_semantic_scores(
+            workspace_root,
+            project_id,
+            &ledger,
+            config,
+            prompt,
+            cancellation,
+        ) {
+            Ok((scores, manifest)) => (scores, Some(manifest), None),
+            Err(error) => (BTreeMap::new(), None, Some(error)),
+        };
+    let mut recalls = fuse_memory_recalls_at(
+        &ledger,
+        lexical_recalls,
+        &semantic_scores,
         session_id,
         AGENT_MEMORY_RECALL_LIMIT.saturating_mul(2),
         now_ms,
@@ -17724,12 +18670,44 @@ fn recall_project_memory_for_prompt(
     if recalls.is_empty() {
         return Ok(None);
     }
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let mut ledger = load_project_memory_ledger(&mut store, project_id)
+        .map_err(|error| error.to_string())?;
+    recalls.retain_mut(|recall| {
+        let Some(current) = ledger
+            .records
+            .iter()
+            .find(|record| record.id == recall.record.id)
+        else {
+            return false;
+        };
+        recall.record = current.clone();
+        true
+    });
+    if recalls.is_empty() {
+        return Ok(None);
+    }
     record_memory_recalls(&mut ledger, &recalls, now_ms);
     let mut metadata = [
         ("action".to_string(), "memory_recall".to_string()),
         ("query".to_string(), prompt.to_string()),
-        ("retrieval_mode".to_string(), "project_memory".to_string()),
+        (
+            "retrieval_mode".to_string(),
+            if semantic_scores.is_empty() {
+                "project_memory_lexical"
+            } else {
+                "project_memory_hybrid"
+            }
+            .to_string(),
+        ),
         ("selected_count".to_string(), recalls.len().to_string()),
+        (
+            "semantic_candidate_count".to_string(),
+            semantic_scores.len().to_string(),
+        ),
         (
             "memory_ids".to_string(),
             recalls
@@ -17752,7 +18730,23 @@ fn recall_project_memory_for_prompt(
         ),
     ]
     .into_iter()
-    .collect();
+    .collect::<Metadata>();
+    if let Some(manifest) = vector_manifest {
+        metadata.insert(
+            "memory_embedding_backend".to_string(),
+            manifest.embedding_backend,
+        );
+        metadata.insert(
+            "memory_embedding_model".to_string(),
+            manifest.embedding_model,
+        );
+    }
+    if let Some(error) = vector_error {
+        metadata.insert(
+            "memory_vector_fallback_error".to_string(),
+            truncate_for_collaboration(&error, 320),
+        );
+    }
     metadata = metadata_with_context(metadata, run_context);
     append_event(
         &mut store,
@@ -17793,11 +18787,11 @@ fn recall_project_memory_for_prompt(
 fn refresh_project_memory_after_completion(
     store: &mut SqliteStore,
     run_context: &Metadata,
-) -> Result<usize, StorageError> {
+) -> Result<Option<MemoryLedger>, StorageError> {
     let Some(project_id) = run_context.get("project_id") else {
-        return Ok(0);
+        return Ok(None);
     };
-    load_project_memory_ledger(store, project_id).map(|ledger| ledger.records.len())
+    load_project_memory_ledger(store, project_id).map(Some)
 }
 
 fn record_project_memory_observed_use(
@@ -18157,6 +19151,7 @@ fn finish_prompt_evaluation_control(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_background_prompt_mutation_stage(
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,
@@ -18233,6 +19228,7 @@ fn append_prompt_mutation_status(
     .map_err(|error| error.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_background_prompt_mutation(
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,
@@ -18410,7 +19406,6 @@ fn schedule_prompt_pairwise_evaluation(
     config: ProviderConfig,
     task_id: TaskId,
     run_context: Metadata,
-    current_objective: String,
     effort: String,
     policy: String,
     worker_models: Vec<String>,
@@ -18451,7 +19446,6 @@ fn schedule_prompt_pairwise_evaluation(
             &config,
             &task_id,
             &run_context,
-            &current_objective,
             &effort,
             &policy,
             &worker_models,
@@ -18494,7 +19488,6 @@ fn run_background_prompt_pairwise_evaluation(
     config: &ProviderConfig,
     task_id: &TaskId,
     run_context: &Metadata,
-    current_objective: &str,
     effort: &str,
     policy: &str,
     worker_models: &[String],
@@ -18508,16 +19501,32 @@ fn run_background_prompt_pairwise_evaluation(
     if worker_models.is_empty() {
         return Ok(());
     }
-    let workspace_root = active_workspace_root(state)?;
-    let evaluation = {
+    let Some(project_id) = run_context.get("project_id") else {
+        return Ok(());
+    };
+    let workspace_root = run_context
+        .get("project_root")
+        .map(|root| validate_workspace_root(root))
+        .transpose()?
+        .unwrap_or(active_workspace_root(state)?);
+    let (evaluation, dataset) = {
         let mut store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
         let model = load_prompt_evolution_read_model(&mut store)
             .map_err(|error| error.to_string())?;
-        evaluate_prompt_evolution_read_model(&model, effort)?
+        let events = store
+            .list_by_task(task_id)
+            .map_err(|error| error.to_string())?;
+        (
+            evaluate_prompt_evolution_read_model(&model, effort)?,
+            prompt_offline_dataset(&events, project_id),
+        )
     };
+    if dataset.len() < PROMPT_EVOLUTION_OFFLINE_MIN_CASES {
+        return Ok(());
+    }
     if let Some(parent) = evaluation.mutation_parent.as_ref() {
         if generate_background_prompt_mutation(
             state,
@@ -18532,9 +19541,9 @@ fn run_background_prompt_pairwise_evaluation(
             return Ok(());
         }
     }
-    let current_task_class = run_context
-        .get("task_class")
-        .map(String::as_str)
+    let current_task_class = dataset
+        .first()
+        .map(|case| case.task_class.as_str())
         .unwrap_or("general");
     let Some(challenger) =
         prompt_evolution_challenger(&evaluation, current_profile, current_task_class)
@@ -18543,51 +19552,14 @@ fn run_background_prompt_pairwise_evaluation(
     };
     let current_counts = prompt_profile_evidence_counts(&evaluation.observations, &current_profile.id);
     let challenger_counts = prompt_profile_evidence_counts(&evaluation.observations, &challenger.id);
-    let needs_replay = current_counts.0 >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS
-        && challenger_counts.0 >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS
-        && (current_counts.1 < PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS
-            || challenger_counts.1 < PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS);
-    let replay_case = if needs_replay {
-        let store = state
-            .store
-            .lock()
-            .map_err(|error| format!("store lock poisoned: {error}"))?;
-        let events = store
-            .list_by_task(task_id)
-            .map_err(|error| error.to_string())?;
-        prompt_replay_case(
-            &events,
-            current_objective,
-            evaluation
-                .observations
-                .iter()
-                .filter(|observation| observation.mode.is_replay_execution())
-                .count(),
-        )
-    } else {
-        None
-    };
-    let (mode, objective, task_class) = if current_counts.0 < PROMPT_EVOLUTION_MIN_TRAIN_RUNS
+    let split = if current_counts.0 < PROMPT_EVOLUTION_MIN_TRAIN_RUNS
         || challenger_counts.0 < PROMPT_EVOLUTION_MIN_TRAIN_RUNS
     {
-        (
-            PromptEvaluationMode::PairedExecution,
-            current_objective.to_string(),
-            run_context
-                .get("task_class")
-                .cloned()
-                .unwrap_or_else(|| "general".to_string()),
-        )
-    } else if (current_counts.1 < PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS
-        || challenger_counts.1 < PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS)
-        && replay_case.is_some()
+        PromptEvaluationSplit::Train
+    } else if current_counts.1 < PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS
+        || challenger_counts.1 < PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS
     {
-        let replay = replay_case.expect("replay case checked above");
-        (
-            PromptEvaluationMode::ReplayExecution,
-            replay.objective,
-            replay.task_class,
-        )
+        PromptEvaluationSplit::Holdout
     } else {
         let live_observations = evaluation
             .observations
@@ -18599,15 +19571,31 @@ fn run_background_prompt_pairwise_evaluation(
         {
             return Ok(());
         }
-        (
-            PromptEvaluationMode::PairedExecution,
-            current_objective.to_string(),
-            run_context
-                .get("task_class")
-                .cloned()
-                .unwrap_or_else(|| "general".to_string()),
-        )
+        PromptEvaluationSplit::Train
     };
+    let Some(selected_case) = select_prompt_offline_case(
+        &dataset,
+        &evaluation.observations,
+        &current_profile.id,
+        &challenger.id,
+        split,
+    ) else {
+        return Ok(());
+    };
+    append_prompt_offline_dataset_snapshot(
+        state,
+        task_id,
+        run_context,
+        effort,
+        &dataset,
+        &selected_case,
+    )?;
+    let mode = match split {
+        PromptEvaluationSplit::Train => PromptEvaluationMode::PairedExecution,
+        PromptEvaluationSplit::Holdout => PromptEvaluationMode::ReplayExecution,
+    };
+    let objective = selected_case.objective.clone();
+    let task_class = selected_case.task_class.clone();
     let evaluation_id = unique_id(match mode {
         PromptEvaluationMode::PairedShadow | PromptEvaluationMode::PairedExecution => {
             "prompt-pair"
@@ -18873,6 +19861,195 @@ fn prompt_evolution_challenger(
         })
 }
 
+fn prompt_offline_dataset(events: &[Event], project_id: &str) -> Vec<PromptOfflineCase> {
+    let mut runs = BTreeMap::<String, Vec<&Event>>::new();
+    for event in events {
+        if let Some(run_id) = event.metadata.get("agent_run_id") {
+            runs.entry(run_id.clone()).or_default().push(event);
+        }
+    }
+    let mut cases = BTreeMap::<String, PromptOfflineCase>::new();
+    for (run_id, mut run_events) in runs {
+        run_events.sort_by_key(|event| event.sequence);
+        if !run_events
+            .iter()
+            .any(|event| event.summary == "Agent task completed")
+            || !run_events.iter().any(|event| {
+                event.metadata.get("project_id").map(String::as_str) == Some(project_id)
+            })
+        {
+            continue;
+        }
+        let objective = run_events
+            .iter()
+            .find(|event| event.summary == "Agent task started")
+            .and_then(|event| event.metadata.get("prompt"))
+            .or_else(|| {
+                run_events
+                    .iter()
+                    .find_map(|event| event.metadata.get("prompt_objective"))
+            })
+            .map(|objective| {
+                truncate_for_collaboration(&redact_sensitive_text(objective.trim()), 4_000)
+            });
+        let Some(objective) = objective.filter(|objective| objective.chars().count() >= 4) else {
+            continue;
+        };
+        let task_class = run_events
+            .iter()
+            .find_map(|event| event.metadata.get("task_class"))
+            .cloned()
+            .unwrap_or_else(|| "general".to_string());
+        let case_digest = sha256_hex(objective.as_bytes());
+        let id = format!("runtime-{task_class}-{}", &case_digest[..16]);
+        let split_digest = sha256_hex(id.as_bytes());
+        let split_bucket = u8::from_str_radix(&split_digest[..2], 16).unwrap_or_default();
+        cases.entry(id.clone()).or_insert(PromptOfflineCase {
+            id,
+            objective,
+            task_class,
+            project_id: project_id.to_string(),
+            source_run_id: run_id,
+            split: if split_bucket.is_multiple_of(5) {
+                PromptEvaluationSplit::Holdout
+            } else {
+                PromptEvaluationSplit::Train
+            },
+        });
+    }
+    let mut cases = cases.into_values().collect::<Vec<_>>();
+    cases.sort_by(|left, right| left.id.cmp(&right.id));
+    cases.truncate(PROMPT_EVOLUTION_OFFLINE_MAX_CASES);
+    if cases.len() >= PROMPT_EVOLUTION_OFFLINE_MIN_CASES {
+        while cases
+            .iter()
+            .filter(|case| case.split == PromptEvaluationSplit::Train)
+            .count()
+            < 2
+        {
+            let Some(case) = cases
+                .iter_mut()
+                .find(|case| case.split == PromptEvaluationSplit::Holdout)
+            else {
+                break;
+            };
+            case.split = PromptEvaluationSplit::Train;
+        }
+        if !cases
+            .iter()
+            .any(|case| case.split == PromptEvaluationSplit::Holdout)
+        {
+            if let Some(case) = cases.last_mut() {
+                case.split = PromptEvaluationSplit::Holdout;
+            }
+        }
+    }
+    cases
+}
+
+fn select_prompt_offline_case(
+    dataset: &[PromptOfflineCase],
+    observations: &[PromptEvolutionObservation],
+    current_profile_id: &str,
+    challenger_profile_id: &str,
+    split: PromptEvaluationSplit,
+) -> Option<PromptOfflineCase> {
+    dataset
+        .iter()
+        .filter(|case| case.split == split)
+        .min_by_key(|case| {
+            let current_repeats = observations
+                .iter()
+                .filter(|observation| {
+                    observation.case_id == case.id
+                        && observation.profile_id == current_profile_id
+                })
+                .count();
+            let challenger_repeats = observations
+                .iter()
+                .filter(|observation| {
+                    observation.case_id == case.id
+                        && observation.profile_id == challenger_profile_id
+                })
+                .count();
+            (
+                current_repeats.saturating_add(challenger_repeats),
+                current_repeats.max(challenger_repeats),
+                case.id.as_str(),
+            )
+        })
+        .cloned()
+}
+
+fn append_prompt_offline_dataset_snapshot(
+    state: &tauri::State<'_, AppState>,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    effort: &str,
+    dataset: &[PromptOfflineCase],
+    selected: &PromptOfflineCase,
+) -> Result<(), String> {
+    let dataset_digest = sha256_hex(
+        dataset
+            .iter()
+            .map(|case| {
+                format!(
+                    "{}:{:?}:{}",
+                    case.id, case.split, case.source_run_id
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .as_bytes(),
+    );
+    let train_cases = dataset
+        .iter()
+        .filter(|case| case.split == PromptEvaluationSplit::Train)
+        .count();
+    let holdout_cases = dataset.len().saturating_sub(train_cases);
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    append_event(
+        &mut store,
+        task_id,
+        EventKind::TaskStatusChanged,
+        "Conductor offline dataset selected",
+        metadata_with_context(
+            [
+                ("background_evaluation".to_string(), "true".to_string()),
+                ("prompt_effort".to_string(), effort.to_string()),
+                ("dataset_sha256".to_string(), dataset_digest),
+                ("dataset_case_count".to_string(), dataset.len().to_string()),
+                ("dataset_train_count".to_string(), train_cases.to_string()),
+                (
+                    "dataset_holdout_count".to_string(),
+                    holdout_cases.to_string(),
+                ),
+                ("selected_case_id".to_string(), selected.id.clone()),
+                (
+                    "selected_case_split".to_string(),
+                    match selected.split {
+                        PromptEvaluationSplit::Train => "train",
+                        PromptEvaluationSplit::Holdout => "holdout",
+                    }
+                    .to_string(),
+                ),
+                (
+                    "selected_source_run_id".to_string(),
+                    selected.source_run_id.clone(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            run_context,
+        ),
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
 fn prompt_replay_case(
     events: &[Event],
     current_objective: &str,
@@ -19136,7 +20313,7 @@ fn complete_prompt_evaluation_worker(
         api_key: config.api_key.clone(),
         model: request.model.clone(),
         embedding_model: config.model_for_role(&ModelRole::Embedder),
-        timeout_seconds: control.timeout_seconds(180),
+        timeout_seconds: control.model_call_timeout_seconds(),
     });
     let mut runtime = start_agent_loop(
         TaskId(unique_id("prompt-evaluation-worker")),
@@ -19183,16 +20360,30 @@ fn complete_prompt_evaluation_worker(
             evidence_turn_limit,
         );
         let request_tools: &[ToolSpec] = if finalizing { &[] } else { &tools };
-        let mut model_request = model_request_for_turn_with_context(
+        let max_output_tokens = bounded_max_output_tokens(
+            config.context_window_tokens,
+            COLLABORATION_MAX_OUTPUT_TOKENS,
+        );
+        let (mut model_request, governor) = model_request_for_turn_with_context_budget(
             &runtime,
             request_tools,
             Some(&config.agent_system_prompt),
             Some(&trusted_context),
+            config.context_window_tokens,
+            max_output_tokens,
         );
         model_request.role = request.role.clone();
         model_request.metadata.insert(
             "max_output_tokens".to_string(),
-            COLLABORATION_MAX_OUTPUT_TOKENS.to_string(),
+            max_output_tokens.to_string(),
+        );
+        usage.insert(
+            "context_governor_applied".to_string(),
+            governor.applied.to_string(),
+        );
+        usage.insert(
+            "context_projected_tokens".to_string(),
+            governor.estimated_projected_tokens.to_string(),
         );
         model_request
             .metadata
@@ -19228,6 +20419,11 @@ fn complete_prompt_evaluation_worker(
         let finalization_content = finalizing
             .then(|| response.message.content.trim().to_string())
             .filter(|content| !content.is_empty());
+        control.record_checkpoint(
+            "model_result",
+            "prompt_evaluation_worker",
+            &model_response_checkpoint_evidence(&response),
+        );
         match advance_with_model_response(&mut runtime, response, request_tools) {
             AgentAdvance::Completed { answer } => {
                 usage.insert("worker_turns".to_string(), runtime.turn.to_string());
@@ -19267,6 +20463,10 @@ fn complete_prompt_evaluation_worker(
                     usage,
                     evidence,
                 }
+            }
+            AgentAdvance::Retry { instruction } => {
+                append_internal_instruction(&mut runtime, "empty_model_retry", &instruction);
+                continue;
             }
             AgentAdvance::ToolCalls { calls } => {
                 if finalizing {
@@ -22491,6 +23691,26 @@ fn lancedb_export_path_for(workspace_root: &Path) -> PathBuf {
         .join("lancedb-records.jsonl")
 }
 
+fn lancedb_database_path_for(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(".cindx").join("lancedb")
+}
+
+fn memory_lancedb_root_for(workspace_root: &Path, project_id: &str) -> PathBuf {
+    let digest = sha256_hex(project_id.as_bytes());
+    workspace_root
+        .join(".cindx")
+        .join("memory-lancedb")
+        .join(&digest[..24])
+}
+
+fn memory_lancedb_database_path_for(workspace_root: &Path, project_id: &str) -> PathBuf {
+    memory_lancedb_root_for(workspace_root, project_id).join("index")
+}
+
+fn memory_lancedb_manifest_path_for(workspace_root: &Path, project_id: &str) -> PathBuf {
+    memory_lancedb_root_for(workspace_root, project_id).join("manifest.json")
+}
+
 fn graph_store_path_for(workspace_root: &Path) -> PathBuf {
     workspace_root.join(".cindx").join("graph.tsv")
 }
@@ -22608,6 +23828,14 @@ fn context_checkpoint_path_for_session(
         .join(format!("{segment}.md"))
 }
 
+fn context_checkpoint_manifest_path_for_session(
+    workspace_root: &Path,
+    session_id: Option<&str>,
+) -> PathBuf {
+    context_checkpoint_path_for_session(workspace_root, session_id)
+        .with_extension("coverage.json")
+}
+
 fn safe_path_segment(value: &str) -> String {
     value
         .chars()
@@ -22660,17 +23888,28 @@ fn cache_rag_adapter(
     workspace_root: &Path,
     adapter: &FileRagAdapter,
 ) -> Result<(), String> {
-    state
+    let key = workspace_knowledge_cache_key(workspace_root);
+    let mut cache = state
         .workspace_knowledge_cache
         .lock()
-        .map_err(|error| format!("workspace knowledge cache lock poisoned: {error}"))?
-        .insert(
-            workspace_knowledge_cache_key(workspace_root),
-            WorkspaceKnowledgeCacheEntry {
-                adapter: adapter.clone(),
-                validated_at: Instant::now(),
-            },
-        );
+        .map_err(|error| format!("workspace knowledge cache lock poisoned: {error}"))?;
+    cache.retain(|_, entry| entry.validated_at.elapsed() <= WORKSPACE_KNOWLEDGE_CACHE_TTL);
+    if !cache.contains_key(&key) && cache.len() >= WORKSPACE_KNOWLEDGE_CACHE_MAX_ENTRIES {
+        let oldest = cache
+            .iter()
+            .max_by_key(|(_, entry)| entry.validated_at.elapsed())
+            .map(|(key, _)| key.clone());
+        if let Some(oldest) = oldest {
+            cache.remove(&oldest);
+        }
+    }
+    cache.insert(
+        key,
+        WorkspaceKnowledgeCacheEntry {
+            adapter: adapter.clone(),
+            validated_at: Instant::now(),
+        },
+    );
     Ok(())
 }
 
@@ -23138,7 +24377,7 @@ fn config_hex_encode(value: &str) -> String {
 }
 
 fn config_hex_decode(value: &str) -> Option<String> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return None;
     }
     let bytes = (0..value.len())
@@ -23487,6 +24726,46 @@ mod tests {
     }
 
     #[test]
+    fn oversized_structured_tool_output_is_materialized_without_inline_duplication() {
+        let root = std::env::temp_dir().join(format!(
+            "cindx-structured-output-test-{}-{}",
+            std::process::id(),
+            current_time_millis()
+        ));
+        fs::create_dir_all(&root).expect("test workspace should exist");
+        let structured = serde_json::json!({ "payload": "x".repeat(300 * 1024) }).to_string();
+        let mut result = ToolResult::text(
+            agent_core::ToolCallId("call/unsafe".to_string()),
+            ToolOutcomeStatus::Succeeded,
+            "bounded preview",
+            Metadata::new(),
+        );
+        result.structured_output_json = Some(structured.clone());
+
+        materialize_tool_result_artifacts(&mut result, &root)
+            .expect("structured output should materialize");
+
+        let path = result
+            .metadata
+            .get("structured_output_path")
+            .expect("structured output should expose its artifact path");
+        assert!(path.ends_with("call_unsafe-structured.json"));
+        assert_eq!(
+            fs::read_to_string(path).expect("structured artifact should read"),
+            structured
+        );
+        assert!(result
+            .structured_output_json
+            .as_deref()
+            .is_some_and(|value| value.len() < 512));
+        assert!(result
+            .metadata
+            .get("structured_output")
+            .is_some_and(|value| value.len() < 512));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn runtime_status_exposes_expected_modes() {
         let status = runtime_status_for_root(workspace_root());
 
@@ -23721,6 +25000,68 @@ mod tests {
                 .map(|record| record.observed_use_count),
             Some(1)
         );
+    }
+
+    #[test]
+    fn project_memory_projection_persists_and_searches_real_lancedb_vectors() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let context = [
+            ("project_id".to_string(), "project-vector-memory".to_string()),
+            ("session_id".to_string(), "session-vector-memory".to_string()),
+            ("agent_run_id".to_string(), "run-vector-memory".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        append_message_event_with_metadata(
+            &mut store,
+            &phase16_task_id(),
+            MessageRole::User,
+            "Keep the inspector frosted and translucent",
+            context.clone(),
+        )
+        .expect("user requirement should append");
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task completed",
+            context,
+        )
+        .expect("run should complete");
+        let ledger = load_project_memory_ledger(&mut store, "project-vector-memory")
+            .expect("memory ledger should build");
+        let root = std::env::temp_dir().join(format!(
+            "cindx-memory-vector-test-{}-{}",
+            std::process::id(),
+            current_time_millis()
+        ));
+
+        let fallback = refresh_project_memory_vector_index(
+            &root,
+            &ProviderConfig::default(),
+            &ledger,
+        )
+        .expect("memory vectors should persist");
+        assert!(fallback.is_none());
+        let database_path =
+            memory_lancedb_database_path_for(&root, "project-vector-memory");
+        assert!(lancedb_index_exists(&database_path));
+        let results = search_lancedb_index(
+            &database_path,
+            &local_query_embedding("frosted translucent inspector"),
+            4,
+        )
+        .expect("memory vectors should search");
+        assert_eq!(results.first().map(|result| result.chunk.id.as_str()), Some(ledger.records[0].id.as_str()));
+        let manifest = load_memory_vector_manifest(&memory_lancedb_manifest_path_for(
+            &root,
+            "project-vector-memory",
+        ))
+        .expect("manifest should load")
+        .expect("manifest should exist");
+        assert_eq!(manifest.embedding_backend, "local");
+        assert_eq!(manifest.record_count, ledger.records.len());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -25157,7 +26498,7 @@ mod tests {
             CheckpointOptions::default(),
             777,
         ));
-        let checkpoint_path = write_context_checkpoint(&root, None, &pack.text)
+        let checkpoint_path = write_context_checkpoint(&root, None, &pack.text, None)
             .expect("checkpoint should write");
         append_event(
             &mut store,
@@ -25226,6 +26567,216 @@ mod tests {
             context_checkpoint_path_for_session(&root, Some("session-a")),
             context_checkpoint_path_for_session(&root, Some("session-b"))
         );
+    }
+
+    #[test]
+    fn context_checkpoint_coverage_restores_only_the_verified_prefix() {
+        let root = temp_test_root("context-checkpoint-coverage");
+        let history = vec![
+            test_message(MessageRole::User, "first requirement"),
+            test_message(MessageRole::Assistant, "first answer"),
+            test_message(MessageRole::User, "second requirement"),
+            test_message(MessageRole::Assistant, "second answer"),
+        ];
+        let path = write_context_checkpoint(
+            &root,
+            Some("session-a"),
+            "verified checkpoint",
+            Some(ContextCheckpointCoverage {
+                history: &history,
+                covered_messages: 2,
+            }),
+        )
+        .expect("checkpoint should write");
+
+        let checkpoint = read_validated_context_checkpoint(
+            &root,
+            Some("session-a"),
+            &history,
+        )
+        .expect("coverage should validate");
+        assert_eq!(checkpoint.covered_messages, 2);
+        let restored = history_with_context_checkpoint(&history, checkpoint, &path)
+            .expect("history should restore");
+
+        assert_eq!(restored.len(), 3);
+        assert_eq!(restored[1].content, "second requirement");
+        assert_eq!(restored[2].content, "second answer");
+        assert_eq!(
+            restored[0].metadata.get("covered_messages").map(String::as_str),
+            Some("2")
+        );
+    }
+
+    #[test]
+    fn legacy_context_checkpoint_never_truncates_history() {
+        let root = temp_test_root("legacy-context-checkpoint");
+        let history = vec![test_message(MessageRole::User, "keep this verbatim")];
+        write_context_checkpoint(&root, Some("session-a"), "legacy checkpoint", None)
+            .expect("legacy checkpoint should write");
+
+        assert!(read_validated_context_checkpoint(
+            &root,
+            Some("session-a"),
+            &history,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn context_checkpoint_rejects_changed_history_prefix() {
+        let root = temp_test_root("stale-context-prefix");
+        let history = vec![
+            test_message(MessageRole::User, "original requirement"),
+            test_message(MessageRole::Assistant, "original answer"),
+            test_message(MessageRole::User, "uncovered tail"),
+        ];
+        write_context_checkpoint(
+            &root,
+            Some("session-a"),
+            "checkpoint",
+            Some(ContextCheckpointCoverage {
+                history: &history,
+                covered_messages: 2,
+            }),
+        )
+        .expect("checkpoint should write");
+        let mut changed = history.clone();
+        changed[0].content = "edited requirement".to_string();
+
+        assert!(read_validated_context_checkpoint(
+            &root,
+            Some("session-a"),
+            &changed,
+        )
+        .is_none());
+        assert!(read_validated_context_checkpoint(
+            &root,
+            Some("session-a"),
+            &history[..2],
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn context_checkpoint_rejects_manifest_content_mismatch() {
+        let root = temp_test_root("stale-context-content");
+        let history = vec![test_message(MessageRole::User, "requirement")];
+        let path = write_context_checkpoint(
+            &root,
+            Some("session-a"),
+            "checkpoint",
+            Some(ContextCheckpointCoverage {
+                history: &history,
+                covered_messages: 1,
+            }),
+        )
+        .expect("checkpoint should write");
+        fs::write(path, "different checkpoint").expect("checkpoint should mutate");
+
+        assert!(read_validated_context_checkpoint(
+            &root,
+            Some("session-a"),
+            &history,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn context_governor_preserves_canonical_history_and_latest_tool_round() {
+        let tools = vec![ToolSpec::builtin(
+            "file.read",
+            "file",
+            "Read a workspace file",
+            ToolRisk::ReadOnly,
+            r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#,
+        )];
+        let mut runtime = start_agent_loop(
+            TaskId("context-governor-test".to_string()),
+            "current goal: finish the verified implementation",
+            AgentRuntimeConfig { max_turns: 24 },
+        );
+        let current_user = runtime.messages.pop().expect("current user should exist");
+        runtime.messages.push(Message {
+            role: MessageRole::System,
+            content: "artifact ".repeat(8_000),
+            metadata: [("kind".to_string(), "artifact_manifest".to_string())]
+                .into_iter()
+                .collect(),
+        });
+        runtime.messages.push(test_message(
+            MessageRole::User,
+            "旧的中文需求".repeat(5_000),
+        ));
+        runtime.messages.push(test_message(
+            MessageRole::Assistant,
+            "old answer ".repeat(5_000),
+        ));
+        runtime.messages.push(current_user);
+        for index in 0..5 {
+            runtime.messages.push(Message {
+                role: MessageRole::Assistant,
+                content: format!("tool round {index}"),
+                metadata: [(
+                    "raw_tool_calls_json".to_string(),
+                    format!(
+                        r#"[{{"id":"call-{index}","type":"function","function":{{"name":"file_read","arguments":"{{\"path\":\"file-{index}\"}}"}}}}]"#
+                    ),
+                )]
+                .into_iter()
+                .collect(),
+            });
+            runtime.messages.push(Message {
+                role: MessageRole::Tool,
+                content: if index == 4 {
+                    "latest verified evidence".to_string()
+                } else {
+                    "older evidence ".repeat(4_000)
+                },
+                metadata: [("tool_call_id".to_string(), format!("call-{index}"))]
+                    .into_iter()
+                    .collect(),
+            });
+        }
+        let canonical_history = runtime.messages.clone();
+
+        let (request, report) = model_request_for_turn_with_context_budget(
+            &runtime,
+            &tools,
+            None,
+            None,
+            16_384,
+            2_048,
+        );
+
+        assert!(report.applied);
+        assert!(report.hard_limit_satisfied);
+        assert!(report.omitted_messages > 0);
+        assert!(request.messages.iter().any(|message| {
+            message.content.contains("current goal: finish the verified implementation")
+        }));
+        assert!(request.messages.iter().any(|message| {
+            message.metadata.get("kind").map(String::as_str) == Some("artifact_manifest")
+        }));
+        let assistant_index = request
+            .messages
+            .iter()
+            .position(|message| {
+                message
+                    .metadata
+                    .get("raw_tool_calls_json")
+                    .is_some_and(|value| value.contains("call-4"))
+            })
+            .expect("latest assistant tool call should remain");
+        let tool_index = request
+            .messages
+            .iter()
+            .position(|message| {
+                message.metadata.get("tool_call_id").map(String::as_str) == Some("call-4")
+            })
+            .expect("latest tool evidence should remain");
+        assert!(assistant_index < tool_index);
+        assert_eq!(runtime.messages, canonical_history);
     }
 
     #[test]
@@ -25863,6 +27414,68 @@ mod tests {
     }
 
     #[test]
+    fn offline_prompt_dataset_is_project_scoped_deterministic_and_split_stable() {
+        let run_events = |sequence: u64,
+                          run_id: &str,
+                          project_id: &str,
+                          objective: &str,
+                          completed: bool| {
+            let metadata = [
+                ("agent_run_id".to_string(), run_id.to_string()),
+                ("project_id".to_string(), project_id.to_string()),
+                ("session_id".to_string(), format!("session-{run_id}")),
+                ("task_class".to_string(), "coding".to_string()),
+                ("prompt".to_string(), objective.to_string()),
+            ]
+            .into_iter()
+            .collect::<Metadata>();
+            let mut events = vec![Event {
+                id: EventId(format!("started-{run_id}")),
+                task_id: phase16_task_id(),
+                sequence,
+                timestamp_ms: sequence * 10,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Agent task started".to_string(),
+                metadata: metadata.clone(),
+            }];
+            if completed {
+                events.push(Event {
+                    id: EventId(format!("completed-{run_id}")),
+                    task_id: phase16_task_id(),
+                    sequence: sequence + 1,
+                    timestamp_ms: (sequence + 1) * 10,
+                    kind: EventKind::TaskStatusChanged,
+                    summary: "Agent task completed".to_string(),
+                    metadata,
+                });
+            }
+            events
+        };
+        let mut events = Vec::new();
+        events.extend(run_events(1, "a", "project-a", "Audit the agent loop", true));
+        events.extend(run_events(3, "b", "project-a", "Improve retrieval fusion", true));
+        events.extend(run_events(5, "c", "project-a", "Verify queue steering", true));
+        events.extend(run_events(7, "other", "project-b", "Unrelated project", true));
+        events.extend(run_events(9, "incomplete", "project-a", "Incomplete run", false));
+
+        let first = prompt_offline_dataset(&events, "project-a");
+        let second = prompt_offline_dataset(&events, "project-a");
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 3);
+        assert!(first.iter().all(|case| case.project_id == "project-a"));
+        assert!(first
+            .iter()
+            .filter(|case| case.split == PromptEvaluationSplit::Train)
+            .count()
+            >= 2);
+        assert!(first
+            .iter()
+            .any(|case| case.split == PromptEvaluationSplit::Holdout));
+        assert!(!first.iter().any(|case| case.objective == "Incomplete run"));
+    }
+
+    #[test]
     fn replay_holdout_accepts_a_completed_bounded_collaboration() {
         let profile = ConductorPromptGenome::seed_for_effort("pro");
         let profile_event = Event {
@@ -26074,13 +27687,67 @@ mod tests {
     fn agent_runtime_turn_budget_tracks_effort_and_extends_on_resume() {
         let control = AgentRunControl::new("pro");
         let config = control.runtime_config();
-        assert_eq!(config.max_turns, 96);
+        assert_eq!(config.max_turns, 384);
 
         let mut runtime = start_agent_loop(phase16_task_id(), "continue", config);
         runtime.turn = 23;
         control.extend_runtime_budget(&mut runtime);
 
-        assert_eq!(runtime.max_turns, 119);
+        assert_eq!(runtime.max_turns, 407);
+    }
+
+    #[test]
+    fn agent_run_budget_extends_only_after_unique_progress_and_stops_cycles() {
+        let control = AgentRunControl::new("fast");
+        for call in 1..=6 {
+            assert_eq!(control.begin_model_call("executor"), Ok(call));
+        }
+        assert!(control.record_checkpoint("model_result", "executor", "new evidence"));
+        assert_eq!(control.begin_model_call("executor"), Ok(7));
+        assert!(!control.record_checkpoint("model_result", "executor", "new evidence"));
+
+        let cycle_control = AgentRunControl::new("fast");
+        for input in ["a", "b", "a", "b", "a", "b", "a"] {
+            assert!(cycle_control
+                .begin_tool_call("executor", "file.read", input)
+                .is_ok());
+        }
+        assert_eq!(
+            cycle_control.begin_tool_call("executor", "file.read", "b"),
+            Err(RunStopReason::RepeatedAction)
+        );
+    }
+
+    #[test]
+    fn agent_runtime_never_completes_with_an_empty_model_answer() {
+        let mut runtime = start_agent_loop(
+            phase16_task_id(),
+            "complete the task",
+            AgentRuntimeConfig { max_turns: 6 },
+        );
+        let empty_response = || model_provider::ModelResponse {
+            message: Message {
+                role: MessageRole::Assistant,
+                content: String::new(),
+                metadata: Metadata::new(),
+            },
+            raw_tool_calls_json: None,
+            tool_calls: Vec::new(),
+            metadata: Metadata::new(),
+        };
+
+        assert!(matches!(
+            advance_with_model_response(&mut runtime, empty_response(), &[]),
+            AgentAdvance::Retry { .. }
+        ));
+        assert!(matches!(
+            advance_with_model_response(&mut runtime, empty_response(), &[]),
+            AgentAdvance::Retry { .. }
+        ));
+        assert!(matches!(
+            advance_with_model_response(&mut runtime, empty_response(), &[]),
+            AgentAdvance::Failed { .. }
+        ));
     }
 
     #[test]
@@ -27126,6 +28793,8 @@ mod tests {
             FileRagAdapter::open(root.join(".cindx").join("rag-index.tsv"))
                 .expect("adapter should open");
         adapter.replace_all(index).expect("index should persist");
+        replace_lancedb_index(lancedb_database_path_for(&root), adapter.index())
+            .expect("LanceDB index should persist");
         let cancellation = Arc::new(AgentRunControl::new("auto"));
 
         let retrieval = run_parallel_retrieval(
@@ -27148,6 +28817,57 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["semantic_rag", "file_search"]
         );
+    }
+
+    #[test]
+    fn complex_retrieval_runs_all_four_independent_channels() {
+        let root = temp_test_root("phase7-four-way-retrieval");
+        fs::create_dir_all(&root).expect("temp root should exist");
+        fs::write(
+            root.join("notes.md"),
+            "Cindx graph retrieval connects workspace evidence",
+        )
+        .expect("fixture should write");
+        let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+        index_graph_chunks(&root, &index.chunks).expect("graph should build");
+        let mut adapter = FileRagAdapter::open(root.join(".cindx").join("rag-index.tsv"))
+            .expect("adapter should open");
+        adapter.replace_all(index).expect("index should persist");
+        replace_lancedb_index(lancedb_database_path_for(&root), adapter.index())
+            .expect("LanceDB index should persist");
+        let cancellation = Arc::new(AgentRunControl::new("pro"));
+
+        let retrieval = run_parallel_retrieval(
+            &root,
+            &adapter,
+            &ProviderConfig::default(),
+            "graph retrieval workspace evidence",
+            4,
+            "four_way_parallel",
+            &cancellation,
+        )
+        .expect("retrieval should run");
+
+        assert_eq!(
+            retrieval
+                .trace
+                .channels
+                .iter()
+                .map(|channel| channel.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "semantic_rag",
+                "graph_recall",
+                "graph_walk",
+                "file_search"
+            ]
+        );
+        assert!(retrieval
+            .trace
+            .channels
+            .iter()
+            .all(|channel| channel.error.is_none()));
+        assert!(!retrieval.results.is_empty());
     }
 
     #[test]
@@ -27179,6 +28899,9 @@ mod tests {
             chunk: index.chunks[1].clone(),
             score: 0.8,
         };
+        let mut overlapping = first.clone();
+        overlapping.chunk.id = "direct-file-evidence".to_string();
+        overlapping.score = 1.2;
         let channels = vec![
             RetrievalChannelOutcome {
                 name: "semantic_rag".to_string(),
@@ -27189,7 +28912,7 @@ mod tests {
             RetrievalChannelOutcome {
                 name: "file_search".to_string(),
                 duration_ms: 1,
-                results: vec![first],
+                results: vec![overlapping],
                 error: None,
             },
         ];

@@ -38,7 +38,9 @@ The promotion report enforces the frozen minimum case and repeat counts, absolut
 
 ## Versioned Contract Suite
 
-The checked-in `benchmarks/agent/core-v1.json` suite contains 72 tasks across:
+The historical pre-GEPA baseline remains frozen against `core-v1`. The active
+`benchmarks/agent/core-v2.json` suite contains the same 72 tasks, with complex
+workspace coding work upgraded to the four-channel retrieval contract. It covers:
 
 - direct general and coding questions
 - coding workflows
@@ -48,7 +50,9 @@ The checked-in `benchmarks/agent/core-v1.json` suite contains 72 tasks across:
 - bounded two- and three-model collaboration
 - latency-sensitive complex work
 
-Every case specifies the expected task class, Auto policy, collaboration width, retrieval mode, and primary model role. `core-v1-baseline.json` requires a 100% Auto contract pass rate with no over- or under-orchestration.
+Every case specifies the expected task class, Auto policy, collaboration width,
+retrieval mode, and primary model role. `core-v2-baseline.json` requires a 100%
+Auto contract pass rate with no over- or under-orchestration.
 
 Run the offline gate and emit a standalone report:
 

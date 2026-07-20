@@ -36,6 +36,9 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
+      - name: Install native build tools
+        run: brew install protobuf
+
       - name: Install frontend dependencies
         working-directory: apps/desktop
         run: npm ci
@@ -49,15 +52,19 @@ jobs:
       - name: Test Rust workspace
         run: cargo test --workspace --locked
 
-      - name: Evaluate agent harness
-        run: cargo run --locked -p orchestrator --example evaluation_lab -- --report target/agent-benchmark-report.json
+      - name: Run deterministic quality gates
+        run: node scripts/run-quality-gates.mjs --profile ci-contract --report target/quality-gate-report.json
 
-      - name: Upload agent benchmark report
+      - name: Upload quality reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Cindx-agent-benchmark-${{ github.sha }}
-          path: target/agent-benchmark-report.json
+          name: Cindx-quality-gates-${{ github.sha }}
+          path: |
+            target/quality-gate-report.json
+            target/agent-benchmark-report.json
+            target/evaluation-v2-foundation.json
+            target/memory-evaluation.json
           if-no-files-found: error
           retention-days: 30
 
@@ -67,9 +74,6 @@ jobs:
       - name: Build frontend
         working-directory: apps/desktop
         run: npm run build
-
-      - name: Check desktop structure
-        run: node scripts/check-desktop-structure.mjs
 
       - name: Build Apple Silicon test app
         if: github.event_name != 'pull_request'
