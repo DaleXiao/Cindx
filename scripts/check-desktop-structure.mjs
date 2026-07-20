@@ -772,6 +772,8 @@ assert(
     sessionThreadSource.includes("useLayoutEffect(() => {") &&
     sessionThreadSource.includes('message.sequence ?? `${message.role}-${index}`') &&
     appSource.includes("optimisticUserMessagesRef") &&
+    appSource.includes("optimisticUserMessageRevision") &&
+    appSource.includes("setOptimisticUserMessageRevision") &&
     appSource.includes("messagesWithOptimisticUserMessage") &&
     appSource.includes("messages={visibleAgentMessages}"),
   "Session thread must show submitted user messages before paint and preserve them during polling"
@@ -2315,7 +2317,12 @@ assert(
 assert(rustLib.includes("fn get_phase6_state("), "Phase 6 state command is missing");
 assert(rustLib.includes("fn run_orchestration("), "Phase 6 orchestration command is missing");
 assert(rustLib.includes("fn get_phase7_state("), "Phase 7 state command is missing");
-assert(rustLib.includes("fn index_workspace_rag("), "Phase 7 index command is missing");
+assert(
+  rustLib.includes("async fn index_workspace_rag(") &&
+    rustLib.includes("index_workspace_rag_blocking") &&
+    rustLib.includes("tauri::async_runtime::spawn_blocking"),
+  "Phase 7 indexing must run outside the Tauri command thread"
+);
 assert(rustLib.includes("fn search_rag("), "Phase 7 search command is missing");
 assert(rustLib.includes("fn answer_with_rag("), "Phase 7 answer command is missing");
 assert(rustLib.includes("fn get_phase8_state("), "Phase 8 state command is missing");

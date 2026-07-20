@@ -7964,7 +7964,17 @@ fn index_workspace_with_cloud_fallback(
 }
 
 #[tauri::command]
-fn index_workspace_rag(state: tauri::State<'_, AppState>) -> Result<Phase7State, String> {
+async fn index_workspace_rag(app: tauri::AppHandle) -> Result<Phase7State, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        index_workspace_rag_blocking(app.state::<AppState>())
+    })
+    .await
+    .map_err(|error| format!("workspace indexing failed to join: {error}"))?
+}
+
+fn index_workspace_rag_blocking(
+    state: tauri::State<'_, AppState>,
+) -> Result<Phase7State, String> {
     let root = active_workspace_root(&state)?;
     let project_id = active_project_id_for_memory(&state)?;
     let config = clone_provider_config(&state)?;
