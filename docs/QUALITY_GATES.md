@@ -9,7 +9,8 @@ does not claim Fugu Ultra equivalence.
 - `quick`: version, desktop layout, and structural UX contracts.
 - `ci-contract`: quick checks plus routing, Evaluation v2 foundation, and memory.
 - `control-plane`: deterministic agent contracts plus Rust workspace and desktop tests.
-- `performance`: long-session incremental projection and 20k-chunk RAG diagnostics.
+- `performance`: long-session incremental projection, bounded context governance,
+  and 20k-chunk RAG diagnostics.
 - `full`: all deterministic gates, sidecars, frontend production build, and Rust tests.
 
 Run a profile and keep its machine-readable report:
@@ -22,7 +23,23 @@ node scripts/run-quality-gates.mjs \
 
 The manifest is versioned at
 `benchmarks/system/quality-gates-v1.json`. Commands never use an interactive shell,
-and report assertions are checked after each producer exits successfully.
+and report assertions are checked after each producer exits successfully. Structured
+`cindx.*.diagnostic.*` JSON records emitted by performance tests are collected in the
+top-level `diagnostics` array of the quality-gate report, including repeated-sample
+P50/P95 timings where available.
+
+Compare two reports captured on the same hardware and build profile before accepting
+an optimization:
+
+```bash
+node scripts/compare-performance-reports.mjs \
+  --baseline target/performance-before.json \
+  --candidate target/performance-after.json \
+  --report target/performance-comparison.json
+```
+
+The comparator requires identical workloads and defaults to a 25% relative or 1ms
+absolute P95 noise allowance. Cross-machine comparisons remain diagnostic only.
 
 ## Required Invariants
 

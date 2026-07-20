@@ -36,6 +36,7 @@
     ],
     "performance": [
       "session-projection-scaling",
+      "context-governor-scaling",
       "rag-search-scaling"
     ],
     "full": [
@@ -177,6 +178,21 @@
         "--locked",
         "incremental_projection_reads_only_the_target_session_delta",
         "--",
+        "--nocapture"
+      ]
+    },
+    {
+      "id": "context-governor-scaling",
+      "category": "performance",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "agent-runtime",
+        "long_history_context_governor_scaling_diagnostic",
+        "--",
+        "--ignored",
         "--nocapture"
       ]
     },

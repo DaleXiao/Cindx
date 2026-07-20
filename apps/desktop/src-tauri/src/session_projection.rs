@@ -417,6 +417,11 @@ mod tests {
             .collect()
     }
 
+    fn percentile(sorted_samples: &[u128], percentile: usize) -> u128 {
+        let index = (sorted_samples.len().saturating_sub(1) * percentile) / 100;
+        sorted_samples[index]
+    }
+
     #[test]
     fn incremental_projection_reads_only_the_target_session_delta() {
         let mut store = SqliteStore::in_memory().expect("store should open");
@@ -442,7 +447,8 @@ mod tests {
         assert_eq!(initial_stats.events_read, 1_000);
         assert_eq!(initial.event_count, 1_000);
 
-        for index in 0..4_000 {
+        let mut unrelated_events = 4_000usize;
+        for index in 0..unrelated_events {
             append_event(
                 &mut store,
                 &phase16_task_id(),
@@ -469,9 +475,46 @@ mod tests {
         assert!(!updated_stats.rebuilt);
         assert_eq!(updated_stats.events_read, 1);
         assert_eq!(updated.event_count, 1_001);
+        let mut warm_samples = vec![warm_micros];
+        for sample in 1..20 {
+            for index in 0..50 {
+                append_event(
+                    &mut store,
+                    &phase16_task_id(),
+                    EventKind::TaskStatusChanged,
+                    format!("Unrelated projection sample {sample} event {index}"),
+                    other_context.clone(),
+                )
+                .expect("unrelated sample event should append");
+            }
+            unrelated_events += 50;
+            append_event(
+                &mut store,
+                &phase16_task_id(),
+                EventKind::TaskStatusChanged,
+                format!("Target projection delta {sample}"),
+                session_context("session-target"),
+            )
+            .expect("target sample delta should append");
+            let started_at = Instant::now();
+            let (sampled, stats) =
+                load_agent_session_read_model_with_stats(&mut store, "session-target")
+                    .expect("incremental projection sample should load");
+            warm_samples.push(started_at.elapsed().as_micros());
+            assert!(!stats.rebuilt);
+            assert_eq!(stats.events_read, 1);
+            assert_eq!(sampled.event_count, 1_001 + sample);
+        }
+        warm_samples.sort_unstable();
+        let warm_p50_micros = percentile(&warm_samples, 50);
+        let warm_p95_micros = percentile(&warm_samples, 95);
+        let warm_max_micros = warm_samples.last().copied().unwrap_or_default();
         println!(
-            "{{\"schema\":\"cindx.session-projection-diagnostic.v1\",\"initial_events\":1000,\"unrelated_events\":4000,\"delta_events_read\":{},\"initial_micros\":{},\"warm_micros\":{}}}",
-            updated_stats.events_read, initial_micros, warm_micros
+            "{{\"schema\":\"cindx.session-projection-diagnostic.v1\",\"initial_events\":1000,\"unrelated_events\":{unrelated_events},\"delta_events_read\":{},\"initial_micros\":{},\"warm_micros\":{},\"warm_sample_count\":{},\"warm_p50_micros\":{warm_p50_micros},\"warm_p95_micros\":{warm_p95_micros},\"warm_max_micros\":{warm_max_micros}}}",
+            updated_stats.events_read,
+            initial_micros,
+            warm_micros,
+            warm_samples.len()
         );
     }
 }
