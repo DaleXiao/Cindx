@@ -56,7 +56,6 @@ import {
 import { Inspector, type InspectorTab } from "./components/Inspector";
 import { Composer } from "./components/Composer";
 import { QueuedMessages } from "./components/QueuedMessages";
-import { ScheduleView } from "./components/ScheduleView";
 import { Sidebar, type WorkspaceView } from "./components/Sidebar";
 import {
   LiveSessionThread,
@@ -169,6 +168,7 @@ const DEBUG_ALWAYS_VISIBLE_STORAGE_KEY = "cindx.debug.always-visible";
 const IGNORED_PERMISSION_REVIEWS_STORAGE_KEY = "cindx.permissions.ignored";
 const APPEARANCE_STORAGE_KEY = "cindx.appearance";
 const SESSION_STATE_CACHE_LIMIT = 24;
+const SESSION_AUXILIARY_CACHE_LIMIT = 8;
 const FOREGROUND_AGENT_POLL_INTERVAL_MS = 1_000;
 const BACKGROUND_AGENT_POLL_INTERVAL_MS = 5_000;
 
@@ -187,6 +187,12 @@ const KnowledgeGraph = lazy(() =>
   }))
 );
 
+const ScheduleView = lazy(() =>
+  import("./components/ScheduleView").then((module) => ({
+    default: module.ScheduleView
+  }))
+);
+
 type AppearanceMode = "light" | "dark" | "system";
 
 const DEFAULT_PERSONALIZATION: PersonalizationConfig = {
@@ -195,10 +201,15 @@ const DEFAULT_PERSONALIZATION: PersonalizationConfig = {
   responseLength: "balanced"
 };
 
-function rememberSessionState<Value>(cache: Map<string, Value>, sessionId: string, value: Value) {
+function rememberSessionState<Value>(
+  cache: Map<string, Value>,
+  sessionId: string,
+  value: Value,
+  limit = SESSION_STATE_CACHE_LIMIT
+) {
   cache.delete(sessionId);
   cache.set(sessionId, value);
-  while (cache.size > SESSION_STATE_CACHE_LIMIT) {
+  while (cache.size > limit) {
     const oldestSessionId = cache.keys().next().value;
     if (!oldestSessionId) break;
     cache.delete(oldestSessionId);
@@ -495,6 +506,55 @@ function mergeSequencedItems<Item extends { sequence?: number }>(
   incoming: Item[]
 ) {
   if (incoming.length === 0) return current;
+  if (current.length === 0) return incoming;
+  const currentFirst = current[0]?.sequence;
+  const currentLast = current[current.length - 1]?.sequence;
+  const incomingFirst = incoming[0]?.sequence;
+  const incomingLast = incoming[incoming.length - 1]?.sequence;
+  if (
+    currentLast !== undefined &&
+    incomingFirst !== undefined &&
+    currentLast < incomingFirst
+  ) {
+    return [...current, ...incoming];
+  }
+  if (
+    incomingLast !== undefined &&
+    currentFirst !== undefined &&
+    incomingLast < currentFirst
+  ) {
+    return [...incoming, ...current];
+  }
+  if (
+    current.every((item) => item.sequence !== undefined) &&
+    incoming.every((item) => item.sequence !== undefined)
+  ) {
+    const merged: Item[] = [];
+    let currentIndex = 0;
+    let incomingIndex = 0;
+    while (currentIndex < current.length || incomingIndex < incoming.length) {
+      const currentItem = current[currentIndex];
+      const incomingItem = incoming[incomingIndex];
+      if (!incomingItem) {
+        merged.push(currentItem);
+        currentIndex += 1;
+      } else if (!currentItem) {
+        merged.push(incomingItem);
+        incomingIndex += 1;
+      } else if (currentItem.sequence! < incomingItem.sequence!) {
+        merged.push(currentItem);
+        currentIndex += 1;
+      } else if (incomingItem.sequence! < currentItem.sequence!) {
+        merged.push(incomingItem);
+        incomingIndex += 1;
+      } else {
+        merged.push(incomingItem);
+        currentIndex += 1;
+        incomingIndex += 1;
+      }
+    }
+    return merged;
+  }
   const merged = new Map<number | string, Item>();
   current.forEach((item, index) => merged.set(item.sequence ?? `current-${index}`, item));
   incoming.forEach((item, index) => merged.set(item.sequence ?? `incoming-${index}`, item));
@@ -715,7 +775,14 @@ export function App() {
   const agentHistoryRequestsRef = useRef<Set<string>>(new Set());
   const [loadingOlderSessionId, setLoadingOlderSessionId] = useState<string | null>(null);
   const sessionSelectionRequestRef = useRef(0);
-  const sessionSelectionQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const sessionSelectionRunningRef = useRef(false);
+  const sessionSelectionPendingRef = useRef<{
+    operation: () => Promise<ProjectSessionState>;
+    waiters: Array<{
+      resolve: (state: ProjectSessionState) => void;
+      reject: (error: unknown) => void;
+    }>;
+  } | null>(null);
   const sessionRefreshRequestRef = useRef(0);
   const trackedSessionTaskIdsRef = useRef<Set<string>>(new Set());
   const optimisticUserMessagesRef = useRef<Map<string, ChatMessageView>>(new Map());
@@ -944,16 +1011,6 @@ export function App() {
         setPhase8(state);
         setComposerError((current) => current ?? state.lastError);
       });
-      getContextState().then((state) => {
-        setContextState(state);
-        setComposerError((current) => current ?? state.lastError);
-      });
-      getAgentTraceState().then((state) => {
-        setAgentTraceState(state);
-        const latestStep = latestTraceStep(state.turns);
-        setSelectedTraceStepId(latestStep?.id ?? null);
-        setComposerError((current) => current ?? state.lastError);
-      });
     };
 
     void Promise.allSettled(coreRequests).then(() => {
@@ -975,12 +1032,19 @@ export function App() {
   useEffect(() => {
     if (startupWindowRevealRequestedRef.current || !runtime || !projectSessionState) return;
     let disposed = false;
+    let fontWaitTimer: number | null = null;
     const reveal = async () => {
       try {
-        await document.fonts.ready;
+        await Promise.race([
+          document.fonts.ready,
+          new Promise<void>((resolve) => {
+            fontWaitTimer = window.setTimeout(resolve, 120);
+          })
+        ]);
       } catch {
         // A missing font should not keep the native window hidden.
       }
+      if (fontWaitTimer !== null) window.clearTimeout(fontWaitTimer);
       if (disposed || startupWindowRevealRequestedRef.current) return;
       startupWindowRevealRequestedRef.current = true;
       await revealMainWindow().catch(() => {});
@@ -988,6 +1052,7 @@ export function App() {
     void reveal();
     return () => {
       disposed = true;
+      if (fontWaitTimer !== null) window.clearTimeout(fontWaitTimer);
     };
   }, [projectSessionState, runtime]);
 
@@ -1173,7 +1238,12 @@ export function App() {
 
   useEffect(() => {
     if (!agentTraceState?.sessionId) return;
-    rememberSessionState(agentTraceCacheRef.current, agentTraceState.sessionId, agentTraceState);
+    rememberSessionState(
+      agentTraceCacheRef.current,
+      agentTraceState.sessionId,
+      agentTraceState,
+      SESSION_AUXILIARY_CACHE_LIMIT
+    );
   }, [agentTraceState]);
 
   const sessionPrefetchKey = useMemo(() => {
@@ -1313,8 +1383,18 @@ export function App() {
     void Promise.all([getAgentTraceState(sessionId), getContextState(sessionId)])
       .then(([nextTrace, nextContext]) => {
         if (disposed || activeSessionIdRef.current !== sessionId) return;
-        rememberSessionState(agentTraceCacheRef.current, sessionId, nextTrace);
-        rememberSessionState(contextStateCacheRef.current, sessionId, nextContext);
+        rememberSessionState(
+          agentTraceCacheRef.current,
+          sessionId,
+          nextTrace,
+          SESSION_AUXILIARY_CACHE_LIMIT
+        );
+        rememberSessionState(
+          contextStateCacheRef.current,
+          sessionId,
+          nextContext,
+          SESSION_AUXILIARY_CACHE_LIMIT
+        );
         startTransition(() => {
           setAgentTraceState((current) =>
             agentTraceUnchanged(current, nextTrace) ? current : nextTrace
@@ -1943,13 +2023,42 @@ export function App() {
     if (workspaceChanged) refreshWorkspaceScopedState();
   }
 
-  function enqueueProjectSessionSelection<Result>(operation: () => Promise<Result>) {
-    const queued = sessionSelectionQueueRef.current.then(operation, operation);
-    sessionSelectionQueueRef.current = queued.then(
-      () => undefined,
-      () => undefined
-    );
-    return queued;
+  async function drainProjectSessionSelections() {
+    if (sessionSelectionRunningRef.current) return;
+    sessionSelectionRunningRef.current = true;
+    try {
+      while (sessionSelectionPendingRef.current) {
+        const pending = sessionSelectionPendingRef.current;
+        sessionSelectionPendingRef.current = null;
+        try {
+          const state = await pending.operation();
+          pending.waiters.forEach(({ resolve }) => resolve(state));
+        } catch (error) {
+          pending.waiters.forEach(({ reject }) => reject(error));
+        }
+      }
+    } finally {
+      sessionSelectionRunningRef.current = false;
+    }
+  }
+
+  function enqueueProjectSessionSelection(
+    operation: () => Promise<ProjectSessionState>
+  ) {
+    const request = new Promise<ProjectSessionState>((resolve, reject) => {
+      const pending = sessionSelectionPendingRef.current;
+      if (pending) {
+        pending.operation = operation;
+        pending.waiters.push({ resolve, reject });
+      } else {
+        sessionSelectionPendingRef.current = {
+          operation,
+          waiters: [{ resolve, reject }]
+        };
+      }
+    });
+    void drainProjectSessionSelections();
+    return request;
   }
 
   function forgetDeletedSessions(sessionIds: string[]) {
@@ -2167,15 +2276,19 @@ export function App() {
       await handleSelectSession(sessionId);
       return;
     }
+    const selectionRequest = ++sessionSelectionRequestRef.current;
     showTimelineView();
     setSessionLoadingId(sessionId);
     setComposerError(null);
     try {
       const next = await enqueueProjectSessionSelection(() => selectSession(sessionId));
+      if (selectionRequest !== sessionSelectionRequestRef.current) return;
       await refreshWorkspaceAfterProjectSession(next);
     } catch (error) {
-      setSessionLoadingId(null);
-      setComposerError(error instanceof Error ? error.message : String(error));
+      if (selectionRequest === sessionSelectionRequestRef.current) {
+        setSessionLoadingId(null);
+        setComposerError(error instanceof Error ? error.message : String(error));
+      }
     }
   }
 
@@ -3574,14 +3687,16 @@ export function App() {
             </div>
           </>
         ) : activeView === "schedule" ? (
-          <ScheduleView
-            projects={projectSessionState?.projects ?? []}
-            sessions={projectSessionState?.sessions ?? []}
-            onOpenSession={(sessionId) => void handleOpenScheduledSession(sessionId)}
-            onBack={showTimelineView}
-            requestedScheduleId={selectedScheduleId}
-            onScheduleSelect={setSelectedScheduleId}
-          />
+          <Suspense fallback={<section className="schedule-view" aria-busy="true" />}>
+            <ScheduleView
+              projects={projectSessionState?.projects ?? []}
+              sessions={projectSessionState?.sessions ?? []}
+              onOpenSession={(sessionId) => void handleOpenScheduledSession(sessionId)}
+              onBack={showTimelineView}
+              requestedScheduleId={selectedScheduleId}
+              onScheduleSelect={setSelectedScheduleId}
+            />
+          </Suspense>
         ) : (
           <section
             className="settings-view"

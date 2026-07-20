@@ -414,6 +414,18 @@ function threadRowMeasurementKey(row: ThreadRow) {
   return threadItemMeasurementKey(row.item);
 }
 
+function threadRowsMeasurementRevision(rows: ThreadRow[]) {
+  let hash = 2_166_136_261;
+  for (const row of rows) {
+    const key = threadRowMeasurementKey(row);
+    for (let index = 0; index < key.length; index += 1) {
+      hash ^= key.charCodeAt(index);
+      hash = Math.imul(hash, 16_777_619);
+    }
+  }
+  return `${rows.length}:${hash >>> 0}`;
+}
+
 const MESSAGE_ATTACHMENT_PREVIEW_CACHE_LIMIT = 8;
 const messageAttachmentPreviewCache = new Map<string, string>();
 
@@ -886,8 +898,13 @@ export const SessionThread = memo(function SessionThread({
     firstId: string | null;
     status: AgentState["status"] | "idle";
   }>({ sessionId, firstId: null, status });
-  const knownMessageIdsRef = useRef<{ sessionId: string | null; ids: Set<string> }>({
+  const knownMessageIdsRef = useRef<{
+    sessionId: string | null;
+    firstId: string | null;
+    ids: Set<string>;
+  }>({
     sessionId,
+    firstId: messages[0] ? threadMessageId(messages[0], 0) : null,
     ids: new Set(messages.map(threadMessageId))
   });
   const [scrollMetrics, setScrollMetrics] = useState<ThreadScrollMetrics>({
@@ -902,26 +919,36 @@ export const SessionThread = memo(function SessionThread({
   }, [streamAnswer]);
 
   useLayoutEffect(() => {
-    const nextIds = new Set(messages.map(threadMessageId));
     const tracker = knownMessageIdsRef.current;
     if (tracker.sessionId !== sessionId) {
-      knownMessageIdsRef.current = { sessionId, ids: nextIds };
+      knownMessageIdsRef.current = {
+        sessionId,
+        firstId: messages[0] ? threadMessageId(messages[0], 0) : null,
+        ids: new Set(messages.map(threadMessageId))
+      };
       streamedAnswerRef.current = false;
       setArrivingMessageId(null);
       return;
     }
 
+    const previousFirstIndex = tracker.firstId
+      ? messages.findIndex(
+          (message, index) => threadMessageId(message, index) === tracker.firstId
+        )
+      : -1;
     let nextArrival: string | null = null;
     messages.forEach((message, index) => {
       const id = threadMessageId(message, index);
       if (tracker.ids.has(id)) return;
+      tracker.ids.add(id);
+      if (previousFirstIndex > 0 && index < previousFirstIndex) return;
       if (message.role === "user") streamedAnswerRef.current = false;
       if (message.role === "assistant") {
         if (streamedAnswerRef.current) streamedAnswerRef.current = false;
         else nextArrival = id;
       }
     });
-    tracker.ids = nextIds;
+    tracker.firstId = messages[0] ? threadMessageId(messages[0], 0) : null;
     if (nextArrival) setArrivingMessageId(nextArrival);
   }, [messages, sessionId]);
 
@@ -994,7 +1021,7 @@ export const SessionThread = memo(function SessionThread({
   }, [items, threadFindQuery]);
   const threadRows = useMemo(() => groupThreadItems(items), [items]);
   const rowMeasurementRevision = useMemo(
-    () => threadRows.map(threadRowMeasurementKey).join("|"),
+    () => threadRowsMeasurementRevision(threadRows),
     [threadRows]
   );
   const rowIndexByItemId = useMemo(() => {
