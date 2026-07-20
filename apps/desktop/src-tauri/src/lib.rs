@@ -114,7 +114,7 @@ use schedule::{
 };
 use session_projection::{
     agent_session_audits, agent_state_from_read_model, empty_agent_state_for_session,
-    load_agent_session_read_model,
+    load_agent_session_read_model, load_agent_session_read_model_snapshot,
 };
 
 const PHASE3_TASK_ID: &str = "phase-3-demo";
@@ -4767,26 +4767,27 @@ async fn get_agent_state(
         let Some(session_id) = run_context.get("session_id").cloned() else {
             return Ok(empty_agent_state_for_session(""));
         };
-        let model = {
-            let mut store = state
-                .store
-                .lock()
-                .map_err(|error| format!("store lock poisoned: {error}"))?;
-            load_agent_session_read_model(&mut store, &session_id)
-                .map_err(|error| error.to_string())?
-        };
         let store = open_app_read_store()?;
-        let history = store
-            .list_by_task_and_metadata_before_with_tool_metadata_limit(
-                &phase16_task_id(),
-                "session_id",
-                &session_id,
-                u64::MAX,
-                AGENT_HISTORY_INITIAL_PAGE_SIZE,
-                AGENT_HISTORY_MAX_TOOL_METADATA_BYTES,
-            )
-            .map_err(|error| error.to_string())?;
-        agent_state_from_read_model(&store, &model, &session_id, &run_context, history)
+        store
+            .with_read_snapshot(|snapshot| {
+                let model = load_agent_session_read_model_snapshot(snapshot, &session_id)?;
+                let history = snapshot
+                    .list_by_task_and_metadata_before_with_tool_metadata_limit(
+                        &phase16_task_id(),
+                        "session_id",
+                        &session_id,
+                        u64::MAX,
+                        AGENT_HISTORY_INITIAL_PAGE_SIZE,
+                        AGENT_HISTORY_MAX_TOOL_METADATA_BYTES,
+                    )?;
+                agent_state_from_read_model(
+                    snapshot,
+                    &model,
+                    &session_id,
+                    &run_context,
+                    history,
+                )
+            })
             .map_err(|error| error.to_string())
     })
     .await
@@ -4822,49 +4823,44 @@ async fn get_agent_state_delta(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
-        let model = {
-            let mut store = state
-                .store
-                .lock()
-                .map_err(|error| format!("store lock poisoned: {error}"))?;
-            load_agent_session_read_model(&mut store, &session_id)
-                .map_err(|error| error.to_string())?
-        };
         let store = open_app_read_store()?;
-        let latest_sequence = model.revision;
-        let reset = after_sequence == 0 || after_sequence > latest_sequence;
-        let events = if reset {
-            store.list_by_task_and_metadata_before_with_tool_metadata_limit(
-                &phase16_task_id(),
-                "session_id",
-                &session_id,
-                u64::MAX,
-                AGENT_HISTORY_INITIAL_PAGE_SIZE,
-                AGENT_HISTORY_MAX_TOOL_METADATA_BYTES,
-            )
-        } else {
-            store.list_by_task_and_metadata_after_with_tool_metadata_limit(
-                &phase16_task_id(),
-                "session_id",
-                &session_id,
-                after_sequence,
-                AGENT_HISTORY_MAX_TOOL_METADATA_BYTES,
-            )
-        }
-        .map_err(|error| error.to_string())?;
-        let agent_state = agent_state_from_read_model(
-            &store,
-            &model,
-            &session_id,
-            &run_context,
-            events,
-        )
-        .map_err(|error| error.to_string())?;
-        Ok(AgentStateDelta {
-            reset,
-            latest_sequence,
-            state: agent_state,
-        })
+        store
+            .with_read_snapshot(|snapshot| {
+                let model = load_agent_session_read_model_snapshot(snapshot, &session_id)?;
+                let latest_sequence = model.revision;
+                let reset = after_sequence == 0 || after_sequence > latest_sequence;
+                let events = if reset {
+                    snapshot.list_by_task_and_metadata_before_with_tool_metadata_limit(
+                        &phase16_task_id(),
+                        "session_id",
+                        &session_id,
+                        u64::MAX,
+                        AGENT_HISTORY_INITIAL_PAGE_SIZE,
+                        AGENT_HISTORY_MAX_TOOL_METADATA_BYTES,
+                    )
+                } else {
+                    snapshot.list_by_task_and_metadata_after_with_tool_metadata_limit(
+                        &phase16_task_id(),
+                        "session_id",
+                        &session_id,
+                        after_sequence,
+                        AGENT_HISTORY_MAX_TOOL_METADATA_BYTES,
+                    )
+                }?;
+                let agent_state = agent_state_from_read_model(
+                    snapshot,
+                    &model,
+                    &session_id,
+                    &run_context,
+                    events,
+                )?;
+                Ok(AgentStateDelta {
+                    reset,
+                    latest_sequence,
+                    state: agent_state,
+                })
+            })
+            .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| format!("agent state delta load failed to join: {error}"))?
@@ -4931,31 +4927,25 @@ async fn get_agent_trace_state(
         let state = app.state::<AppState>();
         let run_context = project_session_metadata_for_session(&state, session_id.as_deref())?;
         let session_id = run_context.get("session_id").map(String::as_str);
-        let active_run_id = if let Some(session_id) = session_id {
-            let mut store = state
-                .store
-                .lock()
-                .map_err(|error| format!("store lock poisoned: {error}"))?;
-            load_agent_session_read_model(&mut store, session_id)
-                .map_err(|error| error.to_string())?
-                .active_run_id
-        } else {
-            None
-        };
         let store = open_app_read_store()?;
-        let events = if let Some(run_id) = active_run_id {
-            store
-                .list_by_task_and_metadata(
-                    &phase16_task_id(),
-                    "agent_run_id",
-                    &run_id,
-                )
-                .map_err(|error| error.to_string())?
-        } else {
-            agent_events_for_session(&store, &phase16_task_id(), session_id)
-                .map_err(|error| error.to_string())?
-        };
-        agent_trace_state_from_events(&store, None, None, session_id, events)
+        store
+            .with_read_snapshot(|snapshot| {
+                let active_run_id = if let Some(session_id) = session_id {
+                    load_agent_session_read_model_snapshot(snapshot, session_id)?.active_run_id
+                } else {
+                    None
+                };
+                let events = if let Some(run_id) = active_run_id {
+                    snapshot.list_by_task_and_metadata(
+                        &phase16_task_id(),
+                        "agent_run_id",
+                        &run_id,
+                    )?
+                } else {
+                    agent_events_for_session(snapshot, &phase16_task_id(), session_id)?
+                };
+                agent_trace_state_from_events(snapshot, None, None, session_id, events)
+            })
             .map_err(|error| error.to_string())
     })
     .await

@@ -243,10 +243,37 @@ pub(crate) fn load_agent_session_read_model(
     load_agent_session_read_model_with_stats(store, session_id).map(|(model, _)| model)
 }
 
+pub(crate) fn load_agent_session_read_model_snapshot(
+    store: &SqliteStore,
+    session_id: &str,
+) -> Result<AgentSessionReadModel, StorageError> {
+    load_current_agent_session_read_model(store, session_id).map(|(model, _, _)| model)
+}
+
 fn load_agent_session_read_model_with_stats(
     store: &mut SqliteStore,
     session_id: &str,
 ) -> Result<(AgentSessionReadModel, SessionProjectionLoadStats), StorageError> {
+    let (model, stats, needs_persist) =
+        load_current_agent_session_read_model(store, session_id)?;
+    if needs_persist {
+        let payload = serde_json::to_string(&model).map_err(|error| {
+            StorageError::new(format!("session read model serialization failed: {error}"))
+        })?;
+        store.save_read_model(
+            AGENT_SESSION_READ_MODEL_NAMESPACE,
+            session_id,
+            model.revision,
+            &payload,
+        )?;
+    }
+    Ok((model, stats))
+}
+
+fn load_current_agent_session_read_model(
+    store: &SqliteStore,
+    session_id: &str,
+) -> Result<(AgentSessionReadModel, SessionProjectionLoadStats, bool), StorageError> {
     let task_id = phase16_task_id();
     let revision = store.event_revision_by_metadata(&task_id, "session_id", session_id)?;
     let stored = store
@@ -312,18 +339,7 @@ fn load_agent_session_read_model_with_stats(
     model.revision = revision.latest_sequence;
     model.state.event_count = revision.event_count;
     model.state.latest_sequence = revision.latest_sequence;
-    if dirty || revision_changed {
-        let payload = serde_json::to_string(&model).map_err(|error| {
-            StorageError::new(format!("session read model serialization failed: {error}"))
-        })?;
-        store.save_read_model(
-            AGENT_SESSION_READ_MODEL_NAMESPACE,
-            session_id,
-            model.revision,
-            &payload,
-        )?;
-    }
-    Ok((model, stats))
+    Ok((model, stats, dirty || revision_changed))
 }
 
 pub(crate) fn agent_session_audits(
@@ -516,5 +532,43 @@ mod tests {
             warm_micros,
             warm_samples.len()
         );
+    }
+
+    #[test]
+    fn read_only_snapshot_applies_unpersisted_session_delta() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Initial session event",
+            session_context("session-snapshot"),
+        )
+        .expect("initial event should append");
+        let persisted = load_agent_session_read_model(&mut store, "session-snapshot")
+            .expect("initial projection should persist");
+        assert_eq!(persisted.event_count, 1);
+
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Unpersisted session delta",
+            session_context("session-snapshot"),
+        )
+        .expect("delta should append");
+        let snapshot = store
+            .with_read_snapshot(|snapshot| {
+                load_agent_session_read_model_snapshot(snapshot, "session-snapshot")
+            })
+            .expect("snapshot should apply the delta");
+        assert_eq!(snapshot.event_count, 2);
+        assert_eq!(snapshot.revision, 2);
+
+        let stored = store
+            .load_read_model(AGENT_SESSION_READ_MODEL_NAMESPACE, "session-snapshot")
+            .expect("stored projection should load")
+            .expect("stored projection should exist");
+        assert_eq!(stored.revision, 1);
     }
 }
