@@ -14,6 +14,7 @@ pub enum RunStopReason {
     ModelCallBudgetExceeded,
     ToolCallBudgetExceeded,
     TurnBudgetExhausted,
+    ProviderUnavailable,
     NoProgress,
     RepeatedAction,
 }
@@ -26,6 +27,7 @@ impl RunStopReason {
             Self::ModelCallBudgetExceeded => "model_call_budget_exceeded",
             Self::ToolCallBudgetExceeded => "tool_call_budget_exceeded",
             Self::TurnBudgetExhausted => "turn_budget_exhausted",
+            Self::ProviderUnavailable => "provider_unavailable",
             Self::NoProgress => "no_progress",
             Self::RepeatedAction => "repeated_action",
         }
@@ -142,6 +144,7 @@ struct RunMutableState {
     tool_call_limit: usize,
     budget_extensions: usize,
     stop_reason: Option<RunStopReason>,
+    active_model_calls: usize,
 }
 
 #[derive(Debug)]
@@ -181,6 +184,7 @@ impl AgentRunControl {
                 tool_call_limit: budget.initial_tool_calls.min(budget.max_tool_calls).max(1),
                 budget_extensions: 0,
                 stop_reason: None,
+                active_model_calls: 0,
             }),
         }
     }
@@ -209,6 +213,7 @@ impl AgentRunControl {
                 tool_call_limit: snapshot.tool_call_limit,
                 budget_extensions: snapshot.budget_extensions,
                 stop_reason: None,
+                active_model_calls: 0,
             }),
         }
     }
@@ -251,7 +256,15 @@ impl AgentRunControl {
         if state.stop_reason.is_none() {
             if now.duration_since(state.started_at) >= self.budget.max_duration {
                 state.stop_reason = Some(RunStopReason::DeadlineExceeded);
-            } else if now.duration_since(state.last_progress_at) >= self.budget.no_progress_timeout {
+            } else if now.duration_since(state.last_progress_at)
+                >= if state.active_model_calls > 0 {
+                    self.budget
+                        .model_call_timeout
+                        .max(self.budget.no_progress_timeout)
+                } else {
+                    self.budget.no_progress_timeout
+                }
+            {
                 state.stop_reason = Some(RunStopReason::NoProgress);
             }
         }
@@ -272,12 +285,22 @@ impl AgentRunControl {
             if call > state.model_call_limit
                 && !extend_model_budget_if_progressed(&self.budget, &mut state, call)
             {
+                self.model_calls.fetch_sub(1, Ordering::SeqCst);
                 state.stop_reason = Some(RunStopReason::ModelCallBudgetExceeded);
                 return Err(RunStopReason::ModelCallBudgetExceeded);
             }
+            state.active_model_calls = state.active_model_calls.saturating_add(1);
+            state.stage = stage.to_string();
+            state.detail = "model request started".to_string();
+            state.last_progress_at = Instant::now();
         }
-        self.mark_progress(stage, "model request started");
         Ok(call)
+    }
+
+    pub fn finish_model_call(&self) {
+        let mut state = self.state.lock().expect("run control state poisoned");
+        state.active_model_calls = state.active_model_calls.saturating_sub(1);
+        state.last_progress_at = Instant::now();
     }
 
     pub fn begin_tool_call(
@@ -556,6 +579,7 @@ mod tests {
             model_control.begin_model_call("three"),
             Err(RunStopReason::ModelCallBudgetExceeded)
         );
+        assert_eq!(model_control.progress().model_calls, 2);
 
         let tool_control = AgentRunControl::with_budget(test_budget());
         assert_eq!(tool_control.begin_tool_call("main", "file.read", "a"), Ok(1));
@@ -646,11 +670,31 @@ mod tests {
         let control = AgentRunControl::with_budget(test_budget());
         control.begin_model_call("planning").expect("model call should start");
         control.record_partial_output("verified work");
+        control.finish_model_call();
         let snapshot = control.snapshot();
         thread::sleep(Duration::from_millis(35));
         let resumed = AgentRunControl::from_snapshot(snapshot);
         assert_eq!(resumed.stop_reason(), None);
         assert_eq!(resumed.partial_output(), "verified work");
         assert_eq!(resumed.progress().model_calls, 1);
+    }
+
+    #[test]
+    fn active_model_call_uses_the_model_timeout_before_no_progress() {
+        let mut budget = test_budget();
+        budget.max_duration = Duration::from_secs(1);
+        budget.no_progress_timeout = Duration::from_millis(20);
+        budget.model_call_timeout = Duration::from_millis(80);
+        let control = AgentRunControl::with_budget(budget);
+
+        control
+            .begin_model_call("executor")
+            .expect("model call should start");
+        thread::sleep(Duration::from_millis(35));
+        assert_eq!(control.stop_reason(), None);
+
+        control.finish_model_call();
+        thread::sleep(Duration::from_millis(30));
+        assert_eq!(control.stop_reason(), Some(RunStopReason::NoProgress));
     }
 }
