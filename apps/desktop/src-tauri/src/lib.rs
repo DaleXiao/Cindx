@@ -162,6 +162,9 @@ const CONTEXT_COMPACTION_TRIGGER_PERCENT: u64 = 65;
 const CONTEXT_RECENT_TARGET_PERCENT: u64 = 28;
 const CONTEXT_RECENT_MAX_TOKENS: u64 = 48_000;
 const CONTEXT_RECENT_MAX_MESSAGES: usize = 32;
+const CONTEXT_RECENT_REUSE_PERCENT: u64 = 42;
+const CONTEXT_RECENT_REUSE_MAX_TOKENS: u64 = 64_000;
+const CONTEXT_RECENT_REUSE_MAX_MESSAGES: usize = 48;
 const CONTEXT_RESTORE_MAX_CHARS: usize = 32_000;
 const CONTEXT_MEMORY_MAX_ITEMS: usize = 12;
 const CONTEXT_CHECKPOINT_MANIFEST_SCHEMA: &str = "cindx.context-checkpoint-coverage.v1";
@@ -6344,96 +6347,35 @@ fn run_agent_task_blocking_inner(
         config.context_window_tokens,
     )
     .map_err(|error| format!("context preparation failed: {error}"))?;
-    if should_recall_agent_memory(&routing_context, &prompt) {
-        cancellation.mark_progress("memory", "Recalling relevant project memory");
-        match recall_project_memory_for_prompt(
-            &state,
-            &task_id,
-            &run_context,
-            &root,
-            &config,
-            &prompt,
-            cancellation,
-        ) {
-            Ok(Some(memory_context)) => {
-                if let Some(memory_ids) = memory_context.metadata.get("memory_ids") {
-                    run_context.insert("memory_ids".to_string(), memory_ids.clone());
-                }
-                if let Some(selected_count) = memory_context.metadata.get("selected_count") {
-                    run_context.insert(
-                        "memory_selected_count".to_string(),
-                        selected_count.clone(),
-                    );
-                }
-                history.push(memory_context);
-            }
-            Ok(None) => {}
-            Err(error) => eprintln!("project memory recall unavailable: {error}"),
+    let prepared_knowledge = match prepare_run_knowledge_contexts(
+        &state,
+        &task_id,
+        &run_context,
+        &root,
+        &config,
+        &prompt,
+        &routing_context,
+        &routing_decision.retrieval_mode,
+        cancellation,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) if error == MODEL_REQUEST_CANCELLED => {
+            return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
         }
-    }
+        Err(error) => return Err(error),
+    };
+    append_prepared_memory_context(
+        &mut run_context,
+        &mut history,
+        prepared_knowledge.memory,
+    );
     if let Some(artifact_manifest) = artifact_manifest {
         history.push(artifact_manifest);
     }
 
-    if let Some(skill_context) = skill_catalog_for_root(&root)
-        .context_for_prompt(&prompt)
-        .map_err(|error| format!("skill context preparation failed: {error}"))?
-    {
-        history.push(Message {
-            role: MessageRole::System,
-            content: skill_context,
-            metadata: [
-                ("internal".to_string(), "true".to_string()),
-                ("kind".to_string(), "skill_context".to_string()),
-            ]
-            .into_iter()
-            .collect(),
-        });
-    }
-
-    if should_run_agent_knowledge_retrieval(&routing_context) {
-        cancellation.mark_progress("retrieval", "Preparing workspace knowledge");
-        append_agent_progress_event(
-            &state,
-            &task_id,
-            &run_context,
-            "Preparing workspace knowledge",
-        )?;
-        match prepare_agent_knowledge_context(
-            &state,
-            &config,
-            &task_id,
-            &run_context,
-            &root,
-            &prompt,
-            &routing_decision.retrieval_mode,
-            cancellation,
-        ) {
-            Ok(Some(knowledge_context)) => history.push(knowledge_context),
-            Ok(None) => {}
-            Err(error) if error == MODEL_REQUEST_CANCELLED => {
-                return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
-            }
-            Err(error) => {
-                let mut store = state
-                    .store
-                    .lock()
-                    .map_err(|lock_error| format!("store lock poisoned: {lock_error}"))?;
-                append_event(
-                    &mut store,
-                    &task_id,
-                    EventKind::Error,
-                    "Workspace knowledge retrieval unavailable",
-                    metadata_with_context(
-                        [("error".to_string(), error)]
-                            .into_iter()
-                            .collect(),
-                        &run_context,
-                    ),
-                )
-                .map_err(|store_error| store_error.to_string())?;
-            }
-        }
+    append_skill_context_for_run(&root, &prompt, &mut history)?;
+    if let Some(workspace_context) = prepared_knowledge.workspace {
+        history.push(workspace_context);
     }
 
     if agent_run_should_stop(cancellation) {
@@ -6914,52 +6856,34 @@ fn retry_agent_task_blocking_inner(
         history,
         config.context_window_tokens,
     )?;
+    let prepared_knowledge = match prepare_run_knowledge_contexts(
+        &state,
+        &task_id,
+        &run_context,
+        &root,
+        &config,
+        &prompt,
+        &routing_context,
+        &routing_decision.retrieval_mode,
+        cancellation,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) if error == MODEL_REQUEST_CANCELLED => {
+            return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
+        }
+        Err(error) => return Err(error),
+    };
+    append_prepared_memory_context(
+        &mut run_context,
+        &mut history,
+        prepared_knowledge.memory,
+    );
     if let Some(artifact_manifest) = artifact_manifest {
         history.push(artifact_manifest);
     }
-    if should_run_agent_knowledge_retrieval(&routing_context) {
-        cancellation.mark_progress("retrieval", "Preparing workspace knowledge");
-        append_agent_progress_event(
-            &state,
-            &task_id,
-            &run_context,
-            "Preparing workspace knowledge",
-        )?;
-        match prepare_agent_knowledge_context(
-            &state,
-            &config,
-            &task_id,
-            &run_context,
-            &root,
-            &prompt,
-            &routing_decision.retrieval_mode,
-            cancellation,
-        ) {
-            Ok(Some(knowledge_context)) => history.push(knowledge_context),
-            Ok(None) => {}
-            Err(error) if error == MODEL_REQUEST_CANCELLED => {
-                return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
-            }
-            Err(error) => {
-                let mut store = state
-                    .store
-                    .lock()
-                    .map_err(|lock_error| format!("store lock poisoned: {lock_error}"))?;
-                append_event(
-                    &mut store,
-                    &task_id,
-                    EventKind::Error,
-                    "Workspace knowledge retrieval unavailable",
-                    metadata_with_context(
-                        [("error".to_string(), error)]
-                            .into_iter()
-                            .collect(),
-                        &run_context,
-                    ),
-                )
-                .map_err(|store_error| store_error.to_string())?;
-            }
-        }
+    append_skill_context_for_run(&root, &prompt, &mut history)?;
+    if let Some(workspace_context) = prepared_knowledge.workspace {
+        history.push(workspace_context);
     }
     cancellation.mark_progress("orchestration", "Preparing execution strategy");
     append_agent_progress_event(
@@ -14299,6 +14223,7 @@ fn agent_state_from_events(
 struct SessionCompactionPlan {
     estimated_history_tokens: u64,
     estimated_request_tokens: u64,
+    recent_budget_tokens: u64,
     recent_start: usize,
     recent_tokens: u64,
     should_compact: bool,
@@ -14446,15 +14371,45 @@ fn history_with_context_checkpoint(
 }
 
 fn estimate_message_tokens(message: &Message) -> u64 {
-    let content_tokens = (message.content.len() as u64).div_ceil(4);
+    let content_tokens = estimate_text_tokens_for_context(&message.content);
     let tool_call_tokens = message
         .metadata
         .get("raw_tool_calls_json")
-        .map(|value| (value.len() as u64).div_ceil(4))
+        .map(|value| estimate_text_tokens_for_context(value))
+        .unwrap_or(0);
+    let image_tokens = message
+        .metadata
+        .get("image_paths")
+        .map(|paths| {
+            paths
+                .lines()
+                .filter(|path| !path.trim().is_empty())
+                .count() as u64
+                * 1_024
+        })
         .unwrap_or(0);
     content_tokens
         .saturating_add(tool_call_tokens)
+        .saturating_add(image_tokens)
         .saturating_add(6)
+}
+
+fn estimate_text_tokens_for_context(value: &str) -> u64 {
+    let mut ascii = 0_u64;
+    let mut non_ascii = 0_u64;
+    for character in value.chars() {
+        if character.is_ascii() {
+            ascii += 1;
+        } else {
+            non_ascii += 1;
+        }
+    }
+    ascii
+        .saturating_add(2)
+        .checked_div(3)
+        .unwrap_or_default()
+        .saturating_add(non_ascii)
+        .saturating_add(u64::from(!value.is_empty()))
 }
 
 fn estimate_context_tokens(messages: &[Message]) -> u64 {
@@ -14530,10 +14485,34 @@ fn session_compaction_plan(
     SessionCompactionPlan {
         estimated_history_tokens,
         estimated_request_tokens,
+        recent_budget_tokens: recent_budget,
         recent_start,
         recent_tokens,
         should_compact,
     }
+}
+
+fn context_checkpoint_is_within_reuse_window(
+    checkpoint: &ValidatedContextCheckpoint,
+    history: &[Message],
+    plan: SessionCompactionPlan,
+    context_window_tokens: u64,
+) -> bool {
+    if checkpoint.covered_messages > history.len() {
+        return false;
+    }
+    let retained = &history[checkpoint.covered_messages..];
+    if retained.len() > CONTEXT_RECENT_REUSE_MAX_MESSAGES {
+        return false;
+    }
+    let retained_tokens = retained.iter().map(estimate_message_tokens).sum::<u64>();
+    let reuse_budget = (context_window_tokens
+        .max(1)
+        .saturating_mul(CONTEXT_RECENT_REUSE_PERCENT)
+        / 100)
+        .min(CONTEXT_RECENT_REUSE_MAX_TOKENS)
+        .max(plan.recent_budget_tokens);
+    retained_tokens <= reuse_budget
 }
 
 fn prepare_session_history_context(
@@ -14552,16 +14531,31 @@ fn prepare_session_history_context(
     );
     let plan = session_compaction_plan(&history, context_window_tokens);
     let session_id = run_context.get("session_id").map(String::as_str);
-    let checkpoint = if plan.should_compact {
+    let existing_checkpoint = read_validated_context_checkpoint(
+        workspace_root,
+        session_id,
+        &history,
+    );
+    let can_reuse_checkpoint = existing_checkpoint.as_ref().is_some_and(|checkpoint| {
+        context_checkpoint_is_within_reuse_window(
+            checkpoint,
+            &history,
+            plan,
+            context_window_tokens,
+        )
+    });
+    let (checkpoint, checkpoint_reused) = if plan.should_compact && !can_reuse_checkpoint {
         if plan.recent_start == 0 {
             return Ok(history);
         }
         let older_messages = &history[..plan.recent_start];
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|error| format!("store lock poisoned: {error}"))?;
-        let events = collect_context_events(&store, run_context).map_err(|error| error.to_string())?;
+        let events = {
+            let store = state
+                .store
+                .lock()
+                .map_err(|error| format!("store lock poisoned: {error}"))?;
+            collect_context_events(&store, run_context).map_err(|error| error.to_string())?
+        };
         let checkpoint = build_session_checkpoint_at(
             &events,
             CheckpointOptions::default(),
@@ -14581,6 +14575,10 @@ fn prepare_session_history_context(
                 covered_messages: plan.recent_start,
             }),
         )?;
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
         append_event(
             &mut store,
             &phase15_task_id(),
@@ -14625,19 +14623,18 @@ fn prepare_session_history_context(
             ),
         )
         .map_err(|error| error.to_string())?;
-        ValidatedContextCheckpoint {
-            text: pack.text,
-            covered_messages: plan.recent_start,
-        }
+        (
+            ValidatedContextCheckpoint {
+                text: pack.text,
+                covered_messages: plan.recent_start,
+            },
+            false,
+        )
     } else {
-        let Some(checkpoint) = read_validated_context_checkpoint(
-            workspace_root,
-            session_id,
-            &history,
-        ) else {
+        let Some(checkpoint) = existing_checkpoint else {
             return Ok(history);
         };
-        checkpoint
+        (checkpoint, true)
     };
     let covered_messages = checkpoint.covered_messages;
     let retained_messages = history.len().saturating_sub(covered_messages);
@@ -14688,6 +14685,10 @@ fn prepare_session_history_context(
                 (
                     "compaction_version".to_string(),
                     CONTEXT_COMPACTION_VERSION.to_string(),
+                ),
+                (
+                    "checkpoint_reused".to_string(),
+                    checkpoint_reused.to_string(),
                 ),
                 (
                     "context_checkpoint_path".to_string(),
@@ -17315,7 +17316,9 @@ fn prepare_agent_knowledge_context(
         config,
         cancellation,
     )?;
-    cache_rag_adapter(state, workspace_root, &adapter)?;
+    if workspace_knowledge_cache_needs_refresh(index_cache_hit, auto_indexed.is_some()) {
+        cache_rag_adapter(state, workspace_root, &adapter)?;
+    }
     let index_duration_ms = index_started_at.elapsed().as_millis() as u64;
     if agent_run_should_stop(cancellation) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
@@ -17431,6 +17434,10 @@ fn prepare_agent_knowledge_context(
         .into_iter()
         .collect(),
     }))
+}
+
+fn workspace_knowledge_cache_needs_refresh(cache_hit: bool, index_changed: bool) -> bool {
+    !cache_hit || index_changed
 }
 
 fn ensure_workspace_knowledge_index(
@@ -17607,7 +17614,7 @@ fn run_parallel_retrieval(
         .then(|| FileGraphStore::open(graph_store_path_for(workspace_root)))
         .transpose()
         .map_err(|error| error.to_string())?;
-    let channels = std::thread::scope(|scope| {
+    let mut channels = std::thread::scope(|scope| {
         let semantic_handle = scope.spawn(|| {
             timed_retrieval_channel("semantic_rag", || {
                 let embedding =
@@ -17685,6 +17692,24 @@ fn run_parallel_retrieval(
     if agent_run_should_stop(cancellation) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
+    if let Some(store) = graph_store.as_ref() {
+        let graph_seeds = graph_walk_seed_results(&channels, channel_limit);
+        let enrichment = timed_retrieval_channel("graph_walk", || {
+            Ok(graph_walk_recall(&graph_seeds, chunks, store, channel_limit)
+                .into_iter()
+                .map(|source| RagSearchResult {
+                    chunk: source.chunk,
+                    score: source.score,
+                })
+                .collect())
+        });
+        if let Some(graph_walk) = channels
+            .iter_mut()
+            .find(|channel| channel.name == "graph_walk")
+        {
+            merge_retrieval_channel(graph_walk, enrichment, channel_limit);
+        }
+    }
     let (results, sources) = fuse_retrieval_channels(&channels, limit);
     let channel_views = channels
         .iter()
@@ -17714,6 +17739,77 @@ fn run_parallel_retrieval(
         results,
         sources,
     })
+}
+
+fn graph_walk_seed_results(
+    channels: &[RetrievalChannelOutcome],
+    limit: usize,
+) -> Vec<RagSearchResult> {
+    let mut seeds = channels
+        .iter()
+        .filter(|channel| channel.name != "graph_walk")
+        .flat_map(|channel| channel.results.iter().cloned())
+        .collect::<Vec<_>>();
+    seeds.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.chunk.path.cmp(&right.chunk.path))
+            .then_with(|| left.chunk.start_line.cmp(&right.chunk.start_line))
+    });
+    let mut unique = Vec::new();
+    for seed in seeds {
+        if unique.iter().any(|candidate: &RagSearchResult| {
+            candidate.chunk.id == seed.chunk.id
+                || (candidate.chunk.path == seed.chunk.path
+                    && retrieval_ranges_overlap(&candidate.chunk, &seed.chunk))
+        }) {
+            continue;
+        }
+        unique.push(seed);
+        if unique.len() >= limit.max(1) {
+            break;
+        }
+    }
+    unique
+}
+
+fn merge_retrieval_channel(
+    channel: &mut RetrievalChannelOutcome,
+    enrichment: RetrievalChannelOutcome,
+    limit: usize,
+) {
+    channel.duration_ms = channel.duration_ms.saturating_add(enrichment.duration_ms);
+    channel.results.extend(enrichment.results);
+    channel.results.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.chunk.path.cmp(&right.chunk.path))
+            .then_with(|| left.chunk.start_line.cmp(&right.chunk.start_line))
+    });
+    let mut unique = Vec::new();
+    for result in channel.results.drain(..) {
+        if unique.iter().any(|candidate: &RagSearchResult| {
+            candidate.chunk.id == result.chunk.id
+                || (candidate.chunk.path == result.chunk.path
+                    && retrieval_ranges_overlap(&candidate.chunk, &result.chunk))
+        }) {
+            continue;
+        }
+        unique.push(result);
+        if unique.len() >= limit.max(1) {
+            break;
+        }
+    }
+    channel.results = unique;
+    if !channel.results.is_empty() {
+        channel.error = None;
+    } else if channel.error.is_none() {
+        channel.error = enrichment.error;
+    }
 }
 
 fn timed_retrieval_channel(
@@ -18388,6 +18484,164 @@ fn should_recall_agent_memory(context: &RoutingContext, prompt: &str) -> bool {
     ]
     .iter()
     .any(|needle| normalized.contains(needle))
+}
+
+#[derive(Debug, Default)]
+struct PreparedRunKnowledgeContexts {
+    memory: Option<Message>,
+    workspace: Option<Message>,
+}
+
+fn append_prepared_memory_context(
+    run_context: &mut Metadata,
+    history: &mut Vec<Message>,
+    memory_context: Option<Message>,
+) {
+    let Some(memory_context) = memory_context else {
+        return;
+    };
+    if let Some(memory_ids) = memory_context.metadata.get("memory_ids") {
+        run_context.insert("memory_ids".to_string(), memory_ids.clone());
+    }
+    if let Some(selected_count) = memory_context.metadata.get("selected_count") {
+        run_context.insert(
+            "memory_selected_count".to_string(),
+            selected_count.clone(),
+        );
+    }
+    history.push(memory_context);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_run_knowledge_contexts(
+    state: &tauri::State<'_, AppState>,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    workspace_root: &Path,
+    config: &ProviderConfig,
+    prompt: &str,
+    routing_context: &RoutingContext,
+    retrieval_mode: &str,
+    cancellation: &Arc<AgentRunControl>,
+) -> Result<PreparedRunKnowledgeContexts, String> {
+    let recall_memory = should_recall_agent_memory(routing_context, prompt);
+    let retrieve_workspace = should_run_agent_knowledge_retrieval(routing_context);
+    if !recall_memory && !retrieve_workspace {
+        return Ok(PreparedRunKnowledgeContexts::default());
+    }
+    if recall_memory {
+        cancellation.mark_progress("memory", "Recalling relevant project memory");
+    }
+    if retrieve_workspace {
+        cancellation.mark_progress("retrieval", "Preparing workspace knowledge");
+        append_agent_progress_event(
+            state,
+            task_id,
+            run_context,
+            "Preparing workspace knowledge",
+        )?;
+    }
+
+    let (memory_result, workspace_result) = std::thread::scope(|scope| {
+        let memory_handle = recall_memory.then(|| {
+            scope.spawn(|| {
+                recall_project_memory_for_prompt(
+                    state,
+                    task_id,
+                    run_context,
+                    workspace_root,
+                    config,
+                    prompt,
+                    cancellation,
+                )
+            })
+        });
+        let workspace_handle = retrieve_workspace.then(|| {
+            scope.spawn(|| {
+                prepare_agent_knowledge_context(
+                    state,
+                    config,
+                    task_id,
+                    run_context,
+                    workspace_root,
+                    prompt,
+                    retrieval_mode,
+                    cancellation,
+                )
+            })
+        });
+        (
+            memory_handle.map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err("project memory worker panicked".to_string()))
+            }),
+            workspace_handle.map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err("workspace retrieval worker panicked".to_string()))
+            }),
+        )
+    });
+
+    let memory = match memory_result {
+        Some(Ok(context)) => context,
+        Some(Err(error)) if error == MODEL_REQUEST_CANCELLED => return Err(error),
+        Some(Err(error)) => {
+            eprintln!("project memory recall unavailable: {error}");
+            None
+        }
+        None => None,
+    };
+    let workspace = match workspace_result {
+        Some(Ok(context)) => context,
+        Some(Err(error)) if error == MODEL_REQUEST_CANCELLED => return Err(error),
+        Some(Err(error)) => {
+            let mut store = state
+                .store
+                .lock()
+                .map_err(|lock_error| format!("store lock poisoned: {lock_error}"))?;
+            append_event(
+                &mut store,
+                task_id,
+                EventKind::Error,
+                "Workspace knowledge retrieval unavailable",
+                metadata_with_context(
+                    [("error".to_string(), error)].into_iter().collect(),
+                    run_context,
+                ),
+            )
+            .map_err(|store_error| store_error.to_string())?;
+            None
+        }
+        None => None,
+    };
+
+    Ok(PreparedRunKnowledgeContexts { memory, workspace })
+}
+
+fn append_skill_context_for_run(
+    workspace_root: &Path,
+    prompt: &str,
+    history: &mut Vec<Message>,
+) -> Result<(), String> {
+    let Some(skill_context) = skill_catalog_for_root(workspace_root)
+        .context_for_prompt(prompt)
+        .map_err(|error| format!("skill context preparation failed: {error}"))?
+    else {
+        return Ok(());
+    };
+    history.push(Message {
+        role: MessageRole::System,
+        content: skill_context,
+        metadata: [
+            ("internal".to_string(), "true".to_string()),
+            ("kind".to_string(), "skill_context".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    });
+    Ok(())
 }
 
 fn memory_vector_projection_sha256(ledger: &MemoryLedger) -> String {
@@ -24626,10 +24880,58 @@ mod tests {
         let chinese = test_message(MessageRole::User, "你好世界你好世界");
         assert!(estimate_message_tokens(&chinese) > estimate_message_tokens(&ascii));
 
+        let mut image_message = test_message(MessageRole::User, "inspect these images");
+        image_message.metadata.insert(
+            "image_paths".to_string(),
+            "/tmp/one.png\n/tmp/two.png".to_string(),
+        );
+        assert!(
+            estimate_message_tokens(&image_message)
+                >= estimate_text_tokens_for_context("inspect these images") + 2_048
+        );
+
         let large_history = vec![test_message(MessageRole::User, "a".repeat(220_000))];
         let plan = session_compaction_plan(&large_history, 100_000);
         assert!(plan.should_compact);
         assert!(plan.estimated_request_tokens > plan.estimated_history_tokens);
+    }
+
+    #[test]
+    fn context_checkpoint_reuse_has_bounded_hysteresis() {
+        let mut history = (0..40)
+            .map(|index| {
+                test_message(
+                    if index % 2 == 0 {
+                        MessageRole::User
+                    } else {
+                        MessageRole::Assistant
+                    },
+                    format!("message {index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let checkpoint = ValidatedContextCheckpoint {
+            text: "verified checkpoint".to_string(),
+            covered_messages: 8,
+        };
+        let plan = session_compaction_plan(&history, 32_000);
+        assert!(context_checkpoint_is_within_reuse_window(
+            &checkpoint,
+            &history,
+            plan,
+            32_000,
+        ));
+
+        history.extend((40..58).map(|index| {
+            test_message(MessageRole::Assistant, format!("message {index}"))
+        }));
+        let plan = session_compaction_plan(&history, 32_000);
+        assert!(!context_checkpoint_is_within_reuse_window(
+            &checkpoint,
+            &history,
+            plan,
+            32_000,
+        ));
     }
 
     #[test]
@@ -28865,6 +29167,56 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["semantic_rag", "file_search"]
         );
+    }
+
+    #[test]
+    fn workspace_cache_ttl_advances_only_after_validation_or_index_change() {
+        assert!(!workspace_knowledge_cache_needs_refresh(true, false));
+        assert!(workspace_knowledge_cache_needs_refresh(false, false));
+        assert!(workspace_knowledge_cache_needs_refresh(true, true));
+    }
+
+    #[test]
+    fn graph_walk_seed_fusion_includes_semantic_and_file_evidence() {
+        let root = temp_test_root("phase7-graph-seeds");
+        fs::create_dir_all(&root).expect("temp root should exist");
+        fs::write(root.join("a.md"), "semantic source alpha").expect("fixture should write");
+        fs::write(root.join("b.md"), "direct source beta").expect("fixture should write");
+        let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+        let semantic = RagSearchResult {
+            chunk: index.chunks[0].clone(),
+            score: 0.9,
+        };
+        let file = RagSearchResult {
+            chunk: index.chunks[1].clone(),
+            score: 0.8,
+        };
+        let channels = vec![
+            RetrievalChannelOutcome {
+                name: "semantic_rag".to_string(),
+                duration_ms: 1,
+                results: vec![semantic.clone()],
+                error: None,
+            },
+            RetrievalChannelOutcome {
+                name: "graph_walk".to_string(),
+                duration_ms: 1,
+                results: Vec::new(),
+                error: None,
+            },
+            RetrievalChannelOutcome {
+                name: "file_search".to_string(),
+                duration_ms: 1,
+                results: vec![file.clone()],
+                error: None,
+            },
+        ];
+
+        let seeds = graph_walk_seed_results(&channels, 8);
+
+        assert_eq!(seeds.len(), 2);
+        assert_eq!(seeds[0].chunk.id, semantic.chunk.id);
+        assert_eq!(seeds[1].chunk.id, file.chunk.id);
     }
 
     #[test]

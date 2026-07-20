@@ -359,7 +359,9 @@ assert(
   "Agent output must stream by session and Stop must cancel the active provider request"
 );
 assert(
-  rustLib.includes("should_run_agent_knowledge_retrieval(&routing_context)") &&
+  rustLib.includes("fn prepare_run_knowledge_contexts(") &&
+    rustLib.includes("should_run_agent_knowledge_retrieval(routing_context)") &&
+    rustLib.includes("let workspace_handle = retrieve_workspace.then") &&
     orchestratorSource.includes("is_capability_question") &&
     orchestratorSource.includes("is_lightweight_direct") &&
     orchestratorSource.includes("learned_router_cannot_upgrade_a_lightweight_coding_question") &&
