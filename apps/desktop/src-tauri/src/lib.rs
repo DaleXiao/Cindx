@@ -10528,6 +10528,9 @@ fn complete_collaboration_model_with_control(
                 .is_some_and(agent_run_should_stop)
         },
     );
+    if let Some(control) = cancellation.as_ref() {
+        control.finish_model_call();
+    }
     let latency_ms = current_time_millis().saturating_sub(started_at_ms);
     match response {
         Ok(response) => {
@@ -10711,7 +10714,7 @@ fn complete_collaboration_worker_with_tools(
         );
         let mut partial_output = String::new();
         let mut stream_progress = ModelStreamProgress::new();
-        let response = match provider.complete_streaming_cancellable(
+        let response = provider.complete_streaming_cancellable(
             request,
             |delta| {
                 if !delta.is_empty() {
@@ -10727,7 +10730,11 @@ fn complete_collaboration_worker_with_tools(
                     .as_ref()
                     .is_some_and(agent_run_should_stop)
             },
-        ) {
+        );
+        if let Some(control) = cancellation.as_ref() {
+            control.finish_model_call();
+        }
+        let response = match response {
             Ok(response) => response,
             Err(error) => {
                 return CollaborationCompletion {
@@ -13057,6 +13064,10 @@ fn is_transient_model_transport_error(message: &str) -> bool {
     .any(|needle| message.contains(needle))
 }
 
+fn exhausted_model_transport_stop_reason(message: &str) -> Option<RunStopReason> {
+    is_transient_model_transport_error(message).then_some(RunStopReason::ProviderUnavailable)
+}
+
 fn model_response_checkpoint_evidence(response: &model_provider::ModelResponse) -> String {
     let mut evidence = response.message.content.clone();
     for call in &response.tool_calls {
@@ -13276,6 +13287,7 @@ fn continue_agent_loop(
                             true,
                             None,
                         );
+                        cancellation.finish_model_call();
                         return pause_agent_loop_for_control_stop(
                             app,
                             state,
@@ -13318,6 +13330,25 @@ fn continue_agent_loop(
                         ));
                         continue;
                     }
+                    if !partial_stream.trim().is_empty() {
+                        cancellation.record_partial_output(&partial_stream);
+                    }
+                    cancellation.finish_model_call();
+                    if let Some(reason) =
+                        exhausted_model_transport_stop_reason(&error.message)
+                    {
+                        cancellation.request_stop(reason);
+                        return pause_agent_loop_for_control_stop(
+                            app,
+                            state,
+                            workspace_root,
+                            &runtime,
+                            &prompt,
+                            &run_context,
+                            collaboration,
+                            cancellation,
+                        );
+                    }
                     return agent_state_with_error_in_context(
                         state,
                         &run_context,
@@ -13326,6 +13357,7 @@ fn continue_agent_loop(
                 }
             }
         };
+        cancellation.finish_model_call();
         if !response.message.content.trim().is_empty() {
             cancellation.record_partial_output(&response.message.content);
         }
@@ -18008,20 +18040,22 @@ impl RagEmbedder for CloudRagEmbedder {
                 .map(|control| control.model_call_timeout_seconds())
                 .unwrap_or(180),
         });
-        let response = provider
-            .embed_cancellable(
-                EmbeddingRequest {
-                    input: texts.to_vec(),
-                    dimensions: None,
-                    metadata: Metadata::new(),
-                },
-                || {
-                    self.cancellation
-                        .as_ref()
-                        .is_some_and(agent_run_should_stop)
-                },
-            )
-            .map_err(|error| agent_rag::RagError::new(error.to_string()))?;
+        let response = provider.embed_cancellable(
+            EmbeddingRequest {
+                input: texts.to_vec(),
+                dimensions: None,
+                metadata: Metadata::new(),
+            },
+            || {
+                self.cancellation
+                    .as_ref()
+                    .is_some_and(agent_run_should_stop)
+            },
+        );
+        if let Some(control) = self.cancellation.as_ref() {
+            control.finish_model_call();
+        }
+        let response = response.map_err(|error| agent_rag::RagError::new(error.to_string()))?;
         if let Some(control) = self.cancellation.as_ref() {
             control.mark_progress("embedding", &format!("Embedded {} items", texts.len()));
         }
@@ -20388,11 +20422,13 @@ fn complete_prompt_evaluation_worker(
         model_request
             .metadata
             .insert("evaluation_sandbox".to_string(), "read_only_v2".to_string());
-        let response = match provider.complete_streaming_cancellable(
+        let response = provider.complete_streaming_cancellable(
             model_request,
             |_| {},
             || control.should_stop(),
-        ) {
+        );
+        control.finish_model_call();
+        let response = match response {
             Ok(response) => response,
             Err(error) => {
                 return CollaborationCompletion {
@@ -24570,6 +24606,18 @@ mod tests {
         assert!(!is_transient_model_transport_error(
             "400 invalid_request_error: Unexpected item type in content"
         ));
+        assert_eq!(
+            exhausted_model_transport_stop_reason(
+                "failed to configure curl: Broken pipe (os error 32)"
+            ),
+            Some(RunStopReason::ProviderUnavailable)
+        );
+        assert_eq!(
+            exhausted_model_transport_stop_reason(
+                "400 invalid_request_error: Unexpected item type in content"
+            ),
+            None
+        );
     }
 
     #[test]
