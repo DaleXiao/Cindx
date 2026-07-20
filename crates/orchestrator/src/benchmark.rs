@@ -789,8 +789,8 @@ fn policy_load(policy: &OrchestrationPolicy) -> usize {
 mod tests {
     use super::*;
 
-    const CORE_SUITE: &str = include_str!("../../../benchmarks/agent/core-v1.json");
-    const CORE_BASELINE: &str = include_str!("../../../benchmarks/agent/core-v1-baseline.json");
+    const CORE_SUITE: &str = include_str!("../../../benchmarks/agent/core-v2.json");
+    const CORE_BASELINE: &str = include_str!("../../../benchmarks/agent/core-v2-baseline.json");
 
     #[test]
     fn core_suite_is_versioned_and_meets_the_regression_baseline() {

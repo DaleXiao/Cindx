@@ -80,6 +80,11 @@ const benchmarkSource = read("crates/orchestrator/src/benchmark.rs");
 const benchmarkSuite = JSON.parse(read("benchmarks/agent/core-v1.json"));
 const benchmarkBaseline = JSON.parse(read("benchmarks/agent/core-v1-baseline.json"));
 const memoryBenchmarkSuite = JSON.parse(read("benchmarks/agent/memory-v1.json"));
+const qualityGateManifest = JSON.parse(
+  read("benchmarks/system/quality-gates-v1.json")
+);
+const qualityGateRunner = read("scripts/run-quality-gates.mjs");
+const qualityGateDoc = read("docs/QUALITY_GATES.md");
 const evaluationLabSource = read("crates/orchestrator/examples/evaluation_lab.rs");
 const memoryEvaluationLabSource = read("crates/agent-memory/examples/memory_lab.rs");
 const agentEvaluationDoc = read("docs/AGENT_EVALUATION.md");
@@ -1775,12 +1780,15 @@ assert(
     agentMemorySource.includes("extract_durable_memories") &&
     agentMemorySource.includes("merge_memory_records") &&
     agentMemorySource.includes("recall_memories_at") &&
+    agentMemorySource.includes("fuse_memory_recalls_at") &&
     agentMemorySource.includes("record_memory_observed_uses") &&
     agentMemorySource.includes("observed_use_count") &&
     agentMemorySource.includes("Memory does not override the current user request") &&
     rustLib.includes('AGENT_MEMORY_READ_MODEL_NAMESPACE: &str = "agent-memory-v1"') &&
     rustLib.includes("load_project_memory_ledger") &&
     rustLib.includes("recall_project_memory_for_prompt") &&
+    rustLib.includes("schedule_project_memory_vector_refresh") &&
+    rustLib.includes("memory_lancedb_database_path_for") &&
     rustLib.includes("MemoryStatsView") &&
     rustLib.includes('"Project memory recalled"') &&
     rustLib.includes('"Project memory utilization measured"') &&
@@ -1794,7 +1802,10 @@ assert(
     rustLib.includes("cached_rag_adapter_for") &&
     rustLib.includes("invalidate_workspace_knowledge_cache") &&
     rustLib.includes('timed_retrieval_channel("graph_walk"') &&
-    rustLib.includes("let graph_seeds = if semantic.is_empty()") &&
+    rustLib.includes("std::thread::scope") &&
+    rustLib.includes("let graph_store = include_graph") &&
+    rustLib.includes("let graph_seeds = search_chunks_literal") &&
+    rustLib.includes("search_lancedb_index(") &&
     tauriBridge.includes("indexCacheHit") &&
     appSource.includes('"index cached"'),
   "Knowledge retrieval must reuse a bounded index cache and keep graph walk inside the parallel channel"
@@ -1837,6 +1848,11 @@ assert(
     rustLib.includes("evaluate_prompt_evolution") &&
     rustLib.includes("Conductor prompt profile selected") &&
     rustLib.includes("PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS") &&
+    rustLib.includes("PROMPT_EVOLUTION_OFFLINE_MIN_CASES") &&
+    rustLib.includes("prompt_offline_dataset") &&
+    rustLib.includes("select_prompt_offline_case") &&
+    rustLib.includes('"Conductor offline dataset selected"') &&
+    rustLib.includes("PROMPT_EVALUATION_IDLE_GRACE_MS: u64 = 30_000") &&
     rustLib.includes("schedule_prompt_pairwise_evaluation") &&
     rustLib.includes("bounded_evolution") &&
     rustLib.includes("prompt_objective") &&
@@ -2176,7 +2192,9 @@ assert(
   rustLib.includes("context_checkpoint_path_for_session") &&
     rustLib.includes("prepare_session_history_context") &&
     rustLib.includes("SessionCompactionPlan") &&
-    rustLib.includes('"hybrid_v2"') &&
+    rustLib.includes('CONTEXT_COMPACTION_VERSION: &str = "hybrid_v3_coverage"') &&
+    rustLib.includes("ContextCheckpointManifest") &&
+    rustLib.includes("covered_prefix_sha256") &&
     rustLib.includes("recent_history_start") &&
     agentMemorySource.includes("conversation_memory_to_markdown") &&
     rustLib.includes("Session context restored for agent run") &&
@@ -2263,8 +2281,13 @@ assert(
     evaluationLabSource.includes("quality=not_observed") &&
     agentEvaluationDoc.includes("Versioned Contract Suite") &&
     agentEvaluationDoc.includes("Real Run Observations") &&
-    ciWorkflow.includes("--report target/agent-benchmark-report.json") &&
-    ciWorkflow.includes("Upload agent benchmark report"),
+    qualityGateManifest.schema === "cindx.quality-gates.v1" &&
+    qualityGateManifest.profiles["ci-contract"].includes("routing-contract") &&
+    qualityGateRunner.includes("cindx.quality-gate-report.v1") &&
+    qualityGateDoc.includes("deterministic green build") &&
+    ciWorkflow.includes("run-quality-gates.mjs --profile ci-contract") &&
+    ciWorkflow.includes("Upload quality reports") &&
+    ciWorkflow.includes("target/agent-benchmark-report.json"),
   "CI must run the versioned offline benchmark and retain auditable quality guidance"
 );
 assert(
@@ -2274,6 +2297,7 @@ assert(
     memoryEvaluationLabSource.includes("recall_at_3_correct") &&
     memoryEvaluationLabSource.includes("trust_violations") &&
     memoryEvaluationLabSource.includes("dedup_failures") &&
+    qualityGateManifest.profiles["ci-contract"].includes("memory-contract") &&
     agentEvaluationDoc.includes("Project Memory Gate"),
   "Project memory must have a versioned deterministic recall and trust-boundary gate"
 );

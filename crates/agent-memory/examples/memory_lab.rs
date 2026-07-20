@@ -20,11 +20,20 @@ struct MemoryEvaluationSuite {
 
 #[derive(Debug, Deserialize)]
 struct MemoryEvaluationCase {
-    #[serde(rename = "id")]
-    _id: String,
+    id: String,
     requirement: String,
     query: String,
     expected: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MemoryEvaluationCaseReport {
+    id: String,
+    requirement_records: usize,
+    recalled_records: usize,
+    top_1_correct: bool,
+    recall_at_3_correct: bool,
+    recall_micros: u128,
 }
 
 #[derive(Debug, Serialize)]
@@ -39,6 +48,7 @@ struct MemoryEvaluationReport {
     dedup_failures: usize,
     average_recall_micros: u128,
     max_recall_micros: u128,
+    case_results: Vec<MemoryEvaluationCaseReport>,
 }
 
 fn main() {
@@ -80,6 +90,7 @@ fn run() -> Result<(), String> {
         dedup_failures: 0,
         average_recall_micros: 0,
         max_recall_micros: 0,
+        case_results: Vec::with_capacity(suite.cases.len()),
     };
     let mut total_recall_micros = 0u128;
     for (index, case) in suite.cases.iter().enumerate() {
@@ -110,22 +121,30 @@ fn run() -> Result<(), String> {
         let elapsed = started_at.elapsed().as_micros();
         total_recall_micros = total_recall_micros.saturating_add(elapsed);
         report.max_recall_micros = report.max_recall_micros.max(elapsed);
-        if recalls
+        let top_1_correct = recalls
             .first()
-            .is_some_and(|recall| recall.record.content.contains(&case.expected))
-        {
+            .is_some_and(|recall| recall.record.content.contains(&case.expected));
+        if top_1_correct {
             report.top_1_correct += 1;
         }
-        if recalls
+        let recall_at_3_correct = recalls
             .iter()
-            .any(|recall| recall.record.content.contains(&case.expected))
-        {
+            .any(|recall| recall.record.content.contains(&case.expected));
+        if recall_at_3_correct {
             report.recall_at_3_correct += 1;
         }
         report.trust_violations += recalls
             .iter()
             .filter(|recall| recall.record.trust != MemoryTrust::UserStated)
             .count();
+        report.case_results.push(MemoryEvaluationCaseReport {
+            id: case.id.clone(),
+            requirement_records: requirement_count,
+            recalled_records: recalls.len(),
+            top_1_correct,
+            recall_at_3_correct,
+            recall_micros: elapsed,
+        });
     }
     report.average_recall_micros = total_recall_micros / report.cases.max(1) as u128;
     let report_text = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
@@ -149,6 +168,18 @@ fn run() -> Result<(), String> {
         report.average_recall_micros,
         report.max_recall_micros,
     );
+    for case in report.case_results.iter().filter(|case| {
+        case.requirement_records != 1 || !case.top_1_correct || !case.recall_at_3_correct
+    }) {
+        println!(
+            "  failed {}: requirements={} recalls={} top1={} recall@3={}",
+            case.id,
+            case.requirement_records,
+            case.recalled_records,
+            case.top_1_correct,
+            case.recall_at_3_correct,
+        );
+    }
     if report.top_1_correct != report.cases
         || report.recall_at_3_correct != report.cases
         || report.trust_violations != 0

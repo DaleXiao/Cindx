@@ -433,9 +433,11 @@ mod tests {
             )
             .expect("target event should append");
         }
+        let initial_started_at = Instant::now();
         let (initial, initial_stats) =
             load_agent_session_read_model_with_stats(&mut store, "session-target")
                 .expect("initial projection should build");
+        let initial_micros = initial_started_at.elapsed().as_micros();
         assert!(initial_stats.rebuilt);
         assert_eq!(initial_stats.events_read, 1_000);
         assert_eq!(initial.event_count, 1_000);
@@ -459,11 +461,17 @@ mod tests {
         )
         .expect("target delta should append");
 
+        let warm_started_at = Instant::now();
         let (updated, updated_stats) =
             load_agent_session_read_model_with_stats(&mut store, "session-target")
                 .expect("incremental projection should load");
+        let warm_micros = warm_started_at.elapsed().as_micros();
         assert!(!updated_stats.rebuilt);
         assert_eq!(updated_stats.events_read, 1);
         assert_eq!(updated.event_count, 1_001);
+        println!(
+            "{{\"schema\":\"cindx.session-projection-diagnostic.v1\",\"initial_events\":1000,\"unrelated_events\":4000,\"delta_events_read\":{},\"initial_micros\":{},\"warm_micros\":{}}}",
+            updated_stats.events_read, initial_micros, warm_micros
+        );
     }
 }

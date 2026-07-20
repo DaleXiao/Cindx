@@ -6,10 +6,12 @@ use model_provider::{tool_function_name, ModelCallMode, ModelRequest, ModelRespo
 use std::collections::BTreeMap;
 
 mod control;
+mod context_governor;
 
 pub use control::{
     AgentRunControl, RunBudget, RunControlSnapshot, RunProgressSnapshot, RunStopReason,
 };
+pub use context_governor::{bounded_max_output_tokens, ContextGovernorReport};
 
 pub const DEFAULT_MAX_AGENT_TURNS: usize = 24;
 pub const DEFAULT_COLLABORATION_WORKER_TURNS: usize = 5;
@@ -39,6 +41,7 @@ pub struct AgentLoopState {
     pub turn: usize,
     pub max_turns: usize,
     pub failed_tool_signatures: BTreeMap<String, usize>,
+    pub consecutive_empty_responses: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +60,7 @@ pub enum AgentAdvance {
         max_turns: usize,
         partial_answer: Option<String>,
     },
+    Retry { instruction: String },
     Failed { message: String },
 }
 
@@ -77,6 +81,7 @@ pub fn start_agent_loop(
         turn: 0,
         max_turns: config.max_turns.max(1),
         failed_tool_signatures: BTreeMap::new(),
+        consecutive_empty_responses: 0,
     }
 }
 
@@ -99,6 +104,7 @@ pub fn start_agent_loop_with_history(
         turn: 0,
         max_turns: config.max_turns.max(1),
         failed_tool_signatures: BTreeMap::new(),
+        consecutive_empty_responses: 0,
     }
 }
 
@@ -132,6 +138,7 @@ pub fn resume_agent_loop_from_messages(
         turn,
         max_turns: config.max_turns.max(1),
         failed_tool_signatures: BTreeMap::new(),
+        consecutive_empty_responses: 0,
     }
 }
 
@@ -172,6 +179,46 @@ pub fn model_request_for_turn_with_context(
         .into_iter()
         .collect(),
     }
+}
+
+pub fn model_request_for_turn_with_context_budget(
+    state: &AgentLoopState,
+    tools: &[ToolSpec],
+    user_instructions: Option<&str>,
+    runtime_context: Option<&str>,
+    context_window_tokens: u64,
+    max_output_tokens: u64,
+) -> (ModelRequest, ContextGovernorReport) {
+    let system_prompt = agent_system_prompt_with_context(
+        tools,
+        user_instructions,
+        runtime_context,
+    );
+    let (messages, report) = context_governor::govern_model_messages(
+        &state.messages,
+        system_prompt,
+        tools,
+        context_window_tokens,
+        max_output_tokens,
+    );
+    let mut metadata = [
+        ("agent_task_id".to_string(), state.task_id.0.clone()),
+        ("agent_turn".to_string(), state.turn.to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    report.insert_metadata(&mut metadata);
+
+    (
+        ModelRequest {
+            role: ModelRole::Executor,
+            messages,
+            tools: tools.to_vec(),
+            mode: ModelCallMode::NonStreaming,
+            metadata,
+        },
+        report,
+    )
 }
 
 pub fn advance_with_model_response(
@@ -218,6 +265,20 @@ pub fn advance_with_model_response(
         };
     }
 
+    if content.is_empty() && response.tool_calls.is_empty() {
+        state.consecutive_empty_responses = state.consecutive_empty_responses.saturating_add(1);
+        if state.consecutive_empty_responses <= 2 {
+            return AgentAdvance::Retry {
+                instruction: "The previous model response was empty. Continue from the preserved task state: either make the next necessary tool call or provide a substantive final answer grounded in available evidence. Do not return an empty response."
+                    .to_string(),
+            };
+        }
+        return AgentAdvance::Failed {
+            message: "model returned three consecutive empty responses".to_string(),
+        };
+    }
+    state.consecutive_empty_responses = 0;
+
     if !response.tool_calls.is_empty() {
         let calls = response
             .tool_calls
@@ -241,13 +302,20 @@ pub fn advance_with_model_response(
         return AgentAdvance::ToolCalls { calls };
     }
 
-    AgentAdvance::Completed {
-        answer: if content.is_empty() {
-            "(model returned an empty answer)".to_string()
-        } else {
-            content
-        },
-    }
+    AgentAdvance::Completed { answer: content }
+}
+
+pub fn append_internal_instruction(state: &mut AgentLoopState, kind: &str, instruction: &str) {
+    state.messages.push(Message {
+        role: MessageRole::System,
+        content: instruction.to_string(),
+        metadata: [
+            ("internal".to_string(), "true".to_string()),
+            ("kind".to_string(), kind.to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    });
 }
 
 pub fn append_observation(state: &mut AgentLoopState, observation: &str) {
@@ -643,6 +711,38 @@ mod tests {
 
         assert!(matches!(advance, AgentAdvance::Completed { .. }));
         assert!(state.messages.iter().any(|message| message.content.contains("Tool observation")));
+    }
+
+    #[test]
+    fn empty_model_responses_retry_before_failing() {
+        let mut state = start_agent_loop(
+            TaskId("empty".to_string()),
+            "complete the task",
+            AgentRuntimeConfig { max_turns: 6 },
+        );
+        let empty_response = || ModelResponse {
+            message: Message {
+                role: MessageRole::Assistant,
+                content: String::new(),
+                metadata: Metadata::new(),
+            },
+            raw_tool_calls_json: None,
+            tool_calls: Vec::new(),
+            metadata: Metadata::new(),
+        };
+
+        assert!(matches!(
+            advance_with_model_response(&mut state, empty_response(), &[]),
+            AgentAdvance::Retry { .. }
+        ));
+        assert!(matches!(
+            advance_with_model_response(&mut state, empty_response(), &[]),
+            AgentAdvance::Retry { .. }
+        ));
+        assert!(matches!(
+            advance_with_model_response(&mut state, empty_response(), &[]),
+            AgentAdvance::Failed { .. }
+        ));
     }
 
     #[test]

@@ -16,7 +16,7 @@ agent-core = { path = "../../../crates/agent-core" }
 agent-graph = { path = "../../../crates/agent-graph" }
 agent-memory = { path = "../../../crates/agent-memory" }
 agent-mcp = { path = "../../../crates/agent-mcp" }
-agent-rag = { path = "../../../crates/agent-rag" }
+agent-rag = { path = "../../../crates/agent-rag", features = ["lancedb-store"] }
 agent-runtime = { path = "../../../crates/agent-runtime" }
 agent-skills = { path = "../../../crates/agent-skills" }
 agent-storage = { path = "../../../crates/agent-storage" }
@@ -35,3 +35,8 @@ objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSOpenPanel", "NSPanel", "NSResponder", "NSSavePanel", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSURL"] }
 window-vibrancy = "0.6.0"
+
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1

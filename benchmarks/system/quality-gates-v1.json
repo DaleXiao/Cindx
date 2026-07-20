@@ -1,0 +1,199 @@
+{
+  "schema": "cindx.quality-gates.v1",
+  "id": "foundation",
+  "version": 1,
+  "priority_order": [
+    "agent_quality",
+    "correctness_and_recovery",
+    "performance",
+    "cost_observability_only"
+  ],
+  "limitations": [
+    "Deterministic gates do not prove provider-backed answer quality.",
+    "Evaluation v2 promotion remains blocked until feedback, Pareto, and hidden test evidence are supplied.",
+    "Gate durations are diagnostic and are not portable latency thresholds."
+  ],
+  "profiles": {
+    "quick": [
+      "version-contract",
+      "desktop-layout",
+      "desktop-structure"
+    ],
+    "ci-contract": [
+      "version-contract",
+      "desktop-layout",
+      "desktop-structure",
+      "routing-contract",
+      "evaluation-foundation",
+      "memory-contract"
+    ],
+    "control-plane": [
+      "routing-contract",
+      "evaluation-foundation",
+      "memory-contract",
+      "workspace-tests",
+      "desktop-tests"
+    ],
+    "performance": [
+      "session-projection-scaling",
+      "rag-search-scaling"
+    ],
+    "full": [
+      "version-contract",
+      "desktop-layout",
+      "desktop-structure",
+      "browser-sidecar",
+      "computer-sidecar",
+      "routing-contract",
+      "evaluation-foundation",
+      "memory-contract",
+      "workspace-tests",
+      "desktop-tests",
+      "frontend-build"
+    ]
+  },
+  "gates": [
+    {
+      "id": "version-contract",
+      "category": "release",
+      "command": ["node", "scripts/check-release-version.mjs"]
+    },
+    {
+      "id": "desktop-layout",
+      "category": "ux",
+      "command": ["node", "scripts/check-desktop-layout.mjs"]
+    },
+    {
+      "id": "desktop-structure",
+      "category": "ux_and_architecture",
+      "command": ["node", "scripts/check-desktop-structure.mjs"]
+    },
+    {
+      "id": "browser-sidecar",
+      "category": "tools",
+      "command": ["node", "scripts/test-browser-sidecar.mjs"]
+    },
+    {
+      "id": "computer-sidecar",
+      "category": "tools",
+      "command": ["node", "scripts/test-computer-sidecar.mjs"]
+    },
+    {
+      "id": "routing-contract",
+      "category": "agent_quality",
+      "command": [
+        "cargo",
+        "run",
+        "--locked",
+        "-p",
+        "orchestrator",
+        "--example",
+        "evaluation_lab",
+        "--",
+        "--report",
+        "target/agent-benchmark-report.json"
+      ],
+      "report": "target/agent-benchmark-report.json",
+      "assertions": [
+        { "path": "baseline_passed", "equals": true },
+        { "path": "contract.pass_rate", "equals": 1 },
+        { "path": "contract.over_orchestrated", "equals": 0 },
+        { "path": "contract.under_orchestrated", "equals": 0 }
+      ]
+    },
+    {
+      "id": "evaluation-foundation",
+      "category": "gepa",
+      "command": [
+        "cargo",
+        "run",
+        "--locked",
+        "-p",
+        "orchestrator",
+        "--example",
+        "evaluation_v2_lab",
+        "--",
+        "--report",
+        "target/evaluation-v2-foundation.json"
+      ],
+      "report": "target/evaluation-v2-foundation.json",
+      "assertions": [
+        { "path": "routing_contract_verified", "equals": true }
+      ]
+    },
+    {
+      "id": "memory-contract",
+      "category": "memory",
+      "command": [
+        "cargo",
+        "run",
+        "--locked",
+        "-p",
+        "agent-memory",
+        "--example",
+        "memory_lab",
+        "--",
+        "--report",
+        "target/memory-evaluation.json"
+      ],
+      "report": "target/memory-evaluation.json",
+      "assertions": [
+        { "path": "top_1_correct", "equals_path": "cases" },
+        { "path": "recall_at_3_correct", "equals_path": "cases" },
+        { "path": "trust_violations", "equals": 0 },
+        { "path": "dedup_failures", "equals": 0 }
+      ]
+    },
+    {
+      "id": "workspace-tests",
+      "category": "correctness",
+      "command": ["cargo", "test", "--workspace", "--locked"]
+    },
+    {
+      "id": "desktop-tests",
+      "category": "control_plane",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--locked"
+      ]
+    },
+    {
+      "id": "frontend-build",
+      "category": "ux",
+      "cwd": "apps/desktop",
+      "command": ["npm", "run", "build"]
+    },
+    {
+      "id": "session-projection-scaling",
+      "category": "performance",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--locked",
+        "incremental_projection_reads_only_the_target_session_delta",
+        "--",
+        "--nocapture"
+      ]
+    },
+    {
+      "id": "rag-search-scaling",
+      "category": "performance",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "agent-rag",
+        "synthetic_rag_search_scaling_diagnostic",
+        "--",
+        "--ignored",
+        "--nocapture"
+      ]
+    }
+  ]
+}

@@ -6,8 +6,8 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-const DEFAULT_SUITE: &str = include_str!("../../../benchmarks/agent/core-v1.json");
-const DEFAULT_BASELINE: &str = include_str!("../../../benchmarks/agent/core-v1-baseline.json");
+const DEFAULT_SUITE: &str = include_str!("../../../benchmarks/agent/core-v2.json");
+const DEFAULT_BASELINE: &str = include_str!("../../../benchmarks/agent/core-v2-baseline.json");
 
 #[derive(Debug, Default)]
 struct Options {
