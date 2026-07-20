@@ -2255,17 +2255,30 @@ mod tests {
             .sum::<usize>();
         let query_embedding = local_query_embedding("graph memory file evidence");
 
-        let semantic_started_at = std::time::Instant::now();
-        let semantic = search_chunks_semantic(&chunks, &query_embedding, 12);
-        let semantic_micros = semantic_started_at.elapsed().as_micros();
-        let literal_started_at = std::time::Instant::now();
-        let literal = search_chunks_literal(&chunks, "graph memory file evidence", 12);
-        let literal_micros = literal_started_at.elapsed().as_micros();
-
-        assert_eq!(semantic.len(), 12);
-        assert_eq!(literal.len(), 12);
+        let sample_count = 11usize;
+        let mut semantic_samples = Vec::with_capacity(sample_count);
+        let mut literal_samples = Vec::with_capacity(sample_count);
+        for _ in 0..sample_count {
+            let semantic_started_at = std::time::Instant::now();
+            let semantic = search_chunks_semantic(&chunks, &query_embedding, 12);
+            semantic_samples.push(semantic_started_at.elapsed().as_micros());
+            let literal_started_at = std::time::Instant::now();
+            let literal = search_chunks_literal(&chunks, "graph memory file evidence", 12);
+            literal_samples.push(literal_started_at.elapsed().as_micros());
+            assert_eq!(semantic.len(), 12);
+            assert_eq!(literal.len(), 12);
+        }
+        semantic_samples.sort_unstable();
+        literal_samples.sort_unstable();
+        let percentile = |samples: &[u128], value: usize| {
+            samples[(samples.len().saturating_sub(1) * value) / 100]
+        };
+        let semantic_micros = percentile(&semantic_samples, 50);
+        let semantic_p95_micros = percentile(&semantic_samples, 95);
+        let literal_micros = percentile(&literal_samples, 50);
+        let literal_p95_micros = percentile(&literal_samples, 95);
         println!(
-            "{{\"schema\":\"cindx.rag-search-diagnostic.v1\",\"chunks\":{chunk_count},\"dimensions\":{EMBEDDING_DIMS},\"estimated_payload_bytes\":{estimated_payload_bytes},\"semantic_micros\":{semantic_micros},\"literal_micros\":{literal_micros}}}"
+            "{{\"schema\":\"cindx.rag-search-diagnostic.v1\",\"chunks\":{chunk_count},\"dimensions\":{EMBEDDING_DIMS},\"estimated_payload_bytes\":{estimated_payload_bytes},\"sample_count\":{sample_count},\"semantic_micros\":{semantic_micros},\"semantic_p95_micros\":{semantic_p95_micros},\"literal_micros\":{literal_micros},\"literal_p95_micros\":{literal_p95_micros}}}"
         );
     }
 }

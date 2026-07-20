@@ -718,4 +718,65 @@ mod tests {
         assert_eq!(bounded_max_output_tokens(128_000, 32_768), 32_000);
         assert_eq!(bounded_max_output_tokens(1_000_000, 32_768), 32_768);
     }
+
+    #[test]
+    #[ignore = "performance diagnostic; run through the quality-gate performance profile"]
+    fn long_history_context_governor_scaling_diagnostic() {
+        let mut history = Vec::with_capacity(8_001);
+        for index in 0..4_000 {
+            history.push(message(
+                MessageRole::User,
+                format!("historical requirement {index}: {}", "constraint ".repeat(12)),
+            ));
+            history.push(message(
+                MessageRole::Assistant,
+                format!("historical response {index}: {}", "evidence ".repeat(12)),
+            ));
+        }
+        history.push(message(
+            MessageRole::User,
+            "current goal: preserve UX and complete the verified task",
+        ));
+        let history_payload_bytes = history
+            .iter()
+            .map(|entry| entry.content.len())
+            .sum::<usize>();
+        let canonical_messages = history.len();
+        let mut samples = Vec::with_capacity(11);
+        let mut projected_messages = 0usize;
+        let mut estimated_original_tokens = 0u64;
+        let mut estimated_projected_tokens = 0u64;
+        for _ in 0..11 {
+            let started_at = std::time::Instant::now();
+            let (projected, report) = govern_model_messages(
+                &history,
+                "system".to_string(),
+                &[tool()],
+                32_768,
+                4_096,
+            );
+            samples.push(started_at.elapsed().as_micros());
+            assert!(report.applied);
+            assert!(report.hard_limit_satisfied);
+            assert!(projected.iter().any(|entry| entry
+                .content
+                .contains("current goal: preserve UX and complete the verified task")));
+            projected_messages = report.projected_messages;
+            estimated_original_tokens = report.estimated_original_tokens;
+            estimated_projected_tokens = report.estimated_projected_tokens;
+        }
+        assert_eq!(history.len(), canonical_messages);
+        assert!(projected_messages < canonical_messages / 10);
+        samples.sort_unstable();
+        let percentile = |value: usize| {
+            samples[(samples.len().saturating_sub(1) * value) / 100]
+        };
+        let p50_micros = percentile(50);
+        let p95_micros = percentile(95);
+        let max_micros = samples.last().copied().unwrap_or_default();
+        println!(
+            "{{\"schema\":\"cindx.context-governor-diagnostic.v1\",\"history_messages\":{canonical_messages},\"history_payload_bytes\":{history_payload_bytes},\"projected_messages\":{projected_messages},\"estimated_original_tokens\":{estimated_original_tokens},\"estimated_projected_tokens\":{estimated_projected_tokens},\"sample_count\":{},\"p50_micros\":{p50_micros},\"p95_micros\":{p95_micros},\"max_micros\":{max_micros}}}",
+            samples.len()
+        );
+    }
 }

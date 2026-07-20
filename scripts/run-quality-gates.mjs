@@ -79,6 +79,21 @@ function validateReport(gate) {
   });
 }
 
+function diagnosticRecords(output) {
+  return output.split(/\r?\n/).flatMap((line) => {
+    const objectStart = line.indexOf("{");
+    if (objectStart < 0) return [];
+    try {
+      const value = JSON.parse(line.slice(objectStart));
+      return typeof value?.schema === "string" && value.schema.includes("diagnostic")
+        ? [value]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
 function runGate(gate) {
   return new Promise((resolve) => {
     const [executable, ...commandArgs] = gate.command;
@@ -107,6 +122,7 @@ function runGate(gate) {
         duration_ms: Date.now() - startedAt,
         exit_code: null,
         errors: [error.message],
+        diagnostics: diagnosticRecords(stdoutTail),
         stdout_tail: stdoutTail,
         stderr_tail: stderrTail
       });
@@ -120,6 +136,7 @@ function runGate(gate) {
         duration_ms: Date.now() - startedAt,
         exit_code: exitCode,
         errors,
+        diagnostics: diagnosticRecords(stdoutTail),
         stdout_tail: stdoutTail,
         stderr_tail: stderrTail
       });
@@ -145,6 +162,9 @@ const report = {
   passed: results.every((result) => result.passed),
   priority_order: manifest.priority_order,
   limitations: manifest.limitations,
+  diagnostics: results.flatMap((result) =>
+    result.diagnostics.map((diagnostic) => ({ gate_id: result.id, ...diagnostic }))
+  ),
   results
 };
 fs.mkdirSync(path.dirname(reportPath), { recursive: true });
