@@ -1557,6 +1557,16 @@ export function App() {
     });
   }
 
+  function clearSessionTransientStatus(sessionId: string) {
+    trackedSessionTaskIdsRef.current.delete(sessionId);
+    setSessionStatusOverrides((current) => {
+      if (!(sessionId in current)) return current;
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+  }
+
   function updateSessionStatus(
     sessionId: string,
     status: AgentState["status"],
@@ -2282,7 +2292,9 @@ export function App() {
     setProjectSessionBusy(true);
     setComposerError(null);
     try {
-      await refreshWorkspaceAfterProjectSession(await archiveSession(sessionId));
+      const next = await archiveSession(sessionId);
+      clearSessionTransientStatus(sessionId);
+      await refreshWorkspaceAfterProjectSession(next);
     } catch (error) {
       setComposerError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -2295,6 +2307,7 @@ export function App() {
     setComposerError(null);
     try {
       const next = await restoreSession(sessionId);
+      clearSessionTransientStatus(sessionId);
       setProjectSessionState(next);
       setComposerError(next.lastError);
     } catch (error) {

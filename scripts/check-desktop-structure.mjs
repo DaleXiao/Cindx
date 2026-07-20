@@ -779,6 +779,12 @@ assert(
   "Session thread must show submitted user messages before paint and preserve them during polling"
 );
 assert(
+  appSource.includes("function clearSessionTransientStatus(sessionId: string)") &&
+    appSource.includes("const next = await archiveSession(sessionId);\n      clearSessionTransientStatus(sessionId);") &&
+    appSource.includes("const next = await restoreSession(sessionId);\n      clearSessionTransientStatus(sessionId);"),
+  "Archiving or restoring a session must clear stale transient status indicators"
+);
+assert(
   sessionThreadSource.includes('className="thread-minimap"') &&
     sessionThreadSource.includes('role="scrollbar"') &&
     sessionThreadSource.includes("onPointerMove={handleMinimapPointerMove}"),
