@@ -9875,6 +9875,81 @@ struct PromptPairwiseEvaluationPayload {
     feedback_b: ActionableSideInformation,
 }
 
+fn merge_unique_feedback_entries(target: &mut Vec<String>, entries: Vec<String>) {
+    for entry in entries {
+        if !entry.trim().is_empty() && !target.iter().any(|existing| existing == &entry) {
+            target.push(entry);
+        }
+    }
+}
+
+fn merge_actionable_feedback(
+    mut primary: ActionableSideInformation,
+    secondary: ActionableSideInformation,
+) -> ActionableSideInformation {
+    if primary.summary.trim().is_empty() {
+        primary.summary = secondary.summary.clone();
+    } else if !secondary.summary.trim().is_empty() && primary.summary != secondary.summary {
+        primary.summary.push('\n');
+        primary.summary.push_str(&secondary.summary);
+    }
+    merge_unique_feedback_entries(
+        &mut primary.passed_constraints,
+        secondary.passed_constraints,
+    );
+    merge_unique_feedback_entries(
+        &mut primary.failed_constraints,
+        secondary.failed_constraints,
+    );
+    merge_unique_feedback_entries(&mut primary.errors, secondary.errors);
+    merge_unique_feedback_entries(&mut primary.suggested_changes, secondary.suggested_changes);
+    primary
+}
+
+fn average_step_score_maps(
+    mut primary: BTreeMap<String, f64>,
+    secondary: BTreeMap<String, f64>,
+) -> BTreeMap<String, f64> {
+    for (step_id, score) in secondary {
+        primary
+            .entry(step_id)
+            .and_modify(|current| *current = (*current + score) / 2.0)
+            .or_insert(score);
+    }
+    primary
+}
+
+fn reverse_prompt_pairwise_payload(
+    payload: PromptPairwiseEvaluationPayload,
+) -> PromptPairwiseEvaluationPayload {
+    PromptPairwiseEvaluationPayload {
+        score_a: payload.score_b,
+        score_b: payload.score_a,
+        safety_violations_a: payload.safety_violations_b,
+        safety_violations_b: payload.safety_violations_a,
+        step_scores_a: payload.step_scores_b,
+        step_scores_b: payload.step_scores_a,
+        feedback_a: payload.feedback_b,
+        feedback_b: payload.feedback_a,
+    }
+}
+
+fn aggregate_prompt_pairwise_payloads(
+    first: PromptPairwiseEvaluationPayload,
+    second: PromptPairwiseEvaluationPayload,
+) -> PromptPairwiseEvaluationPayload {
+    PromptPairwiseEvaluationPayload {
+        score_a: (first.score_a + second.score_a) / 2.0,
+        score_b: (first.score_b + second.score_b) / 2.0,
+        safety_violations_a: first.safety_violations_a.max(second.safety_violations_a),
+        safety_violations_b: first.safety_violations_b.max(second.safety_violations_b),
+        step_scores_a: average_step_score_maps(first.step_scores_a, second.step_scores_a),
+        step_scores_b: average_step_score_maps(first.step_scores_b, second.step_scores_b),
+        feedback_a: merge_actionable_feedback(first.feedback_a, second.feedback_a),
+        feedback_b: merge_actionable_feedback(first.feedback_b, second.feedback_b),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PromptPlanCandidate {
     genome: ConductorPromptGenome,
@@ -19746,7 +19821,7 @@ fn generate_background_prompt_mutation(
                 .into_iter()
                 .collect(),
             )?;
-            return Ok(true);
+            return Ok(false);
         }
     };
     let mutation_id = format!(
@@ -19786,7 +19861,7 @@ fn generate_background_prompt_mutation(
             }
         }
     };
-    match mutation {
+    let generated = match mutation {
         Ok(mutation) => {
             append_prompt_mutation_status(
                 state,
@@ -19825,6 +19900,7 @@ fn generate_background_prompt_mutation(
                 .into_iter()
                 .collect(),
             )?;
+            true
         }
         Err(error) => {
             if error.contains(MODEL_REQUEST_CANCELLED) {
@@ -19858,9 +19934,10 @@ fn generate_background_prompt_mutation(
                 .into_iter()
                 .collect(),
             )?;
+            false
         }
-    }
-    Ok(true)
+    };
+    Ok(generated)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -19990,6 +20067,10 @@ fn run_background_prompt_pairwise_evaluation(
     if dataset.len() < PROMPT_EVOLUTION_OFFLINE_MIN_CASES {
         return Ok(());
     }
+    let attempted_mutation_parent = evaluation
+        .mutation_parent
+        .as_ref()
+        .map(|parent| parent.id.clone());
     if let Some(parent) = evaluation.mutation_parent.as_ref() {
         if generate_background_prompt_mutation(
             state,
@@ -20159,22 +20240,54 @@ fn run_background_prompt_pairwise_evaluation(
     if control.should_stop() {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
-    let swap_order = NEXT_ID
-        .fetch_add(1, Ordering::Relaxed)
-        .is_multiple_of(2);
-    let (candidate_a, candidate_b) = if swap_order {
-        (&challenger, &current)
-    } else {
-        (&current, &challenger)
+    let candidate_a = &current;
+    let candidate_b = &challenger;
+    let objective_ref = objective.as_str();
+    let (forward, reverse) = std::thread::scope(|scope| {
+        let forward_id = format!("{evaluation_id}-forward");
+        let reverse_id = format!("{evaluation_id}-reverse");
+        let forward = scope.spawn(move || {
+            evaluate_prompt_candidate_pair(
+                config,
+                objective_ref,
+                candidate_a,
+                candidate_b,
+                &forward_id,
+                control,
+            )
+        });
+        let reverse = scope.spawn(move || {
+            evaluate_prompt_candidate_pair(
+                config,
+                objective_ref,
+                candidate_b,
+                candidate_a,
+                &reverse_id,
+                control,
+            )
+        });
+        (
+            forward
+                .join()
+                .unwrap_or_else(|_| Err("forward pairwise reviewer panicked".to_string())),
+            reverse
+                .join()
+                .unwrap_or_else(|_| Err("reverse pairwise reviewer panicked".to_string())),
+        )
+    });
+    let judge = match (forward, reverse) {
+        (Ok(forward), Ok(reverse)) => aggregate_prompt_pairwise_payloads(
+            forward,
+            reverse_prompt_pairwise_payload(reverse),
+        ),
+        (Ok(forward), Err(_)) => forward,
+        (Err(_), Ok(reverse)) => reverse_prompt_pairwise_payload(reverse),
+        (Err(forward), Err(reverse)) => {
+            return Err(format!(
+                "both pairwise reviewers failed: forward={forward}; reverse={reverse}"
+            ))
+        }
     };
-    let judge = evaluate_prompt_candidate_pair(
-        config,
-        &objective,
-        candidate_a,
-        candidate_b,
-        &evaluation_id,
-        control,
-    )?;
     if control.should_stop() {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
@@ -20218,23 +20331,14 @@ fn run_background_prompt_pairwise_evaluation(
         judge.feedback_b,
         std::slice::from_ref(&config.api_key),
     );
-    append_prompt_pairwise_observation(
+    append_prompt_pairwise_observations(
         state,
         task_id,
         run_context,
         effort,
         mode,
-        &observation_a,
-        &candidate_a.plan.genome,
-    )?;
-    append_prompt_pairwise_observation(
-        state,
-        task_id,
-        run_context,
-        effort,
-        mode,
-        &observation_b,
-        &candidate_b.plan.genome,
+        [&observation_a, &observation_b],
+        [&candidate_a.plan.genome, &candidate_b.plan.genome],
     )?;
     let next_evaluation = {
         let mut store = state
@@ -20246,16 +20350,18 @@ fn run_background_prompt_pairwise_evaluation(
         evaluate_prompt_evolution_read_model(&model, effort)?
     };
     if let Some(parent) = next_evaluation.mutation_parent.as_ref() {
-        let _ = generate_background_prompt_mutation(
-            state,
-            config,
-            task_id,
-            run_context,
-            effort,
-            parent,
-            &next_evaluation.mutation_trajectories,
-            control,
-        )?;
+        if attempted_mutation_parent.as_deref() != Some(parent.id.as_str()) {
+            let _ = generate_background_prompt_mutation(
+                state,
+                config,
+                task_id,
+                run_context,
+                effort,
+                parent,
+                &next_evaluation.mutation_trajectories,
+                control,
+            )?;
+        }
     }
     Ok(())
 }
@@ -20324,7 +20430,30 @@ fn prompt_evolution_challenger(
         })
 }
 
+fn prompt_offline_split_manifest(
+    events: &[Event],
+    project_id: &str,
+) -> BTreeMap<String, PromptEvaluationSplit> {
+    events
+        .iter()
+        .filter(|event| event.summary == "Conductor offline dataset selected")
+        .filter(|event| {
+            event.metadata.get("project_id").map(String::as_str) == Some(project_id)
+        })
+        .filter_map(|event| {
+            let manifest = event.metadata.get("dataset_split_manifest")?;
+            serde_json::from_str::<BTreeMap<String, PromptEvaluationSplit>>(manifest)
+                .ok()
+                .map(|manifest| (event.sequence, manifest))
+        })
+        .max_by_key(|(sequence, _)| *sequence)
+        .map(|(_, manifest)| manifest)
+        .unwrap_or_default()
+}
+
 fn prompt_offline_dataset(events: &[Event], project_id: &str) -> Vec<PromptOfflineCase> {
+    let prior_splits = prompt_offline_split_manifest(events, project_id);
+    let previously_assigned = prior_splits.keys().cloned().collect::<BTreeSet<_>>();
     let mut runs = BTreeMap::<String, Vec<&Event>>::new();
     for event in events {
         if let Some(run_id) = event.metadata.get("agent_run_id") {
@@ -20367,17 +20496,20 @@ fn prompt_offline_dataset(events: &[Event], project_id: &str) -> Vec<PromptOffli
         let id = format!("runtime-{task_class}-{}", &case_digest[..16]);
         let split_digest = sha256_hex(id.as_bytes());
         let split_bucket = u8::from_str_radix(&split_digest[..2], 16).unwrap_or_default();
+        let split = prior_splits.get(&id).copied().unwrap_or_else(|| {
+            if split_bucket.is_multiple_of(5) {
+                PromptEvaluationSplit::Holdout
+            } else {
+                PromptEvaluationSplit::Train
+            }
+        });
         cases.entry(id.clone()).or_insert(PromptOfflineCase {
             id,
             objective,
             task_class,
             project_id: project_id.to_string(),
             source_run_id: run_id,
-            split: if split_bucket.is_multiple_of(5) {
-                PromptEvaluationSplit::Holdout
-            } else {
-                PromptEvaluationSplit::Train
-            },
+            split,
         });
     }
     let mut cases = cases.into_values().collect::<Vec<_>>();
@@ -20390,10 +20522,16 @@ fn prompt_offline_dataset(events: &[Event], project_id: &str) -> Vec<PromptOffli
             .count()
             < 2
         {
-            let Some(case) = cases
-                .iter_mut()
-                .find(|case| case.split == PromptEvaluationSplit::Holdout)
+            let Some(index) = cases
+                .iter()
+                .position(|case| {
+                    case.split == PromptEvaluationSplit::Holdout
+                        && !previously_assigned.contains(&case.id)
+                })
             else {
+                break;
+            };
+            let Some(case) = cases.get_mut(index) else {
                 break;
             };
             case.split = PromptEvaluationSplit::Train;
@@ -20402,7 +20540,13 @@ fn prompt_offline_dataset(events: &[Event], project_id: &str) -> Vec<PromptOffli
             .iter()
             .any(|case| case.split == PromptEvaluationSplit::Holdout)
         {
-            if let Some(case) = cases.last_mut() {
+            let index = cases
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, case)| !previously_assigned.contains(&case.id))
+                .map(|(index, _)| index);
+            if let Some(case) = index.and_then(|index| cases.get_mut(index)) {
                 case.split = PromptEvaluationSplit::Holdout;
             }
         }
@@ -20452,6 +20596,12 @@ fn append_prompt_offline_dataset_snapshot(
     dataset: &[PromptOfflineCase],
     selected: &PromptOfflineCase,
 ) -> Result<(), String> {
+    let split_manifest = dataset
+        .iter()
+        .map(|case| (case.id.clone(), case.split))
+        .collect::<BTreeMap<_, _>>();
+    let split_manifest = serde_json::to_string(&split_manifest)
+        .map_err(|error| format!("offline split manifest serialization failed: {error}"))?;
     let dataset_digest = sha256_hex(
         dataset
             .iter()
@@ -20484,6 +20634,7 @@ fn append_prompt_offline_dataset_snapshot(
                 ("background_evaluation".to_string(), "true".to_string()),
                 ("prompt_effort".to_string(), effort.to_string()),
                 ("dataset_sha256".to_string(), dataset_digest),
+                ("dataset_split_manifest".to_string(), split_manifest),
                 ("dataset_case_count".to_string(), dataset.len().to_string()),
                 ("dataset_train_count".to_string(), train_cases.to_string()),
                 (
@@ -21592,19 +21743,19 @@ fn append_prompt_evaluation_status(
     .map_err(|error| error.to_string())
 }
 
-fn append_prompt_pairwise_observation(
+fn append_prompt_pairwise_observations(
     state: &tauri::State<'_, AppState>,
     task_id: &TaskId,
     run_context: &Metadata,
     effort: &str,
     mode: PromptEvaluationMode,
-    observation: &PromptEvolutionObservation,
-    genome: &ConductorPromptGenome,
+    observations: [&PromptEvolutionObservation; 2],
+    genomes: [&ConductorPromptGenome; 2],
 ) -> Result<(), String> {
-    let encoded_observation = serde_json::to_string(observation)
-        .map_err(|error| format!("prompt observation serialization failed: {error}"))?;
-    let encoded_genome = serde_json::to_string(genome)
-        .map_err(|error| format!("prompt genome serialization failed: {error}"))?;
+    let encoded_observations = serde_json::to_string(&observations)
+        .map_err(|error| format!("prompt observations serialization failed: {error}"))?;
+    let encoded_genomes = serde_json::to_string(&genomes)
+        .map_err(|error| format!("prompt genomes serialization failed: {error}"))?;
     let mut store = state
         .store
         .lock()
@@ -21617,10 +21768,20 @@ fn append_prompt_pairwise_observation(
         metadata_with_context(
             [
                 ("background_evaluation".to_string(), "true".to_string()),
-                ("evaluation_id".to_string(), observation.evaluation_id.clone()),
+                (
+                    "evaluation_id".to_string(),
+                    observations[0].evaluation_id.clone(),
+                ),
                 ("prompt_effort".to_string(), effort.to_string()),
-                ("prompt_profile".to_string(), observation.profile_id.clone()),
-                ("prompt_genome".to_string(), encoded_genome),
+                (
+                    "prompt_profile_a".to_string(),
+                    observations[0].profile_id.clone(),
+                ),
+                (
+                    "prompt_profile_b".to_string(),
+                    observations[1].profile_id.clone(),
+                ),
+                ("prompt_genomes".to_string(), encoded_genomes),
                 (
                     "evaluation_mode".to_string(),
                     match mode {
@@ -21632,7 +21793,7 @@ fn append_prompt_pairwise_observation(
                     }
                     .to_string(),
                 ),
-                ("prompt_observation".to_string(), encoded_observation),
+                ("prompt_observations".to_string(), encoded_observations),
             ]
             .into_iter()
             .collect(),
@@ -21681,17 +21842,10 @@ fn prompt_genomes_from_events(
 ) -> Vec<ConductorPromptGenome> {
     let mut population = initial_prompt_population(effort);
     for event in events {
-        if event.metadata.get("prompt_effort").map(String::as_str) != Some(effort) {
-            continue;
-        }
-        let Some(encoded) = event.metadata.get("prompt_genome") else {
-            continue;
-        };
-        let Ok(genome) = serde_json::from_str::<ConductorPromptGenome>(encoded) else {
-            continue;
-        };
-        if genome.validate().is_ok() {
-            population.push(genome);
+        for record in prompt_genome_records_from_event(event) {
+            if record.effort == effort {
+                population.push(record.genome);
+            }
         }
     }
     let mut ids = BTreeSet::new();
@@ -21839,16 +21993,10 @@ fn prompt_evolution_observations_from_events(
             ))
         })
         .collect::<Vec<_>>();
-    runs.extend(events.iter().filter_map(|event| {
-        if event.summary != "Conductor pairwise evaluation" {
-            return None;
-        }
-        let effort = event.metadata.get("prompt_effort")?.clone();
-        let observation = event
-            .metadata
-            .get("prompt_observation")
-            .and_then(|encoded| serde_json::from_str::<PromptEvolutionObservation>(encoded).ok())?;
-        Some((event.sequence, effort, observation))
+    runs.extend(events.iter().flat_map(|event| {
+        prompt_observation_records_from_event(event)
+            .into_iter()
+            .map(|(effort, observation)| (event.sequence, effort, observation))
     }));
     runs.sort_by_key(|(sequence, _, _)| *sequence);
     runs.into_iter()
@@ -21856,14 +22004,111 @@ fn prompt_evolution_observations_from_events(
         .collect()
 }
 
-fn prompt_genome_record_from_event(event: &Event) -> Option<PromptGenomeRecord> {
+fn prompt_genome_records_from_event(event: &Event) -> Vec<PromptGenomeRecord> {
+    let Some(effort) = event.metadata.get("prompt_effort").cloned() else {
+        return Vec::new();
+    };
+    let genomes = event
+        .metadata
+        .get("prompt_genomes")
+        .and_then(|encoded| serde_json::from_str::<Vec<ConductorPromptGenome>>(encoded).ok())
+        .or_else(|| {
+            event
+                .metadata
+                .get("prompt_genome")
+                .and_then(|encoded| serde_json::from_str::<ConductorPromptGenome>(encoded).ok())
+                .map(|genome| vec![genome])
+        })
+        .unwrap_or_default();
+    genomes
+        .into_iter()
+        .filter(|genome| genome.validate().is_ok())
+        .map(|genome| PromptGenomeRecord {
+            effort: effort.clone(),
+            genome,
+        })
+        .collect()
+}
+
+fn prompt_observation_records_from_event(
+    event: &Event,
+) -> Vec<(String, PromptEvolutionObservation)> {
+    if event.summary != "Conductor pairwise evaluation" {
+        return Vec::new();
+    }
+    let Some(effort) = event.metadata.get("prompt_effort").cloned() else {
+        return Vec::new();
+    };
+    let observations = event
+        .metadata
+        .get("prompt_observations")
+        .and_then(|encoded| serde_json::from_str::<Vec<PromptEvolutionObservation>>(encoded).ok())
+        .or_else(|| {
+            event
+                .metadata
+                .get("prompt_observation")
+                .and_then(|encoded| {
+                    serde_json::from_str::<PromptEvolutionObservation>(encoded).ok()
+                })
+                .map(|observation| vec![observation])
+        })
+        .unwrap_or_default();
+    observations
+        .into_iter()
+        .map(|observation| (effort.clone(), observation))
+        .collect()
+}
+
+fn prompt_rollout_record_from_event(event: &Event) -> Option<(String, PromptRolloutState)> {
+    if event.summary != "Conductor prompt rollout updated" {
+        return None;
+    }
     let effort = event.metadata.get("prompt_effort")?.clone();
-    let genome = serde_json::from_str::<ConductorPromptGenome>(
-        event.metadata.get("prompt_genome")?,
-    )
-    .ok()?;
-    genome.validate().ok()?;
-    Some(PromptGenomeRecord { effort, genome })
+    let stable_profile_id = event.metadata.get("stable_profile")?.clone();
+    if effort.trim().is_empty() || stable_profile_id.trim().is_empty() {
+        return None;
+    }
+    let optional_text = |key: &str| {
+        event
+            .metadata
+            .get(key)
+            .filter(|value| !value.trim().is_empty())
+            .cloned()
+    };
+    let parse_usize = |key: &str| {
+        event
+            .metadata
+            .get(key)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or_default()
+    };
+    Some((
+        effort,
+        PromptRolloutState {
+            stable_profile_id,
+            canary_profile_id: optional_text("canary_profile"),
+            canary_percent: event
+                .metadata
+                .get("canary_percent")
+                .and_then(|value| value.parse::<u8>().ok())
+                .unwrap_or_default()
+                .min(100),
+            evidence_checkpoint: parse_usize("evidence_checkpoint"),
+            live_checkpoint: parse_usize("live_checkpoint"),
+            rollback_count: parse_usize("rollback_count"),
+            status: event
+                .metadata
+                .get("rollout_status")
+                .cloned()
+                .unwrap_or_else(|| "stable".to_string()),
+            last_reason: optional_text("rollout_reason"),
+            promotion_confidence: event
+                .metadata
+                .get("promotion_confidence")
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite()),
+        },
+    ))
 }
 
 fn upsert_prompt_genome(
@@ -21901,9 +22146,13 @@ fn build_prompt_evolution_read_model(
     event_count: u64,
 ) -> PromptEvolutionReadModel {
     let mut genomes = Vec::new();
+    let mut rollouts = BTreeMap::new();
     for event in events {
-        if let Some(record) = prompt_genome_record_from_event(event) {
+        for record in prompt_genome_records_from_event(event) {
             upsert_prompt_genome(&mut genomes, record);
+        }
+        if let Some((effort, rollout)) = prompt_rollout_record_from_event(event) {
+            rollouts.insert(effort, rollout);
         }
     }
     PromptEvolutionReadModel {
@@ -21912,7 +22161,7 @@ fn build_prompt_evolution_read_model(
         event_count,
         genomes,
         observations: prompt_evolution_observations_from_events(events),
-        rollouts: BTreeMap::new(),
+        rollouts,
     }
 }
 
@@ -21960,25 +22209,14 @@ fn load_prompt_evolution_read_model(
         );
     } else {
         for event in &delta {
-            if let Some(record) = prompt_genome_record_from_event(event) {
+            for record in prompt_genome_records_from_event(event) {
                 upsert_prompt_genome(&mut model.genomes, record);
             }
-            if event.summary == "Conductor pairwise evaluation" {
-                if let (Some(effort), Some(observation)) = (
-                    event.metadata.get("prompt_effort"),
-                    event
-                        .metadata
-                        .get("prompt_observation")
-                        .and_then(|encoded| {
-                            serde_json::from_str::<PromptEvolutionObservation>(encoded).ok()
-                        }),
-                ) {
-                    upsert_prompt_observation(
-                        &mut model.observations,
-                        effort.clone(),
-                        observation,
-                    );
-                }
+            if let Some((effort, rollout)) = prompt_rollout_record_from_event(event) {
+                model.rollouts.insert(effort, rollout);
+            }
+            for (effort, observation) in prompt_observation_records_from_event(event) {
+                upsert_prompt_observation(&mut model.observations, effort, observation);
             }
         }
         let terminal_scopes = delta
@@ -22697,6 +22935,14 @@ fn prompt_evolution_evaluation_for_run(
                             .promotion_confidence
                             .map(|value| format!("{value:.4}"))
                             .unwrap_or_default(),
+                    ),
+                    (
+                        "evidence_checkpoint".to_string(),
+                        rollout.evidence_checkpoint.to_string(),
+                    ),
+                    (
+                        "live_checkpoint".to_string(),
+                        rollout.live_checkpoint.to_string(),
                     ),
                     (
                         "rollback_count".to_string(),
@@ -25956,6 +26202,73 @@ mod tests {
     }
 
     #[test]
+    fn prompt_evolution_read_model_restores_an_atomic_observation_pair() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let genome_a = ConductorPromptGenome::seed_for_effort("auto");
+        let genome_b = ConductorPromptGenome {
+            id: "atomic-challenger".to_string(),
+            ..genome_a.clone()
+        };
+        let observation_a = PromptEvolutionObservation {
+            profile_id: genome_a.id.clone(),
+            evaluation_id: "atomic-pair".to_string(),
+            case_id: "atomic-case".to_string(),
+            opponent_profile_id: Some(genome_b.id.clone()),
+            task_class: "coding".to_string(),
+            split: PromptEvaluationSplit::Holdout,
+            mode: PromptEvaluationMode::ReplayExecution,
+            format_valid: true,
+            succeeded: true,
+            quality_score: 0.8,
+            latency_ms: 100,
+            total_tokens: 200,
+            estimated_cost_microusd: 0,
+            safety_violations: 0,
+            relative_reward: Some(0.2),
+            step_credits: Vec::new(),
+            reflection_packet: None,
+        };
+        let observation_b = PromptEvolutionObservation {
+            profile_id: genome_b.id.clone(),
+            opponent_profile_id: Some(genome_a.id.clone()),
+            quality_score: 0.6,
+            relative_reward: Some(-0.2),
+            ..observation_a.clone()
+        };
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Conductor pairwise evaluation",
+            [
+                ("prompt_effort".to_string(), "auto".to_string()),
+                (
+                    "prompt_genomes".to_string(),
+                    serde_json::to_string(&[&genome_a, &genome_b])
+                        .expect("genomes should serialize"),
+                ),
+                (
+                    "prompt_observations".to_string(),
+                    serde_json::to_string(&[&observation_a, &observation_b])
+                        .expect("observations should serialize"),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        )
+        .expect("atomic pair should append");
+
+        let model = load_prompt_evolution_read_model(&mut store)
+            .expect("atomic pair should rebuild");
+        assert_eq!(model.genomes.len(), 2);
+        assert_eq!(model.observations.len(), 2);
+        assert!(model.observations.iter().all(|(_, observation)| {
+            observation.evaluation_id == "atomic-pair"
+                && observation.mode == PromptEvaluationMode::ReplayExecution
+        }));
+    }
+
+    #[test]
     fn prompt_evolution_evidence_counts_ignore_legacy_plan_only_modes() {
         let profile_id = "seed-auto-v1";
         let observation = |evaluation_id: &str, mode: PromptEvaluationMode| {
@@ -26090,6 +26403,49 @@ mod tests {
         assert!(rolled_back.canary_profile_id.is_none());
         assert_eq!(rolled_back.rollback_count, 1);
         assert_eq!(rolled_back.stable_profile_id, stable.id);
+    }
+
+    #[test]
+    fn prompt_rollout_rebuilds_from_durable_events() {
+        let event = Event {
+            id: EventId("rollout-update".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 7,
+            timestamp_ms: 70,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Conductor prompt rollout updated".to_string(),
+            metadata: [
+                ("prompt_effort".to_string(), "auto".to_string()),
+                ("stable_profile".to_string(), "stable-auto".to_string()),
+                ("canary_profile".to_string(), "candidate-auto".to_string()),
+                ("canary_percent".to_string(), "25".to_string()),
+                ("rollout_status".to_string(), "canary".to_string()),
+                (
+                    "rollout_reason".to_string(),
+                    "canary_stage_advanced".to_string(),
+                ),
+                ("promotion_confidence".to_string(), "0.61".to_string()),
+                ("evidence_checkpoint".to_string(), "8".to_string()),
+                ("live_checkpoint".to_string(), "3".to_string()),
+                ("rollback_count".to_string(), "2".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let model = build_prompt_evolution_read_model(&[event], 7, 1);
+        let rollout = model
+            .rollouts
+            .get("auto")
+            .expect("durable rollout should rebuild");
+
+        assert_eq!(rollout.stable_profile_id, "stable-auto");
+        assert_eq!(rollout.canary_profile_id.as_deref(), Some("candidate-auto"));
+        assert_eq!(rollout.canary_percent, 25);
+        assert_eq!(rollout.evidence_checkpoint, 8);
+        assert_eq!(rollout.live_checkpoint, 3);
+        assert_eq!(rollout.rollback_count, 2);
+        assert_eq!(rollout.promotion_confidence, Some(0.61));
     }
 
     #[test]
@@ -28129,6 +28485,42 @@ mod tests {
             .iter()
             .any(|case| case.split == PromptEvaluationSplit::Holdout));
         assert!(!first.iter().any(|case| case.objective == "Incomplete run"));
+
+        let split_manifest = first
+            .iter()
+            .map(|case| (case.id.clone(), case.split))
+            .collect::<BTreeMap<_, _>>();
+        events.push(Event {
+            id: EventId("offline-split-snapshot".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 11,
+            timestamp_ms: 110,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Conductor offline dataset selected".to_string(),
+            metadata: [
+                ("project_id".to_string(), "project-a".to_string()),
+                (
+                    "dataset_split_manifest".to_string(),
+                    serde_json::to_string(&split_manifest).unwrap(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        });
+        events.extend(run_events(12, "d", "project-a", "Check recovery checkpoints", true));
+        events.extend(run_events(14, "e", "project-a", "Review quality gates", true));
+
+        let grown = prompt_offline_dataset(&events, "project-a");
+        for original in &first {
+            assert_eq!(
+                grown
+                    .iter()
+                    .find(|case| case.id == original.id)
+                    .map(|case| case.split),
+                Some(original.split),
+                "existing offline split must not drift as the dataset grows"
+            );
+        }
     }
 
     #[test]
@@ -28181,6 +28573,49 @@ mod tests {
         assert_eq!(model.genomes.len(), 1);
         assert_eq!(model.observations.len(), 1);
         assert!(model.observations[0].1.format_valid);
+    }
+
+    #[test]
+    fn bidirectional_pairwise_judging_normalizes_position_and_merges_feedback() {
+        let feedback = |summary: &str, change: &str| ActionableSideInformation {
+            summary: summary.to_string(),
+            suggested_changes: vec![change.to_string()],
+            ..ActionableSideInformation::default()
+        };
+        let forward = PromptPairwiseEvaluationPayload {
+            score_a: 0.8,
+            score_b: 0.4,
+            safety_violations_a: 0,
+            safety_violations_b: 1,
+            step_scores_a: [("inspect".to_string(), 0.8)].into_iter().collect(),
+            step_scores_b: [("inspect".to_string(), 0.4)].into_iter().collect(),
+            feedback_a: feedback("forward A", "preserve evidence"),
+            feedback_b: feedback("forward B", "fix verification"),
+        };
+        let reverse = PromptPairwiseEvaluationPayload {
+            score_a: 0.2,
+            score_b: 0.6,
+            safety_violations_a: 0,
+            safety_violations_b: 2,
+            step_scores_a: [("inspect".to_string(), 0.2)].into_iter().collect(),
+            step_scores_b: [("inspect".to_string(), 0.6)].into_iter().collect(),
+            feedback_a: feedback("reverse B", "fix verification"),
+            feedback_b: feedback("reverse A", "reduce unsupported claims"),
+        };
+
+        let aggregate = aggregate_prompt_pairwise_payloads(
+            forward,
+            reverse_prompt_pairwise_payload(reverse),
+        );
+
+        assert!((aggregate.score_a - 0.7).abs() < f64::EPSILON * 8.0);
+        assert!((aggregate.score_b - 0.3).abs() < f64::EPSILON * 8.0);
+        assert_eq!(aggregate.safety_violations_a, 2);
+        assert_eq!(aggregate.safety_violations_b, 1);
+        assert_eq!(aggregate.step_scores_a.get("inspect"), Some(&0.7));
+        assert!(aggregate.feedback_a.summary.contains("forward A"));
+        assert!(aggregate.feedback_a.summary.contains("reverse A"));
+        assert_eq!(aggregate.feedback_b.suggested_changes.len(), 1);
     }
 
     #[test]
