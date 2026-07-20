@@ -230,6 +230,23 @@ impl SqliteStore {
         )
     }
 
+    pub fn with_read_snapshot<T>(
+        &self,
+        operation: impl FnOnce(&Self) -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
+        self.exec_batch("begin deferred transaction;")?;
+        match operation(self) {
+            Ok(value) => {
+                self.exec_batch("commit;")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.exec_batch("rollback;");
+                Err(error)
+            }
+        }
+    }
+
     pub fn next_sequence(&self, task_id: &TaskId) -> Result<u64, StorageError> {
         let mut statement =
             self.prepare("select coalesce(max(sequence), 0) + 1 from events where task_id = ?1")?;
@@ -1688,6 +1705,74 @@ mod tests {
                 .len(),
             2
         );
+        drop(reader);
+        drop(writer);
+        fs::remove_file(path).expect("temporary database should be removed");
+    }
+
+    #[test]
+    fn read_snapshot_stays_consistent_while_writer_appends() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "cindx-agent-storage-read-snapshot-{}-{unique}.sqlite3",
+            std::process::id()
+        ));
+        let task_id = TaskId("task-read-snapshot".to_string());
+        let mut writer = SqliteStore::open(&path).expect("store should open");
+        writer
+            .append(Event {
+                id: EventId("event-before-snapshot".to_string()),
+                task_id: task_id.clone(),
+                sequence: 1,
+                timestamp_ms: 100,
+                kind: EventKind::MessageAdded,
+                summary: "before snapshot".to_string(),
+                metadata: Metadata::new(),
+            })
+            .expect("initial event should append");
+
+        let reader = SqliteStore::open_read_only(&path).expect("read-only store should open");
+        reader
+            .with_read_snapshot(|snapshot| {
+                assert_eq!(
+                    snapshot
+                        .list_by_task(&task_id)
+                        .expect("snapshot events should load")
+                        .len(),
+                    1
+                );
+                writer
+                    .append(Event {
+                        id: EventId("event-during-snapshot".to_string()),
+                        task_id: task_id.clone(),
+                        sequence: 2,
+                        timestamp_ms: 200,
+                        kind: EventKind::MessageAdded,
+                        summary: "during snapshot".to_string(),
+                        metadata: Metadata::new(),
+                    })
+                    .expect("writer should append during read snapshot");
+                assert_eq!(
+                    snapshot
+                        .list_by_task(&task_id)
+                        .expect("snapshot should remain stable")
+                        .len(),
+                    1
+                );
+                Ok(())
+            })
+            .expect("read snapshot should complete");
+        assert_eq!(
+            reader
+                .list_by_task(&task_id)
+                .expect("reader should advance after snapshot")
+                .len(),
+            2
+        );
+
         drop(reader);
         drop(writer);
         fs::remove_file(path).expect("temporary database should be removed");
