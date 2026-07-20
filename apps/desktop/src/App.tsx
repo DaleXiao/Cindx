@@ -719,6 +719,7 @@ export function App() {
   const sessionRefreshRequestRef = useRef(0);
   const trackedSessionTaskIdsRef = useRef<Set<string>>(new Set());
   const optimisticUserMessagesRef = useRef<Map<string, ChatMessageView>>(new Map());
+  const [optimisticUserMessageRevision, setOptimisticUserMessageRevision] = useState(0);
   const optimisticQueuedMessagesRef = useRef<Map<string, QueuedAgentMessage>>(new Map());
   const optimisticallyDeletedQueuedMessagesRef = useRef<Map<string, string>>(new Map());
   const steeredQueuedMessageIdsRef = useRef<Set<string>>(new Set());
@@ -1489,7 +1490,12 @@ export function App() {
               : undefined
           )
         : [],
-    [activeAgentState?.messages, activeSession, activeView]
+    [
+      activeAgentState?.messages,
+      activeSession,
+      activeView,
+      optimisticUserMessageRevision
+    ]
   );
   const selectedTraceStep = useMemo(
     () => traceSteps.find((step) => step.id === selectedTraceStepId) ?? null,
@@ -1588,6 +1594,7 @@ export function App() {
     const optimistic = optimisticUserMessagesRef.current.get(sessionId);
     if (optimistic && containsOptimisticUserMessage(messages, optimistic)) {
       optimisticUserMessagesRef.current.delete(sessionId);
+      setOptimisticUserMessageRevision((revision) => revision + 1);
     }
   }
 
@@ -2903,6 +2910,7 @@ export function App() {
       attachments
     };
     optimisticUserMessagesRef.current.set(sessionId, optimisticUserMessage);
+    setOptimisticUserMessageRevision((revision) => revision + 1);
     const runBudget = runBudgetForEffort(agentEffort);
     setAgentState((current) => {
       if (!current) return current;
