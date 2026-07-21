@@ -6,40 +6,40 @@ use agent_core::{
 use agent_graph::{
     extract_graph_from_chunk, graph_direct_recall, graph_walk_recall, FileGraphStore, GraphStore,
 };
+use agent_mcp::{McpCatalogService, McpServerConfig, McpTransportConfig};
 use agent_memory::{
     build_restore_context_pack, build_session_checkpoint_at, conversation_memory_to_markdown,
     extract_durable_memories, fuse_memory_recalls_at, memory_recalls_to_markdown,
-    merge_memory_records, recall_memories_at, record_memory_observed_uses,
-    record_memory_recalls, CheckpointOptions, MemoryKind, MemoryLedger, RestoreContextPack,
-    SessionCheckpoint, MEMORY_LEDGER_SCHEMA,
+    merge_memory_records, recall_memories_at, record_memory_observed_uses, record_memory_recalls,
+    CheckpointOptions, MemoryKind, MemoryLedger, RestoreContextPack, SessionCheckpoint,
+    MEMORY_LEDGER_SCHEMA,
 };
-use agent_mcp::{McpCatalogService, McpServerConfig, McpTransportConfig};
 use agent_rag::{
     apply_embeddings_to_index_cancellable, build_grounded_answer_prompt,
     export_lancedb_records_jsonl, index_workspace, index_workspace_cancellable,
     lancedb_index_exists, local_query_embedding, replace_lancedb_index, search_chunks_literal,
-    search_lancedb_index, EmbeddingBatch, FileRagAdapter,
-    IndexOptions, workspace_index_is_fresh, RagAdapter, RagChunk, RagEmbedder, RagError,
-    RagIndex, RagIndexStats, RagSearchResult, RAG_INDEX_CANCELLED,
+    search_lancedb_index, workspace_index_is_fresh, EmbeddingBatch, FileRagAdapter, IndexOptions,
+    RagAdapter, RagChunk, RagEmbedder, RagError, RagIndex, RagIndexStats, RagSearchResult,
+    RAG_INDEX_CANCELLED,
+};
+use agent_runtime::{
+    advance_with_model_response, append_internal_instruction, append_steering_instruction,
+    append_tool_observation, bounded_max_output_tokens, completion_verification_instruction,
+    compose_agent_system_prompt, evidence_worker_tools, model_request_for_turn_with_context_budget,
+    observation_from_tool_result, record_tool_outcome, record_tool_outcome_with_risk,
+    repeated_tool_failure_count, resume_agent_loop_from_messages, sanitize_assistant_content,
+    start_agent_loop, start_agent_loop_with_history, tool_invocation_from_request, AgentAdvance,
+    AgentRunControl, AgentRuntimeConfig, RunBudget, RunControlSnapshot, RunStopReason,
+    DEFAULT_COLLABORATION_WORKER_TURNS, MAX_COLLABORATION_WORKER_TOOL_CALLS,
+    MAX_IDENTICAL_TOOL_FAILURES,
 };
 use agent_skills::{
     install_skill_archive as install_skill_archive_package, SkillCatalog, SkillPreference,
     SkillRecord,
 };
-use agent_runtime::{
-    advance_with_model_response, append_internal_instruction, append_steering_instruction,
-    append_tool_observation,
-    bounded_max_output_tokens, completion_verification_instruction,
-    compose_agent_system_prompt, evidence_worker_tools,
-    model_request_for_turn_with_context_budget, observation_from_tool_result,
-    record_tool_outcome, record_tool_outcome_with_risk, repeated_tool_failure_count,
-    resume_agent_loop_from_messages, start_agent_loop, start_agent_loop_with_history,
-    sanitize_assistant_content, tool_invocation_from_request, AgentAdvance, AgentRunControl,
-    AgentRuntimeConfig, RunBudget, RunControlSnapshot, RunStopReason,
-    DEFAULT_COLLABORATION_WORKER_TURNS, MAX_COLLABORATION_WORKER_TOOL_CALLS,
-    MAX_IDENTICAL_TOOL_FAILURES,
+use agent_storage::{
+    EventStore, PermissionAuditRecord, PermissionStore, SqliteStore, StorageError,
 };
-use agent_storage::{EventStore, PermissionAuditRecord, PermissionStore, SqliteStore, StorageError};
 use base64::Engine;
 use model_provider::{
     EmbeddingRequest, ModelCallMode, ModelRequest, OpenAiCompatibleConfig,
@@ -48,26 +48,26 @@ use model_provider::{
 };
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindow, NSWindowButton};
+#[cfg(test)]
+use orchestrator::AgentEvaluationVerifier;
 use orchestrator::{
     adaptive_worker_prompt, adaptive_workflow_layers, adaptive_workflow_step_budget, default_plan,
     evaluate_prompt_convergence, parse_policy, prompt_promotion_confidence,
-    prompt_reflection_packets, role_label, sha256_hex, step_prompt,
-    ActionableSideInformation, AgentEvaluationCaseScore, AgentEvaluationCheck,
-    AgentEvaluationEvidenceSource, AgentEvaluationReflectionPacket, AgentEvaluationSplit,
-    AgentEvaluationToolTrace, AgentEvaluationTrace, AgentEvaluationTraceStep,
-    AgentEvaluationVerifierOutcome, ConductorHarness, ConductorPromptGenome, ConductorRequest,
-    ConductorRoleHints, LearnedModelRouter, ModelCandidate, OrchestrationPolicy,
-    PromptEvaluationMode, PromptEvaluationSplit, PromptEvolutionObservation,
-    PromptInstanceParetoArchive, PromptParetoArchive, PromptPromotionConfidence, PromptRetryPolicy,
-    PromptStepCredit, PromptVerification, RoutingContext, RoutingDecision, RoutingOutcome,
-    RoutingTelemetry, RuleBasedRouter, TaskClass, WorkflowBudget, WorkflowExecutionCheckpoint,
+    prompt_reflection_packets, role_label, sha256_hex, step_prompt, ActionableSideInformation,
+    AgentEvaluationCaseScore, AgentEvaluationCheck, AgentEvaluationEvidenceSource,
+    AgentEvaluationReflectionPacket, AgentEvaluationSplit, AgentEvaluationToolTrace,
+    AgentEvaluationTrace, AgentEvaluationTraceStep, AgentEvaluationVerifierOutcome,
+    ConductorHarness, ConductorPromptGenome, ConductorRequest, ConductorRoleHints,
+    LearnedModelRouter, ModelCandidate, OrchestrationPolicy, PromptEvaluationMode,
+    PromptEvaluationSplit, PromptEvolutionObservation, PromptInstanceParetoArchive,
+    PromptParetoArchive, PromptPromotionConfidence, PromptRetryPolicy, PromptStepCredit,
+    PromptVerification, RoutingContext, RoutingDecision, RoutingOutcome, RoutingTelemetry,
+    RuleBasedRouter, TaskClass, WorkflowBudget, WorkflowExecutionCheckpoint,
     WorkflowExecutionTelemetry, WorkflowPlanIr, WorkflowSearchTeacher, WorkflowStepStatus,
     WorkflowToolPolicy, WorkflowTopologyPrior, AGENT_EVALUATION_TRACE_SCHEMA,
     CONDUCTOR_MAX_ATTEMPTS, MAX_ADAPTIVE_WORKFLOW_AGENTS, WORKFLOW_CHECKPOINT_SCHEMA,
     WORKFLOW_IR_SCHEMA,
 };
-#[cfg(test)]
-use orchestrator::AgentEvaluationVerifier;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,11 +100,15 @@ use agent_application::{
     project_session_lifecycle, AgentOutputArtifact as AgentOutputArtifactView,
     SessionLifecycleInput, SessionTitleState,
 };
+use agent_loop_service::{
+    exhausted_model_transport_stop_reason, is_transient_model_transport_error,
+    model_response_checkpoint_evidence, ModelStreamProgress,
+};
 use collaboration_service::{
     adaptive_model_role, adaptive_stage_metadata, build_collaboration_arbiter_prompt,
     build_collaboration_candidate_prompt, collaboration_agent_budget,
-    collaboration_context_for_genome, collaboration_fallback_models,
-    collaboration_recent_context, collaboration_recovery_evidence, collaboration_step_result,
+    collaboration_context_for_genome, collaboration_fallback_models, collaboration_recent_context,
+    collaboration_recovery_evidence, collaboration_step_result,
     collaboration_worker_runtime_turn_limit, effective_workflow_model_turn_budget,
     effective_workflow_step_attempt_budget, merge_collaboration_evidence,
     prepare_collaboration_worker_turn, truncate_for_collaboration, workflow_role_coverage,
@@ -112,22 +116,16 @@ use collaboration_service::{
     WORKFLOW_RESUMABLE_ERROR_PREFIX,
 };
 use parallel_execution::{run_model_jobs_ordered, ParallelJob};
-use agent_loop_service::{
-    exhausted_model_transport_stop_reason, is_transient_model_transport_error,
-    model_response_checkpoint_evidence, ModelStreamProgress,
-};
 use permission_service::{
-    agent_session_permission_granted, pending_agent_permissions_for_run,
-    permission_decision_label, permission_decision_past_tense, permission_risk_label,
+    agent_session_permission_granted, pending_agent_permissions_for_run, permission_decision_label,
+    permission_decision_past_tense, permission_risk_label,
 };
 use queue_service::{
     apply_queue_event, is_agent_queue_event, pending_queued_agent_messages,
     PendingQueuedAgentMessage, QueuedAgentMessageActionReceipt, QueuedAgentMessagePayload,
     QueuedAgentMessageReceipt, QueuedAgentMessageView,
 };
-use run_lifecycle::{
-    AgentRunEvent, AgentRunStatus, ExclusiveKeyLease, RegisteredRunControl,
-};
+use run_lifecycle::{AgentRunEvent, AgentRunStatus, ExclusiveKeyLease, RegisteredRunControl};
 use schedule::{
     initial_next_run_at_ms, next_occurrence_after_ms, normalized_weekly_days,
     timestamp_ms_from_local, ScheduleCadence, ScheduleConfig, ScheduleRecord, ScheduleRunRecord,
@@ -735,18 +733,18 @@ impl ProjectSessionConfig {
             *self = Self::default_for_root(fallback_root);
             return;
         }
-        if !self.projects.iter().any(|project| project.id == self.active_project_id) {
+        if !self
+            .projects
+            .iter()
+            .any(|project| project.id == self.active_project_id)
+        {
             self.active_project_id = self.projects[0].id.clone();
         }
-        if !self
-            .sessions
-            .iter()
-            .any(|session| {
-                session.project_id == self.active_project_id
-                    && session.archived_at_ms.is_none()
-                    && !is_schedule_execution_session(session)
-            })
-        {
+        if !self.sessions.iter().any(|session| {
+            session.project_id == self.active_project_id
+                && session.archived_at_ms.is_none()
+                && !is_schedule_execution_session(session)
+        }) {
             let now = current_time_millis();
             let session_id = new_session_id();
             self.sessions.push(SessionRecord {
@@ -762,15 +760,11 @@ impl ProjectSessionConfig {
                 archived_at_ms: None,
             });
         }
-        if !self
-            .sessions
-            .iter()
-            .any(|session| {
-                session.id == self.active_session_id
-                    && session.archived_at_ms.is_none()
-                    && !is_schedule_execution_session(session)
-            })
-        {
+        if !self.sessions.iter().any(|session| {
+            session.id == self.active_session_id
+                && session.archived_at_ms.is_none()
+                && !is_schedule_execution_session(session)
+        }) {
             self.active_session_id = self
                 .sessions
                 .iter()
@@ -780,12 +774,9 @@ impl ProjectSessionConfig {
                         && !is_schedule_execution_session(session)
                 })
                 .or_else(|| {
-                    self.sessions
-                        .iter()
-                        .find(|session| {
-                            session.archived_at_ms.is_none()
-                                && !is_schedule_execution_session(session)
-                        })
+                    self.sessions.iter().find(|session| {
+                        session.archived_at_ms.is_none() && !is_schedule_execution_session(session)
+                    })
                 })
                 .map(|session| session.id.clone())
                 .unwrap_or_default();
@@ -2023,9 +2014,7 @@ fn save_web_search_config(
     input: WebSearchConfigInput,
 ) -> Result<WebSearchConfigState, String> {
     let endpoint = normalized_config_value(&input.endpoint);
-    if !(endpoint.is_empty()
-        || endpoint.starts_with("https://")
-        || endpoint.starts_with("http://"))
+    if !(endpoint.is_empty() || endpoint.starts_with("https://") || endpoint.starts_with("http://"))
     {
         return Err("web search endpoint must start with http:// or https://".to_string());
     }
@@ -2189,7 +2178,10 @@ fn mcp_state_view(catalog: &McpCatalogService, last_error: Option<String>) -> Mc
             }
         })
         .collect();
-    McpStateView { servers, last_error }
+    McpStateView {
+        servers,
+        last_error,
+    }
 }
 
 #[tauri::command]
@@ -2291,10 +2283,7 @@ fn install_skill_url(
 }
 
 fn decode_data_url(value: &str) -> Result<Vec<u8>, String> {
-    let encoded = value
-        .split_once(',')
-        .map(|(_, data)| data)
-        .unwrap_or(value);
+    let encoded = value.split_once(',').map(|(_, data)| data).unwrap_or(value);
     if encoded.len() > 70 * 1024 * 1024 {
         return Err("skill data exceeds the 50 MB limit".to_string());
     }
@@ -2681,14 +2670,22 @@ fn validate_schedule_target(
         .lock()
         .map_err(|error| format!("project session config lock poisoned: {error}"))?;
     if let Some(project_id) = project_id {
-        if !config.projects.iter().any(|project| project.id == project_id) {
+        if !config
+            .projects
+            .iter()
+            .any(|project| project.id == project_id)
+        {
             return Err("schedule project not found".to_string());
         }
     }
     if let Some(session_id) = session_id {
-        let project_id = project_id
-            .ok_or_else(|| "choose a project before linking a task".to_string())?;
-        let Some(session) = config.sessions.iter().find(|session| session.id == session_id) else {
+        let project_id =
+            project_id.ok_or_else(|| "choose a project before linking a task".to_string())?;
+        let Some(session) = config
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+        else {
             return Err("schedule session not found".to_string());
         };
         if session.project_id != project_id {
@@ -3181,7 +3178,10 @@ fn poll_schedules(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
             if !schedule.enabled || schedule.active_run().is_some() {
                 continue;
             }
-            if schedule.ends_at_ms.is_some_and(|ends_at_ms| now > ends_at_ms) {
+            if schedule
+                .ends_at_ms
+                .is_some_and(|ends_at_ms| now > ends_at_ms)
+            {
                 schedule.enabled = false;
                 schedule.next_run_at_ms = None;
                 schedule.updated_at_ms = now;
@@ -3194,9 +3194,7 @@ fn poll_schedules(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
             if next_run_at_ms > now {
                 continue;
             }
-            if !schedule.catch_up
-                && now.saturating_sub(next_run_at_ms) > SCHEDULE_MISSED_GRACE_MS
-            {
+            if !schedule.catch_up && now.saturating_sub(next_run_at_ms) > SCHEDULE_MISSED_GRACE_MS {
                 schedule.push_run(ScheduleRunRecord {
                     id: unique_id("schedule-run"),
                     queue_id: None,
@@ -3251,7 +3249,10 @@ fn poll_schedules(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
         .lock()
         .map_err(|error| format!("schedule config lock poisoned: {error}"))?;
     for schedule in &config.schedules {
-        if schedule.active_run().is_some_and(|run| run.status == "queued") {
+        if schedule
+            .active_run()
+            .is_some_and(|run| run.status == "queued")
+        {
             sessions.insert(schedule.execution_session_id.clone());
         }
     }
@@ -3312,9 +3313,9 @@ fn dispatch_scheduled_session(app: &tauri::AppHandle, session_id: &str) -> Resul
             return Ok(());
         };
         if run.dispatch_attempts >= SCHEDULE_MAX_DISPATCH_ATTEMPTS
-            || run.last_dispatch_at_ms.is_some_and(|last| {
-                now.saturating_sub(last) < SCHEDULE_DISPATCH_RETRY_MS
-            })
+            || run
+                .last_dispatch_at_ms
+                .is_some_and(|last| now.saturating_sub(last) < SCHEDULE_DISPATCH_RETRY_MS)
         {
             return Ok(());
         }
@@ -3506,7 +3507,11 @@ fn create_session(
         .project_id
         .filter(|id| !id.trim().is_empty())
         .unwrap_or_else(|| config.active_project_id.clone());
-    if !config.projects.iter().any(|project| project.id == project_id) {
+    if !config
+        .projects
+        .iter()
+        .any(|project| project.id == project_id)
+    {
         return Ok(project_session_state(
             &config,
             Some("project not found for session".to_string()),
@@ -3605,8 +3610,7 @@ fn delete_project(
 
         if let Some(active_project) = config.active_project() {
             workspace_config.root = PathBuf::from(&active_project.root);
-            save_workspace_config_to_disk(&workspace_config)
-                .map_err(|error| error.to_string())?;
+            save_workspace_config_to_disk(&workspace_config).map_err(|error| error.to_string())?;
         }
 
         save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
@@ -3807,25 +3811,26 @@ async fn generate_session_title(
             .project_session_config
             .lock()
             .map_err(|error| format!("project session config lock poisoned: {error}"))?;
-        let project_id = {
-            let Some(session) = config.sessions.iter_mut().find(|session| {
-                session.id == input.session_id && session.archived_at_ms.is_none()
-            }) else {
-                return Ok(project_session_state(&config, None));
-            };
-            if !can_apply_generated_session_title(
-                &session.name,
-                session.updated_at_ms,
-                &fallback_title,
-                expected_updated_at_ms,
-            ) || session.title_state != SessionTitleState::Automatic
+        let project_id =
             {
-                return Ok(project_session_state(&config, None));
-            }
-            session.name = title;
-            session.updated_at_ms = now;
-            session.project_id.clone()
-        };
+                let Some(session) = config.sessions.iter_mut().find(|session| {
+                    session.id == input.session_id && session.archived_at_ms.is_none()
+                }) else {
+                    return Ok(project_session_state(&config, None));
+                };
+                if !can_apply_generated_session_title(
+                    &session.name,
+                    session.updated_at_ms,
+                    &fallback_title,
+                    expected_updated_at_ms,
+                ) || session.title_state != SessionTitleState::Automatic
+                {
+                    return Ok(project_session_state(&config, None));
+                }
+                session.name = title;
+                session.updated_at_ms = now;
+                session.project_id.clone()
+            };
         if let Some(project) = config
             .projects
             .iter_mut()
@@ -4003,13 +4008,11 @@ fn archive_session(
     state: tauri::State<'_, AppState>,
     input: SessionActionInput,
 ) -> Result<ProjectSessionState, String> {
-    let latest_sequence = open_app_read_store()
-        .ok()
-        .and_then(|store| {
-            load_agent_session_read_model_snapshot(&store, &input.session_id)
-                .ok()
-                .map(|snapshot| snapshot.revision)
-        });
+    let latest_sequence = open_app_read_store().ok().and_then(|store| {
+        load_agent_session_read_model_snapshot(&store, &input.session_id)
+            .ok()
+            .map(|snapshot| snapshot.revision)
+    });
     let mut config = state
         .project_session_config
         .lock()
@@ -4287,20 +4290,19 @@ fn select_project(
         .find(|project| project.id == input.project_id)
         .cloned()
     else {
-        return Ok(project_session_state(&config, Some("project not found".to_string())));
+        return Ok(project_session_state(
+            &config,
+            Some("project not found".to_string()),
+        ));
     };
     let root = validate_workspace_root(&project.root)?;
     config.active_project_id = project.id.clone();
-    if !config
-        .sessions
-        .iter()
-        .any(|session| {
-            session.id == config.active_session_id
-                && session.project_id == project.id
-                && session.archived_at_ms.is_none()
-                && !is_schedule_execution_session(session)
-        })
-    {
+    if !config.sessions.iter().any(|session| {
+        session.id == config.active_session_id
+            && session.project_id == project.id
+            && session.archived_at_ms.is_none()
+            && !is_schedule_execution_session(session)
+    }) {
         config.active_session_id = config
             .sessions
             .iter()
@@ -4354,7 +4356,10 @@ fn select_session(
         .find(|session| session.id == input.session_id && session.archived_at_ms.is_none())
         .cloned()
     else {
-        return Ok(project_session_state(&config, Some("session not found".to_string())));
+        return Ok(project_session_state(
+            &config,
+            Some("session not found".to_string()),
+        ));
     };
     let Some(project) = config
         .projects
@@ -4432,7 +4437,9 @@ fn pick_workspace_folder(initial_path: Option<String>) -> Result<Option<String>,
 }
 
 #[cfg(target_os = "macos")]
-fn show_native_workspace_folder_picker(initial_path: Option<&str>) -> Result<Option<String>, String> {
+fn show_native_workspace_folder_picker(
+    initial_path: Option<&str>,
+) -> Result<Option<String>, String> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
     use objc2_foundation::{NSString, NSURL};
@@ -4476,7 +4483,11 @@ fn runtime_status(state: &tauri::State<'_, AppState>) -> Result<RuntimeStatus, S
         .specs()
         .into_iter()
         .map(|spec| spec.name)
-        .chain(["rag.index", "rag.search", "rag.answer"].into_iter().map(str::to_string))
+        .chain(
+            ["rag.index", "rag.search", "rag.answer"]
+                .into_iter()
+                .map(str::to_string),
+        )
         .collect();
     status.registered_tools.sort();
     status.registered_tools.dedup();
@@ -4919,22 +4930,15 @@ async fn get_agent_state(
         store
             .with_read_snapshot(|snapshot| {
                 let model = load_agent_session_read_model_snapshot(snapshot, &session_id)?;
-                let history = snapshot
-                    .list_by_task_and_metadata_before_with_tool_metadata_limit(
-                        &phase16_task_id(),
-                        "session_id",
-                        &session_id,
-                        u64::MAX,
-                        AGENT_HISTORY_INITIAL_PAGE_SIZE,
-                        AGENT_HISTORY_MAX_TOOL_METADATA_BYTES,
-                    )?;
-                agent_state_from_read_model(
-                    snapshot,
-                    &model,
+                let history = snapshot.list_by_task_and_metadata_before_with_tool_metadata_limit(
+                    &phase16_task_id(),
+                    "session_id",
                     &session_id,
-                    &run_context,
-                    history,
-                )
+                    u64::MAX,
+                    AGENT_HISTORY_INITIAL_PAGE_SIZE,
+                    AGENT_HISTORY_MAX_TOOL_METADATA_BYTES,
+                )?;
+                agent_state_from_read_model(snapshot, &model, &session_id, &run_context, history)
             })
             .map_err(|error| error.to_string())
     })
@@ -4943,9 +4947,7 @@ async fn get_agent_state(
 }
 
 #[tauri::command]
-async fn get_agent_state_revision(
-    session_id: String,
-) -> Result<AgentStateRevision, String> {
+async fn get_agent_state_revision(session_id: String) -> Result<AgentStateRevision, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let store = open_app_read_store()?;
         let revision = store
@@ -5122,7 +5124,11 @@ async fn get_agent_session_outputs(
         let mut outputs = agent_output_artifacts_from_events(&events);
         for output in &mut outputs {
             let path = PathBuf::from(&output.path);
-            let resolved = if path.is_absolute() { path } else { root.join(path) };
+            let resolved = if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            };
             if resolved.is_dir() {
                 output.kind = "directory".to_string();
             }
@@ -5149,8 +5155,8 @@ fn export_agent_trace_jsonl(
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let export_path = write_agent_trace_jsonl(&root, &store, session_id)
-        .map_err(|error| error.to_string())?;
+    let export_path =
+        write_agent_trace_jsonl(&root, &store, session_id).map_err(|error| error.to_string())?;
     agent_trace_state_for_session(&store, Some(export_path), None, session_id)
         .map_err(|error| error.to_string())
 }
@@ -5176,9 +5182,7 @@ fn begin_agent_run_control_for_effort<'a>(
     )
 }
 
-fn cancel_background_prompt_evaluations(
-    state: &tauri::State<'_, AppState>,
-) -> Result<(), String> {
+fn cancel_background_prompt_evaluations(state: &tauri::State<'_, AppState>) -> Result<(), String> {
     let controls = state
         .prompt_evaluation_controls
         .lock()
@@ -5300,10 +5304,7 @@ fn append_agent_queue_event(
         ("queue_action".to_string(), action.to_string()),
         ("queue_id".to_string(), queue_id.to_string()),
         ("queue_mode".to_string(), mode.to_string()),
-        (
-            "queue_created_at_ms".to_string(),
-            created_at_ms.to_string(),
-        ),
+        ("queue_created_at_ms".to_string(), created_at_ms.to_string()),
     ]
     .into_iter()
     .collect::<Metadata>();
@@ -5445,15 +5446,7 @@ fn finish_agent_run_for_control_stop(
         true,
         None,
     );
-    emit_agent_stream_delta(
-        app,
-        "agent-budget-stop",
-        session_id,
-        "",
-        true,
-        false,
-        None,
-    );
+    emit_agent_stream_delta(app, "agent-budget-stop", session_id, "", true, false, None);
     let store = state
         .store
         .lock()
@@ -5591,8 +5584,8 @@ fn queued_agent_message_from_read_model(
     session_id: &str,
     queue_id: &str,
 ) -> Result<(Option<QueuedAgentMessageView>, bool), String> {
-    let model = load_agent_session_read_model(store, session_id)
-        .map_err(|error| error.to_string())?;
+    let model =
+        load_agent_session_read_model(store, session_id).map_err(|error| error.to_string())?;
     let can_cancel = model.state.can_cancel;
     let message = model
         .state
@@ -5606,8 +5599,8 @@ fn next_queued_agent_message_from_read_model(
     store: &mut SqliteStore,
     session_id: &str,
 ) -> Result<Option<PendingQueuedAgentMessage>, String> {
-    let model = load_agent_session_read_model(store, session_id)
-        .map_err(|error| error.to_string())?;
+    let model =
+        load_agent_session_read_model(store, session_id).map_err(|error| error.to_string())?;
     let Some(view) = model.state.queued_messages.first().cloned() else {
         return Ok(None);
     };
@@ -5668,11 +5661,8 @@ fn edit_queued_agent_message_blocking(
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let (queued, _) = queued_agent_message_from_read_model(
-        &mut store,
-        &input.session_id,
-        &input.queue_id,
-    )?;
+    let (queued, _) =
+        queued_agent_message_from_read_model(&mut store, &input.session_id, &input.queue_id)?;
     let Some(mut queued) = queued else {
         return Err("queued message not found".to_string());
     };
@@ -5740,11 +5730,8 @@ fn delete_queued_agent_message_blocking(
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let (queued, _) = queued_agent_message_from_read_model(
-        &mut store,
-        &input.session_id,
-        &input.queue_id,
-    )?;
+    let (queued, _) =
+        queued_agent_message_from_read_model(&mut store, &input.session_id, &input.queue_id)?;
     let Some(queued) = queued else {
         return queued_agent_message_action_receipt(
             &store,
@@ -5763,13 +5750,7 @@ fn delete_queued_agent_message_blocking(
         queued.created_at_ms,
         None,
     )?;
-    queued_agent_message_action_receipt(
-        &store,
-        &input.session_id,
-        &input.queue_id,
-        None,
-        false,
-    )
+    queued_agent_message_action_receipt(&store, &input.session_id, &input.queue_id, None, false)
 }
 
 #[tauri::command]
@@ -5796,11 +5777,8 @@ fn steer_queued_agent_message_blocking(
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        let (queued, can_cancel) = queued_agent_message_from_read_model(
-            &mut store,
-            &input.session_id,
-            &input.queue_id,
-        )?;
+        let (queued, can_cancel) =
+            queued_agent_message_from_read_model(&mut store, &input.session_id, &input.queue_id)?;
         let _ = can_cancel;
         queued.ok_or_else(|| "queued message not found".to_string())?
     };
@@ -6025,18 +6003,15 @@ fn persist_completed_conversation_title(
         let Some(session) = config
             .sessions
             .iter_mut()
-            .find(|session| {
-                session.id == session_id
-                    && session.archived_at_ms.is_none()
-            })
+            .find(|session| session.id == session_id && session.archived_at_ms.is_none())
         else {
             return Ok(None);
         };
         let needs_initial_title = session.title_state == SessionTitleState::Pending;
         let needs_repair = session.title_state == SessionTitleState::Automatic
             && is_uninformative_generated_session_title(&session.name);
-        let needs_second_turn_refinement = session.title_state == SessionTitleState::Automatic
-            && meaningful_turn_count == 2;
+        let needs_second_turn_refinement =
+            session.title_state == SessionTitleState::Automatic && meaningful_turn_count == 2;
         if session.title_state == SessionTitleState::Manual
             || (!needs_initial_title && !needs_repair && !needs_second_turn_refinement)
         {
@@ -6141,8 +6116,17 @@ fn automatic_session_title(prompt: &str) -> String {
     for _ in 0..3 {
         let mut stripped = None;
         for prefix in [
-            "我想问问", "我想知道", "我想了解", "我想要", "请帮我", "可以帮我", "麻烦帮我",
-            "帮我", "我想", "能否", "请",
+            "我想问问",
+            "我想知道",
+            "我想了解",
+            "我想要",
+            "请帮我",
+            "可以帮我",
+            "麻烦帮我",
+            "帮我",
+            "我想",
+            "能否",
+            "请",
         ] {
             if let Some(value) = title.strip_prefix(prefix) {
                 stripped = Some(value);
@@ -6151,7 +6135,13 @@ fn automatic_session_title(prompt: &str) -> String {
         }
         if stripped.is_none() {
             let lowercase = title.to_ascii_lowercase();
-            for prefix in ["please ", "could you ", "can you ", "i want to ", "i'd like to "] {
+            for prefix in [
+                "please ",
+                "could you ",
+                "can you ",
+                "i want to ",
+                "i'd like to ",
+            ] {
                 if lowercase.starts_with(prefix) {
                     stripped = Some(&title[prefix.len()..]);
                     break;
@@ -6162,9 +6152,7 @@ fn automatic_session_title(prompt: &str) -> String {
             break;
         };
         title = value
-            .trim_start_matches(|character| {
-                matches!(character, '，' | ',' | '：' | ':' | ' ')
-            })
+            .trim_start_matches(|character| matches!(character, '，' | ',' | '：' | ':' | ' '))
             .to_string();
     }
     let title = title
@@ -6256,11 +6244,9 @@ fn is_uninformative_generated_session_title(title: &str) -> bool {
         return true;
     }
     let lowercase = title.to_ascii_lowercase();
-    [
-        "i am ", "i'm ", "let me ", "sure ", "okay ", "of course ",
-    ]
-    .iter()
-    .any(|prefix| lowercase.starts_with(prefix))
+    ["i am ", "i'm ", "let me ", "sure ", "okay ", "of course "]
+        .iter()
+        .any(|prefix| lowercase.starts_with(prefix))
 }
 
 fn bounded_session_title(value: &str) -> String {
@@ -6392,7 +6378,9 @@ fn semantic_session_title(
             .into_iter()
             .collect(),
     };
-    let response = provider.complete_once(request).map_err(|error| error.to_string())?;
+    let response = provider
+        .complete_once(request)
+        .map_err(|error| error.to_string())?;
     cleaned_generated_session_title(&response.message.content)
         .ok_or_else(|| "model returned an invalid session title".to_string())
 }
@@ -6419,7 +6407,10 @@ fn validate_agent_attachments(
         let metadata = fs::metadata(&path)
             .map_err(|error| format!("failed to inspect attachment: {error}"))?;
         if metadata.len() > MAX_ATTACHMENT_BYTES as u64 {
-            return Err(format!("{} exceeds the 20 MB attachment limit", attachment.name));
+            return Err(format!(
+                "{} exceeds the 20 MB attachment limit",
+                attachment.name
+            ));
         }
         total_bytes = total_bytes.saturating_add(metadata.len());
         if total_bytes > MAX_ATTACHMENT_TOTAL_BYTES as u64 {
@@ -6517,12 +6508,8 @@ fn run_agent_task_blocking(
 ) -> Result<AgentState, String> {
     let session_id = input.session_id.clone();
     let effort = AgentEffort::parse(&input.effort);
-    let run_control_lease = begin_agent_run_control_for_effort(
-        &state,
-        &session_id,
-        effort.label(),
-        None,
-    )?;
+    let run_control_lease =
+        begin_agent_run_control_for_effort(&state, &session_id, effort.label(), None)?;
     let cancellation = run_control_lease.control();
     let result = run_agent_task_blocking_inner(app, state.clone(), input, &cancellation);
     if let Ok(agent) = result.as_ref() {
@@ -6599,8 +6586,7 @@ fn run_agent_task_blocking_inner(
     if requested_policy != OrchestrationPolicy::AutoRouter {
         routing_context.user_policy_override = Some(requested_policy.clone());
     }
-    let (routing_decision, router_examples) =
-        route_with_local_telemetry(&state, &routing_context)?;
+    let (routing_decision, router_examples) = route_with_local_telemetry(&state, &routing_context)?;
     let collaboration_policy = if requested_policy == OrchestrationPolicy::AutoRouter {
         routing_decision.policy.clone()
     } else {
@@ -6631,12 +6617,7 @@ fn run_agent_task_blocking_inner(
     );
     run_context.insert(
         "agent_model".to_string(),
-        agent_model_for_effort(
-            &config,
-            effort,
-            &collaboration_policy,
-            &routing_decision,
-        ),
+        agent_model_for_effort(&config, effort, &collaboration_policy, &routing_decision),
     );
     run_context.insert("router_model".to_string(), routing_decision.model.clone());
     run_context.insert("router_examples".to_string(), router_examples.to_string());
@@ -6709,7 +6690,7 @@ fn run_agent_task_blocking_inner(
             &display_prompt,
             message_metadata,
         )
-            .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?;
         (history, artifact_manifest)
     };
 
@@ -6738,11 +6719,7 @@ fn run_agent_task_blocking_inner(
         }
         Err(error) => return Err(error),
     };
-    append_prepared_memory_context(
-        &mut run_context,
-        &mut history,
-        prepared_knowledge.memory,
-    );
+    append_prepared_memory_context(&mut run_context, &mut history, prepared_knowledge.memory);
     if let Some(artifact_manifest) = artifact_manifest {
         history.push(artifact_manifest);
     }
@@ -6816,12 +6793,7 @@ fn run_agent_task_blocking_inner(
     let mut runtime = if history.is_empty() {
         start_agent_loop(task_id, prompt.clone(), runtime_config.clone())
     } else {
-        start_agent_loop_with_history(
-            task_id,
-            prompt.clone(),
-            history,
-            runtime_config,
-        )
+        start_agent_loop_with_history(task_id, prompt.clone(), history, runtime_config)
     };
     if let Some(message) = runtime
         .messages
@@ -6858,8 +6830,8 @@ fn cancel_agent_task(
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let current = agent_state_for_session(&store, None, session_id)
-        .map_err(|error| error.to_string())?;
+    let current =
+        agent_state_for_session(&store, None, session_id).map_err(|error| error.to_string())?;
     if !current.can_cancel && !active_run_cancelled {
         return Ok(current);
     }
@@ -6916,21 +6888,13 @@ fn retry_agent_task_blocking(
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
         let events = store
-            .list_by_task_and_metadata_or_unscoped(
-                &phase16_task_id(),
-                "session_id",
-                &session_id,
-            )
+            .list_by_task_and_metadata_or_unscoped(&phase16_task_id(), "session_id", &session_id)
             .map_err(|error| error.to_string())?;
         let active_events = active_agent_events_for_session(&events, Some(&session_id));
         agent_effort_from_active_events(&active_events)
     };
-    let run_control_lease = begin_agent_run_control_for_effort(
-        &state,
-        &session_id,
-        effort.label(),
-        None,
-    )?;
+    let run_control_lease =
+        begin_agent_run_control_for_effort(&state, &session_id, effort.label(), None)?;
     let cancellation = run_control_lease.control();
     let suspended = take_suspended_agent_run(&state, &session_id)?;
     let result = if let Some(suspended) = suspended {
@@ -6968,18 +6932,10 @@ fn resume_suspended_agent_run(
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        claim_agent_recovery_envelope(
-            &mut store,
-            &run_context,
-            &["paused"],
-            "user_continued",
-        )?
+        claim_agent_recovery_envelope(&mut store, &run_context, &["paused"], "user_continued")?
     };
     if let Some(recovery) = recovery {
-        run_context.insert(
-            "recovery_resume_key".to_string(),
-            recovery.resume_key,
-        );
+        run_context.insert("recovery_resume_key".to_string(), recovery.resume_key);
         run_context.insert(
             "recovery_attempts".to_string(),
             recovery.attempts.to_string(),
@@ -7074,12 +7030,8 @@ fn retry_agent_task_blocking_inner(
         let prompt = latest_agent_prompt_from_active_events(&active_events)
             .ok_or_else(|| "No previous agent prompt to retry".to_string())?;
         let effort = agent_effort_from_active_events(&active_events);
-        let recovery = claim_agent_recovery_envelope(
-            &mut store,
-            &run_context,
-            &["paused"],
-            "user_continued",
-        )?;
+        let recovery =
+            claim_agent_recovery_envelope(&mut store, &run_context, &["paused"], "user_continued")?;
         (prompt, effort, recovery)
     };
     if let Some(recovery) = recovery.as_ref() {
@@ -7107,8 +7059,7 @@ fn retry_agent_task_blocking_inner(
     if requested_policy != OrchestrationPolicy::AutoRouter {
         routing_context.user_policy_override = Some(requested_policy.clone());
     }
-    let (routing_decision, router_examples) =
-        route_with_local_telemetry(&state, &routing_context)?;
+    let (routing_decision, router_examples) = route_with_local_telemetry(&state, &routing_context)?;
     let collaboration_policy = if requested_policy == OrchestrationPolicy::AutoRouter {
         routing_decision.policy.clone()
     } else {
@@ -7139,17 +7090,9 @@ fn retry_agent_task_blocking_inner(
     );
     run_context.insert(
         "agent_model".to_string(),
-        agent_model_for_effort(
-            &config,
-            effort,
-            &collaboration_policy,
-            &routing_decision,
-        ),
+        agent_model_for_effort(&config, effort, &collaboration_policy, &routing_decision),
     );
-    run_context.insert(
-        "router_model".to_string(),
-        routing_decision.model.clone(),
-    );
+    run_context.insert("router_model".to_string(), routing_decision.model.clone());
     run_context.insert("router_examples".to_string(), router_examples.to_string());
     run_context.insert(
         "router_source".to_string(),
@@ -7196,7 +7139,7 @@ fn retry_agent_task_blocking_inner(
             &prompt,
             continuation_metadata,
         )
-            .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?;
     }
 
     let (mut history, artifact_manifest) = {
@@ -7214,9 +7157,7 @@ fn retry_agent_task_blocking_inner(
         let mut messages = recovery_safe_transcript(&session_events);
         if messages
             .last()
-            .map(|message| {
-                matches!(message.role, MessageRole::User) && message.content == prompt
-            })
+            .map(|message| matches!(message.role, MessageRole::User) && message.content == prompt)
             .unwrap_or(false)
         {
             messages.pop();
@@ -7247,11 +7188,7 @@ fn retry_agent_task_blocking_inner(
         }
         Err(error) => return Err(error),
     };
-    append_prepared_memory_context(
-        &mut run_context,
-        &mut history,
-        prepared_knowledge.memory,
-    );
+    append_prepared_memory_context(&mut run_context, &mut history, prepared_knowledge.memory);
     if let Some(artifact_manifest) = artifact_manifest {
         history.push(artifact_manifest);
     }
@@ -7317,12 +7254,7 @@ fn retry_agent_task_blocking_inner(
     let runtime = if history.is_empty() {
         start_agent_loop(task_id, prompt.clone(), runtime_config.clone())
     } else {
-        start_agent_loop_with_history(
-            task_id,
-            prompt.clone(),
-            history,
-            runtime_config,
-        )
+        start_agent_loop_with_history(task_id, prompt.clone(), history, runtime_config)
     };
     continue_agent_loop(
         app,
@@ -7374,12 +7306,8 @@ fn resolve_agent_permission_blocking(
             .map(|effort| AgentEffort::parse(&effort))
             .unwrap_or(AgentEffort::Auto)
     };
-    let run_control_lease = begin_agent_run_control_for_effort(
-        &state,
-        &session_id,
-        effort.label(),
-        snapshot,
-    )?;
+    let run_control_lease =
+        begin_agent_run_control_for_effort(&state, &session_id, effort.label(), snapshot)?;
     let cancellation = run_control_lease.control();
     let result = resolve_agent_permission_blocking_inner(
         app,
@@ -7464,8 +7392,8 @@ fn resolve_agent_permission_blocking_inner(
         )
         .map_err(|error| error.to_string());
     }
-    let current = agent_state_for_session(&store, None, session_id)
-        .map_err(|error| error.to_string())?;
+    let current =
+        agent_state_for_session(&store, None, session_id).map_err(|error| error.to_string())?;
     if !current
         .pending_approvals
         .iter()
@@ -7546,10 +7474,7 @@ fn resolve_agent_permission_blocking_inner(
         &["blocked"],
         "permission_resolved",
     )? {
-        run_context.insert(
-            "recovery_resume_key".to_string(),
-            recovery.resume_key,
-        );
+        run_context.insert("recovery_resume_key".to_string(), recovery.resume_key);
         run_context.insert(
             "recovery_attempts".to_string(),
             recovery.attempts.to_string(),
@@ -7786,10 +7711,7 @@ fn get_phase5_state(state: tauri::State<'_, AppState>) -> Result<Phase5State, St
 }
 
 #[tauri::command]
-fn run_tool(
-    state: tauri::State<'_, AppState>,
-    input: ToolRunInput,
-) -> Result<Phase5State, String> {
+fn run_tool(state: tauri::State<'_, AppState>, input: ToolRunInput) -> Result<Phase5State, String> {
     let root = active_workspace_root(&state)?;
     let run_context = project_session_metadata_for_session(&state, None)?;
     let tool_name = input.tool_name.trim().to_string();
@@ -7811,12 +7733,13 @@ fn run_tool(
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    append_tool_proposed_event(&mut store, &invocation, None)
-        .map_err(|error| error.to_string())?;
+    append_tool_proposed_event(&mut store, &invocation, None).map_err(|error| error.to_string())?;
 
     if let Some(mut request) = tool.permission_request(&invocation) {
         request.id = PermissionRequestId(unique_id("perm"));
-        request.metadata.insert("phase".to_string(), "5".to_string());
+        request
+            .metadata
+            .insert("phase".to_string(), "5".to_string());
         request
             .metadata
             .insert("tool_input".to_string(), invocation.input_json.clone());
@@ -7844,7 +7767,10 @@ fn run_tool(
                 ("permission_id".to_string(), request.id.0),
                 ("tool_call_id".to_string(), invocation.id.0),
                 ("tool".to_string(), request.action),
-                ("risk".to_string(), permission_risk_label(&request.risk).to_string()),
+                (
+                    "risk".to_string(),
+                    permission_risk_label(&request.risk).to_string(),
+                ),
                 ("scope".to_string(), request.scope),
             ]
             .into_iter()
@@ -7995,7 +7921,8 @@ fn run_orchestration(
         return phase6_state_with_error(&state, "Provider config is incomplete");
     }
 
-    let mut routing_context = RoutingContext::from_prompt(&prompt, model_candidates_for_config(&config));
+    let mut routing_context =
+        RoutingContext::from_prompt(&prompt, model_candidates_for_config(&config));
     if requested_policy != OrchestrationPolicy::AutoRouter {
         routing_context.user_policy_override = Some(requested_policy.clone());
     }
@@ -8028,10 +7955,7 @@ fn run_orchestration(
                     requested_policy.label().to_string(),
                 ),
                 ("policy".to_string(), policy.label().to_string()),
-                (
-                    "router_model".to_string(),
-                    routing_decision.model.clone(),
-                ),
+                ("router_model".to_string(), routing_decision.model.clone()),
                 (
                     "router_retrieval_mode".to_string(),
                     routing_decision.retrieval_mode.clone(),
@@ -8174,10 +8098,7 @@ fn run_orchestration(
             ),
             ("policy".to_string(), policy.label().to_string()),
             ("steps".to_string(), plan.steps.len().to_string()),
-            (
-                "router_model".to_string(),
-                routing_decision.model.clone(),
-            ),
+            ("router_model".to_string(), routing_decision.model.clone()),
             (
                 "router_retrieval_mode".to_string(),
                 routing_decision.retrieval_mode.clone(),
@@ -8218,7 +8139,7 @@ fn get_phase7_state(state: tauri::State<'_, AppState>) -> Result<Phase7State, St
         None,
         None,
     )
-        .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())
 }
 
 fn index_workspace_with_cloud_fallback(
@@ -8262,9 +8183,7 @@ async fn index_workspace_rag(app: tauri::AppHandle) -> Result<Phase7State, Strin
     .map_err(|error| format!("workspace indexing failed to join: {error}"))?
 }
 
-fn index_workspace_rag_blocking(
-    state: tauri::State<'_, AppState>,
-) -> Result<Phase7State, String> {
+fn index_workspace_rag_blocking(state: tauri::State<'_, AppState>) -> Result<Phase7State, String> {
     let root = active_workspace_root(&state)?;
     let project_id = active_project_id_for_memory(&state)?;
     let config = clone_provider_config(&state)?;
@@ -8294,8 +8213,8 @@ fn index_workspace_rag_blocking(
         (index, "local".to_string(), model, None)
     };
     let lancedb_export_path = lancedb_export_path_for(&root);
-    let lancedb_export_records =
-        export_lancedb_records_jsonl(&index, &lancedb_export_path).map_err(|error| error.to_string())?;
+    let lancedb_export_records = export_lancedb_records_jsonl(&index, &lancedb_export_path)
+        .map_err(|error| error.to_string())?;
     let lancedb_path = lancedb_database_path_for(&root);
     let lancedb_records =
         replace_lancedb_index(&lancedb_path, &index).map_err(|error| error.to_string())?;
@@ -8312,7 +8231,10 @@ fn index_workspace_rag_blocking(
     let mut index_metadata = [
         ("action".to_string(), "index".to_string()),
         ("files_indexed".to_string(), stats.files_indexed.to_string()),
-        ("chunks_indexed".to_string(), stats.chunks_indexed.to_string()),
+        (
+            "chunks_indexed".to_string(),
+            stats.chunks_indexed.to_string(),
+        ),
         ("indexed_at_ms".to_string(), stats.indexed_at_ms.to_string()),
         (
             "index_path".to_string(),
@@ -8367,7 +8289,7 @@ fn index_workspace_rag_blocking(
         None,
         None,
     )
-        .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -8414,7 +8336,7 @@ fn search_rag(
         &retrieval.results,
         Some(&retrieval.trace),
     )
-        .map_err(|error| error.to_string())?;
+    .map_err(|error| error.to_string())?;
     let memory = project_memory_stats(&mut store, project_id.as_deref())
         .map_err(|error| error.to_string())?;
 
@@ -8478,7 +8400,7 @@ fn answer_with_rag(
             &selected_results,
             Some(&retrieval.trace),
         )
-            .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?;
     }
 
     if selected_results.is_empty() {
@@ -8517,7 +8439,10 @@ fn answer_with_rag(
                 ("base_url".to_string(), config.base_url.clone()),
                 ("model".to_string(), model.clone()),
                 ("role".to_string(), "executor".to_string()),
-                ("source_count".to_string(), selected_results.len().to_string()),
+                (
+                    "source_count".to_string(),
+                    selected_results.len().to_string(),
+                ),
                 ("prompt_length".to_string(), prompt.len().to_string()),
             ]
             .into_iter()
@@ -8563,7 +8488,10 @@ fn answer_with_rag(
                     ("provider".to_string(), "openai-compatible".to_string()),
                     ("model".to_string(), model),
                     ("latency_ms".to_string(), latency_ms.to_string()),
-                    ("source_count".to_string(), selected_results.len().to_string()),
+                    (
+                        "source_count".to_string(),
+                        selected_results.len().to_string(),
+                    ),
                     ("answer".to_string(), answer.clone()),
                     ("output_length".to_string(), answer.len().to_string()),
                 ]
@@ -8584,7 +8512,7 @@ fn answer_with_rag(
                 Some(answer),
                 None,
             )
-                .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())
         }
         Err(error) => {
             let message = error.to_string();
@@ -8635,15 +8563,17 @@ fn compact_context(state: tauri::State<'_, AppState>) -> Result<ContextState, St
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
     let events = collect_context_events(&store, &run_context).map_err(|error| error.to_string())?;
-    let checkpoint = build_session_checkpoint_at(
-        &events,
-        CheckpointOptions::default(),
-        current_time_millis(),
-    );
+    let checkpoint =
+        build_session_checkpoint_at(&events, CheckpointOptions::default(), current_time_millis());
     let mut pack = build_restore_context_pack(checkpoint);
-    let messages = events.iter().filter_map(message_from_event).collect::<Vec<_>>();
-    pack.text
-        .push_str(&conversation_memory_to_markdown(&messages, CONTEXT_MEMORY_MAX_ITEMS));
+    let messages = events
+        .iter()
+        .filter_map(message_from_event)
+        .collect::<Vec<_>>();
+    pack.text.push_str(&conversation_memory_to_markdown(
+        &messages,
+        CONTEXT_MEMORY_MAX_ITEMS,
+    ));
     let checkpoint_path = write_context_checkpoint(
         &root,
         run_context.get("session_id").map(String::as_str),
@@ -8655,8 +8585,14 @@ fn compact_context(state: tauri::State<'_, AppState>) -> Result<ContextState, St
     )?;
     let mut metadata = Metadata::new();
     metadata.insert("checkpoint_id".to_string(), pack.checkpoint.id.clone());
-    metadata.insert("event_count".to_string(), pack.checkpoint.event_count.to_string());
-    metadata.insert("task_count".to_string(), pack.checkpoint.task_count.to_string());
+    metadata.insert(
+        "event_count".to_string(),
+        pack.checkpoint.event_count.to_string(),
+    );
+    metadata.insert(
+        "task_count".to_string(),
+        pack.checkpoint.task_count.to_string(),
+    );
     metadata.insert(
         "latest_event_ms".to_string(),
         pack.checkpoint.latest_event_ms.to_string(),
@@ -8711,12 +8647,13 @@ fn run_browser_tool(
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    append_tool_proposed_event(&mut store, &invocation, None)
-        .map_err(|error| error.to_string())?;
+    append_tool_proposed_event(&mut store, &invocation, None).map_err(|error| error.to_string())?;
 
     if let Some(mut request) = tool.permission_request(&invocation) {
         request.id = PermissionRequestId(unique_id("perm"));
-        request.metadata.insert("phase".to_string(), "8".to_string());
+        request
+            .metadata
+            .insert("phase".to_string(), "8".to_string());
         request
             .metadata
             .insert("tool_input".to_string(), invocation.input_json.clone());
@@ -8784,8 +8721,11 @@ fn resolve_browser_permission(
         .ok_or_else(|| "permission request not found".to_string())?;
 
     if request.task_id != phase8_task_id() {
-        return phase8_state(&store, Some("permission does not belong to Phase 8".to_string()))
-            .map_err(|error| error.to_string());
+        return phase8_state(
+            &store,
+            Some("permission does not belong to Phase 8".to_string()),
+        )
+        .map_err(|error| error.to_string());
     }
 
     store
@@ -8910,7 +8850,9 @@ pub fn run() {
         match redact_persisted_events(&mut store) {
             Ok(_) => {
                 if let Err(error) = mark_event_redaction_complete(&data_root) {
-                    append_startup_log(&format!("failed to mark event redaction complete: {error}"));
+                    append_startup_log(&format!(
+                        "failed to mark event redaction complete: {error}"
+                    ));
                 }
             }
             Err(error) => eprintln!("failed to redact persisted Cindx history: {error}"),
@@ -8989,13 +8931,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             if matches!(
                 event,
-                tauri::WindowEvent::Resized(_)
-                    | tauri::WindowEvent::ScaleFactorChanged { .. }
+                tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. }
             ) {
-                schedule_macos_traffic_light_position_repair(
-                    window.app_handle(),
-                    window.label(),
-                );
+                schedule_macos_traffic_light_position_repair(window.app_handle(), window.label());
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if !confirm_application_exit(window.app_handle()) {
@@ -9164,9 +9102,7 @@ fn quit_confirmation_suppressed_text(text: &str) -> bool {
         .any(|line| line.trim() == "skip_quit_confirmation=true")
 }
 
-fn persist_quit_confirmation_suppression(
-    app_handle: &tauri::AppHandle,
-) -> Result<(), String> {
+fn persist_quit_confirmation_suppression(app_handle: &tauri::AppHandle) -> Result<(), String> {
     let path = quit_confirmation_preference_path(app_handle)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -9190,9 +9126,7 @@ fn persist_quit_confirmation_suppression(
 #[cfg(target_os = "macos")]
 fn show_native_quit_confirmation() -> QuitConfirmation {
     use objc2::MainThreadMarker;
-    use objc2_app_kit::{
-        NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSControlStateValueOn,
-    };
+    use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSControlStateValueOn};
     use objc2_foundation::NSString;
 
     let Some(main_thread) = MainThreadMarker::new() else {
@@ -9269,7 +9203,11 @@ fn show_native_delete_confirmation(kind: &str, name: &str) -> bool {
     let Some(main_thread) = MainThreadMarker::new() else {
         return false;
     };
-    let target = if kind == "project" { "Project" } else { "Session" };
+    let target = if kind == "project" {
+        "Project"
+    } else {
+        "Session"
+    };
     let informative_text = if kind == "project" {
         "This permanently removes the project and its sessions from Cindx. Files in the workspace are not affected."
     } else {
@@ -9372,9 +9310,7 @@ fn read_artifact_preview(
         "csv" => ("text", "text/csv"),
         "json" => ("text", "application/json"),
         "js" | "jsx" | "mjs" | "ts" | "tsx" => ("text", "text/javascript"),
-        "log" | "rs" | "swift" | "toml" | "txt" | "xml" | "yaml" | "yml" => {
-            ("text", "text/plain")
-        }
+        "log" | "rs" | "swift" | "toml" | "txt" | "xml" | "yaml" | "yml" => ("text", "text/plain"),
         _ => ("file", "application/octet-stream"),
     };
     if kind == "file" {
@@ -9550,7 +9486,10 @@ fn request_mock_permission_in_store(store: &mut SqliteStore) -> Result<Phase3Sta
         format!("Permission requested for {}", request.action),
         [
             ("permission_id".to_string(), request.id.0.clone()),
-            ("risk".to_string(), permission_risk_label(&request.risk).to_string()),
+            (
+                "risk".to_string(),
+                permission_risk_label(&request.risk).to_string(),
+            ),
             ("scope".to_string(), request.scope),
         ]
         .into_iter()
@@ -9652,14 +9591,12 @@ fn permission_review_item(
             .active_session()
             .map(|session| session.id.clone());
     }
-    let session = session_id
-        .as_deref()
-        .and_then(|session_id| {
-            project_sessions
-                .sessions
-                .iter()
-                .find(|session| session.id == session_id)
-        });
+    let session = session_id.as_deref().and_then(|session_id| {
+        project_sessions
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+    });
     let project_id = record
         .request
         .metadata
@@ -9689,8 +9626,8 @@ fn permission_review_item(
         .find_map(|key| record.request.metadata.get(key))
         .map(|value| redact_sensitive_text(value))
         .unwrap_or_default();
-    let can_allow_session = source == "agent"
-        && !matches!(record.request.risk, PermissionRisk::Destructive);
+    let can_allow_session =
+        source == "agent" && !matches!(record.request.risk, PermissionRisk::Destructive);
 
     PermissionReviewItem {
         request_id: record.request.id.0,
@@ -9947,15 +9884,17 @@ fn live_context_checkpoint_view(
     run_context: &Metadata,
 ) -> Result<ContextCheckpointView, String> {
     let events = collect_context_events(store, run_context).map_err(|error| error.to_string())?;
-    let checkpoint = build_session_checkpoint_at(
-        &events,
-        CheckpointOptions::default(),
-        current_time_millis(),
-    );
+    let checkpoint =
+        build_session_checkpoint_at(&events, CheckpointOptions::default(), current_time_millis());
     let mut pack = build_restore_context_pack(checkpoint);
-    let messages = events.iter().filter_map(message_from_event).collect::<Vec<_>>();
-    pack.text
-        .push_str(&conversation_memory_to_markdown(&messages, CONTEXT_MEMORY_MAX_ITEMS));
+    let messages = events
+        .iter()
+        .filter_map(message_from_event)
+        .collect::<Vec<_>>();
+    pack.text.push_str(&conversation_memory_to_markdown(
+        &messages,
+        CONTEXT_MEMORY_MAX_ITEMS,
+    ));
     let checkpoint_path = context_checkpoint_path_for_session(
         workspace_root,
         run_context.get("session_id").map(String::as_str),
@@ -10074,11 +10013,7 @@ fn write_context_checkpoint(
 ) -> Result<PathBuf, String> {
     let path = context_checkpoint_path_for_session(workspace_root, session_id);
     let redacted_text = redact_sensitive_text(text);
-    write_private_file_atomically(
-        &path,
-        redacted_text.as_bytes(),
-        "context checkpoint",
-    )?;
+    write_private_file_atomically(&path, redacted_text.as_bytes(), "context checkpoint")?;
 
     let manifest_path = context_checkpoint_manifest_path_for_session(workspace_root, session_id);
     if let Some(coverage) = coverage {
@@ -10116,10 +10051,7 @@ fn write_private_file_atomically(path: &Path, bytes: &[u8], label: &str) -> Resu
         .file_name()
         .and_then(OsStr::to_str)
         .unwrap_or("checkpoint");
-    let temporary_path = parent.join(format!(
-        ".{file_name}.{}.tmp",
-        unique_id("atomic-write")
-    ));
+    let temporary_path = parent.join(format!(".{file_name}.{}.tmp", unique_id("atomic-write")));
 
     let result = (|| {
         let mut options = fs::OpenOptions::new();
@@ -10616,15 +10548,7 @@ fn synthesize_agent_answer(
         },
     );
     if agent_run_should_stop(cancellation) {
-        emit_agent_stream_delta(
-            app,
-            &stream_request_id,
-            session_id,
-            "",
-            true,
-            true,
-            None,
-        );
+        emit_agent_stream_delta(app, &stream_request_id, session_id, "", true, true, None);
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
     let answer = answer?;
@@ -10742,11 +10666,7 @@ fn complete_collaboration_model_with_control(
             }
             on_delta(delta);
         },
-        || {
-            cancellation
-                .as_ref()
-                .is_some_and(agent_run_should_stop)
-        },
+        || cancellation.as_ref().is_some_and(agent_run_should_stop),
     );
     if let Some(control) = cancellation.as_ref() {
         control.finish_model_call();
@@ -10768,11 +10688,7 @@ fn complete_collaboration_model_with_control(
             }
             if let Some(control) = cancellation.as_ref() {
                 control.record_partial_output(&response.message.content);
-                control.record_checkpoint(
-                    "model_result",
-                    &role_name,
-                    &response.message.content,
-                );
+                control.record_checkpoint("model_result", &role_name, &response.message.content);
             }
             CollaborationCompletion {
                 content: Some(response.message.content),
@@ -10845,10 +10761,7 @@ fn complete_collaboration_worker_with_tools(
         task_id,
         prompt.clone(),
         AgentRuntimeConfig {
-            max_turns: collaboration_worker_runtime_turn_limit(
-                evidence_turn_limit,
-                has_tools,
-            ),
+            max_turns: collaboration_worker_runtime_turn_limit(evidence_turn_limit, has_tools),
         },
     );
     let mut trusted_context = agent_runtime_context_for_run(&run_context).unwrap_or_default();
@@ -10869,17 +10782,17 @@ fn complete_collaboration_worker_with_tools(
     worker_context.insert("collaboration_id".to_string(), collaboration_id);
     worker_context.insert("stage".to_string(), stage.clone());
     worker_context.insert("role".to_string(), role_label(&role).to_string());
-    worker_context.insert("worker_runtime".to_string(), "isolated_evidence_v1".to_string());
+    worker_context.insert(
+        "worker_runtime".to_string(),
+        "isolated_evidence_v1".to_string(),
+    );
     let mut usage = Metadata::new();
     let mut evidence = Vec::new();
     let mut tool_call_count = 0usize;
     let mut first_delta_at_ms = None;
 
     loop {
-        if cancellation
-            .as_ref()
-            .is_some_and(agent_run_should_stop)
-        {
+        if cancellation.as_ref().is_some_and(agent_run_should_stop) {
             return CollaborationCompletion {
                 content: None,
                 error: Some(MODEL_REQUEST_CANCELLED.to_string()),
@@ -10893,7 +10806,10 @@ fn complete_collaboration_worker_with_tools(
             if let Err(reason) = control.begin_model_call(&stage) {
                 return CollaborationCompletion {
                     content: None,
-                    error: Some(format!("Run stopped before worker model call: {}", reason.code())),
+                    error: Some(format!(
+                        "Run stopped before worker model call: {}",
+                        reason.code()
+                    )),
                     latency_ms: current_time_millis().saturating_sub(started_at_ms),
                     usage,
                     evidence,
@@ -10901,11 +10817,8 @@ fn complete_collaboration_worker_with_tools(
             }
         }
 
-        let finalizing = prepare_collaboration_worker_turn(
-            &mut runtime,
-            has_tools,
-            evidence_turn_limit,
-        );
+        let finalizing =
+            prepare_collaboration_worker_turn(&mut runtime, has_tools, evidence_turn_limit);
         let request_tools: &[ToolSpec] = if finalizing { &[] } else { &tools };
 
         let max_output_tokens = bounded_max_output_tokens(
@@ -10949,11 +10862,7 @@ fn complete_collaboration_worker_with_tools(
                     stream_progress.observe(control, "model_stream", &stage, &partial_output);
                 }
             },
-            || {
-                cancellation
-                    .as_ref()
-                    .is_some_and(agent_run_should_stop)
-            },
+            || cancellation.as_ref().is_some_and(agent_run_should_stop),
         );
         if let Some(control) = cancellation.as_ref() {
             control.finish_model_call();
@@ -10980,7 +10889,10 @@ fn complete_collaboration_worker_with_tools(
                 .get(key)
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or_default();
-            usage.insert(key.to_string(), previous.saturating_add(additional).to_string());
+            usage.insert(
+                key.to_string(),
+                previous.saturating_add(additional).to_string(),
+            );
         }
         let finalization_content = finalizing
             .then(|| response.message.content.trim().to_string())
@@ -11335,14 +11247,9 @@ fn run_collaboration_stage_with_delta(
     prompt: String,
     on_delta: impl FnMut(&str),
 ) -> Result<String, String> {
-    let cancellation = active_agent_run_control(
-        state,
-        run_context.get("session_id").map(String::as_str),
-    )?;
-    if cancellation
-        .as_ref()
-        .is_some_and(agent_run_should_stop)
-    {
+    let cancellation =
+        active_agent_run_control(state, run_context.get("session_id").map(String::as_str))?;
+    if cancellation.as_ref().is_some_and(agent_run_should_stop) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
     let request_id = unique_id("collaboration-model");
@@ -11434,7 +11341,11 @@ fn resumable_workflow_checkpoint_from_events(
     allowed_models: &[String],
 ) -> Option<WorkflowExecutionCheckpoint> {
     let event = events.iter().rev().find(|event| {
-        event.metadata.get("workflow_resume_key").map(String::as_str) == Some(resume_key)
+        event
+            .metadata
+            .get("workflow_resume_key")
+            .map(String::as_str)
+            == Some(resume_key)
             && event.metadata.contains_key("workflow_checkpoint")
     })?;
     let encoded = event.metadata.get("workflow_checkpoint")?;
@@ -11460,9 +11371,12 @@ fn load_workflow_checkpoint_for_run(
         Some(session_id) => store
             .list_by_task_and_metadata_or_unscoped(task_id, "session_id", session_id)
             .map_err(|error| error.to_string())?,
-        None => store.list_by_task(task_id).map_err(|error| error.to_string())?,
+        None => store
+            .list_by_task(task_id)
+            .map_err(|error| error.to_string())?,
     };
-    let resume_key = workflow_resume_key_from_events(events.as_slice(), session_id, prompt, effort, policy);
+    let resume_key =
+        workflow_resume_key_from_events(events.as_slice(), session_id, prompt, effort, policy);
     let checkpoint = resumable_workflow_checkpoint_from_events(
         events.as_slice(),
         &resume_key,
@@ -11486,7 +11400,10 @@ fn append_workflow_checkpoint_event(
     let encoded = checkpoint.to_json()?;
     let mut metadata = [
         ("collaboration_id".to_string(), collaboration_id.to_string()),
-        ("workflow_schema".to_string(), WORKFLOW_IR_SCHEMA.to_string()),
+        (
+            "workflow_schema".to_string(),
+            WORKFLOW_IR_SCHEMA.to_string(),
+        ),
         (
             "workflow_checkpoint_schema".to_string(),
             WORKFLOW_CHECKPOINT_SCHEMA.to_string(),
@@ -11519,7 +11436,10 @@ fn append_workflow_checkpoint_event(
     if let Some(step_id) = step_id {
         metadata.insert("step_id".to_string(), step_id.to_string());
         if let Some(step) = checkpoint.steps.get(step_id) {
-            metadata.insert("step_status".to_string(), format!("{:?}", step.status).to_lowercase());
+            metadata.insert(
+                "step_status".to_string(),
+                format!("{:?}", step.status).to_lowercase(),
+            );
             metadata.insert("step_attempts".to_string(), step.attempts.to_string());
             metadata.insert("step_model".to_string(), step.model.clone());
         }
@@ -11655,7 +11575,11 @@ fn run_adaptive_collaboration(
         .and_then(|checkpoint| {
             serde_json::from_str::<ConductorPromptGenome>(&checkpoint.prompt_genome_json).ok()
         })
-        .or_else(|| evolution.as_ref().map(|evaluation| evaluation.next_profile.clone()))
+        .or_else(|| {
+            evolution
+                .as_ref()
+                .map(|evaluation| evaluation.next_profile.clone())
+        })
         .unwrap_or_else(|| ConductorPromptGenome::seed_for_effort(&effort));
     if resumed_from_checkpoint {
         if let Some(profile) = workflow_checkpoint
@@ -11682,7 +11606,10 @@ fn run_adaptive_collaboration(
                     ("collaboration_id".to_string(), collaboration_id.to_string()),
                     ("prompt_profile".to_string(), prompt_genome.id.clone()),
                     ("prompt_effort".to_string(), effort.clone()),
-                    ("prompt_generation".to_string(), prompt_genome.generation.to_string()),
+                    (
+                        "prompt_generation".to_string(),
+                        prompt_genome.generation.to_string(),
+                    ),
                     ("prompt_genome".to_string(), prompt_genome_json.clone()),
                     ("prompt_selection_mode".to_string(), selection_mode.clone()),
                     ("workflow_resume_key".to_string(), resume_key.clone()),
@@ -11755,10 +11682,7 @@ fn run_adaptive_collaboration(
         let harness = ConductorHarness::new(ConductorRequest {
             workflow_id: collaboration_id.to_string(),
             objective: prompt.to_string(),
-            recent_context: collaboration_context_for_genome(
-                history,
-                prompt_genome.context_policy,
-            ),
+            recent_context: collaboration_context_for_genome(history, prompt_genome.context_policy),
             effort: effort.clone(),
             policy: policy.clone(),
             conductor_model: conductor_model.clone(),
@@ -11885,23 +11809,26 @@ fn run_adaptive_collaboration(
             metadata_with_context(
                 [
                     ("collaboration_id".to_string(), collaboration_id.to_string()),
-                    ("workflow_schema".to_string(), WORKFLOW_IR_SCHEMA.to_string()),
+                    (
+                        "workflow_schema".to_string(),
+                        WORKFLOW_IR_SCHEMA.to_string(),
+                    ),
                     ("workflow_ir".to_string(), workflow_ir),
                     ("workflow_resume_key".to_string(), resume_key.clone()),
                     (
                         "workflow_checkpoint_schema".to_string(),
                         WORKFLOW_CHECKPOINT_SCHEMA.to_string(),
                     ),
-                    (
-                        "resumed".to_string(),
-                        resumed_from_checkpoint.to_string(),
-                    ),
+                    ("resumed".to_string(), resumed_from_checkpoint.to_string()),
                     (
                         "prompt_profile".to_string(),
                         workflow_plan.prompt_profile.clone(),
                     ),
                     ("prompt_effort".to_string(), effort.clone()),
-                    ("prompt_generation".to_string(), prompt_genome.generation.to_string()),
+                    (
+                        "prompt_generation".to_string(),
+                        prompt_genome.generation.to_string(),
+                    ),
                     ("prompt_genome".to_string(), prompt_genome_json.clone()),
                     ("prompt_selection_mode".to_string(), selection_mode.clone()),
                     (
@@ -11934,7 +11861,10 @@ fn run_adaptive_collaboration(
                             .unwrap_or_default()
                             .to_string(),
                     ),
-                    ("workflow_steps".to_string(), workflow.steps.len().to_string()),
+                    (
+                        "workflow_steps".to_string(),
+                        workflow.steps.len().to_string(),
+                    ),
                     ("workflow_layers".to_string(), layers.len().to_string()),
                     ("worker_models".to_string(), unique_models.to_string()),
                     (
@@ -11995,10 +11925,7 @@ fn run_adaptive_collaboration(
         None,
         &workflow_checkpoint,
     )?;
-    let shared_memory = collaboration_context_for_genome(
-        history,
-        prompt_genome.context_policy,
-    );
+    let shared_memory = collaboration_context_for_genome(history, prompt_genome.context_policy);
     let max_model_turns_per_step =
         effective_workflow_model_turn_budget(&workflow_plan, &workflow_checkpoint);
     let max_step_attempts =
@@ -12011,10 +11938,9 @@ fn run_adaptive_collaboration(
         if layer.is_empty() {
             continue;
         }
-        if let Some(control) = active_agent_run_control(
-            state,
-            run_context.get("session_id").map(String::as_str),
-        )? {
+        if let Some(control) =
+            active_agent_run_control(state, run_context.get("session_id").map(String::as_str))?
+        {
             control.mark_progress(
                 "collaboration",
                 &format!(
@@ -12035,7 +11961,11 @@ fn run_adaptive_collaboration(
                 &mut store,
                 task_id,
                 EventKind::TaskStatusChanged,
-                format!("Collaboration layer {}/{} started", layer_index + 1, layer_count),
+                format!(
+                    "Collaboration layer {}/{} started",
+                    layer_index + 1,
+                    layer_count
+                ),
                 metadata_with_context(
                     [
                         ("collaboration_id".to_string(), collaboration_id.to_string()),
@@ -12053,14 +11983,11 @@ fn run_adaptive_collaboration(
             .into_iter()
             .map(|step_index| {
                 let step = &workflow.steps[step_index];
-                let worker_prompt = adaptive_worker_prompt(
-                    &workflow,
-                    step_index,
-                    prompt,
-                    &shared_memory,
-                    &outputs,
-                )
-                .ok_or_else(|| format!("adaptive worker prompt is missing for {}", step.id))?;
+                let worker_prompt =
+                    adaptive_worker_prompt(&workflow, step_index, prompt, &shared_memory, &outputs)
+                        .ok_or_else(|| {
+                            format!("adaptive worker prompt is missing for {}", step.id)
+                        })?;
                 Ok(AdaptiveCollaborationSpec {
                     step_index,
                     step_id: step.id.clone(),
@@ -12120,10 +12047,8 @@ fn run_adaptive_collaboration(
             )?;
         }
 
-        let cancellation = active_agent_run_control(
-            state,
-            run_context.get("session_id").map(String::as_str),
-        )?;
+        let cancellation =
+            active_agent_run_control(state, run_context.get("session_id").map(String::as_str))?;
         let jobs = specs
             .iter()
             .map(|spec| {
@@ -12188,10 +12113,11 @@ fn run_adaptive_collaboration(
                 &completion,
                 &metadata,
             )?;
-            if completion.content.as_ref().is_none_or(|content| content.trim().is_empty())
-                && cancellation
-                    .as_ref()
-                    .is_some_and(agent_run_should_stop)
+            if completion
+                .content
+                .as_ref()
+                .is_none_or(|content| content.trim().is_empty())
+                && cancellation.as_ref().is_some_and(agent_run_should_stop)
             {
                 workflow_checkpoint.fail_step(
                     &spec.step_id,
@@ -12216,8 +12142,8 @@ fn run_adaptive_collaboration(
             let mut accumulated_latency_ms = 0u64;
             let mut accumulated_tokens = 0u64;
             loop {
-                accumulated_latency_ms = accumulated_latency_ms
-                    .saturating_add(effective_completion.latency_ms);
+                accumulated_latency_ms =
+                    accumulated_latency_ms.saturating_add(effective_completion.latency_ms);
                 accumulated_tokens = accumulated_tokens.saturating_add(
                     effective_completion
                         .usage
@@ -12249,11 +12175,7 @@ fn run_adaptive_collaboration(
                             .as_deref()
                             .unwrap_or("worker returned empty content")
                     );
-                    workflow_checkpoint.fail_step(
-                        &spec.step_id,
-                        &error,
-                        current_time_millis(),
-                    )?;
+                    workflow_checkpoint.fail_step(&spec.step_id, &error, current_time_millis())?;
                     append_workflow_checkpoint_event(
                         state,
                         task_id,
@@ -12414,10 +12336,7 @@ fn run_adaptive_collaboration(
         if let Some(error) = adaptive_layer_failure_error(&layer_failures) {
             return Err(error);
         }
-        if cancellation
-            .as_ref()
-            .is_some_and(agent_run_should_stop)
-        {
+        if cancellation.as_ref().is_some_and(agent_run_should_stop) {
             return Err(MODEL_REQUEST_CANCELLED.to_string());
         }
     }
@@ -12476,10 +12395,16 @@ fn run_adaptive_collaboration(
             metadata_with_context(
                 [
                     ("collaboration_id".to_string(), collaboration_id.to_string()),
-                    ("workflow_schema".to_string(), WORKFLOW_IR_SCHEMA.to_string()),
+                    (
+                        "workflow_schema".to_string(),
+                        WORKFLOW_IR_SCHEMA.to_string(),
+                    ),
                     ("status".to_string(), "completed".to_string()),
                     ("fallback_used".to_string(), "false".to_string()),
-                    ("workflow_steps".to_string(), workflow_plan.steps.len().to_string()),
+                    (
+                        "workflow_steps".to_string(),
+                        workflow_plan.steps.len().to_string(),
+                    ),
                     ("workflow_layers".to_string(), layer_count.to_string()),
                     ("evidence_count".to_string(), evidence_count.to_string()),
                     ("recovered_steps".to_string(), recovered_steps.to_string()),
@@ -12559,9 +12484,7 @@ fn adaptive_recovery_model(
             candidates
                 .get(recovery_attempt.saturating_sub(2) % candidates.len().max(1))
                 .map(|model| (*model).clone())
-                .ok_or_else(|| {
-                    format!("no alternate model is available for failed step {step_id}")
-                })
+                .ok_or_else(|| format!("no alternate model is available for failed step {step_id}"))
         }
     }
 }
@@ -12603,7 +12526,10 @@ fn recover_adaptive_worker(
                     ("collaboration_id".to_string(), collaboration_id.to_string()),
                     ("failed_step_id".to_string(), spec.step_id.clone()),
                     ("failed_model".to_string(), failed_model.to_string()),
-                    ("replacement_model".to_string(), replacement_model.to_string()),
+                    (
+                        "replacement_model".to_string(),
+                        replacement_model.to_string(),
+                    ),
                     (
                         "retry_policy".to_string(),
                         match retry_policy {
@@ -12657,10 +12583,7 @@ fn recover_adaptive_worker(
         ),
     )
     .unwrap_or_else(|_| spec.subtask.clone());
-    if cancellation
-        .as_ref()
-        .is_some_and(agent_run_should_stop)
-    {
+    if cancellation.as_ref().is_some_and(agent_run_should_stop) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
     let recovery_stage = format!("recovery_{}{}", spec.step_index + 1, stage_suffix);
@@ -12726,9 +12649,7 @@ fn adaptive_quality_repair_budget(verification: PromptVerification) -> usize {
 }
 
 fn adaptive_quality_gate_passes(gate: &CollaborationQualityPayload) -> bool {
-    gate.pass
-        && gate.score >= ADAPTIVE_QUALITY_PASS_SCORE
-        && gate.safety_violations == 0
+    gate.pass && gate.score >= ADAPTIVE_QUALITY_PASS_SCORE && gate.safety_violations == 0
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -12766,7 +12687,10 @@ fn record_adaptive_quality_gate_event(
                     gate.safety_violations.to_string(),
                 ),
                 ("quality_review_index".to_string(), review_index.to_string()),
-                ("quality_repair_budget".to_string(), repair_budget.to_string()),
+                (
+                    "quality_repair_budget".to_string(),
+                    repair_budget.to_string(),
+                ),
             ]
             .into_iter()
             .collect(),
@@ -12850,14 +12774,12 @@ fn quality_gate_adaptive_output(
                 break;
             }
         };
-        let gate = parse_collaboration_quality(&raw_gate).unwrap_or(
-            CollaborationQualityPayload {
-                pass: false,
-                score: 0.0,
-                issues: vec![truncate_for_collaboration(&raw_gate, 2_000)],
-                safety_violations: 0,
-            },
-        );
+        let gate = parse_collaboration_quality(&raw_gate).unwrap_or(CollaborationQualityPayload {
+            pass: false,
+            score: 0.0,
+            issues: vec![truncate_for_collaboration(&raw_gate, 2_000)],
+            safety_violations: 0,
+        });
         record_adaptive_quality_gate_event(
             state,
             task_id,
@@ -12909,12 +12831,7 @@ fn quality_gate_adaptive_output(
     }
 
     let (score, safety_violations) = last_gate
-        .map(|gate| {
-            (
-                gate.score.clamp(0.0, 1.0) as f64,
-                gate.safety_violations,
-            )
-        })
+        .map(|gate| (gate.score.clamp(0.0, 1.0) as f64, gate.safety_violations))
         .unwrap_or((0.5, 0));
     AdaptiveQualityGateResult {
         output: candidate,
@@ -12987,10 +12904,8 @@ fn run_collaboration_candidates(
         )?;
     }
 
-    let cancellation = active_agent_run_control(
-        state,
-        run_context.get("session_id").map(String::as_str),
-    )?;
+    let cancellation =
+        active_agent_run_control(state, run_context.get("session_id").map(String::as_str))?;
     let jobs = specs
         .iter()
         .map(|spec| {
@@ -13034,10 +12949,7 @@ fn run_collaboration_candidates(
             })
         })
         .collect::<Vec<_>>();
-    if cancellation
-        .as_ref()
-        .is_some_and(agent_run_should_stop)
-    {
+    if cancellation.as_ref().is_some_and(agent_run_should_stop) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
 
@@ -13062,12 +12974,7 @@ fn run_collaboration_candidates(
         {
             candidates.push((
                 spec.model.clone(),
-                collaboration_step_result(
-                    &spec.stage,
-                    &spec.model,
-                    content,
-                    &completion.evidence,
-                ),
+                collaboration_step_result(&spec.stage, &spec.model, content, &completion.evidence),
             ));
         }
     }
@@ -13110,8 +13017,7 @@ fn prepare_agent_collaboration(
     let agent_budget = collaboration_agent_budget(*candidates);
     let models = collaboration_candidate_models(config, agent_budget);
     let fallback_models = collaboration_fallback_models(&models, agent_budget);
-    let bounded = run_context.get("collaboration_profile").map(String::as_str)
-        == Some("bounded");
+    let bounded = run_context.get("collaboration_profile").map(String::as_str) == Some("bounded");
     let effort = run_context
         .get("agent_effort")
         .cloned()
@@ -13120,10 +13026,7 @@ fn prepare_agent_collaboration(
         .get("collaboration_policy")
         .cloned()
         .unwrap_or_else(|| policy.label().to_string());
-    let bounded_evolution = if bounded
-        && config.prompt_evolution_enabled
-        && effort != "fast"
-    {
+    let bounded_evolution = if bounded && config.prompt_evolution_enabled && effort != "fast" {
         prompt_evolution_evaluation_for_run(state, &effort, run_context).ok()
     } else {
         None
@@ -13167,14 +13070,8 @@ fn prepare_agent_collaboration(
                         "prompt_champion".to_string(),
                         evaluation.champion_id.clone().unwrap_or_default(),
                     ),
-                    (
-                        "prompt_evolution_enabled".to_string(),
-                        "true".to_string(),
-                    ),
-                    (
-                        "collaboration_profile".to_string(),
-                        "bounded".to_string(),
-                    ),
+                    ("prompt_evolution_enabled".to_string(), "true".to_string()),
+                    ("collaboration_profile".to_string(), "bounded".to_string()),
                     (
                         "prompt_objective".to_string(),
                         truncate_for_collaboration(prompt, 6_000),
@@ -13220,11 +13117,12 @@ fn prepare_agent_collaboration(
             if error.starts_with(WORKFLOW_RESUMABLE_ERROR_PREFIX) {
                 return Err(error);
             }
-            let control = active_agent_run_control(
-                state,
-                run_context.get("session_id").map(String::as_str),
-            )?;
-            if control.as_ref().is_some_and(|control| control.should_stop()) {
+            let control =
+                active_agent_run_control(state, run_context.get("session_id").map(String::as_str))?;
+            if control
+                .as_ref()
+                .is_some_and(|control| control.should_stop())
+            {
                 return Err(error);
             }
             let fallback_allowed = control
@@ -13239,12 +13137,12 @@ fn prepare_agent_collaboration(
                     metadata_with_context(
                         [
                             ("collaboration_id".to_string(), id.clone()),
-                            ("workflow_schema".to_string(), WORKFLOW_IR_SCHEMA.to_string()),
-                            ("status".to_string(), "failed".to_string()),
                             (
-                                "fallback_used".to_string(),
-                                fallback_allowed.to_string(),
+                                "workflow_schema".to_string(),
+                                WORKFLOW_IR_SCHEMA.to_string(),
                             ),
+                            ("status".to_string(), "failed".to_string()),
+                            ("fallback_used".to_string(), fallback_allowed.to_string()),
                             (
                                 "error".to_string(),
                                 truncate_for_collaboration(&error, 2_000),
@@ -13301,10 +13199,7 @@ fn prepare_agent_collaboration(
     }))
 }
 
-fn append_single_model_policy_guidance(
-    history: &mut Vec<Message>,
-    policy: &OrchestrationPolicy,
-) {
+fn append_single_model_policy_guidance(history: &mut Vec<Message>, policy: &OrchestrationPolicy) {
     if *policy != OrchestrationPolicy::PlanExecuteReview {
         return;
     }
@@ -13499,10 +13394,8 @@ fn continue_agent_loop(
                 cancellation,
             );
         }
-        let max_output_tokens = bounded_max_output_tokens(
-            config.context_window_tokens,
-            AGENT_MAX_OUTPUT_TOKENS,
-        );
+        let max_output_tokens =
+            bounded_max_output_tokens(config.context_window_tokens, AGENT_MAX_OUTPUT_TOKENS);
         let (mut request, context_governor) = model_request_for_turn_with_context_budget(
             &runtime,
             &tools,
@@ -13529,10 +13422,7 @@ fn continue_agent_loop(
             let mut metadata = [
                 ("request_id".to_string(), request_id.clone()),
                 ("turn".to_string(), runtime.turn.to_string()),
-                (
-                    "model".to_string(),
-                    agent_model.clone(),
-                ),
+                ("model".to_string(), agent_model.clone()),
                 ("tool_count".to_string(), tools.len().to_string()),
                 ("prompt".to_string(), prompt.clone()),
                 (
@@ -13636,15 +13526,7 @@ fn continue_agent_loop(
                     if error.message == MODEL_REQUEST_CANCELLED
                         || agent_run_should_stop(cancellation)
                     {
-                        emit_agent_stream_delta(
-                            app,
-                            &request_id,
-                            session_id,
-                            "",
-                            true,
-                            true,
-                            None,
-                        );
+                        emit_agent_stream_delta(app, &request_id, session_id, "", true, true, None);
                         cancellation.finish_model_call();
                         return pause_agent_loop_for_control_stop(
                             app,
@@ -13692,9 +13574,7 @@ fn continue_agent_loop(
                         cancellation.record_partial_output(&partial_stream);
                     }
                     cancellation.finish_model_call();
-                    if let Some(reason) =
-                        exhausted_model_transport_stop_reason(&error.message)
-                    {
+                    if let Some(reason) = exhausted_model_transport_stop_reason(&error.message) {
                         cancellation.request_stop(reason);
                         return pause_agent_loop_for_control_stop(
                             app,
@@ -13720,15 +13600,7 @@ fn continue_agent_loop(
         response.message.content = sanitize_assistant_content(&raw_response_content);
         let reasoning_markup_removed = response.message.content != raw_response_content.trim();
         if visible_stream && streamed_output && reasoning_markup_removed {
-            emit_agent_stream_delta(
-                app,
-                &request_id,
-                session_id,
-                "",
-                false,
-                true,
-                None,
-            );
+            emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
             streamed_output = false;
         }
         if !response.message.content.trim().is_empty() {
@@ -13756,15 +13628,7 @@ fn continue_agent_loop(
         let output_length = response.message.content.len();
         let tool_call_count = response.tool_calls.len();
         if visible_stream && streamed_output && tool_call_count > 0 {
-            emit_agent_stream_delta(
-                app,
-                &request_id,
-                session_id,
-                "",
-                false,
-                true,
-                None,
-            );
+            emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
             streamed_output = false;
         }
         {
@@ -13854,11 +13718,9 @@ fn continue_agent_loop(
             let verification_required = run_context
                 .get("verification_required")
                 .is_some_and(|value| value == "true");
-            if let Some(instruction) = completion_verification_instruction(
-                &mut runtime,
-                verification_required,
-                &tools,
-            ) {
+            if let Some(instruction) =
+                completion_verification_instruction(&mut runtime, verification_required, &tools)
+            {
                 runtime.messages.truncate(previous_message_count);
                 append_internal_instruction(
                     &mut runtime,
@@ -14009,13 +13871,10 @@ fn continue_agent_loop(
                                 "budget_extensions".to_string(),
                                 completion_progress.budget_extensions.to_string(),
                             ),
-                            (
-                                "last_stage".to_string(),
-                                completion_progress.stage,
-                            ),
+                            ("last_stage".to_string(), completion_progress.stage),
                         ]
-                            .into_iter()
-                            .collect(),
+                        .into_iter()
+                        .collect(),
                         &run_context,
                     ),
                 )
@@ -14028,28 +13887,18 @@ fn continue_agent_loop(
                 ) {
                     eprintln!("project memory utilization unavailable: {error}");
                 }
-                let memory_ledger = match refresh_project_memory_after_completion(
-                    &mut store,
-                    &run_context,
-                ) {
-                    Ok(ledger) => ledger,
-                    Err(error) => {
-                        eprintln!("project memory checkpoint unavailable: {error}");
-                        None
-                    }
-                };
+                let memory_ledger =
+                    match refresh_project_memory_after_completion(&mut store, &run_context) {
+                        Ok(ledger) => ledger,
+                        Err(error) => {
+                            eprintln!("project memory checkpoint unavailable: {error}");
+                            None
+                        }
+                    };
                 let completed_state = agent_state_for_session(&store, None, session_id)
                     .map_err(|error| error.to_string())?;
                 drop(store);
-                emit_agent_stream_delta(
-                    app,
-                    &request_id,
-                    session_id,
-                    "",
-                    true,
-                    false,
-                    None,
-                );
+                emit_agent_stream_delta(app, &request_id, session_id, "", true, false, None);
                 if let Some(ledger) = memory_ledger {
                     schedule_project_memory_vector_refresh(
                         workspace_root.to_path_buf(),
@@ -14121,11 +13970,8 @@ fn continue_agent_loop(
                     append_tool_proposed_event(&mut store, &invocation, Some(&run_context))
                         .map_err(|error| error.to_string())?;
 
-                    if repeated_tool_failure_count(
-                        &runtime,
-                        &call.tool_name,
-                        &call.input,
-                    ) >= MAX_IDENTICAL_TOOL_FAILURES
+                    if repeated_tool_failure_count(&runtime, &call.tool_name, &call.input)
+                        >= MAX_IDENTICAL_TOOL_FAILURES
                     {
                         let observation = observation_from_tool_result(
                             &call.tool_name,
@@ -14139,18 +13985,17 @@ fn continue_agent_loop(
                             &call.tool_name,
                             "failed",
                             &observation,
-                            [("failure_code".to_string(), "repeated_call_blocked".to_string())]
-                                .into_iter()
-                                .collect(),
+                            [(
+                                "failure_code".to_string(),
+                                "repeated_call_blocked".to_string(),
+                            )]
+                            .into_iter()
+                            .collect(),
                             Some(&run_context),
                         )
                         .map_err(|error| error.to_string())?;
                         let previous_message_count = runtime.messages.len();
-                        append_tool_observation(
-                            &mut runtime,
-                            call.call_id.clone(),
-                            &observation,
-                        );
+                        append_tool_observation(&mut runtime, call.call_id.clone(), &observation);
                         persist_new_runtime_messages(
                             &mut store,
                             &runtime.task_id,
@@ -14180,11 +14025,7 @@ fn continue_agent_loop(
                         )
                         .map_err(|error| error.to_string())?;
                         let previous_message_count = runtime.messages.len();
-                        append_tool_observation(
-                            &mut runtime,
-                            call.call_id.clone(),
-                            &observation,
-                        );
+                        append_tool_observation(&mut runtime, call.call_id.clone(), &observation);
                         persist_new_runtime_messages(
                             &mut store,
                             &runtime.task_id,
@@ -14199,7 +14040,9 @@ fn continue_agent_loop(
 
                     if let Some(mut request) = tool.permission_request(&invocation) {
                         request.id = PermissionRequestId(unique_id("agent-perm"));
-                        request.metadata.insert("phase".to_string(), "16".to_string());
+                        request
+                            .metadata
+                            .insert("phase".to_string(), "16".to_string());
                         request
                             .metadata
                             .entry("tool_input".to_string())
@@ -14226,7 +14069,7 @@ fn continue_agent_loop(
                             &request,
                             session_id,
                         )
-                            .map_err(|error| error.to_string())?
+                        .map_err(|error| error.to_string())?
                         {
                             store
                                 .save_permission_request(request.clone(), current_time_millis())
@@ -14296,11 +14139,7 @@ fn continue_agent_loop(
                         Some(&tool_risk),
                     );
                     let previous_message_count = runtime.messages.len();
-                    append_tool_observation(
-                        &mut runtime,
-                        call.call_id.clone(),
-                        &observation,
-                    );
+                    append_tool_observation(&mut runtime, call.call_id.clone(), &observation);
                     append_visual_reference_message(&mut runtime, &tool_name, &image_paths);
                     let mut store = state
                         .store
@@ -14333,12 +14172,8 @@ fn continue_agent_loop(
                         .store
                         .lock()
                         .map_err(|error| format!("store lock poisoned: {error}"))?;
-                    let events = agent_events_for_session(
-                        &store,
-                        &phase16_task_id(),
-                        session_id,
-                    )
-                    .map_err(|error| error.to_string())?;
+                    let events = agent_events_for_session(&store, &phase16_task_id(), session_id)
+                        .map_err(|error| error.to_string())?;
                     let active_events = active_agent_events_for_session(&events, session_id);
                     let recovery_metadata = agent_recovery_metadata(
                         &active_events,
@@ -14617,11 +14452,11 @@ fn agent_state_from_events(
                 true,
             )
         });
-    let context_remaining_percent =
-        (context_window_tokens.saturating_sub(context_tokens_used) as f64
-            / context_window_tokens as f64
-            * 100.0)
-            .clamp(0.0, 100.0);
+    let context_remaining_percent = (context_window_tokens.saturating_sub(context_tokens_used)
+        as f64
+        / context_window_tokens as f64
+        * 100.0)
+        .clamp(0.0, 100.0);
     let turn_count = active_events
         .iter()
         .filter(|event| {
@@ -14629,8 +14464,12 @@ fn agent_state_from_events(
                 && event.summary == "Agent model turn finished"
         })
         .count();
-    let run_start = active_events.iter().find(|event| is_agent_run_start_event(event));
-    let run_started_at_ms = run_start.map(|event| event.timestamp_ms).unwrap_or_default();
+    let run_start = active_events
+        .iter()
+        .find(|event| is_agent_run_start_event(event));
+    let run_started_at_ms = run_start
+        .map(|event| event.timestamp_ms)
+        .unwrap_or_default();
     let run_budget_ms = run_start
         .and_then(|event| event.metadata.get("run_budget_ms"))
         .and_then(|value| value.parse::<u64>().ok())
@@ -14748,9 +14587,7 @@ impl ContextCheckpointManifest {
             compaction_version: CONTEXT_COMPACTION_VERSION.to_string(),
             covered_messages,
             history_messages: history.len(),
-            covered_prefix_sha256: context_history_prefix_sha256(
-                &history[..covered_messages],
-            ),
+            covered_prefix_sha256: context_history_prefix_sha256(&history[..covered_messages]),
             checkpoint_sha256: sha256_hex(checkpoint_text.as_bytes()),
             generated_at_ms: current_time_millis(),
         })
@@ -14861,13 +14698,7 @@ fn estimate_message_tokens(message: &Message) -> u64 {
     let image_tokens = message
         .metadata
         .get("image_paths")
-        .map(|paths| {
-            paths
-                .lines()
-                .filter(|path| !path.trim().is_empty())
-                .count() as u64
-                * 1_024
-        })
+        .map(|paths| paths.lines().filter(|path| !path.trim().is_empty()).count() as u64 * 1_024)
         .unwrap_or(0);
     content_tokens
         .saturating_add(tool_call_tokens)
@@ -14901,7 +14732,12 @@ fn estimate_context_tokens(messages: &[Message]) -> u64 {
 }
 
 fn effective_context_usage_from_event(event: &Event) -> Option<(u64, bool)> {
-    if event.metadata.get("context_usage_reset").map(String::as_str) == Some("true") {
+    if event
+        .metadata
+        .get("context_usage_reset")
+        .map(String::as_str)
+        == Some("true")
+    {
         let tokens = event.metadata.get("context_tokens_used")?.parse().ok()?;
         let estimated = event
             .metadata
@@ -14971,10 +14807,7 @@ fn recent_history_start(history: &[Message], token_budget: u64) -> (usize, u64) 
     if start == history.len() {
         start = history.len() - 1;
     }
-    let tokens = history[start..]
-        .iter()
-        .map(estimate_message_tokens)
-        .sum();
+    let tokens = history[start..].iter().map(estimate_message_tokens).sum();
     (start, tokens)
 }
 
@@ -14984,15 +14817,13 @@ fn session_compaction_plan(
 ) -> SessionCompactionPlan {
     let context_window_tokens = context_window_tokens.max(1);
     let estimated_history_tokens = estimate_context_tokens(history);
-    let estimated_request_tokens = estimated_history_tokens
-        .saturating_add(context_prompt_reserve(context_window_tokens));
+    let estimated_request_tokens =
+        estimated_history_tokens.saturating_add(context_prompt_reserve(context_window_tokens));
     let should_compact = estimated_request_tokens
         >= context_window_tokens.saturating_mul(CONTEXT_COMPACTION_TRIGGER_PERCENT) / 100
         || history.len() > 80;
     let recent_floor = 8_000.min(context_window_tokens / 2).max(1);
-    let recent_budget = (context_window_tokens
-        .saturating_mul(CONTEXT_RECENT_TARGET_PERCENT)
-        / 100)
+    let recent_budget = (context_window_tokens.saturating_mul(CONTEXT_RECENT_TARGET_PERCENT) / 100)
         .min(CONTEXT_RECENT_MAX_TOKENS)
         .max(recent_floor);
     let (recent_start, recent_tokens) = recent_history_start(history, recent_budget);
@@ -15045,18 +14876,10 @@ fn prepare_session_history_context(
     );
     let plan = session_compaction_plan(&history, context_window_tokens);
     let session_id = run_context.get("session_id").map(String::as_str);
-    let existing_checkpoint = read_validated_context_checkpoint(
-        workspace_root,
-        session_id,
-        &history,
-    );
+    let existing_checkpoint =
+        read_validated_context_checkpoint(workspace_root, session_id, &history);
     let can_reuse_checkpoint = existing_checkpoint.as_ref().is_some_and(|checkpoint| {
-        context_checkpoint_is_within_reuse_window(
-            checkpoint,
-            &history,
-            plan,
-            context_window_tokens,
-        )
+        context_checkpoint_is_within_reuse_window(checkpoint, &history, plan, context_window_tokens)
     });
     let (checkpoint, checkpoint_reused) = if plan.should_compact && !can_reuse_checkpoint {
         if plan.recent_start == 0 {
@@ -15160,11 +14983,8 @@ fn prepare_session_history_context(
             .map(estimate_message_tokens)
             .sum()
     };
-    let Some(compacted) = history_with_context_checkpoint(
-        &history,
-        checkpoint,
-        &checkpoint_path,
-    ) else {
+    let Some(compacted) = history_with_context_checkpoint(&history, checkpoint, &checkpoint_path)
+    else {
         return Ok(history);
     };
 
@@ -15184,18 +15004,12 @@ fn prepare_session_history_context(
                     "retained_messages".to_string(),
                     retained_messages.to_string(),
                 ),
-                (
-                    "covered_messages".to_string(),
-                    covered_messages.to_string(),
-                ),
+                ("covered_messages".to_string(), covered_messages.to_string()),
                 (
                     "original_tokens".to_string(),
                     plan.estimated_history_tokens.to_string(),
                 ),
-                (
-                    "retained_tokens".to_string(),
-                    retained_tokens.to_string(),
-                ),
+                ("retained_tokens".to_string(), retained_tokens.to_string()),
                 (
                     "compaction_version".to_string(),
                     CONTEXT_COMPACTION_VERSION.to_string(),
@@ -15236,14 +15050,8 @@ fn prepare_session_history_context(
                     "context_window_tokens".to_string(),
                     context_window_tokens.to_string(),
                 ),
-                (
-                    "context_usage_estimated".to_string(),
-                    "true".to_string(),
-                ),
-                (
-                    "covered_messages".to_string(),
-                    covered_messages.to_string(),
-                ),
+                ("context_usage_estimated".to_string(), "true".to_string()),
+                ("covered_messages".to_string(), covered_messages.to_string()),
                 (
                     "retained_messages".to_string(),
                     retained_messages.to_string(),
@@ -15300,7 +15108,9 @@ fn agent_task_is_cancelled(
     session_id: Option<&str>,
 ) -> Result<bool, StorageError> {
     if let Some(session_id) = session_id {
-        let status = load_agent_session_read_model(store, session_id)?.state.status;
+        let status = load_agent_session_read_model(store, session_id)?
+            .state
+            .status;
         return Ok(AgentRunStatus::parse(&status) == AgentRunStatus::Cancelled);
     }
     let events = agent_events_for_session(store, &phase16_task_id(), session_id)?;
@@ -15365,8 +15175,8 @@ fn build_agent_recovery_envelope(
 ) -> Option<AgentRecoveryEnvelope> {
     let (resume_key, source_run_id, user_turn_sequence, prompt_fingerprint, _) =
         agent_recovery_identity(events, run_context)?;
-    let prior = latest_agent_recovery_envelope(events)
-        .filter(|envelope| envelope.resume_key == resume_key);
+    let prior =
+        latest_agent_recovery_envelope(events).filter(|envelope| envelope.resume_key == resume_key);
     let workflow_resume_key = events.iter().rev().find_map(|event| {
         event
             .metadata
@@ -15395,7 +15205,10 @@ fn build_agent_recovery_envelope(
         workflow_resume_key,
         state: state.to_string(),
         reason: reason.to_string(),
-        attempts: prior.as_ref().map(|envelope| envelope.attempts).unwrap_or_default(),
+        attempts: prior
+            .as_ref()
+            .map(|envelope| envelope.attempts)
+            .unwrap_or_default(),
         model_calls: events
             .iter()
             .filter(|event| event.kind == EventKind::ModelRequestFinished)
@@ -15419,19 +15232,25 @@ fn agent_recovery_metadata(
     reason: &str,
     mut metadata: Metadata,
 ) -> Result<Metadata, String> {
-    let envelope = build_agent_recovery_envelope(
-        events,
-        run_context,
-        state,
-        reason,
-        current_time_millis(),
-    )
-    .ok_or_else(|| "agent recovery checkpoint is missing a durable session prompt".to_string())?;
-    metadata.insert("recovery_schema".to_string(), AGENT_RECOVERY_SCHEMA.to_string());
-    metadata.insert("recovery_resume_key".to_string(), envelope.resume_key.clone());
+    let envelope =
+        build_agent_recovery_envelope(events, run_context, state, reason, current_time_millis())
+            .ok_or_else(|| {
+                "agent recovery checkpoint is missing a durable session prompt".to_string()
+            })?;
+    metadata.insert(
+        "recovery_schema".to_string(),
+        AGENT_RECOVERY_SCHEMA.to_string(),
+    );
+    metadata.insert(
+        "recovery_resume_key".to_string(),
+        envelope.resume_key.clone(),
+    );
     metadata.insert("recovery_state".to_string(), envelope.state.clone());
     metadata.insert("recovery_reason".to_string(), envelope.reason.clone());
-    metadata.insert("recovery_attempts".to_string(), envelope.attempts.to_string());
+    metadata.insert(
+        "recovery_attempts".to_string(),
+        envelope.attempts.to_string(),
+    );
     metadata.insert(
         "source_agent_run_id".to_string(),
         envelope.source_run_id.clone(),
@@ -15486,9 +15305,10 @@ fn claim_agent_recovery_envelope(
     let Some(mut envelope) = latest_agent_recovery_envelope(&active_events) else {
         return Ok(None);
     };
-    let latest_status = active_events.iter().rev().find(|event| {
-        event.kind == EventKind::TaskStatusChanged && !is_agent_queue_event(event)
-    });
+    let latest_status = active_events
+        .iter()
+        .rev()
+        .find(|event| event.kind == EventKind::TaskStatusChanged && !is_agent_queue_event(event));
     let recoverable_status = latest_status.is_some_and(|event| {
         matches!(
             event.summary.as_str(),
@@ -15521,15 +15341,21 @@ fn claim_agent_recovery_envelope(
         "Recovery resume claimed",
         metadata_with_context(
             [
-                ("recovery_schema".to_string(), AGENT_RECOVERY_SCHEMA.to_string()),
-                ("recovery_resume_key".to_string(), envelope.resume_key.clone()),
+                (
+                    "recovery_schema".to_string(),
+                    AGENT_RECOVERY_SCHEMA.to_string(),
+                ),
+                (
+                    "recovery_resume_key".to_string(),
+                    envelope.resume_key.clone(),
+                ),
                 ("recovery_state".to_string(), envelope.state.clone()),
                 ("recovery_reason".to_string(), envelope.reason.clone()),
-                ("recovery_attempts".to_string(), envelope.attempts.to_string()),
                 (
-                    "agent_run_id".to_string(),
-                    envelope.source_run_id.clone(),
+                    "recovery_attempts".to_string(),
+                    envelope.attempts.to_string(),
                 ),
+                ("agent_run_id".to_string(), envelope.source_run_id.clone()),
                 (
                     "recovery_envelope".to_string(),
                     serde_json::to_string(&envelope).map_err(|error| {
@@ -15750,7 +15576,11 @@ fn agent_trace_role_summaries(events: &[Event]) -> Vec<AgentTraceRoleSummaryView
         } else {
             entry.completed += 1;
         }
-        if let Some(model) = event.metadata.get("model").filter(|model| !model.trim().is_empty()) {
+        if let Some(model) = event
+            .metadata
+            .get("model")
+            .filter(|model| !model.trim().is_empty())
+        {
             entry.models.insert(model.clone());
         }
         entry.latency_ms = entry.latency_ms.saturating_add(
@@ -15794,9 +15624,8 @@ fn agent_trace_role_summaries(events: &[Event]) -> Vec<AgentTraceRoleSummaryView
             completed: summary.completed,
             degraded: summary.degraded,
             latency_ms: summary.latency_ms,
-            first_token_latency_ms: (summary.first_token_samples > 0).then(|| {
-                summary.first_token_latency_ms / summary.first_token_samples
-            }),
+            first_token_latency_ms: (summary.first_token_samples > 0)
+                .then(|| summary.first_token_latency_ms / summary.first_token_samples),
             total_tokens: summary.total_tokens,
             evidence_count: summary.evidence_count,
         })
@@ -15825,8 +15654,7 @@ fn agent_trace_state_from_events(
         .filter(|audit| audit.request.task_id == task_id)
         .filter(|audit| {
             if let Some(session_id) = session_id {
-                if audit.request.metadata.get("session_id").map(String::as_str)
-                    != Some(session_id)
+                if audit.request.metadata.get("session_id").map(String::as_str) != Some(session_id)
                 {
                     return false;
                 }
@@ -15848,13 +15676,10 @@ fn agent_trace_state_from_events(
         })
         .collect::<Vec<_>>();
     let has_pending_approval = audits.iter().any(|audit| audit.resolution.is_none());
-    let status = AgentRunStatus::from_events(
-        &active_events,
-        has_pending_approval,
-        last_error.is_some(),
-    )
-    .label()
-    .to_string();
+    let status =
+        AgentRunStatus::from_events(&active_events, has_pending_approval, last_error.is_some())
+            .label()
+            .to_string();
     let turns = agent_trace_turns_from_events(&active_events, &audits);
     let step_count = turns.iter().map(|turn| turn.steps.len()).sum::<usize>();
     let tool_call_count = turns
@@ -15927,11 +15752,9 @@ fn agent_events_for_session(
     session_id: Option<&str>,
 ) -> Result<Vec<Event>, StorageError> {
     match session_id {
-        Some(session_id) => store.list_by_task_and_metadata_or_unscoped(
-            task_id,
-            "session_id",
-            session_id,
-        ),
+        Some(session_id) => {
+            store.list_by_task_and_metadata_or_unscoped(task_id, "session_id", session_id)
+        }
         None => store.list_by_task(task_id),
     }
 }
@@ -15999,17 +15822,20 @@ impl TraceStarts {
         match event.kind {
             EventKind::ModelRequestStarted => {
                 if let Some(request_id) = event.metadata.get("request_id") {
-                    self.model_requests.insert(request_id.clone(), event.timestamp_ms);
+                    self.model_requests
+                        .insert(request_id.clone(), event.timestamp_ms);
                 }
             }
             EventKind::ToolCallStarted => {
                 if let Some(tool_call_id) = event.metadata.get("tool_call_id") {
-                    self.tool_calls.insert(tool_call_id.clone(), event.timestamp_ms);
+                    self.tool_calls
+                        .insert(tool_call_id.clone(), event.timestamp_ms);
                 }
             }
             EventKind::PermissionRequested => {
                 if let Some(permission_id) = event.metadata.get("permission_id") {
-                    self.permissions.insert(permission_id.clone(), event.timestamp_ms);
+                    self.permissions
+                        .insert(permission_id.clone(), event.timestamp_ms);
                 }
             }
             _ => {}
@@ -16026,7 +15852,8 @@ fn agent_trace_step_from_event(
     let request_id = event.metadata.get("request_id").cloned();
     let tool_call_id = event.metadata.get("tool_call_id").cloned();
     let permission_id = event.metadata.get("permission_id").cloned();
-    let started_at_ms = trace_step_started_at(event, &request_id, &tool_call_id, &permission_id, starts);
+    let started_at_ms =
+        trace_step_started_at(event, &request_id, &tool_call_id, &permission_id, starts);
     let finished_at_ms = trace_step_finished_at(event);
     let latency_ms = event
         .metadata
@@ -16124,11 +15951,11 @@ fn trace_step_status(event: &Event, audits: &[PermissionAuditRecord]) -> String 
         EventKind::Error => "failed".to_string(),
         EventKind::ModelRequestStarted | EventKind::ToolCallStarted => "running".to_string(),
         EventKind::PermissionRequested => {
-            if event
-                .metadata
-                .get("permission_id")
-                .is_some_and(|id| audits.iter().any(|audit| audit.request.id.0 == *id && audit.resolution.is_none()))
-            {
+            if event.metadata.get("permission_id").is_some_and(|id| {
+                audits
+                    .iter()
+                    .any(|audit| audit.request.id.0 == *id && audit.resolution.is_none())
+            }) {
                 "pending".to_string()
             } else {
                 "done".to_string()
@@ -16161,9 +15988,12 @@ fn trace_input_preview(event: &Event) -> Option<String> {
         .get("input_preview")
         .or_else(|| event.metadata.get("tool_input"))
         .or_else(|| event.metadata.get("prompt"))
-        .or_else(|| event.metadata.get("content").filter(|_| {
-            event.metadata.get("role").map(String::as_str) == Some("user")
-        }))
+        .or_else(|| {
+            event
+                .metadata
+                .get("content")
+                .filter(|_| event.metadata.get("role").map(String::as_str) == Some("user"))
+        })
         .map(|value| truncate_for_timeline(&redact_sensitive_text(value)))
 }
 
@@ -16172,9 +16002,12 @@ fn trace_output_preview(event: &Event) -> Option<String> {
         .metadata
         .get("output")
         .or_else(|| event.metadata.get("error"))
-        .or_else(|| event.metadata.get("content").filter(|_| {
-            event.metadata.get("role").map(String::as_str) != Some("user")
-        }))
+        .or_else(|| {
+            event
+                .metadata
+                .get("content")
+                .filter(|_| event.metadata.get("role").map(String::as_str) != Some("user"))
+        })
         .map(|value| truncate_for_timeline(&redact_sensitive_text(value)))
 }
 
@@ -16194,7 +16027,10 @@ fn trace_artifact_path(event: &Event) -> Option<String> {
 }
 
 fn trace_turn_finished_at(steps: &[AgentTraceStepView]) -> Option<u64> {
-    if steps.iter().any(|step| matches!(step.status.as_str(), "running" | "pending" | "waiting")) {
+    if steps
+        .iter()
+        .any(|step| matches!(step.status.as_str(), "running" | "pending" | "waiting"))
+    {
         None
     } else {
         steps
@@ -16207,7 +16043,10 @@ fn trace_turn_finished_at(steps: &[AgentTraceStepView]) -> Option<u64> {
 fn trace_turn_status(steps: &[AgentTraceStepView]) -> String {
     if steps.iter().any(|step| step.status == "failed") {
         "failed".to_string()
-    } else if steps.iter().any(|step| step.status == "pending" || step.status == "waiting") {
+    } else if steps
+        .iter()
+        .any(|step| step.status == "pending" || step.status == "waiting")
+    {
         "waiting".to_string()
     } else if steps.iter().any(|step| step.status == "running") {
         "running".to_string()
@@ -16228,17 +16067,14 @@ fn active_agent_events(events: &[Event]) -> Vec<Event> {
 }
 
 fn active_agent_events_for_session(events: &[Event], session_id: Option<&str>) -> Vec<Event> {
-    let start_event = events
-        .iter()
-        .rev()
-        .find(|event| {
-            is_agent_run_start_event(event)
-                && session_id
-                    .map(|session_id| {
-                        event.metadata.get("session_id").map(String::as_str) == Some(session_id)
-                    })
-                    .unwrap_or(true)
-        });
+    let start_event = events.iter().rev().find(|event| {
+        is_agent_run_start_event(event)
+            && session_id
+                .map(|session_id| {
+                    event.metadata.get("session_id").map(String::as_str) == Some(session_id)
+                })
+                .unwrap_or(true)
+    });
     if session_id.is_some() && start_event.is_none() {
         return Vec::new();
     }
@@ -16255,8 +16091,7 @@ fn active_agent_events_for_session(events: &[Event], session_id: Option<&str>) -
                     && is_agent_run_start_event(event)
                     && run_session_id
                         .map(|session_id| {
-                            event.metadata.get("session_id").map(String::as_str)
-                                == Some(session_id)
+                            event.metadata.get("session_id").map(String::as_str) == Some(session_id)
                         })
                         .unwrap_or(true)
             })
@@ -16329,8 +16164,7 @@ fn agent_run_time_bounds(events: &[Event], active_events: &[Event]) -> (Option<u
                     && is_agent_run_start_event(event)
                     && session_id
                         .map(|session_id| {
-                            event.metadata.get("session_id").map(String::as_str)
-                                == Some(session_id)
+                            event.metadata.get("session_id").map(String::as_str) == Some(session_id)
                         })
                         .unwrap_or(true)
             })
@@ -16463,10 +16297,8 @@ fn execute_agent_tool_invocation(
         .map_err(|error| error.to_string())?;
     }
 
-    let run_control = active_agent_run_control(
-        state,
-        run_context.get("session_id").map(String::as_str),
-    )?;
+    let run_control =
+        active_agent_run_control(state, run_context.get("session_id").map(String::as_str))?;
     let scope = run_context
         .get("stage")
         .or_else(|| run_context.get("collaboration_stage"))
@@ -16479,11 +16311,15 @@ fn execute_agent_tool_invocation(
     });
     let tool_control = ToolExecutionControl::new({
         let run_control = run_control.clone();
-        move || run_control.as_ref().is_some_and(|control| control.should_stop())
+        move || {
+            run_control
+                .as_ref()
+                .is_some_and(|control| control.should_stop())
+        }
     });
-    let mutates_workspace = registry.get(&tool_name).is_some_and(|tool| {
-        !matches!(tool.spec().risk, ToolRisk::ReadOnly)
-    });
+    let mutates_workspace = registry
+        .get(&tool_name)
+        .is_some_and(|tool| !matches!(tool.spec().risk, ToolRisk::ReadOnly));
     let tool_started = budget_stop.is_none();
     let mut result = if let Some(reason) = budget_stop {
         ToolResult::text(
@@ -16496,17 +16332,15 @@ fn execute_agent_tool_invocation(
         )
     } else {
         match registry.get(&tool_name) {
-        Some(tool) => match tool.execute_with_control(invocation, &tool_control) {
-            Ok(result) => result,
-            Err(error) => ToolResult::failed(
-                agent_core::ToolCallId(tool_call_id.clone()),
-                error.message,
-            ),
-        },
-        None => ToolResult::failed(
-            agent_core::ToolCallId(tool_call_id.clone()),
-            "unknown tool",
-        ),
+            Some(tool) => match tool.execute_with_control(invocation, &tool_control) {
+                Ok(result) => result,
+                Err(error) => {
+                    ToolResult::failed(agent_core::ToolCallId(tool_call_id.clone()), error.message)
+                }
+            },
+            None => {
+                ToolResult::failed(agent_core::ToolCallId(tool_call_id.clone()), "unknown tool")
+            }
         }
     };
     if let Some(control) = run_control.as_ref() {
@@ -16708,7 +16542,11 @@ fn materialize_tool_result_artifacts(
             workspace_root.join(path)
         };
         let path = path.display().to_string();
-        if result.artifacts.iter().any(|artifact| artifact.path == path) {
+        if result
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.path == path)
+        {
             continue;
         }
         let mime_type = match Path::new(&path)
@@ -16790,10 +16628,9 @@ fn materialize_tool_result_artifacts(
                     .is_some_and(|mime_type| mime_type.starts_with("image/"))
             })
             .unwrap_or(&result.artifacts[0]);
-        result.metadata.insert(
-            "artifact_path".to_string(),
-            primary_artifact.path.clone(),
-        );
+        result
+            .metadata
+            .insert("artifact_path".to_string(), primary_artifact.path.clone());
     }
     Ok(())
 }
@@ -16996,10 +16833,7 @@ fn phase4_state_with_error(
     phase4_state(&mut store, config, Some(message.to_string())).map_err(|error| error.to_string())
 }
 
-fn record_phase4_error(
-    state: &tauri::State<'_, AppState>,
-    message: &str,
-) -> Result<(), String> {
+fn record_phase4_error(state: &tauri::State<'_, AppState>, message: &str) -> Result<(), String> {
     let mut store = state
         .store
         .lock()
@@ -17046,13 +16880,7 @@ fn append_tool_message_event(
         Some(context) => metadata_with_context(metadata, context),
         None => metadata,
     };
-    append_message_event_with_metadata(
-        store,
-        task_id,
-        MessageRole::Tool,
-        content,
-        metadata,
-    )
+    append_message_event_with_metadata(store, task_id, MessageRole::Tool, content, metadata)
 }
 
 fn persist_new_runtime_messages(
@@ -17229,9 +17057,7 @@ fn mark_tool_event_metadata_compaction_complete(root: &Path) -> Result<(), Strin
     Ok(())
 }
 
-fn compact_persisted_tool_event_metadata(
-    store: &mut SqliteStore,
-) -> Result<usize, StorageError> {
+fn compact_persisted_tool_event_metadata(store: &mut SqliteStore) -> Result<usize, StorageError> {
     let event_ids = store.oversized_tool_event_ids(AGENT_HISTORY_MAX_TOOL_METADATA_BYTES)?;
     let mut updated = 0;
     for event_id in event_ids {
@@ -17254,9 +17080,8 @@ fn start_tool_event_metadata_compaction() {
     }
     tauri::async_runtime::spawn_blocking(move || {
         std::thread::sleep(Duration::from_secs(2));
-        let result = open_app_store().and_then(|mut store| {
-            compact_persisted_tool_event_metadata(&mut store)
-        });
+        let result = open_app_store()
+            .and_then(|mut store| compact_persisted_tool_event_metadata(&mut store));
         match result {
             Ok(updated) => {
                 if let Err(error) = mark_tool_event_metadata_compaction_complete(&root) {
@@ -17267,9 +17092,9 @@ fn start_tool_event_metadata_compaction() {
                     ));
                 }
             }
-            Err(error) => append_startup_log(&format!(
-                "tool event metadata compaction failed: {error}"
-            )),
+            Err(error) => {
+                append_startup_log(&format!("tool event metadata compaction failed: {error}"))
+            }
         }
     });
 }
@@ -17412,7 +17237,11 @@ fn timeline_entry(event: Event, audits: &[PermissionAuditRecord]) -> TimelineEnt
             .map(|model| format!("{} using {model}", event.summary))
             .unwrap_or_else(|| event.summary.clone()),
         EventKind::ModelRequestFinished => {
-            let latency = event.metadata.get("latency_ms").cloned().unwrap_or_default();
+            let latency = event
+                .metadata
+                .get("latency_ms")
+                .cloned()
+                .unwrap_or_default();
             if latency.is_empty() {
                 event.summary.clone()
             } else {
@@ -17422,13 +17251,7 @@ fn timeline_entry(event: Event, audits: &[PermissionAuditRecord]) -> TimelineEnt
         EventKind::ToolCallProposed => event
             .metadata
             .get("input_preview")
-            .map(|input| {
-                format!(
-                    "{} with {}",
-                    event.summary,
-                    input.replace('\n', " ")
-                )
-            })
+            .map(|input| format!("{} with {}", event.summary, input.replace('\n', " ")))
             .unwrap_or_else(|| event.summary.clone()),
         EventKind::ToolCallStarted => event
             .metadata
@@ -17482,7 +17305,11 @@ fn timeline_entry(event: Event, audits: &[PermissionAuditRecord]) -> TimelineEnt
 }
 
 fn timeline_workflow_progress(event: &Event) -> Option<WorkflowProgressView> {
-    let total_steps = event.metadata.get("workflow_steps")?.parse::<usize>().ok()?;
+    let total_steps = event
+        .metadata
+        .get("workflow_steps")?
+        .parse::<usize>()
+        .ok()?;
     if total_steps == 0 || !event.metadata.contains_key("workflow_checkpoint_schema") {
         return None;
     }
@@ -17813,10 +17640,7 @@ fn prepare_agent_knowledge_context(
                     "chunks_indexed".to_string(),
                     indexed.stats.chunks_indexed.to_string(),
                 ),
-                (
-                    "embedding_backend".to_string(),
-                    indexed.embedding_backend,
-                ),
+                ("embedding_backend".to_string(), indexed.embedding_backend),
                 ("embedding_model".to_string(), indexed.embedding_model),
             ]
             .into_iter()
@@ -17855,7 +17679,11 @@ fn prepare_agent_knowledge_context(
         .iter()
         .map(|channel| {
             if let Some(error) = &channel.error {
-                format!("{}=error({})", channel.name, truncate_for_collaboration(error, 160))
+                format!(
+                    "{}=error({})",
+                    channel.name,
+                    truncate_for_collaboration(error, 160)
+                )
             } else {
                 format!(
                     "{}={} hits/{} ms",
@@ -17920,15 +17748,16 @@ fn ensure_workspace_knowledge_index(
         return Ok(None);
     }
     let options = IndexOptions::default();
-    let embedding_profile_matches = adapter
-        .embedding_profile()
-        .is_some_and(|(provider, model, _)| {
-            if config.is_ready() {
-                provider != "local" && model == config.model_for_role(&ModelRole::Embedder)
-            } else {
-                provider == "local"
-            }
-        });
+    let embedding_profile_matches =
+        adapter
+            .embedding_profile()
+            .is_some_and(|(provider, model, _)| {
+                if config.is_ready() {
+                    provider != "local" && model == config.model_for_role(&ModelRole::Embedder)
+                } else {
+                    provider == "local"
+                }
+            });
     let index_is_fresh = embedding_profile_matches
         && !adapter.chunks().is_empty()
         && workspace_index_is_fresh(workspace_root, adapter.chunks(), options.clone(), || {
@@ -18089,8 +17918,7 @@ fn run_parallel_retrieval(
     let mut channels = std::thread::scope(|scope| {
         let semantic_handle = scope.spawn(|| {
             timed_retrieval_channel("semantic_rag", || {
-                let embedding =
-                    query_embedding_for_chunks(config, chunks, query, cancellation)?;
+                let embedding = query_embedding_for_chunks(config, chunks, query, cancellation)?;
                 search_lancedb_index(
                     lancedb_database_path_for(workspace_root),
                     &embedding,
@@ -18122,13 +17950,15 @@ fn run_parallel_retrieval(
                         return Err(MODEL_REQUEST_CANCELLED.to_string());
                     }
                     let graph_seeds = search_chunks_literal(chunks, query, channel_limit);
-                    Ok(graph_walk_recall(&graph_seeds, chunks, store, channel_limit)
-                        .into_iter()
-                        .map(|source| RagSearchResult {
-                            chunk: source.chunk,
-                            score: source.score,
-                        })
-                        .collect())
+                    Ok(
+                        graph_walk_recall(&graph_seeds, chunks, store, channel_limit)
+                            .into_iter()
+                            .map(|source| RagSearchResult {
+                                chunk: source.chunk,
+                                score: source.score,
+                            })
+                            .collect(),
+                    )
                 })
             })
         });
@@ -18160,13 +17990,15 @@ fn run_parallel_retrieval(
     if let Some(store) = graph_store {
         let graph_seeds = graph_walk_seed_results(&channels, channel_limit);
         let enrichment = timed_retrieval_channel("graph_walk", || {
-            Ok(graph_walk_recall(&graph_seeds, chunks, store, channel_limit)
-                .into_iter()
-                .map(|source| RagSearchResult {
-                    chunk: source.chunk,
-                    score: source.score,
-                })
-                .collect())
+            Ok(
+                graph_walk_recall(&graph_seeds, chunks, store, channel_limit)
+                    .into_iter()
+                    .map(|source| RagSearchResult {
+                        chunk: source.chunk,
+                        score: source.score,
+                    })
+                    .collect(),
+            )
         });
         if let Some(graph_walk) = channels
             .iter_mut()
@@ -18323,7 +18155,9 @@ fn query_embedding_for_chunks(
         return Ok(local_query_embedding(query));
     }
     if !config.is_ready() {
-        return Err("cloud RAG index requires a configured provider for query embedding".to_string());
+        return Err(
+            "cloud RAG index requires a configured provider for query embedding".to_string(),
+        );
     }
     let configured_model = config.model_for_role(&ModelRole::Embedder);
     if configured_model != profile.embedding_model {
@@ -18346,7 +18180,8 @@ fn query_embedding_for_chunks(
     if embedding.len() != profile.embedding_dimensions {
         return Err(format!(
             "query embedding has {} dimensions, but the index uses {}",
-            embedding.len(), profile.embedding_dimensions
+            embedding.len(),
+            profile.embedding_dimensions
         ));
     }
     Ok(embedding)
@@ -18423,7 +18258,11 @@ fn fuse_retrieval_channels(
         }
     }
     let fused = selected;
-    let max_score = fused.first().map(|item| item.1).unwrap_or(1.0).max(f32::EPSILON);
+    let max_score = fused
+        .first()
+        .map(|item| item.1)
+        .unwrap_or(1.0)
+        .max(f32::EPSILON);
     let results = fused
         .iter()
         .map(|(result, score, _)| RagSearchResult {
@@ -18580,14 +18419,12 @@ struct CloudRagEmbedder {
 impl RagEmbedder for CloudRagEmbedder {
     fn embed_texts(&mut self, texts: &[String]) -> Result<EmbeddingBatch, agent_rag::RagError> {
         if let Some(control) = self.cancellation.as_ref() {
-            control
-                .begin_model_call("embedding")
-                .map_err(|reason| {
-                    agent_rag::RagError::new(format!(
-                        "Run stopped before embedding call: {}",
-                        reason.code()
-                    ))
-                })?;
+            control.begin_model_call("embedding").map_err(|reason| {
+                agent_rag::RagError::new(format!(
+                    "Run stopped before embedding call: {}",
+                    reason.code()
+                ))
+            })?;
         }
         let model = self.config.model_for_role(&ModelRole::Embedder);
         let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
@@ -18704,9 +18541,24 @@ fn provider_config_state(config: &ProviderConfig) -> ProviderConfigState {
 fn model_candidates_for_config(config: &ProviderConfig) -> Vec<ModelCandidate> {
     [
         (ModelRole::Executor, config.model.clone(), 1, 1),
-        (ModelRole::Planner, config.model_for_role(&ModelRole::Planner), 3, 2),
-        (ModelRole::Executor, config.model_for_role(&ModelRole::Executor), 2, 1),
-        (ModelRole::Reviewer, config.model_for_role(&ModelRole::Reviewer), 2, 2),
+        (
+            ModelRole::Planner,
+            config.model_for_role(&ModelRole::Planner),
+            3,
+            2,
+        ),
+        (
+            ModelRole::Executor,
+            config.model_for_role(&ModelRole::Executor),
+            2,
+            1,
+        ),
+        (
+            ModelRole::Reviewer,
+            config.model_for_role(&ModelRole::Reviewer),
+            2,
+            2,
+        ),
         (
             ModelRole::Summarizer,
             config.model_for_role(&ModelRole::Summarizer),
@@ -18734,8 +18586,8 @@ fn route_with_local_telemetry(
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let telemetry = load_routing_telemetry_read_model(&mut store)
-    .map_err(|error| error.to_string())?;
+    let telemetry =
+        load_routing_telemetry_read_model(&mut store).map_err(|error| error.to_string())?;
     drop(store);
     let router = LearnedModelRouter::train(&telemetry);
     let learned_examples = router
@@ -18807,12 +18659,7 @@ fn load_project_memory_ledger(
     if ledger.event_count.saturating_add(delta.len() as u64) != revision.event_count {
         rebuilding = true;
         ledger = MemoryLedger::new(project_id);
-        delta = store.list_by_task_and_metadata_after(
-            &task_id,
-            "project_id",
-            project_id,
-            0,
-        )?;
+        delta = store.list_by_task_and_metadata_after(&task_id, "project_id", project_id, 0)?;
     }
 
     let completed_runs = if rebuilding {
@@ -18922,7 +18769,11 @@ fn project_memory_stats(
             .iter()
             .filter(|record| record.kind == MemoryKind::Evidence)
             .count(),
-        recalls: ledger.records.iter().map(|record| record.recall_count).sum(),
+        recalls: ledger
+            .records
+            .iter()
+            .map(|record| record.recall_count)
+            .sum(),
         observed_uses: ledger
             .records
             .iter()
@@ -18979,10 +18830,7 @@ fn append_prepared_memory_context(
         run_context.insert("memory_ids".to_string(), memory_ids.clone());
     }
     if let Some(selected_count) = memory_context.metadata.get("selected_count") {
-        run_context.insert(
-            "memory_selected_count".to_string(),
-            selected_count.clone(),
-        );
+        run_context.insert("memory_selected_count".to_string(), selected_count.clone());
     }
     history.push(memory_context);
 }
@@ -19009,12 +18857,7 @@ fn prepare_run_knowledge_contexts(
     }
     if retrieve_workspace {
         cancellation.mark_progress("retrieval", "Preparing workspace knowledge");
-        append_agent_progress_event(
-            state,
-            task_id,
-            run_context,
-            "Preparing workspace knowledge",
-        )?;
+        append_agent_progress_event(state, task_id, run_context, "Preparing workspace knowledge")?;
     }
 
     let (memory_result, workspace_result) = std::thread::scope(|scope| {
@@ -19290,7 +19133,9 @@ fn schedule_project_memory_vector_refresh(
         let _inflight_lease = inflight_lease;
         match refresh_project_memory_vector_index(&workspace_root, &config, &ledger) {
             Ok(Some(error)) => {
-                eprintln!("project memory cloud embedding unavailable; using local vectors: {error}")
+                eprintln!(
+                    "project memory cloud embedding unavailable; using local vectors: {error}"
+                )
             }
             Ok(None) => {}
             Err(error) => eprintln!("project memory vector refresh unavailable: {error}"),
@@ -19338,7 +19183,8 @@ fn project_memory_semantic_scores(
     if query_embedding.len() != manifest.embedding_dimensions {
         return Err(format!(
             "memory query embedding has {} dimensions, expected {}",
-            query_embedding.len(), manifest.embedding_dimensions
+            query_embedding.len(),
+            manifest.embedding_dimensions
         ));
     }
     let results = search_lancedb_index(
@@ -19393,18 +19239,17 @@ fn recall_project_memory_for_prompt(
         AGENT_MEMORY_RECALL_LIMIT.saturating_mul(2),
         now_ms,
     );
-    let (semantic_scores, vector_manifest, vector_error) =
-        match project_memory_semantic_scores(
-            workspace_root,
-            project_id,
-            &ledger,
-            config,
-            prompt,
-            cancellation,
-        ) {
-            Ok((scores, manifest)) => (scores, Some(manifest), None),
-            Err(error) => (BTreeMap::new(), None, Some(error)),
-        };
+    let (semantic_scores, vector_manifest, vector_error) = match project_memory_semantic_scores(
+        workspace_root,
+        project_id,
+        &ledger,
+        config,
+        prompt,
+        cancellation,
+    ) {
+        Ok((scores, manifest)) => (scores, Some(manifest), None),
+        Err(error) => (BTreeMap::new(), None, Some(error)),
+    };
     let mut recalls = fuse_memory_recalls_at(
         &ledger,
         lexical_recalls,
@@ -19430,8 +19275,8 @@ fn recall_project_memory_for_prompt(
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let mut ledger = load_project_memory_ledger(&mut store, project_id)
-        .map_err(|error| error.to_string())?;
+    let mut ledger =
+        load_project_memory_ledger(&mut store, project_id).map_err(|error| error.to_string())?;
     recalls.retain_mut(|recall| {
         let Some(current) = ledger
             .records
@@ -19556,10 +19401,9 @@ fn record_project_memory_observed_use(
     run_context: &Metadata,
     output: &str,
 ) -> Result<usize, StorageError> {
-    let (Some(project_id), Some(memory_ids)) = (
-        run_context.get("project_id"),
-        run_context.get("memory_ids"),
-    ) else {
+    let (Some(project_id), Some(memory_ids)) =
+        (run_context.get("project_id"), run_context.get("memory_ids"))
+    else {
         return Ok(0);
     };
     let memory_ids = memory_ids
@@ -19573,12 +19417,7 @@ fn record_project_memory_observed_use(
     }
     let observed_at_ms = current_time_millis();
     let mut ledger = load_project_memory_ledger(store, project_id)?;
-    let used_ids = record_memory_observed_uses(
-        &mut ledger,
-        &memory_ids,
-        output,
-        observed_at_ms,
-    );
+    let used_ids = record_memory_observed_uses(&mut ledger, &memory_ids, output, observed_at_ms);
     append_event(
         store,
         task_id,
@@ -19587,10 +19426,7 @@ fn record_project_memory_observed_use(
         metadata_with_context(
             [
                 ("action".to_string(), "memory_use".to_string()),
-                (
-                    "selected_count".to_string(),
-                    memory_ids.len().to_string(),
-                ),
+                ("selected_count".to_string(), memory_ids.len().to_string()),
                 ("used_count".to_string(), used_ids.len().to_string()),
                 ("used_memory_ids".to_string(), used_ids.join(",")),
             ]
@@ -19652,16 +19488,17 @@ fn load_routing_telemetry_read_model(
         .cloned()
         .collect::<BTreeSet<_>>();
     for run_id in completed_run_ids {
-        let run_events = store.list_by_task_and_metadata(
-            &task_id,
-            "agent_run_id",
-            &run_id,
-        )?;
-        let Some(telemetry) = routing_telemetry_from_events(&run_events).into_iter().next() else {
+        let run_events = store.list_by_task_and_metadata(&task_id, "agent_run_id", &run_id)?;
+        let Some(telemetry) = routing_telemetry_from_events(&run_events)
+            .into_iter()
+            .next()
+        else {
             continue;
         };
         model.entries.retain(|entry| entry.run_id != run_id);
-        model.entries.push(RoutingTelemetryEntry { run_id, telemetry });
+        model
+            .entries
+            .push(RoutingTelemetryEntry { run_id, telemetry });
     }
     if model.entries.len() > ROUTING_TELEMETRY_MAX_RUNS {
         model
@@ -19765,7 +19602,10 @@ fn workflow_execution_telemetry_from_events(
     let mut workflows = BTreeMap::<String, Vec<&Event>>::new();
     for event in events {
         if let Some(workflow_id) = event.metadata.get("collaboration_id") {
-            workflows.entry(workflow_id.clone()).or_default().push(event);
+            workflows
+                .entry(workflow_id.clone())
+                .or_default()
+                .push(event);
         }
     }
 
@@ -19777,11 +19617,9 @@ fn workflow_execution_telemetry_from_events(
                 event.summary == "Collaboration workflow planned"
                     && event.metadata.contains_key("workflow_ir")
             })?;
-            let plan = WorkflowPlanIr::from_json(
-                planned.metadata.get("workflow_ir")?,
-                allowed_models,
-            )
-            .ok()?;
+            let plan =
+                WorkflowPlanIr::from_json(planned.metadata.get("workflow_ir")?, allowed_models)
+                    .ok()?;
             let terminal = workflow_events.iter().rev().find(|event| {
                 matches!(
                     event.summary.as_str(),
@@ -19878,9 +19716,7 @@ fn wait_for_prompt_evaluation_idle(
             .is_empty();
         if foreground_active {
             idle_since = None;
-        } else if idle_since
-            .get_or_insert_with(Instant::now)
-            .elapsed()
+        } else if idle_since.get_or_insert_with(Instant::now).elapsed()
             >= Duration::from_millis(PROMPT_EVALUATION_IDLE_GRACE_MS)
         {
             return Ok(true);
@@ -20008,7 +19844,10 @@ fn generate_background_prompt_mutation(
                     ("collaboration_id".to_string(), mutation_run_id),
                     ("prompt_effort".to_string(), effort.to_string()),
                     ("parent_profile".to_string(), parent.id.clone()),
-                    ("mutation_strategy".to_string(), "gepa_reflection".to_string()),
+                    (
+                        "mutation_strategy".to_string(),
+                        "gepa_reflection".to_string(),
+                    ),
                     (
                         "reflection_trajectory_count".to_string(),
                         reflection_trajectory_count.to_string(),
@@ -20073,7 +19912,10 @@ fn generate_background_prompt_mutation(
                     ("collaboration_id".to_string(), mutation_run_id),
                     ("prompt_effort".to_string(), effort.to_string()),
                     ("parent_profile".to_string(), parent.id.clone()),
-                    ("mutation_strategy".to_string(), "gepa_reflection".to_string()),
+                    (
+                        "mutation_strategy".to_string(),
+                        "gepa_reflection".to_string(),
+                    ),
                     ("reflection_split".to_string(), "feedback".to_string()),
                     (
                         "reflection_trajectory_count".to_string(),
@@ -20116,7 +19958,10 @@ fn generate_background_prompt_mutation(
                     ("collaboration_id".to_string(), mutation_run_id),
                     ("prompt_effort".to_string(), effort.to_string()),
                     ("parent_profile".to_string(), parent.id.clone()),
-                    ("mutation_strategy".to_string(), "gepa_reflection".to_string()),
+                    (
+                        "mutation_strategy".to_string(),
+                        "gepa_reflection".to_string(),
+                    ),
                     ("reflection_split".to_string(), "feedback".to_string()),
                     (
                         "reflection_trajectory_count".to_string(),
@@ -20163,70 +20008,70 @@ fn schedule_prompt_pairwise_evaluation(
     let spawn_result = std::thread::Builder::new()
         .name(format!("cindx-prompt-evaluation-{lease_key}"))
         .spawn(move || {
-        let _inflight_lease = inflight_lease;
-        let state = app.state::<AppState>();
-        let control = Arc::new(AgentRunControl::new("pro"));
-        let Ok(_control_lease) = RegisteredRunControl::register(
-            &state.prompt_evaluation_controls,
-            lease_key.clone(),
-            Arc::clone(&control),
-            "prompt evaluation control",
-            "prompt evaluation is already active for this effort",
-        ) else {
-            return;
-        };
-        match wait_for_prompt_evaluation_idle(&state, &control) {
-            Ok(true) => {}
-            Ok(false) | Err(_) => return,
-        }
-        for _ in 0..PROMPT_EVOLUTION_BACKGROUND_BATCH_LIMIT {
-            let result = run_background_prompt_pairwise_evaluation(
-                &state,
-                &config,
-                &task_id,
-                &run_context,
-                &effort,
-                &policy,
-                &worker_models,
-                agent_budget,
-                &current_profile,
-                &control,
-            );
-            match result {
-                Ok(true) => continue,
-                Ok(false) => break,
-                Err(error) => {
-                    if error != MODEL_REQUEST_CANCELLED {
-                        if let Ok(mut store) = state.store.lock() {
-                            let _ = append_event(
-                                &mut store,
-                                &task_id,
-                                EventKind::TaskStatusChanged,
-                                "Conductor pairwise evaluation failed",
-                                metadata_with_context(
-                                    [
-                                        (
-                                            "background_evaluation".to_string(),
-                                            "true".to_string(),
-                                        ),
-                                        ("prompt_effort".to_string(), effort.clone()),
-                                        (
-                                            "error".to_string(),
-                                            truncate_for_collaboration(&error, 2_000),
-                                        ),
-                                    ]
-                                    .into_iter()
-                                    .collect(),
-                                    &run_context,
-                                ),
-                            );
+            let _inflight_lease = inflight_lease;
+            let state = app.state::<AppState>();
+            let control = Arc::new(AgentRunControl::new("pro"));
+            let Ok(_control_lease) = RegisteredRunControl::register(
+                &state.prompt_evaluation_controls,
+                lease_key.clone(),
+                Arc::clone(&control),
+                "prompt evaluation control",
+                "prompt evaluation is already active for this effort",
+            ) else {
+                return;
+            };
+            match wait_for_prompt_evaluation_idle(&state, &control) {
+                Ok(true) => {}
+                Ok(false) | Err(_) => return,
+            }
+            for _ in 0..PROMPT_EVOLUTION_BACKGROUND_BATCH_LIMIT {
+                let result = run_background_prompt_pairwise_evaluation(
+                    &state,
+                    &config,
+                    &task_id,
+                    &run_context,
+                    &effort,
+                    &policy,
+                    &worker_models,
+                    agent_budget,
+                    &current_profile,
+                    &control,
+                );
+                match result {
+                    Ok(true) => continue,
+                    Ok(false) => break,
+                    Err(error) => {
+                        if error != MODEL_REQUEST_CANCELLED {
+                            if let Ok(mut store) = state.store.lock() {
+                                let _ = append_event(
+                                    &mut store,
+                                    &task_id,
+                                    EventKind::TaskStatusChanged,
+                                    "Conductor pairwise evaluation failed",
+                                    metadata_with_context(
+                                        [
+                                            (
+                                                "background_evaluation".to_string(),
+                                                "true".to_string(),
+                                            ),
+                                            ("prompt_effort".to_string(), effort.clone()),
+                                            (
+                                                "error".to_string(),
+                                                truncate_for_collaboration(&error, 2_000),
+                                            ),
+                                        ]
+                                        .into_iter()
+                                        .collect(),
+                                        &run_context,
+                                    ),
+                                );
+                            }
                         }
+                        break;
                     }
-                    break;
                 }
             }
-        }
-    });
+        });
     if let Err(error) = spawn_result {
         eprintln!("prompt evaluation worker could not start: {error}");
     }
@@ -20264,8 +20109,8 @@ fn run_background_prompt_pairwise_evaluation(
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        let model = load_prompt_evolution_read_model(&mut store)
-            .map_err(|error| error.to_string())?;
+        let model =
+            load_prompt_evolution_read_model(&mut store).map_err(|error| error.to_string())?;
         let events = store
             .list_by_task(task_id)
             .map_err(|error| error.to_string())?;
@@ -20308,12 +20153,10 @@ fn run_background_prompt_pairwise_evaluation(
         .first()
         .map(|case| case.task_class.as_str())
         .unwrap_or("general");
-    let Some(challenger) = prompt_rollout_counterpart(
-        rollout.as_ref(),
-        &known_profiles,
-        current_profile,
-    )
-    .or_else(|| prompt_evolution_challenger(&evaluation, current_profile, current_task_class))
+    let Some(challenger) =
+        prompt_rollout_counterpart(rollout.as_ref(), &known_profiles, current_profile).or_else(
+            || prompt_evolution_challenger(&evaluation, current_profile, current_task_class),
+        )
     else {
         return Ok(false);
     };
@@ -20332,8 +20175,7 @@ fn run_background_prompt_pairwise_evaluation(
         .filter(|rollout| {
             rollout.canary_profile_id.as_ref().is_some_and(|canary| {
                 (current_profile.id == rollout.stable_profile_id && challenger.id == *canary)
-                    || (challenger.id == rollout.stable_profile_id
-                        && current_profile.id == *canary)
+                    || (challenger.id == rollout.stable_profile_id && current_profile.id == *canary)
             })
         })
         .and_then(|rollout| {
@@ -20347,8 +20189,7 @@ fn run_background_prompt_pairwise_evaluation(
                 })
                 .count();
             (live_runs > rollout.live_checkpoint).then(|| {
-                PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS
-                    .max(rollout.evidence_checkpoint.saturating_add(2))
+                PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS.max(rollout.evidence_checkpoint.saturating_add(2))
             })
         })
         .unwrap_or(PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS);
@@ -20366,9 +20207,7 @@ fn run_background_prompt_pairwise_evaluation(
             .iter()
             .filter(|observation| observation.mode == PromptEvaluationMode::Live)
             .count();
-        if live_observations == 0
-            || live_observations % PROMPT_EVOLUTION_SHADOW_INTERVAL != 0
-        {
+        if live_observations == 0 || live_observations % PROMPT_EVOLUTION_SHADOW_INTERVAL != 0 {
             return Ok(false);
         }
         PromptEvaluationSplit::Train
@@ -20397,9 +20236,7 @@ fn run_background_prompt_pairwise_evaluation(
     let objective = selected_case.objective.clone();
     let task_class = selected_case.task_class.clone();
     let evaluation_id = unique_id(match mode {
-        PromptEvaluationMode::PairedShadow | PromptEvaluationMode::PairedExecution => {
-            "prompt-pair"
-        }
+        PromptEvaluationMode::PairedShadow | PromptEvaluationMode::PairedExecution => "prompt-pair",
         PromptEvaluationMode::ReplayHoldout | PromptEvaluationMode::ReplayExecution => {
             "prompt-replay"
         }
@@ -20487,7 +20324,9 @@ fn run_background_prompt_pairwise_evaluation(
             )
         });
         (
-            current_handle.join().expect("current evaluation worker joined"),
+            current_handle
+                .join()
+                .expect("current evaluation worker joined"),
             challenger_handle
                 .join()
                 .expect("challenger evaluation worker joined"),
@@ -20532,10 +20371,9 @@ fn run_background_prompt_pairwise_evaluation(
         )
     });
     let judge = match (forward, reverse) {
-        (Ok(forward), Ok(reverse)) => aggregate_prompt_pairwise_payloads(
-            forward,
-            reverse_prompt_pairwise_payload(reverse),
-        ),
+        (Ok(forward), Ok(reverse)) => {
+            aggregate_prompt_pairwise_payloads(forward, reverse_prompt_pairwise_payload(reverse))
+        }
         (Ok(forward), Err(_)) => forward,
         (Err(_), Ok(reverse)) => reverse_prompt_pairwise_payload(reverse),
         (Err(forward), Err(reverse)) => {
@@ -20553,9 +20391,7 @@ fn run_background_prompt_pairwise_evaluation(
         }
         PromptEvaluationMode::PairedShadow
         | PromptEvaluationMode::PairedExecution
-        | PromptEvaluationMode::Live => {
-            PromptEvaluationSplit::Train
-        }
+        | PromptEvaluationMode::Live => PromptEvaluationSplit::Train,
     };
     let observation_a = prompt_pairwise_observation(
         candidate_a,
@@ -20601,8 +20437,8 @@ fn run_background_prompt_pairwise_evaluation(
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        let model = load_prompt_evolution_read_model(&mut store)
-            .map_err(|error| error.to_string())?;
+        let model =
+            load_prompt_evolution_read_model(&mut store).map_err(|error| error.to_string())?;
         evaluate_prompt_evolution_read_model(&model, effort)?
     };
     if let Some(parent) = next_evaluation.mutation_parent.as_ref() {
@@ -20626,9 +20462,10 @@ fn prompt_profile_evidence_counts(
     observations: &[PromptEvolutionObservation],
     profile_id: &str,
 ) -> (usize, usize) {
-    observations.iter().filter(|observation| observation.profile_id == profile_id).fold(
-        (0, 0),
-        |(paired, replay), observation| {
+    observations
+        .iter()
+        .filter(|observation| observation.profile_id == profile_id)
+        .fold((0, 0), |(paired, replay), observation| {
             if observation.mode.is_paired_execution() {
                 (paired + 1, replay)
             } else if observation.mode.is_replay_execution() {
@@ -20636,8 +20473,7 @@ fn prompt_profile_evidence_counts(
             } else {
                 (paired, replay)
             }
-        },
-    )
+        })
 }
 
 fn prompt_direct_profile_evidence_counts(
@@ -20735,9 +20571,7 @@ fn prompt_offline_split_manifest(
     events
         .iter()
         .filter(|event| event.summary == "Conductor offline dataset selected")
-        .filter(|event| {
-            event.metadata.get("project_id").map(String::as_str) == Some(project_id)
-        })
+        .filter(|event| event.metadata.get("project_id").map(String::as_str) == Some(project_id))
         .filter_map(|event| {
             let manifest = event.metadata.get("dataset_split_manifest")?;
             serde_json::from_str::<BTreeMap<String, PromptEvaluationSplit>>(manifest)
@@ -20820,13 +20654,10 @@ fn prompt_offline_dataset(events: &[Event], project_id: &str) -> Vec<PromptOffli
             .count()
             < 2
         {
-            let Some(index) = cases
-                .iter()
-                .position(|case| {
-                    case.split == PromptEvaluationSplit::Holdout
-                        && !previously_assigned.contains(&case.id)
-                })
-            else {
+            let Some(index) = cases.iter().position(|case| {
+                case.split == PromptEvaluationSplit::Holdout
+                    && !previously_assigned.contains(&case.id)
+            }) else {
                 break;
             };
             let Some(case) = cases.get_mut(index) else {
@@ -20868,8 +20699,7 @@ fn select_prompt_offline_case(
                 .filter(|observation| {
                     observation.case_id == case.id
                         && observation.profile_id == current_profile_id
-                        && observation.opponent_profile_id.as_deref()
-                            == Some(challenger_profile_id)
+                        && observation.opponent_profile_id.as_deref() == Some(challenger_profile_id)
                 })
                 .count();
             let challenger_repeats = observations
@@ -20877,8 +20707,7 @@ fn select_prompt_offline_case(
                 .filter(|observation| {
                     observation.case_id == case.id
                         && observation.profile_id == challenger_profile_id
-                        && observation.opponent_profile_id.as_deref()
-                            == Some(current_profile_id)
+                        && observation.opponent_profile_id.as_deref() == Some(current_profile_id)
                 })
                 .count();
             (
@@ -20907,12 +20736,7 @@ fn append_prompt_offline_dataset_snapshot(
     let dataset_digest = sha256_hex(
         dataset
             .iter()
-            .map(|case| {
-                format!(
-                    "{}:{:?}:{}",
-                    case.id, case.split, case.source_run_id
-                )
-            })
+            .map(|case| format!("{}:{:?}:{}", case.id, case.split, case.source_run_id))
             .collect::<Vec<_>>()
             .join("\n")
             .as_bytes(),
@@ -20998,7 +20822,10 @@ fn prompt_replay_case(
                 .and_then(|encoded| serde_json::from_str::<WorkflowPlanIr>(encoded).ok())
                 .map(|plan| plan.objective)
         } else if event.summary == "Conductor prompt profile selected"
-            && event.metadata.get("collaboration_profile").map(String::as_str)
+            && event
+                .metadata
+                .get("collaboration_profile")
+                .map(String::as_str)
                 == Some("bounded")
             && event
                 .metadata
@@ -21101,9 +20928,11 @@ where
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or_default(),
         );
-        let raw_output = completion
-            .content
-            .unwrap_or_else(|| completion.error.unwrap_or_else(|| "empty response".to_string()));
+        let raw_output = completion.content.unwrap_or_else(|| {
+            completion
+                .error
+                .unwrap_or_else(|| "empty response".to_string())
+        });
         match harness.parse_plan(&raw_output) {
             Ok(plan) => {
                 return PromptPlanCandidate {
@@ -21187,11 +21016,7 @@ fn prompt_evaluation_tool_specs(
     if *policy == WorkflowToolPolicy::None {
         return Vec::new();
     }
-    evidence_worker_tools(
-        &registry
-            .exposure_plan(prompt, context_window_tokens)
-            .inline,
-    )
+    evidence_worker_tools(&registry.exposure_plan(prompt, context_window_tokens).inline)
 }
 
 fn prompt_evaluation_tool_traces(
@@ -21235,10 +21060,7 @@ fn complete_prompt_evaluation_worker(
         TaskId(unique_id("prompt-evaluation-worker")),
         request.prompt.clone(),
         AgentRuntimeConfig {
-            max_turns: collaboration_worker_runtime_turn_limit(
-                evidence_turn_limit,
-                has_tools,
-            ),
+            max_turns: collaboration_worker_runtime_turn_limit(evidence_turn_limit, has_tools),
         },
     );
     let trusted_context = format!(
@@ -21270,11 +21092,8 @@ fn complete_prompt_evaluation_worker(
                 evidence,
             };
         }
-        let finalizing = prepare_collaboration_worker_turn(
-            &mut runtime,
-            has_tools,
-            evidence_turn_limit,
-        );
+        let finalizing =
+            prepare_collaboration_worker_turn(&mut runtime, has_tools, evidence_turn_limit);
         let request_tools: &[ToolSpec] = if finalizing { &[] } else { &tools };
         let max_output_tokens = bounded_max_output_tokens(
             config.context_window_tokens,
@@ -21332,7 +21151,10 @@ fn complete_prompt_evaluation_worker(
                 .get(key)
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or_default();
-            usage.insert(key.to_string(), previous.saturating_add(additional).to_string());
+            usage.insert(
+                key.to_string(),
+                previous.saturating_add(additional).to_string(),
+            );
         }
         let finalization_content = finalizing
             .then(|| response.message.content.trim().to_string())
@@ -21704,9 +21526,7 @@ fn evaluate_prompt_candidate_pair(
             .plan
             .as_ref()
             .and_then(|plan| plan.to_json().ok())
-            .unwrap_or_else(|| {
-                truncate_for_collaboration(&candidate.plan.raw_output, 12_000)
-            });
+            .unwrap_or_else(|| truncate_for_collaboration(&candidate.plan.raw_output, 12_000));
         let steps = candidate
             .execution
             .steps
@@ -21773,14 +21593,10 @@ fn evaluate_prompt_candidate_pair(
     Ok(payload)
 }
 
-fn redact_prompt_evaluation_trace(
-    trace: &mut AgentEvaluationTrace,
-    redaction_secrets: &[String],
-) {
+fn redact_prompt_evaluation_trace(trace: &mut AgentEvaluationTrace, redaction_secrets: &[String]) {
     trace.input = redact_sensitive_text(&trace.input);
     trace.final_output = redact_sensitive_text(&trace.final_output);
-    trace.actionable_feedback.summary =
-        redact_sensitive_text(&trace.actionable_feedback.summary);
+    trace.actionable_feedback.summary = redact_sensitive_text(&trace.actionable_feedback.summary);
     for entry in trace
         .actionable_feedback
         .passed_constraints
@@ -22119,9 +21935,9 @@ fn initial_prompt_population(effort: &str) -> Vec<ConductorPromptGenome> {
         mutations
             .iter()
             .find(|variant| variant.context_policy != seed.context_policy),
-        mutations.iter().find(|variant| {
-            variant.max_parallel_branches != seed.max_parallel_branches
-        }),
+        mutations
+            .iter()
+            .find(|variant| variant.max_parallel_branches != seed.max_parallel_branches),
         mutations
             .iter()
             .find(|variant| variant.tool_policy != seed.tool_policy),
@@ -22138,10 +21954,7 @@ fn initial_prompt_population(effort: &str) -> Vec<ConductorPromptGenome> {
     population
 }
 
-fn prompt_genomes_from_events(
-    events: &[Event],
-    effort: &str,
-) -> Vec<ConductorPromptGenome> {
+fn prompt_genomes_from_events(events: &[Event], effort: &str) -> Vec<ConductorPromptGenome> {
     let mut population = initial_prompt_population(effort);
     for event in events {
         for record in prompt_genome_records_from_event(event) {
@@ -22162,7 +21975,10 @@ fn prompt_evolution_observations_from_events(
     let mut agent_runs = BTreeMap::<String, Vec<&Event>>::new();
     for event in events {
         if let Some(workflow_id) = event.metadata.get("collaboration_id") {
-            workflows.entry(workflow_id.clone()).or_default().push(event);
+            workflows
+                .entry(workflow_id.clone())
+                .or_default()
+                .push(event);
         }
         if let Some(run_id) = event.metadata.get("agent_run_id") {
             agent_runs.entry(run_id.clone()).or_default().push(event);
@@ -22208,11 +22024,11 @@ fn prompt_evolution_observations_from_events(
                 .and_then(|run_id| agent_runs.get(run_id));
             let terminal = if let Some(run_events) = run_events {
                 run_events.iter().rev().find(|event| {
-                        matches!(
-                            event.summary.as_str(),
-                            "Agent task completed" | "Agent task cancelled" | "Agent task failed"
-                        )
-                    })
+                    matches!(
+                        event.summary.as_str(),
+                        "Agent task completed" | "Agent task cancelled" | "Agent task failed"
+                    )
+                })
             } else {
                 workflow_events.iter().rev().find(|event| {
                     matches!(
@@ -22413,13 +22229,11 @@ fn prompt_rollout_record_from_event(event: &Event) -> Option<(String, PromptRoll
     ))
 }
 
-fn upsert_prompt_genome(
-    records: &mut Vec<PromptGenomeRecord>,
-    record: PromptGenomeRecord,
-) {
-    if let Some(existing) = records.iter_mut().find(|existing| {
-        existing.effort == record.effort && existing.genome.id == record.genome.id
-    }) {
+fn upsert_prompt_genome(records: &mut Vec<PromptGenomeRecord>, record: PromptGenomeRecord) {
+    if let Some(existing) = records
+        .iter_mut()
+        .find(|existing| existing.effort == record.effort && existing.genome.id == record.genome.id)
+    {
         *existing = record;
     } else {
         records.push(record);
@@ -22546,19 +22360,9 @@ fn load_prompt_evolution_read_model(
             })
             .collect::<BTreeSet<_>>();
         for (scope, value) in terminal_scopes {
-            let scoped_events = store.list_by_task_and_metadata(
-                &task_id,
-                scope,
-                &value,
-            )?;
-            for (effort, observation) in
-                prompt_evolution_observations_from_events(&scoped_events)
-            {
-                upsert_prompt_observation(
-                    &mut model.observations,
-                    effort,
-                    observation,
-                );
+            let scoped_events = store.list_by_task_and_metadata(&task_id, scope, &value)?;
+            for (effort, observation) in prompt_evolution_observations_from_events(&scoped_events) {
+                upsert_prompt_observation(&mut model.observations, effort, observation);
             }
         }
         model.revision = revision.latest_sequence;
@@ -22748,12 +22552,8 @@ fn reconcile_prompt_rollout(
         return rollout;
     }
 
-    let direct_evidence = prompt_direct_promotion_evidence(
-        model,
-        effort,
-        candidate_id,
-        &rollout.stable_profile_id,
-    );
+    let direct_evidence =
+        prompt_direct_promotion_evidence(model, effort, candidate_id, &rollout.stable_profile_id);
     let direct_train_runs = direct_evidence
         .iter()
         .filter(|observation| observation.mode.is_paired_execution())
@@ -22798,12 +22598,9 @@ fn reconcile_prompt_rollout(
         return rollout;
     }
 
-    if let Some(reason) = prompt_canary_degraded(
-        model,
-        effort,
-        &rollout.stable_profile_id,
-        candidate_id,
-    ) {
+    if let Some(reason) =
+        prompt_canary_degraded(model, effort, &rollout.stable_profile_id, candidate_id)
+    {
         rollout.canary_profile_id = None;
         rollout.canary_percent = 0;
         rollout.rollback_count = rollout.rollback_count.saturating_add(1);
@@ -22839,9 +22636,12 @@ fn reconcile_prompt_rollout(
 }
 
 fn prompt_rollout_bucket(value: &str) -> u8 {
-    let hash = value.as_bytes().iter().fold(0xcbf29ce484222325u64, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-    });
+    let hash = value
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
     (hash % 100) as u8
 }
 
@@ -22855,15 +22655,19 @@ fn apply_prompt_rollout_selection(
     let rollout_key = format!(
         "{}:{}:{}",
         effort,
-        run_context.get("session_id").map(String::as_str).unwrap_or("session"),
+        run_context
+            .get("session_id")
+            .map(String::as_str)
+            .unwrap_or("session"),
         run_context
             .get("agent_run_id")
             .map(String::as_str)
             .unwrap_or("run")
     );
-    let canary_selected = rollout.canary_profile_id.as_ref().is_some_and(|_| {
-        prompt_rollout_bucket(&rollout_key) < rollout.canary_percent
-    });
+    let canary_selected = rollout
+        .canary_profile_id
+        .as_ref()
+        .is_some_and(|_| prompt_rollout_bucket(&rollout_key) < rollout.canary_percent);
     let selected_id = if canary_selected {
         rollout.canary_profile_id.as_deref()
     } else {
@@ -22973,12 +22777,7 @@ fn prompt_instance_merge_candidate(
                 if by_id.contains_key(merge_id.as_str()) {
                     continue;
                 }
-                if let Ok(merged) = archive.merge_complementary(
-                    merge_id,
-                    ancestor,
-                    left,
-                    right,
-                ) {
+                if let Ok(merged) = archive.merge_complementary(merge_id, ancestor, left, right) {
                     return Some(merged);
                 }
             }
@@ -23060,8 +22859,7 @@ fn evaluate_prompt_evolution_with_observations(
     );
     let profile_complete = |genome: &ConductorPromptGenome| {
         let (train, holdout) = split_counts.get(&genome.id).copied().unwrap_or_default();
-        train >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS
-            && holdout >= PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS
+        train >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS && holdout >= PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS
     };
     let aggregate_breeding_parent = if let Some(generation) = known_population
         .iter()
@@ -23144,7 +22942,12 @@ fn evaluate_prompt_evolution_with_observations(
         } else {
             3
         };
-        (priority, train + holdout, genome.generation, genome.id.clone())
+        (
+            priority,
+            train + holdout,
+            genome.generation,
+            genome.id.clone(),
+        )
     });
     population.truncate(PROMPT_EVOLUTION_POPULATION_LIMIT);
     let exploration_profile = population
@@ -23165,20 +22968,21 @@ fn evaluate_prompt_evolution_with_observations(
         })
         .cloned()
         .unwrap_or_else(|| ConductorPromptGenome::seed_for_effort(effort));
-    let shadow_due = convergence.frozen
-        && (observations.len() + 1) % PROMPT_EVOLUTION_SHADOW_INTERVAL == 0;
-    let shadow_profile = shadow_due.then(|| {
-        population
-            .iter()
-            .filter(|genome| {
-                champion.is_none_or(|candidate| candidate.genome.id != genome.id)
-            })
-            .min_by_key(|genome| {
-                let (train, holdout) = split_counts.get(&genome.id).copied().unwrap_or_default();
-                (train + holdout, genome.generation, genome.id.clone())
-            })
-            .cloned()
-    }).flatten();
+    let shadow_due =
+        convergence.frozen && (observations.len() + 1) % PROMPT_EVOLUTION_SHADOW_INTERVAL == 0;
+    let shadow_profile = shadow_due
+        .then(|| {
+            population
+                .iter()
+                .filter(|genome| champion.is_none_or(|candidate| candidate.genome.id != genome.id))
+                .min_by_key(|genome| {
+                    let (train, holdout) =
+                        split_counts.get(&genome.id).copied().unwrap_or_default();
+                    (train + holdout, genome.generation, genome.id.clone())
+                })
+                .cloned()
+        })
+        .flatten();
     let (status, next_mode, next_profile) = if convergence.frozen {
         if let Some(profile) = shadow_profile {
             ("shadow", "shadow", profile)
@@ -23201,7 +23005,10 @@ fn evaluate_prompt_evolution_with_observations(
     let learned_child_exists = breeding_parent.as_ref().is_some_and(|parent| {
         known_population.iter().any(|genome| {
             genome.id.starts_with("learned-")
-                && genome.parents.iter().any(|candidate| candidate == &parent.id)
+                && genome
+                    .parents
+                    .iter()
+                    .any(|candidate| candidate == &parent.id)
         })
     });
     let mutation_candidate = (!convergence.frozen
@@ -23243,20 +23050,13 @@ fn prompt_evolution_evaluation_for_run(
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let mut model = load_prompt_evolution_read_model(&mut store)
-        .map_err(|error| error.to_string())?;
+    let mut model =
+        load_prompt_evolution_read_model(&mut store).map_err(|error| error.to_string())?;
     let mut evaluation = evaluate_prompt_evolution_read_model(&model, effort)?;
     let previous_rollout = model.rollouts.get(effort).cloned();
     let rollout = reconcile_prompt_rollout(&mut model, effort, &evaluation);
-    apply_prompt_rollout_selection(
-        &mut evaluation,
-        &rollout,
-        &model,
-        run_context,
-        effort,
-    );
-    save_prompt_evolution_read_model(&mut store, &model)
-        .map_err(|error| error.to_string())?;
+    apply_prompt_rollout_selection(&mut evaluation, &rollout, &model, run_context, effort);
+    save_prompt_evolution_read_model(&mut store, &model).map_err(|error| error.to_string())?;
     if previous_rollout.as_ref() != Some(&rollout) {
         append_event(
             &mut store,
@@ -23336,12 +23136,9 @@ fn prompt_evolution_state(
         .map(|inflight| inflight.clone())
         .unwrap_or_default();
     for effort in ["fast", "auto", "pro"] {
-        let evaluation = evaluate_prompt_evolution_with_observations(
-            &events,
-            effort,
-            &observations,
-        )
-            .map_err(StorageError::new)?;
+        let evaluation =
+            evaluate_prompt_evolution_with_observations(&events, effort, &observations)
+                .map_err(StorageError::new)?;
         observed_runs += evaluation.observations.len();
         population_size += evaluation.population.len();
         frontier_profiles += evaluation.frontier_ids.len();
@@ -23453,9 +23250,7 @@ fn prompt_evolution_state(
                 profile.latency_total_ms = profile
                     .latency_total_ms
                     .saturating_add(observation.latency_ms);
-                profile.token_total = profile
-                    .token_total
-                    .saturating_add(observation.total_tokens);
+                profile.token_total = profile.token_total.saturating_add(observation.total_tokens);
             }
             profile_rows.push(PromptEvolutionProfileState {
                 id: genome.id.clone(),
@@ -23472,9 +23267,8 @@ fn prompt_evolution_state(
                 },
                 average_reward: (profile.runs > 0)
                     .then_some(profile.reward_total / profile.runs as f64),
-                average_relative_reward: (profile.relative_reward_runs > 0).then_some(
-                    profile.relative_reward_total / profile.relative_reward_runs as f64,
-                ),
+                average_relative_reward: (profile.relative_reward_runs > 0)
+                    .then_some(profile.relative_reward_total / profile.relative_reward_runs as f64),
                 average_step_credit: (profile.step_credit_count > 0)
                     .then_some(profile.step_credit_total / profile.step_credit_count as f64),
                 average_quality: (profile.runs > 0)
@@ -23582,10 +23376,7 @@ fn append_router_decision_event(
         "routing_signature".to_string(),
         context.learning_signature(),
     );
-    metadata.insert(
-        "learned_examples".to_string(),
-        learned_examples.to_string(),
-    );
+    metadata.insert("learned_examples".to_string(), learned_examples.to_string());
     append_event(
         store,
         task_id,
@@ -23691,9 +23482,7 @@ fn provider_config_from_text(text: &str) -> ProviderConfig {
             "image_model" => config.image_model = value.to_string(),
             "image_endpoint" => config.image_endpoint = value.to_string(),
             "collaboration_policy" => config.collaboration_policy = value.to_string(),
-            "prompt_evolution_enabled" => {
-                config.prompt_evolution_enabled = config_bool(value)
-            }
+            "prompt_evolution_enabled" => config.prompt_evolution_enabled = config_bool(value),
             "context_window_tokens" => {
                 config.context_window_tokens = value.parse().unwrap_or(128_000)
             }
@@ -23752,9 +23541,7 @@ fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<(), std::io::
     Ok(())
 }
 
-fn normalized_personalization_config(
-    config: PersonalizationConfig,
-) -> PersonalizationConfig {
+fn normalized_personalization_config(config: PersonalizationConfig) -> PersonalizationConfig {
     let preferred_name = config
         .preferred_name
         .trim()
@@ -24093,7 +23880,11 @@ fn apply_session_lifecycle_projections(
         if session.archived {
             continue;
         }
-        let Some(record) = config.sessions.iter().find(|record| record.id == session.id) else {
+        let Some(record) = config
+            .sessions
+            .iter()
+            .find(|record| record.id == session.id)
+        else {
             continue;
         };
         let model = load_agent_session_read_model_snapshot(store, &session.id)?;
@@ -24169,19 +23960,12 @@ fn remove_project_from_config(
     Some((project, deleted_session_ids))
 }
 
-fn ensure_open_session_for_project(
-    config: &mut ProjectSessionConfig,
-    project_id: &str,
-) -> String {
-    if let Some(session) = config
-        .sessions
-        .iter()
-        .find(|session| {
-            session.project_id == project_id
-                && session.archived_at_ms.is_none()
-                && !is_schedule_execution_session(session)
-        })
-    {
+fn ensure_open_session_for_project(config: &mut ProjectSessionConfig, project_id: &str) -> String {
+    if let Some(session) = config.sessions.iter().find(|session| {
+        session.project_id == project_id
+            && session.archived_at_ms.is_none()
+            && !is_schedule_execution_session(session)
+    }) {
         return session.id.clone();
     }
 
@@ -24244,10 +24028,7 @@ fn project_session_state_with_error(
     Ok(project_session_state(&config, Some(message.into())))
 }
 
-fn sync_active_project_root(
-    state: &tauri::State<'_, AppState>,
-    root: &Path,
-) -> Result<(), String> {
+fn sync_active_project_root(state: &tauri::State<'_, AppState>, root: &Path) -> Result<(), String> {
     let mut config = state
         .project_session_config
         .lock()
@@ -24324,7 +24105,11 @@ fn agent_run_context_from_events(events: &[Event]) -> AgentRunContext {
     let start = events
         .iter()
         .find(|event| is_agent_run_start_event(event))
-        .or_else(|| events.iter().find(|event| event.metadata.contains_key("session_id")));
+        .or_else(|| {
+            events
+                .iter()
+                .find(|event| event.metadata.contains_key("session_id"))
+        });
     AgentRunContext {
         project_id: start.and_then(|event| event.metadata.get("project_id").cloned()),
         project_name: start.and_then(|event| event.metadata.get("project_name").cloned()),
@@ -24721,14 +24506,13 @@ fn build_tool_registry_for_state(
     } else {
         provider_config.image_endpoint.clone()
     };
-    let image_generation_config = (!provider_config.image_model.trim().is_empty()).then_some(
-        ImageGenerationConfig {
+    let image_generation_config =
+        (!provider_config.image_model.trim().is_empty()).then_some(ImageGenerationConfig {
             base_url: image_endpoint,
             api_key: provider_config.api_key,
             model: provider_config.image_model,
             timeout_seconds: 300,
-        },
-    );
+        });
     let mut registry = ToolRegistry::with_workspace_tools_and_services(
         workspace_root.to_path_buf(),
         web_search_config,
@@ -24840,9 +24624,7 @@ fn rag_index_path_for(workspace_root: &Path) -> PathBuf {
 }
 
 fn lancedb_export_path_for(workspace_root: &Path) -> PathBuf {
-    workspace_root
-        .join(".cindx")
-        .join("lancedb-records.jsonl")
+    workspace_root.join(".cindx").join("lancedb-records.jsonl")
 }
 
 fn lancedb_database_path_for(workspace_root: &Path) -> PathBuf {
@@ -24873,13 +24655,16 @@ fn graph_state_for(
     workspace_root: &Path,
     focus_paths: &[String],
 ) -> Result<GraphStateView, String> {
-    let store =
-        FileGraphStore::open(graph_store_path_for(workspace_root)).map_err(|error| error.to_string())?;
+    let store = FileGraphStore::open(graph_store_path_for(workspace_root))
+        .map_err(|error| error.to_string())?;
     let all_nodes = store.nodes();
     let all_edges = store.edges();
     let total_nodes = all_nodes.len();
     let total_edges = all_edges.len();
-    let focus_paths = focus_paths.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let focus_paths = focus_paths
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
     let mut selected_ids = all_nodes
         .iter()
         .filter(|node| {
@@ -24899,9 +24684,7 @@ fn graph_state_for(
     for _ in 0..2 {
         let neighbors = all_edges
             .iter()
-            .filter(|edge| {
-                selected_ids.contains(&edge.from) || selected_ids.contains(&edge.to)
-            })
+            .filter(|edge| selected_ids.contains(&edge.from) || selected_ids.contains(&edge.to))
             .flat_map(|edge| [edge.from.clone(), edge.to.clone()])
             .collect::<Vec<_>>();
         for id in neighbors {
@@ -24930,7 +24713,10 @@ fn graph_state_for(
             .then_with(|| left.kind.cmp(&right.kind))
             .then_with(|| left.label.cmp(&right.label))
     });
-    let visible_ids = nodes.iter().map(|node| node.id.as_str()).collect::<BTreeSet<_>>();
+    let visible_ids = nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<BTreeSet<_>>();
     let mut edges = all_edges
         .into_iter()
         .filter(|edge| {
@@ -24963,15 +24749,10 @@ fn empty_graph_state() -> GraphStateView {
 }
 
 fn context_checkpoint_path_for(workspace_root: &Path) -> PathBuf {
-    workspace_root
-        .join(".cindx")
-        .join("context-checkpoint.md")
+    workspace_root.join(".cindx").join("context-checkpoint.md")
 }
 
-fn context_checkpoint_path_for_session(
-    workspace_root: &Path,
-    session_id: Option<&str>,
-) -> PathBuf {
+fn context_checkpoint_path_for_session(workspace_root: &Path, session_id: Option<&str>) -> PathBuf {
     let segment = session_id
         .filter(|value| !value.trim().is_empty())
         .map(safe_path_segment)
@@ -24986,8 +24767,7 @@ fn context_checkpoint_manifest_path_for_session(
     workspace_root: &Path,
     session_id: Option<&str>,
 ) -> PathBuf {
-    context_checkpoint_path_for_session(workspace_root, session_id)
-        .with_extension("coverage.json")
+    context_checkpoint_path_for_session(workspace_root, session_id).with_extension("coverage.json")
 }
 
 fn safe_path_segment(value: &str) -> String {
@@ -25109,7 +24889,10 @@ fn invalidate_workspace_knowledge_cache(
     Ok(())
 }
 
-fn index_graph_chunks(workspace_root: &Path, chunks: &[RagChunk]) -> Result<(usize, usize), String> {
+fn index_graph_chunks(
+    workspace_root: &Path,
+    chunks: &[RagChunk],
+) -> Result<(usize, usize), String> {
     index_graph_chunks_cancellable(workspace_root, chunks, || false)
 }
 
@@ -25175,7 +24958,10 @@ fn app_data_root_for(override_root: Option<PathBuf>, home: Option<PathBuf>) -> P
     }
     if let Some(home) = home {
         #[cfg(target_os = "macos")]
-        return home.join("Library").join("Application Support").join("Cindx");
+        return home
+            .join("Library")
+            .join("Application Support")
+            .join("Cindx");
         #[cfg(not(target_os = "macos"))]
         return home.join(".cindx");
     }
@@ -25191,7 +24977,9 @@ fn runtime_path_from_env(key: &str) -> Option<PathBuf> {
     if path.is_absolute() {
         Some(path)
     } else {
-        std::env::current_dir().ok().map(|current| current.join(path))
+        std::env::current_dir()
+            .ok()
+            .map(|current| current.join(path))
     }
 }
 
@@ -25342,7 +25130,9 @@ fn parse_permission_decision(value: &str) -> Result<PermissionDecision, StorageE
         "allow_once" => Ok(PermissionDecision::AllowOnce),
         "allow_for_session" => Ok(PermissionDecision::AllowForSession),
         "deny" => Ok(PermissionDecision::Deny),
-        other => Err(StorageError::new(format!("unknown permission decision: {other}"))),
+        other => Err(StorageError::new(format!(
+            "unknown permission decision: {other}"
+        ))),
     }
 }
 
@@ -25493,10 +25283,7 @@ fn add_image_generation_run_context(
     if !prompt_requests_image_generation(prompt) || config.image_model.trim().is_empty() {
         return;
     }
-    run_context.insert(
-        "image_generation_required".to_string(),
-        "true".to_string(),
-    );
+    run_context.insert("image_generation_required".to_string(), "true".to_string());
     run_context.insert(
         "configured_image_model".to_string(),
         config.image_model.trim().to_string(),
@@ -25515,7 +25302,11 @@ fn required_image_generation_satisfied(
     runtime: &agent_runtime::AgentLoopState,
     run_context: &Metadata,
 ) -> bool {
-    if run_context.get("image_generation_required").map(String::as_str) != Some("true") {
+    if run_context
+        .get("image_generation_required")
+        .map(String::as_str)
+        != Some("true")
+    {
         return true;
     }
     runtime.messages.iter().any(|message| {
@@ -25532,7 +25323,11 @@ fn agent_runtime_context_for_run(run_context: &Metadata) -> Option<String> {
             "Current date and time: {current_time}\nTreat this time as authoritative for this turn."
         ));
     }
-    if run_context.get("image_generation_required").map(String::as_str) == Some("true") {
+    if run_context
+        .get("image_generation_required")
+        .map(String::as_str)
+        == Some("true")
+    {
         let model = run_context
             .get("configured_image_model")
             .map(String::as_str)
@@ -25548,10 +25343,7 @@ fn agent_runtime_context_for_run(run_context: &Metadata) -> Option<String> {
     (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 
-fn collaboration_system_prompt_for_run(
-    user_instructions: &str,
-    run_context: &Metadata,
-) -> String {
+fn collaboration_system_prompt_for_run(user_instructions: &str, run_context: &Metadata) -> String {
     let runtime_context = agent_runtime_context_for_run(run_context);
     compose_agent_system_prompt(Some(user_instructions), runtime_context.as_deref())
 }
@@ -25758,12 +25550,18 @@ mod tests {
         let genome = ConductorPromptGenome::seed_for_effort("pro");
 
         assert_eq!(effective_workflow_model_turn_budget(&plan, &checkpoint), 3);
-        assert_eq!(effective_workflow_step_attempt_budget(&genome, &checkpoint), 3);
+        assert_eq!(
+            effective_workflow_step_attempt_budget(&genome, &checkpoint),
+            3
+        );
 
         checkpoint.continue_with_budget(3, 20);
 
         assert_eq!(effective_workflow_model_turn_budget(&plan, &checkpoint), 6);
-        assert_eq!(effective_workflow_step_attempt_budget(&genome, &checkpoint), 6);
+        assert_eq!(
+            effective_workflow_step_attempt_budget(&genome, &checkpoint),
+            6
+        );
         checkpoint
             .begin_step_with_attempt_limit("inspect", "worker", 6, 30)
             .expect("continued attempt budget should reach the worker");
@@ -25774,22 +25572,14 @@ mod tests {
         let plan = single_step_workflow_plan(3);
         let mut checkpoint = WorkflowExecutionCheckpoint::new("resume-running", plan, 10);
 
-        assert!(ensure_adaptive_step_attempt_started(
-            &mut checkpoint,
-            "inspect",
-            "worker",
-            3,
-            20,
-        )
-        .expect("first attempt should start"));
-        assert!(!ensure_adaptive_step_attempt_started(
-            &mut checkpoint,
-            "inspect",
-            "worker",
-            3,
-            30,
-        )
-        .expect("running attempt should resume"));
+        assert!(
+            ensure_adaptive_step_attempt_started(&mut checkpoint, "inspect", "worker", 3, 20,)
+                .expect("first attempt should start")
+        );
+        assert!(
+            !ensure_adaptive_step_attempt_started(&mut checkpoint, "inspect", "worker", 3, 30,)
+                .expect("running attempt should resume")
+        );
         assert_eq!(checkpoint.steps["inspect"].attempts, 1);
 
         checkpoint
@@ -25879,8 +25669,14 @@ mod tests {
 
     #[test]
     fn adaptive_quality_gate_is_bounded_and_requires_safe_passing_score() {
-        assert_eq!(adaptive_quality_repair_budget(PromptVerification::Minimal), 0);
-        assert_eq!(adaptive_quality_repair_budget(PromptVerification::Evidence), 1);
+        assert_eq!(
+            adaptive_quality_repair_budget(PromptVerification::Minimal),
+            0
+        );
+        assert_eq!(
+            adaptive_quality_repair_budget(PromptVerification::Evidence),
+            1
+        );
         assert_eq!(
             adaptive_quality_repair_budget(PromptVerification::Adversarial),
             2
@@ -25973,9 +25769,9 @@ mod tests {
             32_000,
         ));
 
-        history.extend((40..58).map(|index| {
-            test_message(MessageRole::Assistant, format!("message {index}"))
-        }));
+        history.extend(
+            (40..58).map(|index| test_message(MessageRole::Assistant, format!("message {index}"))),
+        );
         let plan = session_compaction_plan(&history, 32_000);
         assert!(!context_checkpoint_is_within_reuse_window(
             &checkpoint,
@@ -26106,7 +25902,9 @@ mod tests {
         assert_eq!(chat_message.content, "");
         let transcript_message = message_from_event(&event).expect("tool turn should remain");
         assert_eq!(transcript_message.content, "");
-        assert!(transcript_message.metadata.contains_key("raw_tool_calls_json"));
+        assert!(transcript_message
+            .metadata
+            .contains_key("raw_tool_calls_json"));
     }
 
     #[test]
@@ -26492,8 +26290,14 @@ mod tests {
     fn project_memory_projection_persists_and_searches_real_lancedb_vectors() {
         let mut store = SqliteStore::in_memory().expect("store should open");
         let context = [
-            ("project_id".to_string(), "project-vector-memory".to_string()),
-            ("session_id".to_string(), "session-vector-memory".to_string()),
+            (
+                "project_id".to_string(),
+                "project-vector-memory".to_string(),
+            ),
+            (
+                "session_id".to_string(),
+                "session-vector-memory".to_string(),
+            ),
             ("agent_run_id".to_string(), "run-vector-memory".to_string()),
         ]
         .into_iter()
@@ -26522,15 +26326,11 @@ mod tests {
             current_time_millis()
         ));
 
-        let fallback = refresh_project_memory_vector_index(
-            &root,
-            &ProviderConfig::default(),
-            &ledger,
-        )
-        .expect("memory vectors should persist");
+        let fallback =
+            refresh_project_memory_vector_index(&root, &ProviderConfig::default(), &ledger)
+                .expect("memory vectors should persist");
         assert!(fallback.is_none());
-        let database_path =
-            memory_lancedb_database_path_for(&root, "project-vector-memory");
+        let database_path = memory_lancedb_database_path_for(&root, "project-vector-memory");
         assert!(lancedb_index_exists(&database_path));
         let results = search_lancedb_index(
             &database_path,
@@ -26538,7 +26338,10 @@ mod tests {
             4,
         )
         .expect("memory vectors should search");
-        assert_eq!(results.first().map(|result| result.chunk.id.as_str()), Some(ledger.records[0].id.as_str()));
+        assert_eq!(
+            results.first().map(|result| result.chunk.id.as_str()),
+            Some(ledger.records[0].id.as_str())
+        );
         let manifest = load_memory_vector_manifest(&memory_lancedb_manifest_path_for(
             &root,
             "project-vector-memory",
@@ -26554,8 +26357,14 @@ mod tests {
     fn project_memory_never_persists_raw_secrets() {
         let mut store = SqliteStore::in_memory().expect("store should open");
         let context = [
-            ("project_id".to_string(), "project-memory-secret".to_string()),
-            ("session_id".to_string(), "session-memory-secret".to_string()),
+            (
+                "project_id".to_string(),
+                "project-memory-secret".to_string(),
+            ),
+            (
+                "session_id".to_string(),
+                "session-memory-secret".to_string(),
+            ),
             ("agent_run_id".to_string(), "run-memory-secret".to_string()),
         ]
         .into_iter()
@@ -26633,10 +26442,7 @@ mod tests {
             )
             .expect("older page should load");
         assert_eq!(
-            older
-                .iter()
-                .map(|event| event.sequence)
-                .collect::<Vec<_>>(),
+            older.iter().map(|event| event.sequence).collect::<Vec<_>>(),
             vec![2, 3, 4]
         );
         assert!(store
@@ -26696,8 +26502,8 @@ mod tests {
         )
         .expect("run should complete");
 
-        let initial = load_routing_telemetry_read_model(&mut store)
-            .expect("routing read model should build");
+        let initial =
+            load_routing_telemetry_read_model(&mut store).expect("routing read model should build");
         assert_eq!(initial.len(), 1);
         assert_eq!(initial[0].selected_model, "model-a");
         assert_eq!(initial[0].cost_proxy, 900);
@@ -26754,8 +26560,7 @@ mod tests {
                 ),
                 (
                     "prompt_observation".to_string(),
-                    serde_json::to_string(&observation)
-                        .expect("observation should serialize"),
+                    serde_json::to_string(&observation).expect("observation should serialize"),
                 ),
             ]
             .into_iter()
@@ -26842,8 +26647,8 @@ mod tests {
         )
         .expect("atomic pair should append");
 
-        let model = load_prompt_evolution_read_model(&mut store)
-            .expect("atomic pair should rebuild");
+        let model =
+            load_prompt_evolution_read_model(&mut store).expect("atomic pair should rebuild");
         assert_eq!(model.genomes.len(), 2);
         assert_eq!(model.observations.len(), 2);
         assert!(model.observations.iter().all(|(_, observation)| {
@@ -26855,8 +26660,8 @@ mod tests {
     #[test]
     fn prompt_evolution_evidence_counts_ignore_legacy_plan_only_modes() {
         let profile_id = "seed-auto-v1";
-        let observation = |evaluation_id: &str, mode: PromptEvaluationMode| {
-            PromptEvolutionObservation {
+        let observation =
+            |evaluation_id: &str, mode: PromptEvaluationMode| PromptEvolutionObservation {
                 profile_id: profile_id.to_string(),
                 evaluation_id: evaluation_id.to_string(),
                 case_id: evaluation_id.to_string(),
@@ -26878,8 +26683,7 @@ mod tests {
                 relative_reward: Some(0.2),
                 step_credits: Vec::new(),
                 reflection_packet: None,
-            }
-        };
+            };
         let observations = vec![
             observation("legacy-paired", PromptEvaluationMode::PairedShadow),
             observation("legacy-replay", PromptEvaluationMode::ReplayHoldout),
@@ -26921,11 +26725,7 @@ mod tests {
         ];
 
         assert_eq!(
-            prompt_direct_profile_evidence_counts(
-                &observations,
-                "candidate",
-                "stable-profile"
-            ),
+            prompt_direct_profile_evidence_counts(&observations, "candidate", "stable-profile"),
             (0, 1)
         );
     }
@@ -26968,8 +26768,8 @@ mod tests {
             mutation_trajectories: Vec::new(),
         };
 
-        let direct_observation = |index: usize, split: PromptEvaluationSplit| {
-            PromptEvolutionObservation {
+        let direct_observation =
+            |index: usize, split: PromptEvaluationSplit| PromptEvolutionObservation {
                 profile_id: candidate.id.clone(),
                 evaluation_id: format!("direct-stable-{index}"),
                 case_id: format!("direct-case-{index}"),
@@ -26990,8 +26790,7 @@ mod tests {
                 relative_reward: Some(0.4),
                 step_credits: Vec::new(),
                 reflection_packet: None,
-            }
-        };
+            };
         for index in 0..3 {
             model.observations.push((
                 "auto".to_string(),
@@ -27144,13 +26943,19 @@ mod tests {
             .save_permission_request(request, current_time_millis())
             .expect("request should save");
 
-        let state = permission_review_state(&store, &project_sessions)
-            .expect("review state should load");
+        let state =
+            permission_review_state(&store, &project_sessions).expect("review state should load");
 
         assert_eq!(state.pending.len(), 1);
         assert_eq!(state.pending[0].source, "agent");
-        assert_eq!(state.pending[0].session_id.as_deref(), Some(session.id.as_str()));
-        assert_eq!(state.pending[0].session_name.as_deref(), Some(session.name.as_str()));
+        assert_eq!(
+            state.pending[0].session_id.as_deref(),
+            Some(session.id.as_str())
+        );
+        assert_eq!(
+            state.pending[0].session_name.as_deref(),
+            Some(session.name.as_str())
+        );
         assert!(state.pending[0].can_allow_session);
         assert!(state.pending[0].input.contains("cargo test"));
     }
@@ -27236,12 +27041,9 @@ mod tests {
             }
         }])
         .to_string();
-        let metadata = [(
-            "raw_tool_calls_json".to_string(),
-            raw_tool_calls,
-        )]
-        .into_iter()
-        .collect();
+        let metadata = [("raw_tool_calls_json".to_string(), raw_tool_calls)]
+            .into_iter()
+            .collect();
 
         let redacted = redact_metadata(&metadata);
         let parsed: serde_json::Value = serde_json::from_str(
@@ -27288,12 +27090,9 @@ mod tests {
             "browser.capture",
             "completed",
             &"output".repeat(20_000),
-            [(
-                "structured_output".to_string(),
-                "structured".repeat(20_000),
-            )]
-            .into_iter()
-            .collect(),
+            [("structured_output".to_string(), "structured".repeat(20_000))]
+                .into_iter()
+                .collect(),
             None,
         )
         .expect("tool event should append");
@@ -27376,7 +27175,10 @@ mod tests {
         assert_eq!(config.executor_model, "model-a");
         assert_eq!(config.collaboration_policy, "auto_router");
         assert_eq!(config.context_window_tokens, 128_000);
-        assert_eq!(config.agent_system_prompt, "Be concise.\nUse Chinese when asked.");
+        assert_eq!(
+            config.agent_system_prompt,
+            "Be concise.\nUse Chinese when asked."
+        );
         assert_eq!(config.image_model, "image-model-a");
         assert_eq!(config.image_endpoint, "https://images.example.test/v1");
     }
@@ -27491,7 +27293,11 @@ mod tests {
                         role: "synthesizer".to_string(),
                         model: hints.synthesizer.clone(),
                         subtask: "synthesize".to_string(),
-                        access: vec!["plan".to_string(), "execute".to_string(), "review".to_string()],
+                        access: vec![
+                            "plan".to_string(),
+                            "execute".to_string(),
+                            "review".to_string(),
+                        ],
                     },
                 ],
             },
@@ -27577,7 +27383,10 @@ mod tests {
 
     #[test]
     fn agent_effort_maps_to_bounded_policies() {
-        assert_eq!(AgentEffort::parse("fast").requested_policy(), OrchestrationPolicy::Single);
+        assert_eq!(
+            AgentEffort::parse("fast").requested_policy(),
+            OrchestrationPolicy::Single
+        );
         assert_eq!(
             AgentEffort::parse("auto").requested_policy(),
             OrchestrationPolicy::AutoRouter
@@ -27594,10 +27403,16 @@ mod tests {
         let mut context = RoutingContext::from_prompt("重新来一次", Vec::new());
 
         assert_eq!(collaboration_profile(AgentEffort::Pro, &context), "bounded");
-        assert_eq!(collaboration_profile(AgentEffort::Auto, &context), "adaptive");
+        assert_eq!(
+            collaboration_profile(AgentEffort::Auto, &context),
+            "adaptive"
+        );
 
         context.needs_multi_model = true;
-        assert_eq!(collaboration_profile(AgentEffort::Pro, &context), "adaptive");
+        assert_eq!(
+            collaboration_profile(AgentEffort::Pro, &context),
+            "adaptive"
+        );
     }
 
     #[test]
@@ -27744,11 +27559,8 @@ mod tests {
         .into_iter()
         .collect();
 
-        let merged = merge_collaboration_evidence(
-            &["a".to_string(), "b".to_string()],
-            &inherited,
-            &[b],
-        );
+        let merged =
+            merge_collaboration_evidence(&["a".to_string(), "b".to_string()], &inherited, &[b]);
 
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].source_step, "worker_a");
@@ -27773,15 +27585,24 @@ mod tests {
         };
 
         assert_eq!(timeline_event_label(&event), "Candidate 2");
-        assert_eq!(collaboration_stage_display_label("coordinator"), "Conductor");
-        assert_eq!(collaboration_stage_display_label("conductor_plan"), "Conductor");
+        assert_eq!(
+            collaboration_stage_display_label("coordinator"),
+            "Conductor"
+        );
+        assert_eq!(
+            collaboration_stage_display_label("conductor_plan"),
+            "Conductor"
+        );
         assert_eq!(
             collaboration_stage_display_label("conductor_repair"),
             "Conductor repair"
         );
         assert_eq!(collaboration_stage_display_label("worker_3"), "Worker 3");
         assert_eq!(collaboration_stage_display_label("arbiter"), "Arbiter");
-        assert_eq!(collaboration_stage_display_label("synthesizer"), "Synthesis");
+        assert_eq!(
+            collaboration_stage_display_label("synthesizer"),
+            "Synthesis"
+        );
     }
 
     #[test]
@@ -27826,9 +27647,12 @@ mod tests {
 
     #[test]
     fn agent_runtime_context_includes_the_time_computed_for_the_user_turn() {
-        let context = [("current_time".to_string(), "2026-07-11 10:30 CST".to_string())]
-            .into_iter()
-            .collect();
+        let context = [(
+            "current_time".to_string(),
+            "2026-07-11 10:30 CST".to_string(),
+        )]
+        .into_iter()
+        .collect();
         let runtime_context =
             agent_runtime_context_for_run(&context).expect("time context should exist");
 
@@ -27838,9 +27662,12 @@ mod tests {
 
     #[test]
     fn collaboration_prompt_keeps_core_user_instructions_and_runtime_context() {
-        let context = [("current_time".to_string(), "2026-07-11 10:30 CST".to_string())]
-            .into_iter()
-            .collect();
+        let context = [(
+            "current_time".to_string(),
+            "2026-07-11 10:30 CST".to_string(),
+        )]
+        .into_iter()
+        .collect();
         let prompt = collaboration_system_prompt_for_run("Answer in Chinese.", &context);
 
         assert!(prompt.starts_with("You are Cindx"));
@@ -27961,7 +27788,9 @@ mod tests {
             .permission_request(&invocation)
             .expect("write should request permission");
         request.id = PermissionRequestId("perm-phase5".to_string());
-        request.metadata.insert("phase".to_string(), "5".to_string());
+        request
+            .metadata
+            .insert("phase".to_string(), "5".to_string());
         request
             .metadata
             .insert("tool_input".to_string(), invocation.input_json);
@@ -28060,9 +27889,8 @@ mod tests {
         )
         .expect("fixture should write");
         let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
-        let mut adapter =
-            FileRagAdapter::open(root.join(".cindx").join("rag-index.tsv"))
-                .expect("adapter should open");
+        let mut adapter = FileRagAdapter::open(root.join(".cindx").join("rag-index.tsv"))
+            .expect("adapter should open");
         adapter.replace_all(index).expect("index should persist");
         let mut store = SqliteStore::in_memory().expect("store should open");
         append_event(
@@ -28094,7 +27922,10 @@ mod tests {
 
         assert_eq!(state.stats.files_indexed, 1);
         assert_eq!(state.stats.chunks_indexed, 1);
-        assert!(state.timeline.iter().any(|entry| entry.label == "Retrieval"));
+        assert!(state
+            .timeline
+            .iter()
+            .any(|entry| entry.label == "Retrieval"));
     }
 
     #[test]
@@ -28107,9 +27938,8 @@ mod tests {
         )
         .expect("fixture should write");
         let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
-        let mut adapter =
-            FileRagAdapter::open(root.join(".cindx").join("rag-index.tsv"))
-                .expect("adapter should open");
+        let mut adapter = FileRagAdapter::open(root.join(".cindx").join("rag-index.tsv"))
+            .expect("adapter should open");
         adapter.replace_all(index).expect("index should persist");
 
         let results = adapter
@@ -28156,8 +27986,8 @@ mod tests {
         .expect("retrieval should append");
 
         let run_context = Metadata::new();
-        let preview = context_state(&store, &root, &run_context, None, None)
-            .expect("state should load");
+        let preview =
+            context_state(&store, &root, &run_context, None, None).expect("state should load");
         let checkpoint = preview.checkpoint.expect("checkpoint should exist");
 
         assert_eq!(
@@ -28238,7 +28068,10 @@ mod tests {
         let events = collect_context_events(&store, &run_context).expect("events should collect");
 
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].metadata.get("content").map(String::as_str), Some("alpha"));
+        assert_eq!(
+            events[0].metadata.get("content").map(String::as_str),
+            Some("alpha")
+        );
         assert_ne!(
             context_checkpoint_path_for_session(&root, Some("session-a")),
             context_checkpoint_path_for_session(&root, Some("session-b"))
@@ -28265,12 +28098,8 @@ mod tests {
         )
         .expect("checkpoint should write");
 
-        let checkpoint = read_validated_context_checkpoint(
-            &root,
-            Some("session-a"),
-            &history,
-        )
-        .expect("coverage should validate");
+        let checkpoint = read_validated_context_checkpoint(&root, Some("session-a"), &history)
+            .expect("coverage should validate");
         assert_eq!(checkpoint.covered_messages, 2);
         let restored = history_with_context_checkpoint(&history, checkpoint, &path)
             .expect("history should restore");
@@ -28279,7 +28108,10 @@ mod tests {
         assert_eq!(restored[1].content, "second requirement");
         assert_eq!(restored[2].content, "second answer");
         assert_eq!(
-            restored[0].metadata.get("covered_messages").map(String::as_str),
+            restored[0]
+                .metadata
+                .get("covered_messages")
+                .map(String::as_str),
             Some("2")
         );
     }
@@ -28291,12 +28123,7 @@ mod tests {
         write_context_checkpoint(&root, Some("session-a"), "legacy checkpoint", None)
             .expect("legacy checkpoint should write");
 
-        assert!(read_validated_context_checkpoint(
-            &root,
-            Some("session-a"),
-            &history,
-        )
-        .is_none());
+        assert!(read_validated_context_checkpoint(&root, Some("session-a"), &history,).is_none());
     }
 
     #[test]
@@ -28320,18 +28147,10 @@ mod tests {
         let mut changed = history.clone();
         changed[0].content = "edited requirement".to_string();
 
-        assert!(read_validated_context_checkpoint(
-            &root,
-            Some("session-a"),
-            &changed,
-        )
-        .is_none());
-        assert!(read_validated_context_checkpoint(
-            &root,
-            Some("session-a"),
-            &history[..2],
-        )
-        .is_none());
+        assert!(read_validated_context_checkpoint(&root, Some("session-a"), &changed,).is_none());
+        assert!(
+            read_validated_context_checkpoint(&root, Some("session-a"), &history[..2],).is_none()
+        );
     }
 
     #[test]
@@ -28350,12 +28169,7 @@ mod tests {
         .expect("checkpoint should write");
         fs::write(path, "different checkpoint").expect("checkpoint should mutate");
 
-        assert!(read_validated_context_checkpoint(
-            &root,
-            Some("session-a"),
-            &history,
-        )
-        .is_none());
+        assert!(read_validated_context_checkpoint(&root, Some("session-a"), &history,).is_none());
     }
 
     #[test]
@@ -28416,20 +28230,16 @@ mod tests {
         }
         let canonical_history = runtime.messages.clone();
 
-        let (request, report) = model_request_for_turn_with_context_budget(
-            &runtime,
-            &tools,
-            None,
-            None,
-            16_384,
-            2_048,
-        );
+        let (request, report) =
+            model_request_for_turn_with_context_budget(&runtime, &tools, None, None, 16_384, 2_048);
 
         assert!(report.applied);
         assert!(report.hard_limit_satisfied);
         assert!(report.omitted_messages > 0);
         assert!(request.messages.iter().any(|message| {
-            message.content.contains("current goal: finish the verified implementation")
+            message
+                .content
+                .contains("current goal: finish the verified implementation")
         }));
         assert!(request.messages.iter().any(|message| {
             message.metadata.get("kind").map(String::as_str) == Some("artifact_manifest")
@@ -28681,13 +28491,8 @@ mod tests {
             .into_iter()
             .collect(),
         }];
-        let resume_key = workflow_resume_key_from_events(
-            &events,
-            Some("session-a"),
-            prompt,
-            "pro",
-            "best_of_n",
-        );
+        let resume_key =
+            workflow_resume_key_from_events(&events, Some("session-a"), prompt, "pro", "best_of_n");
         let mut checkpoint = WorkflowExecutionCheckpoint::new(&resume_key, plan, 110);
         events.push(Event {
             id: EventId("checkpoint-running".to_string()),
@@ -28706,13 +28511,10 @@ mod tests {
             .into_iter()
             .collect(),
         });
-        assert!(resumable_workflow_checkpoint_from_events(
-            &events,
-            &resume_key,
-            prompt,
-            &models,
-        )
-        .is_some());
+        assert!(
+            resumable_workflow_checkpoint_from_events(&events, &resume_key, prompt, &models,)
+                .is_some()
+        );
 
         checkpoint.begin_step("final", "planner", 130).unwrap();
         checkpoint
@@ -28742,13 +28544,10 @@ mod tests {
             .into_iter()
             .collect(),
         });
-        assert!(resumable_workflow_checkpoint_from_events(
-            &events,
-            &resume_key,
-            prompt,
-            &models,
-        )
-        .is_none());
+        assert!(
+            resumable_workflow_checkpoint_from_events(&events, &resume_key, prompt, &models,)
+                .is_none()
+        );
 
         events.push(Event {
             id: EventId("continuation-replay".to_string()),
@@ -28766,13 +28565,8 @@ mod tests {
             .into_iter()
             .collect(),
         });
-        let continuation_key = workflow_resume_key_from_events(
-            &events,
-            Some("session-a"),
-            prompt,
-            "pro",
-            "best_of_n",
-        );
+        let continuation_key =
+            workflow_resume_key_from_events(&events, Some("session-a"), prompt, "pro", "best_of_n");
         assert_eq!(resume_key, continuation_key);
 
         events.push(Event {
@@ -28790,13 +28584,8 @@ mod tests {
             .into_iter()
             .collect(),
         });
-        let repeated_prompt_key = workflow_resume_key_from_events(
-            &events,
-            Some("session-a"),
-            prompt,
-            "pro",
-            "best_of_n",
-        );
+        let repeated_prompt_key =
+            workflow_resume_key_from_events(&events, Some("session-a"), prompt, "pro", "best_of_n");
         assert_ne!(resume_key, repeated_prompt_key);
     }
 
@@ -29091,48 +28880,75 @@ mod tests {
 
     #[test]
     fn offline_prompt_dataset_is_project_scoped_deterministic_and_split_stable() {
-        let run_events = |sequence: u64,
-                          run_id: &str,
-                          project_id: &str,
-                          objective: &str,
-                          completed: bool| {
-            let metadata = [
-                ("agent_run_id".to_string(), run_id.to_string()),
-                ("project_id".to_string(), project_id.to_string()),
-                ("session_id".to_string(), format!("session-{run_id}")),
-                ("task_class".to_string(), "coding".to_string()),
-                ("prompt".to_string(), objective.to_string()),
-            ]
-            .into_iter()
-            .collect::<Metadata>();
-            let mut events = vec![Event {
-                id: EventId(format!("started-{run_id}")),
-                task_id: phase16_task_id(),
-                sequence,
-                timestamp_ms: sequence * 10,
-                kind: EventKind::TaskStatusChanged,
-                summary: "Agent task started".to_string(),
-                metadata: metadata.clone(),
-            }];
-            if completed {
-                events.push(Event {
-                    id: EventId(format!("completed-{run_id}")),
+        let run_events =
+            |sequence: u64, run_id: &str, project_id: &str, objective: &str, completed: bool| {
+                let metadata = [
+                    ("agent_run_id".to_string(), run_id.to_string()),
+                    ("project_id".to_string(), project_id.to_string()),
+                    ("session_id".to_string(), format!("session-{run_id}")),
+                    ("task_class".to_string(), "coding".to_string()),
+                    ("prompt".to_string(), objective.to_string()),
+                ]
+                .into_iter()
+                .collect::<Metadata>();
+                let mut events = vec![Event {
+                    id: EventId(format!("started-{run_id}")),
                     task_id: phase16_task_id(),
-                    sequence: sequence + 1,
-                    timestamp_ms: (sequence + 1) * 10,
+                    sequence,
+                    timestamp_ms: sequence * 10,
                     kind: EventKind::TaskStatusChanged,
-                    summary: "Agent task completed".to_string(),
-                    metadata,
-                });
-            }
-            events
-        };
+                    summary: "Agent task started".to_string(),
+                    metadata: metadata.clone(),
+                }];
+                if completed {
+                    events.push(Event {
+                        id: EventId(format!("completed-{run_id}")),
+                        task_id: phase16_task_id(),
+                        sequence: sequence + 1,
+                        timestamp_ms: (sequence + 1) * 10,
+                        kind: EventKind::TaskStatusChanged,
+                        summary: "Agent task completed".to_string(),
+                        metadata,
+                    });
+                }
+                events
+            };
         let mut events = Vec::new();
-        events.extend(run_events(1, "a", "project-a", "Audit the agent loop", true));
-        events.extend(run_events(3, "b", "project-a", "Improve retrieval fusion", true));
-        events.extend(run_events(5, "c", "project-a", "Verify queue steering", true));
-        events.extend(run_events(7, "other", "project-b", "Unrelated project", true));
-        events.extend(run_events(9, "incomplete", "project-a", "Incomplete run", false));
+        events.extend(run_events(
+            1,
+            "a",
+            "project-a",
+            "Audit the agent loop",
+            true,
+        ));
+        events.extend(run_events(
+            3,
+            "b",
+            "project-a",
+            "Improve retrieval fusion",
+            true,
+        ));
+        events.extend(run_events(
+            5,
+            "c",
+            "project-a",
+            "Verify queue steering",
+            true,
+        ));
+        events.extend(run_events(
+            7,
+            "other",
+            "project-b",
+            "Unrelated project",
+            true,
+        ));
+        events.extend(run_events(
+            9,
+            "incomplete",
+            "project-a",
+            "Incomplete run",
+            false,
+        ));
 
         let first = prompt_offline_dataset(&events, "project-a");
         let second = prompt_offline_dataset(&events, "project-a");
@@ -29140,11 +28956,13 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first.len(), 3);
         assert!(first.iter().all(|case| case.project_id == "project-a"));
-        assert!(first
-            .iter()
-            .filter(|case| case.split == PromptEvaluationSplit::Train)
-            .count()
-            >= 2);
+        assert!(
+            first
+                .iter()
+                .filter(|case| case.split == PromptEvaluationSplit::Train)
+                .count()
+                >= 2
+        );
         assert!(first
             .iter()
             .any(|case| case.split == PromptEvaluationSplit::Holdout));
@@ -29171,8 +28989,20 @@ mod tests {
             .into_iter()
             .collect(),
         });
-        events.extend(run_events(12, "d", "project-a", "Check recovery checkpoints", true));
-        events.extend(run_events(14, "e", "project-a", "Review quality gates", true));
+        events.extend(run_events(
+            12,
+            "d",
+            "project-a",
+            "Check recovery checkpoints",
+            true,
+        ));
+        events.extend(run_events(
+            14,
+            "e",
+            "project-a",
+            "Review quality gates",
+            true,
+        ));
 
         let grown = prompt_offline_dataset(&events, "project-a");
         for original in &first {
@@ -29267,10 +29097,8 @@ mod tests {
             feedback_b: feedback("reverse A", "reduce unsupported claims"),
         };
 
-        let aggregate = aggregate_prompt_pairwise_payloads(
-            forward,
-            reverse_prompt_pairwise_payload(reverse),
-        );
+        let aggregate =
+            aggregate_prompt_pairwise_payloads(forward, reverse_prompt_pairwise_payload(reverse));
 
         assert!((aggregate.score_a - 0.7).abs() < f64::EPSILON * 8.0);
         assert!((aggregate.score_b - 0.3).abs() < f64::EPSILON * 8.0);
@@ -29391,9 +29219,7 @@ mod tests {
             &[],
         );
 
-        assert!(
-            (observation.relative_reward.unwrap_or_default() - 0.3).abs() < f64::EPSILON * 4.0
-        );
+        assert!((observation.relative_reward.unwrap_or_default() - 0.3).abs() < f64::EPSILON * 4.0);
         assert_eq!(observation.step_credits.len(), 1);
         assert_eq!(observation.step_credits[0].step_id, "verify");
         assert_eq!(observation.step_credits[0].credit, 0.78);
@@ -29571,9 +29397,12 @@ mod tests {
                     }),
                     error: None,
                     latency_ms: if calls == 1 { 7 } else { 11 },
-                    usage: [("total_tokens".to_string(), if calls == 1 { "13" } else { "17" }.to_string())]
-                        .into_iter()
-                        .collect(),
+                    usage: [(
+                        "total_tokens".to_string(),
+                        if calls == 1 { "13" } else { "17" }.to_string(),
+                    )]
+                    .into_iter()
+                    .collect(),
                     evidence: Vec::new(),
                 }
             },
@@ -29931,10 +29760,9 @@ mod tests {
         let response = completion
             .content
             .unwrap_or_else(|| panic!("reflection model failed: {:?}", completion.error));
-        let mutation = match parent.learned_mutation_from_response(
-            &response,
-            "reflection-child-tools-enabled",
-        ) {
+        let mutation = match parent
+            .learned_mutation_from_response(&response, "reflection-child-tools-enabled")
+        {
             Ok(mutation) => mutation,
             Err(error) => {
                 let repair = complete_collaboration_model_with_control(
@@ -30026,8 +29854,8 @@ mod tests {
                 .collect(),
         };
         dataset.validate().expect("hidden dataset should validate");
-        let dataset_json = serde_json::to_string_pretty(&dataset)
-            .expect("hidden dataset should serialize");
+        let dataset_json =
+            serde_json::to_string_pretty(&dataset).expect("hidden dataset should serialize");
         let dataset_sha256 = sha256_hex(dataset_json.as_bytes());
         let jobs = Arc::new(Mutex::new(
             (0..cases.len())
@@ -30045,8 +29873,7 @@ mod tests {
         let baseline_fingerprint = sha256_hex(baseline_id.as_bytes());
         let candidate_profile = ConductorPromptGenome::seed_for_effort("auto");
         let candidate_fingerprint = sha256_hex(
-            &serde_json::to_vec(&candidate_profile)
-                .expect("candidate genome should serialize"),
+            &serde_json::to_vec(&candidate_profile).expect("candidate genome should serialize"),
         );
         let concurrency = std::env::var("CINDX_EVAL_CONCURRENCY")
             .ok()
@@ -30247,7 +30074,10 @@ mod tests {
         .expect("promotion report should persist");
         fs::remove_dir_all(workspace_root).expect("provider hidden workspace should be removed");
 
-        assert!(report.promotion_eligible, "provider hidden gate: {report:#?}");
+        assert!(
+            report.promotion_eligible,
+            "provider hidden gate: {report:#?}"
+        );
         assert_eq!(report.recommended_canary_percent, Some(10));
     }
 
@@ -30294,10 +30124,7 @@ mod tests {
         let captured = Arc::clone(&requests);
         let runner: PromptEvaluationRunner = Arc::new(move |request| {
             let should_fail = request.model == "worker-a";
-            captured
-                .lock()
-                .expect("request capture lock")
-                .push(request);
+            captured.lock().expect("request capture lock").push(request);
             CollaborationCompletion {
                 content: (!should_fail).then(|| "recovered output".to_string()),
                 error: should_fail.then(|| "worker-a failed".to_string()),
@@ -30326,10 +30153,15 @@ mod tests {
         assert_eq!(candidate.execution.steps[0].model, "worker-b");
         assert_eq!(candidate.execution.steps[0].errors, vec!["worker-a failed"]);
         let requests = requests.lock().expect("request capture lock");
-        assert_eq!(requests[0].tool_policy, WorkflowToolPolicy::ReadOnlyEvidence);
+        assert_eq!(
+            requests[0].tool_policy,
+            WorkflowToolPolicy::ReadOnlyEvidence
+        );
         assert_eq!(requests[0].max_model_turns, 2);
         assert_eq!(requests[0].max_tool_calls, 4);
-        assert!(requests[1].prompt.contains("Retry the same authorized evaluation node"));
+        assert!(requests[1]
+            .prompt
+            .contains("Retry the same authorized evaluation node"));
     }
 
     #[test]
@@ -30431,10 +30263,7 @@ mod tests {
                 ("session_id".to_string(), "session-a".to_string()),
             ]
             .into_iter()
-            .chain(
-                queue_action
-                    .map(|action| ("queue_action".to_string(), action.to_string())),
-            )
+            .chain(queue_action.map(|action| ("queue_action".to_string(), action.to_string())))
             .collect(),
         };
         let mut events = vec![
@@ -30447,7 +30276,10 @@ mod tests {
         let waiting = schedule_queue_progress(&events, queue_id).unwrap();
         assert_eq!(waiting.status, "waiting_for_permission");
         assert_eq!(waiting.started_at_ms, Some(200));
-        assert_eq!(latest_unfinished_agent_queue_id(&events).as_deref(), Some(queue_id));
+        assert_eq!(
+            latest_unfinished_agent_queue_id(&events).as_deref(),
+            Some(queue_id)
+        );
 
         events.push(event(5, "Agent task paused", None));
         let paused = schedule_queue_progress(&events, queue_id).unwrap();
@@ -30544,9 +30376,8 @@ mod tests {
         fs::write(root.join("notes.md"), "Cindx selective retrieval source")
             .expect("fixture should write");
         let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
-        let mut adapter =
-            FileRagAdapter::open(root.join(".cindx").join("rag-index.tsv"))
-                .expect("adapter should open");
+        let mut adapter = FileRagAdapter::open(root.join(".cindx").join("rag-index.tsv"))
+            .expect("adapter should open");
         adapter.replace_all(index).expect("index should persist");
         replace_lancedb_index(lancedb_database_path_for(&root), adapter.index())
             .expect("LanceDB index should persist");
@@ -30579,9 +30410,13 @@ mod tests {
     fn retrieval_keeps_file_evidence_when_semantic_channel_is_unavailable() {
         let root = temp_test_root("phase7-independent-channel-failure");
         fs::create_dir_all(&root).expect("temp root should exist");
-        fs::write(root.join("notes.md"), "independent lexical fallback evidence")
-            .expect("fixture should write");
-        let mut index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+        fs::write(
+            root.join("notes.md"),
+            "independent lexical fallback evidence",
+        )
+        .expect("fixture should write");
+        let mut index =
+            index_workspace(&root, IndexOptions::default()).expect("index should build");
         for chunk in &mut index.chunks {
             chunk.embedding_provider = "cloud".to_string();
             chunk.embedding_model = "cloud-embedding".to_string();
@@ -30708,12 +30543,7 @@ mod tests {
                 .iter()
                 .map(|channel| channel.name.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                "semantic_rag",
-                "graph_recall",
-                "graph_walk",
-                "file_search"
-            ]
+            vec!["semantic_rag", "graph_recall", "graph_walk", "file_search"]
         );
         assert!(retrieval
             .trace
@@ -30802,7 +30632,10 @@ mod tests {
 
         assert_eq!(state.observations.len(), 1);
         assert_eq!(state.observations[0].tool_name, "browser.extract_text");
-        assert_eq!(state.observations[0].url.as_deref(), Some("https://example.com"));
+        assert_eq!(
+            state.observations[0].url.as_deref(),
+            Some("https://example.com")
+        );
     }
 
     #[test]
@@ -30823,7 +30656,9 @@ mod tests {
             .permission_request(&invocation)
             .expect("browser capture should request permission");
         request.id = PermissionRequestId("perm-phase8".to_string());
-        request.metadata.insert("phase".to_string(), "8".to_string());
+        request
+            .metadata
+            .insert("phase".to_string(), "8".to_string());
         request
             .metadata
             .insert("tool_input".to_string(), invocation.input_json);
@@ -30871,7 +30706,9 @@ mod tests {
             .permission_request(&invocation)
             .expect("write should request permission");
         request.id = PermissionRequestId("perm-agent".to_string());
-        request.metadata.insert("phase".to_string(), "16".to_string());
+        request
+            .metadata
+            .insert("phase".to_string(), "16".to_string());
         request
             .metadata
             .insert("tool_input".to_string(), invocation.input_json);
@@ -30929,8 +30766,13 @@ mod tests {
                 .collect(),
         )
         .expect("start should append");
-        append_message_event(&mut store, &phase16_task_id(), MessageRole::User, "read README")
-            .expect("user message should append");
+        append_message_event(
+            &mut store,
+            &phase16_task_id(),
+            MessageRole::User,
+            "read README",
+        )
+        .expect("user message should append");
         append_message_event_with_metadata(
             &mut store,
             &phase16_task_id(),
@@ -30968,7 +30810,10 @@ mod tests {
         assert!(transcript[1].metadata.contains_key("raw_tool_calls_json"));
         assert!(matches!(transcript[2].role, MessageRole::Tool));
         assert_eq!(
-            transcript[2].metadata.get("tool_call_id").map(String::as_str),
+            transcript[2]
+                .metadata
+                .get("tool_call_id")
+                .map(String::as_str),
             Some("call-1")
         );
 
@@ -31108,7 +30953,10 @@ mod tests {
 
         assert_eq!(alpha_state.status, "completed");
         assert_eq!(alpha_state.messages.len(), 1);
-        assert_eq!(alpha_state.messages[0].content, "alpha finished after beta started");
+        assert_eq!(
+            alpha_state.messages[0].content,
+            "alpha finished after beta started"
+        );
         assert_eq!(beta_state.status, "completed");
         assert_eq!(beta_state.messages.len(), 1);
         assert_eq!(beta_state.messages[0].content, "beta answer");
@@ -31195,11 +31043,7 @@ mod tests {
         assert!(!interrupted.can_cancel);
         assert!(interrupted.last_error.is_none());
         let interrupted_events = store
-            .list_by_task_and_metadata_or_unscoped(
-                &phase16_task_id(),
-                "session_id",
-                "session-b",
-            )
+            .list_by_task_and_metadata_or_unscoped(&phase16_task_id(), "session_id", "session-b")
             .expect("interrupted events should load");
         let envelope = latest_agent_recovery_envelope(&interrupted_events)
             .expect("recovery envelope should persist");
@@ -31280,11 +31124,7 @@ mod tests {
         assert_eq!(state.pending_approvals.len(), 1);
         assert!(!state.can_continue);
         let events = store
-            .list_by_task_and_metadata_or_unscoped(
-                &phase16_task_id(),
-                "session_id",
-                "session-a",
-            )
+            .list_by_task_and_metadata_or_unscoped(&phase16_task_id(), "session_id", "session-a")
             .expect("events should load");
         let envelope = latest_agent_recovery_envelope(&events)
             .expect("blocked recovery envelope should persist");
@@ -31339,18 +31179,11 @@ mod tests {
                 ),
             },
         ];
-        let envelope = build_agent_recovery_envelope(
-            &events,
-            &context,
-            "paused",
-            "deadline_exceeded",
-            30,
-        )
-        .expect("envelope should build");
+        let envelope =
+            build_agent_recovery_envelope(&events, &context, "paused", "deadline_exceeded", 30)
+                .expect("envelope should build");
         assert!(recovery_envelope_matches_active_turn(
-            &envelope,
-            &events,
-            &context
+            &envelope, &events, &context
         ));
 
         events.push(Event {
@@ -31372,9 +31205,7 @@ mod tests {
             ),
         });
         assert!(recovery_envelope_matches_active_turn(
-            &envelope,
-            &events,
-            &context
+            &envelope, &events, &context
         ));
 
         events.push(Event {
@@ -31395,9 +31226,7 @@ mod tests {
             ),
         });
         assert!(!recovery_envelope_matches_active_turn(
-            &envelope,
-            &events,
-            &context
+            &envelope, &events, &context
         ));
     }
 
@@ -31434,11 +31263,7 @@ mod tests {
         )
         .expect("user message should append");
         let events = store
-            .list_by_task_and_metadata_or_unscoped(
-                &phase16_task_id(),
-                "session_id",
-                "session-a",
-            )
+            .list_by_task_and_metadata_or_unscoped(&phase16_task_id(), "session_id", "session-a")
             .expect("events should load");
         let recovery_metadata = agent_recovery_metadata(
             &events,
@@ -31459,22 +31284,14 @@ mod tests {
         )
         .expect("pause should persist");
 
-        let claimed = claim_agent_recovery_envelope(
-            &mut store,
-            &context,
-            &["paused"],
-            "user_continued",
-        )
-        .expect("claim should succeed")
-        .expect("checkpoint should exist");
+        let claimed =
+            claim_agent_recovery_envelope(&mut store, &context, &["paused"], "user_continued")
+                .expect("claim should succeed")
+                .expect("checkpoint should exist");
         assert_eq!(claimed.attempts, 1);
-        let duplicate = claim_agent_recovery_envelope(
-            &mut store,
-            &context,
-            &["paused"],
-            "user_continued",
-        )
-        .expect_err("a claimed recovery must not be claimed twice");
+        let duplicate =
+            claim_agent_recovery_envelope(&mut store, &context, &["paused"], "user_continued")
+                .expect_err("a claimed recovery must not be claimed twice");
         assert!(duplicate.contains("already claimed"));
 
         assert_eq!(
@@ -31486,14 +31303,10 @@ mod tests {
             .expect("recovered state should load");
         assert_eq!(state.status, "paused");
         let events = store
-            .list_by_task_and_metadata_or_unscoped(
-                &phase16_task_id(),
-                "session_id",
-                "session-a",
-            )
+            .list_by_task_and_metadata_or_unscoped(&phase16_task_id(), "session_id", "session-a")
             .expect("events should reload");
-        let recovered = latest_agent_recovery_envelope(&events)
-            .expect("recovered checkpoint should persist");
+        let recovered =
+            latest_agent_recovery_envelope(&events).expect("recovered checkpoint should persist");
         assert_eq!(recovered.state, "paused");
         assert_eq!(recovered.attempts, 1);
     }
@@ -31569,8 +31382,7 @@ mod tests {
             "agent-queue-client-abc-123"
         );
         assert!(!queued_agent_message_id(Some("queue-client-abc")).starts_with("queue-client-"));
-        assert!(!queued_agent_message_id(Some("agent-queue-client-bad/id"))
-            .contains("bad/id"));
+        assert!(!queued_agent_message_id(Some("agent-queue-client-bad/id")).contains("bad/id"));
     }
 
     #[test]
@@ -31813,16 +31625,8 @@ mod tests {
             Some(&payload),
         )
         .expect("message should queue");
-        append_agent_queue_event(
-            &mut store,
-            &context,
-            "start",
-            "queue-a",
-            "queue",
-            10,
-            None,
-        )
-        .expect("message should start");
+        append_agent_queue_event(&mut store, &context, "start", "queue-a", "queue", 10, None)
+            .expect("message should start");
         let events = store
             .list_by_task(&phase16_task_id())
             .expect("queue events should load");
@@ -31902,30 +31706,20 @@ mod tests {
         let (queued, can_cancel) =
             queued_agent_message_from_read_model(&mut store, session_id, "queue-a")
                 .expect("queue action lookup should use the read model");
-        let receipt = queued_agent_message_action_receipt(
-            &store,
-            session_id,
-            "queue-a",
-            queued,
-            can_cancel,
-        )
-        .expect("queue action receipt should use the compact revision");
+        let receipt =
+            queued_agent_message_action_receipt(&store, session_id, "queue-a", queued, can_cancel)
+                .expect("queue action receipt should use the compact revision");
         assert_eq!(
-            receipt.message.as_ref().map(|message| message.prompt.as_str()),
+            receipt
+                .message
+                .as_ref()
+                .map(|message| message.prompt.as_str()),
             Some("edited version")
         );
         assert!(!receipt.cancelled_active_run);
 
-        append_agent_queue_event(
-            &mut store,
-            &context,
-            "start",
-            "queue-a",
-            "queue",
-            10,
-            None,
-        )
-        .expect("message should start");
+        append_agent_queue_event(&mut store, &context, "start", "queue-a", "queue", 10, None)
+            .expect("message should start");
         let started = load_agent_session_read_model(&mut store, session_id)
             .expect("queue start should apply incrementally");
         assert!(started.state.queued_messages.is_empty());
@@ -32113,7 +31907,9 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        request.metadata.insert("phase".to_string(), "16".to_string());
+        request
+            .metadata
+            .insert("phase".to_string(), "16".to_string());
         store
             .save_permission_request(request, 1)
             .expect("old request should save");
@@ -32127,8 +31923,13 @@ mod tests {
                 .collect(),
         )
         .expect("start should append");
-        append_message_event(&mut store, &phase16_task_id(), MessageRole::User, "new task")
-            .expect("user message should append");
+        append_message_event(
+            &mut store,
+            &phase16_task_id(),
+            MessageRole::User,
+            "new task",
+        )
+        .expect("user message should append");
 
         let state = agent_state(&store, None).expect("state should load");
 
@@ -32181,8 +31982,13 @@ mod tests {
                 .collect(),
         )
         .expect("start should append");
-        append_message_event(&mut store, &phase16_task_id(), MessageRole::User, "read README")
-            .expect("user message should append");
+        append_message_event(
+            &mut store,
+            &phase16_task_id(),
+            MessageRole::User,
+            "read README",
+        )
+        .expect("user message should append");
         append_event(
             &mut store,
             &phase16_task_id(),
@@ -32225,18 +32031,17 @@ mod tests {
         )
         .expect("tool finish should append");
 
-        let trace = agent_trace_state_for_session(&store, None, None, None)
-            .expect("trace should build");
+        let trace =
+            agent_trace_state_for_session(&store, None, None, None).expect("trace should build");
 
         assert_eq!(trace.turn_count, 1);
         assert!(trace.step_count >= 5);
         assert!(trace.tool_call_count >= 1);
-        assert!(trace
-            .turns
-            .iter()
-            .any(|turn| turn.index == 1 && turn.steps.iter().any(|step| {
-                step.kind == "model" && step.latency_ms == Some(42)
-            })));
+        assert!(trace.turns.iter().any(|turn| turn.index == 1
+            && turn
+                .steps
+                .iter()
+                .any(|step| { step.kind == "model" && step.latency_ms == Some(42) })));
         assert!(trace
             .turns
             .iter()
@@ -32253,7 +32058,10 @@ mod tests {
             ("session_id".to_string(), "session-role-trace".to_string()),
             ("project_id".to_string(), "project-role-trace".to_string()),
             ("agent_run_id".to_string(), "run-role-trace".to_string()),
-            ("collaboration_id".to_string(), "collab-role-trace".to_string()),
+            (
+                "collaboration_id".to_string(),
+                "collab-role-trace".to_string(),
+            ),
         ]
         .into_iter()
         .collect::<Metadata>();
@@ -32324,13 +32132,8 @@ mod tests {
         )
         .expect("completion should append");
 
-        let trace = agent_trace_state_for_session(
-            &store,
-            None,
-            None,
-            Some("session-role-trace"),
-        )
-        .expect("trace should build");
+        let trace = agent_trace_state_for_session(&store, None, None, Some("session-role-trace"))
+            .expect("trace should build");
 
         assert_eq!(trace.role_summaries.len(), 2);
         assert_eq!(trace.role_summaries[0].role, "planner");
@@ -32362,7 +32165,10 @@ mod tests {
                 "file written",
                 [
                     ("path".to_string(), "notes/result.md".to_string()),
-                    ("source_path".to_string(), "/workspace/notes/result.md".to_string()),
+                    (
+                        "source_path".to_string(),
+                        "/workspace/notes/result.md".to_string(),
+                    ),
                     (
                         "artifact_path".to_string(),
                         format!("/workspace/.cindx/output-history/{run_id}/result.md"),
@@ -32394,12 +32200,8 @@ mod tests {
         )
         .expect("read-only tool output should append");
 
-        let events = agent_events_for_session(
-            &store,
-            &phase16_task_id(),
-            Some("session-alpha"),
-        )
-        .expect("session events should load");
+        let events = agent_events_for_session(&store, &phase16_task_id(), Some("session-alpha"))
+            .expect("session events should load");
         let outputs = agent_output_artifacts_from_events(&events);
         let manifest = artifact_manifest_message(&events).expect("manifest should exist");
 
@@ -32411,11 +32213,15 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from([1, 2])
         );
-        assert!(outputs.iter().all(|output| {
-            output.source_path.as_deref() == Some("/workspace/notes/result.md")
-        }));
-        assert!(outputs.iter().any(|output| output.run_id.as_deref() == Some("run-one")));
-        assert!(outputs.iter().any(|output| output.run_id.as_deref() == Some("run-two")));
+        assert!(outputs
+            .iter()
+            .all(|output| { output.source_path.as_deref() == Some("/workspace/notes/result.md") }));
+        assert!(outputs
+            .iter()
+            .any(|output| output.run_id.as_deref() == Some("run-one")));
+        assert!(outputs
+            .iter()
+            .any(|output| output.run_id.as_deref() == Some("run-two")));
         assert_eq!(
             manifest.metadata.get("kind").map(String::as_str),
             Some("artifact_manifest")
@@ -32533,7 +32339,11 @@ mod tests {
             archived_at_ms: None,
         });
 
-        assert!(update_session_effort(&mut config, &initial_session_id, "pro"));
+        assert!(update_session_effort(
+            &mut config,
+            &initial_session_id,
+            "pro"
+        ));
         assert_eq!(config.sessions[0].effort, "pro");
         assert_eq!(config.sessions[1].effort, "auto");
         assert!(!update_session_effort(&mut config, "missing", "high"));
@@ -32666,8 +32476,12 @@ mod tests {
         for greeting in ["你好", "您好！", "hello", "Hi there"] {
             assert!(!is_meaningful_session_title_prompt(greeting));
         }
-        assert!(is_meaningful_session_title_prompt("你好，帮我审查 Rust agent loop"));
-        assert!(is_meaningful_session_title_prompt("Hello World app architecture"));
+        assert!(is_meaningful_session_title_prompt(
+            "你好，帮我审查 Rust agent loop"
+        ));
+        assert!(is_meaningful_session_title_prompt(
+            "Hello World app architecture"
+        ));
     }
 
     #[test]
@@ -32796,8 +32610,8 @@ mod tests {
             .expect("user message should append");
 
         let state = agent_state(&store, None).expect("state should load");
-        let trace = agent_trace_state_for_session(&store, None, None, None)
-            .expect("trace should build");
+        let trace =
+            agent_trace_state_for_session(&store, None, None, None).expect("trace should build");
 
         assert_eq!(state.project_id.as_deref(), Some("project-alpha"));
         assert_eq!(state.session_name.as_deref(), Some("Alpha Session"));
