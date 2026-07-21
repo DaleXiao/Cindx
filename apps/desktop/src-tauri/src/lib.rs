@@ -34,8 +34,8 @@ use agent_runtime::{
     model_request_for_turn_with_context_budget, observation_from_tool_result,
     record_tool_outcome, record_tool_outcome_with_risk, repeated_tool_failure_count,
     resume_agent_loop_from_messages, start_agent_loop, start_agent_loop_with_history,
-    tool_invocation_from_request, AgentAdvance, AgentRunControl, AgentRuntimeConfig,
-    RunBudget, RunControlSnapshot, RunStopReason,
+    sanitize_assistant_content, tool_invocation_from_request, AgentAdvance, AgentRunControl,
+    AgentRuntimeConfig, RunBudget, RunControlSnapshot, RunStopReason,
     DEFAULT_COLLABORATION_WORKER_TURNS, MAX_COLLABORATION_WORKER_TOOL_CALLS,
     MAX_IDENTICAL_TOOL_FAILURES,
 };
@@ -14056,6 +14056,21 @@ fn continue_agent_loop(
             }
         };
         cancellation.finish_model_call();
+        let raw_response_content = response.message.content.clone();
+        response.message.content = sanitize_assistant_content(&raw_response_content);
+        let reasoning_markup_removed = response.message.content != raw_response_content.trim();
+        if visible_stream && streamed_output && reasoning_markup_removed {
+            emit_agent_stream_delta(
+                app,
+                &request_id,
+                session_id,
+                "",
+                false,
+                true,
+                None,
+            );
+            streamed_output = false;
+        }
         if !response.message.content.trim().is_empty() {
             cancellation.record_partial_output(&response.message.content);
         }
@@ -17318,8 +17333,18 @@ fn append_message_event_with_metadata(
     content: &str,
     mut metadata: Metadata,
 ) -> Result<(), StorageError> {
+    let content = if role == MessageRole::Assistant {
+        sanitize_assistant_content(content)
+    } else {
+        content.to_string()
+    };
+    if role == MessageRole::Assistant {
+        if let Some(display_content) = metadata.get_mut("display_content") {
+            *display_content = sanitize_assistant_content(display_content);
+        }
+    }
     metadata.insert("role".to_string(), message_role_label(&role).to_string());
-    metadata.insert("content".to_string(), content.to_string());
+    metadata.insert("content".to_string(), content.clone());
     metadata.insert("content_length".to_string(), content.len().to_string());
 
     append_event(
@@ -17765,15 +17790,21 @@ fn message_view_from_event(event: &Event) -> Option<ChatMessageView> {
         return None;
     }
 
+    let role = event.metadata.get("role")?.to_string();
+    let mut content = redact_sensitive_text(
+        event
+            .metadata
+            .get("display_content")
+            .or_else(|| event.metadata.get("content"))?,
+    );
+    if role == "assistant" {
+        content = sanitize_assistant_content(&content);
+    }
+
     Some(ChatMessageView {
         sequence: event.sequence,
-        role: event.metadata.get("role")?.to_string(),
-        content: redact_sensitive_text(
-            event
-                .metadata
-                .get("display_content")
-                .or_else(|| event.metadata.get("content"))?,
-        ),
+        role,
+        content,
         timestamp_ms: event.timestamp_ms,
         run_id: event.metadata.get("agent_run_id").cloned(),
         attachments: attachment_views_from_event(event),
@@ -17865,10 +17896,24 @@ fn message_from_event(event: &Event) -> Option<Message> {
         return None;
     }
 
+    let role = message_role_from_label(event.metadata.get("role")?)?;
+    let mut content = redact_sensitive_text(event.metadata.get("content")?);
+    if role == MessageRole::Assistant {
+        content = sanitize_assistant_content(&content);
+    }
+
+    let mut metadata = redact_metadata(&event.metadata);
+    if role == MessageRole::Assistant {
+        metadata.insert("content".to_string(), content.clone());
+        if metadata.contains_key("display_content") {
+            metadata.insert("display_content".to_string(), content.clone());
+        }
+    }
+
     Some(Message {
-        role: message_role_from_label(event.metadata.get("role")?)?,
-        content: redact_sensitive_text(event.metadata.get("content")?),
-        metadata: redact_metadata(&event.metadata),
+        role,
+        content,
+        metadata,
     })
 }
 
@@ -26250,6 +26295,31 @@ mod tests {
         assert_eq!(message.attachments[0].path, attachment.path);
         assert_eq!(message.attachments[0].mime_type, attachment.mime_type);
         assert_eq!(message.attachments[0].size_bytes, attachment.size_bytes);
+    }
+
+    #[test]
+    fn assistant_reasoning_control_only_message_is_sanitized_for_chat() {
+        let event = Event {
+            id: EventId("assistant-reasoning-control".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 10,
+            timestamp_ms: 100,
+            kind: EventKind::MessageAdded,
+            summary: "assistant message".to_string(),
+            metadata: [
+                ("role".to_string(), "assistant".to_string()),
+                ("content".to_string(), "</think>".to_string()),
+                ("raw_tool_calls_json".to_string(), "[]".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let chat_message = message_view_from_event(&event).expect("message should project");
+        assert_eq!(chat_message.content, "");
+        let transcript_message = message_from_event(&event).expect("tool turn should remain");
+        assert_eq!(transcript_message.content, "");
+        assert!(transcript_message.metadata.contains_key("raw_tool_calls_json"));
     }
 
     #[test]

@@ -191,7 +191,9 @@ fn apply_event_to_agent_session_read_model(model: &mut AgentSessionReadModel, ev
             }
             match message.role {
                 MessageRole::User => model.has_user_prompt = true,
-                MessageRole::Assistant => model.state.latest_answer = Some(message.content),
+                MessageRole::Assistant if !message.content.is_empty() => {
+                    model.state.latest_answer = Some(message.content)
+                }
                 _ => {}
             }
         }
@@ -370,6 +372,11 @@ pub(crate) fn agent_state_from_read_model(
         model.state.run_started_at_ms,
     )?;
     let mut state = model.state.clone();
+    state.latest_answer = state
+        .latest_answer
+        .as_deref()
+        .map(sanitize_assistant_content)
+        .filter(|answer| !answer.is_empty());
     state.project_id = current_context
         .get("project_id")
         .cloned()
