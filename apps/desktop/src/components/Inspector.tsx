@@ -65,6 +65,7 @@ type InspectorProps = {
   width: number;
   tab: InspectorTab;
   sessionId: string | null;
+  outputRequest: { sessionId: string; path: string; nonce: number } | null;
   threadSelection: SessionThreadSelection | null;
   traceStep: AgentTraceStepView | null;
   traceExportPath: string | null;
@@ -87,7 +88,6 @@ type InspectorProps = {
   onWidthChange: (width: number) => void;
   onResizeStart: () => void;
   onResizeEnd: () => void;
-  onOutputCreated: () => void;
   onReview: () => void;
 };
 
@@ -119,6 +119,10 @@ const MARKDOWN_EXTENSIONS = new Set(["md", "mdown", "markdown"]);
 const HTML_EXTENSIONS = new Set(["htm", "html"]);
 const OUTPUT_HISTORY_SESSION_LIMIT = 12;
 const DEBUG_CLOSE_ANIMATION_MS = 230;
+
+function artifactKind(path: string): AgentOutputArtifactView["kind"] {
+  return IMAGE_EXTENSIONS.has(artifactExtension(path)) ? "image" : "file";
+}
 
 function rememberOutputHistory(
   current: Record<string, OutputArtifact[]>,
@@ -201,7 +205,8 @@ function traceOutputArtifacts(
         status: step.status,
         timestampMs: step.finishedAtMs ?? step.startedAtMs,
         runId: step.metadata.agent_run_id ?? null,
-        version: 0
+        version: 0,
+        kind: artifactKind(path)
       })
     );
   });
@@ -342,6 +347,7 @@ export function Inspector({
   width,
   tab,
   sessionId,
+  outputRequest,
   threadSelection,
   traceStep,
   traceExportPath,
@@ -364,7 +370,6 @@ export function Inspector({
   onWidthChange,
   onResizeStart,
   onResizeEnd,
-  onOutputCreated,
   onReview
 }: InspectorProps) {
   const [debugOpen, setDebugOpen] = useState(false);
@@ -388,7 +393,6 @@ export function Inspector({
   const debugUnmountTimerRef = useRef<number | null>(null);
   const debugOpenFrameRef = useRef<number | null>(null);
   const debugDesiredOpenRef = useRef(false);
-  const outputSignaturesBySessionRef = useRef<Map<string, Set<string>>>(new Map());
   const reviewTotal = reviewCounts.agent + reviewCounts.tool + reviewCounts.browser;
   const hasArtifacts = Boolean(ragAnswer || ragSources.length || browserObservations.length || toolResults.length);
   const hasContext = Boolean(
@@ -447,29 +451,6 @@ export function Inspector({
       return rememberOutputHistory(current, sessionId, merged);
     });
   }, [currentRunOutputs, sessionId]);
-
-  useEffect(() => {
-    if (!sessionId) return;
-    const signatures = new Set(
-      currentRunOutputs.map((artifact) => `${artifact.path}:${artifact.timestampMs}`)
-    );
-    const previous = outputSignaturesBySessionRef.current.get(sessionId);
-    if (!previous) {
-      outputSignaturesBySessionRef.current.set(sessionId, signatures);
-      while (outputSignaturesBySessionRef.current.size > OUTPUT_HISTORY_SESSION_LIMIT) {
-        const oldestSessionId = outputSignaturesBySessionRef.current.keys().next().value;
-        if (!oldestSessionId) break;
-        outputSignaturesBySessionRef.current.delete(oldestSessionId);
-      }
-      return;
-    }
-    const accumulated = new Set([...previous, ...signatures]);
-    outputSignaturesBySessionRef.current.delete(sessionId);
-    outputSignaturesBySessionRef.current.set(sessionId, accumulated);
-    if ([...signatures].some((signature) => !previous.has(signature))) {
-      onOutputCreated();
-    }
-  }, [currentRunOutputs, onOutputCreated, sessionId]);
 
   useEffect(() => {
     if (showDebug) return;
@@ -584,6 +565,17 @@ export function Inspector({
 
   const selectedOutput =
     outputArtifacts.find((artifact) => artifact.path === selectedOutputPath) ?? null;
+
+  useEffect(() => {
+    if (!open || !sessionId || outputRequest?.sessionId !== sessionId) return;
+    const requestedPath = absoluteArtifactPath(workspaceRoot, outputRequest.path);
+    const requestedArtifact = outputArtifacts.find(
+      (artifact) => artifact.path === requestedPath
+    );
+    if (!requestedArtifact) return;
+    setOutputsOpen(true);
+    selectOutput(requestedArtifact.path);
+  }, [open, outputArtifacts, outputRequest, sessionId, workspaceRoot]);
 
   function selectOutput(path: string) {
     setSelectedOutputPath(path);

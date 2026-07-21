@@ -138,6 +138,8 @@ pub struct FileGraphStore {
     path: PathBuf,
     nodes: BTreeMap<String, GraphNode>,
     edges: BTreeMap<String, GraphEdge>,
+    adjacency: BTreeMap<String, BTreeSet<String>>,
+    label_index: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl FileGraphStore {
@@ -147,6 +149,8 @@ impl FileGraphStore {
             path: path.clone(),
             nodes: BTreeMap::new(),
             edges: BTreeMap::new(),
+            adjacency: BTreeMap::new(),
+            label_index: BTreeMap::new(),
         };
         if path.exists() {
             store.load()?;
@@ -161,6 +165,7 @@ impl FileGraphStore {
         for extraction in extractions {
             self.merge(extraction);
         }
+        self.rebuild_indexes();
         self.save()
     }
 
@@ -181,17 +186,7 @@ impl FileGraphStore {
                 .map_err(|error| GraphError::new(format!("failed to read graph row: {error}")))?;
             let parts = line.split('\t').collect::<Vec<_>>();
             match parts.as_slice() {
-                [
-                    "node",
-                    id,
-                    kind,
-                    label,
-                    source_path,
-                    start_line,
-                    end_line,
-                    extractor,
-                    observed_at_ms,
-                ] => {
+                ["node", id, kind, label, source_path, start_line, end_line, extractor, observed_at_ms] => {
                     if let Some(kind) = GraphNodeKind::parse(kind) {
                         self.nodes.insert(
                             (*id).to_string(),
@@ -210,18 +205,7 @@ impl FileGraphStore {
                         );
                     }
                 }
-                [
-                    "edge",
-                    id,
-                    from,
-                    to,
-                    kind,
-                    source_path,
-                    start_line,
-                    end_line,
-                    extractor,
-                    observed_at_ms,
-                ] => {
+                ["edge", id, from, to, kind, source_path, start_line, end_line, extractor, observed_at_ms] => {
                     if let Some(kind) = GraphEdgeKind::parse(kind) {
                         self.edges.insert(
                             (*id).to_string(),
@@ -244,13 +228,43 @@ impl FileGraphStore {
                 _ => {}
             }
         }
+        self.rebuild_indexes();
         Ok(())
+    }
+
+    fn rebuild_indexes(&mut self) {
+        self.adjacency.clear();
+        self.label_index.clear();
+        for node in self.nodes.values() {
+            let normalized = node.label.to_ascii_lowercase();
+            self.label_index
+                .entry(normalized)
+                .or_default()
+                .insert(node.id.clone());
+            for token in graph_tokens(&node.label) {
+                self.label_index
+                    .entry(token.to_ascii_lowercase())
+                    .or_default()
+                    .insert(node.id.clone());
+            }
+        }
+        for edge in self.edges.values() {
+            self.adjacency
+                .entry(edge.from.clone())
+                .or_default()
+                .insert(edge.to.clone());
+            self.adjacency
+                .entry(edge.to.clone())
+                .or_default()
+                .insert(edge.from.clone());
+        }
     }
 
     fn save(&self) -> Result<(), GraphError> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| GraphError::new(format!("failed to create graph directory: {error}")))?;
+            fs::create_dir_all(parent).map_err(|error| {
+                GraphError::new(format!("failed to create graph directory: {error}"))
+            })?;
         }
         let mut rows = Vec::new();
         for node in self.nodes.values() {
@@ -288,6 +302,7 @@ impl FileGraphStore {
 impl GraphStore for FileGraphStore {
     fn upsert(&mut self, extraction: GraphExtraction) -> Result<(), GraphError> {
         self.merge(extraction);
+        self.rebuild_indexes();
         self.save()
     }
 
@@ -300,23 +315,23 @@ impl GraphStore for FileGraphStore {
     }
 
     fn neighbors(&self, node_id: &str, limit: usize) -> Vec<GraphNode> {
-        let mut ids = BTreeSet::new();
-        for edge in self.edges.values() {
-            if edge.from == node_id {
-                ids.insert(edge.to.clone());
-            }
-            if edge.to == node_id {
-                ids.insert(edge.from.clone());
-            }
-        }
-        ids.into_iter()
-            .filter_map(|id| self.nodes.get(&id).cloned())
+        self.adjacency
+            .get(node_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.nodes.get(id).cloned())
             .take(limit.max(1))
             .collect()
     }
 
     fn nodes_by_label(&self, label: &str) -> Vec<GraphNode> {
         let normalized = label.to_ascii_lowercase();
+        if let Some(ids) = self.label_index.get(&normalized) {
+            return ids
+                .iter()
+                .filter_map(|id| self.nodes.get(id).cloned())
+                .collect();
+        }
         self.nodes
             .values()
             .filter(|node| node.label.to_ascii_lowercase().contains(&normalized))
@@ -348,7 +363,12 @@ pub fn extract_graph_from_chunk(chunk: &RagChunk) -> GraphExtraction {
                 GraphNodeKind::Claim | GraphNodeKind::Task => GraphEdgeKind::RelatedTo,
             };
             nodes.push(target.clone());
-            edges.push(edge(&file_node.id, &target.id, edge_kind, provenance.clone()));
+            edges.push(edge(
+                &file_node.id,
+                &target.id,
+                edge_kind,
+                provenance.clone(),
+            ));
         }
     }
 
@@ -423,16 +443,24 @@ pub fn graph_walk_recall(
     store: &dyn GraphStore,
     limit: usize,
 ) -> Vec<GraphRagSource> {
-    let mut paths = BTreeSet::new();
+    let mut path_scores = BTreeMap::<String, f32>::new();
     for seed in seed_results {
         let file_id = node_id(GraphNodeKind::File, &seed.chunk.path);
         for neighbor in store.neighbors(&file_id, 24) {
             if neighbor.kind == GraphNodeKind::File {
-                paths.insert(neighbor.label);
+                path_scores
+                    .entry(neighbor.label)
+                    .and_modify(|score| *score = score.max(0.55 + seed.score.max(0.0) * 0.2))
+                    .or_insert(0.55 + seed.score.max(0.0) * 0.2);
             } else {
                 for related in store.neighbors(&neighbor.id, 24) {
                     if related.kind == GraphNodeKind::File {
-                        paths.insert(related.label);
+                        path_scores
+                            .entry(related.label)
+                            .and_modify(|score| {
+                                *score = score.max(0.4 + seed.score.max(0.0) * 0.15)
+                            })
+                            .or_insert(0.4 + seed.score.max(0.0) * 0.15);
                     }
                 }
             }
@@ -442,7 +470,7 @@ pub fn graph_walk_recall(
         .iter()
         .map(|result| result.chunk.id.as_str())
         .collect::<BTreeSet<_>>();
-    graph_sources_for_paths(paths, chunks, "graph_walk", 0.5, limit)
+    graph_sources_for_scored_paths(path_scores, chunks, "graph_walk", limit)
         .into_iter()
         .filter(|source| !seed_ids.contains(source.chunk.id.as_str()))
         .collect()
@@ -469,11 +497,12 @@ pub fn graph_rag_walk(
     let mut neighbors = direct.clone();
     neighbors.extend(walked.clone());
     neighbors.sort_by(|left, right| {
-        left
-            .chunk
-            .id
-            .cmp(&right.chunk.id)
-            .then_with(|| right.score.partial_cmp(&left.score).unwrap_or(std::cmp::Ordering::Equal))
+        left.chunk.id.cmp(&right.chunk.id).then_with(|| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     });
     neighbors.dedup_by(|left, right| left.chunk.id == right.chunk.id);
 
@@ -504,20 +533,39 @@ fn graph_sources_for_paths(
     score: f32,
     limit: usize,
 ) -> Vec<GraphRagSource> {
+    graph_sources_for_scored_paths(
+        paths
+            .into_iter()
+            .map(|path| (path, score))
+            .collect::<BTreeMap<_, _>>(),
+        chunks,
+        reason,
+        limit,
+    )
+}
+
+fn graph_sources_for_scored_paths(
+    path_scores: BTreeMap<String, f32>,
+    chunks: &[RagChunk],
+    reason: &str,
+    limit: usize,
+) -> Vec<GraphRagSource> {
     let mut sources = chunks
         .iter()
-        .filter(|chunk| paths.contains(&chunk.path))
-        .map(|chunk| GraphRagSource {
-            chunk: chunk.clone(),
-            score,
-            reason: reason.to_string(),
+        .filter_map(|chunk| {
+            path_scores.get(&chunk.path).map(|score| GraphRagSource {
+                chunk: chunk.clone(),
+                score: *score,
+                reason: reason.to_string(),
+            })
         })
         .collect::<Vec<_>>();
     sources.sort_by(|left, right| {
-        left
-            .chunk
-            .path
-            .cmp(&right.chunk.path)
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.chunk.path.cmp(&right.chunk.path))
             .then_with(|| left.chunk.start_line.cmp(&right.chunk.start_line))
     });
     sources.truncate(limit.max(1));
@@ -548,13 +596,21 @@ fn node_id(kind: GraphNodeKind, label: &str) -> String {
 }
 
 fn classify_token(token: &str) -> Option<GraphNodeKind> {
-    if token.contains('/') || token.ends_with(".rs") || token.ends_with(".ts") || token.ends_with(".tsx") || token.ends_with(".md") {
+    if token.contains('/')
+        || token.ends_with(".rs")
+        || token.ends_with(".ts")
+        || token.ends_with(".tsx")
+        || token.ends_with(".md")
+    {
         return Some(GraphNodeKind::File);
     }
     if token.contains('.') && !token.starts_with('.') {
         return Some(GraphNodeKind::Tool);
     }
-    if matches!(token, "decision" | "decide" | "decided" | "approved" | "denied" | "policy") {
+    if matches!(
+        token,
+        "decision" | "decide" | "decided" | "approved" | "denied" | "policy"
+    ) {
         return Some(GraphNodeKind::Decision);
     }
     if token.chars().next().is_some_and(char::is_uppercase) || token.contains("::") {
@@ -638,10 +694,22 @@ mod tests {
             "Use file.read with AgentRuntime and approved policy docs/b.md",
         ));
 
-        assert!(extraction.nodes.iter().any(|node| node.kind == GraphNodeKind::File && node.label == "docs/a.md"));
-        assert!(extraction.nodes.iter().any(|node| node.kind == GraphNodeKind::Tool && node.label == "file.read"));
-        assert!(extraction.nodes.iter().any(|node| node.kind == GraphNodeKind::Symbol && node.label == "AgentRuntime"));
-        assert!(extraction.nodes.iter().any(|node| node.kind == GraphNodeKind::Decision && node.label == "approved"));
+        assert!(extraction
+            .nodes
+            .iter()
+            .any(|node| node.kind == GraphNodeKind::File && node.label == "docs/a.md"));
+        assert!(extraction
+            .nodes
+            .iter()
+            .any(|node| node.kind == GraphNodeKind::Tool && node.label == "file.read"));
+        assert!(extraction
+            .nodes
+            .iter()
+            .any(|node| node.kind == GraphNodeKind::Symbol && node.label == "AgentRuntime"));
+        assert!(extraction
+            .nodes
+            .iter()
+            .any(|node| node.kind == GraphNodeKind::Decision && node.label == "approved"));
         assert!(!extraction.edges.is_empty());
     }
 
@@ -657,7 +725,9 @@ mod tests {
         let neighbors = loaded.neighbors(&node_id(GraphNodeKind::File, "docs/a.md"), 10);
 
         assert!(!loaded.nodes().is_empty());
-        assert!(neighbors.iter().any(|node| node.label == "file.read" || node.label == "docs/b.md"));
+        assert!(neighbors
+            .iter()
+            .any(|node| node.label == "file.read" || node.label == "docs/b.md"));
     }
 
     #[test]
@@ -693,7 +763,8 @@ mod tests {
     fn graph_rag_walk_adds_neighbor_sources() {
         let seed = chunk("docs/a.md", "Use file.read");
         let neighbor = chunk("docs/b.md", "file.read details");
-        let path = std::env::temp_dir().join(format!("agent-graph-walk-{}.tsv", current_time_millis()));
+        let path =
+            std::env::temp_dir().join(format!("agent-graph-walk-{}.tsv", current_time_millis()));
         let mut store = FileGraphStore::open(&path).expect("store should open");
         store
             .upsert(extract_graph_from_chunk(&seed))
@@ -716,7 +787,55 @@ mod tests {
         assert_eq!(trace.seeds.len(), 1);
         assert!(!trace.direct.is_empty());
         assert!(!trace.walked.is_empty());
-        assert!(trace.neighbors.iter().any(|source| source.chunk.path == "docs/b.md"));
-        assert!(trace.walked.iter().any(|source| source.reason == "graph_walk"));
+        assert!(trace
+            .neighbors
+            .iter()
+            .any(|source| source.chunk.path == "docs/b.md"));
+        assert!(trace
+            .walked
+            .iter()
+            .any(|source| source.reason == "graph_walk"));
+    }
+
+    #[test]
+    fn graph_walk_scores_nearer_neighbors_above_two_hop_neighbors() {
+        let seed = chunk("docs/a.md", "docs/b.md SharedSymbol");
+        let direct = chunk("docs/b.md", "direct neighbor");
+        let two_hop = chunk("docs/c.md", "SharedSymbol details");
+        let path = std::env::temp_dir().join(format!(
+            "agent-graph-ranked-walk-{}-{}.tsv",
+            std::process::id(),
+            current_time_millis()
+        ));
+        let mut store = FileGraphStore::open(&path).expect("store should open");
+        store
+            .upsert_all([
+                extract_graph_from_chunk(&seed),
+                extract_graph_from_chunk(&direct),
+                extract_graph_from_chunk(&two_hop),
+            ])
+            .expect("graph should save");
+
+        let walked = graph_walk_recall(
+            &[RagSearchResult {
+                chunk: seed.clone(),
+                score: 0.9,
+            }],
+            &[seed, direct, two_hop],
+            &store,
+            8,
+        );
+
+        let direct_score = walked
+            .iter()
+            .find(|source| source.chunk.path == "docs/b.md")
+            .map(|source| source.score)
+            .expect("direct neighbor should be recalled");
+        let two_hop_score = walked
+            .iter()
+            .find(|source| source.chunk.path == "docs/c.md")
+            .map(|source| source.score)
+            .expect("two-hop neighbor should be recalled");
+        assert!(direct_score > two_hop_score);
     }
 }

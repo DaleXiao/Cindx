@@ -69,6 +69,7 @@ import {
   AgentTraceStepView,
   ChatMessageView,
   answerWithRag,
+  acknowledgeSessionActivity,
   archiveSession,
   cancelAgentTask,
   compactContext,
@@ -95,7 +96,6 @@ import {
   getRuntimeStatus,
   getSidecarState,
   getWebSearchConfig,
-  generateSessionTitle,
   editQueuedAgentMessage,
   getMcpState,
   getPersonalizationConfig,
@@ -157,6 +157,7 @@ import {
   selectSession,
   setSessionEffort,
   steerQueuedAgentMessage,
+  subscribeToSessionTitleUpdates,
   SidecarState,
   WebSearchConfigState,
   stageAgentAttachments,
@@ -346,6 +347,7 @@ function promptEvolutionEffortStatus(
 ) {
   if (effort.evaluationInflight) return "Evaluating";
   if (effort.rolloutStatus === "canary") return `Canary ${effort.canaryPercent}%`;
+  if (effort.rolloutStatus === "evaluating") return "Gathering evidence";
   if (effort.rolloutStatus === "rolled_back") return "Rolled back";
   if (effort.rolloutStatus === "promoted") return "Promoted";
   if (effort.status === "disabled") return "Off";
@@ -367,33 +369,6 @@ function permissionReviewSourceLabel(source: PermissionReviewItem["source"]) {
   if (source === "browser") return "Browser";
   if (source === "tool") return "Local tool";
   return "System test";
-}
-
-function isAutoSessionName(name: string) {
-  return ["runtime session", "new session", "untitled session", "session"].includes(
-    name.trim().toLowerCase()
-  );
-}
-
-function sessionTitleFromPrompt(prompt: string) {
-  const compact = prompt.replace(/\s+/g, " ").trim();
-  return [...compact].slice(0, 36).join("").trimEnd() || "New Session";
-}
-
-function sessionTitleFromFirstRound(prompt: string, answer: string) {
-  const lines = answer
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const candidate = lines.find((line) => /^#{1,6}\s+/.test(line)) ?? lines[0] ?? "";
-  const compact = candidate
-    .replace(/^#{1,6}\s+/, "")
-    .replace(/^(?:title|session title|标题|会话标题)\s*[:：]\s*/i, "")
-    .replace(/^[`*_'“”‘’\"\s]+|[`*_'“”‘’\"\s]+$/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  const title = [...compact].slice(0, 28).join("").replace(/[.,;:!?。，；：！？]+$/g, "").trim();
-  return title || sessionTitleFromPrompt(prompt);
 }
 
 function fileDataBase64(file: File) {
@@ -674,6 +649,11 @@ export function App() {
   const [appearanceMode, setAppearanceMode] = useState<AppearanceMode>(loadAppearanceMode);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("details");
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorOutputRequest, setInspectorOutputRequest] = useState<{
+    sessionId: string;
+    path: string;
+    nonce: number;
+  } | null>(null);
   const [inspectorOpenBeforeSettings, setInspectorOpenBeforeSettings] = useState(false);
   const [inspectorOpenBeforeSchedule, setInspectorOpenBeforeSchedule] = useState(false);
   const [inspectorWidth, setInspectorWidth] = useState(320);
@@ -763,7 +743,6 @@ export function App() {
   const [persistingQueuedMessageIds, setPersistingQueuedMessageIds] = useState<Set<string>>(
     () => new Set()
   );
-  const [sessionStatusOverrides, setSessionStatusOverrides] = useState<Record<string, string>>({});
   const activeSessionIdRef = useRef<string | null>(null);
   const agentStateRevisionsRef = useRef<
     Map<string, { eventCount: number; latestSequence: number; latestTimestampMs: number }>
@@ -784,7 +763,7 @@ export function App() {
     }>;
   } | null>(null);
   const sessionRefreshRequestRef = useRef(0);
-  const trackedSessionTaskIdsRef = useRef<Set<string>>(new Set());
+  const sessionLifecycleRefreshRef = useRef(0);
   const optimisticUserMessagesRef = useRef<Map<string, ChatMessageView>>(new Map());
   const [optimisticUserMessageRevision, setOptimisticUserMessageRevision] = useState(0);
   const optimisticQueuedMessagesRef = useRef<Map<string, QueuedAgentMessage>>(new Map());
@@ -841,14 +820,12 @@ export function App() {
         }
         setSessionLoadingId(null);
         acknowledgeOptimisticUserMessage(sessionId, nextAgentState.messages);
-        startTransition(() => {
-          setAgentState((current) => {
-            const merged = preserveOptimisticQueuedMessages(
-              sessionId,
-              mergeAgentStateSnapshot(current, nextAgentState)
-            );
-            return agentStateUnchanged(current, merged) ? current : merged;
-          });
+        setAgentState((current) => {
+          const merged = preserveOptimisticQueuedMessages(
+            sessionId,
+            mergeAgentStateSnapshot(current, nextAgentState)
+          );
+          return agentStateUnchanged(current, merged) ? current : merged;
         });
         updateSessionStatus(sessionId, nextAgentState.status, nextAgentState.canContinue);
       })
@@ -868,11 +845,9 @@ export function App() {
     const cachedTraceState = readSessionState(agentTraceCacheRef.current, sessionId);
     const cachedContextState = readSessionState(contextStateCacheRef.current, sessionId);
     setSessionLoadingId(cachedAgentState ? null : sessionId);
-    startTransition(() => {
-      setAgentState(cachedAgentState);
-      setAgentTraceState(cachedTraceState);
-      setContextState(cachedContextState);
-    });
+    setAgentState(cachedAgentState);
+    setAgentTraceState(cachedTraceState);
+    setContextState(cachedContextState);
   }
 
   const handleThreadSelection = useCallback((selection: SessionThreadSelection) => {
@@ -887,6 +862,42 @@ export function App() {
     if (!sessionId) return;
     setComposerDrafts((current) => ({ ...current, [sessionId]: content }));
     setComposerFocusRequest((request) => request + 1);
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unsubscribe: (() => void) | null = null;
+    void subscribeToSessionTitleUpdates((sessionId) => {
+      void getProjectSessionState()
+        .then((nextState) => {
+          if (disposed) return;
+          const renamedSession = nextState.sessions.find((session) => session.id === sessionId);
+          if (!renamedSession) return;
+          setProjectSessionState((current) =>
+            current
+              ? {
+                  ...current,
+                  sessions: current.sessions.map((session) =>
+                    session.id === sessionId ? renamedSession : session
+                  )
+                }
+              : nextState
+          );
+          setAgentState((current) =>
+            current?.sessionId === sessionId
+              ? { ...current, sessionName: renamedSession.name }
+              : current
+          );
+        })
+        .catch(() => {});
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unsubscribe = unlisten;
+    });
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -1255,13 +1266,20 @@ export function App() {
     const activeIndex = sessions.findIndex(
       (session) => session.id === projectSessionState.activeSessionId
     );
-    const nearby = activeIndex >= 0
-      ? [sessions[activeIndex - 1], sessions[activeIndex + 1]].filter(
-          (session): session is (typeof sessions)[number] => Boolean(session)
-        )
-      : sessions.slice(0, 2);
-    return nearby
-      .map((session) => session.id)
+    const prioritized = activeIndex >= 0
+      ? [
+          sessions[activeIndex - 1],
+          sessions[activeIndex + 1],
+          sessions[0],
+          sessions[sessions.length - 1],
+          ...sessions
+        ]
+      : sessions;
+    return [...new Set(prioritized
+      .filter((session): session is (typeof sessions)[number] => Boolean(session))
+      .map((session) => session.id))]
+      .filter((sessionId) => sessionId !== projectSessionState.activeSessionId)
+      .slice(0, SESSION_STATE_CACHE_LIMIT - 1)
       .join("|");
   }, [projectSessionState]);
 
@@ -1271,18 +1289,25 @@ export function App() {
     let idleCallback: number | null = null;
     let fallbackTimer: number | null = null;
     const sessionIds = sessionPrefetchKey.split("|");
-    const prefetch = () => {
+    const prefetch = async () => {
       if (disposed) return;
-      void Promise.all(
-        sessionIds
-          .filter((sessionId) => !agentStateCacheRef.current.has(sessionId))
-          .map((sessionId) => requestSessionAgentState(sessionId).catch(() => null))
+      const pending = sessionIds.filter(
+        (sessionId) => !agentStateCacheRef.current.has(sessionId)
       );
+      let nextIndex = 0;
+      const worker = async () => {
+        while (!disposed && nextIndex < pending.length) {
+          const sessionId = pending[nextIndex];
+          nextIndex += 1;
+          await requestSessionAgentState(sessionId).catch(() => null);
+        }
+      };
+      await Promise.all([worker(), worker()]);
     };
     if (typeof window.requestIdleCallback === "function") {
-      idleCallback = window.requestIdleCallback(prefetch, { timeout: 2_000 });
+      idleCallback = window.requestIdleCallback(() => void prefetch(), { timeout: 2_000 });
     } else {
-      fallbackTimer = window.setTimeout(prefetch, 1_200);
+      fallbackTimer = window.setTimeout(() => void prefetch(), 1_200);
     }
     return () => {
       disposed = true;
@@ -1486,17 +1511,14 @@ export function App() {
         })
         .map((session) =>
           busySessionIds.has(session.id)
-            ? { ...session, status: "Working" }
-            : sessionStatusOverrides[session.id]
-              ? { ...session, status: sessionStatusOverrides[session.id] }
-              : session
+            ? { ...session, status: "Working", activity: "working" as const }
+            : session
         ),
     [
       activeProject,
       busySessionIds,
       normalizedSidebarQuery,
-      projectSessionState?.sessions,
-      sessionStatusOverrides
+      projectSessionState?.sessions
     ]
   );
 
@@ -1616,65 +1638,39 @@ export function App() {
     });
   }
 
-  function markSessionTaskStarted(sessionId: string) {
-    trackedSessionTaskIdsRef.current.add(sessionId);
-    setSessionStatusOverrides((current) => {
-      if (!current[sessionId]) return current;
-      const next = { ...current };
-      delete next[sessionId];
-      return next;
-    });
-  }
-
   function acknowledgeSessionResult(sessionId: string) {
-    setSessionStatusOverrides((current) => {
-      if (current[sessionId] !== "Completed") {
-        return current;
-      }
-      const next = { ...current };
-      delete next[sessionId];
-      return next;
-    });
-  }
-
-  function clearSessionTransientStatus(sessionId: string) {
-    trackedSessionTaskIdsRef.current.delete(sessionId);
-    setSessionStatusOverrides((current) => {
-      if (!(sessionId in current)) return current;
-      const next = { ...current };
-      delete next[sessionId];
-      return next;
-    });
+    void acknowledgeSessionActivity(sessionId)
+      .then((nextState) => {
+        const acknowledged = nextState.sessions.find((session) => session.id === sessionId);
+        if (!acknowledged) return;
+        setProjectSessionState((current) =>
+          current
+            ? {
+                ...current,
+                sessions: current.sessions.map((session) =>
+                  session.id === sessionId ? acknowledged : session
+                )
+              }
+            : current
+        );
+      })
+      .catch(() => {});
   }
 
   function updateSessionStatus(
-    sessionId: string,
+    _sessionId: string,
     status: AgentState["status"],
-    canContinue = false
+    _canContinue = false
   ) {
-    const tracked = trackedSessionTaskIdsRef.current.has(sessionId);
-    const isTerminal = ["paused", "completed", "failed", "cancelled", "idle"].includes(status);
-    if (isTerminal) trackedSessionTaskIdsRef.current.delete(sessionId);
-
-    setSessionStatusOverrides((current) => {
-      let nextStatus: string | undefined;
-      if (status === "waiting_for_permission") nextStatus = "Approval required";
-      else if (status === "running") nextStatus = "Working";
-      else if (status === "paused" || (status === "completed" && canContinue)) {
-        nextStatus = "Paused";
-      } else if (status === "failed") nextStatus = "Error";
-      else if (status === "cancelled") nextStatus = "Interrupted";
-      else if (tracked && status === "completed") nextStatus = "Completed";
-
-      if (nextStatus === undefined) {
-        if (!(sessionId in current)) return current;
-        const next = { ...current };
-        delete next[sessionId];
-        return next;
-      }
-      if (current[sessionId] === nextStatus) return current;
-      return { ...current, [sessionId]: nextStatus };
-    });
+    if (status === "running") return;
+    const refreshRequest = ++sessionLifecycleRefreshRef.current;
+    void getProjectSessionState()
+      .then((nextState) => {
+        if (sessionLifecycleRefreshRef.current === refreshRequest) {
+          setProjectSessionState(nextState);
+        }
+      })
+      .catch(() => {});
   }
 
   function acknowledgeOptimisticUserMessage(
@@ -2009,14 +2005,12 @@ export function App() {
     if (!isCurrentRequest()) return;
     setSessionLoadingId(null);
     acknowledgeOptimisticUserMessage(sessionId, nextAgentState.messages);
-    startTransition(() => {
-      setAgentState((current) => {
-        const merged = preserveOptimisticQueuedMessages(
-          sessionId,
-          mergeAgentStateSnapshot(current, nextAgentState)
-        );
-        return agentStateUnchanged(current, merged) ? current : merged;
-      });
+    setAgentState((current) => {
+      const merged = preserveOptimisticQueuedMessages(
+        sessionId,
+        mergeAgentStateSnapshot(current, nextAgentState)
+      );
+      return agentStateUnchanged(current, merged) ? current : merged;
     });
     updateSessionStatus(sessionId, nextAgentState.status, nextAgentState.canContinue);
 
@@ -2071,13 +2065,11 @@ export function App() {
     };
     setComposerDrafts(withoutDeletedKeys);
     setAttachmentDrafts(withoutDeletedKeys);
-    setSessionStatusOverrides(withoutDeletedKeys);
     setBusySessionIds((current) => new Set([...current].filter((id) => !deleted.has(id))));
     setAttachmentBusySessionIds(
       (current) => new Set([...current].filter((id) => !deleted.has(id)))
     );
     deleted.forEach((sessionId) => {
-      trackedSessionTaskIdsRef.current.delete(sessionId);
       agentStateRevisionsRef.current.delete(sessionId);
       agentStateCacheRef.current.delete(sessionId);
       agentTraceCacheRef.current.delete(sessionId);
@@ -2378,7 +2370,9 @@ export function App() {
     if (
       sessionIds.some(
         (sessionId) =>
-          busySessionIds.has(sessionId) || sessionStatusOverrides[sessionId] === "Review"
+          busySessionIds.has(sessionId) ||
+          projectSessionState?.sessions.find((session) => session.id === sessionId)
+            ?.attentionReason === "permission"
       )
     ) {
       setComposerError("Stop the running sessions before deleting this project.");
@@ -2398,7 +2392,11 @@ export function App() {
   }
 
   async function handleArchiveSession(sessionId: string) {
-    if (busySessionIds.has(sessionId) || sessionStatusOverrides[sessionId] === "Review") {
+    if (
+      busySessionIds.has(sessionId) ||
+      projectSessionState?.sessions.find((session) => session.id === sessionId)
+        ?.attentionReason === "permission"
+    ) {
       setComposerError("Stop the running session before archiving it.");
       return;
     }
@@ -2406,7 +2404,6 @@ export function App() {
     setComposerError(null);
     try {
       const next = await archiveSession(sessionId);
-      clearSessionTransientStatus(sessionId);
       await refreshWorkspaceAfterProjectSession(next);
     } catch (error) {
       setComposerError(error instanceof Error ? error.message : String(error));
@@ -2420,7 +2417,6 @@ export function App() {
     setComposerError(null);
     try {
       const next = await restoreSession(sessionId);
-      clearSessionTransientStatus(sessionId);
       setProjectSessionState(next);
       setComposerError(next.lastError);
     } catch (error) {
@@ -2431,7 +2427,11 @@ export function App() {
   }
 
   async function handleDeleteSession(sessionId: string) {
-    if (busySessionIds.has(sessionId) || sessionStatusOverrides[sessionId] === "Review") {
+    if (
+      busySessionIds.has(sessionId) ||
+      projectSessionState?.sessions.find((session) => session.id === sessionId)
+        ?.attentionReason === "permission"
+    ) {
       setComposerError("Stop the running session before deleting it.");
       return;
     }
@@ -2610,52 +2610,6 @@ export function App() {
     if (await runSkillInstall(() => installSkillUrl(url))) setSkillUrl("");
   }
 
-  async function refineAutomaticSessionTitle(
-    sessionId: string,
-    prompt: string,
-    answer: string
-  ) {
-    const firstRoundTitle = sessionTitleFromFirstRound(prompt, answer);
-    setProjectSessionState((current) =>
-      current
-        ? {
-            ...current,
-            sessions: current.sessions.map((session) =>
-              session.id === sessionId ? { ...session, name: firstRoundTitle } : session
-            )
-          }
-        : current
-    );
-    setAgentState((current) =>
-      current?.sessionId === sessionId
-        ? { ...current, sessionName: firstRoundTitle }
-        : current
-    );
-    const nextState = await generateSessionTitle(sessionId, prompt, answer);
-    const renamedSession = nextState.sessions.find((session) => session.id === sessionId);
-    if (!renamedSession) return;
-    setProjectSessionState((current) => {
-      if (!current) return nextState;
-      return {
-        ...current,
-        sessions: current.sessions.map((session) =>
-          session.id === sessionId
-            ? {
-                ...session,
-                name: renamedSession.name,
-                updatedAtMs: renamedSession.updatedAtMs
-              }
-            : session
-        )
-      };
-    });
-    setAgentState((current) =>
-      current?.sessionId === sessionId
-        ? { ...current, sessionName: renamedSession.name }
-        : current
-    );
-  }
-
   function applyAgentStateForSession(sessionId: string, next: AgentState) {
     const effectiveNext = preserveOptimisticQueuedMessages(sessionId, next);
     agentStateRevisionsRef.current.set(sessionId, {
@@ -2790,11 +2744,9 @@ export function App() {
     markSessionBusy(sessionId, true);
     try {
       while (!suppressQueueDrainSessionIdsRef.current.has(sessionId)) {
-        markSessionTaskStarted(sessionId);
         const next = await runNextQueuedAgentMessage(sessionId);
         releaseSteeredQueuedMessagesForSession(sessionId);
         if (!next) {
-          trackedSessionTaskIdsRef.current.delete(sessionId);
           break;
         }
         applyAgentStateForSession(sessionId, next);
@@ -3003,30 +2955,9 @@ export function App() {
       }
       return;
     }
-    const automaticSessionTitle =
-      activeSession &&
-      isAutoSessionName(activeSession.name)
-        ? sessionTitleFromPrompt(visiblePrompt)
-        : null;
-    const automaticSessionId = automaticSessionTitle ? activeSession?.id : null;
-    if (automaticSessionTitle && automaticSessionId) {
-      setProjectSessionState((current) =>
-        current
-          ? {
-              ...current,
-              sessions: current.sessions.map((session) =>
-                session.id === automaticSessionId
-                  ? { ...session, name: automaticSessionTitle }
-                  : session
-              )
-            }
-          : current
-      );
-    }
     setStreamResetVersion((version) => version + 1);
     setComposerError(null);
     setAttachmentDrafts((current) => ({ ...current, [sessionId]: [] }));
-    markSessionTaskStarted(sessionId);
     markSessionBusy(sessionId, true);
     const submittedAt = Date.now();
     const optimisticUserMessage: ChatMessageView = {
@@ -3044,7 +2975,7 @@ export function App() {
         current.contextTokensUsed + Math.ceil(visiblePrompt.length / 4) + attachments.length * 64 + 6;
       return {
         ...current,
-        sessionName: automaticSessionTitle ?? current.sessionName,
+        sessionName: current.sessionName,
         status: "running",
         canCancel: true,
         canRetry: false,
@@ -3081,17 +3012,6 @@ export function App() {
         setStreamResetVersion((version) => version + 1);
       }
       setProjectSessionState(await getProjectSessionState());
-      const firstRoundAnswer = [...next.messages]
-        .reverse()
-        .find((message) => message.role === "assistant" && message.content.trim())
-        ?.content.trim();
-      if (automaticSessionId && firstRoundAnswer) {
-        void refineAutomaticSessionTitle(
-          automaticSessionId,
-          visiblePrompt,
-          firstRoundAnswer
-        );
-      }
       await refreshAgentTrace(true, sessionId);
     } catch (error) {
       setAttachmentDrafts((current) => ({
@@ -3158,7 +3078,6 @@ export function App() {
     if (!sessionId || busySessionIds.has(sessionId)) return;
     setStreamResetVersion((version) => version + 1);
     setComposerError(null);
-    markSessionTaskStarted(sessionId);
     markSessionBusy(sessionId, true);
     let completedState: AgentState | null = null;
     try {
@@ -3356,7 +3275,6 @@ export function App() {
   ) {
     const sessionId = targetSessionId;
     if (!sessionId || busySessionIds.has(sessionId)) return;
-    markSessionTaskStarted(sessionId);
     markSessionBusy(sessionId, true);
     setComposerError(null);
     if (activeSessionIdRef.current === sessionId) {
@@ -3643,6 +3561,12 @@ export function App() {
               onLoadOlderHistory={loadOlderAgentHistory}
               onSelect={handleThreadSelection}
               onEditMessage={handleThreadMessageEdit}
+              onArtifactInspect={(path) => {
+                const sessionId = activeSession?.id;
+                if (!sessionId) return;
+                setInspectorOutputRequest({ sessionId, path, nonce: Date.now() });
+                setInspectorOpen(true);
+              }}
               onLinkOpenError={setComposerError}
               onStreamDone={handleAgentStreamDone}
             />
@@ -4221,7 +4145,8 @@ export function App() {
               <p className="settings-section-copy">
                 Candidate harnesses execute in an isolated arena before promotion. Same-task paired
                 runs train the population, historical replay runs provide holdout evidence, and a
-                Wilson confidence gate controls staged canary rollout with automatic rollback.
+                direct stable-versus-challenger Wilson gate controls staged canary rollout with
+                automatic rollback.
               </p>
               <div className="prompt-evolution-summary" aria-label="Evolution overview">
                 <span><strong>{phase4?.promptEvolution?.observedRuns ?? 0}</strong> observed</span>
@@ -4260,7 +4185,7 @@ export function App() {
                           </span>
                         </td>
                         <td title={`${effort.reflectionPackets} feedback reflections · ${effort.learnedProfiles} learned profiles`}>
-                          {effort.pairedRuns}/3 · {effort.replayRuns}/3 · R{effort.reflectionPackets}
+                          {effort.pairedRuns}/3 · {effort.replayRuns}/4 · R{effort.reflectionPackets}
                         </td>
                         <td>{effort.championScore === null ? "-" : `${Math.round(effort.championScore * 100)}%`}</td>
                         <td>{effort.promotionConfidence === null ? "-" : `${Math.round(effort.promotionConfidence * 100)}%`}</td>
@@ -4448,6 +4373,7 @@ export function App() {
                           </button>
                           {review.canAllowSession && (
                             <button
+                              className="permission-session"
                               type="button"
                               disabled={permissionBusy || sessionBusy}
                               onClick={() =>
@@ -4462,6 +4388,7 @@ export function App() {
                             </button>
                           )}
                           <button
+                            className="permission-deny"
                             type="button"
                             disabled={permissionBusy || sessionBusy}
                             onClick={() => void handleResolvePermissionReview(review, "deny")}
@@ -5419,6 +5346,7 @@ export function App() {
         width={inspectorWidth}
         tab={inspectorTab}
         sessionId={activeSession?.id ?? null}
+        outputRequest={inspectorOutputRequest}
         threadSelection={activeView === "timeline" ? selectedThreadItem : null}
         traceStep={selectedTraceStep}
         traceExportPath={agentTraceState?.exportPath ?? null}
@@ -5450,10 +5378,6 @@ export function App() {
         onWidthChange={setInspectorWidth}
         onResizeStart={() => setInspectorResizing(true)}
         onResizeEnd={() => setInspectorResizing(false)}
-        onOutputCreated={() => {
-          if (activeView === "settings") setInspectorOpenBeforeSettings(true);
-          else setInspectorOpen(true);
-        }}
         onReview={() => {
           if (activeView !== "settings") setWorkspaceViewBeforeSettings(activeView);
           setInspectorOpenBeforeSettings(inspectorOpen);

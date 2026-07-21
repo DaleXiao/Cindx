@@ -14,8 +14,8 @@ import {
 import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { Menu } from "@tauri-apps/api/menu";
 import { useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import {
+  confirmDeleteAction,
   getScheduleState,
   type ProjectView,
   type ScheduleView,
@@ -24,48 +24,16 @@ import {
 
 const appIconUrl = new URL("../../src-tauri/icons/icon.png", import.meta.url).href;
 
-type SessionVisualState = "working" | "complete" | "attention" | null;
+type SessionVisualState = Exclude<SessionView["activity"], "idle"> | null;
 
-type DeleteTarget =
-  | { kind: "project"; id: string; name: string }
-  | { kind: "session"; id: string; name: string };
-
-function sessionVisualState(status: string): SessionVisualState {
-  const normalized = status.trim().toLowerCase();
-  if (["working", "running"].includes(normalized)) return "working";
-  if (["completed", "succeeded", "done"].includes(normalized)) return "complete";
-  if (
-    [
-      "review",
-      "approval required",
-      "approval_required",
-      "pending approval",
-      "pending_approval",
-      "waiting_for_permission",
-      "waiting for input",
-      "waiting_for_input",
-      "needs input",
-      "needs_input",
-      "needs user input",
-      "needs_user_input",
-      "paused",
-      "stopped",
-      "failed",
-      "error",
-      "blocked",
-      "cancelled",
-      "canceled",
-      "interrupted",
-      "attention"
-    ].includes(normalized)
-  ) {
-    return "attention";
-  }
-  return null;
-}
-
-function SessionStatusIndicator({ status, active }: { status: string; active: boolean }) {
-  const state = sessionVisualState(status);
+function SessionStatusIndicator({
+  activity,
+  active
+}: {
+  activity: SessionView["activity"];
+  active: boolean;
+}) {
+  const state: SessionVisualState = activity === "idle" ? null : activity;
   if (!state || (active && state === "complete")) return null;
 
   const label =
@@ -158,9 +126,6 @@ export function Sidebar({
   const [projectRenameDraft, setProjectRenameDraft] = useState("");
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
-  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
-  const deleteDialogRef = useRef<HTMLElement>(null);
-  const deleteCancelRef = useRef<HTMLButtonElement>(null);
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const searchActive = searchOpen && Boolean(searchQuery.trim());
 
@@ -182,39 +147,6 @@ export function Sidebar({
       window.clearInterval(timer);
     };
   }, [scheduleExpanded]);
-
-  useEffect(() => {
-    if (!deleteTarget) return;
-    const previouslyFocused = document.activeElement as HTMLElement | null;
-    const frame = window.requestAnimationFrame(() => deleteCancelRef.current?.focus());
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setDeleteTarget(null);
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const controls = deleteDialogRef.current?.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      );
-      if (!controls?.length) return;
-      const first = controls[0];
-      const last = controls[controls.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      window.removeEventListener("keydown", handleKeyDown);
-      previouslyFocused?.focus();
-    };
-  }, [deleteTarget]);
 
   function finishSearchSelection() {
     if (!searchOpen) return;
@@ -275,10 +207,10 @@ export function Sidebar({
     }
   }
 
-  function confirmDelete() {
-    if (!deleteTarget) return;
-    const target = deleteTarget;
-    setDeleteTarget(null);
+  async function requestDelete(
+    target: { kind: "project" | "session"; id: string; name: string }
+  ) {
+    if (!(await confirmDeleteAction(target.kind, target.name))) return;
     if (target.kind === "project") {
       cancelProjectRename();
       cancelSessionRename();
@@ -326,7 +258,7 @@ export function Sidebar({
           id: `delete-${session.id}`,
           text: "Delete Session",
           action: () =>
-            setDeleteTarget({ kind: "session", id: session.id, name: session.name })
+            void requestDelete({ kind: "session", id: session.id, name: session.name })
         }
       ]
     });
@@ -353,7 +285,7 @@ export function Sidebar({
           id: `delete-project-${project.id}`,
           text: "Delete Project",
           action: () =>
-            setDeleteTarget({ kind: "project", id: project.id, name: project.name })
+            void requestDelete({ kind: "project", id: project.id, name: project.name })
         }
       ]
     });
@@ -737,7 +669,7 @@ export function Sidebar({
                                   <span className="session-name">{session.name}</span>
                                 </button>
                                 <SessionStatusIndicator
-                                  status={session.status}
+                                  activity={session.activity}
                                   active={session.active}
                                 />
                                 <button
@@ -785,43 +717,6 @@ export function Sidebar({
         </button>
       </div>
 
-      {deleteTarget &&
-        createPortal(
-          <div className="delete-confirmation-backdrop">
-            <section
-              ref={deleteDialogRef}
-              className="delete-confirmation-dialog"
-              role="alertdialog"
-              aria-modal="true"
-              aria-labelledby="delete-confirmation-title"
-              aria-describedby="delete-confirmation-description"
-            >
-              <div className="delete-confirmation-copy">
-                <h2 id="delete-confirmation-title">
-                  Delete “{deleteTarget.name}”?
-                </h2>
-                <p id="delete-confirmation-description">
-                  {deleteTarget.kind === "project"
-                    ? "This permanently removes the project and its sessions from Cindx. Files in the workspace are not affected."
-                    : "This permanently removes the conversation and its agent history. This action cannot be undone."}
-                </p>
-              </div>
-              <div className="delete-confirmation-actions">
-                <button
-                  ref={deleteCancelRef}
-                  type="button"
-                  onClick={() => setDeleteTarget(null)}
-                >
-                  Cancel
-                </button>
-                <button type="button" className="danger" onClick={confirmDelete}>
-                  Delete {deleteTarget.kind === "project" ? "Project" : "Session"}
-                </button>
-              </div>
-            </section>
-          </div>,
-          document.body
-        )}
     </aside>
   );
 }

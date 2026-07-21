@@ -18,6 +18,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "agent-application"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "agent-core"
 version = "0.1.0"
 dependencies = [
@@ -980,8 +989,9 @@ dependencies = [
 
 [[package]]
 name = "cindx-desktop"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
+ "agent-application",
  "agent-core",
  "agent-graph",
  "agent-mcp",

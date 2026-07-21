@@ -131,6 +131,11 @@ export type SessionView = {
   detail: string;
   effort: AgentEffort;
   status: string;
+  titleState: "pending" | "automatic" | "manual";
+  activity: "idle" | "working" | "complete" | "attention";
+  attentionReason: string | null;
+  unseenResult: boolean;
+  latestSequence: number;
   active: boolean;
   archived: boolean;
   archivedAtMs: number | null;
@@ -370,6 +375,7 @@ export type ChatMessageView = {
   role: "user" | "assistant" | "system" | "tool" | "reviewer";
   content: string;
   timestampMs: number;
+  runId?: string | null;
   attachments?: AgentAttachment[];
 };
 
@@ -753,6 +759,7 @@ export type AgentOutputArtifactView = {
   timestampMs: number;
   runId: string | null;
   version: number;
+  kind: "image" | "file" | "directory";
 };
 
 export type ModelStreamDelta = {
@@ -824,6 +831,11 @@ let browserProjectSessionState: ProjectSessionState = {
       detail: "timeline + chat",
       effort: "auto",
       status: "Active",
+      titleState: "manual",
+      activity: "idle",
+      attentionReason: null,
+      unseenResult: false,
+      latestSequence: 0,
       active: true,
       archived: false,
       archivedAtMs: null,
@@ -1435,6 +1447,43 @@ export async function getProjectSessionState(): Promise<ProjectSessionState> {
   }
 }
 
+export async function acknowledgeSessionActivity(
+  sessionId: string
+): Promise<ProjectSessionState> {
+  try {
+    return await invoke<ProjectSessionState>("acknowledge_session_activity", {
+      input: { sessionId }
+    });
+  } catch {
+    browserProjectSessionState = {
+      ...browserProjectSessionState,
+      sessions: browserProjectSessionState.sessions.map((session) =>
+        session.id === sessionId
+          ? {
+              ...session,
+              activity: session.activity === "complete" ? "idle" : session.activity,
+              unseenResult: false,
+              status: session.activity === "complete" ? "Ready" : session.status
+            }
+          : session
+      )
+    };
+    return browserProjectSessionState;
+  }
+}
+
+export async function confirmDeleteAction(
+  kind: "project" | "session",
+  name: string
+): Promise<boolean> {
+  try {
+    return await invoke<boolean>("confirm_delete_action", { input: { kind, name } });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    return window.confirm(`Delete ${kind} “${name}”?`);
+  }
+}
+
 export async function getScheduleState(): Promise<ScheduleState> {
   try {
     return await invoke<ScheduleState>("get_schedule_state");
@@ -1639,6 +1688,11 @@ export async function createProject(name: string, root: string): Promise<Project
             detail: "timeline + chat",
             effort: "auto",
             status: "Ready",
+            titleState: "pending",
+            activity: "idle",
+            attentionReason: null,
+            unseenResult: false,
+            latestSequence: 0,
             active: false,
             archived: false,
             archivedAtMs: null,
@@ -1678,6 +1732,11 @@ export async function createSession(
             detail: "timeline + chat",
             effort: "auto",
             status: "Ready",
+            titleState: "pending",
+            activity: "idle",
+            attentionReason: null,
+            unseenResult: false,
+            latestSequence: 0,
             active: false,
             archived: false,
             archivedAtMs: null,
@@ -1762,6 +1821,11 @@ export async function forkSession(sessionId: string): Promise<ProjectSessionStat
       detail: `Fork of ${source.name}`,
       effort: "auto" as AgentEffort,
       status: "Ready",
+      titleState: "manual" as const,
+      activity: "idle" as const,
+      attentionReason: null,
+      unseenResult: false,
+      latestSequence: 0,
       active: false,
       archived: false,
       archivedAtMs: null,
@@ -1799,7 +1863,7 @@ export async function renameSession(
       ...browserProjectSessionState,
       sessions: browserProjectSessionState.sessions.map((session) =>
         session.id === sessionId
-          ? { ...session, name: normalizedName, updatedAtMs: now }
+          ? { ...session, name: normalizedName, titleState: "manual", updatedAtMs: now }
           : session
       )
     };
@@ -1860,11 +1924,20 @@ export async function archiveSession(sessionId: string): Promise<ProjectSessionS
     const source = browserProjectSessionState.sessions.find((session) => session.id === sessionId);
     if (!source) return browserProjectSessionState;
     const now = Date.now();
-    let next = {
+    let next: ProjectSessionState = {
       ...browserProjectSessionState,
       sessions: browserProjectSessionState.sessions.map((session) =>
         session.id === sessionId
-          ? { ...session, active: false, archived: true, archivedAtMs: now, status: "Archived" }
+          ? {
+              ...session,
+              active: false,
+              archived: true,
+              archivedAtMs: now,
+              status: "Archived",
+              activity: "idle",
+              attentionReason: null,
+              unseenResult: false
+            }
           : session
       )
     };
@@ -1884,7 +1957,15 @@ export async function restoreSession(sessionId: string): Promise<ProjectSessionS
       ...browserProjectSessionState,
       sessions: browserProjectSessionState.sessions.map((session) =>
         session.id === sessionId
-          ? { ...session, archived: false, archivedAtMs: null, status: "Ready" }
+          ? {
+              ...session,
+              archived: false,
+              archivedAtMs: null,
+              status: "Ready",
+              activity: "idle",
+              attentionReason: null,
+              unseenResult: false
+            }
           : session
       )
     };
@@ -1926,6 +2007,11 @@ function ensureBrowserOpenSession(
     detail: "timeline + chat",
     effort: "auto",
     status: "Ready",
+    titleState: "pending",
+    activity: "idle",
+    attentionReason: null,
+    unseenResult: false,
+    latestSequence: 0,
     active: false,
     archived: false,
     archivedAtMs: null,
@@ -3073,6 +3159,18 @@ export async function subscribeToModelStream(
   try {
     return await listen<ModelStreamDelta>("model-stream-delta", (event) => {
       onDelta(event.payload);
+    });
+  } catch {
+    return () => {};
+  }
+}
+
+export async function subscribeToSessionTitleUpdates(
+  onUpdate: (sessionId: string) => void
+): Promise<() => void> {
+  try {
+    return await listen<string>("session-title-updated", (event) => {
+      onUpdate(event.payload);
     });
   } catch {
     return () => {};

@@ -216,8 +216,18 @@ export function Composer({
               )}
             </div>
             <div className="composer-permission-actions">
+              <button
+                className="permission-once"
+                type="button"
+                disabled={permissionBusy}
+                onClick={() => onResolvePermission(pendingApproval.requestId, "allow_once")}
+              >
+                <Check aria-hidden="true" />
+                <span>Once</span>
+              </button>
               {pendingApproval.risk !== "destructive" && (
                 <button
+                  className="permission-session"
                   type="button"
                   disabled={permissionBusy}
                   onClick={() =>
@@ -229,14 +239,7 @@ export function Composer({
                 </button>
               )}
               <button
-                type="button"
-                disabled={permissionBusy}
-                onClick={() => onResolvePermission(pendingApproval.requestId, "allow_once")}
-              >
-                <Check aria-hidden="true" />
-                <span>Once</span>
-              </button>
-              <button
+                className="permission-deny"
                 type="button"
                 disabled={permissionBusy}
                 onClick={() => onResolvePermission(pendingApproval.requestId, "deny")}

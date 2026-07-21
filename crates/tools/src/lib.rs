@@ -179,7 +179,17 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
-        self.tools.insert(tool.spec().name.clone(), Arc::from(tool));
+        let _ = self.try_register(tool);
+    }
+
+    pub fn try_register(&mut self, tool: Box<dyn Tool>) -> Result<bool, String> {
+        let spec = tool.spec();
+        spec.validate_input_schema()?;
+        if self.tools.contains_key(&spec.name) {
+            return Ok(false);
+        }
+        self.tools.insert(spec.name, Arc::from(tool));
+        Ok(true)
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
@@ -309,7 +319,10 @@ pub fn prompt_requests_image_generation(prompt: &str) -> bool {
         "make an image",
         "render an image",
     ];
-    if DIRECT_PATTERNS.iter().any(|pattern| prompt.contains(pattern)) {
+    if DIRECT_PATTERNS
+        .iter()
+        .any(|pattern| prompt.contains(pattern))
+    {
         return true;
     }
 
@@ -575,8 +588,7 @@ impl Tool for ReadFileTool {
     fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
         let input = parse_input(&invocation.input_json);
         let path = required_input(&input, "path")?;
-        let offset_bytes =
-            parse_bounded_usize_input(&input, "offset_bytes", 0, 0, usize::MAX)?;
+        let offset_bytes = parse_bounded_usize_input(&input, "offset_bytes", 0, 0, usize::MAX)?;
         let max_bytes = parse_bounded_usize_input(
             &input,
             "max_bytes",
@@ -629,10 +641,7 @@ impl Tool for ReadFileTool {
         metadata.insert("offset_bytes".to_string(), offset.to_string());
         metadata.insert("returned_bytes".to_string(), returned_bytes.to_string());
         metadata.insert("next_offset_bytes".to_string(), next_offset.to_string());
-        metadata.insert(
-            "truncated".to_string(),
-            truncated.to_string(),
-        );
+        metadata.insert("truncated".to_string(), truncated.to_string());
 
         Ok(tool_result(
             invocation.id,
@@ -867,7 +876,9 @@ impl Tool for WriteFileTool {
         let snapshot = self.workspace_root.join(&snapshot_relative);
         if let Some(parent) = snapshot.parent() {
             fs::create_dir_all(parent).map_err(|error| {
-                ToolError::new(format!("failed to create output history directory: {error}"))
+                ToolError::new(format!(
+                    "failed to create output history directory: {error}"
+                ))
             })?;
         }
         fs::write(&snapshot, content.as_bytes()).map_err(|error| {
@@ -883,10 +894,7 @@ impl Tool for WriteFileTool {
 
         let mut metadata = Metadata::new();
         metadata.insert("path".to_string(), path);
-        metadata.insert(
-            "source_path".to_string(),
-            resolved.display().to_string(),
-        );
+        metadata.insert("source_path".to_string(), resolved.display().to_string());
         metadata.insert(
             "artifact_path".to_string(),
             snapshot_relative.display().to_string(),
@@ -970,7 +978,8 @@ fn capture_process_stream(mut stream: impl Read, artifact_path: PathBuf) -> Boun
             Ok(0) => break,
             Ok(count) => count,
             Err(error) => {
-                artifact_error.get_or_insert_with(|| format!("failed to read process stream: {error}"));
+                artifact_error
+                    .get_or_insert_with(|| format!("failed to read process stream: {error}"));
                 break;
             }
         };
@@ -1280,10 +1289,9 @@ impl Tool for ShellRunTool {
                     mime_type: Some("text/plain".to_string()),
                     title: Some(format!("Shell {label}")),
                 });
-                result.metadata.insert(
-                    format!("{label}_artifact_path"),
-                    path.display().to_string(),
-                );
+                result
+                    .metadata
+                    .insert(format!("{label}_artifact_path"), path.display().to_string());
                 result.metadata.insert(
                     format!("{label}_artifact_bytes"),
                     capture.artifact_bytes.to_string(),
@@ -2697,12 +2705,7 @@ fn search_file(
                 .chars()
                 .take(SEARCH_MATCH_PREVIEW_CHARS)
                 .collect();
-            results.push(format!(
-                "{}:{}:{}",
-                relative.display(),
-                index,
-                preview
-            ));
+            results.push(format!("{}:{}:{}", relative.display(), index, preview));
         }
     }
     Ok(())
@@ -3282,7 +3285,9 @@ fn run_command_with_limited_output(
         .join()
         .map_err(|_| ToolError::new(format!("{label} stderr reader panicked")))?;
     if let Some(error) = stdout.error {
-        return Err(ToolError::new(format!("failed to read {label} stdout: {error}")));
+        return Err(ToolError::new(format!(
+            "failed to read {label} stdout: {error}"
+        )));
     }
     if stdout.truncated {
         return Err(ToolError::new(format!(
@@ -3291,7 +3296,9 @@ fn run_command_with_limited_output(
         )));
     }
     if let Some(error) = stderr.error {
-        return Err(ToolError::new(format!("failed to read {label} stderr: {error}")));
+        return Err(ToolError::new(format!(
+            "failed to read {label} stderr: {error}"
+        )));
     }
     Ok(LimitedCommandOutput {
         status,
@@ -3484,9 +3491,7 @@ fn run_json_sidecar_controlled(
         .ok_or_else(|| ToolError::new(format!("{env_key} is not configured")))?;
     let sidecar_path = PathBuf::from(&sidecar);
     if !sidecar_path.is_file() {
-        return Err(ToolError::new(format!(
-            "sidecar does not exist: {sidecar}"
-        )));
+        return Err(ToolError::new(format!("sidecar does not exist: {sidecar}")));
     }
     let mut command = if sidecar_path
         .extension()
@@ -3565,7 +3570,9 @@ fn run_json_sidecar_controlled(
         .join()
         .map_err(|_| ToolError::new("sidecar stderr reader panicked"))?;
     if let Some(error) = stdout.error {
-        return Err(ToolError::new(format!("failed to read sidecar stdout: {error}")));
+        return Err(ToolError::new(format!(
+            "failed to read sidecar stdout: {error}"
+        )));
     }
     if stdout.truncated {
         return Err(ToolError::new(format!(
@@ -3578,9 +3585,7 @@ fn run_json_sidecar_controlled(
         if stderr.truncated {
             message.push_str(" [stderr truncated]");
         }
-        return Err(ToolError::new(format!(
-            "sidecar failed: {message}"
-        )));
+        return Err(ToolError::new(format!("sidecar failed: {message}")));
     }
     Ok(ControlledSidecarOutput {
         stdout: String::from_utf8_lossy(&stdout.bytes).trim().to_string(),
@@ -3617,6 +3622,8 @@ mod tests {
         name: String,
     }
 
+    struct InvalidSchemaTool;
+
     impl Tool for CatalogTool {
         fn spec(&self) -> ToolSpec {
             ToolSpec::builtin(
@@ -3637,6 +3644,31 @@ mod tests {
                 invocation.id,
                 ToolOutcomeStatus::Succeeded,
                 self.name.clone(),
+                Metadata::new(),
+            ))
+        }
+    }
+
+    impl Tool for InvalidSchemaTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec::builtin(
+                "invalid.schema",
+                "test",
+                "Invalid schema fixture",
+                ToolRisk::ReadOnly,
+                r#"{"type":"string"}"#,
+            )
+        }
+
+        fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
+            None
+        }
+
+        fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
+            Ok(ToolResult::text(
+                invocation.id,
+                ToolOutcomeStatus::Succeeded,
+                "invalid",
                 Metadata::new(),
             ))
         }
@@ -3752,6 +3784,29 @@ mod tests {
         assert!(prompt_requests_image_generation("请生成一张写实的猫咪图片"));
         assert!(plan.inline.iter().any(|spec| spec.name == "image.generate"));
         assert!(!prompt_requests_image_generation("检查这张图片的尺寸"));
+    }
+
+    #[test]
+    fn registry_rejects_invalid_schemas_and_preserves_the_first_tool_owner() {
+        let mut registry = ToolRegistry::new();
+        assert_eq!(
+            registry.try_register(Box::new(CatalogTool {
+                name: "catalog.unique".to_string(),
+            })),
+            Ok(true)
+        );
+        assert_eq!(
+            registry.try_register(Box::new(CatalogTool {
+                name: "catalog.unique".to_string(),
+            })),
+            Ok(false)
+        );
+        assert!(registry
+            .try_register(Box::new(InvalidSchemaTool))
+            .expect_err("invalid schema must be rejected")
+            .contains("must describe an object"));
+        assert!(registry.get("catalog.unique").is_some());
+        assert!(registry.get("invalid.schema").is_none());
     }
 
     #[test]
@@ -4373,10 +4428,7 @@ mod tests {
 
         let result = tool
             .execute_with_control(
-                invocation(
-                    "computer.click",
-                    encode_input(&[("x", "20"), ("y", "30")]),
-                ),
+                invocation("computer.click", encode_input(&[("x", "20"), ("y", "30")])),
                 &control,
             )
             .expect("computer cancellation should return a tool result");

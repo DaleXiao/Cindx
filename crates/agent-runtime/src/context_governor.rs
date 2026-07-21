@@ -56,9 +56,7 @@ impl ContextGovernorReport {
 
 pub fn bounded_max_output_tokens(context_window_tokens: u64, requested: u64) -> u64 {
     let context_window_tokens = context_window_tokens.max(4_096);
-    requested
-        .max(1)
-        .min((context_window_tokens / 4).max(1_024))
+    requested.max(1).min((context_window_tokens / 4).max(1_024))
 }
 
 pub(crate) fn govern_model_messages(
@@ -116,7 +114,11 @@ pub(crate) fn govern_model_messages(
     );
     let selected_system_tokens = selected
         .iter()
-        .filter_map(|index| replacements.get(index).or_else(|| state_messages.get(*index)))
+        .filter_map(|index| {
+            replacements
+                .get(index)
+                .or_else(|| state_messages.get(*index))
+        })
         .map(estimated_message_tokens)
         .sum::<u64>();
 
@@ -126,7 +128,8 @@ pub(crate) fn govern_model_messages(
         let user_budget = (available_tokens.saturating_mul(45) / 100)
             .max(256)
             .min(available_tokens.saturating_sub(selected_system_tokens));
-        if let Some((message, truncated)) = fit_message_to_budget(&state_messages[index], user_budget)
+        if let Some((message, truncated)) =
+            fit_message_to_budget(&state_messages[index], user_budget)
         {
             selected.insert(index);
             selected_conversation_tokens = estimated_message_tokens(&message);
@@ -159,16 +162,16 @@ pub(crate) fn govern_model_messages(
             &mut selected,
         );
     } else {
-        select_recent_messages(
-            state_messages,
-            &mut recent_budget,
-            &mut selected,
-        );
+        select_recent_messages(state_messages, &mut recent_budget, &mut selected);
     }
 
     let selected_tokens = selected
         .iter()
-        .filter_map(|index| replacements.get(index).or_else(|| state_messages.get(*index)))
+        .filter_map(|index| {
+            replacements
+                .get(index)
+                .or_else(|| state_messages.get(*index))
+        })
         .map(estimated_message_tokens)
         .sum::<u64>();
     let digest_budget = available_tokens.saturating_sub(selected_tokens);
@@ -207,7 +210,8 @@ pub(crate) fn govern_model_messages(
         }
     }
 
-    let estimated_projected_tokens = estimate_messages_tokens(&messages).saturating_add(tool_tokens);
+    let estimated_projected_tokens =
+        estimate_messages_tokens(&messages).saturating_add(tool_tokens);
     let report = ContextGovernorReport {
         applied: true,
         context_window_tokens,
@@ -419,11 +423,7 @@ fn select_prior_user_turns(
     }
 }
 
-fn select_recent_messages(
-    messages: &[Message],
-    budget: &mut u64,
-    selected: &mut BTreeSet<usize>,
-) {
+fn select_recent_messages(messages: &[Message], budget: &mut u64, selected: &mut BTreeSet<usize>) {
     for index in (0..messages.len()).rev() {
         if matches!(messages[index].role, MessageRole::System) {
             continue;
@@ -457,10 +457,8 @@ fn fit_message_to_budget(message: &Message, budget: u64) -> Option<(Message, boo
     let content_tokens = estimate_text_tokens(&message.content).max(1);
     let content_budget = budget.saturating_sub(empty_content_tokens).max(1);
     let character_count = message.content.chars().count();
-    let mut max_characters = ((character_count as u64)
-        .saturating_mul(content_budget)
-        / content_tokens)
-        .max(16) as usize;
+    let mut max_characters =
+        ((character_count as u64).saturating_mul(content_budget) / content_tokens).max(16) as usize;
     let mut fitted = message.clone();
     for _ in 0..5 {
         fitted.content = truncate_middle(&message.content, max_characters);
@@ -582,7 +580,10 @@ fn digest_line(message: &Message) -> String {
         MessageRole::Reviewer => 900,
         MessageRole::Assistant => 700,
     };
-    format!("{label}: {}", compact_excerpt(&message.content, excerpt_limit))
+    format!(
+        "{label}: {}",
+        compact_excerpt(&message.content, excerpt_limit)
+    )
 }
 
 fn compact_excerpt(value: &str, max_characters: usize) -> String {
@@ -621,13 +622,8 @@ mod tests {
     #[test]
     fn small_context_is_preserved_verbatim() {
         let history = vec![message(MessageRole::User, "Inspect README")];
-        let (projected, report) = govern_model_messages(
-            &history,
-            "system".to_string(),
-            &[tool()],
-            128_000,
-            4_096,
-        );
+        let (projected, report) =
+            govern_model_messages(&history, "system".to_string(), &[tool()], 128_000, 4_096);
 
         assert!(!report.applied);
         assert_eq!(projected.len(), 2);
@@ -650,7 +646,10 @@ mod tests {
             artifact,
             message(MessageRole::User, "old requirement ".repeat(5_000)),
             message(MessageRole::Assistant, "old answer ".repeat(5_000)),
-            message(MessageRole::User, "current goal: finish the verified implementation"),
+            message(
+                MessageRole::User,
+                "current goal: finish the verified implementation",
+            ),
         ];
         for index in 0..5 {
             let mut assistant = message(MessageRole::Assistant, format!("tool round {index}"));
@@ -676,19 +675,16 @@ mod tests {
         }
         let original = history.clone();
 
-        let (projected, report) = govern_model_messages(
-            &history,
-            "system".repeat(300),
-            &[tool()],
-            16_384,
-            2_048,
-        );
+        let (projected, report) =
+            govern_model_messages(&history, "system".repeat(300), &[tool()], 16_384, 2_048);
 
         assert!(report.applied);
         assert!(report.hard_limit_satisfied);
         assert!(report.omitted_messages > 0);
         assert!(projected.iter().any(|message| {
-            message.content.contains("current goal: finish the verified implementation")
+            message
+                .content
+                .contains("current goal: finish the verified implementation")
         }));
         assert!(projected.iter().any(|message| {
             message.metadata.get("kind").map(String::as_str) == Some("artifact_manifest")
@@ -709,7 +705,10 @@ mod tests {
             })
             .expect("latest tool evidence should remain");
         assert!(assistant_index < tool_index);
-        assert_eq!(history, original, "canonical runtime history must remain lossless");
+        assert_eq!(
+            history, original,
+            "canonical runtime history must remain lossless"
+        );
     }
 
     #[test]
@@ -726,7 +725,10 @@ mod tests {
         for index in 0..4_000 {
             history.push(message(
                 MessageRole::User,
-                format!("historical requirement {index}: {}", "constraint ".repeat(12)),
+                format!(
+                    "historical requirement {index}: {}",
+                    "constraint ".repeat(12)
+                ),
             ));
             history.push(message(
                 MessageRole::Assistant,
@@ -748,13 +750,8 @@ mod tests {
         let mut estimated_projected_tokens = 0u64;
         for _ in 0..11 {
             let started_at = std::time::Instant::now();
-            let (projected, report) = govern_model_messages(
-                &history,
-                "system".to_string(),
-                &[tool()],
-                32_768,
-                4_096,
-            );
+            let (projected, report) =
+                govern_model_messages(&history, "system".to_string(), &[tool()], 32_768, 4_096);
             samples.push(started_at.elapsed().as_micros());
             assert!(report.applied);
             assert!(report.hard_limit_satisfied);
@@ -768,9 +765,7 @@ mod tests {
         assert_eq!(history.len(), canonical_messages);
         assert!(projected_messages < canonical_messages / 10);
         samples.sort_unstable();
-        let percentile = |value: usize| {
-            samples[(samples.len().saturating_sub(1) * value) / 100]
-        };
+        let percentile = |value: usize| samples[(samples.len().saturating_sub(1) * value) / 100];
         let p50_micros = percentile(50);
         let p95_micros = percentile(95);
         let max_micros = samples.last().copied().unwrap_or_default();

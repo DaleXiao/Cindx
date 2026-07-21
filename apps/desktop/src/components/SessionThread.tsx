@@ -7,6 +7,7 @@ import {
   ChevronUp,
   Copy,
   FileText,
+  FolderOpen,
   Image as ImageIcon,
   Pencil,
   Search,
@@ -33,12 +34,19 @@ import {
 import Markdown from "markdown-to-jsx";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
+  getAgentSessionOutputs,
   openArtifact,
   openExternalUrl,
   readArtifactPreview,
   subscribeToModelStream
 } from "../tauri";
-import type { AgentAttachment, AgentState, ChatMessageView, TimelineEntry } from "../tauri";
+import type {
+  AgentAttachment,
+  AgentOutputArtifactView,
+  AgentState,
+  ChatMessageView,
+  TimelineEntry
+} from "../tauri";
 import { DisclosureTriangle } from "./DisclosureTriangle";
 import { TraceStatusIcon } from "./TraceStatusIcon";
 
@@ -68,6 +76,7 @@ type SessionThreadProps = {
   onLoadOlderHistory: () => void;
   onSelect: (selection: SessionThreadSelection) => void;
   onEditMessage: (content: string) => void;
+  onArtifactInspect: (path: string) => void;
   onLinkOpenError: (message: string) => void;
 };
 
@@ -395,37 +404,6 @@ function estimateThreadRowSize(row: ThreadRow) {
   return 48 + Math.min(48, lineCount) * 20;
 }
 
-function threadItemMeasurementKey(item: SessionThreadSelection) {
-  if (item.type === "event") {
-    return `${item.id}:${item.event.label.length}:${item.event.detail.length}:${item.event.state}`;
-  }
-  const attachmentKey = (item.message.attachments ?? [])
-    .map((attachment) => `${attachment.id}:${attachment.name}:${attachment.mimeType}`)
-    .join(",");
-  return `${item.id}:${item.message.role}:${item.message.content.length}:${
-    item.message.content.split("\n").length
-  }:${attachmentKey}`;
-}
-
-function threadRowMeasurementKey(row: ThreadRow) {
-  if (row.type === "tool-chain") {
-    return `${row.id}:${row.items.map(threadItemMeasurementKey).join(";")}`;
-  }
-  return threadItemMeasurementKey(row.item);
-}
-
-function threadRowsMeasurementRevision(rows: ThreadRow[]) {
-  let hash = 2_166_136_261;
-  for (const row of rows) {
-    const key = threadRowMeasurementKey(row);
-    for (let index = 0; index < key.length; index += 1) {
-      hash ^= key.charCodeAt(index);
-      hash = Math.imul(hash, 16_777_619);
-    }
-  }
-  return `${rows.length}:${hash >>> 0}`;
-}
-
 const MESSAGE_ATTACHMENT_PREVIEW_CACHE_LIMIT = 8;
 const messageAttachmentPreviewCache = new Map<string, string>();
 
@@ -512,6 +490,128 @@ function UserMessageAttachments({
                 <span>{attachment.name}</span>
               </>
             )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function artifactName(path: string) {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? path;
+}
+
+function artifactDisplayPath(artifact: AgentOutputArtifactView) {
+  return artifact.sourcePath ?? artifact.path;
+}
+
+function ArtifactImagePreview({ artifact }: { artifact: AgentOutputArtifactView }) {
+  const [dataUrl, setDataUrl] = useState<string | null>(
+    () => messageAttachmentPreviewCache.get(artifact.path) ?? null
+  );
+
+  useEffect(() => {
+    const cached = messageAttachmentPreviewCache.get(artifact.path);
+    if (cached) {
+      setDataUrl(cached);
+      return;
+    }
+    let active = true;
+    setDataUrl(null);
+    void readArtifactPreview(artifact.path)
+      .then((preview) => {
+        if (!active || preview.kind !== "image" || !preview.dataUrl) return;
+        cacheMessageAttachmentPreview(artifact.path, preview.dataUrl);
+        setDataUrl(preview.dataUrl);
+      })
+      .catch(() => {
+        if (active) setDataUrl(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [artifact.path]);
+
+  if (dataUrl) return <img src={dataUrl} alt={artifactName(artifactDisplayPath(artifact))} />;
+  return (
+    <span className="thread-output-image-placeholder">
+      <ImageIcon aria-hidden="true" />
+    </span>
+  );
+}
+
+function ThreadOutputArtifacts({
+  artifacts,
+  onInspect,
+  onOpenError
+}: {
+  artifacts: AgentOutputArtifactView[];
+  onInspect: (path: string) => void;
+  onOpenError: (message: string) => void;
+}) {
+  if (artifacts.length === 0) return null;
+
+  const openWithSystem = (artifact: AgentOutputArtifactView) => {
+    void openArtifact(artifact.path).catch((error) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      onOpenError(`Could not open ${artifactName(artifactDisplayPath(artifact))}: ${detail}`);
+    });
+  };
+
+  return (
+    <div
+      className="thread-output-artifacts"
+      aria-label="Agent outputs"
+      onClick={(event) => event.stopPropagation()}
+    >
+      {artifacts.map((artifact) => {
+        const displayPath = artifactDisplayPath(artifact);
+        const name = artifactName(displayPath);
+        const versionLabel = artifact.version > 1 ? `v${artifact.version}` : null;
+        if (artifact.kind === "image") {
+          return (
+            <div className="thread-output-image" key={`${artifact.id}-${artifact.path}`}>
+              <button
+                className="thread-output-image-preview"
+                type="button"
+                aria-label={`Open ${name}`}
+                title={`Open ${name}`}
+                onClick={() => openWithSystem(artifact)}
+              >
+                <ArtifactImagePreview artifact={artifact} />
+              </button>
+              <button
+                className="thread-output-name"
+                type="button"
+                title={`Preview ${name}`}
+                onClick={() => onInspect(artifact.path)}
+              >
+                <span>{name}</span>
+                {versionLabel && <small>{versionLabel}</small>}
+              </button>
+            </div>
+          );
+        }
+
+        return (
+          <button
+            className="thread-output-link"
+            type="button"
+            key={`${artifact.id}-${artifact.path}`}
+            title={artifact.kind === "directory" ? `Open ${displayPath} in Finder` : `Preview ${name}`}
+            onClick={() => {
+              if (artifact.kind === "directory") openWithSystem(artifact);
+              else onInspect(artifact.path);
+            }}
+          >
+            {artifact.kind === "directory" ? (
+              <FolderOpen aria-hidden="true" />
+            ) : (
+              <FileText aria-hidden="true" />
+            )}
+            <span>{artifact.kind === "directory" ? displayPath : name}</span>
+            {versionLabel && <small>{versionLabel}</small>}
           </button>
         );
       })}
@@ -861,6 +961,7 @@ export const SessionThread = memo(function SessionThread({
   onLoadOlderHistory,
   onSelect,
   onEditMessage,
+  onArtifactInspect,
   onLinkOpenError
 }: SessionThreadProps) {
   const threadRef = useRef<HTMLElement>(null);
@@ -882,7 +983,6 @@ export const SessionThread = memo(function SessionThread({
   const [threadFindQuery, setThreadFindQuery] = useState("");
   const [threadFindIndex, setThreadFindIndex] = useState(0);
   const [arrivingMessageId, setArrivingMessageId] = useState<string | null>(null);
-  const [contentReady, setContentReady] = useState(false);
   const streamedAnswerRef = useRef(false);
   const scrollSyncFrameRef = useRef<number | null>(null);
   const pinLatestFrameRef = useRef<number | null>(null);
@@ -913,6 +1013,10 @@ export const SessionThread = memo(function SessionThread({
     clientHeight: 1
   });
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [artifactState, setArtifactState] = useState<{
+    sessionId: string | null;
+    artifacts: AgentOutputArtifactView[];
+  }>({ sessionId: null, artifacts: [] });
 
   useLayoutEffect(() => {
     if (streamAnswer) streamedAnswerRef.current = true;
@@ -969,6 +1073,46 @@ export const SessionThread = memo(function SessionThread({
     []
   );
 
+  useEffect(() => {
+    if (!sessionId) {
+      setArtifactState({ sessionId: null, artifacts: [] });
+      return;
+    }
+    let active = true;
+    const timeout = window.setTimeout(
+      () => {
+        void getAgentSessionOutputs(sessionId)
+          .then((artifacts) => {
+            if (!active) return;
+            setArtifactState((current) => {
+              const unchanged =
+                current.sessionId === sessionId &&
+                current.artifacts.length === artifacts.length &&
+                current.artifacts.every((artifact, index) => {
+                  const next = artifacts[index];
+                  return (
+                    artifact.id === next?.id &&
+                    artifact.path === next.path &&
+                    artifact.version === next.version &&
+                    artifact.kind === next.kind
+                  );
+                });
+              return unchanged ? current : { sessionId, artifacts };
+            });
+          })
+          .catch(() => undefined);
+      },
+      status === "running" ? 180 : 0
+    );
+    return () => {
+      active = false;
+      window.clearTimeout(timeout);
+    };
+  }, [messages.length, sessionId, status, timeline.length]);
+
+  const outputArtifacts =
+    artifactState.sessionId === sessionId ? artifactState.artifacts : [];
+
   const items = useMemo<SessionThreadSelection[]>(() => {
     const messageItems = messages.map((message, index) => ({
       id: threadMessageId(message, index),
@@ -1006,6 +1150,42 @@ export const SessionThread = memo(function SessionThread({
     }
     return merged;
   }, [messages, timeline]);
+  const { artifactsByMessageId, trailingArtifacts } = useMemo(() => {
+    const grouped = new Map<string, AgentOutputArtifactView[]>();
+    const trailing: AgentOutputArtifactView[] = [];
+    const assistants = items.filter(
+      (item): item is Extract<SessionThreadSelection, { type: "message" }> =>
+        item.type === "message" && item.message.role === "assistant"
+    );
+    const latestVisibleUserTimestamp = items.reduce(
+      (latest, item) =>
+        item.type === "message" && item.message.role === "user"
+          ? Math.max(latest, item.message.timestampMs)
+          : latest,
+      0
+    );
+
+    [...outputArtifacts]
+      .sort((left, right) => left.timestampMs - right.timestampMs)
+      .forEach((artifact) => {
+        const target =
+          (artifact.runId
+            ? [...assistants]
+                .reverse()
+                .find((item) => item.message.runId === artifact.runId)
+            : undefined) ??
+          assistants.find((item) => item.message.timestampMs >= artifact.timestampMs);
+        if (target) {
+          const current = grouped.get(target.id) ?? [];
+          current.push(artifact);
+          grouped.set(target.id, current);
+        } else if (artifact.timestampMs >= latestVisibleUserTimestamp) {
+          trailing.push(artifact);
+        }
+      });
+
+    return { artifactsByMessageId: grouped, trailingArtifacts: trailing };
+  }, [items, outputArtifacts]);
   const threadFindMatches = useMemo(() => {
     const query = threadFindQuery.trim().toLocaleLowerCase();
     if (!query) return [];
@@ -1020,10 +1200,6 @@ export const SessionThread = memo(function SessionThread({
       .map((item) => item.id);
   }, [items, threadFindQuery]);
   const threadRows = useMemo(() => groupThreadItems(items), [items]);
-  const rowMeasurementRevision = useMemo(
-    () => threadRowsMeasurementRevision(threadRows),
-    [threadRows]
-  );
   const rowIndexByItemId = useMemo(() => {
     const indexes = new Map<string, number>();
     threadRows.forEach((row, rowIndex) => {
@@ -1044,34 +1220,14 @@ export const SessionThread = memo(function SessionThread({
     overscan: 6,
     anchorTo: "end",
     followOnAppend: "auto",
-    useAnimationFrameWithResizeObserver: false
+    useAnimationFrameWithResizeObserver: true
   });
   const virtualRows = rowVirtualizer.getVirtualItems();
-  const measureRenderedRows = useCallback(
-    (resetCache = false) => {
-      if (resetCache) rowVirtualizer.measure();
-      threadContentRef.current
-        ?.querySelectorAll<HTMLElement>(".thread-virtual-row")
-        .forEach((element) => {
-          const index = Number(element.dataset.index);
-          if (!Number.isInteger(index)) return;
-          rowVirtualizer.resizeItem(
-            index,
-            Math.ceil(element.getBoundingClientRect().height)
-          );
-        });
-    },
-    [rowVirtualizer]
-  );
   const measureThreadRow = useCallback(
     (element: HTMLDivElement | null) => {
       rowVirtualizer.measureElement(element);
-      if (!element) return;
-      const index = Number(element.dataset.index);
-      if (!Number.isInteger(index)) return;
-      rowVirtualizer.resizeItem(index, Math.ceil(element.getBoundingClientRect().height));
     },
-    [rowMeasurementRevision, rowVirtualizer]
+    [rowVirtualizer]
   );
   const runProgress = useMemo(
     () => activeRunProgress(timeline, runStartedAtMs),
@@ -1373,26 +1529,6 @@ export const SessionThread = memo(function SessionThread({
   }, [hoveredMinimapIndex, minimapDragging]);
 
   useLayoutEffect(() => {
-    setContentReady(false);
-  }, [sessionId]);
-
-  useLayoutEffect(() => {
-    if (loading) return;
-    let secondFrame = 0;
-    const firstFrame = window.requestAnimationFrame(() => {
-      measureRenderedRows(true);
-      secondFrame = window.requestAnimationFrame(() => {
-        measureRenderedRows();
-        setContentReady(true);
-      });
-    });
-    return () => {
-      window.cancelAnimationFrame(firstFrame);
-      if (secondFrame) window.cancelAnimationFrame(secondFrame);
-    };
-  }, [loading, measureRenderedRows, rowMeasurementRevision, sessionId]);
-
-  useLayoutEffect(() => {
     const thread = threadRef.current;
     if (!thread) return;
     const firstId = items[0]?.id ?? null;
@@ -1598,7 +1734,6 @@ export const SessionThread = memo(function SessionThread({
       />
       <section
         className="session-thread"
-        data-content-ready={contentReady}
         data-loading={loading}
         id="session-thread-scroll"
         aria-label="Session thread"
@@ -1741,11 +1876,18 @@ export const SessionThread = memo(function SessionThread({
                 />
               )}
               {isAssistant ? (
-                <AgentMarkdown
-                  content={item.message.content}
-                  onOpenError={onLinkOpenError}
-                  onCopyCode={copyCode}
-                />
+                <>
+                  <AgentMarkdown
+                    content={item.message.content}
+                    onOpenError={onLinkOpenError}
+                    onCopyCode={copyCode}
+                  />
+                  <ThreadOutputArtifacts
+                    artifacts={artifactsByMessageId.get(item.id) ?? []}
+                    onInspect={onArtifactInspect}
+                    onOpenError={onLinkOpenError}
+                  />
+                </>
               ) : item.message.content ? (
                 <p>{item.message.content}</p>
               ) : !isUser ? (
@@ -1784,6 +1926,16 @@ export const SessionThread = memo(function SessionThread({
           );
         })}
         </div>
+
+        {trailingArtifacts.length > 0 && (
+          <div className="thread-output-pending">
+            <ThreadOutputArtifacts
+              artifacts={trailingArtifacts}
+              onInspect={onArtifactInspect}
+              onOpenError={onLinkOpenError}
+            />
+          </div>
+        )}
 
         {streamAnswer && (
           <article
