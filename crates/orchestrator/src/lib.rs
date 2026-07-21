@@ -1428,6 +1428,8 @@ pub struct WorkflowExecutionTelemetry {
     pub fallback_used: bool,
 }
 
+const ADAPTIVE_WORKFLOW_PRIOR_MIN_QUALITY: f32 = 0.72;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowTopologyStep {
     pub role: String,
@@ -1445,6 +1447,7 @@ pub struct WorkflowTopologyPrior {
     pub steps: Vec<WorkflowTopologyStep>,
     pub examples: usize,
     pub success_rate: f32,
+    pub success_confidence: f64,
     pub average_quality: Option<f32>,
     pub average_latency_ms: u64,
     pub average_total_tokens: u64,
@@ -1484,10 +1487,11 @@ impl WorkflowTopologyPrior {
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "Pareto prompt/topology prior profile={} from {} comparable executions (success={:.0}%, quality={}, avg_latency_ms={}, avg_tokens={}, avg_tools={:.1}). Treat this only as a prior: keep it when it fits the current query, otherwise design a better graph.\n{}",
+            "Pareto prompt/topology prior profile={} from {} comparable executions (success={:.0}%, confidence={:.2}, quality={}, avg_latency_ms={}, avg_tokens={}, avg_tools={:.1}). Treat this only as a prior: keep it when it fits the current query, otherwise design a better graph.\n{}",
             self.profile_id,
             self.examples,
             self.success_rate * 100.0,
+            self.success_confidence,
             quality,
             self.average_latency_ms,
             self.average_total_tokens,
@@ -1551,8 +1555,10 @@ impl WorkflowSearchTeacher {
                 &prior.task_class == task_class
                     && prior.effort == effort
                     && prior.max_models <= max_models
-                    && prior.examples >= 2
-                    && prior.success_rate >= 0.6
+                    && prior.examples >= LEARNED_ROUTER_MIN_EXAMPLES
+                    && prior.success_confidence >= LEARNED_ROUTER_MIN_SUCCESS_CONFIDENCE
+                    && prior.average_quality.unwrap_or(prior.success_rate)
+                        >= ADAPTIVE_WORKFLOW_PRIOR_MIN_QUALITY
                     && prior
                         .steps
                         .iter()
@@ -1588,11 +1594,13 @@ fn workflow_prior_dominates(left: &WorkflowTopologyPrior, right: &WorkflowTopolo
     let left_quality = left.average_quality.unwrap_or(left.success_rate);
     let right_quality = right.average_quality.unwrap_or(right.success_rate);
     let no_worse = left.success_rate >= right.success_rate
+        && left.success_confidence >= right.success_confidence
         && left_quality >= right_quality
         && left.average_latency_ms <= right.average_latency_ms
         && left.average_total_tokens <= right.average_total_tokens
         && left.average_tool_calls <= right.average_tool_calls;
     let strictly_better = left.success_rate > right.success_rate
+        || left.success_confidence > right.success_confidence
         || left_quality > right_quality
         || left.average_latency_ms < right.average_latency_ms
         || left.average_total_tokens < right.average_total_tokens
@@ -1605,7 +1613,9 @@ fn compare_workflow_priors(
     right: &WorkflowTopologyPrior,
     effort: &str,
 ) -> std::cmp::Ordering {
-    match effort {
+    left.success_confidence
+        .total_cmp(&right.success_confidence)
+        .then_with(|| match effort {
         "fast" => right
             .average_latency_ms
             .cmp(&left.average_latency_ms)
@@ -1618,7 +1628,7 @@ fn compare_workflow_priors(
             .then_with(|| left.success_rate.total_cmp(&right.success_rate))
             .then_with(|| right.average_latency_ms.cmp(&left.average_latency_ms)),
         _ => left.score.cmp(&right.score),
-    }
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -1667,6 +1677,7 @@ impl WorkflowPriorAccumulator {
     ) -> WorkflowTopologyPrior {
         let divisor = self.examples.max(1) as u64;
         let success_rate = self.successes as f32 / self.examples.max(1) as f32;
+        let success_confidence = wilson_lower_bound(self.successes, self.examples);
         let average_quality =
             (self.quality_examples > 0).then(|| self.quality_total / self.quality_examples as f32);
         let average_latency_ms = self.latency_ms / divisor;
@@ -1685,6 +1696,7 @@ impl WorkflowPriorAccumulator {
             steps: normalized_topology_steps(&self.plan),
             examples: self.examples,
             success_rate,
+            success_confidence,
             average_quality,
             average_latency_ms,
             average_total_tokens,
@@ -2123,9 +2135,21 @@ pub struct LearnedRoute {
     pub policy: OrchestrationPolicy,
     pub model: String,
     pub examples: usize,
+    pub successes: usize,
     pub success_rate: f32,
+    pub success_confidence: f64,
     pub average_latency_ms: u64,
     pub average_cost_proxy: u64,
+}
+
+const LEARNED_ROUTER_MIN_EXAMPLES: usize = 4;
+const LEARNED_ROUTER_MIN_SUCCESS_CONFIDENCE: f64 = 0.50;
+
+impl LearnedRoute {
+    pub fn evidence_ready(&self) -> bool {
+        self.examples >= LEARNED_ROUTER_MIN_EXAMPLES
+            && self.success_confidence >= LEARNED_ROUTER_MIN_SUCCESS_CONFIDENCE
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2460,7 +2484,7 @@ impl LearnedModelRouter {
         for (context_signature, candidates) in grouped {
             if let Some(((policy_label, model), accumulator)) = candidates
                 .into_iter()
-                .max_by(|(_, left), (_, right)| left.score().cmp(&right.score()))
+                .max_by(|(_, left), (_, right)| left.compare_preference(right))
             {
                 if let Some(policy) = parse_policy(&policy_label) {
                     routes.insert(
@@ -2473,7 +2497,9 @@ impl LearnedModelRouter {
                             policy,
                             model,
                             examples: accumulator.examples,
+                            successes: accumulator.successes,
                             success_rate: accumulator.success_rate(),
+                            success_confidence: accumulator.success_confidence(),
                             average_latency_ms: accumulator.average_latency_ms(),
                             average_cost_proxy: accumulator.average_cost_proxy(),
                         },
@@ -2503,11 +2529,11 @@ impl LearnedModelRouter {
         let Some(route) = self
             .routes
             .get(&context.learning_signature())
-            .or_else(|| self.routes.get(context.task_class.label()))
         else {
             return baseline;
         };
-        if !learned_policy_allowed(context, &route.policy)
+        if !route.evidence_ready()
+            || !learned_policy_allowed(context, &route.policy)
             || !context
                 .model_candidates
                 .iter()
@@ -2518,16 +2544,17 @@ impl LearnedModelRouter {
         let mut decision = self.fallback.decision(
             context,
             route.policy.clone(),
-            "historical executions selected a better policy and model for this context",
+            "historical executions provide sufficient evidence for this policy and model in the exact context",
         );
         decision.model = route.model.clone();
         decision.explanation = format!(
-            "class={} learned_policy={} learned_model={} examples={} success_rate={:.2}",
+            "class={} learned_policy={} learned_model={} examples={} success_rate={:.2} confidence={:.3}",
             context.task_class.label(),
             route.policy.label(),
             route.model,
             route.examples,
-            route.success_rate
+            route.success_rate,
+            route.success_confidence
         );
         decision
             .metadata
@@ -2538,6 +2565,10 @@ impl LearnedModelRouter {
         decision.metadata.insert(
             "learned_success_rate".to_string(),
             format!("{:.3}", route.success_rate),
+        );
+        decision.metadata.insert(
+            "learned_success_confidence".to_string(),
+            format!("{:.3}", route.success_confidence),
         );
         decision
     }
@@ -2550,9 +2581,7 @@ impl LearnedModelRouter {
     }
 
     pub fn learned_route_for_context(&self, context: &RoutingContext) -> Option<&LearnedRoute> {
-        self.routes
-            .get(&context.learning_signature())
-            .or_else(|| self.routes.get(context.task_class.label()))
+        self.routes.get(&context.learning_signature())
     }
 }
 
@@ -2584,6 +2613,10 @@ impl RouteAccumulator {
         }
     }
 
+    fn success_confidence(&self) -> f64 {
+        wilson_lower_bound(self.successes, self.examples)
+    }
+
     fn average_latency_ms(&self) -> u64 {
         if self.examples == 0 {
             0
@@ -2600,11 +2633,28 @@ impl RouteAccumulator {
         }
     }
 
-    fn score(&self) -> i64 {
-        (self.successes as i64 * 10_000)
-            - (self.average_cost_proxy() as i64)
-            - (self.average_latency_ms() as i64 / 100)
+    fn compare_preference(&self, other: &Self) -> std::cmp::Ordering {
+        self.success_confidence()
+            .total_cmp(&other.success_confidence())
+            .then_with(|| self.success_rate().total_cmp(&other.success_rate()))
+            .then_with(|| self.examples.cmp(&other.examples))
+            .then_with(|| other.average_latency_ms().cmp(&self.average_latency_ms()))
+            .then_with(|| other.average_cost_proxy().cmp(&self.average_cost_proxy()))
     }
+}
+
+fn wilson_lower_bound(successes: usize, trials: usize) -> f64 {
+    if trials == 0 {
+        return 0.0;
+    }
+    const Z: f64 = 1.959_963_984_540_054;
+    let n = trials as f64;
+    let rate = successes.min(trials) as f64 / n;
+    let z2 = Z * Z;
+    let denominator = 1.0 + z2 / n;
+    let center = rate + z2 / (2.0 * n);
+    let margin = Z * ((rate * (1.0 - rate) + z2 / (4.0 * n)) / n).sqrt();
+    ((center - margin) / denominator).clamp(0.0, 1.0)
 }
 
 fn learned_policy_allowed(context: &RoutingContext, policy: &OrchestrationPolicy) -> bool {
@@ -3283,11 +3333,31 @@ mod tests {
             },
             WorkflowExecutionTelemetry {
                 task_class: TaskClass::Research,
-                plan: fast_plan,
+                plan: fast_plan.clone(),
                 succeeded: true,
                 quality_score: Some(0.88),
                 latency_ms: 5_000,
                 total_tokens: 5_000,
+                tool_calls: 2,
+                fallback_used: false,
+            },
+            WorkflowExecutionTelemetry {
+                task_class: TaskClass::Research,
+                plan: fast_plan.clone(),
+                succeeded: true,
+                quality_score: Some(0.90),
+                latency_ms: 4_500,
+                total_tokens: 4_500,
+                tool_calls: 2,
+                fallback_used: false,
+            },
+            WorkflowExecutionTelemetry {
+                task_class: TaskClass::Research,
+                plan: fast_plan,
+                succeeded: true,
+                quality_score: Some(0.91),
+                latency_ms: 4_250,
+                total_tokens: 4_250,
                 tool_calls: 2,
                 fallback_used: false,
             },
@@ -3318,9 +3388,33 @@ mod tests {
             .best_prior(&TaskClass::Research, "pro", &allowed_models, 2)
             .expect("a stable prior should be available");
         assert_eq!(prior.steps.len(), 3);
-        assert_eq!(prior.examples, 2);
+        assert_eq!(prior.examples, 4);
         assert_eq!(prior.success_rate, 1.0);
+        assert!(prior.success_confidence >= LEARNED_ROUTER_MIN_SUCCESS_CONFIDENCE);
         assert!(prior.prompt_hint().contains("Treat this only as a prior"));
+    }
+
+    #[test]
+    fn search_teacher_withholds_under_evidenced_topology() {
+        let allowed_models = vec!["planner".to_string(), "reviewer".to_string()];
+        let plan = workflow_plan("under-evidenced", false);
+        let telemetry = (0..3)
+            .map(|_| WorkflowExecutionTelemetry {
+                task_class: TaskClass::Research,
+                plan: plan.clone(),
+                succeeded: true,
+                quality_score: Some(0.95),
+                latency_ms: 4_000,
+                total_tokens: 4_000,
+                tool_calls: 2,
+                fallback_used: false,
+            })
+            .collect::<Vec<_>>();
+
+        let teacher = WorkflowSearchTeacher::train(&telemetry);
+        assert!(teacher
+            .best_prior(&TaskClass::Research, "pro", &allowed_models, 2)
+            .is_none());
     }
 
     #[test]
@@ -3839,8 +3933,8 @@ mod tests {
         let context =
             RoutingContext::from_prompt("Research and compare local agent routers", candidates());
         let context_signature = context.learning_signature();
-        let telemetry = vec![
-            RoutingTelemetry {
+        let mut telemetry = (0..4)
+            .map(|_| RoutingTelemetry {
                 task_class: TaskClass::Research,
                 context_signature: context_signature.clone(),
                 selected_policy: OrchestrationPolicy::PlanExecuteReview,
@@ -3851,20 +3945,20 @@ mod tests {
                 tool_count: 0,
                 retrieval_count: 2,
                 user_override: false,
-            },
-            RoutingTelemetry {
-                task_class: TaskClass::Research,
-                context_signature,
-                selected_policy: OrchestrationPolicy::Single,
-                selected_model: "fast-mini".to_string(),
-                latency_ms: 200,
-                outcome: RoutingOutcome::Failed,
-                cost_proxy: 20,
-                tool_count: 0,
-                retrieval_count: 0,
-                user_override: false,
-            },
-        ];
+            })
+            .collect::<Vec<_>>();
+        telemetry.push(RoutingTelemetry {
+            task_class: TaskClass::Research,
+            context_signature,
+            selected_policy: OrchestrationPolicy::Single,
+            selected_model: "fast-mini".to_string(),
+            latency_ms: 200,
+            outcome: RoutingOutcome::Failed,
+            cost_proxy: 20,
+            tool_count: 0,
+            retrieval_count: 0,
+            user_override: false,
+        });
         let router = LearnedModelRouter::train(&telemetry);
         let decision = router.route(&context);
 
@@ -3887,7 +3981,7 @@ mod tests {
             RuleBasedRouter.route(&context).policy,
             OrchestrationPolicy::PlanExecuteReview
         );
-        let telemetry = (0..3)
+        let telemetry = (0..4)
             .map(|_| RoutingTelemetry {
                 task_class: TaskClass::General,
                 context_signature: context.learning_signature(),
@@ -3906,6 +4000,101 @@ mod tests {
         assert_eq!(decision.policy, OrchestrationPolicy::Single);
         assert_eq!(decision.model, "fast-mini");
         assert!(decision.explanation.contains("learned_policy=single"));
+    }
+
+    #[test]
+    fn learned_router_does_not_overfit_three_successful_traces() {
+        let prompt =
+            "Discuss this topic clearly and summarize the important distinctions. ".repeat(10);
+        let context = RoutingContext::from_prompt(&prompt, candidates());
+        let telemetry = (0..3)
+            .map(|_| RoutingTelemetry {
+                task_class: TaskClass::General,
+                context_signature: context.learning_signature(),
+                selected_policy: OrchestrationPolicy::Single,
+                selected_model: "fast-mini".to_string(),
+                latency_ms: 250,
+                outcome: RoutingOutcome::Succeeded,
+                cost_proxy: 80,
+                tool_count: 0,
+                retrieval_count: 0,
+                user_override: false,
+            })
+            .collect::<Vec<_>>();
+
+        let router = LearnedModelRouter::train(&telemetry);
+        let route = router
+            .learned_route_for_context(&context)
+            .expect("route evidence should remain observable");
+        assert!(!route.evidence_ready());
+        assert_eq!(router.route(&context), RuleBasedRouter.route(&context));
+    }
+
+    #[test]
+    fn learned_router_does_not_transfer_coarse_task_class_evidence() {
+        let prompt =
+            "Discuss this topic clearly and summarize the important distinctions. ".repeat(10);
+        let context = RoutingContext::from_prompt(&prompt, candidates());
+        let telemetry = (0..4)
+            .map(|_| RoutingTelemetry {
+                task_class: TaskClass::General,
+                context_signature: TaskClass::General.label().to_string(),
+                selected_policy: OrchestrationPolicy::Single,
+                selected_model: "fast-mini".to_string(),
+                latency_ms: 250,
+                outcome: RoutingOutcome::Succeeded,
+                cost_proxy: 80,
+                tool_count: 0,
+                retrieval_count: 0,
+                user_override: false,
+            })
+            .collect::<Vec<_>>();
+
+        let router = LearnedModelRouter::train(&telemetry);
+        assert!(router.learned_route_for_context(&context).is_none());
+        assert_eq!(router.route(&context), RuleBasedRouter.route(&context));
+    }
+
+    #[test]
+    fn learned_router_prefers_reliable_route_over_more_raw_successes() {
+        let prompt =
+            "Discuss this topic clearly and summarize the important distinctions. ".repeat(10);
+        let context = RoutingContext::from_prompt(&prompt, candidates());
+        let signature = context.learning_signature();
+        let mut telemetry = (0..4)
+            .map(|_| RoutingTelemetry {
+                task_class: TaskClass::General,
+                context_signature: signature.clone(),
+                selected_policy: OrchestrationPolicy::Single,
+                selected_model: "fast-mini".to_string(),
+                latency_ms: 250,
+                outcome: RoutingOutcome::Succeeded,
+                cost_proxy: 80,
+                tool_count: 0,
+                retrieval_count: 0,
+                user_override: false,
+            })
+            .collect::<Vec<_>>();
+        telemetry.extend((0..10).map(|index| RoutingTelemetry {
+            task_class: TaskClass::General,
+            context_signature: signature.clone(),
+            selected_policy: OrchestrationPolicy::PlanExecuteReview,
+            selected_model: "strong-vision".to_string(),
+            latency_ms: 900,
+            outcome: if index < 5 {
+                RoutingOutcome::Succeeded
+            } else {
+                RoutingOutcome::Failed
+            },
+            cost_proxy: 120,
+            tool_count: 0,
+            retrieval_count: 0,
+            user_override: false,
+        }));
+
+        let decision = LearnedModelRouter::train(&telemetry).route(&context);
+        assert_eq!(decision.policy, OrchestrationPolicy::Single);
+        assert_eq!(decision.model, "fast-mini");
     }
 
     #[test]

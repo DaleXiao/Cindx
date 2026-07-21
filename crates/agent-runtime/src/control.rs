@@ -120,6 +120,7 @@ pub struct RunControlSnapshot {
     model_call_limit: usize,
     tool_call_limit: usize,
     budget_extensions: usize,
+    stop_reason: Option<RunStopReason>,
     pending_steers: VecDeque<RunSteer>,
 }
 
@@ -229,11 +230,56 @@ impl AgentRunControl {
                 model_call_limit: snapshot.model_call_limit,
                 tool_call_limit: snapshot.tool_call_limit,
                 budget_extensions: snapshot.budget_extensions,
-                stop_reason: None,
+                stop_reason: snapshot.stop_reason,
                 active_model_calls: 0,
                 active_tool_calls: 0,
                 pending_steers: snapshot.pending_steers,
             }),
+        }
+    }
+
+    pub fn from_snapshot_for_continuation(
+        snapshot: RunControlSnapshot,
+    ) -> Result<Self, RunStopReason> {
+        match snapshot.stop_reason {
+            Some(RunStopReason::UserCancelled) => Err(RunStopReason::UserCancelled),
+            None => Ok(Self::from_snapshot(snapshot)),
+            Some(_) => {
+                let now = Instant::now();
+                let budget = snapshot.budget;
+                Ok(Self {
+                    budget,
+                    user_cancelled: AtomicBool::new(false),
+                    model_calls: AtomicUsize::new(0),
+                    tool_calls: AtomicUsize::new(0),
+                    state: Mutex::new(RunMutableState {
+                        started_at: now,
+                        last_progress_at: now,
+                        stage: "continuing".to_string(),
+                        detail: String::new(),
+                        partial_output: snapshot.partial_output,
+                        action_history: snapshot.action_history,
+                        recent_actions: snapshot.recent_actions,
+                        checkpoint_fingerprints: snapshot.checkpoint_fingerprints,
+                        checkpoint_count: snapshot.checkpoint_count,
+                        model_extension_checkpoint: snapshot.checkpoint_count,
+                        tool_extension_checkpoint: snapshot.checkpoint_count,
+                        model_call_limit: budget
+                            .initial_model_calls
+                            .min(budget.max_model_calls)
+                            .max(1),
+                        tool_call_limit: budget
+                            .initial_tool_calls
+                            .min(budget.max_tool_calls)
+                            .max(1),
+                        budget_extensions: snapshot.budget_extensions,
+                        stop_reason: None,
+                        active_model_calls: 0,
+                        active_tool_calls: 0,
+                        pending_steers: snapshot.pending_steers,
+                    }),
+                })
+            }
         }
     }
 
@@ -254,6 +300,7 @@ impl AgentRunControl {
             model_call_limit: state.model_call_limit,
             tool_call_limit: state.tool_call_limit,
             budget_extensions: state.budget_extensions,
+            stop_reason: state.stop_reason,
             pending_steers: state.pending_steers.clone(),
         }
     }
@@ -753,6 +800,68 @@ mod tests {
         assert_eq!(resumed.stop_reason(), None);
         assert_eq!(resumed.partial_output(), "verified work");
         assert_eq!(resumed.progress().model_calls, 1);
+    }
+
+    #[test]
+    fn continuation_starts_a_fresh_bounded_segment_after_budget_exhaustion() {
+        let control = AgentRunControl::with_budget(test_budget());
+        control.record_partial_output("verified work");
+        assert!(control.record_checkpoint("tool", "created file", "artifact-a"));
+        assert_eq!(control.request_steer("queue-a"), Ok(true));
+        assert_eq!(control.begin_model_call("one"), Ok(1));
+        assert_eq!(control.begin_model_call("two"), Ok(2));
+        assert_eq!(
+            control.begin_model_call("three"),
+            Err(RunStopReason::ModelCallBudgetExceeded)
+        );
+
+        let continued = AgentRunControl::from_snapshot_for_continuation(control.snapshot())
+            .expect("budget exhaustion should be resumable");
+        assert_eq!(continued.stop_reason(), None);
+        assert_eq!(continued.partial_output(), "verified work");
+        assert_eq!(continued.progress().model_calls, 0);
+        assert_eq!(continued.progress().checkpoints, 1);
+        assert_eq!(continued.begin_model_call("continued-one"), Ok(1));
+        assert_eq!(continued.begin_model_call("continued-two"), Ok(2));
+        assert_eq!(
+            continued.begin_model_call("continued-three"),
+            Err(RunStopReason::ModelCallBudgetExceeded)
+        );
+        assert_eq!(
+            continued
+                .take_pending_steers()
+                .into_iter()
+                .map(|steer| steer.queue_id)
+                .collect::<Vec<_>>(),
+            vec!["queue-a"]
+        );
+    }
+
+    #[test]
+    fn permission_resume_preserves_consumed_budget() {
+        let control = AgentRunControl::with_budget(test_budget());
+        assert_eq!(control.begin_model_call("planning"), Ok(1));
+        control.finish_model_call();
+
+        let resumed = AgentRunControl::from_snapshot(control.snapshot());
+        assert_eq!(resumed.stop_reason(), None);
+        assert_eq!(resumed.progress().model_calls, 1);
+        assert_eq!(resumed.begin_model_call("after-permission"), Ok(2));
+        assert_eq!(
+            resumed.begin_model_call("over-budget"),
+            Err(RunStopReason::ModelCallBudgetExceeded)
+        );
+    }
+
+    #[test]
+    fn user_cancelled_snapshot_cannot_continue() {
+        let control = AgentRunControl::with_budget(test_budget());
+        control.request_cancel();
+        assert_eq!(
+            AgentRunControl::from_snapshot_for_continuation(control.snapshot())
+                .expect_err("user cancellation must remain terminal"),
+            RunStopReason::UserCancelled
+        );
     }
 
     #[test]

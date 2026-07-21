@@ -312,6 +312,7 @@ function promptEvolutionProfileLabel(effort: string) {
 function promptEvolutionEffortStatus(
   effort: Phase4State["promptEvolution"]["efforts"][number]
 ) {
+  if (!effort.applicable) return "Not applicable";
   if (effort.evaluationInflight) return "Evaluating";
   if (effort.rolloutStatus === "canary") return `Canary ${effort.canaryPercent}%`;
   if (effort.rolloutStatus === "evaluating") return "Gathering evidence";
@@ -319,6 +320,35 @@ function promptEvolutionEffortStatus(
   if (effort.rolloutStatus === "promoted") return "Promoted";
   if (effort.status === "disabled") return "Off";
   return "Stable";
+}
+
+function promptEvolutionReadinessLabel(
+  effort: Phase4State["promptEvolution"]["efforts"][number]
+) {
+  switch (effort.readiness) {
+    case "not_applicable":
+      return "Single-model path";
+    case "disabled":
+      return "Enable evolution";
+    case "evaluating":
+      return "Running offline pair";
+    case "collecting_dataset":
+      return `Need ${Math.max(0, 3 - effort.datasetCases)} completed task${Math.max(0, 3 - effort.datasetCases) === 1 ? "" : "s"}`;
+    case "collecting_train_evidence":
+      return "Collect train evidence";
+    case "collecting_holdout_evidence":
+      return "Collect holdout evidence";
+    case "selecting_frontier":
+      return "Select Pareto frontier";
+    case "canary":
+      return "Measure canary";
+    case "rolled_back":
+      return "Explore after rollback";
+    case "promoted":
+      return "Monitor promoted profile";
+    default:
+      return effort.nextMode.replace(/_/g, " ");
+  }
 }
 
 function promptEvolutionProfileStatus(
@@ -3972,8 +4002,10 @@ export function App() {
                             {promptEvolutionEffortStatus(effort)}
                           </span>
                         </td>
-                        <td title={`${effort.reflectionPackets} feedback reflections · ${effort.learnedProfiles} learned profiles`}>
-                          {effort.pairedRuns}/3 · {effort.replayRuns}/4 · R{effort.reflectionPackets}
+                        <td title={`${effort.datasetCases} offline cases (${effort.datasetTrainCases} train · ${effort.datasetHoldoutCases} holdout) · ${effort.reflectionPackets} feedback reflections · ${effort.learnedProfiles} learned profiles`}>
+                          {effort.applicable
+                            ? `${effort.pairedRuns}/${effort.requiredPairedRuns} · ${effort.replayRuns}/${effort.requiredReplayRuns} · R${effort.reflectionPackets}`
+                            : "-"}
                         </td>
                         <td>{effort.championScore === null ? "-" : `${Math.round(effort.championScore * 100)}%`}</td>
                         <td>{effort.promotionConfidence === null ? "-" : `${Math.round(effort.promotionConfidence * 100)}%`}</td>
@@ -3981,7 +4013,7 @@ export function App() {
                           Gen {effort.evaluatedGenerations} · Ready {effort.readyProfiles}
                         </td>
                         <td>{effort.rollbackCount}</td>
-                        <td title={effort.freezeReason ?? undefined}>{effort.nextMode.replace(/_/g, " ")}</td>
+                        <td title={effort.freezeReason ?? undefined}>{promptEvolutionReadinessLabel(effort)}</td>
                       </tr>
                     ))}
                   </tbody>

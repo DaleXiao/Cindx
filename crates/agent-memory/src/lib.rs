@@ -134,14 +134,15 @@ pub fn extract_durable_memories(
         return Vec::new();
     }
 
-    let successful_tools = events
+    let outcome_evidence = events
         .iter()
         .filter(|event| {
             matches!(event.kind, EventKind::ToolCallFinished)
                 && event.metadata.get("status").map(String::as_str) == Some("succeeded")
+                && durable_tool_memory(event).is_some()
         })
         .collect::<Vec<_>>();
-    let evidence_ids = successful_tools
+    let evidence_ids = outcome_evidence
         .iter()
         .map(|event| event.id.0.clone())
         .take(8)
@@ -201,7 +202,7 @@ pub fn extract_durable_memories(
                     .metadata
                     .get("content")
                     .map(String::as_str)
-                    .unwrap_or("")
+                    .unwrap_or(""),
             ),
             900,
         );
@@ -211,13 +212,9 @@ pub fn extract_durable_memories(
         }
         records.push(memory_record(
             MemoryKind::Outcome,
-            if evidence_ids.is_empty() {
-                MemoryTrust::AssistantReported
-            } else {
-                MemoryTrust::ToolVerified
-            },
+            MemoryTrust::AssistantReported,
             content,
-            if evidence_ids.is_empty() { 58 } else { 76 },
+            if evidence_ids.is_empty() { 58 } else { 68 },
             event,
             project_id,
             session_id,
@@ -309,9 +306,9 @@ pub fn recall_memories_at(
             let overlap_score = overlap as f64 / query_terms.len().max(1) as f64;
             let exact = !normalized_query.is_empty()
                 && normalize_memory_text(&record.content).contains(&normalized_query);
-            let identifier_match = query_terms.intersection(&terms).any(|term| {
-                term.contains('_') || term.contains('/') || term.contains('.')
-            });
+            let identifier_match = query_terms
+                .intersection(&terms)
+                .any(|term| term.contains('_') || term.contains('/') || term.contains('.'));
             if (overlap == 0 && !exact)
                 || (!exact && overlap < 2 && query_terms.len() > 3 && !identifier_match)
             {
@@ -428,7 +425,11 @@ pub fn fuse_memory_recalls_at(
 
         if let Some(existing) = fused.get_mut(&record.id) {
             existing.score = existing.score * 0.7 + semantic_score * 0.3;
-            if !existing.reasons.iter().any(|reason| reason == "semantic_vector") {
+            if !existing
+                .reasons
+                .iter()
+                .any(|reason| reason == "semantic_vector")
+            {
                 existing.reasons.push("semantic_vector".to_string());
             }
         } else if semantic_score >= 0.18 {
@@ -507,7 +508,10 @@ pub fn record_memory_observed_uses(
     output: &str,
     observed_at_ms: u64,
 ) -> Vec<String> {
-    let recalled = recalled_ids.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let recalled = recalled_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
     let output_terms = memory_terms(output);
     let normalized_output = normalize_memory_text(output);
     let mut used = Vec::new();
@@ -1616,8 +1620,45 @@ mod tests {
                 && record.content.contains("src/session.ts")
         }));
         assert!(records.iter().any(|record| {
-            record.kind == MemoryKind::Outcome && record.trust == MemoryTrust::ToolVerified
+            record.kind == MemoryKind::Outcome
+                && record.trust == MemoryTrust::AssistantReported
+                && record.source_event_ids == vec!["event-2".to_string()]
         }));
+    }
+
+    #[test]
+    fn unrelated_successful_tool_does_not_verify_assistant_outcome() {
+        let events = vec![
+            event(
+                1,
+                EventKind::ToolCallFinished,
+                "Tool finished",
+                [
+                    ("tool", "shell.run"),
+                    ("status", "succeeded"),
+                    ("result_command", "ls -la"),
+                ],
+            ),
+            event(
+                2,
+                EventKind::MessageAdded,
+                "Assistant message",
+                [
+                    ("role", "assistant"),
+                    ("content", "Implemented the requested architecture changes."),
+                ],
+            ),
+            event(3, EventKind::TaskStatusChanged, "Agent task completed", []),
+        ];
+
+        let records = extract_durable_memories(&events, "project-a", "session-a");
+        let outcome = records
+            .iter()
+            .find(|record| record.kind == MemoryKind::Outcome)
+            .expect("assistant outcome should remain available as a low-trust memory");
+
+        assert_eq!(outcome.trust, MemoryTrust::AssistantReported);
+        assert_eq!(outcome.source_event_ids, vec!["event-2".to_string()]);
     }
 
     #[test]
@@ -1712,25 +1753,15 @@ mod tests {
         let semantic_scores = [(ledger.records[0].id.clone(), 0.91)]
             .into_iter()
             .collect::<BTreeMap<_, _>>();
-        let recalls = fuse_memory_recalls_at(
-            &ledger,
-            lexical,
-            &semantic_scores,
-            Some("session-b"),
-            4,
-            10,
-        );
+        let recalls =
+            fuse_memory_recalls_at(&ledger, lexical, &semantic_scores, Some("session-b"), 4, 10);
 
         assert_eq!(recalls.len(), 1);
-        assert!(recalls[0]
-            .reasons
-            .contains(&"semantic_vector".to_string()));
+        assert!(recalls[0].reasons.contains(&"semantic_vector".to_string()));
         assert!(recalls[0]
             .reasons
             .contains(&"trust:user_stated".to_string()));
-        assert!(recalls[0]
-            .reasons
-            .contains(&"cross_session".to_string()));
+        assert!(recalls[0].reasons.contains(&"cross_session".to_string()));
     }
 
     #[test]
@@ -1788,7 +1819,10 @@ mod tests {
         );
 
         assert_eq!(recalls.len(), 1);
-        assert!(recalls[0].record.content.contains("traffic light vertical position"));
+        assert!(recalls[0]
+            .record
+            .content
+            .contains("traffic light vertical position"));
     }
 
     #[test]
@@ -1862,12 +1896,7 @@ mod tests {
                     ("content", "Always keep sidebar white material accessible"),
                 ],
             ),
-            event(
-                21,
-                EventKind::TaskStatusChanged,
-                "Agent task completed",
-                [],
-            ),
+            event(21, EventKind::TaskStatusChanged, "Agent task completed", []),
         ];
         merge_memory_records(
             &mut ledger,
@@ -1924,7 +1953,10 @@ mod tests {
                 2,
                 EventKind::MessageAdded,
                 "Assistant message",
-                [("role", "assistant"), ("content", "Yes, I can help with code.")],
+                [
+                    ("role", "assistant"),
+                    ("content", "Yes, I can help with code."),
+                ],
             ),
             event(3, EventKind::TaskStatusChanged, "Agent task completed", []),
         ];
@@ -1936,7 +1968,10 @@ mod tests {
                 1,
                 EventKind::MessageAdded,
                 "User message",
-                [("role", "user"), ("content", "Should I always use compact mode?")],
+                [
+                    ("role", "user"),
+                    ("content", "Should I always use compact mode?"),
+                ],
             ),
             event(2, EventKind::TaskStatusChanged, "Agent task completed", []),
         ];

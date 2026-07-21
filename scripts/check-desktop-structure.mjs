@@ -50,6 +50,9 @@ const collaborationServiceSource = read(
 const agentLoopServiceSource = read(
   "apps/desktop/src-tauri/src/agent_loop_service.rs"
 );
+const agentRecoveryServiceSource = read(
+  "apps/desktop/src-tauri/src/agent_recovery_service.rs"
+);
 const parallelExecutionSource = read(
   "apps/desktop/src-tauri/src/parallel_execution.rs"
 );
@@ -60,6 +63,15 @@ const queueServiceSource = read("apps/desktop/src-tauri/src/queue_service.rs");
 const runLifecycleSource = read("apps/desktop/src-tauri/src/run_lifecycle.rs");
 const sessionProjectionSource = read(
   "apps/desktop/src-tauri/src/session_projection.rs"
+);
+const sessionContextServiceSource = read(
+  "apps/desktop/src-tauri/src/session_context_service.rs"
+);
+const sessionTitleServiceSource = read(
+  "apps/desktop/src-tauri/src/session_title_service.rs"
+);
+const toolRuntimeServiceSource = read(
+  "apps/desktop/src-tauri/src/tool_runtime_service.rs"
 );
 const scheduleSource = read("apps/desktop/src-tauri/src/schedule.rs");
 const cargoToml = read("apps/desktop/src-tauri/Cargo.toml");
@@ -371,6 +383,28 @@ assert(
     tauriBridge.includes("sessionId: string | null") &&
     tauriBridge.includes("reset: boolean"),
   "Agent output must stream by session and Stop must cancel the active provider request"
+);
+assert(
+  runControlSource.includes("from_snapshot_for_continuation") &&
+    runControlSource.includes("user_cancelled_snapshot_cannot_continue") &&
+    runControlSource.includes("permission_resume_preserves_consumed_budget") &&
+    runControlSource.includes(
+      "continuation_starts_a_fresh_bounded_segment_after_budget_exhaustion"
+    ) &&
+    rustLib.includes("begin_agent_run_control_for_continuation") &&
+    rustLib.includes("suspended_agent_run_control_snapshot"),
+  "Paused long-running work must continue in a fresh bounded segment without weakening permission or cancellation semantics"
+);
+assert(
+  rustLib.includes("mod tool_runtime_service;") &&
+    rustLib.includes("completed_tool_result(&store, &invocation)") &&
+    toolRuntimeServiceSource.includes('TOOL_RESULT_SCHEMA: &str = "cindx.tool-result.v1"') &&
+    toolRuntimeServiceSource.includes("tool_input_fingerprint") &&
+    toolRuntimeServiceSource.includes("idempotent_replay") &&
+    toolRuntimeServiceSource.includes("retryable_failure_is_not_replayed") &&
+    agentStorageSource.includes("list_by_task_and_tool_call_id") &&
+    agentStorageSource.includes("idx_events_task_tool_call_sequence"),
+  "Tool execution must persist metrics and replay only exact non-retryable completed calls through an indexed journal"
 );
 assert(
   rustLib.includes("fn prepare_run_knowledge_contexts(") &&
@@ -852,6 +886,15 @@ assert(
   "Long sessions must virtualize variable-height rows instead of mounting the full transcript"
 );
 assert(
+  sessionThreadSource.includes("SESSION_THREAD_PROJECTION_CACHE_LIMIT = 4") &&
+    sessionThreadSource.includes(
+      "useRef<Map<string, SessionThreadProjection>>(new Map())"
+    ) &&
+    sessionThreadSource.includes("readSessionState(projectionCacheRef.current, sessionId)") &&
+    sessionThreadSource.includes("SESSION_THREAD_PROJECTION_CACHE_LIMIT\n      );"),
+  "Session switching must reuse a small bounded projection cache without retaining every long transcript"
+);
+assert(
   styles.includes(".session-thread::-webkit-scrollbar") &&
     styles.includes("scrollbar-width: none") &&
     styles.includes(".thread-minimap-position") &&
@@ -983,7 +1026,9 @@ assert(
     rustLib.includes("MAX_AGENT_MODEL_TRANSPORT_ATTEMPTS") &&
     rustLib.includes("is_transient_model_transport_error") &&
     rustLib.includes('"continuation_available".to_string()') &&
-    rustLib.includes('"stop_reason".to_string(), "app_restarted".to_string()') &&
+    agentRecoveryServiceSource.includes(
+      '"stop_reason".to_string(), "app_restarted".to_string()'
+    ) &&
     rustLib.includes("startup_recovery_preserves_unfinished_agent_runs_as_continuations") &&
     tauriBridge.includes("canContinue: boolean"),
   "Safety stops and app restarts must retain resumable state and expose a continuation action"
@@ -1642,12 +1687,12 @@ assert(
   "Settings must use persistent left tabs and right-side details"
 );
 assert(
-  rustLib.includes("persist_completed_conversation_title") &&
-    rustLib.includes("spawn_semantic_session_title_refinement") &&
-    rustLib.includes("semantic_session_title") &&
-    rustLib.includes("automatic_conversation_title") &&
-    rustLib.includes("can_apply_generated_session_title") &&
-    rustLib.includes('app.emit("session-title-updated"') &&
+  sessionTitleServiceSource.includes("persist_completed_conversation_title") &&
+    sessionTitleServiceSource.includes("spawn_semantic_session_title_refinement") &&
+    sessionTitleServiceSource.includes("semantic_session_title") &&
+    sessionTitleServiceSource.includes("automatic_conversation_title") &&
+    sessionTitleServiceSource.includes("can_apply_generated_session_title") &&
+    sessionTitleServiceSource.includes('app.emit("session-title-updated"') &&
     appSource.includes("subscribeToSessionTitleUpdates") &&
     tauriBridge.includes('listen<string>("session-title-updated"'),
   "New sessions must receive a non-blocking semantic title without overwriting manual names"
@@ -1766,7 +1811,9 @@ assert(
   "Agent tool execution must release the shared event-store lock"
 );
 assert(
-  rustLib.includes('join("Application Support").join("Cindx")') &&
+  /join\("Library"\)\s*\.join\("Application Support"\)\s*\.join\("Cindx"\)/.test(
+    rustLib
+  ) &&
     rustLib.includes("persistent state unavailable; using in-memory state") &&
     rustLib.includes("install_startup_panic_log") &&
     rustLib.includes('std::env::var("CINDX_STARTUP_PROBE")') &&
@@ -1800,11 +1847,12 @@ assert(
 assert(
   rustLib.includes('AGENT_RECOVERY_SCHEMA: &str = "cindx.agent-recovery.v1"') &&
     rustLib.includes("AgentRecoveryEnvelope") &&
-    rustLib.includes("claim_agent_recovery_envelope") &&
-    rustLib.includes("recovery_safe_transcript") &&
-    rustLib.includes('"Agent task paused"') &&
+    agentRecoveryServiceSource.includes("claim_agent_recovery_envelope") &&
+    agentRecoveryServiceSource.includes("recovery_safe_transcript") &&
+    agentRecoveryServiceSource.includes("reconcile_interrupted_agent_runs") &&
+    agentRecoveryServiceSource.includes('"Agent task paused"') &&
     rustLib.includes('"continuation_replay"') &&
-    rustLib.includes('"app_restarted_waiting_for_permission"') &&
+    agentRecoveryServiceSource.includes('"app_restarted_waiting_for_permission"') &&
     tauriBridge.includes('| "paused"'),
   "Long agent runs must recover durably without replaying unknown tool outcomes"
 );
@@ -2243,14 +2291,14 @@ assert(
 );
 assert(
   rustLib.includes("context_checkpoint_path_for_session") &&
-    rustLib.includes("prepare_session_history_context") &&
-    rustLib.includes("SessionCompactionPlan") &&
+    sessionContextServiceSource.includes("prepare_session_history_context") &&
+    sessionContextServiceSource.includes("SessionCompactionPlan") &&
     rustLib.includes('CONTEXT_COMPACTION_VERSION: &str = "hybrid_v3_coverage"') &&
-    rustLib.includes("ContextCheckpointManifest") &&
-    rustLib.includes("covered_prefix_sha256") &&
-    rustLib.includes("recent_history_start") &&
+    sessionContextServiceSource.includes("ContextCheckpointManifest") &&
+    sessionContextServiceSource.includes("covered_prefix_sha256") &&
+    sessionContextServiceSource.includes("recent_history_start") &&
     agentMemorySource.includes("conversation_memory_to_markdown") &&
-    rustLib.includes("Session context restored for agent run") &&
+    sessionContextServiceSource.includes("Session context restored for agent run") &&
     rustLib.includes("event_matches_context"),
   "Context compaction must preserve session-scoped operational and conversational memory"
 );

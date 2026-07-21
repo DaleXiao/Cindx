@@ -6,6 +6,10 @@ import {
   sessionMinimapMarkers,
   updateSessionThreadProjection
 } from "../src/components/sessionThreadProjection.ts";
+import {
+  readSessionState,
+  rememberSessionState
+} from "../src/sessionRuntimeModel.ts";
 
 function message(
   sequence: number,
@@ -158,4 +162,26 @@ test("projection falls back safely when history is prepended", () => {
   const rebuilt = buildSessionThreadProjection(messages, [], 32);
 
   assert.deepEqual(projectionView(updated), projectionView(rebuilt));
+});
+
+test("session switching reuses a bounded cached projection", () => {
+  const cache = new Map<string, ReturnType<typeof buildSessionThreadProjection>>();
+  const firstMessages = [message(1, "user", "First", 100)];
+  const secondMessages = [message(2, "user", "Second", 200)];
+  const firstTimeline: ReturnType<typeof event>[] = [];
+  const first = buildSessionThreadProjection(firstMessages, firstTimeline, 32);
+  const second = buildSessionThreadProjection(secondMessages, [], 32);
+  rememberSessionState(cache, "first", first, 2);
+  rememberSessionState(cache, "second", second, 2);
+
+  const cached = readSessionState(cache, "first");
+  assert.equal(cached, first);
+  assert.equal(
+    updateSessionThreadProjection(cached, firstMessages, firstTimeline, 32),
+    first
+  );
+
+  const third = buildSessionThreadProjection([message(3, "user", "Third", 300)], [], 32);
+  rememberSessionState(cache, "third", third, 2);
+  assert.deepEqual([...cache.keys()], ["first", "third"]);
 });

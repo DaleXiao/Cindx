@@ -273,12 +273,13 @@ impl SqliteStore {
             "
             insert into events(
               id, task_id, sequence, timestamp_ms, kind, summary, metadata_text,
-              project_id, session_id, agent_run_id, collaboration_id, prompt_profile
+              project_id, session_id, agent_run_id, collaboration_id, prompt_profile,
+              tool_call_id
             )
             values (
               ?1, ?2,
               (select coalesce(max(sequence), 0) + 1 from events where task_id = ?2),
-              ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+              ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
             )
             ",
         )?;
@@ -294,6 +295,7 @@ impl SqliteStore {
         statement.bind_optional_text(9, metadata.get("agent_run_id").map(String::as_str))?;
         statement.bind_optional_text(10, metadata.get("collaboration_id").map(String::as_str))?;
         statement.bind_optional_text(11, metadata.get("prompt_profile").map(String::as_str))?;
+        statement.bind_optional_text(12, metadata.get("tool_call_id").map(String::as_str))?;
         statement.expect_done()
     }
 
@@ -380,6 +382,22 @@ impl SqliteStore {
         )?;
         statement.bind_text(1, &task_id.0)?;
         statement.bind_text(2, &row)?;
+        events_from_statement(&mut statement)
+    }
+
+    pub fn list_by_task_and_tool_call_id(
+        &self,
+        task_id: &TaskId,
+        tool_call_id: &str,
+    ) -> Result<Vec<Event>, StorageError> {
+        let mut statement = self.prepare(
+            "select id, task_id, sequence, timestamp_ms, kind, summary, metadata_text
+             from events
+             where task_id = ?1 and tool_call_id = ?2
+             order by sequence asc",
+        )?;
+        statement.bind_text(1, &task_id.0)?;
+        statement.bind_text(2, tool_call_id)?;
         events_from_statement(&mut statement)
     }
 
@@ -835,8 +853,9 @@ impl SqliteStore {
                  session_id = ?4,
                  agent_run_id = ?5,
                  collaboration_id = ?6,
-                 prompt_profile = ?7
-             where id = ?8",
+                 prompt_profile = ?7,
+                 tool_call_id = ?8
+             where id = ?9",
         )?;
         statement.bind_text(1, &event.summary)?;
         statement.bind_text(2, &metadata_to_text(&event.metadata))?;
@@ -849,7 +868,8 @@ impl SqliteStore {
         )?;
         statement
             .bind_optional_text(7, event.metadata.get("prompt_profile").map(String::as_str))?;
-        statement.bind_text(8, &event.id.0)?;
+        statement.bind_optional_text(8, event.metadata.get("tool_call_id").map(String::as_str))?;
+        statement.bind_text(9, &event.id.0)?;
         statement.expect_done()
     }
 
@@ -868,7 +888,8 @@ impl SqliteStore {
               session_id text,
               agent_run_id text,
               collaboration_id text,
-              prompt_profile text
+              prompt_profile text,
+              tool_call_id text
             );
 
             create index if not exists idx_events_task_sequence
@@ -911,6 +932,9 @@ impl SqliteStore {
             ",
         )?;
         self.ensure_event_scope_columns()?;
+        if !self.table_has_column("events", "tool_call_id")? {
+            self.exec_batch("alter table events add column tool_call_id text")?;
+        }
         self.ensure_permission_scope_columns()?;
         self.exec_batch(
             "
@@ -924,6 +948,8 @@ impl SqliteStore {
               on events(task_id, collaboration_id, sequence);
             create index if not exists idx_events_task_prompt_profile_sequence
               on events(task_id, prompt_profile, sequence);
+            create index if not exists idx_events_task_tool_call_sequence
+              on events(task_id, tool_call_id, sequence);
             create index if not exists idx_permission_requests_task_session_time
               on permission_requests(task_id, session_id, requested_at_ms desc);
             create index if not exists idx_permission_requests_task_session_run
@@ -1159,9 +1185,10 @@ impl EventStore for SqliteStore {
             "
             insert into events(
               id, task_id, sequence, timestamp_ms, kind, summary, metadata_text,
-              project_id, session_id, agent_run_id, collaboration_id, prompt_profile
+              project_id, session_id, agent_run_id, collaboration_id, prompt_profile,
+              tool_call_id
             )
-            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             ",
         )?;
 
@@ -1181,6 +1208,10 @@ impl EventStore for SqliteStore {
         )?;
         statement
             .bind_optional_text(12, event.metadata.get("prompt_profile").map(String::as_str))?;
+        statement.bind_optional_text(
+            13,
+            event.metadata.get("tool_call_id").map(String::as_str),
+        )?;
         statement.expect_done()
     }
 
@@ -2221,6 +2252,49 @@ mod tests {
         assert!(plan
             .iter()
             .any(|step| step.contains("idx_events_task_project_sequence")));
+    }
+
+    #[test]
+    fn tool_call_queries_use_the_dedicated_index() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("task-tool-call".to_string());
+        store
+            .append(Event {
+                id: EventId("event-tool-call".to_string()),
+                task_id: task_id.clone(),
+                sequence: 1,
+                timestamp_ms: 100,
+                kind: EventKind::ToolCallFinished,
+                summary: "tool finished".to_string(),
+                metadata: [("tool_call_id".to_string(), "call-1".to_string())]
+                    .into_iter()
+                    .collect(),
+            })
+            .expect("event should append");
+
+        let events = store
+            .list_by_task_and_tool_call_id(&task_id, "call-1")
+            .expect("tool call events should load");
+        assert_eq!(events.len(), 1);
+
+        let mut statement = store
+            .prepare(
+                "explain query plan
+                 select id, task_id, sequence, timestamp_ms, kind, summary, metadata_text
+                 from events
+                 where task_id = ?1 and tool_call_id = ?2
+                 order by sequence asc",
+            )
+            .unwrap();
+        statement.bind_text(1, "task").unwrap();
+        statement.bind_text(2, "call").unwrap();
+        let mut plan = Vec::new();
+        while statement.step().unwrap() == StepResult::Row {
+            plan.push(statement.column_text(3).unwrap());
+        }
+        assert!(plan
+            .iter()
+            .any(|step| step.contains("idx_events_task_tool_call_sequence")));
     }
 
     #[test]
