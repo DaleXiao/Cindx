@@ -410,6 +410,7 @@ export type PromptEvolutionProfileState = {
 
 export type PromptEvolutionEffortState = {
   effort: string;
+  applicable: boolean;
   status: string;
   championId: string | null;
   championScore: number | null;
@@ -430,6 +431,12 @@ export type PromptEvolutionEffortState = {
   promotionConfidence: number | null;
   rollbackCount: number;
   rolloutStatus: string;
+  readiness: string;
+  datasetCases: number;
+  datasetTrainCases: number;
+  datasetHoldoutCases: number;
+  requiredPairedRuns: number;
+  requiredReplayRuns: number;
 };
 
 export type PromptEvolutionState = {
@@ -893,6 +900,7 @@ let browserPhase4State: Phase4State = {
     evaluationInflight: false,
     efforts: ["fast", "auto", "pro"].map((effort) => ({
       effort,
+      applicable: effort !== "fast",
       status: "exploring",
       championId: null,
       championScore: null,
@@ -912,7 +920,13 @@ let browserPhase4State: Phase4State = {
       canaryPercent: 0,
       promotionConfidence: null,
       rollbackCount: 0,
-      rolloutStatus: "stable"
+      rolloutStatus: "stable",
+      readiness: effort === "fast" ? "not_applicable" : "collecting_dataset",
+      datasetCases: 0,
+      datasetTrainCases: 0,
+      datasetHoldoutCases: 0,
+      requiredPairedRuns: 3,
+      requiredReplayRuns: 4
     })),
     profiles: ["fast", "auto", "pro"].map((effort) => ({
       id: `seed-${effort}-v1`,

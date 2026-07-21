@@ -47,6 +47,7 @@ import type {
   ChatMessageView,
   TimelineEntry
 } from "../tauri";
+import { readSessionState, rememberSessionState } from "../sessionRuntimeModel";
 import { DisclosureTriangle } from "./DisclosureTriangle";
 import { TraceStatusIcon } from "./TraceStatusIcon";
 import {
@@ -107,6 +108,7 @@ const MIN_MINIMAP_MARKERS = 2;
 const MAX_MINIMAP_MARKERS = 32;
 const MINIMAP_MARKER_GAP = 12;
 const LATEST_OUTPUT_THRESHOLD = 48;
+const SESSION_THREAD_PROJECTION_CACHE_LIMIT = 4;
 
 function ThreadFind({
   open,
@@ -922,10 +924,7 @@ export const SessionThread = memo(function SessionThread({
   const lastScrollTopRef = useRef(0);
   const historyLoadRequestedRef = useRef(false);
   const prependScrollHeightRef = useRef<number | null>(null);
-  const projectionCacheRef = useRef<{
-    sessionId: string | null;
-    projection: SessionThreadProjection;
-  } | null>(null);
+  const projectionCacheRef = useRef<Map<string, SessionThreadProjection>>(new Map());
   const previousThreadRef = useRef<{
     sessionId: string | null;
     firstId: string | null;
@@ -1047,17 +1046,23 @@ export const SessionThread = memo(function SessionThread({
     artifactState.sessionId === sessionId ? artifactState.artifacts : [];
 
   const projection = useMemo(() => {
-    const previous =
-      projectionCacheRef.current?.sessionId === sessionId
-        ? projectionCacheRef.current.projection
-        : null;
+    const previous = sessionId
+      ? readSessionState(projectionCacheRef.current, sessionId)
+      : null;
     const next = updateSessionThreadProjection(
       previous,
       messages,
       timeline,
       MAX_MINIMAP_MARKERS
     );
-    projectionCacheRef.current = { sessionId, projection: next };
+    if (sessionId) {
+      rememberSessionState(
+        projectionCacheRef.current,
+        sessionId,
+        next,
+        SESSION_THREAD_PROJECTION_CACHE_LIMIT
+      );
+    }
     return next;
   }, [messages, sessionId, timeline]);
   const { items, rows: threadRows, rowIndexByItemId } = projection;

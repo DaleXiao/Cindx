@@ -1,0 +1,385 @@
+use agent_core::{
+    Event, EventKind, Metadata, ToolArtifact, ToolCallId, ToolContent, ToolFailure, ToolInvocation,
+    ToolOutcomeStatus, ToolResult,
+};
+use agent_storage::{SqliteStore, StorageError};
+use orchestrator::sha256_hex;
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+pub(super) const TOOL_RESULT_SCHEMA: &str = "cindx.tool-result.v1";
+
+const EXECUTION_SCOPE_KEYS: [&str; 3] = ["session_id", "agent_run_id", "collaboration_id"];
+const EVENT_CONTEXT_KEYS: [&str; 5] = [
+    "project_id",
+    "session_id",
+    "agent_run_id",
+    "collaboration_id",
+    "prompt_profile",
+];
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PersistedToolArtifact {
+    path: String,
+    mime_type: Option<String>,
+    title: Option<String>,
+}
+
+pub(super) fn tool_input_fingerprint(tool_name: &str, input_json: &str) -> String {
+    let canonical_input = serde_json::from_str::<serde_json::Value>(input_json)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|_| input_json.trim().to_string());
+    sha256_hex(format!("{tool_name}\n{canonical_input}").as_bytes())
+}
+
+pub(super) fn tool_invocation_event_metadata(invocation: &ToolInvocation) -> Metadata {
+    let mut metadata = [
+        ("tool_call_id".to_string(), invocation.id.0.clone()),
+        ("tool".to_string(), invocation.tool_name.clone()),
+        (
+            "input_fingerprint".to_string(),
+            tool_input_fingerprint(&invocation.tool_name, &invocation.input_json),
+        ),
+        (
+            "input_length".to_string(),
+            invocation.input_json.len().to_string(),
+        ),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    metadata.extend(tool_invocation_context(invocation));
+    metadata
+}
+
+pub(super) fn tool_invocation_context(invocation: &ToolInvocation) -> Metadata {
+    EVENT_CONTEXT_KEYS
+        .iter()
+        .filter_map(|key| {
+            invocation
+                .metadata
+                .get(*key)
+                .map(|value| ((*key).to_string(), value.clone()))
+        })
+        .collect()
+}
+
+pub(super) fn finalize_tool_result(
+    result: &mut ToolResult,
+    invocation_id: &ToolCallId,
+    input_fingerprint: &str,
+    elapsed: Duration,
+) {
+    if result.invocation_id != *invocation_id {
+        result.metadata.insert(
+            "reported_invocation_id".to_string(),
+            result.invocation_id.0.clone(),
+        );
+        result.invocation_id = invocation_id.clone();
+    }
+    if matches!(result.status, ToolOutcomeStatus::Failed) && result.failure.is_none() {
+        result.failure = Some(ToolFailure {
+            code: "tool_execution_failed".to_string(),
+            message: result.output.clone(),
+            retryable: false,
+        });
+    }
+
+    result.metadata.insert(
+        "tool_result_schema".to_string(),
+        TOOL_RESULT_SCHEMA.to_string(),
+    );
+    result.metadata.insert(
+        "input_fingerprint".to_string(),
+        input_fingerprint.to_string(),
+    );
+    result.metadata.insert(
+        "latency_ms".to_string(),
+        elapsed.as_millis().min(u128::from(u64::MAX)).to_string(),
+    );
+    if let Some(failure) = &result.failure {
+        result
+            .metadata
+            .insert("failure_code".to_string(), failure.code.clone());
+        result.metadata.insert(
+            "failure_retryable".to_string(),
+            failure.retryable.to_string(),
+        );
+    }
+    if !result.artifacts.is_empty() {
+        let artifacts = result
+            .artifacts
+            .iter()
+            .map(|artifact| PersistedToolArtifact {
+                path: artifact.path.clone(),
+                mime_type: artifact.mime_type.clone(),
+                title: artifact.title.clone(),
+            })
+            .collect::<Vec<_>>();
+        if let Ok(encoded) = serde_json::to_string(&artifacts) {
+            result
+                .metadata
+                .insert("artifacts_json".to_string(), encoded);
+        }
+    }
+}
+
+pub(super) fn completed_tool_result(
+    store: &SqliteStore,
+    invocation: &ToolInvocation,
+) -> Result<Option<ToolResult>, StorageError> {
+    let events = store.list_by_task_and_tool_call_id(&invocation.task_id, &invocation.id.0)?;
+    Ok(completed_tool_result_from_events(&events, invocation))
+}
+
+fn completed_tool_result_from_events(
+    events: &[Event],
+    invocation: &ToolInvocation,
+) -> Option<ToolResult> {
+    let fingerprint = tool_input_fingerprint(&invocation.tool_name, &invocation.input_json);
+    events.iter().rev().find_map(|event| {
+        if event.kind != EventKind::ToolCallFinished
+            || event.metadata.get("tool").map(String::as_str) != Some(invocation.tool_name.as_str())
+            || event
+                .metadata
+                .get("result_input_fingerprint")
+                .map(String::as_str)
+                != Some(fingerprint.as_str())
+            || !execution_scope_matches(event, invocation)
+        {
+            return None;
+        }
+        result_from_finished_event(event, invocation)
+    })
+}
+
+fn execution_scope_matches(event: &Event, invocation: &ToolInvocation) -> bool {
+    EXECUTION_SCOPE_KEYS.iter().all(|key| {
+        invocation
+            .metadata
+            .get(*key)
+            .is_none_or(|expected| event.metadata.get(*key) == Some(expected))
+    })
+}
+
+fn result_from_finished_event(event: &Event, invocation: &ToolInvocation) -> Option<ToolResult> {
+    let status = match event.metadata.get("status").map(String::as_str)? {
+        "succeeded" => ToolOutcomeStatus::Succeeded,
+        "failed" => ToolOutcomeStatus::Failed,
+        _ => return None,
+    };
+    let retryable = event
+        .metadata
+        .get("result_failure_retryable")
+        .and_then(|value| value.parse::<bool>().ok());
+    if matches!(status, ToolOutcomeStatus::Failed) && retryable != Some(false) {
+        return None;
+    }
+
+    let output = event.metadata.get("output").cloned().unwrap_or_default();
+    let mut metadata = event
+        .metadata
+        .iter()
+        .filter_map(|(key, value)| {
+            key.strip_prefix("result_")
+                .map(|key| (key.to_string(), value.clone()))
+        })
+        .collect::<Metadata>();
+    metadata.insert("idempotent_replay".to_string(), "true".to_string());
+    metadata.insert("replayed_event_id".to_string(), event.id.0.clone());
+    metadata.insert(
+        "replayed_event_sequence".to_string(),
+        event.sequence.to_string(),
+    );
+    if event.metadata.get("output_omitted").map(String::as_str) == Some("true") {
+        metadata.insert("replayed_output_compacted".to_string(), "true".to_string());
+    }
+
+    let artifacts = metadata
+        .get("artifacts_json")
+        .and_then(|encoded| serde_json::from_str::<Vec<PersistedToolArtifact>>(encoded).ok())
+        .map(|artifacts| {
+            artifacts
+                .into_iter()
+                .map(|artifact| ToolArtifact {
+                    path: artifact.path,
+                    mime_type: artifact.mime_type,
+                    title: artifact.title,
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            metadata
+                .get("artifact_path")
+                .map(|path| {
+                    vec![ToolArtifact {
+                        path: path.clone(),
+                        mime_type: None,
+                        title: None,
+                    }]
+                })
+                .unwrap_or_default()
+        });
+    let failure = matches!(status, ToolOutcomeStatus::Failed).then(|| ToolFailure {
+        code: metadata
+            .get("failure_code")
+            .cloned()
+            .unwrap_or_else(|| "tool_execution_failed".to_string()),
+        message: output.clone(),
+        retryable: false,
+    });
+    let structured_output_json = metadata.get("structured_output").cloned();
+
+    Some(ToolResult {
+        invocation_id: ToolCallId(invocation.id.0.clone()),
+        status,
+        output: output.clone(),
+        content: vec![ToolContent::Text(output)],
+        structured_output_json,
+        artifacts,
+        failure,
+        metadata,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::{EventId, TaskId};
+
+    fn invocation(input_json: &str) -> ToolInvocation {
+        ToolInvocation {
+            id: ToolCallId("call-1".to_string()),
+            task_id: TaskId("task-1".to_string()),
+            tool_name: "filesystem.write".to_string(),
+            input_json: input_json.to_string(),
+            proposed_by_model: "test".to_string(),
+            metadata: [("session_id".to_string(), "session-1".to_string())]
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn finished_event(invocation: &ToolInvocation, result: &ToolResult) -> Event {
+        let mut metadata = tool_invocation_event_metadata(invocation);
+        metadata.insert("status".to_string(), "succeeded".to_string());
+        metadata.insert("output".to_string(), result.output.clone());
+        metadata.insert("session_id".to_string(), "session-1".to_string());
+        for (key, value) in &result.metadata {
+            metadata.insert(format!("result_{key}"), value.clone());
+        }
+        Event {
+            id: EventId("event-1".to_string()),
+            task_id: invocation.task_id.clone(),
+            sequence: 7,
+            timestamp_ms: 1,
+            kind: EventKind::ToolCallFinished,
+            summary: "finished".to_string(),
+            metadata,
+        }
+    }
+
+    #[test]
+    fn fingerprint_is_stable_for_equivalent_json_objects() {
+        assert_eq!(
+            tool_input_fingerprint("tool", r#"{"b":2,"a":1}"#),
+            tool_input_fingerprint("tool", r#"{"a":1,"b":2}"#)
+        );
+    }
+
+    #[test]
+    fn completed_result_requires_the_exact_input_and_scope() {
+        let invocation = invocation(r#"{"path":"a.txt"}"#);
+        let mut result = ToolResult::text(
+            invocation.id.clone(),
+            ToolOutcomeStatus::Succeeded,
+            "written",
+            Metadata::new(),
+        );
+        let fingerprint = tool_input_fingerprint(&invocation.tool_name, &invocation.input_json);
+        finalize_tool_result(
+            &mut result,
+            &invocation.id,
+            &fingerprint,
+            Duration::from_millis(12),
+        );
+        let event = finished_event(&invocation, &result);
+
+        assert!(completed_tool_result_from_events(&[event.clone()], &invocation).is_some());
+        assert!(completed_tool_result_from_events(
+            &[event.clone()],
+            &super::tests::invocation(r#"{"path":"b.txt"}"#)
+        )
+        .is_none());
+
+        let mut other_session = invocation.clone();
+        other_session
+            .metadata
+            .insert("session_id".to_string(), "session-2".to_string());
+        assert!(completed_tool_result_from_events(&[event], &other_session).is_none());
+    }
+
+    #[test]
+    fn completed_result_rehydrates_artifacts_and_replay_metadata() {
+        let invocation = invocation(r#"{"path":"a.txt"}"#);
+        let mut result = ToolResult::text(
+            invocation.id.clone(),
+            ToolOutcomeStatus::Succeeded,
+            "written",
+            Metadata::new(),
+        );
+        result.artifacts.push(ToolArtifact {
+            path: "/tmp/a.txt".to_string(),
+            mime_type: Some("text/plain".to_string()),
+            title: Some("Output".to_string()),
+        });
+        let fingerprint = tool_input_fingerprint(&invocation.tool_name, &invocation.input_json);
+        finalize_tool_result(
+            &mut result,
+            &invocation.id,
+            &fingerprint,
+            Duration::from_millis(12),
+        );
+        let replayed =
+            completed_tool_result_from_events(&[finished_event(&invocation, &result)], &invocation)
+                .expect("completed result should replay");
+
+        assert_eq!(replayed.output, "written");
+        assert_eq!(replayed.artifacts, result.artifacts);
+        assert_eq!(
+            replayed
+                .metadata
+                .get("idempotent_replay")
+                .map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn retryable_failure_is_not_replayed() {
+        let invocation = invocation(r#"{"path":"a.txt"}"#);
+        let mut result = ToolResult::text(
+            invocation.id.clone(),
+            ToolOutcomeStatus::Failed,
+            "temporary failure",
+            Metadata::new(),
+        );
+        result.failure = Some(ToolFailure {
+            code: "temporary".to_string(),
+            message: "temporary failure".to_string(),
+            retryable: true,
+        });
+        let fingerprint = tool_input_fingerprint(&invocation.tool_name, &invocation.input_json);
+        finalize_tool_result(
+            &mut result,
+            &invocation.id,
+            &fingerprint,
+            Duration::from_millis(12),
+        );
+        let mut event = finished_event(&invocation, &result);
+        event
+            .metadata
+            .insert("status".to_string(), "failed".to_string());
+
+        assert!(completed_tool_result_from_events(&[event], &invocation).is_none());
+    }
+}
