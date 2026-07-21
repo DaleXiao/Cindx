@@ -911,11 +911,13 @@ impl PromptParetoArchive {
                 rejected_profiles.push(genome.id.clone());
                 continue;
             }
-            let confidence = prompt_promotion_confidence(
-                observations
-                    .iter()
-                    .filter(|observation| observation.profile_id == genome.id),
-            );
+            let confidence = prompt_promotion_confidence(observations.iter().filter(
+                |observation| {
+                    observation.profile_id == genome.id
+                        && observation.split == PromptEvaluationSplit::Holdout
+                        && observation.mode == PromptEvaluationMode::ReplayExecution
+                },
+            ));
             if confidence.wilson_lower_bound < PROMOTION_MIN_LOWER_BOUND {
                 rejected_profiles.push(genome.id.clone());
                 continue;
@@ -1910,6 +1912,41 @@ mod tests {
     }
 
     #[test]
+    fn promotion_confidence_is_earned_on_holdout_not_training() {
+        let genome = ConductorPromptGenome::seed_for_effort("auto");
+        let mut observations = Vec::new();
+        for round in 0..12 {
+            let mut entry = observation(
+                &genome.id,
+                PromptEvaluationSplit::Train,
+                1.0,
+                100 + round,
+                100,
+            );
+            entry.relative_reward = Some(0.5);
+            observations.push(entry);
+        }
+        for round in 0..4 {
+            let mut entry = observation(
+                &genome.id,
+                PromptEvaluationSplit::Holdout,
+                0.9,
+                200 + round,
+                100,
+            );
+            entry.relative_reward = Some(-0.5);
+            observations.push(entry);
+        }
+
+        let archive =
+            PromptParetoArchive::build(std::slice::from_ref(&genome), &observations, 3, 4)
+                .unwrap();
+
+        assert!(archive.candidates.is_empty());
+        assert_eq!(archive.rejected_profiles, vec![genome.id]);
+    }
+
+    #[test]
     fn same_task_relative_winner_improves_robust_score() {
         let winner = ConductorPromptGenome::seed_for_effort("auto");
         let loser = ConductorPromptGenome {
@@ -1918,7 +1955,12 @@ mod tests {
         };
         let mut observations = Vec::new();
         for split in [PromptEvaluationSplit::Train, PromptEvaluationSplit::Holdout] {
-            for round in 0..2 {
+            let repeats = if split == PromptEvaluationSplit::Holdout {
+                4
+            } else {
+                2
+            };
+            for round in 0..repeats {
                 let mut winning = observation(&winner.id, split, 0.9, 1_000, 1_000);
                 winning.evaluation_id = format!("pair-{split:?}-{round}");
                 winning.opponent_profile_id = Some(loser.id.clone());
@@ -1949,12 +1991,16 @@ mod tests {
         let genomes = vec![fast.clone(), pro.clone(), dominated.clone()];
         let mut observations = Vec::new();
         for split in [PromptEvaluationSplit::Train, PromptEvaluationSplit::Holdout] {
-            observations.push(observation(&fast.id, split, 0.82, 1_000, 1_000));
-            observations.push(observation(&fast.id, split, 0.82, 1_000, 1_000));
-            observations.push(observation(&pro.id, split, 0.96, 4_000, 3_000));
-            observations.push(observation(&pro.id, split, 0.96, 4_000, 3_000));
-            observations.push(observation(&dominated.id, split, 0.75, 5_000, 4_000));
-            observations.push(observation(&dominated.id, split, 0.75, 5_000, 4_000));
+            let repeats = if split == PromptEvaluationSplit::Holdout {
+                4
+            } else {
+                2
+            };
+            for _ in 0..repeats {
+                observations.push(observation(&fast.id, split, 0.82, 1_000, 1_000));
+                observations.push(observation(&pro.id, split, 0.96, 4_000, 3_000));
+                observations.push(observation(&dominated.id, split, 0.75, 5_000, 4_000));
+            }
         }
         let archive = PromptParetoArchive::build(&genomes, &observations, 2, 2).unwrap();
         let ids = archive
@@ -1975,10 +2021,15 @@ mod tests {
         let genomes = vec![compact.clone(), expansive.clone()];
         let mut observations = Vec::new();
         for split in [PromptEvaluationSplit::Train, PromptEvaluationSplit::Holdout] {
-            observations.push(observation(&compact.id, split, 0.9, 2_000, 500));
-            observations.push(observation(&compact.id, split, 0.9, 2_000, 500));
-            observations.push(observation(&expansive.id, split, 0.9, 2_000, 8_000));
-            observations.push(observation(&expansive.id, split, 0.9, 2_000, 8_000));
+            let repeats = if split == PromptEvaluationSplit::Holdout {
+                4
+            } else {
+                2
+            };
+            for _ in 0..repeats {
+                observations.push(observation(&compact.id, split, 0.9, 2_000, 500));
+                observations.push(observation(&expansive.id, split, 0.9, 2_000, 8_000));
+            }
         }
 
         let archive = PromptParetoArchive::build(&genomes, &observations, 2, 2).unwrap();
@@ -2134,7 +2185,7 @@ mod tests {
         }
         let mut observations = Vec::new();
         for genome in &genomes {
-            for _ in 0..2 {
+            for _ in 0..4 {
                 observations.push(observation(
                     &genome.id,
                     PromptEvaluationSplit::Train,

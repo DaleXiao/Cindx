@@ -42,6 +42,7 @@ impl RunStopReason {
 pub struct RunBudget {
     pub max_duration: Duration,
     pub model_call_timeout: Duration,
+    pub tool_call_timeout: Duration,
     pub initial_model_calls: usize,
     pub max_model_calls: usize,
     pub model_calls_per_extension: usize,
@@ -58,6 +59,7 @@ impl RunBudget {
             "fast" => Self {
                 max_duration: Duration::from_secs(5 * 60),
                 model_call_timeout: Duration::from_secs(3 * 60),
+                tool_call_timeout: Duration::from_secs(5 * 60),
                 initial_model_calls: 6,
                 max_model_calls: 12,
                 model_calls_per_extension: 3,
@@ -70,6 +72,7 @@ impl RunBudget {
             "pro" => Self {
                 max_duration: Duration::from_secs(4 * 60 * 60),
                 model_call_timeout: Duration::from_secs(15 * 60),
+                tool_call_timeout: Duration::from_secs(60 * 60),
                 initial_model_calls: 48,
                 max_model_calls: 384,
                 model_calls_per_extension: 48,
@@ -82,6 +85,7 @@ impl RunBudget {
             _ => Self {
                 max_duration: Duration::from_secs(45 * 60),
                 model_call_timeout: Duration::from_secs(5 * 60),
+                tool_call_timeout: Duration::from_secs(15 * 60),
                 initial_model_calls: 18,
                 max_model_calls: 72,
                 model_calls_per_extension: 18,
@@ -93,6 +97,11 @@ impl RunBudget {
             },
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunSteer {
+    pub queue_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +120,7 @@ pub struct RunControlSnapshot {
     model_call_limit: usize,
     tool_call_limit: usize,
     budget_extensions: usize,
+    pending_steers: VecDeque<RunSteer>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +155,8 @@ struct RunMutableState {
     budget_extensions: usize,
     stop_reason: Option<RunStopReason>,
     active_model_calls: usize,
+    active_tool_calls: usize,
+    pending_steers: VecDeque<RunSteer>,
 }
 
 #[derive(Debug)]
@@ -180,11 +192,16 @@ impl AgentRunControl {
                 checkpoint_count: 0,
                 model_extension_checkpoint: 0,
                 tool_extension_checkpoint: 0,
-                model_call_limit: budget.initial_model_calls.min(budget.max_model_calls).max(1),
+                model_call_limit: budget
+                    .initial_model_calls
+                    .min(budget.max_model_calls)
+                    .max(1),
                 tool_call_limit: budget.initial_tool_calls.min(budget.max_tool_calls).max(1),
                 budget_extensions: 0,
                 stop_reason: None,
                 active_model_calls: 0,
+                active_tool_calls: 0,
+                pending_steers: VecDeque::new(),
             }),
         }
     }
@@ -214,6 +231,8 @@ impl AgentRunControl {
                 budget_extensions: snapshot.budget_extensions,
                 stop_reason: None,
                 active_model_calls: 0,
+                active_tool_calls: 0,
+                pending_steers: snapshot.pending_steers,
             }),
         }
     }
@@ -235,6 +254,7 @@ impl AgentRunControl {
             model_call_limit: state.model_call_limit,
             tool_call_limit: state.tool_call_limit,
             budget_extensions: state.budget_extensions,
+            pending_steers: state.pending_steers.clone(),
         }
     }
 
@@ -258,9 +278,9 @@ impl AgentRunControl {
                 state.stop_reason = Some(RunStopReason::DeadlineExceeded);
             } else if now.duration_since(state.last_progress_at)
                 >= if state.active_model_calls > 0 {
-                    self.budget
-                        .model_call_timeout
-                        .max(self.budget.no_progress_timeout)
+                    self.budget.model_call_timeout
+                } else if state.active_tool_calls > 0 {
+                    self.budget.tool_call_timeout
                 } else {
                     self.budget.no_progress_timeout
                 }
@@ -318,6 +338,7 @@ impl AgentRunControl {
         if call > state.tool_call_limit
             && !extend_tool_budget_if_progressed(&self.budget, &mut state, call)
         {
+            self.tool_calls.fetch_sub(1, Ordering::SeqCst);
             state.stop_reason = Some(RunStopReason::ToolCallBudgetExceeded);
             return Err(RunStopReason::ToolCallBudgetExceeded);
         }
@@ -331,6 +352,7 @@ impl AgentRunControl {
             *history = (signature, 1);
         }
         if history.1 > self.budget.max_identical_actions {
+            self.tool_calls.fetch_sub(1, Ordering::SeqCst);
             state.stop_reason = Some(RunStopReason::RepeatedAction);
             return Err(RunStopReason::RepeatedAction);
         }
@@ -340,13 +362,62 @@ impl AgentRunControl {
             recent.pop_front();
         }
         if has_repeated_action_cycle(recent, self.budget.max_identical_actions + 1) {
+            self.tool_calls.fetch_sub(1, Ordering::SeqCst);
             state.stop_reason = Some(RunStopReason::RepeatedAction);
             return Err(RunStopReason::RepeatedAction);
         }
+        state.active_tool_calls = state.active_tool_calls.saturating_add(1);
         state.stage = "tool".to_string();
         state.detail = tool_name.to_string();
         state.last_progress_at = Instant::now();
         Ok(call)
+    }
+
+    pub fn finish_tool_call(&self) {
+        let mut state = self.state.lock().expect("run control state poisoned");
+        state.active_tool_calls = state.active_tool_calls.saturating_sub(1);
+        state.last_progress_at = Instant::now();
+    }
+
+    pub fn request_steer(&self, queue_id: impl Into<String>) -> Result<bool, RunStopReason> {
+        if let Some(reason) = self.stop_reason() {
+            return Err(reason);
+        }
+        let queue_id = queue_id.into();
+        let mut state = self.state.lock().expect("run control state poisoned");
+        if state
+            .pending_steers
+            .iter()
+            .any(|pending| pending.queue_id == queue_id)
+        {
+            return Ok(false);
+        }
+        if state.pending_steers.len() >= 16 {
+            state.pending_steers.pop_front();
+        }
+        state.pending_steers.push_back(RunSteer { queue_id });
+        state.stage = "steering".to_string();
+        state.detail = "Applying user guidance".to_string();
+        state.last_progress_at = Instant::now();
+        Ok(true)
+    }
+
+    pub fn has_pending_steer(&self) -> bool {
+        !self
+            .state
+            .lock()
+            .expect("run control state poisoned")
+            .pending_steers
+            .is_empty()
+    }
+
+    pub fn take_pending_steers(&self) -> Vec<RunSteer> {
+        self.state
+            .lock()
+            .expect("run control state poisoned")
+            .pending_steers
+            .drain(..)
+            .collect()
     }
 
     pub fn mark_progress(&self, stage: &str, detail: &str) {
@@ -499,9 +570,8 @@ fn has_repeated_action_cycle(actions: &VecDeque<u64>, repetitions: usize) -> boo
             return false;
         }
         let start = actions.len() - required;
-        (period..required).all(|offset| {
-            actions.get(start + offset) == actions.get(start + (offset % period))
-        })
+        (period..required)
+            .all(|offset| actions.get(start + offset) == actions.get(start + (offset % period)))
     })
 }
 
@@ -514,6 +584,7 @@ mod tests {
         RunBudget {
             max_duration: Duration::from_millis(60),
             model_call_timeout: Duration::from_millis(40),
+            tool_call_timeout: Duration::from_millis(45),
             initial_model_calls: 2,
             max_model_calls: 2,
             model_calls_per_extension: 1,
@@ -530,6 +601,7 @@ mod tests {
         let budget = RunBudget::for_effort("pro");
         assert_eq!(budget.max_duration, Duration::from_secs(4 * 60 * 60));
         assert_eq!(budget.model_call_timeout, Duration::from_secs(15 * 60));
+        assert_eq!(budget.tool_call_timeout, Duration::from_secs(60 * 60));
         assert_eq!(budget.initial_model_calls, 48);
         assert_eq!(budget.max_model_calls, 384);
         assert_eq!(budget.initial_tool_calls, 96);
@@ -582,8 +654,14 @@ mod tests {
         assert_eq!(model_control.progress().model_calls, 2);
 
         let tool_control = AgentRunControl::with_budget(test_budget());
-        assert_eq!(tool_control.begin_tool_call("main", "file.read", "a"), Ok(1));
-        assert_eq!(tool_control.begin_tool_call("main", "file.read", "b"), Ok(2));
+        assert_eq!(
+            tool_control.begin_tool_call("main", "file.read", "a"),
+            Ok(1)
+        );
+        assert_eq!(
+            tool_control.begin_tool_call("main", "file.read", "b"),
+            Ok(2)
+        );
         assert_eq!(
             tool_control.begin_tool_call("main", "file.read", "c"),
             Err(RunStopReason::ToolCallBudgetExceeded)
@@ -596,8 +674,12 @@ mod tests {
         budget.initial_tool_calls = 10;
         budget.max_tool_calls = 10;
         let control = AgentRunControl::with_budget(budget);
-        assert!(control.begin_tool_call("worker-1", "file.read", "a").is_ok());
-        assert!(control.begin_tool_call("worker-1", "file.read", "a").is_ok());
+        assert!(control
+            .begin_tool_call("worker-1", "file.read", "a")
+            .is_ok());
+        assert!(control
+            .begin_tool_call("worker-1", "file.read", "a")
+            .is_ok());
         assert_eq!(
             control.begin_tool_call("worker-1", "file.read", "a"),
             Err(RunStopReason::RepeatedAction)
@@ -624,9 +706,7 @@ mod tests {
         budget.max_tool_calls = 12;
         let control = AgentRunControl::with_budget(budget);
         for input in ["a", "b", "a", "b", "a"] {
-            assert!(control
-                .begin_tool_call("main", "file.read", input)
-                .is_ok());
+            assert!(control.begin_tool_call("main", "file.read", input).is_ok());
         }
         assert_eq!(
             control.begin_tool_call("main", "file.read", "b"),
@@ -648,10 +728,7 @@ mod tests {
         budget.no_progress_timeout = Duration::from_secs(1);
         let control = AgentRunControl::with_budget(budget);
         thread::sleep(Duration::from_millis(30));
-        assert_eq!(
-            control.stop_reason(),
-            Some(RunStopReason::DeadlineExceeded)
-        );
+        assert_eq!(control.stop_reason(), Some(RunStopReason::DeadlineExceeded));
     }
 
     #[test]
@@ -659,16 +736,15 @@ mod tests {
         let control = AgentRunControl::with_budget(test_budget());
         control.request_cancel();
         control.mark_progress("model", "late delta");
-        assert_eq!(
-            control.stop_reason(),
-            Some(RunStopReason::UserCancelled)
-        );
+        assert_eq!(control.stop_reason(), Some(RunStopReason::UserCancelled));
     }
 
     #[test]
     fn snapshot_excludes_permission_wait_time() {
         let control = AgentRunControl::with_budget(test_budget());
-        control.begin_model_call("planning").expect("model call should start");
+        control
+            .begin_model_call("planning")
+            .expect("model call should start");
         control.record_partial_output("verified work");
         control.finish_model_call();
         let snapshot = control.snapshot();
@@ -696,5 +772,60 @@ mod tests {
         control.finish_model_call();
         thread::sleep(Duration::from_millis(30));
         assert_eq!(control.stop_reason(), Some(RunStopReason::NoProgress));
+    }
+
+    #[test]
+    fn active_tool_call_uses_its_own_timeout_and_finishes_cleanly() {
+        let mut budget = test_budget();
+        budget.max_duration = Duration::from_secs(1);
+        budget.no_progress_timeout = Duration::from_millis(20);
+        budget.tool_call_timeout = Duration::from_millis(90);
+        let control = AgentRunControl::with_budget(budget);
+
+        control
+            .begin_tool_call("main", "shell.run", "build")
+            .expect("tool call should start");
+        thread::sleep(Duration::from_millis(35));
+        assert_eq!(control.stop_reason(), None);
+
+        control.finish_tool_call();
+        thread::sleep(Duration::from_millis(30));
+        assert_eq!(control.stop_reason(), Some(RunStopReason::NoProgress));
+    }
+
+    #[test]
+    fn rejected_tool_calls_do_not_consume_the_call_counter() {
+        let mut budget = test_budget();
+        budget.initial_tool_calls = 10;
+        budget.max_tool_calls = 10;
+        budget.max_identical_actions = 1;
+        let control = AgentRunControl::with_budget(budget);
+
+        assert!(control.begin_tool_call("main", "file.read", "a").is_ok());
+        control.finish_tool_call();
+        assert_eq!(
+            control.begin_tool_call("main", "file.read", "a"),
+            Err(RunStopReason::RepeatedAction)
+        );
+        assert_eq!(control.progress().tool_calls, 1);
+    }
+
+    #[test]
+    fn steering_is_deduplicated_and_survives_a_snapshot() {
+        let control = AgentRunControl::with_budget(test_budget());
+        assert_eq!(control.request_steer("queue-a"), Ok(true));
+        assert_eq!(control.request_steer("queue-a"), Ok(false));
+        assert!(control.has_pending_steer());
+
+        let resumed = AgentRunControl::from_snapshot(control.snapshot());
+        assert_eq!(
+            resumed
+                .take_pending_steers()
+                .into_iter()
+                .map(|steer| steer.queue_id)
+                .collect::<Vec<_>>(),
+            vec!["queue-a"]
+        );
+        assert!(!resumed.has_pending_steer());
     }
 }

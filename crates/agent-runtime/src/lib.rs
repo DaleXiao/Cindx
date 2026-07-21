@@ -5,13 +5,13 @@ use agent_core::{
 use model_provider::{tool_function_name, ModelCallMode, ModelRequest, ModelResponse};
 use std::collections::BTreeMap;
 
-mod control;
 mod context_governor;
+mod control;
 
-pub use control::{
-    AgentRunControl, RunBudget, RunControlSnapshot, RunProgressSnapshot, RunStopReason,
-};
 pub use context_governor::{bounded_max_output_tokens, ContextGovernorReport};
+pub use control::{
+    AgentRunControl, RunBudget, RunControlSnapshot, RunProgressSnapshot, RunSteer, RunStopReason,
+};
 
 pub const DEFAULT_MAX_AGENT_TURNS: usize = 24;
 pub const DEFAULT_COLLABORATION_WORKER_TURNS: usize = 5;
@@ -42,6 +42,9 @@ pub struct AgentLoopState {
     pub max_turns: usize,
     pub failed_tool_signatures: BTreeMap<String, usize>,
     pub consecutive_empty_responses: usize,
+    pub successful_mutations: usize,
+    pub verified_after_last_mutation: bool,
+    pub verification_gate_requests: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,15 +56,23 @@ pub struct AgentToolRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentAdvance {
-    Completed { answer: String },
-    ToolCalls { calls: Vec<AgentToolRequest> },
+    Completed {
+        answer: String,
+    },
+    ToolCalls {
+        calls: Vec<AgentToolRequest>,
+    },
     TurnBudgetExhausted {
         completed_turns: usize,
         max_turns: usize,
         partial_answer: Option<String>,
     },
-    Retry { instruction: String },
-    Failed { message: String },
+    Retry {
+        instruction: String,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 pub fn start_agent_loop(
@@ -82,6 +93,9 @@ pub fn start_agent_loop(
         max_turns: config.max_turns.max(1),
         failed_tool_signatures: BTreeMap::new(),
         consecutive_empty_responses: 0,
+        successful_mutations: 0,
+        verified_after_last_mutation: false,
+        verification_gate_requests: 0,
     }
 }
 
@@ -105,6 +119,9 @@ pub fn start_agent_loop_with_history(
         max_turns: config.max_turns.max(1),
         failed_tool_signatures: BTreeMap::new(),
         consecutive_empty_responses: 0,
+        successful_mutations: 0,
+        verified_after_last_mutation: false,
+        verification_gate_requests: 0,
     }
 }
 
@@ -139,6 +156,9 @@ pub fn resume_agent_loop_from_messages(
         max_turns: config.max_turns.max(1),
         failed_tool_signatures: BTreeMap::new(),
         consecutive_empty_responses: 0,
+        successful_mutations: 0,
+        verified_after_last_mutation: false,
+        verification_gate_requests: 0,
     }
 }
 
@@ -189,11 +209,7 @@ pub fn model_request_for_turn_with_context_budget(
     context_window_tokens: u64,
     max_output_tokens: u64,
 ) -> (ModelRequest, ContextGovernorReport) {
-    let system_prompt = agent_system_prompt_with_context(
-        tools,
-        user_instructions,
-        runtime_context,
-    );
+    let system_prompt = agent_system_prompt_with_context(tools, user_instructions, runtime_context);
     let (messages, report) = context_governor::govern_model_messages(
         &state.messages,
         system_prompt,
@@ -318,6 +334,20 @@ pub fn append_internal_instruction(state: &mut AgentLoopState, kind: &str, instr
     });
 }
 
+pub fn append_steering_instruction(
+    state: &mut AgentLoopState,
+    instruction: impl Into<String>,
+    mut metadata: Metadata,
+) {
+    metadata.insert("steer".to_string(), "true".to_string());
+    state.messages.push(Message {
+        role: MessageRole::User,
+        content: instruction.into(),
+        metadata,
+    });
+    state.consecutive_empty_responses = 0;
+}
+
 pub fn append_observation(state: &mut AgentLoopState, observation: &str) {
     state.messages.push(Message {
         role: MessageRole::User,
@@ -386,12 +416,110 @@ pub fn record_tool_outcome(
     input_json: &str,
     status: &ToolOutcomeStatus,
 ) {
+    record_tool_outcome_with_risk(state, tool_name, input_json, status, None);
+}
+
+pub fn record_tool_outcome_with_risk(
+    state: &mut AgentLoopState,
+    tool_name: &str,
+    input_json: &str,
+    status: &ToolOutcomeStatus,
+    risk: Option<&ToolRisk>,
+) {
     let signature = tool_signature(tool_name, input_json);
-    if matches!(status, ToolOutcomeStatus::Failed | ToolOutcomeStatus::Denied) {
+    if matches!(
+        status,
+        ToolOutcomeStatus::Failed | ToolOutcomeStatus::Denied
+    ) {
         *state.failed_tool_signatures.entry(signature).or_default() += 1;
     } else {
         state.failed_tool_signatures.remove(&signature);
     }
+
+    if !matches!(status, ToolOutcomeStatus::Succeeded) {
+        return;
+    }
+    match risk.or_else(|| inferred_builtin_tool_risk(tool_name)) {
+        Some(ToolRisk::WritesWorkspace | ToolRisk::Destructive) => {
+            state.successful_mutations = state.successful_mutations.saturating_add(1);
+            state.verified_after_last_mutation = false;
+            state.verification_gate_requests = 0;
+        }
+        Some(ToolRisk::ReadOnly) if state.successful_mutations > 0 => {
+            state.verified_after_last_mutation = true;
+        }
+        Some(ToolRisk::ExecutesProcess)
+            if state.successful_mutations > 0
+                && process_input_looks_like_verification(input_json) =>
+        {
+            state.verified_after_last_mutation = true;
+        }
+        _ => {}
+    }
+}
+
+pub fn completion_verification_instruction(
+    state: &mut AgentLoopState,
+    verification_required: bool,
+    tools: &[ToolSpec],
+) -> Option<String> {
+    if !verification_required
+        || state.successful_mutations == 0
+        || state.verified_after_last_mutation
+        || state.verification_gate_requests > 0
+        || !tools.iter().any(tool_can_verify_workspace_change)
+    {
+        return None;
+    }
+    state.verification_gate_requests = state.verification_gate_requests.saturating_add(1);
+    Some(
+        "The task changed the workspace but has no successful post-change verification evidence yet. Before finishing, use an available read or execution tool to verify the requested result. Prefer the narrowest relevant test, build, lint, diff, or direct read-back. If verification is genuinely unavailable, state that limitation explicitly in the final answer."
+            .to_string(),
+    )
+}
+
+fn tool_can_verify_workspace_change(tool: &ToolSpec) -> bool {
+    matches!(tool.risk, ToolRisk::ReadOnly | ToolRisk::ExecutesProcess)
+}
+
+fn inferred_builtin_tool_risk(tool_name: &str) -> Option<&'static ToolRisk> {
+    static READ_ONLY: ToolRisk = ToolRisk::ReadOnly;
+    static WRITES_WORKSPACE: ToolRisk = ToolRisk::WritesWorkspace;
+    static EXECUTES_PROCESS: ToolRisk = ToolRisk::ExecutesProcess;
+    match tool_name {
+        "file.read" | "file.list" | "file.search" => Some(&READ_ONLY),
+        "file.write" => Some(&WRITES_WORKSPACE),
+        "shell.run" => Some(&EXECUTES_PROCESS),
+        _ => None,
+    }
+}
+
+fn process_input_looks_like_verification(input_json: &str) -> bool {
+    let normalized = input_json.to_ascii_lowercase();
+    [
+        " test",
+        "test ",
+        "check",
+        "build",
+        "lint",
+        "verify",
+        "pytest",
+        "vitest",
+        "jest",
+        "cargo test",
+        "cargo check",
+        "swift test",
+        "go test",
+        "git diff",
+        "git status",
+        "typecheck",
+        "tsc",
+        "eslint",
+        "ruff",
+        "mypy",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
 }
 
 fn tool_signature(tool_name: &str, input_json: &str) -> String {
@@ -504,7 +632,7 @@ fn truncate_observation(output: &str) -> String {
 mod tests {
     use super::*;
     use agent_core::{ToolRisk, ToolSpec};
-    use model_provider::{ModelToolCall, ModelResponse};
+    use model_provider::{ModelResponse, ModelToolCall};
 
     #[test]
     fn default_turn_budget_supports_multi_step_agent_runs() {
@@ -534,11 +662,7 @@ mod tests {
         );
 
         assert_eq!(
-            repeated_tool_failure_count(
-                &state,
-                "shell.run",
-                r#"{"command":"false","cwd":"."}"#
-            ),
+            repeated_tool_failure_count(&state, "shell.run", r#"{"command":"false","cwd":"."}"#),
             MAX_IDENTICAL_TOOL_FAILURES
         );
     }
@@ -710,7 +834,10 @@ mod tests {
         let advance = advance_with_model_response(&mut state, response, &[]);
 
         assert!(matches!(advance, AgentAdvance::Completed { .. }));
-        assert!(state.messages.iter().any(|message| message.content.contains("Tool observation")));
+        assert!(state
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Tool observation")));
     }
 
     #[test]
@@ -841,6 +968,104 @@ mod tests {
         assert_eq!(state.turn, 0);
         assert_eq!(state.messages.len(), 3);
         assert_eq!(state.messages[2].content, "follow up");
+    }
+
+    #[test]
+    fn steering_is_preserved_as_user_guidance() {
+        let mut state = start_agent_loop(
+            TaskId("task-steer".to_string()),
+            "build the feature",
+            AgentRuntimeConfig::default(),
+        );
+        state.consecutive_empty_responses = 2;
+
+        append_steering_instruction(
+            &mut state,
+            "Keep the API backwards compatible",
+            [("queue_id".to_string(), "queue-1".to_string())]
+                .into_iter()
+                .collect(),
+        );
+
+        let message = state.messages.last().expect("steering message");
+        assert_eq!(message.role, MessageRole::User);
+        assert_eq!(message.content, "Keep the API backwards compatible");
+        assert_eq!(
+            message.metadata.get("steer").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(state.consecutive_empty_responses, 0);
+    }
+
+    #[test]
+    fn completion_gate_requests_post_mutation_verification_once() {
+        let mut state = start_agent_loop(
+            TaskId("task-verify".to_string()),
+            "change the file",
+            AgentRuntimeConfig::default(),
+        );
+        let tools = vec![
+            ToolSpec::builtin(
+                "file.read",
+                "file",
+                "Read a file",
+                ToolRisk::ReadOnly,
+                r#"{"type":"object"}"#,
+            ),
+            ToolSpec::builtin(
+                "file.write",
+                "file",
+                "Write a file",
+                ToolRisk::WritesWorkspace,
+                r#"{"type":"object"}"#,
+            ),
+        ];
+        record_tool_outcome_with_risk(
+            &mut state,
+            "file.write",
+            r#"{"path":"src/lib.rs"}"#,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::WritesWorkspace),
+        );
+
+        assert!(completion_verification_instruction(&mut state, true, &tools).is_some());
+        assert!(completion_verification_instruction(&mut state, true, &tools).is_none());
+
+        record_tool_outcome_with_risk(
+            &mut state,
+            "file.read",
+            r#"{"path":"src/lib.rs"}"#,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ReadOnly),
+        );
+        assert!(state.verified_after_last_mutation);
+        assert!(completion_verification_instruction(&mut state, true, &tools).is_none());
+    }
+
+    #[test]
+    fn verification_gate_does_not_affect_read_only_or_unverified_tasks() {
+        let tools = vec![tool("file.read", "path=<workspace-relative-path>")];
+        let mut state = start_agent_loop(
+            TaskId("task-read".to_string()),
+            "read the file",
+            AgentRuntimeConfig::default(),
+        );
+        record_tool_outcome(
+            &mut state,
+            "file.read",
+            r#"{"path":"README.md"}"#,
+            &ToolOutcomeStatus::Succeeded,
+        );
+        assert!(completion_verification_instruction(&mut state, true, &tools).is_none());
+
+        record_tool_outcome_with_risk(
+            &mut state,
+            "file.write",
+            r#"{"path":"README.md"}"#,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::WritesWorkspace),
+        );
+        assert!(completion_verification_instruction(&mut state, false, &tools).is_none());
     }
 
     fn tool(name: &str, schema: &str) -> ToolSpec {

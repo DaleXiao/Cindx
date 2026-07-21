@@ -1,6 +1,6 @@
 [package]
 name = "cindx-desktop"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 license = "UNLICENSED"
 
@@ -12,6 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+agent-application = { path = "../../../crates/agent-application" }
 agent-core = { path = "../../../crates/agent-core" }
 agent-graph = { path = "../../../crates/agent-graph" }
 agent-memory = { path = "../../../crates/agent-memory" }

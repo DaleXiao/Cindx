@@ -217,10 +217,10 @@ assert(
     rustLib.includes("repair_macos_traffic_light_position(&window)?;") &&
     rustLib.includes("let _ = repair_macos_traffic_light_position(&window);") &&
     rustLib.includes("tauri::WindowEvent::Resized(_)") &&
-    rustLib.includes("tauri::WindowEvent::Moved(_)") &&
-    rustLib.includes("tauri::WindowEvent::Focused(true)") &&
     rustLib.includes("tauri::WindowEvent::ScaleFactorChanged { .. }") &&
-    rustLib.includes("tauri::WindowEvent::ThemeChanged(_)") &&
+    !rustLib.includes("tauri::WindowEvent::Moved(_)") &&
+    !rustLib.includes("tauri::WindowEvent::Focused(true)") &&
+    !rustLib.includes("tauri::WindowEvent::ThemeChanged(_)") &&
     tauriBridge.includes('invoke<void>("reveal_main_window")') &&
     appSource.includes("startupWindowRevealRequestedRef") &&
     appSource.includes("await Promise.race([") &&
@@ -230,7 +230,7 @@ assert(
     appSource.includes("!agentStateCacheRef.current.has(state.activeSessionId)") &&
     !appSource.includes("agentState?.sessionId !== projectSessionState.activeSessionId") &&
     !appSource.includes("revealAfterStableFrame"),
-  "The native window must reveal a stable loading frame without waiting for large session history and repair native controls after AppKit relayouts"
+  "The native window must reveal a stable loading frame and repair native controls only after size or scale relayouts"
 );
 const titlebarHeight = 46;
 // This is the user-confirmed macOS alignment; do not retune it indirectly.
@@ -587,10 +587,10 @@ assert(
 assert(
   appSource.includes('const [inspectorOpen, setInspectorOpen] = useState(false)') &&
     appSource.includes('const [inspectorOpenBeforeSettings, setInspectorOpenBeforeSettings] = useState(false)') &&
-    appSource.includes("onOutputCreated={() =>") &&
-    inspectorSource.includes("outputSignaturesBySessionRef") &&
-    inspectorSource.includes("onOutputCreated();"),
-  "Inspector must start closed and open when the active session creates an output"
+    appSource.includes("onArtifactInspect={(path) =>") &&
+    appSource.includes("setInspectorOutputRequest({ sessionId, path, nonce: Date.now() })") &&
+    appSource.includes("setInspectorOpen(true)"),
+  "Inspector must start closed and open only when the user inspects an in-thread output"
 );
 assert(
   appSource.includes('DEBUG_ALWAYS_VISIBLE_STORAGE_KEY = "cindx.debug.always-visible"') &&
@@ -784,10 +784,10 @@ assert(
   "Session thread must show submitted user messages before paint and preserve them during polling"
 );
 assert(
-  appSource.includes("function clearSessionTransientStatus(sessionId: string)") &&
-    appSource.includes("const next = await archiveSession(sessionId);\n      clearSessionTransientStatus(sessionId);") &&
-    appSource.includes("const next = await restoreSession(sessionId);\n      clearSessionTransientStatus(sessionId);"),
-  "Archiving or restoring a session must clear stale transient status indicators"
+  rustLib.includes("config.sessions[index].seen_event_sequence = latest_sequence;") &&
+    rustLib.includes("if session.archived {\n            continue;\n        }") &&
+    rustLib.includes("fn archived_session_restore_does_not_revive_seen_activity()"),
+  "Archiving or restoring a session must clear stale lifecycle status durably"
 );
 assert(
   sessionThreadSource.includes('className="thread-minimap"') &&
@@ -821,11 +821,10 @@ assert(
     sessionThreadSource.includes('import { useVirtualizer } from "@tanstack/react-virtual"') &&
     sessionThreadSource.includes("const rowVirtualizer = useVirtualizer") &&
     sessionThreadSource.includes("const virtualRows = rowVirtualizer.getVirtualItems()") &&
-    sessionThreadSource.includes("const rowMeasurementRevision = useMemo") &&
-    sessionThreadSource.includes("const measureRenderedRows = useCallback") &&
-    sessionThreadSource.includes("rowVirtualizer.resizeItem(") &&
-    sessionThreadSource.includes("element.getBoundingClientRect().height") &&
-    sessionThreadSource.includes("useAnimationFrameWithResizeObserver: false") &&
+    sessionThreadSource.includes("rowVirtualizer.measureElement(element)") &&
+    sessionThreadSource.includes("useAnimationFrameWithResizeObserver: true") &&
+    !sessionThreadSource.includes("const measureRenderedRows = useCallback") &&
+    !sessionThreadSource.includes("element.getBoundingClientRect().height") &&
     sessionThreadSource.includes("ref={measureThreadRow}") &&
     sessionThreadSource.includes('className="thread-virtual-list"') &&
     sessionThreadSource.includes('className="thread-virtual-row"') &&
@@ -847,16 +846,15 @@ assert(
   "Session thread must replace its native scrollbar with the minimap"
 );
 assert(
-  sessionThreadSource.includes('data-content-ready={contentReady}') &&
+  !sessionThreadSource.includes('data-content-ready={contentReady}') &&
     sessionThreadSource.includes('className="session-thread-empty-state"') &&
-    sessionThreadSource.includes("rowVirtualizer.measure()") &&
-    sessionThreadSource.includes("setContentReady(true)") &&
+    sessionThreadSource.includes("rowVirtualizer.measureElement(element)") &&
     appSource.includes("const sessionPrefetchKey = useMemo") &&
     appSource.includes("requestSessionAgentState(sessionId).catch(() => null)") &&
-    /\.session-thread\[data-content-ready="false"\] \.thread-content \{[\s\S]*?opacity: 0;/.test(
-      styles
-    ),
-  "Initial session hydration must prewarm local state and reveal measured rows without layout jumps"
+    appSource.includes("await Promise.all([worker(), worker()])") &&
+    appSource.includes("setAgentState(cachedAgentState)") &&
+    !styles.includes('.session-thread[data-content-ready="false"]'),
+  "Initial session hydration must restore cached rows immediately and prewarm uncached sessions with bounded concurrency"
 );
 assert(
   sessionThreadSource.includes("thread-message-actions") &&
@@ -1080,11 +1078,10 @@ assert(
 );
 assert(
   sidebarSource.includes('if (!state || (active && state === "complete")) return null;') &&
+    sidebarSource.includes('activity === "idle" ? null : activity') &&
+    sidebarSource.includes('state === "working"') &&
+    sidebarSource.includes('"Session needs attention"') &&
     sidebarSource.includes('<LoaderCircle aria-hidden="true" />') &&
-    sidebarSource.includes('"approval required"') &&
-    sidebarSource.includes('"waiting_for_input"') &&
-    sidebarSource.includes('"paused"') &&
-    sidebarSource.includes('"interrupted"') &&
     styles.includes(".session-status-working svg") &&
     styles.includes("animation: spin 900ms linear infinite") &&
     /\.session-status \{[\s\S]*?right: 3px;[\s\S]*?width: 26px;[\s\S]*?height: 28px;/.test(
@@ -1150,13 +1147,11 @@ assert(
     sidebarSource.includes('className="session-name"') &&
     !sidebarSource.includes("<strong>{session.name}</strong>") &&
     styles.includes(".session-name") &&
-    appSource.includes("trackedSessionTaskIdsRef") &&
-    appSource.includes("markSessionTaskStarted(sessionId)") &&
-    appSource.includes('status === "paused" || (status === "completed" && canContinue)') &&
-    appSource.includes('status === "waiting_for_permission"') &&
-    appSource.includes('tracked && status === "completed"') &&
-    appSource.includes('nextStatus = "Error"') &&
-    appSource.includes('nextStatus = "Interrupted"'),
+    !appSource.includes("trackedSessionTaskIdsRef") &&
+    rustLib.includes("project_session_lifecycle(SessionLifecycleInput {") &&
+    rustLib.includes("session.activity = projection.activity.to_string();") &&
+    rustLib.includes("session.attention_reason = projection.attention_reason.map(str::to_string);") &&
+    rustLib.includes("session.unseen_result = projection.unseen_result;"),
   "Sidebar rows must show normal-weight titles and only icon-only background task state"
 );
 assert(
@@ -1186,10 +1181,12 @@ assert(
     sidebarSource.includes("onProjectDelete") &&
     sidebarSource.includes('text: "Delete Session"') &&
     sidebarSource.includes('text: "Delete Project"') &&
-    sidebarSource.includes('role="alertdialog"') &&
-    sidebarSource.includes('aria-modal="true"') &&
-    !sidebarSource.includes("window.confirm") &&
-    styles.includes(".delete-confirmation-dialog") &&
+    sidebarSource.includes("confirmDeleteAction") &&
+    sidebarSource.includes("await confirmDeleteAction(target.kind, target.name)") &&
+    !sidebarSource.includes('role="alertdialog"') &&
+    tauriBridge.includes('invoke<boolean>("confirm_delete_action"') &&
+    rustLib.includes("async fn confirm_delete_action(") &&
+    rustLib.includes("fn show_native_delete_confirmation(") &&
     appSource.includes("handleDeleteProject") &&
     tauriBridge.includes('invoke<ProjectSessionState>("delete_project"') &&
     rustLib.includes("fn delete_project(") &&
@@ -1622,16 +1619,14 @@ assert(
   "Settings must use persistent left tabs and right-side details"
 );
 assert(
-  rustLib.includes("maybe_auto_name_session") &&
+  rustLib.includes("persist_completed_first_round_title") &&
+    rustLib.includes("spawn_semantic_session_title_refinement") &&
     rustLib.includes("semantic_session_title") &&
     rustLib.includes("automatic_conversation_title") &&
-    rustLib.includes("First assistant response") &&
     rustLib.includes("can_apply_generated_session_title") &&
-    appSource.includes("sessionTitleFromPrompt") &&
-    appSource.includes("sessionTitleFromFirstRound") &&
-    appSource.includes("refineAutomaticSessionTitle") &&
-    appSource.includes("firstRoundAnswer") &&
-    tauriBridge.includes('invoke<ProjectSessionState>("generate_session_title"'),
+    rustLib.includes('app.emit("session-title-updated"') &&
+    appSource.includes("subscribeToSessionTitleUpdates") &&
+    tauriBridge.includes('listen<string>("session-title-updated"'),
   "New sessions must receive a non-blocking semantic title without overwriting manual names"
 );
 assert(
@@ -1765,7 +1760,8 @@ assert(
 assert(
   appSource.includes("agentStateUnchanged") &&
     appSource.includes("agentTraceUnchanged") &&
-    appSource.includes("if (current[sessionId] === nextStatus) return current"),
+    appSource.includes("sessionLifecycleRefreshRef") &&
+    appSource.includes("sessionLifecycleRefreshRef.current === refreshRequest"),
   "Agent polling must preserve unchanged React state references"
 );
 assert(
@@ -1817,7 +1813,8 @@ assert(
     rustLib.includes("invalidate_workspace_knowledge_cache") &&
     rustLib.includes('timed_retrieval_channel("graph_walk"') &&
     rustLib.includes("std::thread::scope") &&
-    rustLib.includes("let graph_store = include_graph") &&
+    rustLib.includes("let graph_store = if include_graph") &&
+    rustLib.includes("cached_graph_store.or(opened_graph_store.as_ref())") &&
     rustLib.includes("let graph_seeds = search_chunks_literal") &&
     rustLib.includes("search_lancedb_index(") &&
     tauriBridge.includes("indexCacheHit") &&
@@ -1862,6 +1859,10 @@ assert(
     rustLib.includes("evaluate_prompt_evolution") &&
     rustLib.includes("Conductor prompt profile selected") &&
     rustLib.includes("PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS") &&
+    rustLib.includes("PROMPT_EVOLUTION_BACKGROUND_BATCH_LIMIT") &&
+    rustLib.includes("prompt_direct_profile_evidence_counts") &&
+    rustLib.includes("prompt_direct_promotion_evidence") &&
+    rustLib.includes("direct_stable_evidence_pending") &&
     rustLib.includes("PROMPT_EVOLUTION_OFFLINE_MIN_CASES") &&
     rustLib.includes("prompt_offline_dataset") &&
     rustLib.includes("select_prompt_offline_case") &&
@@ -1893,7 +1894,7 @@ assert(
     /<Dna size=\{17\} aria-hidden="true" \/>\s*<h2>Genetic Pareto<\/h2>/.test(appSource) &&
     appSource.includes("Genetic Pareto") &&
     appSource.includes("Candidate harnesses execute in an isolated arena before promotion") &&
-    appSource.includes("Wilson confidence gate controls staged canary rollout") &&
+    appSource.includes("direct stable-versus-challenger Wilson gate controls staged canary rollout") &&
     appSource.includes("Evaluating in background") &&
     appSource.includes("Rollout by effort") &&
     appSource.includes("Candidate profiles") &&
@@ -1912,12 +1913,27 @@ const nonGrayColors = [...styles.matchAll(/#([0-9a-fA-F]{6})(?![0-9a-fA-F])/g)]
     (hex) =>
       ![
         "2563eb",
+        "1d4ed8",
+        "245fae",
         "2f9e64",
+        "3974c8",
         "39b96b",
+        "60a5fa",
+        "8ab8f7",
         "9fe3b0",
+        "9f2d25",
+        "b5d2fa",
+        "bfdbfe",
+        "dbeafe",
         "e05b5b",
+        "e5c7c4",
+        "e3efff",
+        "eef5ff",
         "eef6ff",
-        "e3efff"
+        "eff6ff",
+        "f7f9fc",
+        "fca5a5",
+        "fff4f2"
       ].includes(hex)
   )
   .filter((hex) => hex.slice(0, 2) !== hex.slice(2, 4) || hex.slice(2, 4) !== hex.slice(4, 6));
