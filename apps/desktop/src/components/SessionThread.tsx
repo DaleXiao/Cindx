@@ -49,18 +49,19 @@ import type {
 } from "../tauri";
 import { DisclosureTriangle } from "./DisclosureTriangle";
 import { TraceStatusIcon } from "./TraceStatusIcon";
+import {
+  associateOutputArtifacts,
+  isToolRequestPlaceholder,
+  sessionMinimapMarkers,
+  threadMessageId,
+  threadRowKey,
+  updateSessionThreadProjection,
+  type SessionThreadProjection,
+  type SessionThreadSelection,
+  type ThreadRow
+} from "./sessionThreadProjection";
 
-export type SessionThreadSelection =
-  | {
-      id: string;
-      type: "message";
-      message: ChatMessageView;
-    }
-  | {
-      id: string;
-      type: "event";
-      event: TimelineEntry;
-    };
+export type { SessionThreadSelection } from "./sessionThreadProjection";
 
 type SessionThreadProps = {
   sessionId: string | null;
@@ -101,31 +102,6 @@ type ThreadScrollMetrics = {
   scrollHeight: number;
   clientHeight: number;
 };
-
-function threadMessageId(message: ChatMessageView, index: number) {
-  return `message-${message.sequence ?? `${message.role}-${index}`}`;
-}
-
-type MinimapMarker = {
-  id: string;
-  kind: string;
-  label: string;
-  preview: string;
-  targetIndex: number;
-};
-
-type ThreadRow =
-  | {
-      type: "item";
-      item: SessionThreadSelection;
-      itemIndex: number;
-    }
-  | {
-      type: "tool-chain";
-      id: string;
-      items: SessionThreadSelection[];
-      itemIndex: number;
-    };
 
 const MIN_MINIMAP_MARKERS = 2;
 const MAX_MINIMAP_MARKERS = 32;
@@ -341,53 +317,6 @@ function toolMessageDetail(content: string) {
       .map((line) => line.trim())
       .find((line) => line && !/^(tool|status)=/i.test(line)) ?? "Tool output"
   );
-}
-
-function isToolRequestPlaceholder(item: SessionThreadSelection) {
-  const content = item.type === "message" ? item.message.content.trim().toLowerCase() : "";
-  return (
-    item.type === "message" &&
-    item.message.role === "assistant" &&
-    (!content || content === "tool request")
-  );
-}
-
-function isActivityCandidate(item: SessionThreadSelection) {
-  return (
-    item.type === "event" ||
-    (item.type === "message" && item.message.role === "tool") ||
-    isToolRequestPlaceholder(item)
-  );
-}
-
-function groupThreadItems(items: SessionThreadSelection[]): ThreadRow[] {
-  const rows: ThreadRow[] = [];
-  let index = 0;
-
-  while (index < items.length) {
-    if (!isActivityCandidate(items[index])) {
-      rows.push({ type: "item", item: items[index], itemIndex: index });
-      index += 1;
-      continue;
-    }
-
-    let end = index + 1;
-    while (end < items.length && isActivityCandidate(items[end])) end += 1;
-    const candidates = items.slice(index, end);
-    rows.push({
-      type: "tool-chain",
-      id: `tool-chain-${candidates[0].id}`,
-      items: candidates,
-      itemIndex: index
-    });
-    index = end;
-  }
-
-  return rows;
-}
-
-function threadRowKey(row: ThreadRow) {
-  return row.type === "tool-chain" ? row.id : row.item.id;
 }
 
 function estimateThreadRowSize(row: ThreadRow) {
@@ -993,6 +922,10 @@ export const SessionThread = memo(function SessionThread({
   const lastScrollTopRef = useRef(0);
   const historyLoadRequestedRef = useRef(false);
   const prependScrollHeightRef = useRef<number | null>(null);
+  const projectionCacheRef = useRef<{
+    sessionId: string | null;
+    projection: SessionThreadProjection;
+  } | null>(null);
   const previousThreadRef = useRef<{
     sessionId: string | null;
     firstId: string | null;
@@ -1113,79 +1046,25 @@ export const SessionThread = memo(function SessionThread({
   const outputArtifacts =
     artifactState.sessionId === sessionId ? artifactState.artifacts : [];
 
-  const items = useMemo<SessionThreadSelection[]>(() => {
-    const messageItems = messages.map((message, index) => ({
-      id: threadMessageId(message, index),
-      type: "message" as const,
-      message
-    }));
-    const eventItems = timeline
-      .filter(
-        (event) =>
-          event.kind !== "message" &&
-          !(
-            event.kind === "model" &&
-            (event.label === "Model started" || event.label === "Model finished")
-          )
-      )
-      .map((event, index) => ({
-        id: `event-${event.sequence ?? `${event.timestampMs}-${index}`}`,
-        type: "event" as const,
-        event
-      }));
-
-    const merged: SessionThreadSelection[] = [];
-    let messageIndex = 0;
-    let eventIndex = 0;
-    while (messageIndex < messageItems.length || eventIndex < eventItems.length) {
-      const message = messageItems[messageIndex];
-      const event = eventItems[eventIndex];
-      if (message && (!event || message.message.timestampMs <= event.event.timestampMs)) {
-        merged.push(message);
-        messageIndex += 1;
-      } else if (event) {
-        merged.push(event);
-        eventIndex += 1;
-      }
-    }
-    return merged;
-  }, [messages, timeline]);
-  const { artifactsByMessageId, trailingArtifacts } = useMemo(() => {
-    const grouped = new Map<string, AgentOutputArtifactView[]>();
-    const trailing: AgentOutputArtifactView[] = [];
-    const assistants = items.filter(
-      (item): item is Extract<SessionThreadSelection, { type: "message" }> =>
-        item.type === "message" && item.message.role === "assistant"
+  const projection = useMemo(() => {
+    const previous =
+      projectionCacheRef.current?.sessionId === sessionId
+        ? projectionCacheRef.current.projection
+        : null;
+    const next = updateSessionThreadProjection(
+      previous,
+      messages,
+      timeline,
+      MAX_MINIMAP_MARKERS
     );
-    const latestVisibleUserTimestamp = items.reduce(
-      (latest, item) =>
-        item.type === "message" && item.message.role === "user"
-          ? Math.max(latest, item.message.timestampMs)
-          : latest,
-      0
-    );
-
-    [...outputArtifacts]
-      .sort((left, right) => left.timestampMs - right.timestampMs)
-      .forEach((artifact) => {
-        const target =
-          (artifact.runId
-            ? [...assistants]
-                .reverse()
-                .find((item) => item.message.runId === artifact.runId)
-            : undefined) ??
-          assistants.find((item) => item.message.timestampMs >= artifact.timestampMs);
-        if (target) {
-          const current = grouped.get(target.id) ?? [];
-          current.push(artifact);
-          grouped.set(target.id, current);
-        } else if (artifact.timestampMs >= latestVisibleUserTimestamp) {
-          trailing.push(artifact);
-        }
-      });
-
-    return { artifactsByMessageId: grouped, trailingArtifacts: trailing };
-  }, [items, outputArtifacts]);
+    projectionCacheRef.current = { sessionId, projection: next };
+    return next;
+  }, [messages, sessionId, timeline]);
+  const { items, rows: threadRows, rowIndexByItemId } = projection;
+  const { artifactsByMessageId, trailingArtifacts } = useMemo(
+    () => associateOutputArtifacts(projection, outputArtifacts),
+    [outputArtifacts, projection]
+  );
   const threadFindMatches = useMemo(() => {
     const query = threadFindQuery.trim().toLocaleLowerCase();
     if (!query) return [];
@@ -1199,18 +1078,6 @@ export const SessionThread = memo(function SessionThread({
       )
       .map((item) => item.id);
   }, [items, threadFindQuery]);
-  const threadRows = useMemo(() => groupThreadItems(items), [items]);
-  const rowIndexByItemId = useMemo(() => {
-    const indexes = new Map<string, number>();
-    threadRows.forEach((row, rowIndex) => {
-      if (row.type === "tool-chain") {
-        row.items.forEach((item) => indexes.set(item.id, rowIndex));
-      } else {
-        indexes.set(row.item.id, rowIndex);
-      }
-    });
-    return indexes;
-  }, [threadRows]);
   const rowVirtualizer = useVirtualizer<HTMLElement, HTMLDivElement>({
     count: threadRows.length,
     getScrollElement: () => threadRef.current,
@@ -1234,47 +1101,10 @@ export const SessionThread = memo(function SessionThread({
     [runStartedAtMs, timeline]
   );
   const hasStreamAnswer = Boolean(streamAnswer);
-  const minimapMarkers = useMemo<MinimapMarker[]>(() => {
-    const markers: MinimapMarker[] = [];
-    items.forEach((item, targetIndex) => {
-      if (item.type === "event") return;
-      const role = item.message.role;
-      if (role !== "user" && role !== "assistant" && role !== "reviewer") return;
-
-      const preview = item.message.content.trim();
-      if (!preview || preview.toLowerCase() === "tool request") return;
-      markers.push({
-        id: item.id,
-        kind: role,
-        label:
-          role === "user"
-            ? "You"
-            : role === "assistant"
-              ? "Cindx"
-              : `${role.charAt(0).toUpperCase()}${role.slice(1)}`,
-        preview,
-        targetIndex
-      });
-    });
-
-    if (streamAnswer.trim()) {
-      markers.push({
-        id: "streaming-answer",
-        kind: "streaming",
-        label: "Cindx",
-        preview: streamAnswer.trim(),
-        targetIndex: items.length
-      });
-    }
-
-    if (markers.length <= MAX_MINIMAP_MARKERS) return markers;
-    return Array.from({ length: MAX_MINIMAP_MARKERS }, (_, index) => {
-      const sourceIndex = Math.round(
-        (index * (markers.length - 1)) / (MAX_MINIMAP_MARKERS - 1)
-      );
-      return markers[sourceIndex];
-    });
-  }, [items, streamAnswer]);
+  const minimapMarkers = useMemo(
+    () => sessionMinimapMarkers(projection, streamAnswer, MAX_MINIMAP_MARKERS),
+    [projection, streamAnswer]
+  );
 
   const syncScrollMetrics = useCallback(() => {
     if (scrollSyncFrameRef.current !== null) return;

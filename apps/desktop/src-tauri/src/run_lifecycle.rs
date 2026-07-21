@@ -1,4 +1,89 @@
 use agent_core::{Event, EventKind};
+use agent_runtime::AgentRunControl;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
+
+pub(crate) struct RegisteredRunControl<'a> {
+    controls: &'a Mutex<BTreeMap<String, Arc<AgentRunControl>>>,
+    key: String,
+    control: Arc<AgentRunControl>,
+}
+
+impl<'a> RegisteredRunControl<'a> {
+    pub(crate) fn register(
+        controls: &'a Mutex<BTreeMap<String, Arc<AgentRunControl>>>,
+        key: impl Into<String>,
+        control: Arc<AgentRunControl>,
+        lock_label: &str,
+        duplicate_error: &str,
+    ) -> Result<Self, String> {
+        let key = key.into();
+        let mut entries = controls
+            .lock()
+            .map_err(|error| format!("{lock_label} lock poisoned: {error}"))?;
+        if entries.contains_key(&key) {
+            return Err(duplicate_error.to_string());
+        }
+        entries.insert(key.clone(), Arc::clone(&control));
+        drop(entries);
+        Ok(Self {
+            controls,
+            key,
+            control,
+        })
+    }
+
+    pub(crate) fn control(&self) -> Arc<AgentRunControl> {
+        Arc::clone(&self.control)
+    }
+}
+
+impl Drop for RegisteredRunControl<'_> {
+    fn drop(&mut self) {
+        let mut controls = self
+            .controls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if controls
+            .get(&self.key)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.control))
+        {
+            controls.remove(&self.key);
+        }
+    }
+}
+
+pub(crate) struct ExclusiveKeyLease<'a> {
+    keys: &'a Mutex<BTreeSet<String>>,
+    key: String,
+}
+
+impl<'a> ExclusiveKeyLease<'a> {
+    pub(crate) fn try_acquire(
+        keys: &'a Mutex<BTreeSet<String>>,
+        key: impl Into<String>,
+        lock_label: &str,
+    ) -> Result<Option<Self>, String> {
+        let key = key.into();
+        let mut entries = keys
+            .lock()
+            .map_err(|error| format!("{lock_label} lock poisoned: {error}"))?;
+        if !entries.insert(key.clone()) {
+            return Ok(None);
+        }
+        drop(entries);
+        Ok(Some(Self { keys, key }))
+    }
+}
+
+impl Drop for ExclusiveKeyLease<'_> {
+    fn drop(&mut self) {
+        self.keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.key);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentRunStatus {
@@ -228,5 +313,43 @@ mod tests {
         assert!(AgentRunStatus::Failed.can_retry(true));
         assert!(!AgentRunStatus::Failed.can_retry(false));
         assert!(AgentRunStatus::Completed.is_terminal());
+    }
+
+    #[test]
+    fn registered_run_control_is_removed_when_scope_ends() {
+        let controls = Mutex::new(BTreeMap::new());
+        let control = Arc::new(AgentRunControl::new("auto"));
+        {
+            let lease = RegisteredRunControl::register(
+                &controls,
+                "session-a",
+                Arc::clone(&control),
+                "test controls",
+                "duplicate",
+            )
+            .expect("control should register");
+            assert!(Arc::ptr_eq(&lease.control(), &control));
+            assert!(controls.lock().unwrap().contains_key("session-a"));
+        }
+        assert!(!controls.lock().unwrap().contains_key("session-a"));
+    }
+
+    #[test]
+    fn exclusive_key_can_be_reacquired_after_scope_ends() {
+        let keys = Mutex::new(BTreeSet::new());
+        let lease = ExclusiveKeyLease::try_acquire(&keys, "session-a", "test keys")
+            .expect("key lock should work")
+            .expect("first lease should acquire");
+        assert!(
+            ExclusiveKeyLease::try_acquire(&keys, "session-a", "test keys")
+                .expect("key lock should work")
+                .is_none()
+        );
+        drop(lease);
+        assert!(
+            ExclusiveKeyLease::try_acquire(&keys, "session-a", "test keys")
+                .expect("key lock should work")
+                .is_some()
+        );
     }
 }
