@@ -1,0 +1,1423 @@
+use super::*;
+
+pub(crate) fn phase8_state_with_error(
+    state: &tauri::State<'_, AppState>,
+    message: impl Into<String>,
+) -> Result<Phase8State, String> {
+    let message = message.into();
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    append_event(
+        &mut store,
+        &phase8_task_id(),
+        EventKind::Error,
+        "Browser tool failed",
+        [("error".to_string(), message.clone())]
+            .into_iter()
+            .collect(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    phase8_state(&store, Some(message)).map_err(|error| error.to_string())
+}
+
+pub(crate) fn phase6_state_with_error(
+    state: &tauri::State<'_, AppState>,
+    message: impl Into<String>,
+) -> Result<Phase6State, String> {
+    let message = message.into();
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    append_event(
+        &mut store,
+        &phase6_task_id(),
+        EventKind::Error,
+        "Orchestration failed",
+        [("error".to_string(), message.clone())]
+            .into_iter()
+            .collect(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    phase6_state(&store, Some(message)).map_err(|error| error.to_string())
+}
+
+pub(crate) fn phase5_state_with_error(
+    state: &tauri::State<'_, AppState>,
+    message: impl Into<String>,
+) -> Result<Phase5State, String> {
+    let message = message.into();
+    let root = active_workspace_root(state)?;
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    append_event(
+        &mut store,
+        &phase5_task_id(),
+        EventKind::Error,
+        "Tool call failed",
+        [("error".to_string(), message.clone())]
+            .into_iter()
+            .collect(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    phase5_state(&store, Some(message), &root).map_err(|error| error.to_string())
+}
+
+pub(crate) fn execute_tool_invocation(
+    store: &mut SqliteStore,
+    invocation: ToolInvocation,
+    workspace_root: &Path,
+    registry: Option<&ToolRegistry>,
+) -> Result<(), StorageError> {
+    execute_tool_invocation_with_result(store, invocation, workspace_root, registry, None)
+        .map(|_| ())
+}
+
+pub(crate) fn execute_agent_tool_invocation(
+    state: &tauri::State<'_, AppState>,
+    registry: &ToolRegistry,
+    mut invocation: ToolInvocation,
+    workspace_root: &Path,
+    run_context: &Metadata,
+) -> Result<ToolResult, String> {
+    for (key, value) in run_context {
+        invocation
+            .metadata
+            .entry(key.clone())
+            .or_insert_with(|| value.clone());
+    }
+    let task_id = invocation.task_id.clone();
+    let tool_call_id = invocation.id.0.clone();
+    let tool_name = invocation.tool_name.clone();
+    let tool_input = invocation.input_json.clone();
+    let input_fingerprint = tool_input_fingerprint(&tool_name, &tool_input);
+    {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        if let Some(result) =
+            completed_tool_result(&store, &invocation).map_err(|error| error.to_string())?
+        {
+            return Ok(result);
+        }
+        append_event(
+            &mut store,
+            &task_id,
+            EventKind::ToolCallStarted,
+            format!("Tool call started: {tool_name}"),
+            metadata_with_context(tool_invocation_event_metadata(&invocation), run_context),
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    let execution_started_at = Instant::now();
+    let run_control =
+        active_agent_run_control(state, run_context.get("session_id").map(String::as_str))?;
+    let scope = run_context
+        .get("stage")
+        .or_else(|| run_context.get("collaboration_stage"))
+        .map(String::as_str)
+        .unwrap_or("executor");
+    let budget_stop = run_control.as_ref().and_then(|control| {
+        control
+            .begin_tool_call(scope, &tool_name, &invocation.input_json)
+            .err()
+    });
+    let tool_control = ToolExecutionControl::new({
+        let run_control = run_control.clone();
+        move || {
+            run_control
+                .as_ref()
+                .is_some_and(|control| control.should_stop())
+        }
+    });
+    let mutates_workspace = registry
+        .get(&tool_name)
+        .is_some_and(|tool| !matches!(tool.spec().risk, ToolRisk::ReadOnly));
+    let tool_started = budget_stop.is_none();
+    let mut result = if let Some(reason) = budget_stop {
+        ToolResult::text(
+            invocation.id,
+            ToolOutcomeStatus::Cancelled,
+            format!("Tool execution stopped: {}.", reason.code()),
+            [("stop_reason".to_string(), reason.code().to_string())]
+                .into_iter()
+                .collect(),
+        )
+    } else {
+        match registry.get(&tool_name) {
+            Some(tool) => match tool.execute_with_control(invocation, &tool_control) {
+                Ok(result) => result,
+                Err(error) => {
+                    ToolResult::failed(agent_core::ToolCallId(tool_call_id.clone()), error.message)
+                }
+            },
+            None => {
+                ToolResult::failed(agent_core::ToolCallId(tool_call_id.clone()), "unknown tool")
+            }
+        }
+    };
+    if let Some(control) = run_control.as_ref() {
+        if tool_started {
+            control.finish_tool_call();
+        }
+        control.mark_progress("tool_result", &tool_name);
+        if matches!(result.status, ToolOutcomeStatus::Succeeded) {
+            control.record_checkpoint(
+                "tool_result",
+                &tool_name,
+                &format!("{tool_name}\n{tool_input}\n{}", result.output),
+            );
+        }
+        let progress = control.progress();
+        result.metadata.insert(
+            "run_checkpoints".to_string(),
+            progress.checkpoints.to_string(),
+        );
+        result.metadata.insert(
+            "run_budget_extensions".to_string(),
+            progress.budget_extensions.to_string(),
+        );
+    }
+    materialize_tool_result_artifacts(&mut result, workspace_root)?;
+    finalize_tool_result(
+        &mut result,
+        &agent_core::ToolCallId(tool_call_id.clone()),
+        &input_fingerprint,
+        execution_started_at.elapsed(),
+    );
+    if mutates_workspace && matches!(result.status, ToolOutcomeStatus::Succeeded) {
+        if let Err(error) = invalidate_workspace_knowledge_cache(state, workspace_root) {
+            eprintln!("workspace knowledge cache invalidation failed: {error}");
+        }
+    }
+
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    append_tool_finished_event(
+        &mut store,
+        &task_id,
+        &tool_call_id,
+        &tool_name,
+        tool_outcome_label(&result.status),
+        &result.output,
+        result.metadata.clone(),
+        Some(run_context),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(result)
+}
+
+pub(crate) fn observation_from_agent_tool_result(tool_name: &str, result: &ToolResult) -> String {
+    let mut output = result.output.clone();
+    if !result.artifacts.is_empty() {
+        output.push_str("\n\nArtifacts available in the active workspace:\n");
+        output.push_str(
+            &result
+                .artifacts
+                .iter()
+                .map(|artifact| format!("- {}", artifact.path))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    observation_from_tool_result(tool_name, tool_outcome_label(&result.status), &output)
+}
+
+pub(crate) fn tool_result_image_paths(result: &ToolResult) -> Vec<String> {
+    result
+        .artifacts
+        .iter()
+        .filter(|artifact| {
+            artifact
+                .mime_type
+                .as_deref()
+                .is_some_and(|mime_type| mime_type.starts_with("image/"))
+                || matches!(
+                    Path::new(&artifact.path)
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                        .as_str(),
+                    "avif" | "gif" | "jpeg" | "jpg" | "png" | "webp"
+                )
+        })
+        .map(|artifact| artifact.path.clone())
+        .collect()
+}
+
+pub(crate) fn append_visual_reference_message(
+    runtime: &mut agent_runtime::AgentLoopState,
+    tool_name: &str,
+    image_paths: &[String],
+) {
+    if image_paths.is_empty() {
+        return;
+    }
+    runtime.messages.push(Message {
+        role: MessageRole::User,
+        content: format!(
+            "Visual reference captured by {tool_name}. Inspect the attached screenshot before deciding the next action."
+        ),
+        metadata: [
+            ("internal".to_string(), "true".to_string()),
+            ("kind".to_string(), "visual_reference".to_string()),
+            ("tool".to_string(), tool_name.to_string()),
+            ("image_paths".to_string(), image_paths.join("\n")),
+        ]
+        .into_iter()
+        .collect(),
+    });
+}
+
+pub(crate) fn append_visual_reference_event(
+    store: &mut SqliteStore,
+    task_id: &TaskId,
+    tool_name: &str,
+    image_paths: &[String],
+    run_context: &Metadata,
+) -> Result<(), String> {
+    if image_paths.is_empty() {
+        return Ok(());
+    }
+    append_message_event_with_metadata(
+        store,
+        task_id,
+        MessageRole::User,
+        &format!(
+            "Visual reference captured by {tool_name}. Inspect the attached screenshot before deciding the next action."
+        ),
+        metadata_with_context(
+            [
+                ("internal".to_string(), "true".to_string()),
+                ("kind".to_string(), "visual_reference".to_string()),
+                ("tool".to_string(), tool_name.to_string()),
+                ("image_paths".to_string(), image_paths.join("\n")),
+            ]
+            .into_iter()
+            .collect(),
+            run_context,
+        ),
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub(crate) fn materialize_tool_result_artifacts(
+    result: &mut ToolResult,
+    workspace_root: &Path,
+) -> Result<(), String> {
+    const MAX_INLINE_STRUCTURED_OUTPUT_BYTES: usize = 256 * 1024;
+    let output_dir = workspace_root.join(".cindx").join("artifacts");
+    let artifact_stem: String = result
+        .invocation_id
+        .0
+        .chars()
+        .take(96)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut image_index = 0usize;
+    for content in &mut result.content {
+        let ToolContent::Image { mime_type, data } = content else {
+            continue;
+        };
+        fs::create_dir_all(&output_dir)
+            .map_err(|error| format!("failed to create tool artifact directory: {error}"))?;
+        let extension = match mime_type.as_str() {
+            "image/jpeg" => "jpg",
+            "image/webp" => "webp",
+            "image/gif" => "gif",
+            _ => "png",
+        };
+        let filename = format!("{artifact_stem}-{image_index}.{extension}");
+        let path = output_dir.join(&filename);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data.as_bytes())
+            .map_err(|error| format!("invalid tool image data: {error}"))?;
+        fs::write(&path, bytes)
+            .map_err(|error| format!("failed to write tool image artifact: {error}"))?;
+        result.artifacts.push(ToolArtifact {
+            path: path.display().to_string(),
+            mime_type: Some(mime_type.clone()),
+            title: Some("MCP image output".to_string()),
+        });
+        data.clear();
+        image_index += 1;
+    }
+    for key in ["artifact_path", "screenshot_path", "text_path"] {
+        let Some(path) = result.metadata.get(key).cloned() else {
+            continue;
+        };
+        let path = if Path::new(&path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            workspace_root.join(path)
+        };
+        let path = path.display().to_string();
+        if result
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.path == path)
+        {
+            continue;
+        }
+        let mime_type = match Path::new(&path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "avif" => Some("image/avif"),
+            "gif" => Some("image/gif"),
+            "jpeg" | "jpg" => Some("image/jpeg"),
+            "png" => Some("image/png"),
+            "webp" => Some("image/webp"),
+            "html" | "htm" => Some("text/html"),
+            "md" | "markdown" => Some("text/markdown"),
+            "txt" => Some("text/plain"),
+            _ => None,
+        }
+        .map(str::to_string);
+        result.artifacts.push(ToolArtifact {
+            path,
+            mime_type,
+            title: None,
+        });
+    }
+    if let Some(structured) = result.structured_output_json.take() {
+        if structured.len() > MAX_INLINE_STRUCTURED_OUTPUT_BYTES {
+            fs::create_dir_all(&output_dir)
+                .map_err(|error| format!("failed to create tool artifact directory: {error}"))?;
+            let path = output_dir.join(format!("{artifact_stem}-structured.json"));
+            write_private_file_atomically(
+                &path,
+                structured.as_bytes(),
+                "structured tool output artifact",
+            )?;
+            let reference = serde_json::json!({
+                "schema": "cindx.tool-output-reference.v1",
+                "artifact_path": path.display().to_string(),
+                "bytes": structured.len(),
+            })
+            .to_string();
+            result.artifacts.push(ToolArtifact {
+                path: path.display().to_string(),
+                mime_type: Some("application/json".to_string()),
+                title: Some("Structured tool output".to_string()),
+            });
+            result.metadata.insert(
+                "structured_output_path".to_string(),
+                path.display().to_string(),
+            );
+            result.metadata.insert(
+                "structured_output_bytes".to_string(),
+                structured.len().to_string(),
+            );
+            result
+                .metadata
+                .insert("structured_output".to_string(), reference.clone());
+            result.structured_output_json = Some(reference);
+        } else {
+            result
+                .metadata
+                .insert("structured_output".to_string(), structured.clone());
+            result.structured_output_json = Some(structured);
+        }
+    }
+    if !result.artifacts.is_empty() {
+        result.metadata.insert(
+            "artifact_count".to_string(),
+            result.artifacts.len().to_string(),
+        );
+        let primary_artifact = result
+            .artifacts
+            .iter()
+            .find(|artifact| {
+                artifact
+                    .mime_type
+                    .as_deref()
+                    .is_some_and(|mime_type| mime_type.starts_with("image/"))
+            })
+            .unwrap_or(&result.artifacts[0]);
+        result
+            .metadata
+            .insert("artifact_path".to_string(), primary_artifact.path.clone());
+    }
+    Ok(())
+}
+
+pub(crate) fn execute_tool_invocation_with_result(
+    store: &mut SqliteStore,
+    invocation: ToolInvocation,
+    workspace_root: &Path,
+    registry: Option<&ToolRegistry>,
+    run_context: Option<&Metadata>,
+) -> Result<ToolResult, StorageError> {
+    if let Some(result) = completed_tool_result(store, &invocation)? {
+        return Ok(result);
+    }
+    let invocation_context = tool_invocation_context(&invocation);
+    let event_context =
+        run_context.or_else(|| (!invocation_context.is_empty()).then_some(&invocation_context));
+    let metadata = tool_invocation_event_metadata(&invocation);
+    let metadata = match run_context {
+        Some(context) => metadata_with_context(metadata, context),
+        None => metadata,
+    };
+    append_event(
+        store,
+        &invocation.task_id,
+        EventKind::ToolCallStarted,
+        format!("Tool call started: {}", invocation.tool_name),
+        metadata,
+    )?;
+
+    let execution_started_at = Instant::now();
+    let task_id = invocation.task_id.clone();
+    let tool_call_id = invocation.id.0.clone();
+    let tool_name = invocation.tool_name.clone();
+    let input_fingerprint = tool_input_fingerprint(&tool_name, &invocation.input_json);
+    let fallback_registry = registry
+        .is_none()
+        .then(|| ToolRegistry::with_workspace_tools(workspace_root.to_path_buf()));
+    let registry = registry
+        .or(fallback_registry.as_ref())
+        .expect("tool registry should be available");
+    let Some(tool) = registry.get(&invocation.tool_name) else {
+        let mut result = ToolResult::failed(invocation.id, "unknown tool");
+        finalize_tool_result(
+            &mut result,
+            &agent_core::ToolCallId(tool_call_id.clone()),
+            &input_fingerprint,
+            execution_started_at.elapsed(),
+        );
+        append_tool_finished_event(
+            store,
+            &task_id,
+            &tool_call_id,
+            &tool_name,
+            "failed",
+            "unknown tool",
+            result.metadata.clone(),
+            event_context,
+        )?;
+        return Ok(result);
+    };
+
+    let result = match tool.execute(invocation) {
+        Ok(mut result) => {
+            finalize_tool_result(
+                &mut result,
+                &agent_core::ToolCallId(tool_call_id.clone()),
+                &input_fingerprint,
+                execution_started_at.elapsed(),
+            );
+            append_tool_finished_event(
+                store,
+                &task_id,
+                &tool_call_id,
+                &tool_name,
+                tool_outcome_label(&result.status),
+                &result.output,
+                result.metadata.clone(),
+                event_context,
+            )?;
+            result
+        }
+        Err(error) => {
+            let mut result =
+                ToolResult::failed(agent_core::ToolCallId(tool_call_id.clone()), error.message);
+            finalize_tool_result(
+                &mut result,
+                &agent_core::ToolCallId(tool_call_id.clone()),
+                &input_fingerprint,
+                execution_started_at.elapsed(),
+            );
+            append_tool_finished_event(
+                store,
+                &task_id,
+                &tool_call_id,
+                &tool_name,
+                "failed",
+                &result.output,
+                result.metadata.clone(),
+                event_context,
+            )?;
+            result
+        }
+    };
+
+    Ok(result)
+}
+
+pub(crate) fn append_tool_proposed_event(
+    store: &mut SqliteStore,
+    invocation: &ToolInvocation,
+    run_context: Option<&Metadata>,
+) -> Result<(), StorageError> {
+    let mut metadata = tool_invocation_event_metadata(invocation);
+    metadata.insert(
+        "input_preview".to_string(),
+        truncate_for_timeline(&invocation.input_json),
+    );
+    let metadata = match run_context {
+        Some(context) => metadata_with_context(metadata, context),
+        None => metadata,
+    };
+    append_event(
+        store,
+        &invocation.task_id,
+        EventKind::ToolCallProposed,
+        format!("Tool call proposed: {}", invocation.tool_name),
+        metadata,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn append_tool_finished_event(
+    store: &mut SqliteStore,
+    task_id: &TaskId,
+    tool_call_id: &str,
+    tool_name: &str,
+    status: &str,
+    output: &str,
+    result_metadata: Metadata,
+    run_context: Option<&Metadata>,
+) -> Result<(), StorageError> {
+    let mut metadata = Metadata::new();
+    metadata.insert("tool_call_id".to_string(), tool_call_id.to_string());
+    metadata.insert("tool".to_string(), tool_name.to_string());
+    metadata.insert("status".to_string(), status.to_string());
+    metadata.insert("output".to_string(), output.to_string());
+    metadata.insert("output_length".to_string(), output.len().to_string());
+    for (key, value) in result_metadata {
+        metadata.insert(format!("result_{key}"), value);
+    }
+    if let Some(context) = run_context {
+        metadata = metadata_with_context(metadata, context);
+    }
+    compact_tool_event_metadata(&mut metadata);
+
+    append_event(
+        store,
+        task_id,
+        EventKind::ToolCallFinished,
+        format!("Tool call finished: {tool_name}"),
+        metadata,
+    )
+}
+
+pub(crate) fn compact_tool_event_metadata(metadata: &mut Metadata) -> usize {
+    let oversized_keys = metadata
+        .iter()
+        .filter(|(_, value)| value.len() > PERSISTED_TOOL_EVENT_METADATA_VALUE_LIMIT)
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+
+    for key in &oversized_keys {
+        let Some(value) = metadata.remove(key) else {
+            continue;
+        };
+        let value_length = value.len();
+        metadata
+            .entry(format!("{key}_length"))
+            .or_insert_with(|| value_length.to_string());
+        metadata.insert(format!("{key}_omitted"), "true".to_string());
+        let replacement = if key == "output" {
+            truncate_utf8_bytes(&value, PERSISTED_TOOL_EVENT_OUTPUT_PREVIEW_BYTES)
+        } else {
+            format!("[omitted: {value_length}-byte tool metadata]")
+        };
+        metadata.insert(key.clone(), replacement);
+    }
+
+    oversized_keys.len()
+}
+
+pub(crate) fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &value[..end])
+}
+
+pub(crate) fn phase4_state_with_error(
+    state: &tauri::State<'_, AppState>,
+    config: &ProviderConfig,
+    message: &str,
+) -> Result<Phase4State, String> {
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+
+    phase4_state(&mut store, config, Some(message.to_string())).map_err(|error| error.to_string())
+}
+
+pub(crate) fn record_phase4_error(
+    state: &tauri::State<'_, AppState>,
+    message: &str,
+) -> Result<(), String> {
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    append_event(
+        &mut store,
+        &phase4_task_id(),
+        EventKind::Error,
+        "Model request failed",
+        [("error".to_string(), message.to_string())]
+            .into_iter()
+            .collect(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub(crate) fn append_message_event(
+    store: &mut SqliteStore,
+    task_id: &TaskId,
+    role: MessageRole,
+    content: &str,
+) -> Result<(), StorageError> {
+    append_message_event_with_metadata(store, task_id, role, content, Metadata::new())
+}
+
+pub(crate) fn append_tool_message_event(
+    store: &mut SqliteStore,
+    task_id: &TaskId,
+    tool_call_id: &str,
+    tool_name: &str,
+    status: &str,
+    content: &str,
+    run_context: Option<&Metadata>,
+) -> Result<(), StorageError> {
+    let metadata = [
+        ("kind".to_string(), "tool_observation".to_string()),
+        ("tool_call_id".to_string(), tool_call_id.to_string()),
+        ("tool".to_string(), tool_name.to_string()),
+        ("status".to_string(), status.to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let metadata = match run_context {
+        Some(context) => metadata_with_context(metadata, context),
+        None => metadata,
+    };
+    append_message_event_with_metadata(store, task_id, MessageRole::Tool, content, metadata)
+}
+
+pub(crate) fn persist_new_runtime_messages(
+    store: &mut SqliteStore,
+    task_id: &TaskId,
+    messages: &[Message],
+    previous_message_count: usize,
+    run_context: &Metadata,
+) -> Result<(), StorageError> {
+    for message in messages.iter().skip(previous_message_count) {
+        append_message_event_with_metadata(
+            store,
+            task_id,
+            message.role.clone(),
+            &message.content,
+            metadata_with_context(message.metadata.clone(), run_context),
+        )?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn append_message_event_with_metadata(
+    store: &mut SqliteStore,
+    task_id: &TaskId,
+    role: MessageRole,
+    content: &str,
+    mut metadata: Metadata,
+) -> Result<(), StorageError> {
+    let content = if role == MessageRole::Assistant {
+        sanitize_assistant_content(content)
+    } else {
+        content.to_string()
+    };
+    if role == MessageRole::Assistant {
+        if let Some(display_content) = metadata.get_mut("display_content") {
+            *display_content = sanitize_assistant_content(display_content);
+        }
+    }
+    metadata.insert("role".to_string(), message_role_label(&role).to_string());
+    metadata.insert("content".to_string(), content.clone());
+    metadata.insert("content_length".to_string(), content.len().to_string());
+
+    append_event(
+        store,
+        task_id,
+        EventKind::MessageAdded,
+        format!("{} message", message_role_label(&role)),
+        metadata,
+    )
+}
+
+pub(crate) fn append_event(
+    store: &mut SqliteStore,
+    task_id: &TaskId,
+    kind: EventKind,
+    summary: impl Into<String>,
+    metadata: Metadata,
+) -> Result<(), StorageError> {
+    let metadata = redact_metadata(&metadata);
+
+    store.append_next_event(
+        EventId(unique_id("event")),
+        task_id.clone(),
+        current_time_millis(),
+        kind,
+        redact_sensitive_text(&summary.into()),
+        metadata,
+    )
+}
+
+pub(crate) fn redact_metadata(metadata: &Metadata) -> Metadata {
+    metadata
+        .iter()
+        .map(|(key, value)| {
+            let redacted = if is_sensitive_assignment_key(key) {
+                "[REDACTED]".to_string()
+            } else if key == "raw_tool_calls_json" {
+                redact_structured_json(value).unwrap_or_else(|| redact_sensitive_text(value))
+            } else {
+                redact_sensitive_text(value)
+            };
+            (key.clone(), redacted)
+        })
+        .collect()
+}
+
+pub(crate) fn redact_structured_json(value: &str) -> Option<String> {
+    let mut parsed = serde_json::from_str::<serde_json::Value>(value).ok()?;
+    redact_json_value(&mut parsed);
+    serde_json::to_string(&parsed).ok()
+}
+
+pub(crate) fn redact_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            values.iter_mut().for_each(redact_json_value);
+        }
+        serde_json::Value::Object(values) => {
+            for (key, value) in values {
+                if is_sensitive_assignment_key(key) {
+                    *value = serde_json::Value::String("[REDACTED]".to_string());
+                } else {
+                    redact_json_value(value);
+                }
+            }
+        }
+        serde_json::Value::String(text) => {
+            *text = redact_structured_json(text).unwrap_or_else(|| redact_sensitive_text(text));
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn redact_event(mut event: Event) -> Event {
+    event.summary = redact_sensitive_text(&event.summary);
+    event.metadata = redact_metadata(&event.metadata);
+    event
+}
+
+pub(crate) fn redact_persisted_events(store: &mut SqliteStore) -> Result<usize, StorageError> {
+    let mut updated = 0;
+    for event in store.list_all_events()? {
+        let redacted = redact_event(event.clone());
+        if redacted.summary != event.summary || redacted.metadata != event.metadata {
+            store.update_event_content(&redacted)?;
+            updated += 1;
+        }
+    }
+    Ok(updated)
+}
+
+pub(crate) fn event_redaction_marker_path(root: &Path) -> PathBuf {
+    root.join(EVENT_REDACTION_MARKER_FILE)
+}
+
+pub(crate) fn event_redaction_complete(root: &Path) -> bool {
+    event_redaction_marker_path(root).is_file()
+}
+
+pub(crate) fn mark_event_redaction_complete(root: &Path) -> Result<(), String> {
+    fs::create_dir_all(root)
+        .map_err(|error| format!("failed to create event redaction marker directory: {error}"))?;
+    secure_directory(root)
+        .map_err(|error| format!("failed to secure event redaction marker directory: {error}"))?;
+    let path = event_redaction_marker_path(root);
+    fs::write(&path, b"events-redaction-v1\n")
+        .map_err(|error| format!("failed to write event redaction marker: {error}"))?;
+    secure_private_file(&path)
+        .map_err(|error| format!("failed to secure event redaction marker: {error}"))?;
+    Ok(())
+}
+
+pub(crate) fn tool_event_metadata_compaction_marker_path(root: &Path) -> PathBuf {
+    root.join(TOOL_EVENT_METADATA_COMPACTION_MARKER_FILE)
+}
+
+pub(crate) fn tool_event_metadata_compaction_complete(root: &Path) -> bool {
+    tool_event_metadata_compaction_marker_path(root).is_file()
+}
+
+pub(crate) fn mark_tool_event_metadata_compaction_complete(root: &Path) -> Result<(), String> {
+    fs::create_dir_all(root).map_err(|error| {
+        format!("failed to create tool metadata compaction marker directory: {error}")
+    })?;
+    secure_directory(root).map_err(|error| {
+        format!("failed to secure tool metadata compaction marker directory: {error}")
+    })?;
+    let path = tool_event_metadata_compaction_marker_path(root);
+    fs::write(&path, b"events-tool-metadata-v1\n")
+        .map_err(|error| format!("failed to write tool metadata compaction marker: {error}"))?;
+    secure_private_file(&path)
+        .map_err(|error| format!("failed to secure tool metadata compaction marker: {error}"))?;
+    Ok(())
+}
+
+pub(crate) fn compact_persisted_tool_event_metadata(
+    store: &mut SqliteStore,
+) -> Result<usize, StorageError> {
+    let event_ids = store.oversized_tool_event_ids(AGENT_HISTORY_MAX_TOOL_METADATA_BYTES)?;
+    let mut updated = 0;
+    for event_id in event_ids {
+        let Some(mut event) = store.event_by_id(&event_id)? else {
+            continue;
+        };
+        if compact_tool_event_metadata(&mut event.metadata) == 0 {
+            continue;
+        }
+        store.update_event_content(&event)?;
+        updated += 1;
+    }
+    Ok(updated)
+}
+
+pub(crate) fn start_tool_event_metadata_compaction() {
+    let root = app_data_root();
+    if tool_event_metadata_compaction_complete(&root) {
+        return;
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        std::thread::sleep(Duration::from_secs(2));
+        let result = open_app_store()
+            .and_then(|mut store| compact_persisted_tool_event_metadata(&mut store));
+        match result {
+            Ok(updated) => {
+                if let Err(error) = mark_tool_event_metadata_compaction_complete(&root) {
+                    append_startup_log(&error);
+                } else {
+                    append_startup_log(&format!(
+                        "compacted {updated} oversized tool event metadata records"
+                    ));
+                }
+            }
+            Err(error) => {
+                append_startup_log(&format!("tool event metadata compaction failed: {error}"))
+            }
+        }
+    });
+}
+
+pub(crate) fn redact_existing_text_artifact(path: &Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read text artifact: {error}"))?;
+    let redacted = redact_sensitive_text(&text);
+    if redacted == text {
+        return Ok(false);
+    }
+
+    let mut options = fs::OpenOptions::new();
+    options.truncate(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("failed to open text artifact: {error}"))?;
+    file.write_all(redacted.as_bytes())
+        .map_err(|error| format!("failed to rewrite text artifact: {error}"))?;
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("failed to secure text artifact: {error}"))?;
+    Ok(true)
+}
+
+pub(crate) fn redact_sensitive_text(value: &str) -> String {
+    value
+        .split('\n')
+        .map(redact_sensitive_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(crate) fn redact_sensitive_line(line: &str) -> String {
+    for (index, character) in line.char_indices() {
+        if matches!(character, '=' | ':') && is_sensitive_assignment_key(&line[..index]) {
+            return format!("{}[REDACTED]", &line[..=index]);
+        }
+    }
+
+    let lower = line.to_ascii_lowercase();
+    if let Some(index) = lower.find("bearer ") {
+        return format!("{}Bearer [REDACTED]", &line[..index]);
+    }
+
+    [
+        ("github_pat_", 20_usize),
+        ("ghp_", 16_usize),
+        ("xoxb-", 16_usize),
+        ("sk-", 16_usize),
+        ("AKIA", 16_usize),
+    ]
+    .into_iter()
+    .fold(line.to_string(), |text, (prefix, minimum_length)| {
+        redact_prefixed_secret(&text, prefix, minimum_length)
+    })
+}
+
+pub(crate) fn is_sensitive_assignment_key(value: &str) -> bool {
+    let compact = value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    [
+        "apikey",
+        "xapikey",
+        "authorization",
+        "proxyauthorization",
+        "accesstoken",
+        "refreshtoken",
+        "authtoken",
+        "clientsecret",
+        "secretkey",
+        "password",
+    ]
+    .iter()
+    .any(|key| compact.ends_with(key))
+}
+
+pub(crate) fn redact_prefixed_secret(value: &str, prefix: &str, minimum_length: usize) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while let Some(relative_start) = value[cursor..].find(prefix) {
+        let start = cursor + relative_start;
+        output.push_str(&value[cursor..start]);
+        let mut end = start + prefix.len();
+        while end < value.len() {
+            let byte = value.as_bytes()[end];
+            if byte.is_ascii_whitespace()
+                || matches!(byte, b'\'' | b'"' | b',' | b';' | b')' | b']' | b'}')
+            {
+                break;
+            }
+            end += 1;
+        }
+        if end.saturating_sub(start) >= minimum_length {
+            output.push_str("[REDACTED]");
+        } else {
+            output.push_str(prefix);
+        }
+        cursor = end;
+    }
+    output.push_str(&value[cursor..]);
+    output
+}
+
+pub(crate) fn timeline_entry(event: Event, audits: &[PermissionAuditRecord]) -> TimelineEntry {
+    let permission_id = event.metadata.get("permission_id");
+    let permission_is_pending = permission_id.is_some_and(|id| {
+        audits
+            .iter()
+            .any(|audit| audit.request.id.0 == *id && audit.resolution.is_none())
+    });
+    let workflow_progress = timeline_workflow_progress(&event);
+    let detail = match event.kind {
+        EventKind::MessageAdded => event
+            .metadata
+            .get("content")
+            .map(|content| {
+                format!(
+                    "{}: {}",
+                    event
+                        .metadata
+                        .get("role")
+                        .cloned()
+                        .unwrap_or_else(|| "message".to_string()),
+                    truncate_for_timeline(content)
+                )
+            })
+            .unwrap_or_else(|| event.summary.clone()),
+        EventKind::ModelRequestStarted => event
+            .metadata
+            .get("model")
+            .map(|model| format!("{} using {model}", event.summary))
+            .unwrap_or_else(|| event.summary.clone()),
+        EventKind::ModelRequestFinished => {
+            let latency = event
+                .metadata
+                .get("latency_ms")
+                .cloned()
+                .unwrap_or_default();
+            if latency.is_empty() {
+                event.summary.clone()
+            } else {
+                format!("{} in {latency} ms", event.summary)
+            }
+        }
+        EventKind::ToolCallProposed => event
+            .metadata
+            .get("input_preview")
+            .map(|input| format!("{} with {}", event.summary, input.replace('\n', " ")))
+            .unwrap_or_else(|| event.summary.clone()),
+        EventKind::ToolCallStarted => event
+            .metadata
+            .get("tool")
+            .map(|tool| format!("Executing {tool}"))
+            .unwrap_or_else(|| event.summary.clone()),
+        EventKind::ToolCallFinished => {
+            let status = event
+                .metadata
+                .get("status")
+                .cloned()
+                .unwrap_or_else(|| "done".to_string());
+            let output = event
+                .metadata
+                .get("output")
+                .map(|value| truncate_for_timeline(value))
+                .unwrap_or_default();
+            if output.is_empty() {
+                format!("{}: {status}", event.summary)
+            } else {
+                format!("{}: {status}. {output}", event.summary)
+            }
+        }
+        EventKind::PermissionRequested => event
+            .metadata
+            .get("scope")
+            .map(|scope| format!("{} Scope: {scope}", event.summary))
+            .unwrap_or_else(|| event.summary.clone()),
+        EventKind::PermissionResolved => event
+            .metadata
+            .get("decision")
+            .map(|decision| format!("{} with {decision}", event.summary))
+            .unwrap_or_else(|| event.summary.clone()),
+        EventKind::Error => event
+            .metadata
+            .get("error")
+            .cloned()
+            .unwrap_or_else(|| event.summary.clone()),
+        _ => event.summary.clone(),
+    };
+
+    TimelineEntry {
+        sequence: event.sequence,
+        label: timeline_event_label(&event),
+        detail: redact_sensitive_text(&detail),
+        kind: event_kind_ui_kind(&event.kind).to_string(),
+        state: event_state(&event.kind, permission_is_pending).to_string(),
+        timestamp_ms: event.timestamp_ms,
+        workflow_progress,
+    }
+}
+
+pub(crate) fn timeline_workflow_progress(event: &Event) -> Option<WorkflowProgressView> {
+    let total_steps = event
+        .metadata
+        .get("workflow_steps")?
+        .parse::<usize>()
+        .ok()?;
+    if total_steps == 0 || !event.metadata.contains_key("workflow_checkpoint_schema") {
+        return None;
+    }
+    let completed_steps = event
+        .metadata
+        .get("completed_steps")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_default()
+        .min(total_steps);
+    let step_status = event.metadata.get("step_status").cloned();
+    Some(WorkflowProgressView {
+        completed_steps,
+        total_steps,
+        current_step_id: event.metadata.get("step_id").cloned(),
+        continuations: event
+            .metadata
+            .get("workflow_continuations")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or_default(),
+        recoverable: completed_steps < total_steps
+            && event.summary != "Collaboration workflow checkpoint finalized",
+        step_status,
+    })
+}
+
+pub(crate) fn permission_audit(record: PermissionAuditRecord) -> PermissionAudit {
+    let resolution = record.resolution;
+    PermissionAudit {
+        id: record.request.id.0,
+        risk: permission_risk_label(&record.request.risk).to_string(),
+        action: redact_sensitive_text(&record.request.action),
+        reason: redact_sensitive_text(&record.request.reason),
+        scope: redact_sensitive_text(&record.request.scope),
+        status: if resolution.is_some() {
+            "resolved".to_string()
+        } else {
+            "pending".to_string()
+        },
+        decision: resolution
+            .as_ref()
+            .map(|resolution| permission_decision_label(&resolution.decision).to_string()),
+        requested_at_ms: record.requested_at_ms,
+        resolved_at_ms: resolution.map(|resolution| resolution.resolved_at_ms),
+    }
+}
+
+pub(crate) fn message_view_from_event(event: &Event) -> Option<ChatMessageView> {
+    if event.kind != EventKind::MessageAdded {
+        return None;
+    }
+    if event.metadata.get("internal").map(String::as_str) == Some("true") {
+        return None;
+    }
+
+    let role = event.metadata.get("role")?.to_string();
+    let mut content = redact_sensitive_text(
+        event
+            .metadata
+            .get("display_content")
+            .or_else(|| event.metadata.get("content"))?,
+    );
+    if role == "assistant" {
+        content = sanitize_assistant_content(&content);
+    }
+
+    Some(ChatMessageView {
+        sequence: event.sequence,
+        role,
+        content,
+        timestamp_ms: event.timestamp_ms,
+        run_id: event.metadata.get("agent_run_id").cloned(),
+        attachments: attachment_views_from_event(event),
+    })
+}
+
+pub(crate) fn attachment_views_from_event(event: &Event) -> Vec<AgentAttachmentView> {
+    let paths = event
+        .metadata
+        .get("attachment_paths")
+        .map(|value| value.lines().collect::<Vec<_>>())
+        .unwrap_or_default();
+    if paths.is_empty() {
+        return Vec::new();
+    }
+
+    let names = event
+        .metadata
+        .get("attachment_names")
+        .map(|value| value.lines().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let ids = event
+        .metadata
+        .get("attachment_ids")
+        .map(|value| value.lines().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mime_types = event
+        .metadata
+        .get("attachment_mime_types")
+        .map(|value| value.lines().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let sizes = event
+        .metadata
+        .get("attachment_sizes")
+        .map(|value| value.lines().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let image_paths = event
+        .metadata
+        .get("image_paths")
+        .map(|value| value.lines().collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    paths
+        .into_iter()
+        .enumerate()
+        .filter(|(_, path)| !path.trim().is_empty())
+        .map(|(index, path)| {
+            let inferred_mime = normalized_attachment_mime("", Path::new(path));
+            let mime_type = mime_types
+                .get(index)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| (*value).to_string())
+                .unwrap_or_else(|| {
+                    if image_paths.contains(&path) && !inferred_mime.starts_with("image/") {
+                        "image/*".to_string()
+                    } else {
+                        inferred_mime
+                    }
+                });
+            AgentAttachmentView {
+                id: ids
+                    .get(index)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| (*value).to_string())
+                    .unwrap_or_else(|| format!("message-attachment-{}-{index}", event.sequence)),
+                name: names
+                    .get(index)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| (*value).to_string())
+                    .unwrap_or_else(|| safe_attachment_name(path)),
+                path: path.to_string(),
+                mime_type,
+                size_bytes: sizes
+                    .get(index)
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn message_from_event(event: &Event) -> Option<Message> {
+    if event.kind != EventKind::MessageAdded {
+        return None;
+    }
+    if event.metadata.get("internal").map(String::as_str) == Some("true")
+        && event.metadata.get("kind").map(String::as_str) != Some("visual_reference")
+    {
+        return None;
+    }
+
+    let role = message_role_from_label(event.metadata.get("role")?)?;
+    let mut content = redact_sensitive_text(event.metadata.get("content")?);
+    if role == MessageRole::Assistant {
+        content = sanitize_assistant_content(&content);
+    }
+
+    let mut metadata = redact_metadata(&event.metadata);
+    if role == MessageRole::Assistant {
+        metadata.insert("content".to_string(), content.clone());
+        if metadata.contains_key("display_content") {
+            metadata.insert("display_content".to_string(), content.clone());
+        }
+    }
+
+    Some(Message {
+        role,
+        content,
+        metadata,
+    })
+}
+
+pub(crate) fn tool_run_from_event(event: &Event) -> Option<ToolRunView> {
+    if event.kind != EventKind::ToolCallFinished {
+        return None;
+    }
+
+    Some(ToolRunView {
+        invocation_id: event.metadata.get("tool_call_id")?.to_string(),
+        tool_name: event.metadata.get("tool")?.to_string(),
+        status: event.metadata.get("status")?.to_string(),
+        output: event
+            .metadata
+            .get("output")
+            .map(|value| redact_sensitive_text(value))
+            .unwrap_or_default(),
+        timestamp_ms: event.timestamp_ms,
+    })
+}
+
+pub(crate) fn tool_approval_from_audit(record: PermissionAuditRecord) -> Option<ToolApprovalView> {
+    Some(ToolApprovalView {
+        request_id: record.request.id.0,
+        invocation_id: record.request.metadata.get("tool_call_id")?.to_string(),
+        tool_name: record.request.metadata.get("tool_name")?.to_string(),
+        risk: permission_risk_label(&record.request.risk).to_string(),
+        reason: redact_sensitive_text(&record.request.reason),
+        scope: redact_sensitive_text(&record.request.scope),
+        input: record
+            .request
+            .metadata
+            .get("tool_input")
+            .map(|value| redact_sensitive_text(value))
+            .unwrap_or_default(),
+        requested_at_ms: record.requested_at_ms,
+    })
+}
+
+pub(crate) fn orchestration_step_from_event(event: &Event) -> Option<OrchestrationStepView> {
+    if event.kind != EventKind::ModelRequestFinished {
+        return None;
+    }
+    let orchestration_id = event.metadata.get("orchestration_id")?.to_string();
+
+    Some(OrchestrationStepView {
+        orchestration_id,
+        policy: event.metadata.get("policy")?.to_string(),
+        step_index: event.metadata.get("step_index")?.parse().ok()?,
+        role: event.metadata.get("role")?.to_string(),
+        model: event.metadata.get("model")?.to_string(),
+        output: event
+            .metadata
+            .get("output")
+            .map(|value| redact_sensitive_text(value))
+            .unwrap_or_default(),
+        latency_ms: event
+            .metadata
+            .get("latency_ms")
+            .and_then(|value| value.parse().ok()),
+        timestamp_ms: event.timestamp_ms,
+    })
+}
+
+#[derive(Debug)]
+pub(crate) struct RetrievalChannelOutcome {
+    pub(crate) name: String,
+    pub(crate) duration_ms: u64,
+    pub(crate) results: Vec<RagSearchResult>,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ParallelRetrievalResult {
+    pub(crate) results: Vec<RagSearchResult>,
+    pub(crate) sources: Vec<RagSourceView>,
+    pub(crate) trace: RetrievalTraceView,
+}
+
+#[derive(Debug)]
+pub(crate) struct AutomaticKnowledgeIndexResult {
+    pub(crate) stats: RagIndexStats,
+    pub(crate) embedding_backend: String,
+    pub(crate) embedding_model: String,
+    pub(crate) fallback_error: Option<String>,
+}

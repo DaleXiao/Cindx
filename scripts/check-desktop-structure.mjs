@@ -43,7 +43,22 @@ const tauriBridge = read("apps/desktop/src/tauri.ts");
 const localBuildScript = read("scripts/build-local-app.mjs");
 const browserSidecarSource = read("scripts/sidecars/browser-sidecar.js");
 const browserIntegrationTest = read("scripts/test-browser-sidecar.mjs");
-const rustLib = read("apps/desktop/src-tauri/src/lib.rs");
+const desktopRustSourceDirectory = path.join(
+  root,
+  "apps/desktop/src-tauri/src"
+);
+const desktopRustModules = fs
+  .readdirSync(desktopRustSourceDirectory)
+  .filter((entry) => entry.endsWith(".rs"))
+  .sort()
+  .map((entry) => ({
+    entry,
+    source: fs.readFileSync(path.join(desktopRustSourceDirectory, entry), "utf8"),
+  }));
+const rustCompositionRoot = read("apps/desktop/src-tauri/src/lib.rs");
+const rustLib = desktopRustModules
+  .map(({ entry, source }) => `// ${entry}\n${source}`)
+  .join("\n");
 const collaborationServiceSource = read(
   "apps/desktop/src-tauri/src/collaboration_service.rs"
 );
@@ -124,6 +139,38 @@ const sessionRefreshEnd = appSource.indexOf(
   sessionRefreshStart
 );
 const sessionRefreshBlock = appSource.slice(sessionRefreshStart, sessionRefreshEnd);
+
+const rustCompositionRootLineCount = rustCompositionRoot.split("\n").length;
+const oversizedProductionRustModules = desktopRustModules
+  .filter(({ entry }) => entry !== "tests.rs")
+  .map(({ entry, source }) => ({ entry, lines: source.split("\n").length }))
+  .filter(({ lines }) => lines > 2_200);
+
+assert(
+  rustCompositionRootLineCount <= 250 &&
+    !rustCompositionRoot.includes("#[tauri::command]") &&
+    !rustCompositionRoot.includes("pub(crate) fn "),
+  `Desktop Rust composition root must remain declarative (found ${rustCompositionRootLineCount} lines)`
+);
+assert(
+  oversizedProductionRustModules.length === 0,
+  `Desktop Rust production modules exceeded the 2,200-line cohesion budget: ${oversizedProductionRustModules
+    .map(({ entry, lines }) => `${entry} (${lines})`)
+    .join(", ")}`
+);
+for (const requiredModule of [
+  "agent_loop_runtime.rs",
+  "adaptive_collaboration_runtime.rs",
+  "prompt_evaluation_runtime.rs",
+  "prompt_evolution_runtime.rs",
+  "routing_learning_runtime.rs",
+  "tool_execution.rs",
+]) {
+  assert(
+    desktopRustModules.some(({ entry }) => entry === requiredModule),
+    `Desktop Rust architecture is missing ${requiredModule}`
+  );
+}
 
 assert(packageJson.name === "cindx-desktop", "desktop package name changed");
 assert(packageJson.scripts.dev.includes("vite"), "desktop dev script must run Vite");
