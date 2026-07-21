@@ -6,6 +6,8 @@ pub(crate) struct AgentSessionReadModel {
     pub(crate) revision: u64,
     pub(crate) event_count: u64,
     pub(crate) estimated_context_tokens: u64,
+    #[serde(default)]
+    pub(crate) has_effective_context_usage: bool,
     pub(crate) has_user_prompt: bool,
     pub(crate) active_run_id: Option<String>,
     #[serde(default)]
@@ -67,6 +69,7 @@ fn build_agent_session_read_model(
             revision: 0,
             event_count: 0,
             estimated_context_tokens: 0,
+            has_effective_context_usage: false,
             has_user_prompt: false,
             active_run_id: None,
             latest_run_queue_id: None,
@@ -101,6 +104,9 @@ fn build_agent_session_read_model(
         .map(|event| event.sequence)
         .unwrap_or_default();
     let event_count = events.len() as u64;
+    let has_effective_context_usage = events
+        .iter()
+        .any(|event| effective_context_usage_from_event(event).is_some());
     let mut state = agent_state_from_events(store, None, Some(session_id), events)?;
     state.timeline.clear();
     state.messages.clear();
@@ -114,6 +120,7 @@ fn build_agent_session_read_model(
         revision,
         event_count,
         estimated_context_tokens,
+        has_effective_context_usage,
         has_user_prompt,
         active_run_id,
         latest_run_queue_id,
@@ -186,7 +193,7 @@ fn apply_event_to_agent_session_read_model(model: &mut AgentSessionReadModel, ev
                     .estimated_context_tokens
                     .saturating_add(estimate_message_tokens(&message))
             };
-            if model.state.context_usage_estimated {
+            if !model.has_effective_context_usage {
                 model.state.context_tokens_used = model.estimated_context_tokens;
             }
             match message.role {
@@ -202,9 +209,14 @@ fn apply_event_to_agent_session_read_model(model: &mut AgentSessionReadModel, ev
     if event.kind == EventKind::ModelRequestFinished && event.summary == "Agent model turn finished"
     {
         model.state.turn_count = model.state.turn_count.saturating_add(1);
-        if let Some(tokens) = metadata_u64(event, "prompt_tokens") {
-            model.state.context_tokens_used = tokens;
-            model.state.context_usage_estimated = false;
+    }
+
+    if let Some((tokens, estimated)) = effective_context_usage_from_event(event) {
+        model.state.context_tokens_used = tokens;
+        model.state.context_usage_estimated = estimated;
+        model.has_effective_context_usage = true;
+        if let Some(context_window_tokens) = metadata_u64(event, "context_window_tokens") {
+            model.state.context_window_tokens = context_window_tokens.max(1);
         }
     }
 
@@ -291,6 +303,7 @@ fn load_current_agent_session_read_model(
         });
 
     let (mut model, dirty, stats) = if let Some(mut model) = stored {
+        model.has_effective_context_usage |= !model.state.context_usage_estimated;
         let delta = store.list_by_task_and_metadata_after(
             &task_id,
             "session_id",
@@ -577,5 +590,121 @@ mod tests {
             .expect("stored projection should load")
             .expect("stored projection should exist");
         assert_eq!(stored.revision, 1);
+    }
+
+    #[test]
+    fn effective_context_usage_survives_later_message_events() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let session_id = "session-context-usage";
+        let context = session_context(session_id);
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task started",
+            metadata_with_context(
+                [
+                    ("prompt".to_string(), "continue".to_string()),
+                    ("context_window_tokens".to_string(), "100000".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                &context,
+            ),
+        )
+        .expect("run start should append");
+        append_message_event_with_metadata(
+            &mut store,
+            &phase16_task_id(),
+            MessageRole::User,
+            "continue",
+            context.clone(),
+        )
+        .expect("user message should append");
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent context compacted",
+            metadata_with_context(
+                [
+                    ("context_usage_reset".to_string(), "true".to_string()),
+                    ("context_tokens_used".to_string(), "12000".to_string()),
+                    ("context_window_tokens".to_string(), "100000".to_string()),
+                    ("context_usage_estimated".to_string(), "true".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                &context,
+            ),
+        )
+        .expect("context reset should append");
+
+        let compacted = load_agent_session_read_model(&mut store, session_id)
+            .expect("compacted projection should load");
+        assert_eq!(compacted.state.context_tokens_used, 12_000);
+        assert_eq!(compacted.state.context_remaining_percent, 88.0);
+        assert!(compacted.state.context_usage_estimated);
+
+        append_message_event_with_metadata(
+            &mut store,
+            &phase16_task_id(),
+            MessageRole::Assistant,
+            "preparing the next request",
+            context.clone(),
+        )
+        .expect("assistant message should append");
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::ModelRequestStarted,
+            "Agent model turn started",
+            metadata_with_context(
+                [
+                    ("context_projected_tokens".to_string(), "15000".to_string()),
+                    ("context_window_tokens".to_string(), "100000".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                &context,
+            ),
+        )
+        .expect("model start should append");
+
+        let projected = load_agent_session_read_model(&mut store, session_id)
+            .expect("projected usage should load");
+        assert_eq!(projected.state.context_tokens_used, 15_000);
+        assert!(projected.state.context_usage_estimated);
+
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::ModelRequestFinished,
+            "Agent model turn finished",
+            metadata_with_context(
+                [
+                    ("context_projected_tokens".to_string(), "15000".to_string()),
+                    ("prompt_tokens".to_string(), "14500".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                &context,
+            ),
+        )
+        .expect("model finish should append");
+        append_message_event_with_metadata(
+            &mut store,
+            &phase16_task_id(),
+            MessageRole::Assistant,
+            "finished",
+            context,
+        )
+        .expect("final assistant message should append");
+
+        let exact = load_agent_session_read_model(&mut store, session_id)
+            .expect("exact usage should load");
+        assert_eq!(exact.state.context_tokens_used, 14_500);
+        assert_eq!(exact.state.context_remaining_percent, 85.5);
+        assert!(!exact.state.context_usage_estimated);
     }
 }

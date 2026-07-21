@@ -632,7 +632,7 @@ impl ProjectSessionConfig {
     fn default_for_root(root: &Path) -> Self {
         let now = current_time_millis();
         let project_id = "project-cindx".to_string();
-        let session_id = "session-runtime".to_string();
+        let session_id = new_session_id();
         Self {
             active_project_id: project_id.clone(),
             active_session_id: session_id.clone(),
@@ -689,15 +689,7 @@ impl ProjectSessionConfig {
             })
         {
             let now = current_time_millis();
-            let session_id = unique_config_id(
-                "session",
-                "Runtime Session",
-                &self
-                    .sessions
-                    .iter()
-                    .map(|session| session.id.clone())
-                    .collect::<Vec<_>>(),
-            );
+            let session_id = new_session_id();
             self.sessions.push(SessionRecord {
                 id: session_id,
                 project_id: self.active_project_id.clone(),
@@ -2640,7 +2632,7 @@ fn validate_schedule_target(
 
 fn ensure_schedule_execution_session(
     state: &tauri::State<'_, AppState>,
-    schedule_id: &str,
+    _schedule_id: &str,
     schedule_name: &str,
     effort: &str,
     project_id: Option<&str>,
@@ -2695,15 +2687,7 @@ fn ensure_schedule_execution_session(
         return Ok(execution_session_id);
     }
 
-    let execution_session_id = unique_config_id(
-        "schedule-session",
-        schedule_id,
-        &config
-            .sessions
-            .iter()
-            .map(|session| session.id.clone())
-            .collect::<Vec<_>>(),
-    );
+    let execution_session_id = new_session_id();
     let now = current_time_millis();
     config.sessions.push(SessionRecord {
         id: execution_session_id.clone(),
@@ -3403,15 +3387,7 @@ fn create_project(
             .map(|project| project.id.clone())
             .collect::<Vec<_>>(),
     );
-    let session_id = unique_config_id(
-        "session",
-        "New Session",
-        &config
-            .sessions
-            .iter()
-            .map(|session| session.id.clone())
-            .collect::<Vec<_>>(),
-    );
+    let session_id = new_session_id();
     let now = current_time_millis();
     config.projects.push(ProjectRecord {
         id: project_id.clone(),
@@ -3465,15 +3441,7 @@ fn create_session(
             Some("project not found for session".to_string()),
         ));
     }
-    let session_id = unique_config_id(
-        "session",
-        &name,
-        &config
-            .sessions
-            .iter()
-            .map(|session| session.id.clone())
-            .collect::<Vec<_>>(),
-    );
+    let session_id = new_session_id();
     let now = current_time_millis();
     config.sessions.push(SessionRecord {
         id: session_id.clone(),
@@ -3902,15 +3870,7 @@ fn fork_session(
             ));
         };
         let name = unique_fork_name(&config, &source);
-        let id = unique_config_id(
-            "session",
-            &name,
-            &config
-                .sessions
-                .iter()
-                .map(|session| session.id.clone())
-                .collect::<Vec<_>>(),
-        );
+        let id = new_session_id();
         let now = current_time_millis();
         let fork = SessionRecord {
             id: id.clone(),
@@ -4235,15 +4195,7 @@ fn select_project(
             })
             .map(|session| session.id.clone())
             .unwrap_or_else(|| {
-                let session_id = unique_config_id(
-                    "session",
-                    &format!("{} Session", project.name),
-                    &config
-                        .sessions
-                        .iter()
-                        .map(|session| session.id.clone())
-                        .collect::<Vec<_>>(),
-                );
+                let session_id = new_session_id();
                 let now = current_time_millis();
                 config.sessions.push(SessionRecord {
                     id: session_id.clone(),
@@ -14127,6 +14079,10 @@ fn continue_agent_loop(
             }
             metadata.insert("output_length".to_string(), output_length.to_string());
             metadata.insert("tool_calls".to_string(), tool_call_count.to_string());
+            metadata.insert(
+                "context_projected_tokens".to_string(),
+                context_governor.estimated_projected_tokens.to_string(),
+            );
             let progress = cancellation.progress();
             metadata.insert(
                 "run_checkpoints".to_string(),
@@ -14933,22 +14889,23 @@ fn agent_state_from_events(
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(128_000)
         .max(1);
-    let reported_context_tokens = active_events.iter().rev().find_map(|event| {
-        (event.kind == EventKind::ModelRequestFinished
-            && event.summary == "Agent model turn finished")
-            .then(|| event.metadata.get("prompt_tokens")?.parse::<u64>().ok())
-            .flatten()
-    });
-    let context_usage_estimated = reported_context_tokens.is_none();
-    let context_tokens_used = reported_context_tokens.unwrap_or_else(|| {
-        estimate_context_tokens(
-            thread_events
-                .iter()
-                .filter_map(message_from_event)
-                .collect::<Vec<_>>()
-                .as_slice(),
-        )
-    });
+    let effective_context_usage = active_events
+        .iter()
+        .rev()
+        .find_map(effective_context_usage_from_event);
+    let (context_tokens_used, context_usage_estimated) =
+        effective_context_usage.unwrap_or_else(|| {
+            (
+                estimate_context_tokens(
+                    thread_events
+                        .iter()
+                        .filter_map(message_from_event)
+                        .collect::<Vec<_>>()
+                        .as_slice(),
+                ),
+                true,
+            )
+        });
     let context_remaining_percent =
         (context_window_tokens.saturating_sub(context_tokens_used) as f64
             / context_window_tokens as f64
@@ -15232,6 +15189,39 @@ fn estimate_context_tokens(messages: &[Message]) -> u64 {
     512_u64.saturating_add(messages.iter().map(estimate_message_tokens).sum::<u64>())
 }
 
+fn effective_context_usage_from_event(event: &Event) -> Option<(u64, bool)> {
+    if event.metadata.get("context_usage_reset").map(String::as_str) == Some("true") {
+        let tokens = event.metadata.get("context_tokens_used")?.parse().ok()?;
+        let estimated = event
+            .metadata
+            .get("context_usage_estimated")
+            .map(String::as_str)
+            != Some("false");
+        return Some((tokens, estimated));
+    }
+
+    match (&event.kind, event.summary.as_str()) {
+        (EventKind::ModelRequestStarted, "Agent model turn started") => event
+            .metadata
+            .get("context_projected_tokens")
+            .and_then(|value| value.parse().ok())
+            .map(|tokens| (tokens, true)),
+        (EventKind::ModelRequestFinished, "Agent model turn finished") => event
+            .metadata
+            .get("prompt_tokens")
+            .and_then(|value| value.parse().ok())
+            .map(|tokens| (tokens, false))
+            .or_else(|| {
+                event
+                    .metadata
+                    .get("context_projected_tokens")
+                    .and_then(|value| value.parse().ok())
+                    .map(|tokens| (tokens, true))
+            }),
+        _ => None,
+    }
+}
+
 fn context_prompt_reserve(context_window_tokens: u64) -> u64 {
     let context_window_tokens = context_window_tokens.max(1);
     (context_window_tokens / 8)
@@ -15506,6 +15496,54 @@ fn prepare_session_history_context(
                 (
                     "context_checkpoint_path".to_string(),
                     checkpoint_path.display().to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            run_context,
+        ),
+    )
+    .map_err(|error| error.to_string())?;
+
+    let context_tokens_used = estimate_context_tokens(&compacted)
+        .saturating_add(context_prompt_reserve(context_window_tokens))
+        .min(context_window_tokens.max(1));
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent context compacted",
+        metadata_with_context(
+            [
+                ("internal".to_string(), "true".to_string()),
+                ("context_usage_reset".to_string(), "true".to_string()),
+                (
+                    "context_tokens_used".to_string(),
+                    context_tokens_used.to_string(),
+                ),
+                (
+                    "context_window_tokens".to_string(),
+                    context_window_tokens.to_string(),
+                ),
+                (
+                    "context_usage_estimated".to_string(),
+                    "true".to_string(),
+                ),
+                (
+                    "covered_messages".to_string(),
+                    covered_messages.to_string(),
+                ),
+                (
+                    "retained_messages".to_string(),
+                    retained_messages.to_string(),
+                ),
+                (
+                    "checkpoint_reused".to_string(),
+                    checkpoint_reused.to_string(),
+                ),
+                (
+                    "compaction_version".to_string(),
+                    CONTEXT_COMPACTION_VERSION.to_string(),
                 ),
             ]
             .into_iter()
@@ -24460,15 +24498,7 @@ fn ensure_open_session_for_project(
         .map(|project| project.name.clone())
         .unwrap_or_else(|| "Runtime".to_string());
     let name = format!("{project_name} Session");
-    let id = unique_config_id(
-        "session",
-        &name,
-        &config
-            .sessions
-            .iter()
-            .map(|session| session.id.clone())
-            .collect::<Vec<_>>(),
-    );
+    let id = new_session_id();
     let now = current_time_millis();
     config.sessions.push(SessionRecord {
         id: id.clone(),
@@ -25563,6 +25593,10 @@ fn context_task_ids() -> Vec<TaskId> {
 fn unique_id(prefix: &str) -> String {
     let counter = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}-{}-{counter}", current_time_millis())
+}
+
+fn new_session_id() -> String {
+    format!("sess_{}", uuid::Uuid::now_v7())
 }
 
 fn current_time_millis() -> u64 {
@@ -32609,6 +32643,7 @@ mod tests {
     fn project_session_state_defaults_to_active_workspace() {
         let root = temp_test_root("phase20-projects");
         let config = ProjectSessionConfig::default_for_root(&root);
+        let session_id = config.active_session_id.clone();
         let state = project_session_state(&config, None);
 
         assert_eq!(state.projects.len(), 1);
@@ -32618,13 +32653,30 @@ mod tests {
         assert!(state.sessions[0].active);
         assert_eq!(state.sessions[0].effort, "auto");
         assert_eq!(state.active_project_id, "project-cindx");
-        assert_eq!(state.active_session_id, "session-runtime");
+        assert_eq!(state.active_session_id, session_id);
+        assert!(state.active_session_id.starts_with("sess_"));
+    }
+
+    #[test]
+    fn new_session_ids_are_unique_uuid_v7_values() {
+        let first = new_session_id();
+        let second = new_session_id();
+
+        assert_ne!(first, second);
+        for session_id in [first, second] {
+            let value = session_id
+                .strip_prefix("sess_")
+                .expect("session id should use the opaque prefix");
+            let uuid = uuid::Uuid::parse_str(value).expect("session id should contain a UUID");
+            assert_eq!(uuid.get_version(), Some(uuid::Version::SortRand));
+        }
     }
 
     #[test]
     fn schedule_execution_sessions_stay_out_of_the_task_sidebar() {
         let root = temp_test_root("hidden-schedule-session");
         let mut config = ProjectSessionConfig::default_for_root(&root);
+        let initial_session_id = config.active_session_id.clone();
         config.sessions.push(SessionRecord {
             id: "schedule-session-review".to_string(),
             project_id: "project-cindx".to_string(),
@@ -32640,7 +32692,7 @@ mod tests {
 
         let state = project_session_state(&config, None);
         assert_eq!(state.sessions.len(), 1);
-        assert_eq!(state.sessions[0].id, "session-runtime");
+        assert_eq!(state.sessions[0].id, initial_session_id);
 
         config.sessions.retain(is_schedule_execution_session);
         let replacement = ensure_open_session_for_project(&mut config, "project-cindx");
@@ -32654,6 +32706,7 @@ mod tests {
     fn session_effort_updates_only_the_selected_session() {
         let root = temp_test_root("session-effort");
         let mut config = ProjectSessionConfig::default_for_root(&root);
+        let initial_session_id = config.active_session_id.clone();
         config.sessions.push(SessionRecord {
             id: "session-second".to_string(),
             project_id: config.projects[0].id.clone(),
@@ -32667,7 +32720,7 @@ mod tests {
             archived_at_ms: None,
         });
 
-        assert!(update_session_effort(&mut config, "session-runtime", "pro"));
+        assert!(update_session_effort(&mut config, &initial_session_id, "pro"));
         assert_eq!(config.sessions[0].effort, "pro");
         assert_eq!(config.sessions[1].effort, "auto");
         assert!(!update_session_effort(&mut config, "missing", "high"));
@@ -32677,6 +32730,7 @@ mod tests {
     fn deleting_a_project_removes_its_sessions_and_selects_a_neighbor() {
         let root = temp_test_root("delete-project");
         let mut config = ProjectSessionConfig::default_for_root(&root);
+        let initial_session_id = config.active_session_id.clone();
         config.projects.push(ProjectRecord {
             id: "project-next".to_string(),
             name: "Next".to_string(),
@@ -32701,7 +32755,7 @@ mod tests {
         let (_, deleted_session_ids) = remove_project_from_config(&mut config, "project-cindx")
             .expect("project should be removed");
 
-        assert_eq!(deleted_session_ids, vec!["session-runtime"]);
+        assert_eq!(deleted_session_ids, vec![initial_session_id]);
         assert_eq!(config.projects.len(), 1);
         assert_eq!(config.sessions.len(), 1);
         assert_eq!(config.active_project_id, "project-next");
