@@ -810,6 +810,14 @@ let browserPersonalizationConfig: PersonalizationConfig = {
   responseLength: "balanced"
 };
 
+function newBrowserSessionId(): string {
+  const randomId = globalThis.crypto?.randomUUID?.();
+  const fallback = `${Date.now().toString(16)}_${Math.random().toString(16).slice(2)}`;
+  return `sess_${randomId ?? fallback}`;
+}
+
+const browserDefaultSessionId = newBrowserSessionId();
+
 let browserProjectSessionState: ProjectSessionState = {
   projects: [
     {
@@ -825,7 +833,7 @@ let browserProjectSessionState: ProjectSessionState = {
   ],
   sessions: [
     {
-      id: "session-runtime",
+      id: browserDefaultSessionId,
       projectId: "project-cindx",
       name: "Runtime Session",
       detail: "timeline + chat",
@@ -844,7 +852,7 @@ let browserProjectSessionState: ProjectSessionState = {
     }
   ],
   activeProjectId: "project-cindx",
-  activeSessionId: "session-runtime",
+  activeSessionId: browserDefaultSessionId,
   lastError: null
 };
 
@@ -1106,7 +1114,7 @@ let browserAgentState: AgentState = {
   taskId: "phase-16-agent-loop",
   projectId: "project-cindx",
   projectName: "Cindx",
-  sessionId: "session-runtime",
+  sessionId: browserDefaultSessionId,
   sessionName: "Runtime Session",
   status: "idle",
   turnCount: 0,
@@ -1141,7 +1149,7 @@ let browserAgentTraceState: AgentTraceState = {
   runId: "browser-preview",
   projectId: "project-cindx",
   projectName: "Cindx",
-  sessionId: "session-runtime",
+  sessionId: browserDefaultSessionId,
   sessionName: "Runtime Session",
   status: "idle",
   startedAtMs: 0,
@@ -1662,7 +1670,7 @@ export async function createProject(name: string, root: string): Promise<Project
     const now = Date.now();
     const suffix = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "project";
     const projectId = `project-${suffix}-${now}`;
-    const sessionId = `session-${suffix}-${now}`;
+    const sessionId = newBrowserSessionId();
     browserProjectSessionState = withProjectSessionSelection(
       {
         ...browserProjectSessionState,
@@ -1719,7 +1727,7 @@ export async function createSession(
   } catch {
     const now = Date.now();
     const activeProjectId = projectId ?? browserProjectSessionState.activeProjectId;
-    const sessionId = `session-${now}`;
+    const sessionId = newBrowserSessionId();
     browserProjectSessionState = withProjectSessionSelection(
       {
         ...browserProjectSessionState,
@@ -1816,7 +1824,7 @@ export async function forkSession(sessionId: string): Promise<ProjectSessionStat
     const now = Date.now();
     const fork = {
       ...source,
-      id: `session-fork-${now}`,
+      id: newBrowserSessionId(),
       name: `${source.name} Fork`,
       detail: `Fork of ${source.name}`,
       effort: "auto" as AgentEffort,
@@ -2001,7 +2009,7 @@ function ensureBrowserOpenSession(
   if (available) return withProjectSessionSelection(state, projectId, available.id);
   const now = Date.now();
   const session: SessionView = {
-    id: `session-${now}`,
+    id: newBrowserSessionId(),
     projectId,
     name: "New Session",
     detail: "timeline + chat",
