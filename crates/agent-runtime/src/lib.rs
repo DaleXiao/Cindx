@@ -75,6 +75,109 @@ pub enum AgentAdvance {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThinkTag {
+    Open,
+    Close,
+}
+
+fn think_tag_at(bytes: &[u8], index: usize) -> Option<(ThinkTag, usize)> {
+    if bytes.get(index) != Some(&b'<') {
+        return None;
+    }
+
+    let mut cursor = index + 1;
+    let tag = if bytes.get(cursor) == Some(&b'/') {
+        cursor += 1;
+        ThinkTag::Close
+    } else {
+        ThinkTag::Open
+    };
+    let name_end = cursor.checked_add(5)?;
+    if name_end > bytes.len() || !bytes[cursor..name_end].eq_ignore_ascii_case(b"think") {
+        return None;
+    }
+    cursor = name_end;
+    while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
+    }
+    (bytes.get(cursor) == Some(&b'>')).then_some((tag, cursor + 1 - index))
+}
+
+fn delimiter_run_length(bytes: &[u8], index: usize, delimiter: u8) -> usize {
+    bytes[index..]
+        .iter()
+        .take_while(|byte| **byte == delimiter)
+        .count()
+}
+
+fn code_span_end(bytes: &[u8], start: usize, delimiter: u8, run_length: usize) -> Option<usize> {
+    let mut cursor = start + run_length;
+    while cursor < bytes.len() {
+        if bytes[cursor] != delimiter {
+            cursor += 1;
+            continue;
+        }
+        let closing_length = delimiter_run_length(bytes, cursor, delimiter);
+        let closes_span = if run_length >= 3 {
+            closing_length >= run_length
+        } else {
+            closing_length == run_length
+        };
+        if closes_span {
+            return Some(cursor + closing_length);
+        }
+        cursor += closing_length;
+    }
+    None
+}
+
+/// Removes provider reasoning control markup without exposing or retaining hidden reasoning.
+/// Markdown inline code and fenced code blocks are preserved verbatim.
+pub fn sanitize_assistant_content(content: &str) -> String {
+    let bytes = content.as_bytes();
+    let mut output = String::with_capacity(content.len());
+    let mut cursor = 0;
+    let mut inside_think = false;
+
+    while cursor < bytes.len() {
+        if let Some((tag, length)) = think_tag_at(bytes, cursor) {
+            match tag {
+                ThinkTag::Open => inside_think = true,
+                ThinkTag::Close => inside_think = false,
+            }
+            cursor += length;
+            continue;
+        }
+
+        if inside_think {
+            cursor += 1;
+            continue;
+        }
+
+        let delimiter = bytes[cursor];
+        if delimiter == b'`' || delimiter == b'~' {
+            let run_length = delimiter_run_length(bytes, cursor, delimiter);
+            if delimiter == b'`' || run_length >= 3 {
+                if let Some(end) = code_span_end(bytes, cursor, delimiter, run_length) {
+                    output.push_str(&content[cursor..end]);
+                    cursor = end;
+                    continue;
+                }
+            }
+        }
+
+        let character = content[cursor..]
+            .chars()
+            .next()
+            .expect("cursor stays on a character boundary");
+        output.push(character);
+        cursor += character.len_utf8();
+    }
+
+    output.trim().to_string()
+}
+
 pub fn start_agent_loop(
     task_id: TaskId,
     user_prompt: impl Into<String>,
@@ -244,7 +347,7 @@ pub fn advance_with_model_response(
 ) -> AgentAdvance {
     state.turn += 1;
 
-    let content = response.message.content.trim().to_string();
+    let content = sanitize_assistant_content(&response.message.content);
     let tool_call_count = response.tool_calls.len();
     if !content.is_empty() || tool_call_count > 0 {
         let mut metadata = response.message.metadata.clone();
@@ -870,6 +973,61 @@ mod tests {
             advance_with_model_response(&mut state, empty_response(), &[]),
             AgentAdvance::Failed { .. }
         ));
+    }
+
+    #[test]
+    fn assistant_reasoning_control_tags_are_not_exposed() {
+        assert_eq!(sanitize_assistant_content("</think>"), "");
+        assert_eq!(
+            sanitize_assistant_content("<think>private reasoning</think>\nVisible answer"),
+            "Visible answer"
+        );
+        assert_eq!(
+            sanitize_assistant_content(
+                "<THINK >\nprivate\nreasoning\n</THINK >\n\nVisible answer"
+            ),
+            "Visible answer"
+        );
+    }
+
+    #[test]
+    fn assistant_reasoning_sanitizer_preserves_code_examples() {
+        let content = "Use `</think>` literally.\n\n```xml\n<think>example</think>\n```";
+
+        assert_eq!(sanitize_assistant_content(content), content);
+    }
+
+    #[test]
+    fn dangling_reasoning_tag_with_tool_calls_keeps_the_tool_turn() {
+        let tools = vec![tool("file.read", "path=<workspace-relative-path>")];
+        let mut state = start_agent_loop(
+            TaskId("reasoning-tag".to_string()),
+            "read README",
+            AgentRuntimeConfig::default(),
+        );
+        let response = ModelResponse {
+            message: Message {
+                role: MessageRole::Assistant,
+                content: "</think>".to_string(),
+                metadata: Metadata::new(),
+            },
+            raw_tool_calls_json: Some("[]".to_string()),
+            tool_calls: vec![ModelToolCall {
+                id: "call-1".to_string(),
+                name: "file_read".to_string(),
+                arguments_json: r#"{"input":"path=README.md"}"#.to_string(),
+            }],
+            metadata: Metadata::new(),
+        };
+
+        let advance = advance_with_model_response(&mut state, response, &tools);
+
+        assert!(matches!(advance, AgentAdvance::ToolCalls { .. }));
+        assert_eq!(state.messages.last().map(|message| message.content.as_str()), Some(""));
+        assert!(state
+            .messages
+            .last()
+            .is_some_and(|message| message.metadata.contains_key("raw_tool_calls_json")));
     }
 
     #[test]
