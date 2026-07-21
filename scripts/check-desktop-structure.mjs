@@ -1619,7 +1619,7 @@ assert(
   "Settings must use persistent left tabs and right-side details"
 );
 assert(
-  rustLib.includes("persist_completed_first_round_title") &&
+  rustLib.includes("persist_completed_conversation_title") &&
     rustLib.includes("spawn_semantic_session_title_refinement") &&
     rustLib.includes("semantic_session_title") &&
     rustLib.includes("automatic_conversation_title") &&
