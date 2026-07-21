@@ -19,7 +19,13 @@ const packageLock = parseJson("apps/desktop/package-lock.json");
 const tauriConfig = parseJson("apps/desktop/src-tauri/tauri.conf.json");
 const capability = parseJson("apps/desktop/src-tauri/capabilities/default.json");
 const appSource = read("apps/desktop/src/App.tsx");
+const sessionRuntimeModelSource = read(
+  "apps/desktop/src/sessionRuntimeModel.ts"
+);
 const sessionThreadSource = read("apps/desktop/src/components/SessionThread.tsx");
+const sessionThreadProjectionSource = read(
+  "apps/desktop/src/components/sessionThreadProjection.ts"
+);
 const composerSource = read("apps/desktop/src/components/Composer.tsx");
 const queuedMessagesSource = read("apps/desktop/src/components/QueuedMessages.tsx");
 const scheduleViewSource = read("apps/desktop/src/components/ScheduleView.tsx");
@@ -40,6 +46,12 @@ const browserIntegrationTest = read("scripts/test-browser-sidecar.mjs");
 const rustLib = read("apps/desktop/src-tauri/src/lib.rs");
 const collaborationServiceSource = read(
   "apps/desktop/src-tauri/src/collaboration_service.rs"
+);
+const agentLoopServiceSource = read(
+  "apps/desktop/src-tauri/src/agent_loop_service.rs"
+);
+const parallelExecutionSource = read(
+  "apps/desktop/src-tauri/src/parallel_execution.rs"
 );
 const permissionServiceSource = read(
   "apps/desktop/src-tauri/src/permission_service.rs"
@@ -391,7 +403,8 @@ assert(
   "Session switching must prioritize chat state and defer workspace-wide refreshes"
 );
 assert(
-  appSource.includes("SESSION_STATE_CACHE_LIMIT = 24") &&
+  sessionRuntimeModelSource.includes("SESSION_STATE_CACHE_LIMIT = 24") &&
+    appSource.includes("SESSION_STATE_CACHE_LIMIT") &&
     appSource.includes("agentStateCacheRef") &&
     appSource.includes("agentTraceCacheRef") &&
     appSource.includes("contextStateCacheRef") &&
@@ -425,7 +438,7 @@ assert(
 );
 assert(
   agentStorageSource.includes("idx_events_task_session_sequence") &&
-    agentStorageSource.includes("event_scope_columns_v1") &&
+    agentStorageSource.includes("event_scope_columns_v2") &&
     agentStorageSource.includes("list_by_task_and_metadata_after") &&
     agentStorageSource.includes("save_read_model") &&
     rustLib.includes("AGENT_SESSION_READ_MODEL_NAMESPACE") &&
@@ -440,7 +453,8 @@ assert(
     sessionProjectionSource.includes("load_agent_session_read_model_with_stats") &&
     rustLib.includes("struct AgentStateDelta") &&
     tauriBridge.includes("export async function getAgentStateDelta") &&
-    appSource.includes("function mergeAgentStateDelta") &&
+    sessionRuntimeModelSource.includes("function mergeAgentStateDelta") &&
+    appSource.includes("mergeAgentStateDelta") &&
     appSource.includes("getAgentStateDelta(sessionId"),
   "Active session polling must use indexed event deltas and a persistent read model"
 );
@@ -456,7 +470,8 @@ assert(
 );
 assert(
   tauriBridge.match(/if \(isTauriRuntime\(\)\) throw error;/g)?.length >= 10 &&
-    appSource.includes("function mergeAgentStateSnapshot") &&
+    sessionRuntimeModelSource.includes("function mergeAgentStateSnapshot") &&
+    appSource.includes("mergeAgentStateSnapshot") &&
     appSource.includes("mergeAgentStateSnapshot(current, failedState)") &&
     appSource.includes("mergeAgentStateSnapshot(current, nextAgentState)"),
   "Real Tauri agent failures must propagate without replacing loaded session history"
@@ -775,7 +790,9 @@ assert(
 assert(
   sessionThreadSource.includes("thread.scrollTop = thread.scrollHeight") &&
     sessionThreadSource.includes("useLayoutEffect(() => {") &&
-    sessionThreadSource.includes('message.sequence ?? `${message.role}-${index}`') &&
+    sessionThreadProjectionSource.includes(
+      'message.sequence ?? `${message.role}-${index}`'
+    ) &&
     appSource.includes("optimisticUserMessagesRef") &&
     appSource.includes("optimisticUserMessageRevision") &&
     appSource.includes("setOptimisticUserMessageRevision") &&
@@ -810,9 +827,11 @@ assert(
 );
 assert(
   sessionThreadSource.includes("MAX_MINIMAP_MARKERS = 32") &&
-    sessionThreadSource.includes('role !== "user"') &&
-    sessionThreadSource.includes('role !== "assistant"') &&
-    sessionThreadSource.includes('preview.toLowerCase() === "tool request"') &&
+    sessionThreadProjectionSource.includes('role === "user"') &&
+    sessionThreadProjectionSource.includes('role === "assistant"') &&
+    sessionThreadProjectionSource.includes(
+      'preview.toLowerCase() !== "tool request"'
+    ) &&
     sessionThreadSource.includes("rowIndexByItemId.get(marker.id)"),
   "Minimap must index only sparse, substantive user and model output anchors"
 );
@@ -879,10 +898,14 @@ assert(
   "Assistant output must begin without a robot icon or Cindx label"
 );
 assert(
-  sessionThreadSource.includes("groupThreadItems") &&
-    sessionThreadSource.includes('!content || content === "tool request"') &&
-    !sessionThreadSource.includes("containsToolActivity") &&
-    sessionThreadSource.includes("while (end < items.length && isActivityCandidate(items[end]))") &&
+  sessionThreadProjectionSource.includes("function appendRows") &&
+    sessionThreadProjectionSource.includes(
+      '!content || content === "tool request"'
+    ) &&
+    !sessionThreadProjectionSource.includes("containsToolActivity") &&
+    sessionThreadProjectionSource.includes(
+      "while (end < items.length && isActivityCandidate(items[end]))"
+    ) &&
     sessionThreadSource.includes("thread-tool-chain") &&
     sessionThreadSource.includes("Agent actions") &&
     sessionThreadSource.includes('className="thread-tool-chain-chevron"') &&
@@ -2203,8 +2226,8 @@ assert(
   "Completed agent runs must persist performance counters for regression analysis"
 );
 assert(
-  sessionThreadSource.includes('event.label === "Model started"') &&
-    sessionThreadSource.includes('event.label === "Model finished"') &&
+  sessionThreadProjectionSource.includes('event.label === "Model started"') &&
+    sessionThreadProjectionSource.includes('event.label === "Model finished"') &&
     rustLib.includes('"Model started"') &&
     rustLib.includes('"Model finished"'),
   "Internal model lifecycle events must stay in trace storage without appearing in chat"
@@ -2249,10 +2272,14 @@ assert(
     rustLib.includes('"isolated_evidence_v1"') &&
     agentRuntimeSource.includes("evidence_worker_tools") &&
     agentRuntimeSource.includes("DEFAULT_COLLABORATION_WORKER_TURNS") &&
-    rustLib.includes("std::thread::spawn") &&
+    parallelExecutionSource.includes("MAX_GLOBAL_MODEL_WORKERS: usize = 12") &&
+    parallelExecutionSource.includes("fn run_model_jobs_ordered") &&
+    rustLib.includes("run_model_jobs_ordered") &&
     rustLib.includes('"conductor_plan"') &&
     rustLib.includes('format!("worker_{}", step_index + 1)') &&
-    rustLib.includes('("access_list".to_string(), spec.access.join(","))') &&
+    collaborationServiceSource.includes(
+      '("access_list".to_string(), spec.access.join(","))'
+    ) &&
     rustLib.includes('"arbiter"') &&
     rustLib.includes('"planner"') &&
     rustLib.includes('"reviewer"') &&

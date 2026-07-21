@@ -131,7 +131,8 @@ pub struct StoredReadModel {
     pub payload: String,
 }
 
-const EVENT_SCOPE_COLUMNS: [(&str, &str); 4] = [
+const EVENT_SCOPE_COLUMNS: [(&str, &str); 5] = [
+    ("project_id", "project_id"),
     ("session_id", "session_id"),
     ("agent_run_id", "agent_run_id"),
     ("collaboration_id", "collaboration_id"),
@@ -257,6 +258,43 @@ impl SqliteStore {
         } else {
             Ok(1)
         }
+    }
+
+    pub fn append_next_event(
+        &mut self,
+        id: EventId,
+        task_id: TaskId,
+        timestamp_ms: u64,
+        kind: EventKind,
+        summary: String,
+        metadata: Metadata,
+    ) -> Result<(), StorageError> {
+        let mut statement = self.prepare(
+            "
+            insert into events(
+              id, task_id, sequence, timestamp_ms, kind, summary, metadata_text,
+              project_id, session_id, agent_run_id, collaboration_id, prompt_profile
+            )
+            values (
+              ?1, ?2,
+              (select coalesce(max(sequence), 0) + 1 from events where task_id = ?2),
+              ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+            )
+            ",
+        )?;
+
+        statement.bind_text(1, &id.0)?;
+        statement.bind_text(2, &task_id.0)?;
+        statement.bind_i64(3, timestamp_ms as i64)?;
+        statement.bind_text(4, event_kind_to_str(&kind))?;
+        statement.bind_text(5, &summary)?;
+        statement.bind_text(6, &metadata_to_text(&metadata))?;
+        statement.bind_optional_text(7, metadata.get("project_id").map(String::as_str))?;
+        statement.bind_optional_text(8, metadata.get("session_id").map(String::as_str))?;
+        statement.bind_optional_text(9, metadata.get("agent_run_id").map(String::as_str))?;
+        statement.bind_optional_text(10, metadata.get("collaboration_id").map(String::as_str))?;
+        statement.bind_optional_text(11, metadata.get("prompt_profile").map(String::as_str))?;
+        statement.expect_done()
     }
 
     pub fn event_revision(&self, task_id: &TaskId) -> Result<EventRevision, StorageError> {
@@ -619,11 +657,7 @@ impl SqliteStore {
         statement.expect_done()
     }
 
-    pub fn delete_read_model(
-        &mut self,
-        namespace: &str,
-        key: &str,
-    ) -> Result<(), StorageError> {
+    pub fn delete_read_model(&mut self, namespace: &str, key: &str) -> Result<(), StorageError> {
         let mut statement =
             self.prepare("delete from read_models where namespace = ?1 and model_key = ?2")?;
         statement.bind_text(1, namespace)?;
@@ -797,22 +831,25 @@ impl SqliteStore {
             "update events
              set summary = ?1,
                  metadata_text = ?2,
-                 session_id = ?3,
-                 agent_run_id = ?4,
-                 collaboration_id = ?5,
-                 prompt_profile = ?6
-             where id = ?7",
+                 project_id = ?3,
+                 session_id = ?4,
+                 agent_run_id = ?5,
+                 collaboration_id = ?6,
+                 prompt_profile = ?7
+             where id = ?8",
         )?;
         statement.bind_text(1, &event.summary)?;
         statement.bind_text(2, &metadata_to_text(&event.metadata))?;
-        statement.bind_optional_text(3, event.metadata.get("session_id").map(String::as_str))?;
-        statement.bind_optional_text(4, event.metadata.get("agent_run_id").map(String::as_str))?;
+        statement.bind_optional_text(3, event.metadata.get("project_id").map(String::as_str))?;
+        statement.bind_optional_text(4, event.metadata.get("session_id").map(String::as_str))?;
+        statement.bind_optional_text(5, event.metadata.get("agent_run_id").map(String::as_str))?;
         statement.bind_optional_text(
-            5,
+            6,
             event.metadata.get("collaboration_id").map(String::as_str),
         )?;
-        statement.bind_optional_text(6, event.metadata.get("prompt_profile").map(String::as_str))?;
-        statement.bind_text(7, &event.id.0)?;
+        statement
+            .bind_optional_text(7, event.metadata.get("prompt_profile").map(String::as_str))?;
+        statement.bind_text(8, &event.id.0)?;
         statement.expect_done()
     }
 
@@ -827,6 +864,7 @@ impl SqliteStore {
               kind text not null,
               summary text not null,
               metadata_text text not null,
+              project_id text,
               session_id text,
               agent_run_id text,
               collaboration_id text,
@@ -878,6 +916,8 @@ impl SqliteStore {
             "
             create index if not exists idx_events_task_session_sequence
               on events(task_id, session_id, sequence);
+            create index if not exists idx_events_task_project_sequence
+              on events(task_id, project_id, sequence);
             create index if not exists idx_events_task_run_sequence
               on events(task_id, agent_run_id, sequence);
             create index if not exists idx_events_task_collaboration_sequence
@@ -935,7 +975,11 @@ impl SqliteStore {
     }
 
     fn backfill_event_scope_columns(&self) -> Result<(), StorageError> {
-        if self.storage_meta_value("event_scope_columns_v1")?.as_deref() == Some("complete") {
+        if self
+            .storage_meta_value("event_scope_columns_v2")?
+            .as_deref()
+            == Some("complete")
+        {
             return Ok(());
         }
 
@@ -966,26 +1010,25 @@ impl SqliteStore {
                 };
                 let mut update = self.prepare(
                     "update events
-                     set session_id = ?1,
-                         agent_run_id = ?2,
-                         collaboration_id = ?3,
-                         prompt_profile = ?4
-                     where id = ?5",
+                     set project_id = ?1,
+                         session_id = ?2,
+                         agent_run_id = ?3,
+                         collaboration_id = ?4,
+                         prompt_profile = ?5
+                     where id = ?6",
                 )?;
-                update.bind_optional_text(1, session_id)?;
-                update.bind_optional_text(2, metadata.get("agent_run_id").map(String::as_str))?;
-                update.bind_optional_text(
-                    3,
-                    metadata.get("collaboration_id").map(String::as_str),
-                )?;
-                update.bind_optional_text(4, metadata.get("prompt_profile").map(String::as_str))?;
-                update.bind_text(5, &event_id)?;
+                update.bind_optional_text(1, metadata.get("project_id").map(String::as_str))?;
+                update.bind_optional_text(2, session_id)?;
+                update.bind_optional_text(3, metadata.get("agent_run_id").map(String::as_str))?;
+                update
+                    .bind_optional_text(4, metadata.get("collaboration_id").map(String::as_str))?;
+                update.bind_optional_text(5, metadata.get("prompt_profile").map(String::as_str))?;
+                update.bind_text(6, &event_id)?;
                 update.expect_done()?;
             }
-            let mut marker = self.prepare(
-                "insert or replace into storage_meta(key, value) values (?1, ?2)",
-            )?;
-            marker.bind_text(1, "event_scope_columns_v1")?;
+            let mut marker =
+                self.prepare("insert or replace into storage_meta(key, value) values (?1, ?2)")?;
+            marker.bind_text(1, "event_scope_columns_v2")?;
             marker.bind_text(2, "complete")?;
             marker.expect_done()
         })();
@@ -1027,9 +1070,8 @@ impl SqliteStore {
                 update.bind_text(3, &request_id)?;
                 update.expect_done()?;
             }
-            let mut marker = self.prepare(
-                "insert or replace into storage_meta(key, value) values (?1, ?2)",
-            )?;
+            let mut marker =
+                self.prepare("insert or replace into storage_meta(key, value) values (?1, ?2)")?;
             marker.bind_text(1, "permission_scope_columns_v1")?;
             marker.bind_text(2, "complete")?;
             marker.expect_done()
@@ -1117,9 +1159,9 @@ impl EventStore for SqliteStore {
             "
             insert into events(
               id, task_id, sequence, timestamp_ms, kind, summary, metadata_text,
-              session_id, agent_run_id, collaboration_id, prompt_profile
+              project_id, session_id, agent_run_id, collaboration_id, prompt_profile
             )
-            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             ",
         )?;
 
@@ -1130,13 +1172,15 @@ impl EventStore for SqliteStore {
         statement.bind_text(5, event_kind_to_str(&event.kind))?;
         statement.bind_text(6, &event.summary)?;
         statement.bind_text(7, &metadata_to_text(&event.metadata))?;
-        statement.bind_optional_text(8, event.metadata.get("session_id").map(String::as_str))?;
-        statement.bind_optional_text(9, event.metadata.get("agent_run_id").map(String::as_str))?;
+        statement.bind_optional_text(8, event.metadata.get("project_id").map(String::as_str))?;
+        statement.bind_optional_text(9, event.metadata.get("session_id").map(String::as_str))?;
+        statement.bind_optional_text(10, event.metadata.get("agent_run_id").map(String::as_str))?;
         statement.bind_optional_text(
-            10,
+            11,
             event.metadata.get("collaboration_id").map(String::as_str),
         )?;
-        statement.bind_optional_text(11, event.metadata.get("prompt_profile").map(String::as_str))?;
+        statement
+            .bind_optional_text(12, event.metadata.get("prompt_profile").map(String::as_str))?;
         statement.expect_done()
     }
 
@@ -1212,10 +1256,8 @@ impl PermissionStore for SqliteStore {
         statement.bind_text(7, &metadata_to_text(&request.metadata))?;
         statement.bind_i64(8, requested_at_ms as i64)?;
         statement.bind_optional_text(9, request.metadata.get("session_id").map(String::as_str))?;
-        statement.bind_optional_text(
-            10,
-            request.metadata.get("agent_run_id").map(String::as_str),
-        )?;
+        statement
+            .bind_optional_text(10, request.metadata.get("agent_run_id").map(String::as_str))?;
         statement.expect_done()
     }
 
@@ -1646,6 +1688,46 @@ mod tests {
     }
 
     #[test]
+    fn append_next_event_assigns_monotonic_task_scoped_sequences() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_a = TaskId("task-a".to_string());
+        let task_b = TaskId("task-b".to_string());
+
+        for (event_id, task_id) in [
+            ("event-a1", task_a.clone()),
+            ("event-b1", task_b.clone()),
+            ("event-a2", task_a.clone()),
+        ] {
+            store
+                .append_next_event(
+                    EventId(event_id.to_string()),
+                    task_id,
+                    100,
+                    EventKind::MessageAdded,
+                    "message".to_string(),
+                    Metadata::new(),
+                )
+                .expect("event should append");
+        }
+
+        let task_a_sequences = store
+            .list_by_task(&task_a)
+            .expect("task A events should load")
+            .into_iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>();
+        let task_b_sequences = store
+            .list_by_task(&task_b)
+            .expect("task B events should load")
+            .into_iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>();
+
+        assert_eq!(task_a_sequences, vec![1, 2]);
+        assert_eq!(task_b_sequences, vec![1]);
+    }
+
+    #[test]
     fn opens_an_independent_read_only_connection() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2035,12 +2117,7 @@ mod tests {
         );
 
         let delta = store
-            .list_by_task_and_metadata_or_unscoped_after(
-                &task_id,
-                "session_id",
-                "session-a",
-                2,
-            )
+            .list_by_task_and_metadata_or_unscoped_after(&task_id, "session_id", "session-a", 2)
             .expect("session delta should load");
         assert_eq!(
             delta.iter().map(|event| event.sequence).collect::<Vec<_>>(),
@@ -2052,9 +2129,12 @@ mod tests {
     fn backfills_scope_columns_for_legacy_event_rows() {
         let store = SqliteStore::in_memory().expect("store should open");
         let task_id = TaskId("task-legacy-scope".to_string());
-        let metadata = [("session_id".to_string(), "legacy-session".to_string())]
-            .into_iter()
-            .collect::<Metadata>();
+        let metadata = [
+            ("project_id".to_string(), "legacy-project".to_string()),
+            ("session_id".to_string(), "legacy-session".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
         let mut statement = store
             .prepare(
                 "insert into events(
@@ -2074,7 +2154,7 @@ mod tests {
         statement.expect_done().unwrap();
         drop(statement);
         store
-            .exec_batch("delete from storage_meta where key = 'event_scope_columns_v1'")
+            .exec_batch("delete from storage_meta where key = 'event_scope_columns_v2'")
             .unwrap();
 
         store.backfill_event_scope_columns().unwrap();
@@ -2084,6 +2164,13 @@ mod tests {
             .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id.0, "legacy-event");
+        assert_eq!(
+            store
+                .list_by_task_and_metadata(&task_id, "project_id", "legacy-project")
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -2112,6 +2199,31 @@ mod tests {
     }
 
     #[test]
+    fn scoped_project_queries_use_the_composite_index() {
+        let store = SqliteStore::in_memory().expect("store should open");
+        let mut statement = store
+            .prepare(
+                "explain query plan
+                 select id, task_id, sequence, timestamp_ms, kind, summary, metadata_text
+                 from events
+                 where task_id = ?1 and project_id = ?2 and sequence > ?3
+                 order by sequence asc",
+            )
+            .unwrap();
+        statement.bind_text(1, "task").unwrap();
+        statement.bind_text(2, "project").unwrap();
+        statement.bind_i64(3, 0).unwrap();
+        let mut plan = Vec::new();
+        while statement.step().unwrap() == StepResult::Row {
+            plan.push(statement.column_text(3).unwrap());
+        }
+
+        assert!(plan
+            .iter()
+            .any(|step| step.contains("idx_events_task_project_sequence")));
+    }
+
+    #[test]
     fn pages_session_events_backwards_without_changing_display_order() {
         let mut store = SqliteStore::in_memory().expect("store should open");
         let task_id = TaskId("task-history-page".to_string());
@@ -2132,16 +2244,13 @@ mod tests {
         }
 
         let latest = store
-            .list_by_task_and_metadata_before(
-                &task_id,
-                "session_id",
-                "session-a",
-                u64::MAX,
-                3,
-            )
+            .list_by_task_and_metadata_before(&task_id, "session_id", "session-a", u64::MAX, 3)
             .expect("latest page should load");
         assert_eq!(
-            latest.iter().map(|event| event.sequence).collect::<Vec<_>>(),
+            latest
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
             vec![6, 7, 8]
         );
         assert!(store
@@ -2149,13 +2258,7 @@ mod tests {
             .expect("older event check should load"));
 
         let older = store
-            .list_by_task_and_metadata_before(
-                &task_id,
-                "session_id",
-                "session-a",
-                6,
-                3,
-            )
+            .list_by_task_and_metadata_before(&task_id, "session_id", "session-a", 6, 3)
             .expect("older page should load");
         assert_eq!(
             older.iter().map(|event| event.sequence).collect::<Vec<_>>(),
@@ -2242,7 +2345,12 @@ mod tests {
             .is_none());
 
         store
-            .save_read_model("agent-session-v1", "session-a", 12, "{\"status\":\"running\"}")
+            .save_read_model(
+                "agent-session-v1",
+                "session-a",
+                12,
+                "{\"status\":\"running\"}",
+            )
             .expect("read model should save");
         let stored = store
             .load_read_model("agent-session-v1", "session-a")
