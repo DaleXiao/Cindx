@@ -2,6 +2,7 @@ import {
   Check,
   CheckCheck,
   ChevronUp,
+  CircleCheck,
   FileText,
   Image,
   LoaderCircle,
@@ -222,7 +223,7 @@ export function Composer({
                 disabled={permissionBusy}
                 onClick={() => onResolvePermission(pendingApproval.requestId, "allow_once")}
               >
-                <Check aria-hidden="true" />
+                <CircleCheck aria-hidden="true" />
                 <span>Once</span>
               </button>
               {pendingApproval.risk !== "destructive" && (
