@@ -2057,19 +2057,22 @@ pre {
 }
 
 .thread-output-artifacts {
-  display: flex;
+  display: grid;
   width: 100%;
   align-items: flex-start;
   justify-content: flex-start;
-  gap: 9px;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 168px));
+  gap: 12px 16px;
   margin-top: 12px;
-  flex-wrap: wrap;
 }
 
 .thread-output-image {
   display: grid;
-  width: min(168px, 100%);
+  width: 100%;
+  min-width: 0;
+  align-content: start;
   gap: 5px;
+  overflow: hidden;
 }
 
 .thread-output-image-preview {
@@ -2125,11 +2128,12 @@ pre {
 }
 
 .thread-output-name {
-  width: fit-content;
+  width: 100%;
   max-width: 100%;
 }
 
 .thread-output-link {
+  grid-column: 1 / -1;
   max-width: min(100%, 420px);
   min-height: 28px;
   padding: 4px 7px;

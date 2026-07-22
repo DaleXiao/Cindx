@@ -53,6 +53,14 @@ assert(
   "Composer shell must remain inside the 760px conversation rail"
 );
 assert(
+  /\.thread-output-artifacts \{[\s\S]*?display: grid;[\s\S]*?grid-template-columns: repeat\(auto-fill, minmax\(148px, 168px\)\);/.test(
+    css
+  ) &&
+    /\.thread-output-image \{[\s\S]*?min-width: 0;[\s\S]*?overflow: hidden;/.test(css) &&
+    /\.thread-output-link \{[\s\S]*?grid-column: 1 \/ -1;/.test(css),
+  "Thread output previews must use isolated grid cells without overlap"
+);
+assert(
     appSource.includes('className="sidebar-resize-handle"') &&
     appSource.includes('aria-label="Resize sidebar"') &&
     css.includes("left: calc(var(--sidebar-layout-width) - 4px)") &&
