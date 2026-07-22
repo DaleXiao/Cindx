@@ -94,6 +94,7 @@ pub fn run() {
             agent_run_controls: Mutex::new(BTreeMap::new()),
             prompt_evaluation_controls: Mutex::new(BTreeMap::new()),
             queue_dispatching_sessions: Mutex::new(BTreeSet::new()),
+            session_title_refinement_sessions: Mutex::new(BTreeSet::new()),
             workspace_knowledge_cache: Mutex::new(BTreeMap::new()),
             tool_registry_cache: Mutex::new(ToolRegistryCache::default()),
             tool_registry_generation: AtomicU64::new(0),

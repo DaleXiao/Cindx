@@ -587,7 +587,6 @@ pub(crate) fn run_agent_task_blocking(
             if let Ok(Some(refinement)) =
                 persist_completed_conversation_title(&state, &session_id, &agent.messages)
             {
-                let _ = app.emit("session-title-updated", session_id.clone());
                 spawn_semantic_session_title_refinement(app.clone(), refinement);
             }
         }

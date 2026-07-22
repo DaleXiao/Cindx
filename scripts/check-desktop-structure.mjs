@@ -1772,12 +1772,19 @@ assert(
   sessionTitleServiceSource.includes("persist_completed_conversation_title") &&
     sessionTitleServiceSource.includes("spawn_semantic_session_title_refinement") &&
     sessionTitleServiceSource.includes("semantic_session_title") &&
-    sessionTitleServiceSource.includes("automatic_conversation_title") &&
-    sessionTitleServiceSource.includes("can_apply_generated_session_title") &&
+    sessionTitleServiceSource.includes("session_title_refinement_needed") &&
+    sessionTitleServiceSource.includes("generated_session_title_copies_conversation") &&
+    sessionTitleServiceSource.includes("session_title_refinement_sessions") &&
+    sessionTitleServiceSource.includes("SessionTitleState::Manual") &&
+    sessionTitleServiceSource.includes(
+      "session.title_state = SessionTitleState::Automatic"
+    ) &&
+    !sessionTitleServiceSource.includes("automatic_conversation_title") &&
     sessionTitleServiceSource.includes('app.emit("session-title-updated"') &&
+    (rustLib.match(/persist_completed_conversation_title/g) || []).length >= 2 &&
     appSource.includes("subscribeToSessionTitleUpdates") &&
     tauriBridge.includes('listen<string>("session-title-updated"'),
-  "New sessions must receive a non-blocking semantic title without overwriting manual names"
+  "Session titles must refine semantically, retry safely, and never overwrite manual names"
 );
 assert(
   styles.includes(".lucide-check") &&

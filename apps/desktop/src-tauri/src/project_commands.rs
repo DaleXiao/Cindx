@@ -308,20 +308,16 @@ pub(crate) async fn generate_session_title(
                 "session title requires the first user and assistant messages",
             );
         }
-        let prompt_fallback_title = automatic_session_title(prompt);
-        let fallback_title = automatic_conversation_title(prompt, answer);
         let title_turns = vec![SessionTitleTurn {
             prompt: prompt.to_string(),
             answer: answer.to_string(),
         }];
-        let expected_updated_at_ms = {
+        let (expected_title, expected_title_state, expected_updated_at_ms) = {
             let mut config = state
                 .project_session_config
                 .lock()
                 .map_err(|error| format!("project session config lock poisoned: {error}"))?;
-            let mut project_id = None;
-            let mut fallback_applied = false;
-            let expected_updated_at_ms = {
+            let (project_id, expected_title, expected_title_state, expected_updated_at_ms) = {
                 let Some(session) = config.sessions.iter_mut().find(|session| {
                     session.id == input.session_id && session.archived_at_ms.is_none()
                 }) else {
@@ -330,33 +326,35 @@ pub(crate) async fn generate_session_title(
                         Some("session not found".to_string()),
                     ));
                 };
-                if session.title_state == SessionTitleState::Pending
-                    || session.name == prompt_fallback_title
-                {
-                    let now = current_time_millis();
-                    session.name = fallback_title.clone();
-                    session.title_state = SessionTitleState::Automatic;
-                    session.updated_at_ms = now;
-                    project_id = Some(session.project_id.clone());
-                    fallback_applied = true;
-                } else if session.name != fallback_title {
+                if !session_title_refinement_needed(
+                    session.title_state,
+                    &session.name,
+                    &title_turns,
+                ) {
                     return Ok(project_session_state(&config, None));
                 }
-                session.updated_at_ms
+                let now = current_time_millis().max(session.updated_at_ms.saturating_add(1));
+                session.updated_at_ms = now;
+                (
+                    session.project_id.clone(),
+                    session.name.clone(),
+                    session.title_state,
+                    now,
+                )
             };
-            if let Some(project_id) = project_id {
-                if let Some(project) = config
-                    .projects
-                    .iter_mut()
-                    .find(|project| project.id == project_id)
-                {
-                    project.updated_at_ms = expected_updated_at_ms;
-                }
+            if let Some(project) = config
+                .projects
+                .iter_mut()
+                .find(|project| project.id == project_id)
+            {
+                project.updated_at_ms = expected_updated_at_ms;
             }
-            if fallback_applied {
-                save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
-            }
-            expected_updated_at_ms
+            save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+            (
+                expected_title,
+                expected_title_state,
+                expected_updated_at_ms,
+            )
         };
         let provider_config = clone_provider_config(&state)?;
         if !provider_config.is_ready() {
@@ -366,12 +364,18 @@ pub(crate) async fn generate_session_title(
                 .map_err(|error| format!("project session config lock poisoned: {error}"))?;
             return Ok(project_session_state(&config, None));
         }
-        let Ok(title) = semantic_session_title(&provider_config, &title_turns) else {
-            let config = state
-                .project_session_config
-                .lock()
-                .map_err(|error| format!("project session config lock poisoned: {error}"))?;
-            return Ok(project_session_state(&config, None));
+        let title = match semantic_session_title(&provider_config, &title_turns) {
+            Ok(title) => title,
+            Err(error) => {
+                eprintln!(
+                    "session title generation failed for {}: {error}",
+                    input.session_id
+                );
+                let config = state.project_session_config.lock().map_err(|error| {
+                    format!("project session config lock poisoned: {error}")
+                })?;
+                return Ok(project_session_state(&config, None));
+            }
         };
 
         let now = current_time_millis();
@@ -386,16 +390,15 @@ pub(crate) async fn generate_session_title(
                 }) else {
                     return Ok(project_session_state(&config, None));
                 };
-                if !can_apply_generated_session_title(
-                    &session.name,
-                    session.updated_at_ms,
-                    &fallback_title,
-                    expected_updated_at_ms,
-                ) || session.title_state != SessionTitleState::Automatic
+                if session.name != expected_title
+                    || session.title_state != expected_title_state
+                    || session.title_state == SessionTitleState::Manual
+                    || session.updated_at_ms != expected_updated_at_ms
                 {
                     return Ok(project_session_state(&config, None));
                 }
                 session.name = title;
+                session.title_state = SessionTitleState::Automatic;
                 session.updated_at_ms = now;
                 session.project_id.clone()
             };
@@ -407,7 +410,10 @@ pub(crate) async fn generate_session_title(
             project.updated_at_ms = now;
         }
         save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
-        Ok(project_session_state(&config, None))
+        let next_state = project_session_state(&config, None);
+        drop(config);
+        let _ = app.emit("session-title-updated", input.session_id);
+        Ok(next_state)
     })
     .await
     .map_err(|error| format!("session title task failed: {error}"))?

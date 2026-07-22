@@ -7310,14 +7310,76 @@ fn automatic_session_names_use_the_first_prompt() {
 }
 
 #[test]
-fn automatic_conversation_titles_never_copy_the_assistant_opening() {
-    let title = automatic_conversation_title(
-        "我想分析自己的 MBTI 倾向",
-        "你好，Dale！我是 Cindx，很高兴认识你。",
+fn semantic_session_titles_reject_raw_conversation_sentences() {
+    let turns = vec![
+        SessionTitleTurn {
+            prompt: "你帮我画一个超时空要塞的三段变形机器人".to_string(),
+            answer: "我会生成一张三段变形机器人设定图。".to_string(),
+        },
+        SessionTitleTurn {
+            prompt: "这是高达，不是马克罗士，你重新画".to_string(),
+            answer: "我会按超时空要塞 VF-1 的特征重新绘制。".to_string(),
+        },
+    ];
+
+    assert!(generated_session_title_copies_conversation(
+        "这是高达 不是马克罗士 你重新画",
+        &turns
+    ));
+    assert_eq!(
+        validated_generated_session_title("这是高达 不是马克罗士 你重新画", &turns),
+        None
     );
-    assert_eq!(title, "分析自己的 MBTI 倾向");
-    assert!(!title.contains("Dale"));
-    assert!(!title.contains("Cindx"));
+    assert_eq!(
+        validated_generated_session_title("重绘超时空要塞变形机器人", &turns),
+        Some("重绘超时空要塞变形机器人".to_string())
+    );
+}
+
+#[test]
+fn concise_user_topic_can_already_be_a_valid_title() {
+    let turns = vec![SessionTitleTurn {
+        prompt: "Rust agent loop review".to_string(),
+        answer: "I found two lifecycle races.".to_string(),
+    }];
+
+    assert!(!generated_session_title_copies_conversation(
+        "Rust agent loop review",
+        &turns
+    ));
+    assert_eq!(
+        validated_generated_session_title("Rust agent loop review", &turns),
+        Some("Rust agent loop review".to_string())
+    );
+}
+
+#[test]
+fn session_title_state_retries_pending_and_repairs_legacy_prompt_copies() {
+    let turns = vec![SessionTitleTurn {
+        prompt: "这是高达，不是马克罗士，你重新画".to_string(),
+        answer: "我会按超时空要塞的设定重新绘制。".to_string(),
+    }];
+
+    assert!(session_title_refinement_needed(
+        SessionTitleState::Pending,
+        "New Session",
+        &turns
+    ));
+    assert!(session_title_refinement_needed(
+        SessionTitleState::Automatic,
+        "这是高达 不是马克罗士 你重新画",
+        &turns
+    ));
+    assert!(!session_title_refinement_needed(
+        SessionTitleState::Automatic,
+        "重绘超时空要塞变形机器人",
+        &turns
+    ));
+    assert!(!session_title_refinement_needed(
+        SessionTitleState::Manual,
+        "这是高达 不是马克罗士 你重新画",
+        &turns
+    ));
 }
 
 #[test]
