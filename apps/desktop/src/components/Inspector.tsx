@@ -156,22 +156,20 @@ function absoluteArtifactPath(workspaceRoot: string, path: string) {
   return `${workspaceRoot.replace(/\/$/, "")}/${path.replace(/^\.\//, "")}`;
 }
 
-function sessionArtifactPaths(step: AgentTraceStepView) {
-  const paths = new Set<string>();
-  if (step.artifactPath) paths.add(step.artifactPath);
-  const sourcePath = step.metadata.result_source_path;
+function isInternalRuntimePath(path: string) {
+  return path.split(/[\\/]/).some((component) => component === ".cindx");
+}
 
-  Object.entries(step.metadata).forEach(([key, path]) => {
-    const resultPath = key.startsWith("result_") && key.endsWith("_path");
-    const fileOutput = key === "result_path" && step.toolName === "file.write";
-    const contextPath = key === "context_checkpoint_path" || key === "lancedb_export_path";
-    if (key === "result_source_path" || (sourcePath && path === sourcePath)) return;
-    if ((resultPath && (key !== "result_path" || fileOutput)) || contextPath) {
-      if (path.trim()) paths.add(path);
-    }
-  });
-
-  return [...paths];
+function sessionArtifact(step: AgentTraceStepView) {
+  const sourcePath =
+    step.metadata.result_source_path ??
+    (step.toolName === "file.write" ? step.metadata.result_path ?? null : null);
+  const path =
+    step.metadata.result_artifact_path ??
+    step.artifactPath ??
+    (step.toolName === "file.write" ? step.metadata.result_path ?? null : null);
+  if (!path?.trim() || isInternalRuntimePath(sourcePath ?? path)) return null;
+  return { path, sourcePath };
 }
 
 function resolveOutputArtifact(
@@ -194,22 +192,21 @@ function traceOutputArtifacts(
 ) {
   return sessionTraceSteps.flatMap((step) => {
     if (step.status === "failed") return [];
-    const sourcePath =
-      step.metadata.result_source_path ??
-      (step.toolName === "file.write" ? step.metadata.result_path ?? null : null);
-    return sessionArtifactPaths(step).map((path, index) =>
+    const artifact = sessionArtifact(step);
+    if (!artifact) return [];
+    return [
       resolveOutputArtifact(workspaceRoot, {
-        id: `${step.id}-${index}`,
-        path,
-        sourcePath,
+        id: `${step.id}-0`,
+        path: artifact.path,
+        sourcePath: artifact.sourcePath,
         toolName: step.toolName ?? step.label,
         status: step.status,
         timestampMs: step.finishedAtMs ?? step.startedAtMs,
         runId: step.metadata.agent_run_id ?? null,
         version: 0,
-        kind: artifactKind(path)
+        kind: artifactKind(artifact.path)
       })
-    );
+    ];
   });
 }
 
@@ -433,9 +430,9 @@ export function Inspector({
           resolveOutputArtifact(workspaceRoot, artifact)
         );
         setOutputHistoryBySession((current) => {
-          const merged = mergeOutputArtifacts(current[sessionId] ?? [], resolved);
-          if (outputArtifactsUnchanged(current[sessionId] ?? [], merged)) return current;
-          return rememberOutputHistory(current, sessionId, merged);
+          const authoritative = mergeOutputArtifacts(resolved);
+          if (outputArtifactsUnchanged(current[sessionId] ?? [], authoritative)) return current;
+          return rememberOutputHistory(current, sessionId, authoritative);
         });
       })
       .catch(() => undefined);

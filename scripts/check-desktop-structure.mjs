@@ -47,6 +47,7 @@ const knowledgeGraphSource = read(
   "apps/desktop/src/components/KnowledgeGraph.tsx"
 );
 const traceStatusIconSource = read("apps/desktop/src/components/TraceStatusIcon.tsx");
+const artifactProjectionSource = read("crates/agent-application/src/artifacts.rs");
 const styles = read("apps/desktop/src/styles.css");
 const tauriBridge = read("apps/desktop/src/tauri.ts");
 const localBuildScript = read("scripts/build-local-app.mjs");
@@ -1505,14 +1506,18 @@ assert(
   inspectorSource.includes('aria-label={outputPreviewFullscreen ? "Exit full screen" : "Show full screen"}') &&
     inspectorSource.includes('aria-label="Open with default app"') &&
     inspectorSource.includes("createPortal(outputPreview, document.body)") &&
-    inspectorSource.includes("sessionArtifactPaths") &&
-    inspectorSource.includes('key.startsWith("result_")') &&
+    inspectorSource.includes("sessionArtifact(step") &&
+    inspectorSource.includes("isInternalRuntimePath") &&
+    inspectorSource.includes("step.metadata.result_artifact_path") &&
     inspectorSource.includes('step.toolName === "file.write"') &&
     inspectorSource.includes("getAgentSessionOutputs") &&
     inspectorSource.includes("outputHistoryBySession") &&
     inspectorSource.includes("mergeOutputArtifacts") &&
+    inspectorSource.includes("const authoritative = mergeOutputArtifacts(resolved)") &&
     inspectorSource.includes("currentRunOutputs") &&
     inspectorSource.includes("}, [sessionId]);") &&
+    artifactProjectionSource.includes('get("result_artifact_path")') &&
+    artifactProjectionSource.includes("is_internal_runtime_path(logical_path)") &&
     tauriBridge.includes('invoke<AgentOutputArtifactView[]>("get_agent_session_outputs"') &&
     rustLib.includes("get_agent_session_outputs") &&
     rustLib.includes("agent_output_artifacts_from_events") &&
