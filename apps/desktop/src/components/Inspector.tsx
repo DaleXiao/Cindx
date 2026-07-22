@@ -392,6 +392,8 @@ export function Inspector({
   const debugUnmountTimerRef = useRef<number | null>(null);
   const debugOpenFrameRef = useRef<number | null>(null);
   const debugDesiredOpenRef = useRef(false);
+  const debugBodyRef = useRef<HTMLDivElement | null>(null);
+  const debugToggleRef = useRef<HTMLButtonElement | null>(null);
   const reviewTotal = reviewCounts.agent + reviewCounts.tool + reviewCounts.browser;
   const hasArtifacts = Boolean(ragAnswer || ragSources.length || browserObservations.length || toolResults.length);
   const hasContext = Boolean(
@@ -478,8 +480,7 @@ export function Inspector({
     []
   );
 
-  function toggleDebug() {
-    const nextOpen = !debugDesiredOpenRef.current;
+  function setDebugVisibility(nextOpen: boolean) {
     debugDesiredOpenRef.current = nextOpen;
     if (debugUnmountTimerRef.current !== null) {
       window.clearTimeout(debugUnmountTimerRef.current);
@@ -504,6 +505,18 @@ export function Inspector({
       if (!debugDesiredOpenRef.current) return;
       setDebugOpen(true);
     });
+  }
+
+  function toggleDebug() {
+    setDebugVisibility(!debugDesiredOpenRef.current);
+  }
+
+  function handleInspectorPointerDown(event: ReactPointerEvent<HTMLElement>) {
+    if (!debugDesiredOpenRef.current) return;
+    const target = event.target as Node;
+    if (debugBodyRef.current?.contains(target)) return;
+    if (debugToggleRef.current?.contains(target)) return;
+    setDebugVisibility(false);
   }
 
   useEffect(() => {
@@ -724,6 +737,7 @@ export function Inspector({
       aria-label="Inspector"
       data-open={open}
       data-tab={tab}
+      onPointerDownCapture={handleInspectorPointerDown}
     >
       <div
         className="inspector-resize-handle"
@@ -832,6 +846,7 @@ export function Inspector({
       <section className="inspector-debug" data-open={debugOpen} hidden={!showDebug}>
         {debugBodyMounted && (
         <div
+          ref={debugBodyRef}
           className="inspector-debug-body"
           id="inspector-debug-panel"
           aria-hidden={!debugOpen}
@@ -1256,6 +1271,7 @@ export function Inspector({
         </div>
         )}
         <button
+          ref={debugToggleRef}
           className="inspector-debug-toggle"
           type="button"
           aria-label={debugOpen ? "Hide debug and trace" : "Show debug and trace"}
