@@ -369,9 +369,7 @@ pub(crate) fn continue_agent_loop(
                                 MAX_AGENT_MODEL_TRANSPORT_ATTEMPTS
                             ),
                         )?;
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            250 * transport_attempt as u64,
-                        ));
+                        std::thread::sleep(model_transport_retry_delay(transport_attempt));
                         continue;
                     }
                     if !partial_stream.trim().is_empty() {
@@ -410,11 +408,9 @@ pub(crate) fn continue_agent_loop(
         if !response.message.content.trim().is_empty() {
             cancellation.record_partial_output(&response.message.content);
         }
-        cancellation.record_checkpoint(
-            "model_result",
-            "executor",
-            &model_response_checkpoint_evidence(&response),
-        );
+        if let Some(evidence) = model_response_checkpoint_evidence(&response) {
+            cancellation.record_checkpoint("model_result", "executor", &evidence);
+        }
         let should_synthesize = collaboration.is_some()
             && response.tool_calls.is_empty()
             && !response.message.content.trim().is_empty();
@@ -455,6 +451,10 @@ pub(crate) fn continue_agent_loop(
             }
             metadata.insert("output_length".to_string(), output_length.to_string());
             metadata.insert("tool_calls".to_string(), tool_call_count.to_string());
+            metadata.insert(
+                "transport_attempts".to_string(),
+                transport_attempt.to_string(),
+            );
             metadata.insert(
                 "context_projected_tokens".to_string(),
                 context_governor.estimated_projected_tokens.to_string(),

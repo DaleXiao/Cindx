@@ -82,8 +82,7 @@ pub(super) fn persist_completed_conversation_title(
         else {
             return Ok(None);
         };
-        if !session_title_refinement_needed(session.title_state, &session.name, &meaningful_turns)
-        {
+        if !session_title_refinement_needed(session.title_state, &session.name, &meaningful_turns) {
             return Ok(None);
         }
         let now = current_time_millis().max(session.updated_at_ms.saturating_add(1));
@@ -272,7 +271,16 @@ fn source_is_already_title_like(value: &str) -> bool {
     }
     let normalized = normalized_session_title_signal(value);
     if [
-        "我", "你", "请", "能否", "可以", "帮我", "麻烦", "这是", "这个", "为什么",
+        "我",
+        "你",
+        "请",
+        "能否",
+        "可以",
+        "帮我",
+        "麻烦",
+        "这是",
+        "这个",
+        "为什么",
     ]
     .iter()
     .any(|prefix| normalized.starts_with(prefix))

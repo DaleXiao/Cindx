@@ -1196,6 +1196,17 @@ pub(crate) fn save_project_memory_ledger(
     )
 }
 
+fn refresh_project_memory_ledger_revision(
+    store: &mut SqliteStore,
+    task_id: &TaskId,
+    ledger: &mut MemoryLedger,
+) -> Result<(), StorageError> {
+    let revision = store.event_revision_by_metadata(task_id, "project_id", &ledger.project_id)?;
+    ledger.revision = revision.latest_sequence;
+    ledger.event_count = revision.event_count;
+    Ok(())
+}
+
 pub(crate) fn active_project_id_for_memory(
     state: &tauri::State<'_, AppState>,
 ) -> Result<Option<String>, String> {
@@ -1822,11 +1833,8 @@ pub(crate) fn recall_project_memory_for_prompt(
         metadata,
     )
     .map_err(|error| error.to_string())?;
-    let revision = store
-        .event_revision(task_id)
+    refresh_project_memory_ledger_revision(&mut store, task_id, &mut ledger)
         .map_err(|error| error.to_string())?;
-    ledger.revision = revision.latest_sequence;
-    ledger.event_count = revision.event_count;
     save_project_memory_ledger(&mut store, &ledger).map_err(|error| error.to_string())?;
 
     Ok(Some(Message {
@@ -1900,9 +1908,7 @@ pub(crate) fn record_project_memory_observed_use(
             run_context,
         ),
     )?;
-    let revision = store.event_revision(task_id)?;
-    ledger.revision = revision.latest_sequence;
-    ledger.event_count = revision.event_count;
+    refresh_project_memory_ledger_revision(store, task_id, &mut ledger)?;
     save_project_memory_ledger(store, &ledger)?;
     Ok(used_ids.len())
 }

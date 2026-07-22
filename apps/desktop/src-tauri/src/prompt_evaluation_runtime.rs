@@ -302,11 +302,9 @@ pub(crate) fn complete_prompt_evaluation_worker(
         let finalization_content = finalizing
             .then(|| response.message.content.trim().to_string())
             .filter(|content| !content.is_empty());
-        control.record_checkpoint(
-            "model_result",
-            "prompt_evaluation_worker",
-            &model_response_checkpoint_evidence(&response),
-        );
+        if let Some(evidence) = model_response_checkpoint_evidence(&response) {
+            control.record_checkpoint("model_result", "prompt_evaluation_worker", &evidence);
+        }
         match advance_with_model_response(&mut runtime, response, request_tools) {
             AgentAdvance::Completed { answer } => {
                 usage.insert("worker_turns".to_string(), runtime.turn.to_string());

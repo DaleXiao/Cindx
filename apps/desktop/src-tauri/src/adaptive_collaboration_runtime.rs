@@ -862,13 +862,28 @@ pub(crate) fn run_adaptive_collaboration(
         &final_output,
         prompt_genome.verification,
     );
+    let final_output = match adaptive_quality_handoff(&quality_gate) {
+        Ok(output) => output,
+        Err(error) => {
+            append_workflow_checkpoint_event(
+                state,
+                task_id,
+                run_context,
+                collaboration_id,
+                "Collaboration workflow blocked by quality gate",
+                "paused",
+                Some(&final_step.id),
+                &workflow_checkpoint,
+            )?;
+            return Err(error);
+        }
+    };
     let recovered_steps = workflow_checkpoint
         .steps
         .values()
         .filter(|step| step.attempts > 1)
         .count();
     let step_credits = workflow_checkpoint.assign_step_credits(quality_gate.score);
-    let final_output = quality_gate.output;
     workflow_checkpoint.finalize(final_output.clone(), current_time_millis())?;
     append_workflow_checkpoint_event(
         state,
@@ -925,6 +940,15 @@ pub(crate) fn run_adaptive_collaboration(
                     (
                         "step_credits".to_string(),
                         serde_json::to_string(&step_credits).unwrap_or_else(|_| "[]".to_string()),
+                    ),
+                    ("quality_pass".to_string(), quality_gate.passed.to_string()),
+                    (
+                        "quality_score".to_string(),
+                        format!("{:.3}", quality_gate.score.clamp(0.0, 1.0)),
+                    ),
+                    (
+                        "quality_issues".to_string(),
+                        truncate_for_collaboration(&quality_gate.issues.join(" | "), 4_000),
                     ),
                     (
                         "safety_violations".to_string(),
@@ -1146,7 +1170,59 @@ pub(crate) fn adaptive_quality_repair_budget(verification: PromptVerification) -
 }
 
 pub(crate) fn adaptive_quality_gate_passes(gate: &CollaborationQualityPayload) -> bool {
-    gate.pass && gate.score >= ADAPTIVE_QUALITY_PASS_SCORE && gate.safety_violations == 0
+    gate.pass
+        && gate.score.is_finite()
+        && (0.0..=1.0).contains(&gate.score)
+        && gate.score >= ADAPTIVE_QUALITY_PASS_SCORE
+        && gate.safety_violations == 0
+}
+
+pub(crate) fn adaptive_quality_handoff(gate: &AdaptiveQualityGateResult) -> Result<String, String> {
+    if gate.safety_violations > 0 {
+        return Err(format!(
+            "{WORKFLOW_RESUMABLE_ERROR_PREFIX} adaptive quality gate found {} safety violation(s)",
+            gate.safety_violations
+        ));
+    }
+    if gate.passed {
+        return Ok(gate.output.clone());
+    }
+    let issues = if gate.issues.is_empty() {
+        "The independent quality review was unavailable or inconclusive.".to_string()
+    } else {
+        gate.issues.join("\n- ")
+    };
+    Ok(format!(
+        "INTERNAL QUALITY HANDOFF: The adaptive team guidance did not yet pass its independent quality gate. The downstream executor, reviewer, and synthesizer must resolve every issue below, verify claims against tool evidence, and must not claim completion until the issues are closed. Do not expose this internal note to the user.\n\nUnresolved issues:\n- {}\n\nCandidate guidance:\n{}",
+        issues,
+        gate.output
+    ))
+}
+
+fn distinct_quality_models(models: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut distinct = Vec::new();
+    for model in models {
+        if !model.trim().is_empty() && !distinct.iter().any(|existing| existing == &model) {
+            distinct.push(model);
+        }
+    }
+    distinct
+}
+
+fn adaptive_quality_reviewer_models(config: &ProviderConfig) -> Vec<String> {
+    distinct_quality_models([
+        config.model_for_role(&ModelRole::Reviewer),
+        config.model_for_conductor(),
+        config.model_for_role(&ModelRole::Planner),
+    ])
+}
+
+fn adaptive_quality_repair_models(config: &ProviderConfig) -> Vec<String> {
+    distinct_quality_models([
+        config.model_for_role(&ModelRole::Summarizer),
+        config.model_for_conductor(),
+        config.model_for_role(&ModelRole::Executor),
+    ])
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1212,15 +1288,22 @@ pub(crate) fn quality_gate_adaptive_output(
             output: output.to_string(),
             score: 0.6,
             safety_violations: 0,
+            passed: true,
+            issues: Vec::new(),
         };
     }
-    let reviewer_model = config.model_for_role(&ModelRole::Reviewer);
-    let synthesizer_model = config.model_for_role(&ModelRole::Summarizer);
+    let reviewer_models = adaptive_quality_reviewer_models(config);
+    let repair_models = adaptive_quality_repair_models(config);
     let repair_budget = adaptive_quality_repair_budget(verification);
     let mut candidate = output.to_string();
     let mut last_gate = None;
+    let mut review_errors = Vec::new();
 
     for review_index in 0..=repair_budget {
+        let reviewer_model = reviewer_models
+            .get(review_index % reviewer_models.len().max(1))
+            .cloned()
+            .unwrap_or_else(|| config.model_for_role(&ModelRole::Reviewer));
         let stage = if review_index == 0 {
             "quality_gate".to_string()
         } else {
@@ -1268,7 +1351,8 @@ pub(crate) fn quality_gate_adaptive_output(
                         ),
                     );
                 }
-                break;
+                review_errors.push(format!("reviewer {reviewer_model} unavailable: {error}"));
+                continue;
             }
         };
         let gate = parse_collaboration_quality(&raw_gate).unwrap_or(CollaborationQualityPayload {
@@ -1291,6 +1375,8 @@ pub(crate) fn quality_gate_adaptive_output(
                 output: candidate,
                 score: gate.score.clamp(0.0, 1.0) as f64,
                 safety_violations: gate.safety_violations,
+                passed: true,
+                issues: Vec::new(),
             };
         }
 
@@ -1305,6 +1391,10 @@ pub(crate) fn quality_gate_adaptive_output(
         }
 
         let repair_stage = format!("quality_repair_{}", review_index + 1);
+        let synthesizer_model = repair_models
+            .get(review_index % repair_models.len().max(1))
+            .cloned()
+            .unwrap_or_else(|| config.model_for_role(&ModelRole::Summarizer));
         let repaired = match run_collaboration_stage(
             state,
             config,
@@ -1327,13 +1417,22 @@ pub(crate) fn quality_gate_adaptive_output(
         candidate = repaired;
     }
 
-    let (score, safety_violations) = last_gate
-        .map(|gate| (gate.score.clamp(0.0, 1.0) as f64, gate.safety_violations))
-        .unwrap_or((0.5, 0));
+    let (score, safety_violations, mut issues) = last_gate
+        .map(|gate| {
+            (
+                gate.score.clamp(0.0, 1.0) as f64,
+                gate.safety_violations,
+                gate.issues,
+            )
+        })
+        .unwrap_or((0.5, 0, Vec::new()));
+    issues.extend(review_errors);
     AdaptiveQualityGateResult {
         output: candidate,
         score,
         safety_violations,
+        passed: false,
+        issues,
     }
 }
 

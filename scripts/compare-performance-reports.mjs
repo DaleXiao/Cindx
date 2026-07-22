@@ -30,11 +30,23 @@ function loadReport(reportPath) {
   return report;
 }
 
+function loadPolicy(policyPath) {
+  if (!policyPath) return null;
+  const policy = JSON.parse(fs.readFileSync(policyPath, "utf8"));
+  if (
+    policy.schema !== "cindx.performance-policy.v1" ||
+    !Array.isArray(policy.workloads)
+  ) {
+    throw new Error(`${policyPath} is not a Cindx performance policy`);
+  }
+  return policy;
+}
+
 function diagnosticMap(report) {
   return new Map(report.diagnostics.map((diagnostic) => [diagnostic.schema, diagnostic]));
 }
 
-const workloads = [
+const defaultWorkloads = [
   {
     schema: "cindx.session-projection-diagnostic.v1",
     identity: ["initial_events", "delta_events_read", "warm_sample_count"],
@@ -57,6 +69,9 @@ const candidatePath = requiredPath("--candidate");
 const outputPath = option("--report");
 const maxRegressionPercent = positiveNumber("--max-regression-percent", 25);
 const absoluteToleranceMicros = positiveNumber("--absolute-tolerance-micros", 1_000);
+const policyPath = option("--policy");
+const policy = loadPolicy(policyPath ? path.resolve(policyPath) : null);
+const workloads = policy?.workloads ?? defaultWorkloads;
 const baseline = diagnosticMap(loadReport(baselinePath));
 const candidate = diagnosticMap(loadReport(candidatePath));
 const comparisons = [];
@@ -77,18 +92,29 @@ for (const workload of workloads) {
       ? []
       : [`${field} differs: baseline=${before[field]} candidate=${after[field]}`]
   );
-  const metrics = workload.metrics.map((field) => {
+  const metrics = workload.metrics.map((metric) => {
+    const field = typeof metric === "string" ? metric : metric.field;
+    const metricMaxRegressionPercent =
+      typeof metric === "string"
+        ? maxRegressionPercent
+        : metric.max_regression_percent ?? maxRegressionPercent;
+    const metricAbsoluteToleranceMicros =
+      typeof metric === "string"
+        ? absoluteToleranceMicros
+        : metric.absolute_tolerance_micros ?? absoluteToleranceMicros;
     const baselineValue = Number(before[field]);
     const candidateValue = Number(after[field]);
     const allowed = Math.max(
-      baselineValue * (1 + maxRegressionPercent / 100),
-      baselineValue + absoluteToleranceMicros
+      baselineValue * (1 + metricMaxRegressionPercent / 100),
+      baselineValue + metricAbsoluteToleranceMicros
     );
     return {
       field,
       baseline: baselineValue,
       candidate: candidateValue,
       allowed,
+      max_regression_percent: metricMaxRegressionPercent,
+      absolute_tolerance_micros: metricAbsoluteToleranceMicros,
       passed:
         Number.isFinite(baselineValue) &&
         Number.isFinite(candidateValue) &&
@@ -107,6 +133,7 @@ const result = {
   schema: "cindx.performance-comparison.v1",
   baseline: baselinePath,
   candidate: candidatePath,
+  policy: policyPath ? path.resolve(policyPath) : null,
   max_regression_percent: maxRegressionPercent,
   absolute_tolerance_micros: absoluteToleranceMicros,
   passed: comparisons.every((comparison) => comparison.passed),

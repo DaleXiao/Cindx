@@ -213,7 +213,9 @@ pub fn replace_lancedb_index(
                 .create_index(&["vector"], Index::Auto)
                 .execute()
                 .await
-                .map_err(|error| RagError::new(format!("failed to build LanceDB ANN index: {error}")))?;
+                .map_err(|error| {
+                    RagError::new(format!("failed to build LanceDB ANN index: {error}"))
+                })?;
         }
         Ok::<(), RagError>(())
     })?;
@@ -417,10 +419,7 @@ fn lancedb_string_column<'a>(
 }
 
 #[cfg(feature = "lancedb-store")]
-fn lancedb_u64_column<'a>(
-    batch: &'a RecordBatch,
-    name: &str,
-) -> Result<&'a UInt64Array, RagError> {
+fn lancedb_u64_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a UInt64Array, RagError> {
     batch
         .column_by_name(name)
         .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
@@ -510,8 +509,9 @@ impl FileRagAdapter {
 impl RagAdapter for FileRagAdapter {
     fn replace_all(&mut self, index: RagIndex) -> Result<RagIndexStats, RagError> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| RagError::new(format!("failed to create RAG directory: {error}")))?;
+            fs::create_dir_all(parent).map_err(|error| {
+                RagError::new(format!("failed to create RAG directory: {error}"))
+            })?;
         }
         save_index(&self.path, &index)?;
         self.index = Arc::new(index);
@@ -602,11 +602,7 @@ pub fn index_workspace_with_embedder_cancellable(
     mut should_cancel: impl FnMut() -> bool,
 ) -> Result<RagIndex, RagError> {
     let mut index = index_workspace_cancellable(workspace_root, options, &mut should_cancel)?;
-    apply_embeddings_to_index_cancellable(
-        &mut index,
-        embedder,
-        &mut should_cancel,
-    )?;
+    apply_embeddings_to_index_cancellable(&mut index, embedder, &mut should_cancel)?;
     Ok(index)
 }
 
@@ -642,7 +638,9 @@ pub fn apply_embeddings_to_index_cancellable(
                 texts_batch.len()
             )));
         }
-        if provider.as_ref().is_some_and(|value| value != &batch.provider)
+        if provider
+            .as_ref()
+            .is_some_and(|value| value != &batch.provider)
             || model.as_ref().is_some_and(|value| value != &batch.model)
         {
             return Err(RagError::new(
@@ -682,18 +680,16 @@ pub fn search_chunks_semantic(
     limit: usize,
 ) -> Vec<RagSearchResult> {
     let limit = limit.clamp(1, 50);
-    let mut results = chunks
+    let scored = chunks
         .iter()
-        .filter(|chunk| chunk.embedding_dimensions == query_embedding.len())
-        .cloned()
-        .map(|chunk| RagSearchResult {
-            score: cosine_similarity(query_embedding, &chunk.embedding),
-            chunk,
+        .enumerate()
+        .filter(|(_, chunk)| chunk.embedding_dimensions == query_embedding.len())
+        .filter_map(|(index, chunk)| {
+            let score = cosine_similarity(query_embedding, &chunk.embedding);
+            (score > 0.0).then_some((index, score))
         })
-        .filter(|result| result.score > 0.0)
         .collect::<Vec<_>>();
-    sort_and_truncate_results(&mut results, limit);
-    results
+    top_scored_chunks(chunks, scored, limit)
 }
 
 pub fn search_chunks_literal(
@@ -706,28 +702,27 @@ pub fn search_chunks_literal(
         return Vec::new();
     }
     let query_tokens = token_counts(&normalized_query);
-    let mut results = chunks
+    let scored = chunks
         .iter()
-        .cloned()
-        .filter_map(|chunk| {
+        .enumerate()
+        .filter_map(|(index, chunk)| {
             let normalized_text = chunk.text.to_lowercase();
             let normalized_path = chunk.path.to_lowercase();
             let exact_matches = normalized_text.matches(&normalized_query).count();
             let path_exact = normalized_path.contains(&normalized_query);
-            let text_score = lexical_overlap(&query_tokens, &token_counts(&normalized_text));
-            let path_score = lexical_overlap(&query_tokens, &token_counts(&normalized_path));
             let score = if path_exact {
                 1.25 + (exact_matches.min(8) as f32 * 0.04)
             } else if exact_matches > 0 {
                 1.0 + (exact_matches.min(8) as f32 * 0.05)
             } else {
+                let text_score = lexical_overlap_in_text(&query_tokens, &normalized_text);
+                let path_score = lexical_overlap_in_text(&query_tokens, &normalized_path);
                 (text_score * 0.75) + (path_score * 0.45)
             };
-            (score > 0.0).then_some(RagSearchResult { chunk, score })
+            (score > 0.0).then_some((index, score))
         })
         .collect::<Vec<_>>();
-    sort_and_truncate_results(&mut results, limit.clamp(1, 50));
-    results
+    top_scored_chunks(chunks, scored, limit.clamp(1, 50))
 }
 
 pub fn search_workspace_files_cancellable(
@@ -763,26 +758,47 @@ pub fn search_chunks_with_embedding(
 ) -> Vec<RagSearchResult> {
     let limit = limit.clamp(1, 50);
     let query_tokens = token_counts(query);
-    let mut results = chunks
+    let scored = chunks
         .iter()
-        .cloned()
-        .map(|chunk| {
+        .enumerate()
+        .filter_map(|(index, chunk)| {
             let vector_score = if query_embedding.len() == chunk.embedding_dimensions {
                 cosine_similarity(query_embedding, &chunk.embedding)
             } else {
                 0.0
             };
-            let lexical_score = lexical_overlap(&query_tokens, &token_counts(&chunk.text));
-            RagSearchResult {
-                chunk,
-                score: (vector_score * 0.72) + (lexical_score * 0.28),
-            }
+            let lexical_score = lexical_overlap_in_text(&query_tokens, &chunk.text);
+            let score = (vector_score * 0.72) + (lexical_score * 0.28);
+            (score > 0.0).then_some((index, score))
         })
-        .filter(|result| result.score > 0.0)
         .collect::<Vec<_>>();
+    top_scored_chunks(chunks, scored, limit)
+}
 
-    sort_and_truncate_results(&mut results, limit);
-    results
+fn top_scored_chunks(
+    chunks: &[RagChunk],
+    mut scored: Vec<(usize, f32)>,
+    limit: usize,
+) -> Vec<RagSearchResult> {
+    scored.sort_by(|(left_index, left_score), (right_index, right_score)| {
+        right_score
+            .partial_cmp(left_score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| chunks[*left_index].path.cmp(&chunks[*right_index].path))
+            .then_with(|| {
+                chunks[*left_index]
+                    .start_line
+                    .cmp(&chunks[*right_index].start_line)
+            })
+    });
+    scored.truncate(limit);
+    scored
+        .into_iter()
+        .map(|(index, score)| RagSearchResult {
+            chunk: chunks[index].clone(),
+            score,
+        })
+        .collect()
 }
 
 fn sort_and_truncate_results(results: &mut Vec<RagSearchResult>, limit: usize) {
@@ -824,8 +840,11 @@ pub fn export_lancedb_records_jsonl(
 ) -> Result<usize, RagError> {
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| RagError::new(format!("failed to create LanceDB export directory: {error}")))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            RagError::new(format!(
+                "failed to create LanceDB export directory: {error}"
+            ))
+        })?;
     }
 
     let rows = lancedb_records(index)
@@ -904,7 +923,11 @@ fn search_workspace_path(
     let metadata = match fs::metadata(current) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
-        Err(error) => return Err(RagError::new(format!("failed to stat search path: {error}"))),
+        Err(error) => {
+            return Err(RagError::new(format!(
+                "failed to stat search path: {error}"
+            )))
+        }
     };
     if metadata.is_file() {
         search_workspace_file(
@@ -922,7 +945,11 @@ fn search_workspace_path(
     let entries = match fs::read_dir(current) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
-        Err(error) => return Err(RagError::new(format!("failed to search directory: {error}"))),
+        Err(error) => {
+            return Err(RagError::new(format!(
+                "failed to search directory: {error}"
+            )))
+        }
     };
     let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
     entries.sort_by_key(|entry| entry.path());
@@ -1354,7 +1381,9 @@ fn index_file(
         let start_line = start as u64 + 1;
         let end_line = end as u64;
         chunks.push(RagChunk {
-            id: stable_hash_hex(format!("{relative}:{start_line}:{end_line}:{file_hash}").as_bytes()),
+            id: stable_hash_hex(
+                format!("{relative}:{start_line}:{end_line}:{file_hash}").as_bytes(),
+            ),
             path: relative.clone(),
             file_hash: file_hash.clone(),
             modified_time_ms,
@@ -1382,7 +1411,10 @@ fn relative_workspace_path(workspace_root: &Path, path: &Path) -> Result<String,
         .strip_prefix(workspace_root)
         .map_err(|_| RagError::new("path is outside workspace"))?;
     for component in relative.components() {
-        if matches!(component, Component::ParentDir | Component::Prefix(_) | Component::RootDir) {
+        if matches!(
+            component,
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir
+        ) {
             return Err(RagError::new("path escapes workspace"));
         }
     }
@@ -1399,21 +1431,21 @@ fn should_skip_path(name: &str) -> bool {
         || lower.ends_with(".pem")
         || lower.ends_with(".key")
         || matches!(
-        lower.as_str(),
-        ".git"
-            | ".cindx"
-            | "target"
-            | "node_modules"
-            | "dist"
-            | ".ds_store"
-            | "cargo.lock"
-            | "package-lock.json"
-            | ".npmrc"
-            | ".pypirc"
-            | "credentials"
-            | "credentials.json"
-            | "id_rsa"
-            | "id_ed25519"
+            lower.as_str(),
+            ".git"
+                | ".cindx"
+                | "target"
+                | "node_modules"
+                | "dist"
+                | ".ds_store"
+                | "cargo.lock"
+                | "package-lock.json"
+                | ".npmrc"
+                | ".pypirc"
+                | "credentials"
+                | "credentials.json"
+                | "id_rsa"
+                | "id_ed25519"
         )
 }
 
@@ -1447,8 +1479,8 @@ fn should_skip_workspace_entry(workspace_root: &Path, current: &Path, name: &str
 fn is_probably_binary_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     [
-        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".icns", ".ico", ".pdf", ".zip", ".gz",
-        ".tar", ".sqlite", ".sqlite3", ".db", ".app", ".dylib", ".so", ".a",
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".icns", ".ico", ".pdf", ".zip", ".gz", ".tar",
+        ".sqlite", ".sqlite3", ".db", ".app", ".dylib", ".so", ".a",
     ]
     .iter()
     .any(|suffix| lower.ends_with(suffix))
@@ -1514,8 +1546,43 @@ fn lexical_overlap(query: &BTreeMap<String, usize>, chunk: &BTreeMap<String, usi
         return 0.0;
     }
 
-    let hits = query.keys().filter(|token| chunk.contains_key(*token)).count();
+    let hits = query
+        .keys()
+        .filter(|token| chunk.contains_key(*token))
+        .count();
     hits as f32 / query.len() as f32
+}
+
+fn lexical_overlap_in_text(query: &BTreeMap<String, usize>, text: &str) -> f32 {
+    if query.is_empty() {
+        return 0.0;
+    }
+
+    let mut matched = BTreeSet::new();
+    let mut current = String::new();
+    let record_token = |token: &mut String, matched: &mut BTreeSet<String>| {
+        if !token.is_empty() {
+            if query.contains_key(token) {
+                matched.insert(std::mem::take(token));
+            } else {
+                token.clear();
+            }
+        }
+    };
+    for character in text.chars() {
+        if character.is_alphanumeric() || character == '_' {
+            for lower in character.to_lowercase() {
+                current.push(lower);
+            }
+        } else {
+            record_token(&mut current, &mut matched);
+            if matched.len() == query.len() {
+                return 1.0;
+            }
+        }
+    }
+    record_token(&mut current, &mut matched);
+    matched.len() as f32 / query.len() as f32
 }
 
 fn empty_index() -> RagIndex {
@@ -1570,21 +1637,8 @@ fn load_index(path: &Path) -> Result<RagIndex, RagError> {
                     indexed_at_ms: indexed_at.parse().unwrap_or(0),
                 };
             }
-            [
-                "chunk",
-                id,
-                path,
-                file_hash,
-                modified_time_ms,
-                start_line,
-                end_line,
-                indexed_at_ms,
-                embedding_provider,
-                embedding_model,
-                embedding_dimensions,
-                embedding,
-                text,
-            ] => {
+            ["chunk", id, path, file_hash, modified_time_ms, start_line, end_line, indexed_at_ms, embedding_provider, embedding_model, embedding_dimensions, embedding, text] =>
+            {
                 index.chunks.push(RagChunk {
                     id: (*id).to_string(),
                     path: String::from_utf8(hex_decode(path)?)
@@ -1604,18 +1658,8 @@ fn load_index(path: &Path) -> Result<RagIndex, RagError> {
                         .map_err(|error| RagError::new(error.to_string()))?,
                 });
             }
-            [
-                "chunk",
-                id,
-                path,
-                file_hash,
-                modified_time_ms,
-                start_line,
-                end_line,
-                indexed_at_ms,
-                embedding,
-                text,
-            ] => {
+            ["chunk", id, path, file_hash, modified_time_ms, start_line, end_line, indexed_at_ms, embedding, text] =>
+            {
                 let embedding = decode_embedding(embedding);
                 index.chunks.push(RagChunk {
                     id: (*id).to_string(),
@@ -1795,43 +1839,32 @@ mod tests {
         fs::write(&notes, "original workspace notes").expect("file should write");
         let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
 
-        assert!(workspace_index_is_fresh(
-            &root,
-            &index.chunks,
-            IndexOptions::default(),
-            || false
-        )
-        .expect("freshness should be checked"));
+        assert!(
+            workspace_index_is_fresh(&root, &index.chunks, IndexOptions::default(), || false)
+                .expect("freshness should be checked")
+        );
 
         std::thread::sleep(std::time::Duration::from_millis(5));
         fs::write(&notes, "modified workspace notes").expect("file should update");
-        assert!(!workspace_index_is_fresh(
-            &root,
-            &index.chunks,
-            IndexOptions::default(),
-            || false
-        )
-        .expect("modified file should be detected"));
+        assert!(
+            !workspace_index_is_fresh(&root, &index.chunks, IndexOptions::default(), || false)
+                .expect("modified file should be detected")
+        );
 
-        let updated = index_workspace(&root, IndexOptions::default()).expect("index should rebuild");
+        let updated =
+            index_workspace(&root, IndexOptions::default()).expect("index should rebuild");
         fs::write(root.join("new.md"), "new knowledge").expect("new file should write");
-        assert!(!workspace_index_is_fresh(
-            &root,
-            &updated.chunks,
-            IndexOptions::default(),
-            || false
-        )
-        .expect("new file should be detected"));
+        assert!(
+            !workspace_index_is_fresh(&root, &updated.chunks, IndexOptions::default(), || false)
+                .expect("new file should be detected")
+        );
 
         fs::remove_file(root.join("new.md")).expect("new file should remove");
         fs::remove_file(&notes).expect("indexed file should remove");
-        assert!(!workspace_index_is_fresh(
-            &root,
-            &updated.chunks,
-            IndexOptions::default(),
-            || false
-        )
-        .expect("deleted file should be detected"));
+        assert!(
+            !workspace_index_is_fresh(&root, &updated.chunks, IndexOptions::default(), || false)
+                .expect("deleted file should be detected")
+        );
     }
 
     #[test]
@@ -1885,8 +1918,11 @@ mod tests {
     #[test]
     fn searches_index_by_semantic_and_lexical_score() {
         let root = temp_workspace();
-        fs::write(root.join("a.md"), "permission audit events and model traces")
-            .expect("file should write");
+        fs::write(
+            root.join("a.md"),
+            "permission audit events and model traces",
+        )
+        .expect("file should write");
         fs::write(root.join("b.md"), "recipe ingredients and cooking notes")
             .expect("file should write");
         let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
@@ -1909,19 +1945,23 @@ mod tests {
         adapter.replace_all(index).expect("index should save");
 
         let loaded = FileRagAdapter::open(&index_path).expect("adapter should reload");
-        let results = loaded.search("retrieval sources", 2).expect("search should work");
+        let results = loaded
+            .search("retrieval sources", 2)
+            .expect("search should work");
 
         assert_eq!(loaded.stats().chunks_indexed, 1);
         assert_eq!(results[0].chunk.path, "readme.md");
-        assert_eq!(results[0].chunk.embedding_model, format!("local-hash-{EMBEDDING_DIMS}"));
+        assert_eq!(
+            results[0].chunk.embedding_model,
+            format!("local-hash-{EMBEDDING_DIMS}")
+        );
     }
 
     #[test]
     fn cloning_file_adapter_shares_the_immutable_index_snapshot() {
         let root = temp_workspace();
         let index_path = root.join(".cindx").join("rag-index.tsv");
-        fs::write(root.join("readme.md"), "shared retrieval snapshot")
-            .expect("file should write");
+        fs::write(root.join("readme.md"), "shared retrieval snapshot").expect("file should write");
         let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
         let mut adapter = FileRagAdapter::open(&index_path).expect("adapter should open");
         adapter.replace_all(index).expect("index should save");
@@ -1934,8 +1974,7 @@ mod tests {
     #[test]
     fn indexes_workspace_with_external_embeddings() {
         let root = temp_workspace();
-        fs::write(root.join("a.md"), "cloud embedding vector alpha")
-            .expect("file should write");
+        fs::write(root.join("a.md"), "cloud embedding vector alpha").expect("file should write");
         let mut embedder = FakeEmbedder {
             vectors: vec![vec![0.9, 0.1, 0.0]],
         };
@@ -2024,16 +2063,12 @@ mod tests {
         };
         let mut checks = 0usize;
 
-        let error = index_workspace_with_embedder_cancellable(
-            &root,
-            options,
-            &mut embedder,
-            || {
+        let error =
+            index_workspace_with_embedder_cancellable(&root, options, &mut embedder, || {
                 checks += 1;
                 checks >= 6
-            },
-        )
-        .expect_err("external indexing should stop when cancelled");
+            })
+            .expect_err("external indexing should stop when cancelled");
 
         assert_eq!(error.message, RAG_INDEX_CANCELLED);
         assert!(embedder.calls < 3);
@@ -2098,20 +2133,16 @@ mod tests {
         .expect("large file should write");
         let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
 
-        assert!(index
-            .chunks
-            .iter()
-            .all(|chunk| chunk.path != "large.log"));
-        let results = search_workspace_files_cancellable(
-            &root,
-            "unique direct file evidence",
-            4,
-            || false,
-        )
-        .expect("direct file search should succeed");
+        assert!(index.chunks.iter().all(|chunk| chunk.path != "large.log"));
+        let results =
+            search_workspace_files_cancellable(&root, "unique direct file evidence", 4, || false)
+                .expect("direct file search should succeed");
 
         assert_eq!(results[0].chunk.path, "large.log");
-        assert!(results[0].chunk.text.contains("unique direct file evidence"));
+        assert!(results[0]
+            .chunk
+            .text
+            .contains("unique direct file evidence"));
         assert!(results[0].chunk.start_line <= results[0].chunk.end_line);
     }
 
@@ -2119,8 +2150,7 @@ mod tests {
     fn indexing_respects_max_files() {
         let root = temp_workspace();
         for name in ["a.md", "b.md", "c.md"] {
-            fs::write(root.join(name), format!("content for {name}"))
-                .expect("file should write");
+            fs::write(root.join(name), format!("content for {name}")).expect("file should write");
         }
 
         let index = index_workspace(
@@ -2170,15 +2200,14 @@ mod tests {
     #[test]
     fn persists_and_searches_a_real_lancedb_index() {
         let root = temp_workspace();
-        fs::write(root.join("a.md"), "permission audit model traces")
-            .expect("file should write");
+        fs::write(root.join("a.md"), "permission audit model traces").expect("file should write");
         fs::write(root.join("b.md"), "recipe ingredients cooking notes")
             .expect("file should write");
         let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
         let database_path = root.join(".cindx").join("lancedb");
 
-        let rows = replace_lancedb_index(&database_path, &index)
-            .expect("LanceDB index should persist");
+        let rows =
+            replace_lancedb_index(&database_path, &index).expect("LanceDB index should persist");
         let results = search_lancedb_index(
             &database_path,
             &local_query_embedding("model audit trail"),
@@ -2209,10 +2238,8 @@ mod tests {
             embedding_dimensions: EMBEDDING_DIMS,
         };
 
-        let prompt = build_grounded_answer_prompt(
-            "What matters?",
-            &[RagSearchResult { chunk, score: 0.9 }],
-        );
+        let prompt =
+            build_grounded_answer_prompt("What matters?", &[RagSearchResult { chunk, score: 0.9 }]);
 
         assert!(prompt.contains("[docs/a.md:3-8"));
         assert!(prompt.contains("What matters?"));

@@ -484,8 +484,9 @@ impl AgentRunControl {
         }
         let partial_output = output
             .char_indices()
-            .nth(PARTIAL_OUTPUT_MAX_CHARS)
-            .map(|(end, _)| output[..end].to_string())
+            .rev()
+            .nth(PARTIAL_OUTPUT_MAX_CHARS.saturating_sub(1))
+            .map(|(start, _)| output[start..].to_string())
             .unwrap_or_else(|| output.to_string());
         let mut state = self.state.lock().expect("run control state poisoned");
         state.partial_output = partial_output;
@@ -936,5 +937,22 @@ mod tests {
             vec!["queue-a"]
         );
         assert!(!resumed.has_pending_steer());
+    }
+
+    #[test]
+    fn partial_output_keeps_the_latest_bounded_unicode_tail() {
+        let control = AgentRunControl::with_budget(test_budget());
+        let output = format!(
+            "{}{}",
+            "old".repeat(PARTIAL_OUTPUT_MAX_CHARS),
+            "latest verified result 你好"
+        );
+
+        control.record_partial_output(&output);
+
+        let partial = control.partial_output();
+        assert_eq!(partial.chars().count(), PARTIAL_OUTPUT_MAX_CHARS);
+        assert!(partial.ends_with("latest verified result 你好"));
+        assert_ne!(partial, output);
     }
 }

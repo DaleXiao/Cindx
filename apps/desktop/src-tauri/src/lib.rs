@@ -176,8 +176,8 @@ use workflow_checkpoint_runtime::*;
 use workflow_routing_runtime::*;
 
 use tool_runtime_service::{
-    completed_tool_result, finalize_tool_result, tool_input_fingerprint, tool_invocation_context,
-    tool_invocation_event_metadata,
+    completed_tool_result, failed_tool_result, finalize_tool_result, tool_input_fingerprint,
+    tool_invocation_context, tool_invocation_event_metadata,
 };
 
 use agent_application::{
@@ -187,7 +187,7 @@ use agent_application::{
 };
 use agent_loop_service::{
     exhausted_model_transport_stop_reason, is_transient_model_transport_error,
-    model_response_checkpoint_evidence, ModelStreamProgress,
+    model_response_checkpoint_evidence, model_transport_retry_delay, ModelStreamProgress,
 };
 use agent_recovery_service::*;
 use collaboration_service::{

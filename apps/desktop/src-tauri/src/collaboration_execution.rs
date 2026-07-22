@@ -169,29 +169,13 @@ pub(crate) fn synthesize_agent_answer(
     let answer = match answer {
         Ok(answer) => answer,
         Err(error) => {
-            emit_agent_stream_delta(
-                app,
-                &stream_request_id,
-                session_id,
-                "",
-                false,
-                true,
-                None,
-            );
+            emit_agent_stream_delta(app, &stream_request_id, session_id, "", false, true, None);
             return Err(error);
         }
     };
     let answer = answer.trim().to_string();
     if answer.is_empty() {
-        emit_agent_stream_delta(
-            app,
-            &stream_request_id,
-            session_id,
-            "",
-            false,
-            true,
-            None,
-        );
+        emit_agent_stream_delta(app, &stream_request_id, session_id, "", false, true, None);
         Err("synthesizer returned an empty answer".to_string())
     } else {
         Ok(answer)
@@ -564,11 +548,9 @@ pub(crate) fn complete_collaboration_worker_with_tools(
             .then(|| response.message.content.trim().to_string())
             .filter(|content| !content.is_empty());
         if let Some(control) = cancellation.as_ref() {
-            control.record_checkpoint(
-                "model_result",
-                &stage,
-                &model_response_checkpoint_evidence(&response),
-            );
+            if let Some(evidence) = model_response_checkpoint_evidence(&response) {
+                control.record_checkpoint("model_result", &stage, &evidence);
+            }
         }
 
         match advance_with_model_response(&mut runtime, response, request_tools) {

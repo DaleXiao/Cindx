@@ -1522,30 +1522,42 @@ pub(crate) fn index_graph_chunks_cancellable(
     mut should_cancel: impl FnMut() -> bool,
 ) -> Result<(usize, usize), String> {
     let graph_path = graph_store_path_for(workspace_root);
-    if graph_path.exists() {
-        fs::remove_file(&graph_path)
-            .map_err(|error| format!("failed to reset graph store: {error}"))?;
-    }
-    let mut graph_store = FileGraphStore::open(&graph_path).map_err(|error| error.to_string())?;
-    let mut extractions = Vec::with_capacity(chunks.len());
-    for chunk in chunks {
-        if should_cancel() {
-            drop(graph_store);
-            let _ = fs::remove_file(&graph_path);
+    let file_name = graph_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("graph.tsv");
+    let temporary_path =
+        graph_path.with_file_name(format!(".{file_name}.{}.tmp", unique_id("graph-index")));
+    let result = (|| {
+        let mut graph_store =
+            FileGraphStore::open(&temporary_path).map_err(|error| error.to_string())?;
+        let mut cancelled = false;
+        {
+            let extractions = chunks.iter().map_while(|chunk| {
+                if should_cancel() {
+                    cancelled = true;
+                    None
+                } else {
+                    Some(extract_graph_from_chunk(chunk))
+                }
+            });
+            graph_store
+                .upsert_all(extractions)
+                .map_err(|error| error.to_string())?;
+        }
+        if cancelled || should_cancel() {
             return Err(MODEL_REQUEST_CANCELLED.to_string());
         }
-        extractions.push(extract_graph_from_chunk(chunk));
-    }
-    if should_cancel() {
+        let counts = (graph_store.nodes().len(), graph_store.edges().len());
         drop(graph_store);
-        let _ = fs::remove_file(&graph_path);
-        return Err(MODEL_REQUEST_CANCELLED.to_string());
+        fs::rename(&temporary_path, &graph_path)
+            .map_err(|error| format!("failed to replace graph store: {error}"))?;
+        Ok(counts)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
     }
-    graph_store
-        .upsert_all(extractions)
-        .map_err(|error| error.to_string())?;
-
-    Ok((graph_store.nodes().len(), graph_store.edges().len()))
+    result
 }
 
 pub(crate) fn workspace_root() -> PathBuf {

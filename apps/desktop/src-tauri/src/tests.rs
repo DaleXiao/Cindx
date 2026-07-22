@@ -262,6 +262,45 @@ fn adaptive_quality_gate_is_bounded_and_requires_safe_passing_score() {
     gate.score = 1.0;
     gate.safety_violations = 1;
     assert!(!adaptive_quality_gate_passes(&gate));
+    gate.safety_violations = 0;
+    gate.score = 1.01;
+    assert!(!adaptive_quality_gate_passes(&gate));
+    gate.score = f32::NAN;
+    assert!(!adaptive_quality_gate_passes(&gate));
+}
+
+#[test]
+fn adaptive_quality_handoff_preserves_issues_and_fails_closed_on_safety() {
+    let unresolved = AdaptiveQualityGateResult {
+        output: "candidate guidance".to_string(),
+        score: 0.61,
+        safety_violations: 0,
+        passed: false,
+        issues: vec!["verify the generated artifact".to_string()],
+    };
+    let handoff = adaptive_quality_handoff(&unresolved).expect("safe issues should be delegated");
+    assert!(handoff.contains("INTERNAL QUALITY HANDOFF"));
+    assert!(handoff.contains("verify the generated artifact"));
+    assert!(handoff.contains("candidate guidance"));
+
+    let passed = AdaptiveQualityGateResult {
+        passed: true,
+        issues: Vec::new(),
+        score: 0.9,
+        ..unresolved
+    };
+    assert_eq!(
+        adaptive_quality_handoff(&passed).expect("passing guidance should flow through"),
+        "candidate guidance"
+    );
+
+    let unsafe_result = AdaptiveQualityGateResult {
+        safety_violations: 1,
+        ..passed
+    };
+    let error = adaptive_quality_handoff(&unsafe_result)
+        .expect_err("safety violations must stop the workflow");
+    assert!(error.starts_with(WORKFLOW_RESUMABLE_ERROR_PREFIX));
 }
 
 #[test]
@@ -370,6 +409,51 @@ fn recent_context_starts_on_a_complete_user_turn() {
         estimate_message_tokens(history.last().expect("latest message")),
     );
     assert_eq!(narrow_start, 3);
+}
+
+#[test]
+fn context_checkpoint_events_stop_at_the_covered_message_prefix() {
+    let session_id = "session-prefix";
+    let event = |sequence: u64, kind: EventKind, role: Option<&str>, content: Option<&str>| {
+        let mut metadata = [("session_id".to_string(), session_id.to_string())]
+            .into_iter()
+            .collect::<Metadata>();
+        if let Some(role) = role {
+            metadata.insert("role".to_string(), role.to_string());
+        }
+        if let Some(content) = content {
+            metadata.insert("content".to_string(), content.to_string());
+        }
+        Event {
+            id: EventId(format!("event-{sequence}")),
+            task_id: phase16_task_id(),
+            timestamp_ms: sequence,
+            sequence,
+            kind,
+            summary: format!("event {sequence}"),
+            metadata,
+        }
+    };
+    let events = vec![
+        event(1, EventKind::MessageAdded, Some("user"), Some("first")),
+        event(2, EventKind::ToolCallFinished, None, None),
+        event(
+            3,
+            EventKind::MessageAdded,
+            Some("assistant"),
+            Some("answer"),
+        ),
+        event(4, EventKind::TaskStatusChanged, None, None),
+        event(5, EventKind::MessageAdded, Some("user"), Some("retained")),
+    ];
+
+    let covered = context_events_for_covered_history_prefix(&events, 2);
+
+    assert_eq!(covered.len(), 3);
+    assert_eq!(covered.last().map(|event| event.sequence), Some(3));
+    assert!(covered
+        .iter()
+        .all(|event| event.metadata.get("content").map(String::as_str) != Some("retained")));
 }
 
 #[test]
@@ -942,6 +1026,98 @@ fn project_memory_read_model_ignores_unrelated_project_events() {
 }
 
 #[test]
+fn project_memory_feedback_keeps_project_scoped_revision() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let project_a = [
+        ("project_id".to_string(), "project-feedback-a".to_string()),
+        ("session_id".to_string(), "session-feedback-a".to_string()),
+        ("agent_run_id".to_string(), "run-feedback-a".to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    append_message_event_with_metadata(
+        &mut store,
+        &phase16_task_id(),
+        MessageRole::User,
+        "Keep memory feedback isolated by project",
+        project_a.clone(),
+    )
+    .expect("project A message should append");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task completed",
+        project_a,
+    )
+    .expect("project A run should complete");
+    let initial = load_project_memory_ledger(&mut store, "project-feedback-a")
+        .expect("project A ledger should build");
+    let memory_id = initial
+        .records
+        .iter()
+        .find(|record| record.kind == agent_memory::MemoryKind::Requirement)
+        .expect("requirement memory should exist")
+        .id
+        .clone();
+
+    let project_b = [
+        ("project_id".to_string(), "project-feedback-b".to_string()),
+        ("session_id".to_string(), "session-feedback-b".to_string()),
+        ("agent_run_id".to_string(), "run-feedback-b".to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    append_message_event_with_metadata(
+        &mut store,
+        &phase16_task_id(),
+        MessageRole::User,
+        "Unrelated project B requirement",
+        project_b,
+    )
+    .expect("project B message should append");
+
+    let use_context = [
+        ("project_id".to_string(), "project-feedback-a".to_string()),
+        ("session_id".to_string(), "session-feedback-a-2".to_string()),
+        ("agent_run_id".to_string(), "run-feedback-a-2".to_string()),
+        ("memory_ids".to_string(), memory_id.clone()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    assert_eq!(
+        record_project_memory_observed_use(
+            &mut store,
+            &phase16_task_id(),
+            &use_context,
+            "Kept memory feedback isolated by project.",
+        )
+        .expect("memory feedback should persist"),
+        1
+    );
+
+    let persisted = store
+        .load_read_model(AGENT_MEMORY_READ_MODEL_NAMESPACE, "project-feedback-a")
+        .expect("memory read model should load")
+        .expect("memory read model should exist");
+    let scoped_revision = store
+        .event_revision_by_metadata(&phase16_task_id(), "project_id", "project-feedback-a")
+        .expect("project revision should load");
+    assert_eq!(persisted.revision, scoped_revision.latest_sequence);
+    let updated = load_project_memory_ledger(&mut store, "project-feedback-a")
+        .expect("project A ledger should remain incremental");
+    assert_eq!(updated.event_count, scoped_revision.event_count);
+    assert_eq!(
+        updated
+            .records
+            .iter()
+            .find(|record| record.id == memory_id)
+            .map(|record| record.observed_use_count),
+        Some(1)
+    );
+}
+
+#[test]
 fn project_memory_projection_persists_and_searches_real_lancedb_vectors() {
     let mut store = SqliteStore::in_memory().expect("store should open");
     let context = [
@@ -1429,6 +1605,8 @@ fn prompt_evolution_evidence_counts_ignore_legacy_plan_only_modes() {
         observation("legacy-paired", PromptEvaluationMode::PairedShadow),
         observation("legacy-replay", PromptEvaluationMode::ReplayHoldout),
         observation("train", PromptEvaluationMode::PairedExecution),
+        observation("train", PromptEvaluationMode::PairedExecution),
+        observation("holdout", PromptEvaluationMode::ReplayExecution),
         observation("holdout", PromptEvaluationMode::ReplayExecution),
     ];
 
@@ -1463,12 +1641,51 @@ fn prompt_evolution_direct_evidence_does_not_reuse_a_weaker_opponent() {
         observation("weak-1", "weak-profile"),
         observation("weak-2", "weak-profile"),
         observation("stable-1", "stable-profile"),
+        observation("stable-1", "stable-profile"),
     ];
 
     assert_eq!(
         prompt_direct_profile_evidence_counts(&observations, "candidate", "stable-profile"),
         (0, 1)
     );
+}
+
+#[test]
+fn prompt_instance_pareto_seeds_are_stable_across_event_order() {
+    let genome = ConductorPromptGenome::seed_for_effort("auto");
+    let observation = |evaluation_id: &str, case_id: &str| PromptEvolutionObservation {
+        profile_id: genome.id.clone(),
+        evaluation_id: evaluation_id.to_string(),
+        case_id: case_id.to_string(),
+        opponent_profile_id: Some("challenger".to_string()),
+        task_class: "coding".to_string(),
+        split: PromptEvaluationSplit::Holdout,
+        mode: PromptEvaluationMode::ReplayExecution,
+        format_valid: true,
+        succeeded: true,
+        quality_score: 0.9,
+        latency_ms: 100,
+        total_tokens: 100,
+        estimated_cost_microusd: 0,
+        safety_violations: 0,
+        relative_reward: Some(0.2),
+        step_credits: Vec::new(),
+        reflection_packet: None,
+    };
+    let forward = vec![
+        observation("replay-a", "case-a"),
+        observation("replay-b", "case-b"),
+    ];
+    let reversed = forward.iter().rev().cloned().collect::<Vec<_>>();
+    let seeds = |observations: &[PromptEvolutionObservation]| {
+        prompt_instance_pareto_scores(std::slice::from_ref(&genome), observations)
+            .into_iter()
+            .map(|score| (score.run_id, score.seed))
+            .collect::<BTreeMap<_, _>>()
+    };
+
+    assert_eq!(seeds(&forward), seeds(&reversed));
+    assert_ne!(seeds(&forward)["replay-a"], seeds(&forward)["replay-b"]);
 }
 
 #[test]
@@ -5483,17 +5700,37 @@ fn complex_retrieval_runs_all_four_independent_channels() {
 }
 
 #[test]
-fn graph_index_cancellation_removes_partial_cache() {
+fn graph_index_cancellation_preserves_previous_cache() {
     let root = temp_test_root("phase7-graph-cancel");
     fs::create_dir_all(&root).expect("temp root should exist");
     fs::write(root.join("a.md"), "graph source").expect("fixture should write");
     let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+    index_graph_chunks(&root, &index.chunks).expect("initial graph should build");
+    let graph_path = graph_store_path_for(&root);
+    let before = fs::read(&graph_path).expect("initial graph should persist");
 
-    let error = index_graph_chunks_cancellable(&root, &index.chunks, || true)
+    fs::write(root.join("b.md"), "replacement graph source")
+        .expect("replacement fixture should write");
+    let replacement =
+        index_workspace(&root, IndexOptions::default()).expect("replacement index should build");
+
+    let error = index_graph_chunks_cancellable(&root, &replacement.chunks, || true)
         .expect_err("graph indexing should cancel");
 
     assert_eq!(error, MODEL_REQUEST_CANCELLED);
-    assert!(!graph_store_path_for(&root).exists());
+    assert_eq!(
+        fs::read(&graph_path).expect("previous graph should remain available"),
+        before
+    );
+    assert!(
+        fs::read_dir(graph_path.parent().expect("graph parent should exist"))
+            .expect("graph directory should list")
+            .all(|entry| !entry
+                .expect("graph entry should load")
+                .file_name()
+                .to_string_lossy()
+                .contains("graph-index"))
+    );
 }
 
 #[test]

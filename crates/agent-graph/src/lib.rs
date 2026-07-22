@@ -1,7 +1,7 @@
 use agent_rag::{RagChunk, RagSearchResult};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -266,9 +266,12 @@ impl FileGraphStore {
                 GraphError::new(format!("failed to create graph directory: {error}"))
             })?;
         }
-        let mut rows = Vec::new();
+        let file = fs::File::create(&self.path)
+            .map_err(|error| GraphError::new(format!("failed to save graph store: {error}")))?;
+        let mut writer = BufWriter::new(file);
         for node in self.nodes.values() {
-            rows.push(format!(
+            writeln!(
+                writer,
                 "node\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 node.id,
                 node.kind.label(),
@@ -278,10 +281,12 @@ impl FileGraphStore {
                 node.provenance.end_line,
                 encode(&node.provenance.extractor),
                 node.provenance.observed_at_ms
-            ));
+            )
+            .map_err(|error| GraphError::new(format!("failed to save graph store: {error}")))?;
         }
         for edge in self.edges.values() {
-            rows.push(format!(
+            writeln!(
+                writer,
                 "edge\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 edge.id,
                 edge.from,
@@ -292,9 +297,11 @@ impl FileGraphStore {
                 edge.provenance.end_line,
                 encode(&edge.provenance.extractor),
                 edge.provenance.observed_at_ms
-            ));
+            )
+            .map_err(|error| GraphError::new(format!("failed to save graph store: {error}")))?;
         }
-        fs::write(&self.path, rows.join("\n"))
+        writer
+            .flush()
             .map_err(|error| GraphError::new(format!("failed to save graph store: {error}")))
     }
 }

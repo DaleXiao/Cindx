@@ -23,6 +23,7 @@
       "version-contract",
       "desktop-layout",
       "desktop-structure",
+      "performance-comparator-contract",
       "routing-contract",
       "evaluation-foundation",
       "memory-contract"
@@ -35,6 +36,7 @@
       "desktop-tests"
     ],
     "performance": [
+      "performance-comparator-contract",
       "session-projection-scaling",
       "context-governor-scaling",
       "rag-search-scaling"
@@ -43,6 +45,7 @@
       "version-contract",
       "desktop-layout",
       "desktop-structure",
+      "performance-comparator-contract",
       "browser-sidecar",
       "computer-sidecar",
       "routing-contract",
@@ -68,6 +71,11 @@
       "id": "desktop-structure",
       "category": "ux_and_architecture",
       "command": ["node", "scripts/check-desktop-structure.mjs"]
+    },
+    {
+      "id": "performance-comparator-contract",
+      "category": "performance",
+      "command": ["node", "--test", "scripts/performance-comparison.test.mjs"]
     },
     {
       "id": "browser-sidecar",

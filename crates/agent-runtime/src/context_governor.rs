@@ -125,21 +125,21 @@ pub(crate) fn govern_model_messages(
     let current_user_index = state_messages.iter().rposition(is_user_turn_start);
     let mut selected_conversation_tokens = 0u64;
     if let Some(index) = current_user_index {
-        let user_budget = (available_tokens.saturating_mul(45) / 100)
+        let maximum_user_budget = available_tokens.saturating_sub(selected_system_tokens);
+        let preferred_user_budget = (available_tokens.saturating_mul(45) / 100)
             .max(256)
-            .min(available_tokens.saturating_sub(selected_system_tokens));
-        if let Some((message, truncated)) =
-            fit_message_to_budget(&state_messages[index], user_budget)
-        {
+            .min(maximum_user_budget);
+        let fitted =
+            fit_message_to_budget(&state_messages[index], preferred_user_budget).or_else(|| {
+                fit_required_user_message_to_budget(&state_messages[index], maximum_user_budget)
+            });
+        if let Some((message, truncated)) = fitted {
             selected.insert(index);
             selected_conversation_tokens = estimated_message_tokens(&message);
             if truncated {
                 replacements.insert(index, message);
                 truncated_messages += 1;
             }
-        } else {
-            selected.insert(index);
-            selected_conversation_tokens = estimated_message_tokens(&state_messages[index]);
         }
     }
 
@@ -438,7 +438,7 @@ fn select_recent_messages(messages: &[Message], budget: &mut u64, selected: &mut
 }
 
 fn fit_message_to_budget(message: &Message, budget: u64) -> Option<(Message, bool)> {
-    if budget < 16 {
+    if budget < 8 {
         return None;
     }
     let original_tokens = estimated_message_tokens(message);
@@ -471,6 +471,55 @@ fn fit_message_to_budget(message: &Message, budget: u64) -> Option<(Message, boo
         }
     }
     None
+}
+
+fn fit_required_user_message_to_budget(message: &Message, budget: u64) -> Option<(Message, bool)> {
+    if budget < 8 {
+        return None;
+    }
+
+    let mut projected = message.clone();
+    projected.metadata.remove("raw_tool_calls_json");
+    let image_paths = projected
+        .metadata
+        .get("image_paths")
+        .map(|value| {
+            value
+                .lines()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if !image_paths.is_empty() {
+        let mut retained = image_paths.len();
+        loop {
+            if retained == 0 {
+                projected.metadata.remove("image_paths");
+            } else {
+                projected.metadata.insert(
+                    "image_paths".to_string(),
+                    image_paths[..retained].join("\n"),
+                );
+            }
+            let mut empty = projected.clone();
+            empty.content.clear();
+            if estimated_message_tokens(&empty) < budget || retained == 0 {
+                break;
+            }
+            retained -= 1;
+        }
+        if retained < image_paths.len() {
+            projected.metadata.insert(
+                "context_omitted_image_count".to_string(),
+                image_paths.len().saturating_sub(retained).to_string(),
+            );
+        }
+    }
+
+    fit_message_to_budget(&projected, budget).map(|(message, _)| (message, true))
 }
 
 fn truncate_middle(value: &str, max_characters: usize) -> String {
@@ -587,14 +636,41 @@ fn digest_line(message: &Message) -> String {
 }
 
 fn compact_excerpt(value: &str, max_characters: usize) -> String {
-    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.chars().count() <= max_characters {
-        normalized
-    } else {
-        let mut output = normalized.chars().take(max_characters).collect::<String>();
-        output.push_str("...");
-        output
+    let mut output = String::new();
+    let mut output_characters = 0usize;
+    let mut pending_space = false;
+    let mut has_content = false;
+    let mut truncated = false;
+
+    for character in value.chars() {
+        if character.is_whitespace() {
+            pending_space = has_content;
+            continue;
+        }
+
+        if pending_space {
+            if output_characters >= max_characters {
+                truncated = true;
+                break;
+            }
+            output.push(' ');
+            output_characters += 1;
+            pending_space = false;
+        }
+
+        if output_characters >= max_characters {
+            truncated = true;
+            break;
+        }
+        output.push(character);
+        output_characters += 1;
+        has_content = true;
     }
+
+    if truncated {
+        output.push_str("...");
+    }
+    output
 }
 
 #[cfg(test)]
@@ -634,6 +710,23 @@ mod tests {
     fn token_estimate_is_conservative_for_cjk() {
         let chinese = "上下文压缩".repeat(200);
         assert!(estimate_text_tokens(&chinese) >= 1_000);
+    }
+
+    #[test]
+    fn compact_excerpt_preserves_normalized_excerpt_semantics() {
+        assert_eq!(
+            compact_excerpt("  alpha\n beta\tgamma  ", 64),
+            "alpha beta gamma"
+        );
+        assert_eq!(compact_excerpt("abc   ", 3), "abc");
+        assert_eq!(compact_excerpt("abc def", 4), "abc ...");
+        assert_eq!(compact_excerpt("   ", 0), "");
+        assert_eq!(compact_excerpt("content", 0), "...");
+    }
+
+    #[test]
+    fn compact_excerpt_stops_on_unicode_character_boundaries() {
+        assert_eq!(compact_excerpt("上下文 压缩之后", 5), "上下文 压...");
     }
 
     #[test]
@@ -708,6 +801,50 @@ mod tests {
         assert_eq!(
             history, original,
             "canonical runtime history must remain lossless"
+        );
+    }
+
+    #[test]
+    fn oversized_current_user_attachments_are_bounded_without_mutating_history() {
+        let mut current = message(
+            MessageRole::User,
+            "Compare every attached reference and preserve the stated constraints. ".repeat(500),
+        );
+        current.metadata.insert(
+            "image_paths".to_string(),
+            (0..10)
+                .map(|index| format!("/tmp/reference-{index}.png"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let history = vec![current];
+        let canonical = history.clone();
+
+        let (projected, report) =
+            govern_model_messages(&history, "system".to_string(), &[tool()], 8_192, 1_024);
+
+        assert!(report.applied);
+        assert!(report.hard_limit_satisfied);
+        let projected_user = projected
+            .iter()
+            .find(|message| matches!(message.role, MessageRole::User))
+            .expect("current user request should remain");
+        let retained_images = projected_user
+            .metadata
+            .get("image_paths")
+            .map(|paths| paths.lines().count())
+            .unwrap_or_default();
+        assert!(retained_images < 10);
+        assert_eq!(
+            projected_user
+                .metadata
+                .get("context_omitted_image_count")
+                .and_then(|value| value.parse::<usize>().ok()),
+            Some(10 - retained_images)
+        );
+        assert_eq!(
+            history, canonical,
+            "canonical attachment metadata must remain lossless"
         );
     }
 
