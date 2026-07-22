@@ -2,6 +2,7 @@ import {
   Activity,
   Bug,
   Check,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
   Clock3,
@@ -1287,7 +1288,7 @@ export function Inspector({
               {sessionCopyState === "failed" ? (
                 <TriangleAlert aria-hidden="true" />
               ) : (
-                <Check aria-hidden="true" />
+                <CheckCircle2 aria-hidden="true" />
               )}
               <span>
                 {sessionCopyState === "failed"
