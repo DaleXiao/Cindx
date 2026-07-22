@@ -3549,6 +3549,12 @@ textarea::placeholder {
   height: 12px;
 }
 
+.composer-permission-actions button.permission-once svg {
+  color: #ffffff !important;
+  stroke: currentColor !important;
+  stroke-width: 2.25;
+}
+
 .send-button:hover {
   background: #2563eb;
   border-color: #2563eb;
