@@ -159,11 +159,13 @@ function absoluteArtifactPath(workspaceRoot: string, path: string) {
 function sessionArtifactPaths(step: AgentTraceStepView) {
   const paths = new Set<string>();
   if (step.artifactPath) paths.add(step.artifactPath);
+  const sourcePath = step.metadata.result_source_path;
 
   Object.entries(step.metadata).forEach(([key, path]) => {
     const resultPath = key.startsWith("result_") && key.endsWith("_path");
     const fileOutput = key === "result_path" && step.toolName === "file.write";
     const contextPath = key === "context_checkpoint_path" || key === "lancedb_export_path";
+    if (key === "result_source_path" || (sourcePath && path === sourcePath)) return;
     if ((resultPath && (key !== "result_path" || fileOutput)) || contextPath) {
       if (path.trim()) paths.add(path);
     }
@@ -193,9 +195,8 @@ function traceOutputArtifacts(
   return sessionTraceSteps.flatMap((step) => {
     if (step.status === "failed") return [];
     const sourcePath =
-      step.toolName === "file.write"
-        ? step.metadata.result_source_path ?? step.metadata.result_path ?? null
-        : null;
+      step.metadata.result_source_path ??
+      (step.toolName === "file.write" ? step.metadata.result_path ?? null : null);
     return sessionArtifactPaths(step).map((path, index) =>
       resolveOutputArtifact(workspaceRoot, {
         id: `${step.id}-${index}`,

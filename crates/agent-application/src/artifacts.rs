@@ -1,6 +1,6 @@
 use agent_core::{Event, EventKind, Message, MessageRole};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 const ARTIFACT_MANIFEST_SCHEMA: &str = "cindx.artifact-manifest.v1";
@@ -40,17 +40,21 @@ pub fn project_agent_artifacts(events: &[Event]) -> Vec<AgentOutputArtifact> {
             .get("tool")
             .cloned()
             .unwrap_or_else(|| "tool".to_string());
-        let source_path = (tool_name == "file.write")
+        let has_versioned_artifact = event.metadata.contains_key("result_artifact_path");
+        let source_path = has_versioned_artifact
             .then(|| {
                 event
                     .metadata
                     .get("result_source_path")
-                    .or_else(|| event.metadata.get("result_path"))
+                    .or_else(|| {
+                        (tool_name == "file.write")
+                            .then(|| event.metadata.get("result_path"))
+                            .flatten()
+                    })
                     .cloned()
             })
             .flatten();
-        let has_versioned_artifact = event.metadata.contains_key("result_artifact_path");
-        let mut paths = BTreeSet::new();
+        let mut paths = BTreeMap::<String, Option<String>>::new();
         for (key, value) in &event.metadata {
             let result_path = key.starts_with("result_") && key.ends_with("_path");
             if !result_path || key == "result_source_path" || value.trim().is_empty() {
@@ -62,18 +66,34 @@ pub fn project_agent_artifacts(events: &[Event]) -> Vec<AgentOutputArtifact> {
             if tool_name == "file.write" && has_versioned_artifact && key == "result_path" {
                 continue;
             }
-            paths.insert(value.clone());
+            if source_path.as_deref() == Some(value.as_str()) && key != "result_artifact_path" {
+                continue;
+            }
+            let version_source = (key == "result_artifact_path")
+                .then(|| source_path.clone())
+                .flatten();
+            paths
+                .entry(value.clone())
+                .and_modify(|current| {
+                    if current.is_none() {
+                        *current = version_source.clone();
+                    }
+                })
+                .or_insert(version_source);
         }
 
-        for (index, path) in paths.into_iter().enumerate() {
-            let logical_path = source_path.as_deref().unwrap_or(path.as_str()).to_string();
+        for (index, (path, version_source)) in paths.into_iter().enumerate() {
+            let logical_path = version_source
+                .as_deref()
+                .unwrap_or(path.as_str())
+                .to_string();
             let version = versions.entry(logical_path).or_default();
             *version += 1;
             outputs.push(AgentOutputArtifact {
                 id: format!("{}-{index}", event.id.0),
                 kind: artifact_kind_from_path(&path).to_string(),
                 path,
-                source_path: source_path.clone(),
+                source_path: version_source,
                 tool_name: tool_name.clone(),
                 status: status.clone(),
                 timestamp_ms: event.timestamp_ms,
@@ -187,7 +207,10 @@ mod tests {
             ("tool".to_string(), "file.write".to_string()),
             ("status".to_string(), "succeeded".to_string()),
             ("agent_run_id".to_string(), run_id.to_string()),
-            ("result_source_path".to_string(), "/workspace/image.png".to_string()),
+            (
+                "result_source_path".to_string(),
+                "/workspace/image.png".to_string(),
+            ),
             ("result_artifact_path".to_string(), path.to_string()),
         ]
         .into_iter()
@@ -221,9 +244,32 @@ mod tests {
     }
 
     #[test]
+    fn non_file_tools_project_snapshots_by_their_logical_source() {
+        let mut first = output_event(1, "run-one", "/history/run-one/image.png");
+        first
+            .metadata
+            .insert("tool".to_string(), "image.generate".to_string());
+        let mut second = output_event(2, "run-two", "/history/run-two/image.png");
+        second
+            .metadata
+            .insert("tool".to_string(), "image.generate".to_string());
+
+        let outputs = project_agent_artifacts(&[first, second]);
+
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].version, 2);
+        assert_eq!(outputs[1].version, 1);
+        assert!(outputs
+            .iter()
+            .all(|output| { output.source_path.as_deref() == Some("/workspace/image.png") }));
+    }
+
+    #[test]
     fn failed_tool_results_do_not_become_outputs() {
         let mut event = output_event(1, "run", "/history/run/image.png");
-        event.metadata.insert("status".to_string(), "failed".to_string());
+        event
+            .metadata
+            .insert("status".to_string(), "failed".to_string());
 
         assert!(project_agent_artifacts(&[event]).is_empty());
     }
