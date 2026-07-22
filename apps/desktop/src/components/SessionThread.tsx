@@ -49,7 +49,9 @@ import type {
 } from "../tauri";
 import { readSessionState, rememberSessionState } from "../sessionRuntimeModel";
 import { DisclosureTriangle } from "./DisclosureTriangle";
+import { MermaidDiagram } from "./MermaidDiagram";
 import { TraceStatusIcon } from "./TraceStatusIcon";
+import { markdownDiagramForCode } from "./markdownDiagramModel";
 import {
   associateOutputArtifacts,
   isToolRequestPlaceholder,
@@ -649,6 +651,7 @@ type MarkdownLinkProps = ComponentPropsWithoutRef<"a"> & {
 
 type MarkdownCodeBlockProps = ComponentPropsWithoutRef<"pre"> & {
   onCopyCode?: (content: string) => void;
+  renderDiagrams?: boolean;
 };
 
 function externalLinkTarget(href: string) {
@@ -728,7 +731,12 @@ function markdownNodeText(node: ReactNode): string {
   return "";
 }
 
-function MarkdownCodeBlock({ children, onCopyCode, ...props }: MarkdownCodeBlockProps) {
+function MarkdownCodeBlock({
+  children,
+  onCopyCode,
+  renderDiagrams = true,
+  ...props
+}: MarkdownCodeBlockProps) {
   const codeElement = Children.toArray(children).find((child) =>
     isValidElement<{ className?: string }>(child)
   );
@@ -737,6 +745,7 @@ function MarkdownCodeBlock({ children, onCopyCode, ...props }: MarkdownCodeBlock
     : "";
   const language = codeClassName.match(/(?:language|lang)-([^\s]+)/)?.[1] ?? "code";
   const code = markdownNodeText(children).replace(/\n$/, "");
+  const diagram = renderDiagrams ? markdownDiagramForCode(language, code) : null;
 
   return (
     <div className="thread-code-block">
@@ -754,7 +763,7 @@ function MarkdownCodeBlock({ children, onCopyCode, ...props }: MarkdownCodeBlock
           <Copy aria-hidden="true" />
         </button>
       </header>
-      <pre {...props}>{children}</pre>
+      {diagram ? <MermaidDiagram {...diagram} /> : <pre {...props}>{children}</pre>}
     </div>
   );
 }
@@ -826,7 +835,7 @@ const MarkdownChunk = memo(function MarkdownChunk({
           },
           pre: {
             component: MarkdownCodeBlock,
-            props: { onCopyCode }
+            props: { onCopyCode, renderDiagrams: !streaming }
           }
         }
       }}

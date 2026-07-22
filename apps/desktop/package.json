@@ -1,7 +1,7 @@
 {
   "name": "cindx-desktop",
   "private": true,
-  "version": "0.1.13",
+  "version": "0.1.14",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
@@ -16,6 +16,7 @@
     "d3-force": "^3.0.0",
     "lucide-react": "^0.468.0",
     "markdown-to-jsx": "^9.8.2",
+    "mermaid": "^11.16.0",
     "playwright-core": "1.61.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"

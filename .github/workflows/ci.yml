@@ -46,6 +46,9 @@ jobs:
       - name: Stamp build version
         run: node scripts/stamp-build-version.mjs "$GITHUB_RUN_NUMBER"
 
+      - name: Test build version carry rules
+        run: node --test scripts/versioning.test.mjs
+
       - name: Test Browser Control v2
         run: node scripts/test-browser-sidecar.mjs
 

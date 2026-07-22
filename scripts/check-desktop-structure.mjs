@@ -26,6 +26,12 @@ const sessionThreadSource = read("apps/desktop/src/components/SessionThread.tsx"
 const sessionThreadProjectionSource = read(
   "apps/desktop/src/components/sessionThreadProjection.ts"
 );
+const mermaidDiagramSource = read(
+  "apps/desktop/src/components/MermaidDiagram.tsx"
+);
+const markdownDiagramModelSource = read(
+  "apps/desktop/src/components/markdownDiagramModel.ts"
+);
 const composerSource = read("apps/desktop/src/components/Composer.tsx");
 const queuedMessagesSource = read("apps/desktop/src/components/QueuedMessages.tsx");
 const scheduleViewSource = read("apps/desktop/src/components/ScheduleView.tsx");
@@ -93,6 +99,7 @@ const cargoToml = read("apps/desktop/src-tauri/Cargo.toml");
 const cargoLock = read("apps/desktop/src-tauri/Cargo.lock");
 const runTauriSource = read("scripts/run-tauri.mjs");
 const stampBuildVersionSource = read("scripts/stamp-build-version.mjs");
+const versioningSource = read("scripts/versioning.mjs");
 const releaseWorkflow = read(".github/workflows/release.yml");
 const unsignedReleaseStart = releaseWorkflow.indexOf(
   "- name: Build and publish unsigned Universal app"
@@ -214,9 +221,12 @@ assert(
 assert(
   ciWorkflow.includes("Stamp build version") &&
     ciWorkflow.includes('stamp-build-version.mjs "$GITHUB_RUN_NUMBER"') &&
-    stampBuildVersionSource.includes("Math.max(Number(match[3]) + 1, runNumber)") &&
+    ciWorkflow.includes("Test build version carry rules") &&
+    stampBuildVersionSource.includes("nextCindxVersion") &&
+    versioningSource.includes("CINDX_MAX_MINOR = 10") &&
+    versioningSource.includes("CINDX_MAX_PATCH = 100") &&
     stampBuildVersionSource.includes("apps/desktop/src-tauri/Cargo.lock"),
-  "Every CI app build must stamp one synchronized monotonic patch version"
+  "Every CI app build must stamp one synchronized monotonic version with carry rules"
 );
 assert(
   releaseVersionCheck.includes("does not match committed version"),
@@ -325,9 +335,11 @@ assert(
   "Tauri bundle must use the generated macOS app icon"
 );
 assert(
-  localBuildScript.includes("local-build-number") &&
-    localBuildScript.includes('args.has("--source-version")') &&
-    localBuildScript.includes("useSourceVersion ? sourceVersion") &&
+  !localBuildScript.includes("local-build-number") &&
+    localBuildScript.includes("nextCindxVersion(sourceVersion") &&
+    localBuildScript.includes('"--version"') &&
+    localBuildScript.includes("buildCompleted = true") &&
+    localBuildScript.includes("if (!buildCompleted) restoreVersions()") &&
     localBuildScript.includes('args.has("--ephemeral-target")') &&
     localBuildScript.includes("CARGO_TARGET_DIR: targetRoot") &&
     localBuildScript.includes('path.join(os.homedir(), ".cargo", "bin")') &&
@@ -336,9 +348,8 @@ assert(
     localBuildScript.includes('const installApp = !args.has("--no-install")') &&
     localBuildScript.includes('run("pkill", ["-x", "cindx-desktop"]') &&
     localBuildScript.includes('waitForProcessExit("cindx-desktop")') &&
-    localBuildScript.includes("restoreVersions()") &&
     packageJson.scripts?.["build:app"] === "node ../../scripts/build-local-app.mjs",
-  "Local builds must auto-version, probe, sign, install, package, and restore source versions"
+  "Local builds must persist successful versions, roll back failures, probe, sign, install, and package"
 );
 assert(
   tauriConfig.bundle.resources["../../../scripts/sidecars/browser-sidecar.js"] ===
@@ -376,12 +387,19 @@ assert(
 );
 assert(
   packageJson.dependencies["markdown-to-jsx"] &&
+    packageJson.dependencies.mermaid &&
     sessionThreadSource.includes('from "markdown-to-jsx"') &&
     sessionThreadSource.includes("disableParsingRawHTML: true") &&
     sessionThreadSource.includes("content={item.message.content}") &&
     sessionThreadSource.includes("content={streamAnswer}") &&
     sessionThreadSource.includes("streaming") &&
     sessionThreadSource.includes("function MarkdownCodeBlock") &&
+    sessionThreadSource.includes("markdownDiagramForCode") &&
+    sessionThreadSource.includes("renderDiagrams: !streaming") &&
+    mermaidDiagramSource.includes('import("mermaid")') &&
+    mermaidDiagramSource.includes('securityLevel: "strict"') &&
+    mermaidDiagramSource.includes("MAX_DIAGRAM_SOURCE_LENGTH") &&
+    markdownDiagramModelSource.includes('normalizedLanguage !== "mindmap"') &&
     sessionThreadSource.includes("component: MarkdownCodeBlock") &&
     sessionThreadSource.includes('aria-label="Copy code"') &&
     sessionThreadSource.includes('role={!isUser && !isAssistant ? "button" : undefined}') &&
@@ -391,7 +409,7 @@ assert(
     styles.includes(".thread-code-block-header") &&
     styles.includes(".clipboard-toast") &&
     styles.includes(".thread-markdown table"),
-  "Assistant messages must render safe Markdown with copyable code blocks and clipboard feedback"
+  "Assistant messages must render safe Markdown, lazy Mermaid and mind maps, copyable code, and clipboard feedback"
 );
 assert(
   sessionThreadSource.includes("useLayoutEffect") &&
@@ -1456,7 +1474,9 @@ assert(
     rustLib.includes("model_request_for_turn_with_context") &&
     agentRuntimeSource.includes("compose_base_agent_system_prompt") &&
     coreAgentPrompt.includes("Cindx core contract") &&
-    coreAgentPrompt.includes("Verify the requested result with direct evidence"),
+    coreAgentPrompt.includes("Verify the requested result with direct evidence") &&
+    coreAgentPrompt.includes("fenced `mermaid` block") &&
+    coreAgentPrompt.includes("Mermaid `mindmap` syntax"),
   "Settings must persist lower-priority Agent instructions without replacing the core contract"
 );
 assert(!styles.includes("artifact-sidebar"), "Legacy artifact sidebar styles must be removed");
