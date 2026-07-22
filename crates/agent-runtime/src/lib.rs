@@ -5,6 +5,9 @@ use agent_core::{
 use model_provider::{tool_function_name, ModelCallMode, ModelRequest, ModelResponse};
 use std::collections::BTreeMap;
 
+const DSML_TOOL_CALLS_OPEN: &str = "<｜DSML｜tool_calls>";
+const DSML_TOOL_CALLS_CLOSE: &str = "</｜DSML｜tool_calls>";
+
 mod context_governor;
 mod control;
 
@@ -165,6 +168,15 @@ pub fn sanitize_assistant_content(content: &str) -> String {
                     continue;
                 }
             }
+        }
+
+        if content[cursor..].starts_with(DSML_TOOL_CALLS_OPEN) {
+            let body_start = cursor + DSML_TOOL_CALLS_OPEN.len();
+            cursor = content[body_start..]
+                .find(DSML_TOOL_CALLS_CLOSE)
+                .map(|offset| body_start + offset + DSML_TOOL_CALLS_CLOSE.len())
+                .unwrap_or(content.len());
+            continue;
         }
 
         let character = content[cursor..]
@@ -1003,6 +1015,34 @@ mod tests {
     #[test]
     fn assistant_reasoning_sanitizer_preserves_code_examples() {
         let content = "Use `</think>` literally.\n\n```xml\n<think>example</think>\n```";
+
+        assert_eq!(sanitize_assistant_content(content), content);
+    }
+
+    #[test]
+    fn dsml_tool_protocol_is_not_exposed_as_assistant_content() {
+        let content = concat!(
+            "Checking the workspace.\n",
+            "<｜DSML｜tool_calls>",
+            "<｜DSML｜invoke name=\"shell_run\">",
+            "<｜DSML｜parameter name=\"command\" string=\"true\">pwd</｜DSML｜parameter>",
+            "</｜DSML｜invoke>",
+            "</｜DSML｜tool_calls>"
+        );
+
+        assert_eq!(
+            sanitize_assistant_content(content),
+            "Checking the workspace."
+        );
+    }
+
+    #[test]
+    fn dsml_example_inside_code_is_preserved() {
+        let content = concat!(
+            "```text\n",
+            "<｜DSML｜tool_calls><｜DSML｜invoke name=\"shell_run\"></｜DSML｜invoke></｜DSML｜tool_calls>\n",
+            "```"
+        );
 
         assert_eq!(sanitize_assistant_content(content), content);
     }

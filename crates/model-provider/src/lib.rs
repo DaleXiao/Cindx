@@ -16,6 +16,12 @@ const HTTP_POLL_INTERVAL: Duration = Duration::from_millis(40);
 const MAX_MODEL_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_IMAGE_RESPONSE_BYTES: usize = 48 * 1024 * 1024;
 const MAX_GENERATED_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+const DSML_TOOL_CALLS_OPEN: &str = "<｜DSML｜tool_calls>";
+const DSML_TOOL_CALLS_CLOSE: &str = "</｜DSML｜tool_calls>";
+const DSML_INVOKE_OPEN: &str = "<｜DSML｜invoke";
+const DSML_INVOKE_CLOSE: &str = "</｜DSML｜invoke>";
+const DSML_PARAMETER_OPEN: &str = "<｜DSML｜parameter";
+const DSML_PARAMETER_CLOSE: &str = "</｜DSML｜parameter>";
 static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 static HTTP_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
@@ -413,6 +419,67 @@ fn execute_http_cancellable(
     })
 }
 
+#[derive(Default)]
+struct DsmlStreamDeltaFilter {
+    pending: String,
+    inside_protocol: bool,
+}
+
+impl DsmlStreamDeltaFilter {
+    fn push(&mut self, delta: &str, on_delta: &mut impl FnMut(&str)) {
+        self.pending.push_str(delta);
+        loop {
+            if self.inside_protocol {
+                if let Some(end) = self.pending.find(DSML_TOOL_CALLS_CLOSE) {
+                    self.pending
+                        .drain(..end + DSML_TOOL_CALLS_CLOSE.len());
+                    self.inside_protocol = false;
+                    continue;
+                }
+                let retained = marker_prefix_suffix_len(&self.pending, DSML_TOOL_CALLS_CLOSE);
+                let discarded = self.pending.len() - retained;
+                self.pending.drain(..discarded);
+                return;
+            }
+
+            if let Some(start) = self.pending.find(DSML_TOOL_CALLS_OPEN) {
+                if start > 0 {
+                    on_delta(&self.pending[..start]);
+                }
+                self.pending
+                    .drain(..start + DSML_TOOL_CALLS_OPEN.len());
+                self.inside_protocol = true;
+                continue;
+            }
+
+            let retained = marker_prefix_suffix_len(&self.pending, DSML_TOOL_CALLS_OPEN);
+            let visible_len = self.pending.len() - retained;
+            if visible_len > 0 {
+                on_delta(&self.pending[..visible_len]);
+                self.pending.drain(..visible_len);
+            }
+            return;
+        }
+    }
+
+    fn finish(&mut self, on_delta: &mut impl FnMut(&str)) {
+        if !self.inside_protocol && !self.pending.is_empty() {
+            on_delta(&self.pending);
+        }
+        self.pending.clear();
+    }
+}
+
+fn marker_prefix_suffix_len(value: &str, marker: &str) -> usize {
+    let mut longest = 0;
+    for (index, _) in marker.char_indices().skip(1) {
+        if value.ends_with(&marker[..index]) {
+            longest = index;
+        }
+    }
+    longest
+}
+
 fn apply_stream_line(
     line: &str,
     answer: &mut String,
@@ -477,32 +544,23 @@ fn finish_streaming_response(
         answer = fallback.message.content;
         tool_calls = fallback.tool_calls;
         raw_tool_calls_json = fallback.raw_tool_calls_json;
-        for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+        for key in [
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "tool_protocol",
+        ] {
             if let Some(value) = fallback.metadata.get(key) {
                 metadata.insert(key.to_string(), value.clone());
             }
         }
     }
+    if normalize_dsml_tool_calls(&mut answer, &mut tool_calls)? {
+        metadata.insert("tool_protocol".to_string(), "dsml".to_string());
+    }
     metadata.insert("tool_calls".to_string(), tool_calls.len().to_string());
     if raw_tool_calls_json.is_none() && !tool_calls.is_empty() {
-        raw_tool_calls_json = Some(
-            serde_json::to_string(
-                &tool_calls
-                    .iter()
-                    .map(|call| {
-                        serde_json::json!({
-                            "id": call.id,
-                            "type": "function",
-                            "function": {
-                                "name": call.name,
-                                "arguments": call.arguments_json,
-                            }
-                        })
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap_or_else(|_| "[]".to_string()),
-        );
+        raw_tool_calls_json = Some(serialize_tool_calls(&tool_calls));
     }
 
     Ok(ModelResponse {
@@ -544,6 +602,8 @@ where
     let mut answer = String::new();
     let mut streamed_tool_calls = BTreeMap::<usize, StreamingToolCall>::new();
     let mut last_activity = Instant::now();
+    let mut dsml_filter = DsmlStreamDeltaFilter::default();
+    let mut filtered_on_delta = |delta: &str| dsml_filter.push(delta, on_delta);
 
     loop {
         if should_cancel() {
@@ -568,7 +628,7 @@ where
                     &mut pending,
                     &mut answer,
                     &mut streamed_tool_calls,
-                    on_delta,
+                    &mut filtered_on_delta,
                 )?;
             }
             Ok(Some(Err(error))) => {
@@ -590,8 +650,15 @@ where
 
     if !pending.is_empty() {
         let line = String::from_utf8_lossy(&pending).into_owned();
-        apply_stream_line(&line, &mut answer, &mut streamed_tool_calls, on_delta)?;
+        apply_stream_line(
+            &line,
+            &mut answer,
+            &mut streamed_tool_calls,
+            &mut filtered_on_delta,
+        )?;
     }
+    drop(filtered_on_delta);
+    dsml_filter.finish(on_delta);
     finish_streaming_response(
         String::from_utf8_lossy(&raw_response).into_owned(),
         answer,
@@ -1580,12 +1647,18 @@ pub fn parse_model_response(text: &str) -> Result<ModelResponse, ModelError> {
         return Err(ModelError::new(message));
     }
 
-    let content =
+    let mut content =
         extract_json_string_field_after(text, "\"message\"", "content").unwrap_or_default();
-    let tool_calls = parse_tool_calls(text)?;
-    let raw_tool_calls_json = extract_json_array_after(text, "\"tool_calls\"");
+    let mut tool_calls = parse_tool_calls(text)?;
+    let mut raw_tool_calls_json = extract_json_array_after(text, "\"tool_calls\"");
     let mut metadata = Metadata::new();
+    if normalize_dsml_tool_calls(&mut content, &mut tool_calls)? {
+        metadata.insert("tool_protocol".to_string(), "dsml".to_string());
+    }
     metadata.insert("tool_calls".to_string(), tool_calls.len().to_string());
+    if raw_tool_calls_json.is_none() && !tool_calls.is_empty() {
+        raw_tool_calls_json = Some(serialize_tool_calls(&tool_calls));
+    }
     for field in ["prompt_tokens", "completion_tokens", "total_tokens"] {
         if let Some(value) = extract_json_number_field(text, field) {
             metadata.insert(field.to_string(), value);
@@ -1602,6 +1675,198 @@ pub fn parse_model_response(text: &str) -> Result<ModelResponse, ModelError> {
         tool_calls,
         metadata,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DsmlToolCallBlock {
+    visible_content: String,
+    tool_calls: Vec<ModelToolCall>,
+}
+
+fn normalize_dsml_tool_calls(
+    content: &mut String,
+    tool_calls: &mut Vec<ModelToolCall>,
+) -> Result<bool, ModelError> {
+    let Some(parsed) = parse_dsml_tool_call_blocks(content)? else {
+        return Ok(false);
+    };
+    *content = parsed.visible_content;
+    if tool_calls.is_empty() {
+        *tool_calls = parsed.tool_calls;
+    }
+    Ok(true)
+}
+
+fn parse_dsml_tool_call_blocks(content: &str) -> Result<Option<DsmlToolCallBlock>, ModelError> {
+    if !content.contains(DSML_TOOL_CALLS_OPEN) {
+        return Ok(None);
+    }
+
+    let mut visible_content = String::with_capacity(content.len());
+    let mut tool_calls = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative_start) = content[cursor..].find(DSML_TOOL_CALLS_OPEN) {
+        let block_start = cursor + relative_start;
+        visible_content.push_str(&content[cursor..block_start]);
+        let body_start = block_start + DSML_TOOL_CALLS_OPEN.len();
+        let relative_end = content[body_start..]
+            .find(DSML_TOOL_CALLS_CLOSE)
+            .ok_or_else(|| ModelError::new("model returned incomplete DSML tool protocol"))?;
+        let body_end = body_start + relative_end;
+        parse_dsml_invocations(&content[body_start..body_end], &mut tool_calls)?;
+        cursor = body_end + DSML_TOOL_CALLS_CLOSE.len();
+    }
+    visible_content.push_str(&content[cursor..]);
+    if tool_calls.is_empty() {
+        return Err(ModelError::new(
+            "model returned a DSML tool block without invocations",
+        ));
+    }
+
+    Ok(Some(DsmlToolCallBlock {
+        visible_content: visible_content.trim().to_string(),
+        tool_calls,
+    }))
+}
+
+fn parse_dsml_invocations(
+    body: &str,
+    tool_calls: &mut Vec<ModelToolCall>,
+) -> Result<(), ModelError> {
+    let mut cursor = 0;
+    let mut invocation_count = 0;
+    while let Some(relative_start) = body[cursor..].find(DSML_INVOKE_OPEN) {
+        let invoke_start = cursor + relative_start;
+        if !body[cursor..invoke_start].trim().is_empty() {
+            return Err(ModelError::new(
+                "model returned unexpected text inside DSML tool protocol",
+            ));
+        }
+        let header_end = body[invoke_start..]
+            .find('>')
+            .map(|offset| invoke_start + offset)
+            .ok_or_else(|| ModelError::new("model returned incomplete DSML invoke tag"))?;
+        let header = &body[invoke_start..=header_end];
+        let name = dsml_attribute(header, "name")
+            .filter(|name| !name.trim().is_empty())
+            .ok_or_else(|| ModelError::new("DSML invoke did not include a tool name"))?;
+        let parameters_start = header_end + 1;
+        let relative_end = body[parameters_start..]
+            .find(DSML_INVOKE_CLOSE)
+            .ok_or_else(|| ModelError::new("model returned incomplete DSML invoke"))?;
+        let invoke_end = parameters_start + relative_end;
+        let arguments = parse_dsml_parameters(&body[parameters_start..invoke_end])?;
+        let call_index = tool_calls.len();
+        tool_calls.push(ModelToolCall {
+            id: format!("call-dsml-{call_index}"),
+            name: name.to_string(),
+            arguments_json: serde_json::to_string(&arguments)
+                .map_err(|error| ModelError::new(format!("invalid DSML arguments: {error}")))?,
+        });
+        invocation_count += 1;
+        cursor = invoke_end + DSML_INVOKE_CLOSE.len();
+    }
+    if invocation_count == 0 {
+        return Err(ModelError::new(
+            "model returned a DSML tool block without invocations",
+        ));
+    }
+    if !body[cursor..].trim().is_empty() {
+        return Err(ModelError::new(
+            "model returned trailing text inside DSML tool protocol",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_dsml_parameters(
+    body: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, ModelError> {
+    let mut parameters = serde_json::Map::new();
+    let mut cursor = 0;
+    while let Some(relative_start) = body[cursor..].find(DSML_PARAMETER_OPEN) {
+        let parameter_start = cursor + relative_start;
+        if !body[cursor..parameter_start].trim().is_empty() {
+            return Err(ModelError::new(
+                "model returned unexpected text inside a DSML invoke",
+            ));
+        }
+        let header_end = body[parameter_start..]
+            .find('>')
+            .map(|offset| parameter_start + offset)
+            .ok_or_else(|| ModelError::new("model returned incomplete DSML parameter tag"))?;
+        let header = &body[parameter_start..=header_end];
+        let name = dsml_attribute(header, "name")
+            .filter(|name| !name.trim().is_empty())
+            .ok_or_else(|| ModelError::new("DSML parameter did not include a name"))?;
+        if parameters.contains_key(name) {
+            return Err(ModelError::new(format!(
+                "DSML invoke repeated parameter {name}"
+            )));
+        }
+        let value_start = header_end + 1;
+        let relative_end = body[value_start..]
+            .find(DSML_PARAMETER_CLOSE)
+            .ok_or_else(|| ModelError::new("model returned incomplete DSML parameter"))?;
+        let value_end = value_start + relative_end;
+        let raw_value = body[value_start..value_end].trim();
+        let force_string = dsml_attribute(header, "string") == Some("true");
+        let value = if force_string {
+            serde_json::Value::String(raw_value.to_string())
+        } else {
+            serde_json::from_str(raw_value)
+                .unwrap_or_else(|_| serde_json::Value::String(raw_value.to_string()))
+        };
+        parameters.insert(name.to_string(), value);
+        cursor = value_end + DSML_PARAMETER_CLOSE.len();
+    }
+    if !body[cursor..].trim().is_empty() {
+        return Err(ModelError::new(
+            "model returned trailing text inside a DSML invoke",
+        ));
+    }
+    Ok(parameters)
+}
+
+fn dsml_attribute<'a>(tag: &'a str, attribute: &str) -> Option<&'a str> {
+    let needle = format!("{attribute}=");
+    let mut cursor = 0;
+    while let Some(relative_start) = tag[cursor..].find(&needle) {
+        let start = cursor + relative_start;
+        let boundary_ok = start == 0
+            || tag[..start]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace);
+        let value_start = start + needle.len();
+        let quote = tag[value_start..].chars().next()?;
+        if boundary_ok && matches!(quote, '\'' | '"') {
+            let quoted_value_start = value_start + quote.len_utf8();
+            let value_end = tag[quoted_value_start..].find(quote)? + quoted_value_start;
+            return Some(&tag[quoted_value_start..value_end]);
+        }
+        cursor = value_start;
+    }
+    None
+}
+
+fn serialize_tool_calls(tool_calls: &[ModelToolCall]) -> String {
+    serde_json::to_string(
+        &tool_calls
+            .iter()
+            .map(|call| {
+                serde_json::json!({
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": call.arguments_json,
+                    }
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".to_string())
 }
 
 pub fn parse_tool_calls(text: &str) -> Result<Vec<ModelToolCall>, ModelError> {
@@ -2581,6 +2846,118 @@ mod tests {
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].name, "file_read");
         assert!(response.raw_tool_calls_json.is_some());
+    }
+
+    #[test]
+    fn streaming_reader_normalizes_dsml_tool_calls() {
+        let dsml = concat!(
+            "<｜DSML｜tool_calls> ",
+            "<｜DSML｜invoke name=\"shell_run\"> ",
+            "<｜DSML｜parameter name=\"command\" string=\"true\">ls -la racing_game.html</｜DSML｜parameter> ",
+            "</｜DSML｜invoke> ",
+            "<｜DSML｜invoke name=\"shell_run\"> ",
+            "<｜DSML｜parameter name=\"command\" string=\"true\">find ~ -name build_game.py</｜DSML｜parameter> ",
+            "</｜DSML｜invoke> ",
+            "</｜DSML｜tool_calls>"
+        );
+        let response = finish_streaming_response(
+            String::new(),
+            dsml.to_string(),
+            BTreeMap::new(),
+            "test-model",
+            "http://example.test/v1",
+        )
+        .expect("DSML response should normalize");
+
+        assert_eq!(response.message.content, "");
+        assert_eq!(response.tool_calls.len(), 2);
+        assert_eq!(response.tool_calls[0].name, "shell_run");
+        assert_eq!(response.tool_calls[1].name, "shell_run");
+        let first_arguments: serde_json::Value =
+            serde_json::from_str(&response.tool_calls[0].arguments_json)
+                .expect("arguments should be JSON");
+        let second_arguments: serde_json::Value =
+            serde_json::from_str(&response.tool_calls[1].arguments_json)
+                .expect("arguments should be JSON");
+        assert_eq!(first_arguments["command"], "ls -la racing_game.html");
+        assert_eq!(second_arguments["command"], "find ~ -name build_game.py");
+        assert_eq!(
+            response.metadata.get("tool_protocol").map(String::as_str),
+            Some("dsml")
+        );
+        assert!(response.raw_tool_calls_json.is_some());
+    }
+
+    #[test]
+    fn streaming_delta_filter_hides_split_dsml_protocol() {
+        let mut filter = DsmlStreamDeltaFilter::default();
+        let mut visible = String::new();
+        for delta in [
+            "Before <｜DS",
+            "ML｜tool_calls><｜DSML｜invoke name=\"shell_run\">",
+            "<｜DSML｜parameter name=\"command\">pwd</｜DSML｜parameter>",
+            "</｜DSML｜invoke></｜DSML｜tool_calls> after",
+        ] {
+            filter.push(delta, &mut |value| visible.push_str(value));
+        }
+        filter.finish(&mut |value| visible.push_str(value));
+
+        assert_eq!(visible, "Before  after");
+    }
+
+    #[test]
+    fn streaming_delta_filter_drops_unclosed_dsml_protocol() {
+        let mut filter = DsmlStreamDeltaFilter::default();
+        let mut visible = String::new();
+        filter.push(
+            "Visible<｜DSML｜tool_calls><｜DSML｜invoke name=\"shell_run\">secret",
+            &mut |value| visible.push_str(value),
+        );
+        filter.finish(&mut |value| visible.push_str(value));
+
+        assert_eq!(visible, "Visible");
+    }
+
+    #[test]
+    fn non_streaming_reader_preserves_visible_text_around_dsml_calls() {
+        let content = concat!(
+            "I will inspect the workspace.\n",
+            "<｜DSML｜tool_calls>",
+            "<｜DSML｜invoke name=\"file_read\">",
+            "<｜DSML｜parameter name=\"path\" string=\"true\">README.md</｜DSML｜parameter>",
+            "</｜DSML｜invoke>",
+            "</｜DSML｜tool_calls>"
+        );
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": content
+                }
+            }]
+        })
+        .to_string();
+        let response = parse_model_response(&body).expect("DSML response should parse");
+
+        assert_eq!(response.message.content, "I will inspect the workspace.");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "file_read");
+    }
+
+    #[test]
+    fn incomplete_dsml_tool_protocol_is_rejected() {
+        let result = finish_streaming_response(
+            String::new(),
+            "<｜DSML｜tool_calls><｜DSML｜invoke name=\"shell_run\">".to_string(),
+            BTreeMap::new(),
+            "test-model",
+            "http://example.test/v1",
+        );
+
+        assert_eq!(
+            result.expect_err("incomplete DSML must fail").message,
+            "model returned incomplete DSML tool protocol"
+        );
     }
 
     #[test]

@@ -478,6 +478,39 @@ fn assistant_reasoning_control_only_message_is_sanitized_for_chat() {
 }
 
 #[test]
+fn assistant_dsml_tool_protocol_is_sanitized_for_chat_and_transcript() {
+    let event = Event {
+        id: EventId("assistant-dsml-tool-protocol".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 11,
+        timestamp_ms: 100,
+        kind: EventKind::MessageAdded,
+        summary: "assistant message".to_string(),
+        metadata: [
+            ("role".to_string(), "assistant".to_string()),
+            (
+                "content".to_string(),
+                concat!(
+                    "<｜DSML｜tool_calls>",
+                    "<｜DSML｜invoke name=\"shell_run\">",
+                    "<｜DSML｜parameter name=\"command\" string=\"true\">pwd</｜DSML｜parameter>",
+                    "</｜DSML｜invoke>",
+                    "</｜DSML｜tool_calls>"
+                )
+                .to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    let chat_message = message_view_from_event(&event).expect("message should project");
+    assert_eq!(chat_message.content, "");
+    let transcript_message = message_from_event(&event).expect("message should remain");
+    assert_eq!(transcript_message.content, "");
+}
+
+#[test]
 fn computer_screenshot_becomes_the_primary_visual_artifact() {
     let root = std::env::temp_dir().join(format!(
         "cindx-screenshot-test-{}-{}",
