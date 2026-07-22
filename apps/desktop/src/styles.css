@@ -5358,7 +5358,7 @@ details[open] > summary .settings-disclosure-chevron > svg {
 .clipboard-toast svg {
   width: 15px;
   height: 15px;
-  color: #2f9e64;
+  color: var(--accent);
   stroke-width: 2.25;
 }
 
