@@ -1,7 +1,8 @@
 import { memo, useEffect, useState } from "react";
-import type { MarkdownDiagram } from "./markdownDiagramModel";
 
-type MermaidDiagramProps = MarkdownDiagram;
+type MermaidDiagramProps = {
+  source: string;
+};
 
 type RenderState =
   | { status: "loading" }
@@ -48,7 +49,6 @@ function renderErrorMessage(error: unknown) {
 }
 
 export const MermaidDiagram = memo(function MermaidDiagram({
-  kind,
   source
 }: MermaidDiagramProps) {
   const [renderState, setRenderState] = useState<RenderState>({ status: "loading" });
@@ -74,7 +74,7 @@ export const MermaidDiagram = memo(function MermaidDiagram({
   if (renderState.status === "loading") {
     return (
       <div className="thread-diagram-loading" role="status">
-        Rendering {kind === "mindmap" ? "mind map" : "diagram"}...
+        Rendering diagram...
       </div>
     );
   }
@@ -92,7 +92,7 @@ export const MermaidDiagram = memo(function MermaidDiagram({
     <div
       className="thread-mermaid-diagram"
       role="img"
-      aria-label={kind === "mindmap" ? "Mind map" : "Mermaid diagram"}
+      aria-label="Mermaid diagram"
       dangerouslySetInnerHTML={{ __html: renderState.svg }}
     />
   );

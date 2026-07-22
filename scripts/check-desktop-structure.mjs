@@ -29,6 +29,9 @@ const sessionThreadProjectionSource = read(
 const mermaidDiagramSource = read(
   "apps/desktop/src/components/MermaidDiagram.tsx"
 );
+const markmapDiagramSource = read(
+  "apps/desktop/src/components/MarkmapDiagram.tsx"
+);
 const markdownDiagramModelSource = read(
   "apps/desktop/src/components/markdownDiagramModel.ts"
 );
@@ -388,6 +391,8 @@ assert(
 assert(
   packageJson.dependencies["markdown-to-jsx"] &&
     packageJson.dependencies.mermaid &&
+    packageJson.dependencies["markmap-lib"] &&
+    packageJson.dependencies["markmap-view"] &&
     sessionThreadSource.includes('from "markdown-to-jsx"') &&
     sessionThreadSource.includes("disableParsingRawHTML: true") &&
     sessionThreadSource.includes("content={item.message.content}") &&
@@ -399,6 +404,10 @@ assert(
     mermaidDiagramSource.includes('import("mermaid")') &&
     mermaidDiagramSource.includes('securityLevel: "strict"') &&
     mermaidDiagramSource.includes("MAX_DIAGRAM_SOURCE_LENGTH") &&
+    markmapDiagramSource.includes('import("markmap-lib")') &&
+    markmapDiagramSource.includes('import("markmap-view")') &&
+    markmapDiagramSource.includes("MAX_MINDMAP_SOURCE_LENGTH") &&
+    markmapDiagramSource.includes("transformer.md.set({ html: false })") &&
     markdownDiagramModelSource.includes('normalizedLanguage !== "mindmap"') &&
     sessionThreadSource.includes("component: MarkdownCodeBlock") &&
     sessionThreadSource.includes('aria-label="Copy code"') &&
@@ -409,7 +418,7 @@ assert(
     styles.includes(".thread-code-block-header") &&
     styles.includes(".clipboard-toast") &&
     styles.includes(".thread-markdown table"),
-  "Assistant messages must render safe Markdown, lazy Mermaid and mind maps, copyable code, and clipboard feedback"
+  "Assistant messages must render safe Markdown, lazy Mermaid and Markmap mind maps, copyable code, and clipboard feedback"
 );
 assert(
   sessionThreadSource.includes("useLayoutEffect") &&
@@ -1476,7 +1485,8 @@ assert(
     coreAgentPrompt.includes("Cindx core contract") &&
     coreAgentPrompt.includes("Verify the requested result with direct evidence") &&
     coreAgentPrompt.includes("fenced `mermaid` block") &&
-    coreAgentPrompt.includes("Mermaid `mindmap` syntax"),
+    coreAgentPrompt.includes("fenced `mindmap` block") &&
+    coreAgentPrompt.includes("renders it with Markmap"),
   "Settings must persist lower-priority Agent instructions without replacing the core contract"
 );
 assert(!styles.includes("artifact-sidebar"), "Legacy artifact sidebar styles must be removed");

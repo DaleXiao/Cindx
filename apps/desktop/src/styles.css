@@ -2421,6 +2421,44 @@ pre {
   margin: 0 auto;
 }
 
+.thread-markmap-diagram {
+  position: relative;
+  height: clamp(280px, 46vh, 460px);
+  min-height: 280px;
+  overflow: hidden;
+  color: #252525;
+  background: #ffffff;
+}
+
+.thread-markmap-diagram > svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  opacity: 1;
+  transition: opacity 160ms ease;
+}
+
+.thread-markmap-diagram[data-status="loading"] > svg {
+  opacity: 0;
+}
+
+.thread-markmap-loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  color: #888888;
+  font-size: 12px;
+  background: #ffffff;
+  place-items: center;
+}
+
+.thread-markmap-diagram > .thread-diagram-error {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  background: #ffffff;
+}
+
 .thread-diagram-loading {
   display: grid;
   min-height: 120px;
@@ -7270,6 +7308,9 @@ details[open] > summary .settings-disclosure-chevron > svg {
 }
 
 :root[data-theme="dark"] .thread-mermaid-diagram,
+:root[data-theme="dark"] .thread-markmap-diagram,
+:root[data-theme="dark"] .thread-markmap-loading,
+:root[data-theme="dark"] .thread-markmap-diagram > .thread-diagram-error,
 :root[data-theme="dark"] .thread-diagram-loading,
 :root[data-theme="dark"] .thread-diagram-error > p {
   color: var(--text);
