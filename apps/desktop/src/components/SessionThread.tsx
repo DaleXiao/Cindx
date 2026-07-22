@@ -49,6 +49,7 @@ import type {
 } from "../tauri";
 import { readSessionState, rememberSessionState } from "../sessionRuntimeModel";
 import { DisclosureTriangle } from "./DisclosureTriangle";
+import { MarkmapDiagram } from "./MarkmapDiagram";
 import { MermaidDiagram } from "./MermaidDiagram";
 import { TraceStatusIcon } from "./TraceStatusIcon";
 import { markdownDiagramForCode } from "./markdownDiagramModel";
@@ -763,7 +764,13 @@ function MarkdownCodeBlock({
           <Copy aria-hidden="true" />
         </button>
       </header>
-      {diagram ? <MermaidDiagram {...diagram} /> : <pre {...props}>{children}</pre>}
+      {diagram?.kind === "mindmap" ? (
+        <MarkmapDiagram source={diagram.source} />
+      ) : diagram ? (
+        <MermaidDiagram source={diagram.source} />
+      ) : (
+        <pre {...props}>{children}</pre>
+      )}
     </div>
   );
 }

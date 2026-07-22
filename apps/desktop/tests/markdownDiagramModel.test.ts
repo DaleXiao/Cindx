@@ -9,21 +9,28 @@ test("mermaid fences become renderable diagrams", () => {
   });
 });
 
-test("mindmap fences receive the Mermaid mindmap declaration", () => {
-  assert.deepEqual(markdownDiagramForCode("mindmap", "root((Cindx))\n  Memory"), {
+test("mindmap fences preserve Markdown hierarchy for Markmap", () => {
+  assert.deepEqual(markdownDiagramForCode("mindmap", "# Cindx\n## Memory\n- Retrieval"), {
     kind: "mindmap",
-    source: "mindmap\n  root((Cindx))\n    Memory"
+    source: "# Cindx\n## Memory\n- Retrieval"
   });
 });
 
-test("explicit mindmap declarations are not duplicated", () => {
-  assert.deepEqual(markdownDiagramForCode("mindmap", "mindmap\n  root((Cindx))"), {
-    kind: "mindmap",
-    source: "mindmap\n  root((Cindx))"
-  });
+test("legacy Mermaid mind maps are converted to Markmap Markdown", () => {
+  assert.deepEqual(
+    markdownDiagramForCode(
+      "mindmap",
+      "mindmap\n  root((Cindx))\n    Memory\n      Retrieval\n    Tools"
+    ),
+    {
+      kind: "mindmap",
+      source: "# Cindx\n- Memory\n  - Retrieval\n- Tools"
+    }
+  );
 });
 
 test("ordinary and empty code fences stay as code", () => {
   assert.equal(markdownDiagramForCode("rust", "fn main() {}"), null);
   assert.equal(markdownDiagramForCode("mermaid", "  \n"), null);
+  assert.equal(markdownDiagramForCode("mindmap", "mindmap\n  \n"), null);
 });

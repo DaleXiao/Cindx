@@ -839,7 +839,8 @@ mod tests {
         let prompt = compose_base_agent_system_prompt(None);
 
         assert!(prompt.contains("fenced `mermaid` block"));
-        assert!(prompt.contains("Mermaid `mindmap` syntax"));
+        assert!(prompt.contains("fenced `mindmap` block"));
+        assert!(prompt.contains("renders it with Markmap"));
         assert!(prompt.contains("Do not force a diagram"));
     }
 
