@@ -425,6 +425,7 @@ fn user_message_projection_preserves_attachment_metadata() {
     let mut metadata = [
         ("role".to_string(), "user".to_string()),
         ("content".to_string(), "Review this screenshot".to_string()),
+        ("queue_id".to_string(), "steer-queue-1".to_string()),
     ]
     .into_iter()
     .collect::<Metadata>();
@@ -446,6 +447,7 @@ fn user_message_projection_preserves_attachment_metadata() {
     assert_eq!(message.attachments[0].path, attachment.path);
     assert_eq!(message.attachments[0].mime_type, attachment.mime_type);
     assert_eq!(message.attachments[0].size_bytes, attachment.size_bytes);
+    assert_eq!(message.queue_id.as_deref(), Some("steer-queue-1"));
 }
 
 #[test]
@@ -7341,6 +7343,7 @@ fn session_title_context_skips_greetings_and_uses_two_meaningful_turns() {
         content: content.to_string(),
         timestamp_ms: sequence,
         run_id: None,
+        queue_id: None,
         attachments: Vec::new(),
     };
     let messages = vec![

@@ -1293,6 +1293,7 @@ pub(crate) fn message_view_from_event(event: &Event) -> Option<ChatMessageView> 
         content,
         timestamp_ms: event.timestamp_ms,
         run_id: event.metadata.get("agent_run_id").cloned(),
+        queue_id: event.metadata.get("queue_id").cloned(),
         attachments: attachment_views_from_event(event),
     })
 }

@@ -38,6 +38,11 @@ export function containsOptimisticUserMessage(
   messages: ChatMessageView[],
   optimistic: ChatMessageView
 ) {
+  if (optimistic.queueId) {
+    return messages.some(
+      (message) => message.role === "user" && message.queueId === optimistic.queueId
+    );
+  }
   return messages.some(
     (message) =>
       message.role === "user" &&
@@ -46,12 +51,16 @@ export function containsOptimisticUserMessage(
   );
 }
 
-export function messagesWithOptimisticUserMessage(
+export function messagesWithOptimisticUserMessages(
   messages: ChatMessageView[],
-  optimistic: ChatMessageView | undefined
+  optimistic: ChatMessageView[] | undefined
 ) {
-  if (!optimistic || containsOptimisticUserMessage(messages, optimistic)) return messages;
-  return [...messages, optimistic].sort(
+  if (!optimistic || optimistic.length === 0) return messages;
+  const pending = optimistic.filter(
+    (message) => !containsOptimisticUserMessage(messages, message)
+  );
+  if (pending.length === 0) return messages;
+  return [...messages, ...pending].sort(
     (left, right) => left.timestampMs - right.timestampMs
   );
 }
