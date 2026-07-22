@@ -2404,6 +2404,45 @@ pre {
   border-radius: 0;
 }
 
+.thread-mermaid-diagram {
+  min-height: 120px;
+  padding: 14px;
+  overflow: auto;
+  color: #252525;
+  background: #ffffff;
+}
+
+.thread-mermaid-diagram svg {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: 640px;
+  margin: 0 auto;
+}
+
+.thread-diagram-loading {
+  display: grid;
+  min-height: 120px;
+  padding: 14px;
+  color: #888888;
+  font-size: 12px;
+  background: #ffffff;
+  place-items: center;
+}
+
+.thread-diagram-error > p {
+  margin: 0;
+  padding: 10px 14px;
+  color: #666666;
+  font-size: 12px;
+  background: #ffffff;
+}
+
+.thread-diagram-error pre {
+  border-top: 0.5px solid #dedede;
+}
+
 .thread-markdown table {
   display: block;
   width: 100%;
@@ -7220,6 +7259,17 @@ details[open] > summary .settings-disclosure-chevron > svg {
   color: var(--text);
   background: #222222;
   border-color: var(--border);
+}
+
+:root[data-theme="dark"] .thread-mermaid-diagram,
+:root[data-theme="dark"] .thread-diagram-loading,
+:root[data-theme="dark"] .thread-diagram-error > p {
+  color: var(--text);
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .thread-diagram-error pre {
+  border-top-color: var(--border);
 }
 
 :root[data-theme="dark"] .queued-message-stack,

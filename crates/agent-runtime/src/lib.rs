@@ -835,6 +835,15 @@ mod tests {
     }
 
     #[test]
+    fn core_prompt_exposes_session_diagram_capabilities() {
+        let prompt = compose_base_agent_system_prompt(None);
+
+        assert!(prompt.contains("fenced `mermaid` block"));
+        assert!(prompt.contains("Mermaid `mindmap` syntax"));
+        assert!(prompt.contains("Do not force a diagram"));
+    }
+
+    #[test]
     fn trusted_runtime_context_is_separate_from_custom_instructions() {
         let prompt = compose_agent_system_prompt(
             Some("Answer in Chinese."),

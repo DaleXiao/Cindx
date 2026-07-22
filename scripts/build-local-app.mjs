@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { nextCindxVersion } from "./versioning.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const desktopRoot = path.join(repoRoot, "apps", "desktop");
@@ -12,7 +13,9 @@ const args = new Set(process.argv.slice(2));
 const skipTests = args.has("--skip-tests");
 const installApp = !args.has("--no-install");
 const ephemeralTarget = args.has("--ephemeral-target");
-const useSourceVersion = args.has("--source-version");
+if (args.has("--source-version")) {
+  throw new Error("--source-version is no longer supported; every local build advances the source version");
+}
 const targetRoot = ephemeralTarget
   ? fs.mkdtempSync(path.join(os.tmpdir(), "cindx-build-target-"))
   : path.join(tauriRoot, "target");
@@ -46,6 +49,7 @@ const buildEnv = {
     .join(path.delimiter)
 };
 let versionsRestored = false;
+let buildCompleted = false;
 
 function restoreVersions() {
   if (versionsRestored) return;
@@ -65,33 +69,6 @@ function run(command, commandArgs, options = {}) {
     throw new Error(`${command} exited with status ${result.status ?? 1}`);
   }
   return result;
-}
-
-function patchVersion(version) {
-  const match = /^0\.0\.(\d+)$/.exec(version.trim());
-  return match ? Number(match[1]) : 0;
-}
-
-function installedBuildNumber() {
-  const plist = "/Applications/Cindx.app/Contents/Info.plist";
-  if (!fs.existsSync(plist)) return 0;
-  const result = run(
-    "plutil",
-    ["-extract", "CFBundleShortVersionString", "raw", plist],
-    { encoding: "utf8", allowFailure: true }
-  );
-  return result.status === 0 ? patchVersion(result.stdout ?? "") : 0;
-}
-
-function nextBuildNumber() {
-  const sourceVersion = JSON.parse(originals.get(path.join(tauriRoot, "tauri.conf.json"))).version;
-  const counterPath = path.join(repoRoot, ".cindx", "local-build-number");
-  const localCounter = fs.existsSync(counterPath)
-    ? Number(fs.readFileSync(counterPath, "utf8").trim()) || 0
-    : 0;
-  const baseline = Math.max(patchVersion(sourceVersion), installedBuildNumber(), localCounter);
-  const requested = Number(process.env.CINDX_BUILD_NUMBER);
-  return Number.isSafeInteger(requested) && requested > baseline ? requested : baseline + 1;
 }
 
 function processIsRunning(name) {
@@ -123,17 +100,16 @@ function install(outputApp) {
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => {
-    restoreVersions();
+    if (!buildCompleted) restoreVersions();
     process.exit(signal === "SIGINT" ? 130 : 143);
   });
 }
 
-const buildNumber = nextBuildNumber();
 const sourceVersion = JSON.parse(
   originals.get(path.join(tauriRoot, "tauri.conf.json"))
 ).version;
-const version = useSourceVersion ? sourceVersion : `0.0.${buildNumber}`;
-const counterPath = path.join(repoRoot, ".cindx", "local-build-number");
+const requestedBuildOrdinal = process.env.CINDX_BUILD_NUMBER || undefined;
+const version = nextCindxVersion(sourceVersion, requestedBuildOrdinal);
 const builtApp = path.join(
   targetRoot,
   targetTriple,
@@ -147,9 +123,12 @@ const outputApp = path.join(outputRoot, "Cindx.app");
 const outputArchive = path.join(outputRoot, `Cindx-${version}-macOS-arm64.zip`);
 
 try {
-  if (!useSourceVersion) {
-    run(process.execPath, [path.join(repoRoot, "scripts", "stamp-build-version.mjs"), String(buildNumber)]);
-  }
+  run(process.execPath, [
+    path.join(repoRoot, "scripts", "stamp-build-version.mjs"),
+    "--version",
+    version
+  ]);
+  run(process.execPath, ["--test", path.join(repoRoot, "scripts", "versioning.test.mjs")]);
   run(process.execPath, [path.join(repoRoot, "scripts", "check-desktop-structure.mjs")]);
   run(process.execPath, [path.join(repoRoot, "scripts", "check-desktop-layout.mjs")]);
   run("rustup", ["target", "add", targetTriple]);
@@ -209,11 +188,10 @@ try {
     outputArchive
   ]);
   run("shasum", ["-a", "256", outputArchive]);
-  fs.mkdirSync(path.dirname(counterPath), { recursive: true });
-  fs.writeFileSync(counterPath, `${buildNumber}\n`);
+  buildCompleted = true;
   if (installApp) install(outputApp);
   process.stdout.write(`Local Cindx build ${version}\n${outputApp}\n${outputArchive}\n`);
 } finally {
-  restoreVersions();
+  if (!buildCompleted) restoreVersions();
   if (ephemeralTarget) fs.rmSync(targetRoot, { recursive: true, force: true });
 }

@@ -1,12 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { cindxVersionOrdinal, nextCindxVersion, parseCindxVersion } from "./versioning.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const runNumber = Number(process.argv[2] || process.env.GITHUB_RUN_NUMBER);
-if (!Number.isSafeInteger(runNumber) || runNumber < 1) {
-  throw new Error("A positive GitHub run number is required");
-}
 
 const paths = {
   packageJson: path.join(root, "apps/desktop/package.json"),
@@ -36,10 +33,22 @@ const versions = [
 if (versions.some((version) => version !== current)) {
   throw new Error(`Cindx version files are out of sync: ${[current, ...versions].join(", ")}`);
 }
-const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(current);
-if (!match) throw new Error(`Unsupported Cindx version: ${current}`);
-
-const next = `${match[1]}.${match[2]}.${Math.max(Number(match[3]) + 1, runNumber)}`;
+parseCindxVersion(current);
+const explicitVersionIndex = process.argv.indexOf("--version");
+const explicitVersion =
+  explicitVersionIndex >= 0 ? process.argv[explicitVersionIndex + 1] : undefined;
+const requestedOrdinal = process.argv[2]?.startsWith("--")
+  ? process.env.GITHUB_RUN_NUMBER
+  : process.argv[2] || process.env.GITHUB_RUN_NUMBER;
+const next = explicitVersion
+  ? (() => {
+      parseCindxVersion(explicitVersion);
+      if (cindxVersionOrdinal(explicitVersion) <= cindxVersionOrdinal(current)) {
+        throw new Error(`Cindx build version must advance beyond ${current}: ${explicitVersion}`);
+      }
+      return explicitVersion;
+    })()
+  : nextCindxVersion(current, requestedOrdinal);
 packageJson.version = next;
 packageLock.version = next;
 packageLock.packages[""].version = next;
@@ -63,4 +72,4 @@ fs.writeFileSync(
   )
 );
 
-process.stdout.write(`Stamped Cindx CI version ${next}\n`);
+process.stdout.write(`Stamped Cindx version ${next}\n`);
