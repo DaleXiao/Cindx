@@ -166,9 +166,32 @@ pub(crate) fn synthesize_agent_answer(
         emit_agent_stream_delta(app, &stream_request_id, session_id, "", true, true, None);
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
-    let answer = answer?;
+    let answer = match answer {
+        Ok(answer) => answer,
+        Err(error) => {
+            emit_agent_stream_delta(
+                app,
+                &stream_request_id,
+                session_id,
+                "",
+                false,
+                true,
+                None,
+            );
+            return Err(error);
+        }
+    };
     let answer = answer.trim().to_string();
     if answer.is_empty() {
+        emit_agent_stream_delta(
+            app,
+            &stream_request_id,
+            session_id,
+            "",
+            false,
+            true,
+            None,
+        );
         Err("synthesizer returned an empty answer".to_string())
     } else {
         Ok(answer)
@@ -301,12 +324,27 @@ pub(crate) fn complete_collaboration_model_with_control(
                     first_delta_at_ms.saturating_sub(started_at_ms).to_string(),
                 );
             }
+            let content = match no_tool_collaboration_content(response, &role_name) {
+                Ok(content) => content,
+                Err(error) => {
+                    if let Some(control) = cancellation.as_ref() {
+                        control.record_checkpoint("model_protocol_error", &role_name, &error);
+                    }
+                    return CollaborationCompletion {
+                        content: None,
+                        error: Some(error),
+                        latency_ms,
+                        usage,
+                        evidence: Vec::new(),
+                    };
+                }
+            };
             if let Some(control) = cancellation.as_ref() {
-                control.record_partial_output(&response.message.content);
-                control.record_checkpoint("model_result", &role_name, &response.message.content);
+                control.record_partial_output(&content);
+                control.record_checkpoint("model_result", &role_name, &content);
             }
             CollaborationCompletion {
-                content: Some(response.message.content),
+                content: Some(content),
                 error: None,
                 latency_ms,
                 usage,
@@ -321,6 +359,19 @@ pub(crate) fn complete_collaboration_model_with_control(
             evidence: Vec::new(),
         },
     }
+}
+
+fn no_tool_collaboration_content(
+    response: model_provider::ModelResponse,
+    role_name: &str,
+) -> Result<String, String> {
+    if !response.tool_calls.is_empty() {
+        return Err(format!(
+            "collaboration {role_name} attempted {} tool call(s) in a no-tool stage",
+            response.tool_calls.len()
+        ));
+    }
+    Ok(response.message.content)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -905,4 +956,37 @@ pub(crate) fn run_collaboration_stage_with_delta(
             .error
             .unwrap_or_else(|| "collaboration model returned no content".to_string())
     })
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+
+    fn response_with_tool_call() -> model_provider::ModelResponse {
+        model_provider::ModelResponse {
+            message: agent_core::Message {
+                role: agent_core::MessageRole::Assistant,
+                content: String::new(),
+                metadata: agent_core::Metadata::new(),
+            },
+            raw_tool_calls_json: None,
+            tool_calls: vec![model_provider::ModelToolCall {
+                id: "call-dsml-0".to_string(),
+                name: "shell_run".to_string(),
+                arguments_json: r#"{"command":"pwd"}"#.to_string(),
+            }],
+            metadata: agent_core::Metadata::new(),
+        }
+    }
+
+    #[test]
+    fn no_tool_collaboration_stage_rejects_tool_calls() {
+        let error = no_tool_collaboration_content(response_with_tool_call(), "synthesizer")
+            .expect_err("tool calls must not be accepted as final content");
+
+        assert_eq!(
+            error,
+            "collaboration synthesizer attempted 1 tool call(s) in a no-tool stage"
+        );
+    }
 }
