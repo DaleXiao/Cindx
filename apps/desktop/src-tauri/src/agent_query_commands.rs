@@ -12,7 +12,7 @@ pub(crate) async fn get_agent_state(
             return Ok(empty_agent_state_for_session(""));
         };
         let store = open_app_read_store()?;
-        store
+        let agent = store
             .with_read_snapshot(|snapshot| {
                 let model = load_agent_session_read_model_snapshot(snapshot, &session_id)?;
                 let history = snapshot.list_by_task_and_metadata_before_with_tool_metadata_limit(
@@ -25,7 +25,17 @@ pub(crate) async fn get_agent_state(
                 )?;
                 agent_state_from_read_model(snapshot, &model, &session_id, &run_context, history)
             })
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        match persist_completed_conversation_title(&state, &session_id, &agent.messages) {
+            Ok(Some(refinement)) => {
+                spawn_semantic_session_title_refinement(app.clone(), refinement);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("failed to prepare session title repair for {session_id}: {error}")
+            }
+        }
+        Ok(agent)
     })
     .await
     .map_err(|error| format!("agent state load failed to join: {error}"))?

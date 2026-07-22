@@ -14,6 +14,7 @@ pub(crate) struct AppState {
     pub(crate) agent_run_controls: Mutex<BTreeMap<String, Arc<AgentRunControl>>>,
     pub(crate) prompt_evaluation_controls: Mutex<BTreeMap<String, Arc<AgentRunControl>>>,
     pub(crate) queue_dispatching_sessions: Mutex<BTreeSet<String>>,
+    pub(crate) session_title_refinement_sessions: Mutex<BTreeSet<String>>,
     pub(crate) workspace_knowledge_cache: Mutex<BTreeMap<String, WorkspaceKnowledgeCacheEntry>>,
     pub(crate) tool_registry_cache: Mutex<ToolRegistryCache>,
     pub(crate) tool_registry_generation: AtomicU64,
