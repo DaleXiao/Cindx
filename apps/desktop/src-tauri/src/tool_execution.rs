@@ -370,11 +370,15 @@ pub(crate) fn materialize_tool_result_artifacts(
             workspace_root.join(path)
         };
         let path = path.display().to_string();
-        if result
-            .artifacts
-            .iter()
-            .any(|artifact| artifact.path == path)
-        {
+        if result.artifacts.iter().any(|artifact| {
+            let artifact_path = Path::new(&artifact.path);
+            let artifact_path = if artifact_path.is_absolute() {
+                artifact_path.to_path_buf()
+            } else {
+                workspace_root.join(artifact_path)
+            };
+            artifact_path == Path::new(&path)
+        }) {
             continue;
         }
         let mime_type = match Path::new(&path)
@@ -446,7 +450,7 @@ pub(crate) fn materialize_tool_result_artifacts(
             "artifact_count".to_string(),
             result.artifacts.len().to_string(),
         );
-        let primary_artifact = result
+        let primary_artifact_path = result
             .artifacts
             .iter()
             .find(|artifact| {
@@ -455,11 +459,72 @@ pub(crate) fn materialize_tool_result_artifacts(
                     .as_deref()
                     .is_some_and(|mime_type| mime_type.starts_with("image/"))
             })
-            .unwrap_or(&result.artifacts[0]);
+            .unwrap_or(&result.artifacts[0])
+            .path
+            .clone();
         result
             .metadata
-            .insert("artifact_path".to_string(), primary_artifact.path.clone());
+            .insert("artifact_path".to_string(), primary_artifact_path.clone());
+        preserve_primary_tool_artifact_version(
+            result,
+            workspace_root,
+            &artifact_stem,
+            &primary_artifact_path,
+        )?;
     }
+    Ok(())
+}
+
+fn preserve_primary_tool_artifact_version(
+    result: &mut ToolResult,
+    workspace_root: &Path,
+    artifact_stem: &str,
+    primary_artifact_path: &str,
+) -> Result<(), String> {
+    if !matches!(result.status, ToolOutcomeStatus::Succeeded) {
+        return Ok(());
+    }
+    let canonical_root = fs::canonicalize(workspace_root)
+        .map_err(|error| format!("failed to resolve tool artifact workspace: {error}"))?;
+    let source = Path::new(primary_artifact_path);
+    let source = if source.is_absolute() {
+        source.to_path_buf()
+    } else {
+        workspace_root.join(source)
+    };
+    let Ok(source) = fs::canonicalize(source) else {
+        return Ok(());
+    };
+    if !source.is_file() || !source.starts_with(&canonical_root) {
+        return Ok(());
+    }
+    let relative_source = source
+        .strip_prefix(&canonical_root)
+        .map_err(|error| format!("failed to resolve tool artifact path: {error}"))?;
+    let output_history_root = Path::new(".cindx").join("output-history");
+    if relative_source.starts_with(&output_history_root) {
+        return Ok(());
+    }
+
+    let snapshot_relative = output_history_root
+        .join("tool-results")
+        .join(artifact_stem)
+        .join(relative_source);
+    let snapshot = workspace_root.join(&snapshot_relative);
+    if let Some(parent) = snapshot.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create output history directory: {error}"))?;
+    }
+    fs::copy(&source, &snapshot)
+        .map_err(|error| format!("failed to preserve tool output version: {error}"))?;
+    result.metadata.insert(
+        "source_path".to_string(),
+        relative_source.display().to_string(),
+    );
+    result.metadata.insert(
+        "artifact_path".to_string(),
+        snapshot_relative.display().to_string(),
+    );
     Ok(())
 }
 

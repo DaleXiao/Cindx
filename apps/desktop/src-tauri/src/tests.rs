@@ -517,6 +517,59 @@ fn computer_screenshot_becomes_the_primary_visual_artifact() {
 }
 
 #[test]
+fn repeated_image_outputs_keep_distinct_immutable_versions() {
+    let root = std::env::temp_dir().join(format!(
+        "cindx-versioned-image-test-{}-{}",
+        std::process::id(),
+        current_time_millis()
+    ));
+    let relative_path = "generated-images/cat.png";
+    let source = root.join(relative_path);
+    fs::create_dir_all(source.parent().expect("image parent should exist"))
+        .expect("image directory should be created");
+
+    let materialize = |call_id: &str, bytes: &[u8]| {
+        fs::write(&source, bytes).expect("image version should write");
+        let mut result = ToolResult::text(
+            agent_core::ToolCallId(call_id.to_string()),
+            ToolOutcomeStatus::Succeeded,
+            "generated",
+            [("artifact_path".to_string(), relative_path.to_string())]
+                .into_iter()
+                .collect(),
+        );
+        result.artifacts.push(ToolArtifact {
+            path: relative_path.to_string(),
+            mime_type: Some("image/png".to_string()),
+            title: Some("Generated image".to_string()),
+        });
+        materialize_tool_result_artifacts(&mut result, &root)
+            .expect("image artifact should materialize");
+        result
+    };
+
+    let first = materialize("image-call-one", b"version-one");
+    let first_snapshot = first.metadata["artifact_path"].clone();
+    let second = materialize("image-call-two", b"version-two");
+    let second_snapshot = second.metadata["artifact_path"].clone();
+
+    assert_eq!(first.metadata["source_path"], relative_path);
+    assert_eq!(second.metadata["source_path"], relative_path);
+    assert_ne!(first_snapshot, second_snapshot);
+    assert_eq!(
+        fs::read(root.join(&first_snapshot)).expect("first snapshot should remain readable"),
+        b"version-one"
+    );
+    assert_eq!(
+        fs::read(root.join(&second_snapshot)).expect("second snapshot should remain readable"),
+        b"version-two"
+    );
+    assert_eq!(first.artifacts.len(), 1);
+    assert_eq!(second.artifacts.len(), 1);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn oversized_structured_tool_output_is_materialized_without_inline_duplication() {
     let root = std::env::temp_dir().join(format!(
         "cindx-structured-output-test-{}-{}",
