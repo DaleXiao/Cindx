@@ -376,6 +376,7 @@ export type ChatMessageView = {
   content: string;
   timestampMs: number;
   runId?: string | null;
+  queueId?: string | null;
   attachments?: AgentAttachment[];
 };
 

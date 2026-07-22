@@ -408,6 +408,7 @@ pub(crate) struct ChatMessageView {
     pub(crate) content: String,
     pub(crate) timestamp_ms: u64,
     pub(crate) run_id: Option<String>,
+    pub(crate) queue_id: Option<String>,
     pub(crate) attachments: Vec<AgentAttachmentView>,
 }
 

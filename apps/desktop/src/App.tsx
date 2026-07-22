@@ -173,7 +173,7 @@ import {
   mergeAgentStateSnapshot,
   mergeQueuedAgentMessage,
   mergeSequencedItems,
-  messagesWithOptimisticUserMessage,
+  messagesWithOptimisticUserMessages,
   readSessionState,
   rememberSessionState
 } from "./sessionRuntimeModel";
@@ -582,7 +582,7 @@ export function App() {
   } | null>(null);
   const sessionRefreshRequestRef = useRef(0);
   const sessionLifecycleRefreshRef = useRef(0);
-  const optimisticUserMessagesRef = useRef<Map<string, ChatMessageView>>(new Map());
+  const optimisticUserMessagesRef = useRef<Map<string, ChatMessageView[]>>(new Map());
   const [optimisticUserMessageRevision, setOptimisticUserMessageRevision] = useState(0);
   const optimisticQueuedMessagesRef = useRef<Map<string, QueuedAgentMessage>>(new Map());
   const optimisticallyDeletedQueuedMessagesRef = useRef<Map<string, string>>(new Map());
@@ -1403,7 +1403,7 @@ export function App() {
   const visibleAgentMessages = useMemo(
     () =>
       activeView === "timeline"
-        ? messagesWithOptimisticUserMessage(
+        ? messagesWithOptimisticUserMessages(
             activeAgentState?.messages ?? [],
             activeSession
               ? optimisticUserMessagesRef.current.get(activeSession.id)
@@ -1496,10 +1496,36 @@ export function App() {
     messages: ChatMessageView[]
   ) {
     const optimistic = optimisticUserMessagesRef.current.get(sessionId);
-    if (optimistic && containsOptimisticUserMessage(messages, optimistic)) {
+    if (!optimistic) return;
+    const pending = optimistic.filter(
+      (message) => !containsOptimisticUserMessage(messages, message)
+    );
+    if (pending.length === optimistic.length) return;
+    if (pending.length > 0) {
+      optimisticUserMessagesRef.current.set(sessionId, pending);
+    } else {
       optimisticUserMessagesRef.current.delete(sessionId);
-      setOptimisticUserMessageRevision((revision) => revision + 1);
     }
+    setOptimisticUserMessageRevision((revision) => revision + 1);
+  }
+
+  function addOptimisticUserMessage(sessionId: string, message: ChatMessageView) {
+    const current = optimisticUserMessagesRef.current.get(sessionId) ?? [];
+    optimisticUserMessagesRef.current.set(sessionId, [...current, message]);
+    setOptimisticUserMessageRevision((revision) => revision + 1);
+  }
+
+  function removeOptimisticUserMessage(sessionId: string, target: ChatMessageView) {
+    const current = optimisticUserMessagesRef.current.get(sessionId);
+    if (!current) return;
+    const next = current.filter((message) => message !== target);
+    if (next.length === current.length) return;
+    if (next.length > 0) {
+      optimisticUserMessagesRef.current.set(sessionId, next);
+    } else {
+      optimisticUserMessagesRef.current.delete(sessionId);
+    }
+    setOptimisticUserMessageRevision((revision) => revision + 1);
   }
 
   async function refreshAgentTrace(
@@ -2665,6 +2691,14 @@ export function App() {
     if (!sessionId) return;
     const previous = queuedMessageForSession(sessionId, queueId);
     if (!previous) return;
+    const optimisticSteerMessage: ChatMessageView = {
+      role: "user",
+      content: previous.prompt,
+      timestampMs: Date.now(),
+      queueId,
+      attachments: previous.attachments
+    };
+    addOptimisticUserMessage(sessionId, optimisticSteerMessage);
     optimisticallyDeletedQueuedMessagesRef.current.set(queueId, sessionId);
     steeredQueuedMessageIdsRef.current.add(queueId);
     updateQueuedMessagesForSession(sessionId, (messages) =>
@@ -2679,6 +2713,7 @@ export function App() {
       applyQueuedMessageActionReceiptForSession(sessionId, { ...receipt, message: null });
       if (!runCommandActive) void drainQueuedMessages(sessionId);
     } catch (error) {
+      removeOptimisticUserMessage(sessionId, optimisticSteerMessage);
       steeredQueuedMessageIdsRef.current.delete(queueId);
       optimisticallyDeletedQueuedMessagesRef.current.delete(queueId);
       updateQueuedMessagesForSession(sessionId, (messages) =>
@@ -2784,8 +2819,7 @@ export function App() {
       timestampMs: submittedAt,
       attachments
     };
-    optimisticUserMessagesRef.current.set(sessionId, optimisticUserMessage);
-    setOptimisticUserMessageRevision((revision) => revision + 1);
+    addOptimisticUserMessage(sessionId, optimisticUserMessage);
     const runBudget = runBudgetForEffort(agentEffort);
     setAgentState((current) => {
       if (!current) return current;

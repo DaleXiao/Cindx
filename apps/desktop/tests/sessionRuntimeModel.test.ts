@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   latestTraceStep,
+  messagesWithOptimisticUserMessages,
   mergeAgentStateSnapshot,
   mergeQueuedAgentMessage,
   mergeSequencedItems,
@@ -84,4 +85,40 @@ test("latest trace step skips empty turns without flattening the trace", () => {
     { steps: [] }
   ] as any);
   assert.equal(latest?.id, "last");
+});
+
+test("optimistic steers render immediately and reconcile by queue id", () => {
+  const optimistic = {
+    role: "user",
+    content: "Use the existing output",
+    timestampMs: 10,
+    queueId: "steer-a"
+  } as any;
+
+  assert.deepEqual(
+    messagesWithOptimisticUserMessages([], [optimistic]),
+    [optimistic]
+  );
+
+  const persisted = { ...optimistic, sequence: 7, timestampMs: 20 };
+  assert.deepEqual(
+    messagesWithOptimisticUserMessages([persisted], [optimistic]),
+    [persisted]
+  );
+});
+
+test("equal steer prompts reconcile independently", () => {
+  const first = {
+    role: "user",
+    content: "Continue",
+    timestampMs: 10,
+    queueId: "steer-a"
+  } as any;
+  const second = { ...first, timestampMs: 11, queueId: "steer-b" };
+  const persistedFirst = { ...first, sequence: 7, timestampMs: 20 };
+
+  assert.deepEqual(
+    messagesWithOptimisticUserMessages([persistedFirst], [first, second]),
+    [second, persistedFirst]
+  );
 });
