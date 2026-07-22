@@ -30,6 +30,7 @@ pub(crate) fn prompt_live_observations<'a>(
     effort: &str,
     profile_id: &str,
 ) -> Vec<&'a PromptEvolutionObservation> {
+    let mut seen = BTreeSet::new();
     model
         .observations
         .iter()
@@ -39,6 +40,7 @@ pub(crate) fn prompt_live_observations<'a>(
                 && observation.mode == PromptEvaluationMode::Live
         })
         .map(|(_, observation)| observation)
+        .filter(|observation| seen.insert(observation.evidence_identity()))
         .collect()
 }
 
@@ -48,6 +50,7 @@ pub(crate) fn prompt_direct_promotion_evidence<'a>(
     candidate_id: &str,
     stable_id: &str,
 ) -> Vec<&'a PromptEvolutionObservation> {
+    let mut seen = BTreeSet::new();
     model
         .observations
         .iter()
@@ -58,6 +61,7 @@ pub(crate) fn prompt_direct_promotion_evidence<'a>(
                 && observation.mode.is_execution()
         })
         .map(|(_, observation)| observation)
+        .filter(|observation| seen.insert(observation.evidence_identity()))
         .collect()
 }
 
@@ -298,12 +302,14 @@ pub(crate) fn prompt_instance_pareto_scores(
         .collect::<BTreeMap<_, _>>();
     observations
         .iter()
-        .enumerate()
-        .filter(|(_, observation)| observation.mode == PromptEvaluationMode::ReplayExecution)
-        .filter(|(_, observation)| !observation.case_id.trim().is_empty())
-        .filter_map(|(index, observation)| {
+        .filter(|observation| observation.mode == PromptEvaluationMode::ReplayExecution)
+        .filter(|observation| !observation.case_id.trim().is_empty())
+        .filter_map(|observation| {
             let fingerprint = fingerprints.get(observation.profile_id.as_str())?;
             let safe = observation.format_valid && observation.safety_violations == 0;
+            let identity = observation.evidence_identity();
+            let digest = sha256_hex(identity.as_bytes());
+            let seed = u64::from_str_radix(&digest[..16], 16).unwrap_or_default();
             Some(AgentEvaluationCaseScore {
                 suite_id: "runtime-prompt-evolution".to_string(),
                 suite_version: 2,
@@ -311,7 +317,7 @@ pub(crate) fn prompt_instance_pareto_scores(
                 category: observation.task_class.clone(),
                 split: AgentEvaluationSplit::Pareto,
                 run_id: observation.evaluation_id.clone(),
-                seed: index as u64,
+                seed,
                 candidate_id: observation.profile_id.clone(),
                 candidate_fingerprint: fingerprint.clone(),
                 evidence_source: AgentEvaluationEvidenceSource::Judge,
@@ -430,18 +436,15 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
             .iter()
             .map(|candidate| candidate.profile_id.clone()),
     );
-    let split_counts = observations.iter().fold(
-        BTreeMap::<String, (usize, usize)>::new(),
-        |mut counts, observation| {
-            let entry = counts.entry(observation.profile_id.clone()).or_default();
-            if observation.mode.is_paired_execution() {
-                entry.0 += 1;
-            } else if observation.mode.is_replay_execution() {
-                entry.1 += 1;
-            }
-            counts
-        },
-    );
+    let split_counts = known_population
+        .iter()
+        .map(|genome| {
+            (
+                genome.id.clone(),
+                prompt_profile_evidence_counts(&observations, &genome.id),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let profile_complete = |genome: &ConductorPromptGenome| {
         let (train, holdout) = split_counts.get(&genome.id).copied().unwrap_or_default();
         train >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS && holdout >= PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS

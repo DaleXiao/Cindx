@@ -1,0 +1,45 @@
+{
+  "schema": "cindx.performance-policy.v1",
+  "id": "same-machine-foundation",
+  "same_hardware_only": true,
+  "workloads": [
+    {
+      "schema": "cindx.session-projection-diagnostic.v1",
+      "identity": ["initial_events", "delta_events_read", "warm_sample_count"],
+      "metrics": [
+        {
+          "field": "warm_p95_micros",
+          "max_regression_percent": 15,
+          "absolute_tolerance_micros": 250
+        }
+      ]
+    },
+    {
+      "schema": "cindx.context-governor-diagnostic.v1",
+      "identity": ["history_messages", "sample_count"],
+      "metrics": [
+        {
+          "field": "p95_micros",
+          "max_regression_percent": 8,
+          "absolute_tolerance_micros": 2000
+        }
+      ]
+    },
+    {
+      "schema": "cindx.rag-search-diagnostic.v1",
+      "identity": ["chunks", "dimensions", "sample_count"],
+      "metrics": [
+        {
+          "field": "semantic_p95_micros",
+          "max_regression_percent": 8,
+          "absolute_tolerance_micros": 2000
+        },
+        {
+          "field": "literal_p95_micros",
+          "max_regression_percent": 8,
+          "absolute_tolerance_micros": 4000
+        }
+      ]
+    }
+  ]
+}

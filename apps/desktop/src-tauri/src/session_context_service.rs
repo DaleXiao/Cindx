@@ -321,6 +321,34 @@ pub(super) fn context_checkpoint_is_within_reuse_window(
     retained_tokens <= reuse_budget
 }
 
+pub(super) fn context_events_for_covered_history_prefix(
+    events: &[Event],
+    covered_messages: usize,
+) -> Vec<Event> {
+    if covered_messages == 0 {
+        return Vec::new();
+    }
+
+    let task_id = phase16_task_id();
+    let mut visible_messages = 0usize;
+    let cutoff = events.iter().position(|event| {
+        if event.task_id != task_id || message_from_event(event).is_none() {
+            return false;
+        }
+        visible_messages += 1;
+        visible_messages == covered_messages
+    });
+    let Some(cutoff) = cutoff else {
+        return Vec::new();
+    };
+
+    events[..=cutoff]
+        .iter()
+        .filter(|event| event.task_id == task_id)
+        .cloned()
+        .collect()
+}
+
 pub(super) fn prepare_session_history_context(
     state: &tauri::State<'_, AppState>,
     workspace_root: &Path,
@@ -354,8 +382,9 @@ pub(super) fn prepare_session_history_context(
                 .map_err(|error| format!("store lock poisoned: {error}"))?;
             collect_context_events(&store, run_context).map_err(|error| error.to_string())?
         };
+        let covered_events = context_events_for_covered_history_prefix(&events, plan.recent_start);
         let checkpoint = build_session_checkpoint_at(
-            &events,
+            &covered_events,
             CheckpointOptions::default(),
             current_time_millis(),
         );
@@ -401,6 +430,10 @@ pub(super) fn prepare_session_history_context(
                     (
                         "covered_messages".to_string(),
                         plan.recent_start.to_string(),
+                    ),
+                    (
+                        "covered_events".to_string(),
+                        covered_events.len().to_string(),
                     ),
                     (
                         "original_tokens".to_string(),

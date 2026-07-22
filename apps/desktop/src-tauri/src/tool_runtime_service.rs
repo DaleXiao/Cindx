@@ -6,6 +6,7 @@ use agent_storage::{SqliteStore, StorageError};
 use orchestrator::sha256_hex;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tools::ToolError;
 
 pub(super) const TOOL_RESULT_SCHEMA: &str = "cindx.tool-result.v1";
 
@@ -30,6 +31,16 @@ pub(super) fn tool_input_fingerprint(tool_name: &str, input_json: &str) -> Strin
         .map(|value| value.to_string())
         .unwrap_or_else(|_| input_json.trim().to_string());
     sha256_hex(format!("{tool_name}\n{canonical_input}").as_bytes())
+}
+
+pub(super) fn failed_tool_result(invocation_id: ToolCallId, error: ToolError) -> ToolResult {
+    let mut result = ToolResult::failed(invocation_id, error.message.clone());
+    result.failure = Some(ToolFailure {
+        code: error.code,
+        message: error.message,
+        retryable: error.retryable,
+    });
+    result
 }
 
 pub(super) fn tool_invocation_event_metadata(invocation: &ToolInvocation) -> Metadata {
@@ -381,5 +392,23 @@ mod tests {
             .insert("status".to_string(), "failed".to_string());
 
         assert!(completed_tool_result_from_events(&[event], &invocation).is_none());
+    }
+
+    #[test]
+    fn tool_error_preserves_structured_retryability() {
+        let result = failed_tool_result(
+            ToolCallId("call-1".to_string()),
+            ToolError::retryable("tool_timeout", "temporary timeout"),
+        );
+
+        assert_eq!(result.status, ToolOutcomeStatus::Failed);
+        assert_eq!(
+            result.failure,
+            Some(ToolFailure {
+                code: "tool_timeout".to_string(),
+                message: "temporary timeout".to_string(),
+                retryable: true,
+            })
+        );
     }
 }

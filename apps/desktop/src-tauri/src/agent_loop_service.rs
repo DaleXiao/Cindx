@@ -32,7 +32,7 @@ pub(crate) fn exhausted_model_transport_stop_reason(message: &str) -> Option<Run
     is_transient_model_transport_error(message).then_some(RunStopReason::ProviderUnavailable)
 }
 
-pub(crate) fn model_response_checkpoint_evidence(response: &ModelResponse) -> String {
+pub(crate) fn model_response_checkpoint_evidence(response: &ModelResponse) -> Option<String> {
     let mut evidence = response.message.content.clone();
     for call in &response.tool_calls {
         evidence.push('\n');
@@ -40,7 +40,12 @@ pub(crate) fn model_response_checkpoint_evidence(response: &ModelResponse) -> St
         evidence.push(':');
         evidence.push_str(&call.arguments_json);
     }
-    evidence
+    (!evidence.trim().is_empty()).then_some(evidence)
+}
+
+pub(crate) fn model_transport_retry_delay(attempt: usize) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(3) as u32;
+    Duration::from_millis(500_u64.saturating_mul(2_u64.pow(exponent)))
 }
 
 pub(crate) struct ModelStreamProgress {
@@ -94,5 +99,29 @@ mod tests {
         assert!(!is_transient_model_transport_error(
             "400 invalid messages input"
         ));
+    }
+
+    #[test]
+    fn transport_retry_delay_is_bounded_exponential_backoff() {
+        assert_eq!(model_transport_retry_delay(1), Duration::from_millis(500));
+        assert_eq!(model_transport_retry_delay(2), Duration::from_secs(1));
+        assert_eq!(model_transport_retry_delay(3), Duration::from_secs(2));
+        assert_eq!(model_transport_retry_delay(99), Duration::from_secs(4));
+    }
+
+    #[test]
+    fn empty_model_responses_do_not_create_progress_evidence() {
+        let response = ModelResponse {
+            message: agent_core::Message {
+                role: agent_core::MessageRole::Assistant,
+                content: "  ".to_string(),
+                metadata: Default::default(),
+            },
+            tool_calls: Vec::new(),
+            metadata: Default::default(),
+            raw_tool_calls_json: None,
+        };
+
+        assert_eq!(model_response_checkpoint_evidence(&response), None);
     }
 }

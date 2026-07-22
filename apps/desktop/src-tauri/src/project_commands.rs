@@ -350,11 +350,7 @@ pub(crate) async fn generate_session_title(
                 project.updated_at_ms = expected_updated_at_ms;
             }
             save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
-            (
-                expected_title,
-                expected_title_state,
-                expected_updated_at_ms,
-            )
+            (expected_title, expected_title_state, expected_updated_at_ms)
         };
         let provider_config = clone_provider_config(&state)?;
         if !provider_config.is_ready() {
@@ -371,9 +367,10 @@ pub(crate) async fn generate_session_title(
                     "session title generation failed for {}: {error}",
                     input.session_id
                 );
-                let config = state.project_session_config.lock().map_err(|error| {
-                    format!("project session config lock poisoned: {error}")
-                })?;
+                let config = state
+                    .project_session_config
+                    .lock()
+                    .map_err(|error| format!("project session config lock poisoned: {error}"))?;
                 return Ok(project_session_state(&config, None));
             }
         };

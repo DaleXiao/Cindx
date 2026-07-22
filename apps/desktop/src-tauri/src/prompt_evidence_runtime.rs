@@ -4,18 +4,11 @@ pub(crate) fn prompt_profile_evidence_counts(
     observations: &[PromptEvolutionObservation],
     profile_id: &str,
 ) -> (usize, usize) {
-    observations
-        .iter()
-        .filter(|observation| observation.profile_id == profile_id)
-        .fold((0, 0), |(paired, replay), observation| {
-            if observation.mode.is_paired_execution() {
-                (paired + 1, replay)
-            } else if observation.mode.is_replay_execution() {
-                (paired, replay + 1)
-            } else {
-                (paired, replay)
-            }
-        })
+    prompt_unique_evidence_counts(
+        observations
+            .iter()
+            .filter(|observation| observation.profile_id == profile_id),
+    )
 }
 
 pub(crate) fn prompt_direct_profile_evidence_counts(
@@ -23,21 +16,25 @@ pub(crate) fn prompt_direct_profile_evidence_counts(
     profile_id: &str,
     opponent_profile_id: &str,
 ) -> (usize, usize) {
-    observations
-        .iter()
-        .filter(|observation| {
-            observation.profile_id == profile_id
-                && observation.opponent_profile_id.as_deref() == Some(opponent_profile_id)
-        })
-        .fold((0, 0), |(paired, replay), observation| {
-            if observation.mode.is_paired_execution() {
-                (paired + 1, replay)
-            } else if observation.mode.is_replay_execution() {
-                (paired, replay + 1)
-            } else {
-                (paired, replay)
-            }
-        })
+    prompt_unique_evidence_counts(observations.iter().filter(|observation| {
+        observation.profile_id == profile_id
+            && observation.opponent_profile_id.as_deref() == Some(opponent_profile_id)
+    }))
+}
+
+fn prompt_unique_evidence_counts<'a>(
+    observations: impl Iterator<Item = &'a PromptEvolutionObservation>,
+) -> (usize, usize) {
+    let mut paired = BTreeSet::new();
+    let mut replay = BTreeSet::new();
+    for observation in observations {
+        if observation.mode.is_paired_execution() {
+            paired.insert(observation.evidence_identity());
+        } else if observation.mode.is_replay_execution() {
+            replay.insert(observation.evidence_identity());
+        }
+    }
+    (paired.len(), replay.len())
 }
 
 pub(crate) fn prompt_rollout_counterpart(
@@ -236,22 +233,20 @@ pub(crate) fn select_prompt_offline_case(
         .iter()
         .filter(|case| case.split == split)
         .min_by_key(|case| {
-            let current_repeats = observations
-                .iter()
-                .filter(|observation| {
+            let current_repeats =
+                prompt_unique_evidence_counts(observations.iter().filter(|observation| {
                     observation.case_id == case.id
                         && observation.profile_id == current_profile_id
                         && observation.opponent_profile_id.as_deref() == Some(challenger_profile_id)
-                })
-                .count();
-            let challenger_repeats = observations
-                .iter()
-                .filter(|observation| {
+                }));
+            let challenger_repeats =
+                prompt_unique_evidence_counts(observations.iter().filter(|observation| {
                     observation.case_id == case.id
                         && observation.profile_id == challenger_profile_id
                         && observation.opponent_profile_id.as_deref() == Some(current_profile_id)
-                })
-                .count();
+                }));
+            let current_repeats = current_repeats.0.saturating_add(current_repeats.1);
+            let challenger_repeats = challenger_repeats.0.saturating_add(challenger_repeats.1);
             (
                 current_repeats.saturating_add(challenger_repeats),
                 current_repeats.max(challenger_repeats),

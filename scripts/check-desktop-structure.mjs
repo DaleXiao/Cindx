@@ -6,6 +6,16 @@ const root = process.cwd();
 const read = (relativePath) =>
   fs.readFileSync(path.join(root, relativePath), "utf8");
 
+const readRustCrateSource = (crateName) => {
+  const sourceDirectory = path.join(root, "crates", crateName, "src");
+  return fs
+    .readdirSync(sourceDirectory)
+    .filter((entry) => entry.endsWith(".rs"))
+    .sort()
+    .map((entry) => fs.readFileSync(path.join(sourceDirectory, entry), "utf8"))
+    .join("\n");
+};
+
 const parseJson = (relativePath) => JSON.parse(read(relativePath));
 
 const assert = (condition, message) => {
@@ -112,7 +122,7 @@ const unsignedReleaseBlock =
   unsignedReleaseStart >= 0 ? releaseWorkflow.slice(unsignedReleaseStart) : "";
 const ciWorkflow = read(".github/workflows/ci.yml");
 const releaseVersionCheck = read("scripts/check-release-version.mjs");
-const toolsSource = read("crates/tools/src/lib.rs");
+const toolsSource = readRustCrateSource("tools");
 const agentStorageSource = read("crates/agent-storage/src/lib.rs");
 const agentSkillsSource = read("crates/agent-skills/src/lib.rs");
 const builtinSkillCreator = read("crates/agent-skills/builtins/skill-creator/SKILL.md");
@@ -124,7 +134,7 @@ const agentMemorySource = read("crates/agent-memory/src/lib.rs");
 const agentRuntimeSource = read("crates/agent-runtime/src/lib.rs");
 const runControlSource = read("crates/agent-runtime/src/control.rs");
 const coreAgentPrompt = read("crates/agent-runtime/src/core_prompt.txt");
-const orchestratorSource = read("crates/orchestrator/src/lib.rs");
+const orchestratorSource = readRustCrateSource("orchestrator");
 const promptEvolutionSource = read("crates/orchestrator/src/prompt_evolution.rs");
 const benchmarkSource = read("crates/orchestrator/src/benchmark.rs");
 const benchmarkSuite = JSON.parse(read("benchmarks/agent/core-v1.json"));
@@ -2382,9 +2392,11 @@ assert(
   rustLib.includes("context_checkpoint_path_for_session") &&
     sessionContextServiceSource.includes("prepare_session_history_context") &&
     sessionContextServiceSource.includes("SessionCompactionPlan") &&
-    rustLib.includes('CONTEXT_COMPACTION_VERSION: &str = "hybrid_v3_coverage"') &&
+    rustLib.includes('CONTEXT_COMPACTION_VERSION: &str = "hybrid_v4_prefix_events"') &&
     sessionContextServiceSource.includes("ContextCheckpointManifest") &&
     sessionContextServiceSource.includes("covered_prefix_sha256") &&
+    sessionContextServiceSource.includes("context_events_for_covered_history_prefix") &&
+    sessionContextServiceSource.includes('"covered_events"') &&
     sessionContextServiceSource.includes("recent_history_start") &&
     agentMemorySource.includes("conversation_memory_to_markdown") &&
     sessionContextServiceSource.includes("Session context restored for agent run") &&

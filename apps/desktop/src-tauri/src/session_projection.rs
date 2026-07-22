@@ -268,8 +268,7 @@ fn load_agent_session_read_model_with_stats(
     store: &mut SqliteStore,
     session_id: &str,
 ) -> Result<(AgentSessionReadModel, SessionProjectionLoadStats), StorageError> {
-    let (model, stats, needs_persist) =
-        load_current_agent_session_read_model(store, session_id)?;
+    let (model, stats, needs_persist) = load_current_agent_session_read_model(store, session_id)?;
     if needs_persist {
         let payload = serde_json::to_string(&model).map_err(|error| {
             StorageError::new(format!("session read model serialization failed: {error}"))
@@ -701,8 +700,8 @@ mod tests {
         )
         .expect("final assistant message should append");
 
-        let exact = load_agent_session_read_model(&mut store, session_id)
-            .expect("exact usage should load");
+        let exact =
+            load_agent_session_read_model(&mut store, session_id).expect("exact usage should load");
         assert_eq!(exact.state.context_tokens_used, 14_500);
         assert_eq!(exact.state.context_remaining_percent, 85.5);
         assert!(!exact.state.context_usage_estimated);

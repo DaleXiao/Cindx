@@ -783,6 +783,8 @@ pub(crate) struct AdaptiveQualityGateResult {
     pub(crate) output: String,
     pub(crate) score: f64,
     pub(crate) safety_violations: u64,
+    pub(crate) passed: bool,
+    pub(crate) issues: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -745,6 +745,22 @@ fn default_true() -> bool {
 }
 
 impl PromptEvolutionObservation {
+    pub fn evidence_identity(&self) -> String {
+        if !self.evaluation_id.trim().is_empty() {
+            return format!("{}:{}", self.profile_id, self.evaluation_id.trim());
+        }
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            format!(
+                "legacy:{}:{}:{}:{}:{}",
+                self.profile_id,
+                self.case_id,
+                self.opponent_profile_id.as_deref().unwrap_or_default(),
+                self.latency_ms,
+                self.total_tokens
+            )
+        })
+    }
+
     pub fn reward(&self) -> f64 {
         if !self.format_valid || self.safety_violations > 0 {
             return 0.0;
@@ -911,13 +927,12 @@ impl PromptParetoArchive {
                 rejected_profiles.push(genome.id.clone());
                 continue;
             }
-            let confidence = prompt_promotion_confidence(observations.iter().filter(
-                |observation| {
+            let confidence =
+                prompt_promotion_confidence(observations.iter().filter(|observation| {
                     observation.profile_id == genome.id
                         && observation.split == PromptEvaluationSplit::Holdout
                         && observation.mode == PromptEvaluationMode::ReplayExecution
-                },
-            ));
+                }));
             if confidence.wilson_lower_bound < PROMOTION_MIN_LOWER_BOUND {
                 rejected_profiles.push(genome.id.clone());
                 continue;
@@ -1036,21 +1051,37 @@ impl PromptInstanceParetoArchive {
             return Err("instance-wise Pareto scores span multiple evaluation suites".to_string());
         }
 
-        let mut grouped = BTreeMap::<(String, String), Vec<&AgentEvaluationCaseScore>>::new();
+        let mut grouped =
+            BTreeMap::<(String, String), BTreeMap<String, &AgentEvaluationCaseScore>>::new();
         for score in scores {
             if !score.score.is_finite() || !(0.0..=1.0).contains(&score.score) {
                 return Err(
                     "instance-wise Pareto score must be finite and between 0 and 1".to_string(),
                 );
             }
-            grouped
+            let repeat_identity = if score.run_id.trim().is_empty() {
+                format!("seed:{}", score.seed)
+            } else {
+                format!("run:{}", score.run_id.trim())
+            };
+            let repeats = grouped
                 .entry((score.candidate_id.clone(), score.case_id.clone()))
-                .or_default()
-                .push(score);
+                .or_default();
+            if let Some(existing) = repeats.get(&repeat_identity) {
+                if *existing != score {
+                    return Err(format!(
+                        "conflicting instance-wise Pareto repeat: {} / {} / {}",
+                        score.candidate_id, score.case_id, repeat_identity
+                    ));
+                }
+                continue;
+            }
+            repeats.insert(repeat_identity, score);
         }
 
         let mut averages = BTreeMap::<(String, String), (f64, f64, usize)>::new();
         for ((profile_id, case_id), entries) in grouped {
+            let entries = entries.into_values().collect::<Vec<_>>();
             if entries.len() < minimum_repeats_per_case
                 || entries.iter().any(|entry| entry.safety_violations > 0)
             {
@@ -1262,9 +1293,14 @@ pub fn prompt_promotion_confidence<'a>(
     let mut wins = 0usize;
     let mut losses = 0usize;
     let mut ties = 0usize;
+    let mut seen = BTreeSet::new();
     for reward in observations
         .filter(|observation| observation.mode.is_execution())
-        .filter_map(|observation| observation.relative_reward)
+        .filter_map(|observation| {
+            seen.insert(observation.evidence_identity())
+                .then_some(observation.relative_reward)
+                .flatten()
+        })
     {
         if reward > 0.02 {
             wins += 1;
@@ -1387,7 +1423,11 @@ pub fn evaluate_prompt_convergence(
 fn summarize<'a>(
     observations: impl Iterator<Item = &'a PromptEvolutionObservation>,
 ) -> PromptFitness {
+    let mut seen = BTreeSet::new();
     let mut entries = observations.collect::<Vec<_>>();
+    entries.reverse();
+    entries.retain(|observation| seen.insert(observation.evidence_identity()));
+    entries.reverse();
     if entries.len() > FITNESS_WINDOW_PER_SPLIT {
         entries = entries.split_off(entries.len() - FITNESS_WINDOW_PER_SPLIT);
     }
@@ -1480,9 +1520,12 @@ mod tests {
         latency_ms: u64,
         tokens: u64,
     ) -> PromptEvolutionObservation {
+        static OBSERVATION_SEQUENCE: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let sequence = OBSERVATION_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         PromptEvolutionObservation {
             profile_id: profile_id.to_string(),
-            evaluation_id: format!("eval-{profile_id}-{latency_ms}-{tokens}"),
+            evaluation_id: format!("eval-{profile_id}-{latency_ms}-{tokens}-{sequence}"),
             case_id: format!("case-{latency_ms}-{tokens}"),
             opponent_profile_id: Some("baseline".to_string()),
             task_class: "coding".to_string(),
@@ -1701,30 +1744,31 @@ mod tests {
             },
             actionable_feedback: crate::ActionableSideInformation::default(),
         };
-        let observation = |evaluation_id: &str,
-                           split: PromptEvaluationSplit,
-                           mode: PromptEvaluationMode,
-                           reflection_packet: Option<AgentEvaluationReflectionPacket>| {
-            PromptEvolutionObservation {
-                profile_id: profile_id.to_string(),
-                evaluation_id: evaluation_id.to_string(),
-                case_id: "shared-case".to_string(),
-                opponent_profile_id: Some("challenger".to_string()),
-                task_class: "coding".to_string(),
-                split,
-                mode,
-                format_valid: true,
-                succeeded: true,
-                quality_score: 1.0,
-                latency_ms: 10,
-                total_tokens: 20,
-                estimated_cost_microusd: 0,
-                safety_violations: 0,
-                relative_reward: Some(0.5),
-                step_credits: Vec::new(),
-                reflection_packet,
-            }
-        };
+        let observation =
+            |evaluation_id: &str,
+             split: PromptEvaluationSplit,
+             mode: PromptEvaluationMode,
+             reflection_packet: Option<AgentEvaluationReflectionPacket>| {
+                PromptEvolutionObservation {
+                    profile_id: profile_id.to_string(),
+                    evaluation_id: evaluation_id.to_string(),
+                    case_id: "shared-case".to_string(),
+                    opponent_profile_id: Some("challenger".to_string()),
+                    task_class: "coding".to_string(),
+                    split,
+                    mode,
+                    format_valid: true,
+                    succeeded: true,
+                    quality_score: 1.0,
+                    latency_ms: 10,
+                    total_tokens: 20,
+                    estimated_cost_microusd: 0,
+                    safety_violations: 0,
+                    relative_reward: Some(0.5),
+                    step_credits: Vec::new(),
+                    reflection_packet,
+                }
+            };
         let observations = vec![
             observation(
                 "feedback-1",
@@ -1813,6 +1857,51 @@ mod tests {
         assert_eq!(merged.verification, PromptVerification::Adversarial);
         assert_eq!(merged.context_policy, ancestor.context_policy);
         assert_eq!(merged.parents, vec!["left", "right"]);
+    }
+
+    #[test]
+    fn instance_wise_pareto_counts_only_independent_repeat_identities() {
+        let genome = ConductorPromptGenome::seed_for_effort("auto");
+        let score = instance_score(&genome.id, "case-a", 0, 0.9);
+        let duplicate = score.clone();
+
+        let archive = PromptInstanceParetoArchive::build(
+            std::slice::from_ref(&genome),
+            &[score, duplicate],
+            2,
+        )
+        .unwrap();
+
+        assert!(archive.candidates.is_empty());
+        assert!(archive.case_best_scores.is_empty());
+    }
+
+    #[test]
+    fn instance_wise_pareto_rejects_conflicting_duplicate_repeats() {
+        let genome = ConductorPromptGenome::seed_for_effort("auto");
+        let score = instance_score(&genome.id, "case-a", 0, 0.9);
+        let mut conflicting = score.clone();
+        conflicting.score = 0.1;
+
+        let error = PromptInstanceParetoArchive::build(
+            std::slice::from_ref(&genome),
+            &[score, conflicting],
+            1,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("conflicting instance-wise Pareto repeat"));
+    }
+
+    #[test]
+    fn promotion_confidence_deduplicates_replayed_observations() {
+        let entry = observation("candidate", PromptEvaluationSplit::Holdout, 0.9, 100, 100);
+        let observations = [entry.clone(), entry.clone(), entry];
+
+        let confidence = prompt_promotion_confidence(observations.iter());
+
+        assert_eq!(confidence.comparisons, 1);
+        assert_eq!(confidence.wins, 1);
     }
 
     #[test]
@@ -1939,8 +2028,7 @@ mod tests {
         }
 
         let archive =
-            PromptParetoArchive::build(std::slice::from_ref(&genome), &observations, 3, 4)
-                .unwrap();
+            PromptParetoArchive::build(std::slice::from_ref(&genome), &observations, 3, 4).unwrap();
 
         assert!(archive.candidates.is_empty());
         assert_eq!(archive.rejected_profiles, vec![genome.id]);

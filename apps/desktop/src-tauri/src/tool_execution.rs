@@ -157,7 +157,7 @@ pub(crate) fn execute_agent_tool_invocation(
             Some(tool) => match tool.execute_with_control(invocation, &tool_control) {
                 Ok(result) => result,
                 Err(error) => {
-                    ToolResult::failed(agent_core::ToolCallId(tool_call_id.clone()), error.message)
+                    failed_tool_result(agent_core::ToolCallId(tool_call_id.clone()), error)
                 }
             },
             None => {
@@ -220,6 +220,12 @@ pub(crate) fn execute_agent_tool_invocation(
 
 pub(crate) fn observation_from_agent_tool_result(tool_name: &str, result: &ToolResult) -> String {
     let mut output = result.output.clone();
+    if let Some(failure) = &result.failure {
+        output = format!(
+            "failure_code={}\nretryable={}\n{}",
+            failure.code, failure.retryable, output
+        );
+    }
     if !result.artifacts.is_empty() {
         output.push_str("\n\nArtifacts available in the active workspace:\n");
         output.push_str(
@@ -608,7 +614,7 @@ pub(crate) fn execute_tool_invocation_with_result(
         }
         Err(error) => {
             let mut result =
-                ToolResult::failed(agent_core::ToolCallId(tool_call_id.clone()), error.message);
+                failed_tool_result(agent_core::ToolCallId(tool_call_id.clone()), error);
             finalize_tool_result(
                 &mut result,
                 &agent_core::ToolCallId(tool_call_id.clone()),

@@ -657,7 +657,6 @@ where
             &mut filtered_on_delta,
         )?;
     }
-    drop(filtered_on_delta);
     dsml_filter.finish(on_delta);
     finish_streaming_response(
         String::from_utf8_lossy(&raw_response).into_owned(),

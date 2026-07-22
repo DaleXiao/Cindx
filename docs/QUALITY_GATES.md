@@ -35,11 +35,14 @@ an optimization:
 node scripts/compare-performance-reports.mjs \
   --baseline target/performance-before.json \
   --candidate target/performance-after.json \
+  --policy benchmarks/system/performance-policy-v1.json \
   --report target/performance-comparison.json
 ```
 
-The comparator requires identical workloads and defaults to a 25% relative or 1ms
-absolute P95 noise allowance. Cross-machine comparisons remain diagnostic only.
+The versioned same-machine policy applies workload-specific P95 tolerances to Session
+projection, context governance, and RAG search. Without `--policy`, the comparator
+retains its compatible 25% relative or 1ms absolute allowance. Cross-machine
+comparisons remain diagnostic only.
 
 ## Required Invariants
 
