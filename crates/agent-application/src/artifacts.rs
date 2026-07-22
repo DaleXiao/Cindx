@@ -40,67 +40,46 @@ pub fn project_agent_artifacts(events: &[Event]) -> Vec<AgentOutputArtifact> {
             .get("tool")
             .cloned()
             .unwrap_or_else(|| "tool".to_string());
-        let has_versioned_artifact = event.metadata.contains_key("result_artifact_path");
-        let source_path = has_versioned_artifact
-            .then(|| {
-                event
-                    .metadata
-                    .get("result_source_path")
-                    .or_else(|| {
-                        (tool_name == "file.write")
-                            .then(|| event.metadata.get("result_path"))
-                            .flatten()
-                    })
-                    .cloned()
+        let source_path = event
+            .metadata
+            .get("result_source_path")
+            .or_else(|| {
+                (tool_name == "file.write")
+                    .then(|| event.metadata.get("result_path"))
+                    .flatten()
             })
-            .flatten();
-        let mut paths = BTreeMap::<String, Option<String>>::new();
-        for (key, value) in &event.metadata {
-            let result_path = key.starts_with("result_") && key.ends_with("_path");
-            if !result_path || key == "result_source_path" || value.trim().is_empty() {
-                continue;
-            }
-            if key == "result_path" && tool_name != "file.write" {
-                continue;
-            }
-            if tool_name == "file.write" && has_versioned_artifact && key == "result_path" {
-                continue;
-            }
-            if source_path.as_deref() == Some(value.as_str()) && key != "result_artifact_path" {
-                continue;
-            }
-            let version_source = (key == "result_artifact_path")
-                .then(|| source_path.clone())
-                .flatten();
-            paths
-                .entry(value.clone())
-                .and_modify(|current| {
-                    if current.is_none() {
-                        *current = version_source.clone();
-                    }
-                })
-                .or_insert(version_source);
+            .cloned();
+        let artifact_path = event
+            .metadata
+            .get("result_artifact_path")
+            .cloned()
+            .or_else(|| {
+                (tool_name == "file.write")
+                    .then(|| event.metadata.get("result_path"))
+                    .flatten()
+                    .cloned()
+            });
+        let Some(path) = artifact_path.filter(|path| !path.trim().is_empty()) else {
+            continue;
+        };
+        let logical_path = source_path.as_deref().unwrap_or(path.as_str());
+        if is_internal_runtime_path(logical_path) {
+            continue;
         }
 
-        for (index, (path, version_source)) in paths.into_iter().enumerate() {
-            let logical_path = version_source
-                .as_deref()
-                .unwrap_or(path.as_str())
-                .to_string();
-            let version = versions.entry(logical_path).or_default();
-            *version += 1;
-            outputs.push(AgentOutputArtifact {
-                id: format!("{}-{index}", event.id.0),
-                kind: artifact_kind_from_path(&path).to_string(),
-                path,
-                source_path: version_source,
-                tool_name: tool_name.clone(),
-                status: status.clone(),
-                timestamp_ms: event.timestamp_ms,
-                run_id: event.metadata.get("agent_run_id").cloned(),
-                version: *version,
-            });
-        }
+        let version = versions.entry(logical_path.to_string()).or_default();
+        *version += 1;
+        outputs.push(AgentOutputArtifact {
+            id: format!("{}-0", event.id.0),
+            kind: artifact_kind_from_path(&path).to_string(),
+            path,
+            source_path,
+            tool_name,
+            status,
+            timestamp_ms: event.timestamp_ms,
+            run_id: event.metadata.get("agent_run_id").cloned(),
+            version: *version,
+        });
     }
 
     outputs.sort_by(|left, right| {
@@ -110,6 +89,11 @@ pub fn project_agent_artifacts(events: &[Event]) -> Vec<AgentOutputArtifact> {
             .then_with(|| right.id.cmp(&left.id))
     });
     outputs
+}
+
+fn is_internal_runtime_path(path: &str) -> bool {
+    path.split(['/', '\\'])
+        .any(|component| component == ".cindx")
 }
 
 pub fn artifact_kind_from_path(path: &str) -> &'static str {
@@ -272,5 +256,76 @@ mod tests {
             .insert("status".to_string(), "failed".to_string());
 
         assert!(project_agent_artifacts(&[event]).is_empty());
+    }
+
+    #[test]
+    fn process_artifact_paths_do_not_become_outputs() {
+        let metadata: Metadata = [
+            ("tool".to_string(), "browser.click".to_string()),
+            ("status".to_string(), "succeeded".to_string()),
+            (
+                "result_source_path".to_string(),
+                "/workspace/.cindx/browser-sessions/session/screenshot.png".to_string(),
+            ),
+            (
+                "result_artifact_path".to_string(),
+                "/workspace/.cindx/output-history/run/screenshot.png".to_string(),
+            ),
+            (
+                "result_trace_path".to_string(),
+                "/workspace/.cindx/browser-sessions/session/trace.json".to_string(),
+            ),
+            (
+                "result_text_path".to_string(),
+                "/workspace/.cindx/browser-sessions/session/page.txt".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let event = Event {
+            id: EventId("event-process".to_string()),
+            task_id: TaskId("task".to_string()),
+            sequence: 1,
+            timestamp_ms: 1,
+            kind: EventKind::ToolCallFinished,
+            summary: "captured".to_string(),
+            metadata,
+        };
+
+        assert!(project_agent_artifacts(&[event]).is_empty());
+    }
+
+    #[test]
+    fn only_the_primary_deliverable_is_projected() {
+        let mut event = output_event(1, "run", "/history/run/mindmap.html");
+        event.metadata.insert(
+            "result_source_path".to_string(),
+            "/workspace/mindmap.html".to_string(),
+        );
+        event.metadata.insert(
+            "result_trace_path".to_string(),
+            "/workspace/.cindx/browser-sessions/session/trace.json".to_string(),
+        );
+        event.metadata.insert(
+            "result_text_path".to_string(),
+            "/workspace/.cindx/browser-sessions/session/page.txt".to_string(),
+        );
+
+        let outputs = project_agent_artifacts(&[event]);
+
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].path, "/history/run/mindmap.html");
+        assert_eq!(
+            outputs[0].source_path.as_deref(),
+            Some("/workspace/mindmap.html")
+        );
+    }
+
+    #[test]
+    fn internal_runtime_paths_are_recognized_on_windows() {
+        assert!(is_internal_runtime_path(
+            r"C:\workspace\.cindx\browser-sessions\trace.json"
+        ));
+        assert!(!is_internal_runtime_path(r"C:\workspace\deliverable.html"));
     }
 }
