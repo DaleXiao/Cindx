@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -16,10 +17,23 @@ pub struct QuorumExecution<T> {
     pub cancelled_stragglers: usize,
 }
 
+#[derive(Debug)]
+pub struct InterruptibleQuorumExecution<T> {
+    pub execution: QuorumExecution<T>,
+    pub interrupted: bool,
+}
+
+#[derive(Debug)]
+pub struct ParallelJobCompletion<T> {
+    pub job_id: usize,
+    pub result: Result<T, ParallelTaskError>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParallelTaskError {
     Spawn(String),
     Panic,
+    Cancelled,
 }
 
 impl fmt::Display for ParallelTaskError {
@@ -27,6 +41,7 @@ impl fmt::Display for ParallelTaskError {
         match self {
             Self::Spawn(error) => write!(formatter, "worker could not start: {error}"),
             Self::Panic => formatter.write_str("worker panicked"),
+            Self::Cancelled => formatter.write_str("worker cancelled after quorum"),
         }
     }
 }
@@ -92,10 +107,121 @@ pub struct BoundedParallelExecutor {
     gate: Arc<WorkerGate>,
 }
 
+pub struct ParallelJobSupervisor<T> {
+    gate: Arc<WorkerGate>,
+    sender: mpsc::Sender<ParallelJobCompletion<T>>,
+    receiver: mpsc::Receiver<ParallelJobCompletion<T>>,
+    cancellations: BTreeMap<usize, Arc<AtomicBool>>,
+}
+
+impl<T> fmt::Debug for ParallelJobSupervisor<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ParallelJobSupervisor")
+            .field("pending", &self.cancellations.len())
+            .finish()
+    }
+}
+
+impl<T: Send + 'static> ParallelJobSupervisor<T> {
+    pub fn submit(
+        &mut self,
+        job_id: usize,
+        thread_label: &str,
+        job: CancellableParallelJob<T>,
+    ) -> Result<(), ParallelTaskError> {
+        if self.cancellations.contains_key(&job_id) {
+            return Err(ParallelTaskError::Spawn(format!(
+                "duplicate parallel job id {job_id}"
+            )));
+        }
+
+        static THREAD_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let worker_cancellation = Arc::clone(&cancellation);
+        let sender = self.sender.clone();
+        let gate = Arc::clone(&self.gate);
+        let sequence = THREAD_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let name = format!("cindx-{thread_label}-{sequence}");
+        thread::Builder::new()
+            .name(name)
+            .spawn(move || {
+                let permit = gate.acquire();
+                let result = if worker_cancellation.load(Ordering::SeqCst) {
+                    Err(ParallelTaskError::Cancelled)
+                } else {
+                    catch_unwind(AssertUnwindSafe(|| job(Arc::clone(&worker_cancellation))))
+                        .map_err(|_| ParallelTaskError::Panic)
+                };
+                drop(permit);
+                let _ = sender.send(ParallelJobCompletion { job_id, result });
+            })
+            .map_err(|error| ParallelTaskError::Spawn(error.to_string()))?;
+        self.cancellations.insert(job_id, cancellation);
+        Ok(())
+    }
+
+    pub fn recv(&mut self) -> Option<ParallelJobCompletion<T>> {
+        self.receiver.recv().ok().map(|completion| {
+            self.cancellations.remove(&completion.job_id);
+            completion
+        })
+    }
+
+    pub fn recv_timeout(&mut self, timeout: Duration) -> Option<ParallelJobCompletion<T>> {
+        self.receiver.recv_timeout(timeout).ok().map(|completion| {
+            self.cancellations.remove(&completion.job_id);
+            completion
+        })
+    }
+
+    pub fn try_recv(&mut self) -> Option<ParallelJobCompletion<T>> {
+        self.receiver.try_recv().ok().map(|completion| {
+            self.cancellations.remove(&completion.job_id);
+            completion
+        })
+    }
+
+    pub fn cancel(&self, job_id: usize) -> bool {
+        self.cancellations
+            .get(&job_id)
+            .is_some_and(|token| !token.swap(true, Ordering::SeqCst))
+    }
+
+    pub fn cancel_all(&self) -> usize {
+        self.cancellations
+            .values()
+            .filter(|token| !token.swap(true, Ordering::SeqCst))
+            .count()
+    }
+
+    pub fn pending(&self) -> usize {
+        self.cancellations.len()
+    }
+}
+
+impl<T> Drop for ParallelJobSupervisor<T> {
+    fn drop(&mut self) {
+        for token in self.cancellations.values() {
+            token.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
 impl BoundedParallelExecutor {
     pub fn new(limit: usize) -> Self {
         Self {
             gate: Arc::new(WorkerGate::new(limit)),
+        }
+    }
+
+    pub fn supervisor<T: Send + 'static>(&self) -> ParallelJobSupervisor<T> {
+        let (sender, receiver) = mpsc::channel();
+        ParallelJobSupervisor {
+            gate: Arc::clone(&self.gate),
+            sender,
+            receiver,
+            cancellations: BTreeMap::new(),
         }
     }
 
@@ -148,8 +274,6 @@ impl BoundedParallelExecutor {
         T: Send + 'static,
         F: Fn(&T) -> bool,
     {
-        static THREAD_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-
         let total = jobs.len();
         if total == 0 {
             return QuorumExecution {
@@ -160,35 +284,18 @@ impl BoundedParallelExecutor {
             };
         }
         let required_successes = required_successes.clamp(1, total);
-        let cancellation = Arc::new(AtomicBool::new(false));
-        let (sender, receiver) = mpsc::channel();
-        let mut handles = Vec::with_capacity(total);
+        let mut supervisor = self.supervisor();
         let mut slots = (0..total).map(|_| None).collect::<Vec<_>>();
 
         for (index, job) in jobs.into_iter().enumerate() {
-            let permit = self.gate.acquire();
-            let worker_cancellation = Arc::clone(&cancellation);
-            let sender = sender.clone();
-            let sequence = THREAD_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let name = format!("cindx-{thread_label}-{sequence}");
-            match thread::Builder::new().name(name).spawn(move || {
-                let _permit = permit;
-                let result =
-                    catch_unwind(AssertUnwindSafe(|| job(Arc::clone(&worker_cancellation))))
-                        .map_err(|_| ParallelTaskError::Panic);
-                let _ = sender.send((index, result));
-            }) {
-                Ok(handle) => handles.push(handle),
-                Err(error) => {
-                    slots[index] = Some(Err(ParallelTaskError::Spawn(error.to_string())));
-                }
+            if let Err(error) = supervisor.submit(index, thread_label, job) {
+                slots[index] = Some(Err(error));
             }
         }
-        drop(sender);
 
         let mut received = 0usize;
         let mut successful = 0usize;
-        let spawned = handles.len();
+        let spawned = supervisor.pending();
         let mut quorum_at = None;
         let mut cancelled_stragglers = 0usize;
 
@@ -199,53 +306,135 @@ impl BoundedParallelExecutor {
                 if remaining.is_zero() {
                     None
                 } else {
-                    receiver.recv_timeout(remaining).ok()
+                    supervisor.recv_timeout(remaining)
                 }
             } else {
-                receiver.recv().ok()
+                supervisor.recv()
             };
-            let Some((index, result)) = next else {
-                cancelled_stragglers = spawned.saturating_sub(received);
-                cancellation.store(true, Ordering::SeqCst);
+            let Some(ParallelJobCompletion { job_id, result }) = next else {
+                cancelled_stragglers = supervisor.cancel_all();
                 break;
             };
             if result.as_ref().is_ok_and(&is_success) {
                 successful = successful.saturating_add(1);
             }
-            slots[index] = Some(result);
+            slots[job_id] = Some(result);
             received = received.saturating_add(1);
             if successful >= required_successes && quorum_at.is_none() && received < spawned {
                 quorum_at = Some(Instant::now());
                 if grace_period.is_zero() {
-                    cancelled_stragglers = spawned.saturating_sub(received);
-                    cancellation.store(true, Ordering::SeqCst);
+                    cancelled_stragglers = supervisor.cancel_all();
                     break;
                 }
             }
         }
 
-        while received < spawned {
-            let Ok((index, result)) = receiver.recv() else {
-                break;
-            };
-            if result.as_ref().is_ok_and(&is_success) {
-                successful = successful.saturating_add(1);
-            }
-            slots[index] = Some(result);
-            received = received.saturating_add(1);
-        }
-        for handle in handles {
-            let _ = handle.join();
-        }
+        drop(supervisor);
 
         QuorumExecution {
             results: slots
                 .into_iter()
-                .map(|result| result.unwrap_or(Err(ParallelTaskError::Panic)))
+                .map(|result| result.unwrap_or(Err(ParallelTaskError::Cancelled)))
                 .collect(),
             quorum_reached: successful >= required_successes,
             successful,
             cancelled_stragglers,
+        }
+    }
+
+    pub fn run_until_quorum_interruptible<T, F, I>(
+        &self,
+        thread_label: &str,
+        jobs: Vec<CancellableParallelJob<T>>,
+        required_successes: usize,
+        grace_period: Duration,
+        poll_interval: Duration,
+        is_success: F,
+        mut should_interrupt: I,
+    ) -> InterruptibleQuorumExecution<T>
+    where
+        T: Send + 'static,
+        F: Fn(&T) -> bool,
+        I: FnMut() -> bool,
+    {
+        let total = jobs.len();
+        if total == 0 {
+            return InterruptibleQuorumExecution {
+                execution: QuorumExecution {
+                    results: Vec::new(),
+                    quorum_reached: false,
+                    successful: 0,
+                    cancelled_stragglers: 0,
+                },
+                interrupted: false,
+            };
+        }
+        let required_successes = required_successes.clamp(1, total);
+        let mut supervisor = self.supervisor();
+        let mut slots = (0..total).map(|_| None).collect::<Vec<_>>();
+
+        for (index, job) in jobs.into_iter().enumerate() {
+            if let Err(error) = supervisor.submit(index, thread_label, job) {
+                slots[index] = Some(Err(error));
+            }
+        }
+
+        let poll_interval = poll_interval.max(Duration::from_millis(1));
+        let mut received = 0usize;
+        let mut successful = 0usize;
+        let spawned = supervisor.pending();
+        let mut quorum_at = None;
+        let mut cancelled_stragglers = 0usize;
+        let mut interrupted = false;
+
+        while received < spawned {
+            if should_interrupt() {
+                interrupted = true;
+                cancelled_stragglers = supervisor.cancel_all();
+                break;
+            }
+            let wait = if let Some(quorum_at) = quorum_at {
+                let remaining =
+                    grace_period.saturating_sub(Instant::now().duration_since(quorum_at));
+                if remaining.is_zero() {
+                    cancelled_stragglers = supervisor.cancel_all();
+                    break;
+                }
+                remaining.min(poll_interval)
+            } else {
+                poll_interval
+            };
+            let Some(ParallelJobCompletion { job_id, result }) = supervisor.recv_timeout(wait)
+            else {
+                continue;
+            };
+            if result.as_ref().is_ok_and(&is_success) {
+                successful = successful.saturating_add(1);
+            }
+            slots[job_id] = Some(result);
+            received = received.saturating_add(1);
+            if successful >= required_successes && quorum_at.is_none() && received < spawned {
+                quorum_at = Some(Instant::now());
+                if grace_period.is_zero() {
+                    cancelled_stragglers = supervisor.cancel_all();
+                    break;
+                }
+            }
+        }
+
+        drop(supervisor);
+
+        InterruptibleQuorumExecution {
+            execution: QuorumExecution {
+                results: slots
+                    .into_iter()
+                    .map(|result| result.unwrap_or(Err(ParallelTaskError::Cancelled)))
+                    .collect(),
+                quorum_reached: successful >= required_successes,
+                successful,
+                cancelled_stragglers,
+            },
+            interrupted,
         }
     }
 }
@@ -321,6 +510,99 @@ mod tests {
         assert_eq!(output.cancelled_stragglers, 1);
         assert_eq!(output.results[0], Ok(10));
         assert_eq!(output.results[1], Ok(20));
-        assert_eq!(output.results[2], Ok(0));
+        assert_eq!(output.results[2], Err(ParallelTaskError::Cancelled));
+    }
+
+    #[test]
+    fn quorum_executor_returns_without_joining_a_non_cooperative_straggler() {
+        let executor = BoundedParallelExecutor::new(2);
+        let jobs = vec![
+            Box::new(|_| 10usize) as CancellableParallelJob<usize>,
+            Box::new(|_| {
+                thread::sleep(Duration::from_millis(500));
+                20usize
+            }) as CancellableParallelJob<usize>,
+        ];
+
+        let started = Instant::now();
+        let output =
+            executor.run_until_quorum("early-return-test", jobs, 1, Duration::ZERO, |_| true);
+
+        assert!(output.quorum_reached);
+        assert_eq!(output.successful, 1);
+        assert_eq!(output.cancelled_stragglers, 1);
+        assert_eq!(output.results[0], Ok(10));
+        assert_eq!(output.results[1], Err(ParallelTaskError::Cancelled));
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "quorum return waited for the detached straggler"
+        );
+    }
+
+    #[test]
+    fn interruptible_quorum_cancels_speculation_without_waiting_for_stragglers() {
+        let executor = BoundedParallelExecutor::new(2);
+        let jobs = vec![
+            Box::new(|cancelled: Arc<AtomicBool>| {
+                while !cancelled.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                10usize
+            }) as CancellableParallelJob<usize>,
+            Box::new(|_| {
+                thread::sleep(Duration::from_millis(500));
+                20usize
+            }) as CancellableParallelJob<usize>,
+        ];
+        let started = Instant::now();
+
+        let output = executor.run_until_quorum_interruptible(
+            "interrupt-test",
+            jobs,
+            2,
+            Duration::ZERO,
+            Duration::from_millis(5),
+            |_| true,
+            || started.elapsed() >= Duration::from_millis(20),
+        );
+
+        assert!(output.interrupted);
+        assert_eq!(output.execution.cancelled_stragglers, 2);
+        assert!(started.elapsed() < Duration::from_millis(200));
+    }
+
+    #[test]
+    fn supervisor_accepts_followup_work_before_an_older_straggler_finishes() {
+        let executor = BoundedParallelExecutor::new(3);
+        let mut supervisor = executor.supervisor();
+        supervisor
+            .submit(
+                0,
+                "dynamic-test",
+                Box::new(|_| {
+                    thread::sleep(Duration::from_millis(500));
+                    "slow"
+                }),
+            )
+            .unwrap();
+        supervisor
+            .submit(1, "dynamic-test", Box::new(|_| "anchor"))
+            .unwrap();
+
+        let first = supervisor
+            .recv_timeout(Duration::from_millis(250))
+            .expect("the direct anchor should complete first");
+        assert_eq!(first.job_id, 1);
+        assert_eq!(first.result, Ok("anchor"));
+
+        supervisor
+            .submit(2, "dynamic-test", Box::new(|_| "verification"))
+            .unwrap();
+        let second = supervisor
+            .recv_timeout(Duration::from_millis(250))
+            .expect("followup verification should not wait for the straggler");
+        assert_eq!(second.job_id, 2);
+        assert_eq!(second.result, Ok("verification"));
+        assert!(supervisor.cancel(0));
     }
 }

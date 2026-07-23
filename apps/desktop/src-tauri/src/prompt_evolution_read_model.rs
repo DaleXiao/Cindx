@@ -100,6 +100,20 @@ pub(crate) fn prompt_evolution_observations_from_events(
                 .get("collaboration_profile")
                 .map(String::as_str)
                 == Some("bounded");
+            let workflow_terminal = workflow_events.iter().rev().find(|event| {
+                matches!(
+                    event.summary.as_str(),
+                    "Collaboration workflow completed" | "Collaboration workflow failed"
+                )
+            });
+            if workflow_terminal.is_some_and(|terminal| {
+                terminal
+                    .metadata
+                    .get("anytime_prompt_learning_eligible")
+                    .is_some_and(|eligible| eligible == "false")
+            }) {
+                return None;
+            }
             let run_events = profile_event
                 .metadata
                 .get("agent_run_id")
@@ -112,14 +126,17 @@ pub(crate) fn prompt_evolution_observations_from_events(
                     )
                 })
             } else {
-                workflow_events.iter().rev().find(|event| {
-                    matches!(
-                        event.summary.as_str(),
-                        "Collaboration workflow completed" | "Collaboration workflow failed"
-                    )
-                })
+                workflow_terminal
             }?;
             if terminal.summary == "Agent task cancelled" {
+                return None;
+            }
+            if terminal.summary == "Agent task completed"
+                && terminal
+                    .metadata
+                    .get("routing_learning_eligible")
+                    .is_some_and(|eligible| eligible == "false")
+            {
                 return None;
             }
             let succeeded = matches!(

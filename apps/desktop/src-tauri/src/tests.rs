@@ -79,14 +79,33 @@ fn arbiter_failure_handoff_preserves_candidate_work_for_executor() {
 }
 
 #[test]
-fn only_safety_collaboration_errors_block_the_executor() {
+fn safety_and_steer_collaboration_errors_block_stale_executor_context() {
     assert!(collaboration_error_blocks_executor(&format!(
         "{WORKFLOW_SAFETY_ERROR_PREFIX} unsafe output"
     )));
+    assert!(collaboration_error_blocks_executor(
+        COLLABORATION_STEER_INTERRUPTED
+    ));
     assert!(!collaboration_error_blocks_executor(&format!(
         "{WORKFLOW_RESUMABLE_ERROR_PREFIX} provider timeout"
     )));
     assert!(!collaboration_error_blocks_executor("arbiter unavailable"));
+}
+
+#[test]
+fn pending_steer_interrupts_collaboration_without_stopping_the_run() {
+    let control = Arc::new(AgentRunControl::new("pro"));
+    assert!(!collaboration_run_should_interrupt(&control));
+
+    assert_eq!(control.request_steer("queue-steer"), Ok(true));
+    assert!(control.has_pending_steer());
+    assert!(collaboration_run_should_interrupt(&control));
+    assert!(!agent_run_should_stop(&control));
+
+    let pending = control.take_pending_steers();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].queue_id, "queue-steer");
+    assert!(!collaboration_run_should_interrupt(&control));
 }
 
 fn test_message(role: MessageRole, content: impl Into<String>) -> Message {
@@ -323,6 +342,132 @@ fn adaptive_partial_handoff_preserves_completed_branches_without_claiming_comple
         &["failed".to_string()]
     )
     .is_none());
+}
+
+#[test]
+fn anytime_best_known_output_tracks_verification_and_rejection() {
+    let plan = single_step_workflow_plan(2);
+    let mut checkpoint = WorkflowExecutionCheckpoint::new("resume", plan, 1);
+    let mut controller = AnytimeController::new(AnytimeControllerConfig {
+        max_parallelism: 2,
+        min_successful_candidates: 1,
+        max_candidates: 3,
+        min_usable_quality_bps: 4_500,
+        stop_policy: ConductorStopPolicy::FirstVerified,
+    });
+    controller
+        .register(AnytimeCandidate::direct_anchor(DIRECT_ANCHOR_CANDIDATE_ID))
+        .unwrap();
+    controller
+        .register(AnytimeCandidate::workflow("inspect", Vec::new(), 7_000))
+        .unwrap();
+    controller.mark_running(DIRECT_ANCHOR_CANDIDATE_ID).unwrap();
+    controller
+        .observe(
+            DIRECT_ANCHOR_CANDIDATE_ID,
+            AnytimeVerdict {
+                quality_bps: 6_000,
+                confidence_bps: 5_500,
+                constraint_coverage_bps: 6_000,
+                evidence_count: 0,
+                safety_violations: 0,
+                deliverable: true,
+                verified: false,
+            },
+        )
+        .unwrap();
+    controller.mark_running("inspect").unwrap();
+    controller
+        .observe(
+            "inspect",
+            AnytimeVerdict {
+                quality_bps: 7_500,
+                confidence_bps: 8_000,
+                constraint_coverage_bps: 8_000,
+                evidence_count: 3,
+                safety_violations: 0,
+                deliverable: true,
+                verified: true,
+            },
+        )
+        .unwrap();
+    checkpoint
+        .anytime_outputs
+        .insert(DIRECT_ANCHOR_CANDIDATE_ID.to_string(), "anchor".to_string());
+    checkpoint
+        .anytime_outputs
+        .insert("inspect".to_string(), "verified workflow".to_string());
+
+    let (candidate_id, output, verdict) =
+        anytime_best_known_output(&controller, &checkpoint).unwrap();
+    assert_eq!(candidate_id, "inspect");
+    assert_eq!(output, "verified workflow");
+    assert!(verdict.verified);
+
+    controller
+        .revise(
+            "inspect",
+            AnytimeVerdict {
+                safety_violations: 1,
+                ..verdict
+            },
+        )
+        .unwrap();
+    let (candidate_id, output, _) = anytime_best_known_output(&controller, &checkpoint).unwrap();
+    assert_eq!(candidate_id, DIRECT_ANCHOR_CANDIDATE_ID);
+    assert_eq!(output, "anchor");
+}
+
+#[test]
+fn partial_handoff_enters_the_anytime_frontier_and_checkpoint() {
+    let plan = single_step_workflow_plan(2);
+    let mut checkpoint = WorkflowExecutionCheckpoint::new("resume", plan, 1);
+    let mut controller = AnytimeController::new(AnytimeControllerConfig {
+        max_parallelism: 2,
+        min_successful_candidates: 1,
+        max_candidates: 2,
+        min_usable_quality_bps: 4_500,
+        stop_policy: ConductorStopPolicy::Quorum,
+    });
+    controller
+        .register(AnytimeCandidate::direct_anchor(DIRECT_ANCHOR_CANDIDATE_ID))
+        .unwrap();
+    controller.mark_running(DIRECT_ANCHOR_CANDIDATE_ID).unwrap();
+    controller
+        .observe(
+            DIRECT_ANCHOR_CANDIDATE_ID,
+            AnytimeVerdict {
+                quality_bps: 6_000,
+                confidence_bps: 5_500,
+                constraint_coverage_bps: 6_000,
+                evidence_count: 0,
+                safety_violations: 0,
+                deliverable: true,
+                verified: false,
+            },
+        )
+        .unwrap();
+    checkpoint
+        .anytime_outputs
+        .insert(DIRECT_ANCHOR_CANDIDATE_ID.to_string(), "anchor".to_string());
+
+    register_partial_handoff_candidate(
+        &mut controller,
+        &mut checkpoint,
+        "partial evidence handoff",
+        2,
+        1,
+        4,
+    )
+    .unwrap();
+
+    let (candidate_id, output, verdict) =
+        anytime_best_known_output(&controller, &checkpoint).unwrap();
+    assert_eq!(candidate_id, PARTIAL_HANDOFF_CANDIDATE_ID);
+    assert_eq!(output, "partial evidence handoff");
+    assert_eq!(verdict.evidence_count, 4);
+    assert!(!verdict.verified);
+    assert!(!checkpoint.anytime_controller_json.is_empty());
 }
 
 #[test]
@@ -3553,6 +3698,73 @@ fn routing_telemetry_uses_collaboration_quality_gate_as_outcome() {
 }
 
 #[test]
+fn routing_telemetry_excludes_unverified_anytime_delivery() {
+    let run_context = [
+        ("agent_run_id".to_string(), "run-anytime-draft".to_string()),
+        ("task_class".to_string(), "research".to_string()),
+        ("collaboration_policy".to_string(), "best_of_n".to_string()),
+        ("requested_policy".to_string(), "auto_router".to_string()),
+        ("router_model".to_string(), "model-a".to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task started",
+        run_context.clone(),
+    )
+    .expect("start should append");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Collaboration workflow completed",
+        metadata_with_context(
+            [
+                (
+                    "anytime_selected_candidate".to_string(),
+                    DIRECT_ANCHOR_CANDIDATE_ID.to_string(),
+                ),
+                ("anytime_selected_verified".to_string(), "false".to_string()),
+                (
+                    "anytime_selected_quality_bps".to_string(),
+                    "6500".to_string(),
+                ),
+                (
+                    "anytime_routing_learning_eligible".to_string(),
+                    "false".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            &run_context,
+        ),
+    )
+    .expect("workflow completion should append");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task completed",
+        metadata_with_context(
+            [("routing_learning_eligible".to_string(), "true".to_string())]
+                .into_iter()
+                .collect(),
+            &run_context,
+        ),
+    )
+    .expect("completion should append");
+
+    let events = store
+        .list_by_task(&phase16_task_id())
+        .expect("events should load");
+    assert!(routing_telemetry_from_events(&events).is_empty());
+}
+
+#[test]
 fn collaboration_result_frontier_brief_is_bounded_and_excludes_executor_duplicate() {
     let control = AgentRunControl::new("pro");
     control.record_best_known_result(
@@ -3652,7 +3864,7 @@ fn workflow_telemetry_restores_versioned_plan_and_quality() {
     ]
     .into_iter()
     .collect::<Metadata>();
-    let events = vec![
+    let mut events = vec![
         Event {
             id: EventId("planned".to_string()),
             task_id: phase16_task_id(),
@@ -3720,6 +3932,12 @@ fn workflow_telemetry_restores_versioned_plan_and_quality() {
     assert_eq!(telemetry[0].latency_ms, 400);
     assert_eq!(telemetry[0].total_tokens, 640);
     assert!(telemetry[0].succeeded);
+
+    events.last_mut().unwrap().metadata.insert(
+        "anytime_prompt_learning_eligible".to_string(),
+        "false".to_string(),
+    );
+    assert!(workflow_execution_telemetry_from_events(&events, &models).is_empty());
 }
 
 #[test]
@@ -5522,6 +5740,74 @@ fn prompt_evolution_waits_for_the_final_agent_outcome() {
     let observations = prompt_evolution_observations_from_events(&events);
     assert_eq!(observations.len(), 1);
     assert!(!observations[0].1.succeeded);
+}
+
+#[test]
+fn prompt_evolution_does_not_credit_a_profile_when_anchor_was_delivered() {
+    let seed = ConductorPromptGenome::seed_for_effort("pro");
+    let context = [
+        ("collaboration_id".to_string(), "collab-anchor".to_string()),
+        ("agent_run_id".to_string(), "run-anchor".to_string()),
+        ("prompt_profile".to_string(), seed.id.clone()),
+        ("prompt_effort".to_string(), "pro".to_string()),
+        (
+            "prompt_genome".to_string(),
+            serde_json::to_string(&seed).unwrap(),
+        ),
+        ("collaboration_profile".to_string(), "bounded".to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    let events = vec![
+        Event {
+            id: EventId("profile-anchor".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 1,
+            timestamp_ms: 100,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Conductor prompt profile selected".to_string(),
+            metadata: context.clone(),
+        },
+        Event {
+            id: EventId("workflow-anchor".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 2,
+            timestamp_ms: 200,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Collaboration workflow completed".to_string(),
+            metadata: metadata_with_context(
+                [
+                    (
+                        "anytime_selected_candidate".to_string(),
+                        DIRECT_ANCHOR_CANDIDATE_ID.to_string(),
+                    ),
+                    (
+                        "anytime_prompt_learning_eligible".to_string(),
+                        "false".to_string(),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                &context,
+            ),
+        },
+        Event {
+            id: EventId("agent-anchor".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 3,
+            timestamp_ms: 300,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Agent task completed".to_string(),
+            metadata: metadata_with_context(
+                [("routing_learning_eligible".to_string(), "true".to_string())]
+                    .into_iter()
+                    .collect(),
+                &context,
+            ),
+        },
+    ];
+
+    assert!(prompt_evolution_observations_from_events(&events).is_empty());
 }
 
 #[test]

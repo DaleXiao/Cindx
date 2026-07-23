@@ -103,8 +103,8 @@ pub(crate) fn execute_agent_tool_invocation(
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        if let Some(result) =
-            completed_tool_result(&store, &invocation).map_err(|error| error.to_string())?
+        if let Some(result) = completed_tool_result(&store, &invocation, workspace_root)
+            .map_err(|error| error.to_string())?
         {
             return Ok(result);
         }
@@ -552,7 +552,7 @@ pub(crate) fn execute_tool_invocation_with_result(
     registry: Option<&ToolRegistry>,
     run_context: Option<&Metadata>,
 ) -> Result<ToolResult, StorageError> {
-    if let Some(result) = completed_tool_result(store, &invocation)? {
+    if let Some(result) = completed_tool_result(store, &invocation, workspace_root)? {
         return Ok(result);
     }
     let invocation_context = tool_invocation_context(&invocation);

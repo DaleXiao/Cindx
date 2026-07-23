@@ -5,12 +5,22 @@ use agent_core::{
 use agent_storage::{SqliteStore, StorageError};
 use orchestrator::sha256_hex;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::{
+    fs,
+    path::{Component, Path},
+    time::Duration,
+};
 use tools::ToolError;
 
 pub(super) const TOOL_RESULT_SCHEMA: &str = "cindx.tool-result.v1";
+pub(super) const EFFECT_LEDGER_SCHEMA: &str = "cindx.effect-ledger.v1";
 
-const EXECUTION_SCOPE_KEYS: [&str; 3] = ["session_id", "agent_run_id", "collaboration_id"];
+const EXECUTION_SCOPE_KEYS: [&str; 4] = [
+    "project_id",
+    "session_id",
+    "agent_run_id",
+    "collaboration_id",
+];
 const EVENT_CONTEXT_KEYS: [&str; 5] = [
     "project_id",
     "session_id",
@@ -44,12 +54,15 @@ pub(super) fn failed_tool_result(invocation_id: ToolCallId, error: ToolError) ->
 }
 
 pub(super) fn tool_invocation_event_metadata(invocation: &ToolInvocation) -> Metadata {
+    let input_fingerprint = tool_input_fingerprint(&invocation.tool_name, &invocation.input_json);
     let mut metadata = [
         ("tool_call_id".to_string(), invocation.id.0.clone()),
         ("tool".to_string(), invocation.tool_name.clone()),
+        ("input_fingerprint".to_string(), input_fingerprint.clone()),
+        ("effect_fingerprint".to_string(), input_fingerprint),
         (
-            "input_fingerprint".to_string(),
-            tool_input_fingerprint(&invocation.tool_name, &invocation.input_json),
+            "effect_ledger_schema".to_string(),
+            EFFECT_LEDGER_SCHEMA.to_string(),
         ),
         (
             "input_length".to_string(),
@@ -100,7 +113,15 @@ pub(super) fn finalize_tool_result(
         TOOL_RESULT_SCHEMA.to_string(),
     );
     result.metadata.insert(
+        "effect_ledger_schema".to_string(),
+        EFFECT_LEDGER_SCHEMA.to_string(),
+    );
+    result.metadata.insert(
         "input_fingerprint".to_string(),
+        input_fingerprint.to_string(),
+    );
+    result.metadata.insert(
+        "effect_fingerprint".to_string(),
         input_fingerprint.to_string(),
     );
     result.metadata.insert(
@@ -137,9 +158,24 @@ pub(super) fn finalize_tool_result(
 pub(super) fn completed_tool_result(
     store: &SqliteStore,
     invocation: &ToolInvocation,
+    workspace_root: &Path,
 ) -> Result<Option<ToolResult>, StorageError> {
     let events = store.list_by_task_and_tool_call_id(&invocation.task_id, &invocation.id.0)?;
-    Ok(completed_tool_result_from_events(&events, invocation))
+    if let Some(result) = completed_tool_result_from_events(&events, invocation) {
+        return Ok(Some(result));
+    }
+
+    if !supports_recovery_effect_replay(invocation) {
+        return Ok(None);
+    }
+    let fingerprint = tool_input_fingerprint(&invocation.tool_name, &invocation.input_json);
+    let effect_events =
+        store.list_by_task_and_effect_fingerprint(&invocation.task_id, &fingerprint)?;
+    Ok(completed_recovery_effect_from_events(
+        &effect_events,
+        invocation,
+        workspace_root,
+    ))
 }
 
 fn completed_tool_result_from_events(
@@ -159,20 +195,127 @@ fn completed_tool_result_from_events(
         {
             return None;
         }
-        result_from_finished_event(event, invocation)
+        result_from_finished_event(event, invocation, "exact_call_id")
     })
 }
 
 fn execution_scope_matches(event: &Event, invocation: &ToolInvocation) -> bool {
     EXECUTION_SCOPE_KEYS.iter().all(|key| {
-        invocation
-            .metadata
-            .get(*key)
-            .is_none_or(|expected| event.metadata.get(*key) == Some(expected))
+        let Some(expected) = invocation.metadata.get(*key) else {
+            return true;
+        };
+        if event.metadata.get(*key) == Some(expected) {
+            return true;
+        }
+        *key == "agent_run_id"
+            && invocation
+                .metadata
+                .get("source_agent_run_id")
+                .is_some_and(|source| event.metadata.get(*key) == Some(source))
     })
 }
 
-fn result_from_finished_event(event: &Event, invocation: &ToolInvocation) -> Option<ToolResult> {
+fn completed_recovery_effect_from_events(
+    events: &[Event],
+    invocation: &ToolInvocation,
+    workspace_root: &Path,
+) -> Option<ToolResult> {
+    let fingerprint = tool_input_fingerprint(&invocation.tool_name, &invocation.input_json);
+    events.iter().rev().find_map(|event| {
+        if event.kind != EventKind::ToolCallFinished
+            || event.metadata.get("tool").map(String::as_str) != Some(invocation.tool_name.as_str())
+            || event
+                .metadata
+                .get("result_input_fingerprint")
+                .map(String::as_str)
+                != Some(fingerprint.as_str())
+            || !recovery_source_scope_matches(event, invocation)
+            || !deterministic_effect_is_still_applied(event, invocation, workspace_root)
+        {
+            return None;
+        }
+        let mut result =
+            result_from_finished_event(event, invocation, "recovery_source_fingerprint")?;
+        result
+            .metadata
+            .insert("effect_ledger_replay".to_string(), "true".to_string());
+        Some(result)
+    })
+}
+
+fn supports_recovery_effect_replay(invocation: &ToolInvocation) -> bool {
+    invocation.tool_name == "file.write"
+        && invocation
+            .metadata
+            .get("source_agent_run_id")
+            .is_some_and(|value| !value.trim().is_empty())
+        && invocation
+            .metadata
+            .get("recovery_resume_key")
+            .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn recovery_source_scope_matches(event: &Event, invocation: &ToolInvocation) -> bool {
+    let Some(source_run_id) = invocation.metadata.get("source_agent_run_id") else {
+        return false;
+    };
+    if event.metadata.get("agent_run_id") != Some(source_run_id) {
+        return false;
+    }
+    ["project_id", "session_id", "collaboration_id"]
+        .iter()
+        .all(|key| {
+            invocation
+                .metadata
+                .get(*key)
+                .is_none_or(|expected| event.metadata.get(*key) == Some(expected))
+        })
+}
+
+fn deterministic_effect_is_still_applied(
+    _event: &Event,
+    invocation: &ToolInvocation,
+    workspace_root: &Path,
+) -> bool {
+    if invocation.tool_name != "file.write" {
+        return false;
+    }
+    let Ok(input) = serde_json::from_str::<serde_json::Value>(&invocation.input_json) else {
+        return false;
+    };
+    let Some(path) = input.get("path").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let Some(content) = input.get("content").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let relative = Path::new(path);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return false;
+    }
+    let Ok(canonical_root) = fs::canonicalize(workspace_root) else {
+        return false;
+    };
+    let candidate = workspace_root.join(relative);
+    let Ok(canonical_candidate) = fs::canonicalize(candidate) else {
+        return false;
+    };
+    canonical_candidate.starts_with(&canonical_root)
+        && fs::read(canonical_candidate).is_ok_and(|bytes| bytes.as_slice() == content.as_bytes())
+}
+
+fn result_from_finished_event(
+    event: &Event,
+    invocation: &ToolInvocation,
+    replay_mode: &str,
+) -> Option<ToolResult> {
     let status = match event.metadata.get("status").map(String::as_str)? {
         "succeeded" => ToolOutcomeStatus::Succeeded,
         "failed" => ToolOutcomeStatus::Failed,
@@ -196,6 +339,7 @@ fn result_from_finished_event(event: &Event, invocation: &ToolInvocation) -> Opt
         })
         .collect::<Metadata>();
     metadata.insert("idempotent_replay".to_string(), "true".to_string());
+    metadata.insert("effect_replay_mode".to_string(), replay_mode.to_string());
     metadata.insert("replayed_event_id".to_string(), event.id.0.clone());
     metadata.insert(
         "replayed_event_sequence".to_string(),
@@ -256,6 +400,7 @@ fn result_from_finished_event(event: &Event, invocation: &ToolInvocation) -> Opt
 mod tests {
     use super::*;
     use agent_core::{EventId, TaskId};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn invocation(input_json: &str) -> ToolInvocation {
         ToolInvocation {
@@ -286,6 +431,37 @@ mod tests {
             kind: EventKind::ToolCallFinished,
             summary: "finished".to_string(),
             metadata,
+        }
+    }
+
+    fn temporary_workspace(name: &str) -> std::path::PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("cindx-{name}-{suffix}"));
+        fs::create_dir_all(&root).expect("temporary workspace should be created");
+        root
+    }
+
+    fn recovery_file_write_invocation(
+        call_id: &str,
+        agent_run_id: &str,
+        input_json: &str,
+    ) -> ToolInvocation {
+        ToolInvocation {
+            id: ToolCallId(call_id.to_string()),
+            task_id: TaskId("task-1".to_string()),
+            tool_name: "file.write".to_string(),
+            input_json: input_json.to_string(),
+            proposed_by_model: "test".to_string(),
+            metadata: [
+                ("project_id".to_string(), "project-1".to_string()),
+                ("session_id".to_string(), "session-1".to_string()),
+                ("agent_run_id".to_string(), agent_run_id.to_string()),
+            ]
+            .into_iter()
+            .collect(),
         }
     }
 
@@ -363,6 +539,143 @@ mod tests {
                 .map(String::as_str),
             Some("true")
         );
+    }
+
+    #[test]
+    fn exact_call_replay_accepts_the_recovery_source_run() {
+        let original = recovery_file_write_invocation(
+            "call-1",
+            "run-source",
+            r#"{"path":"a.txt","content":"written"}"#,
+        );
+        let mut result = ToolResult::text(
+            original.id.clone(),
+            ToolOutcomeStatus::Succeeded,
+            "written",
+            Metadata::new(),
+        );
+        let fingerprint = tool_input_fingerprint(&original.tool_name, &original.input_json);
+        finalize_tool_result(
+            &mut result,
+            &original.id,
+            &fingerprint,
+            Duration::from_millis(12),
+        );
+        let event = finished_event(&original, &result);
+        let mut recovered = original.clone();
+        recovered
+            .metadata
+            .insert("agent_run_id".to_string(), "run-new".to_string());
+        recovered
+            .metadata
+            .insert("source_agent_run_id".to_string(), "run-source".to_string());
+
+        let replayed = completed_tool_result_from_events(&[event], &recovered)
+            .expect("the exact logical call should replay across a recovery run");
+        assert_eq!(
+            replayed
+                .metadata
+                .get("effect_replay_mode")
+                .map(String::as_str),
+            Some("exact_call_id")
+        );
+    }
+
+    #[test]
+    fn recovery_effect_ledger_replays_only_a_verified_file_write() {
+        let root = temporary_workspace("effect-ledger");
+        fs::write(root.join("a.txt"), "written").expect("effect should exist");
+        let original = recovery_file_write_invocation(
+            "call-1",
+            "run-source",
+            r#"{"path":"a.txt","content":"written"}"#,
+        );
+        let mut result = ToolResult::text(
+            original.id.clone(),
+            ToolOutcomeStatus::Succeeded,
+            "file written",
+            Metadata::new(),
+        );
+        let fingerprint = tool_input_fingerprint(&original.tool_name, &original.input_json);
+        finalize_tool_result(
+            &mut result,
+            &original.id,
+            &fingerprint,
+            Duration::from_millis(12),
+        );
+        let event = finished_event(&original, &result);
+        let mut recovered = recovery_file_write_invocation(
+            "call-2",
+            "run-new",
+            r#"{"content":"written","path":"a.txt"}"#,
+        );
+        recovered
+            .metadata
+            .insert("source_agent_run_id".to_string(), "run-source".to_string());
+        recovered
+            .metadata
+            .insert("recovery_resume_key".to_string(), "resume-1".to_string());
+
+        let replayed = completed_recovery_effect_from_events(&[event.clone()], &recovered, &root)
+            .expect("verified deterministic effect should replay");
+        assert_eq!(
+            replayed
+                .metadata
+                .get("effect_replay_mode")
+                .map(String::as_str),
+            Some("recovery_source_fingerprint")
+        );
+        assert_eq!(
+            replayed
+                .metadata
+                .get("effect_ledger_replay")
+                .map(String::as_str),
+            Some("true")
+        );
+
+        fs::write(root.join("a.txt"), "changed").expect("effect should be changed");
+        assert!(completed_recovery_effect_from_events(&[event], &recovered, &root).is_none());
+        fs::remove_dir_all(root).expect("temporary workspace should be removed");
+    }
+
+    #[test]
+    fn recovery_effect_ledger_rejects_cross_run_and_non_recovery_reuse() {
+        let root = temporary_workspace("effect-scope");
+        fs::write(root.join("a.txt"), "written").expect("effect should exist");
+        let original = recovery_file_write_invocation(
+            "call-1",
+            "run-source",
+            r#"{"path":"a.txt","content":"written"}"#,
+        );
+        let mut result = ToolResult::text(
+            original.id.clone(),
+            ToolOutcomeStatus::Succeeded,
+            "file written",
+            Metadata::new(),
+        );
+        let fingerprint = tool_input_fingerprint(&original.tool_name, &original.input_json);
+        finalize_tool_result(
+            &mut result,
+            &original.id,
+            &fingerprint,
+            Duration::from_millis(12),
+        );
+        let event = finished_event(&original, &result);
+        let mut recovered = recovery_file_write_invocation(
+            "call-2",
+            "run-new",
+            r#"{"path":"a.txt","content":"written"}"#,
+        );
+        assert!(!supports_recovery_effect_replay(&recovered));
+        recovered.metadata.insert(
+            "source_agent_run_id".to_string(),
+            "different-source".to_string(),
+        );
+        recovered
+            .metadata
+            .insert("recovery_resume_key".to_string(), "resume-1".to_string());
+        assert!(completed_recovery_effect_from_events(&[event], &recovered, &root).is_none());
+        fs::remove_dir_all(root).expect("temporary workspace should be removed");
     }
 
     #[test]

@@ -482,13 +482,16 @@ assert(
 );
 assert(
   rustLib.includes("mod tool_runtime_service;") &&
-    rustLib.includes("completed_tool_result(&store, &invocation)") &&
+    rustLib.includes("completed_tool_result(&store, &invocation, workspace_root)") &&
     toolRuntimeServiceSource.includes('TOOL_RESULT_SCHEMA: &str = "cindx.tool-result.v1"') &&
     toolRuntimeServiceSource.includes("tool_input_fingerprint") &&
     toolRuntimeServiceSource.includes("idempotent_replay") &&
     toolRuntimeServiceSource.includes("retryable_failure_is_not_replayed") &&
     agentStorageSource.includes("list_by_task_and_tool_call_id") &&
-    agentStorageSource.includes("idx_events_task_tool_call_sequence"),
+    agentStorageSource.includes("idx_events_task_tool_call_sequence") &&
+    agentStorageSource.includes("list_by_task_and_effect_fingerprint") &&
+    agentStorageSource.includes("idx_events_task_effect_fingerprint_sequence") &&
+    agentStorageSource.includes("event_scope_columns_v3"),
   "Tool execution must persist metrics and replay only exact non-retryable completed calls through an indexed journal"
 );
 assert(
@@ -557,7 +560,7 @@ assert(
 );
 assert(
   agentStorageSource.includes("idx_events_task_session_sequence") &&
-    agentStorageSource.includes("event_scope_columns_v2") &&
+    agentStorageSource.includes("event_scope_columns_v3") &&
     agentStorageSource.includes("list_by_task_and_metadata_after") &&
     agentStorageSource.includes("save_read_model") &&
     rustLib.includes("AGENT_SESSION_READ_MODEL_NAMESPACE") &&

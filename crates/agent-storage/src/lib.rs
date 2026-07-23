@@ -131,12 +131,13 @@ pub struct StoredReadModel {
     pub payload: String,
 }
 
-const EVENT_SCOPE_COLUMNS: [(&str, &str); 5] = [
+const EVENT_SCOPE_COLUMNS: [(&str, &str); 6] = [
     ("project_id", "project_id"),
     ("session_id", "session_id"),
     ("agent_run_id", "agent_run_id"),
     ("collaboration_id", "collaboration_id"),
     ("prompt_profile", "prompt_profile"),
+    ("result_effect_fingerprint", "effect_fingerprint"),
 ];
 const PERMISSION_SCOPE_COLUMNS: [(&str, &str); 2] = [
     ("session_id", "session_id"),
@@ -147,6 +148,13 @@ fn event_scope_column(key: &str) -> Option<&'static str> {
     EVENT_SCOPE_COLUMNS
         .iter()
         .find_map(|(metadata_key, column)| (*metadata_key == key).then_some(*column))
+}
+
+fn event_effect_fingerprint(metadata: &Metadata) -> Option<&str> {
+    metadata
+        .get("result_effect_fingerprint")
+        .or_else(|| metadata.get("result_input_fingerprint"))
+        .map(String::as_str)
 }
 
 fn permission_scope_column(key: &str) -> Option<&'static str> {
@@ -274,12 +282,12 @@ impl SqliteStore {
             insert into events(
               id, task_id, sequence, timestamp_ms, kind, summary, metadata_text,
               project_id, session_id, agent_run_id, collaboration_id, prompt_profile,
-              tool_call_id
+              tool_call_id, effect_fingerprint
             )
             values (
               ?1, ?2,
               (select coalesce(max(sequence), 0) + 1 from events where task_id = ?2),
-              ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
+              ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
             )
             ",
         )?;
@@ -296,6 +304,7 @@ impl SqliteStore {
         statement.bind_optional_text(10, metadata.get("collaboration_id").map(String::as_str))?;
         statement.bind_optional_text(11, metadata.get("prompt_profile").map(String::as_str))?;
         statement.bind_optional_text(12, metadata.get("tool_call_id").map(String::as_str))?;
+        statement.bind_optional_text(13, event_effect_fingerprint(&metadata))?;
         statement.expect_done()
     }
 
@@ -398,6 +407,22 @@ impl SqliteStore {
         )?;
         statement.bind_text(1, &task_id.0)?;
         statement.bind_text(2, tool_call_id)?;
+        events_from_statement(&mut statement)
+    }
+
+    pub fn list_by_task_and_effect_fingerprint(
+        &self,
+        task_id: &TaskId,
+        effect_fingerprint: &str,
+    ) -> Result<Vec<Event>, StorageError> {
+        let mut statement = self.prepare(
+            "select id, task_id, sequence, timestamp_ms, kind, summary, metadata_text
+             from events
+             where task_id = ?1 and effect_fingerprint = ?2
+             order by sequence asc",
+        )?;
+        statement.bind_text(1, &task_id.0)?;
+        statement.bind_text(2, effect_fingerprint)?;
         events_from_statement(&mut statement)
     }
 
@@ -854,8 +879,9 @@ impl SqliteStore {
                  agent_run_id = ?5,
                  collaboration_id = ?6,
                  prompt_profile = ?7,
-                 tool_call_id = ?8
-             where id = ?9",
+                 tool_call_id = ?8,
+                 effect_fingerprint = ?9
+             where id = ?10",
         )?;
         statement.bind_text(1, &event.summary)?;
         statement.bind_text(2, &metadata_to_text(&event.metadata))?;
@@ -869,7 +895,8 @@ impl SqliteStore {
         statement
             .bind_optional_text(7, event.metadata.get("prompt_profile").map(String::as_str))?;
         statement.bind_optional_text(8, event.metadata.get("tool_call_id").map(String::as_str))?;
-        statement.bind_text(9, &event.id.0)?;
+        statement.bind_optional_text(9, event_effect_fingerprint(&event.metadata))?;
+        statement.bind_text(10, &event.id.0)?;
         statement.expect_done()
     }
 
@@ -889,7 +916,8 @@ impl SqliteStore {
               agent_run_id text,
               collaboration_id text,
               prompt_profile text,
-              tool_call_id text
+              tool_call_id text,
+              effect_fingerprint text
             );
 
             create index if not exists idx_events_task_sequence
@@ -950,6 +978,8 @@ impl SqliteStore {
               on events(task_id, prompt_profile, sequence);
             create index if not exists idx_events_task_tool_call_sequence
               on events(task_id, tool_call_id, sequence);
+            create index if not exists idx_events_task_effect_fingerprint_sequence
+              on events(task_id, effect_fingerprint, sequence);
             create index if not exists idx_permission_requests_task_session_time
               on permission_requests(task_id, session_id, requested_at_ms desc);
             create index if not exists idx_permission_requests_task_session_run
@@ -1002,7 +1032,7 @@ impl SqliteStore {
 
     fn backfill_event_scope_columns(&self) -> Result<(), StorageError> {
         if self
-            .storage_meta_value("event_scope_columns_v2")?
+            .storage_meta_value("event_scope_columns_v3")?
             .as_deref()
             == Some("complete")
         {
@@ -1040,8 +1070,9 @@ impl SqliteStore {
                          session_id = ?2,
                          agent_run_id = ?3,
                          collaboration_id = ?4,
-                         prompt_profile = ?5
-                     where id = ?6",
+                         prompt_profile = ?5,
+                         effect_fingerprint = ?6
+                     where id = ?7",
                 )?;
                 update.bind_optional_text(1, metadata.get("project_id").map(String::as_str))?;
                 update.bind_optional_text(2, session_id)?;
@@ -1049,12 +1080,13 @@ impl SqliteStore {
                 update
                     .bind_optional_text(4, metadata.get("collaboration_id").map(String::as_str))?;
                 update.bind_optional_text(5, metadata.get("prompt_profile").map(String::as_str))?;
-                update.bind_text(6, &event_id)?;
+                update.bind_optional_text(6, event_effect_fingerprint(&metadata))?;
+                update.bind_text(7, &event_id)?;
                 update.expect_done()?;
             }
             let mut marker =
                 self.prepare("insert or replace into storage_meta(key, value) values (?1, ?2)")?;
-            marker.bind_text(1, "event_scope_columns_v2")?;
+            marker.bind_text(1, "event_scope_columns_v3")?;
             marker.bind_text(2, "complete")?;
             marker.expect_done()
         })();
@@ -1186,9 +1218,9 @@ impl EventStore for SqliteStore {
             insert into events(
               id, task_id, sequence, timestamp_ms, kind, summary, metadata_text,
               project_id, session_id, agent_run_id, collaboration_id, prompt_profile,
-              tool_call_id
+              tool_call_id, effect_fingerprint
             )
-            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             ",
         )?;
 
@@ -1208,10 +1240,8 @@ impl EventStore for SqliteStore {
         )?;
         statement
             .bind_optional_text(12, event.metadata.get("prompt_profile").map(String::as_str))?;
-        statement.bind_optional_text(
-            13,
-            event.metadata.get("tool_call_id").map(String::as_str),
-        )?;
+        statement.bind_optional_text(13, event.metadata.get("tool_call_id").map(String::as_str))?;
+        statement.bind_optional_text(14, event_effect_fingerprint(&event.metadata))?;
         statement.expect_done()
     }
 
@@ -2163,6 +2193,10 @@ mod tests {
         let metadata = [
             ("project_id".to_string(), "legacy-project".to_string()),
             ("session_id".to_string(), "legacy-session".to_string()),
+            (
+                "result_input_fingerprint".to_string(),
+                "legacy-effect".to_string(),
+            ),
         ]
         .into_iter()
         .collect::<Metadata>();
@@ -2185,7 +2219,7 @@ mod tests {
         statement.expect_done().unwrap();
         drop(statement);
         store
-            .exec_batch("delete from storage_meta where key = 'event_scope_columns_v2'")
+            .exec_batch("delete from storage_meta where key = 'event_scope_columns_v3'")
             .unwrap();
 
         store.backfill_event_scope_columns().unwrap();
@@ -2198,6 +2232,13 @@ mod tests {
         assert_eq!(
             store
                 .list_by_task_and_metadata(&task_id, "project_id", "legacy-project")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .list_by_task_and_effect_fingerprint(&task_id, "legacy-effect")
                 .unwrap()
                 .len(),
             1
@@ -2295,6 +2336,52 @@ mod tests {
         assert!(plan
             .iter()
             .any(|step| step.contains("idx_events_task_tool_call_sequence")));
+    }
+
+    #[test]
+    fn effect_fingerprint_queries_use_the_dedicated_index() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("task-effect".to_string());
+        store
+            .append(Event {
+                id: EventId("event-effect".to_string()),
+                task_id: task_id.clone(),
+                sequence: 1,
+                timestamp_ms: 100,
+                kind: EventKind::ToolCallFinished,
+                summary: "effect applied".to_string(),
+                metadata: [(
+                    "result_effect_fingerprint".to_string(),
+                    "effect-1".to_string(),
+                )]
+                .into_iter()
+                .collect(),
+            })
+            .expect("event should append");
+
+        let events = store
+            .list_by_task_and_effect_fingerprint(&task_id, "effect-1")
+            .expect("effect events should load");
+        assert_eq!(events.len(), 1);
+
+        let mut statement = store
+            .prepare(
+                "explain query plan
+                 select id, task_id, sequence, timestamp_ms, kind, summary, metadata_text
+                 from events
+                 where task_id = ?1 and effect_fingerprint = ?2
+                 order by sequence asc",
+            )
+            .unwrap();
+        statement.bind_text(1, "task").unwrap();
+        statement.bind_text(2, "effect").unwrap();
+        let mut plan = Vec::new();
+        while statement.step().unwrap() == StepResult::Row {
+            plan.push(statement.column_text(3).unwrap());
+        }
+        assert!(plan
+            .iter()
+            .any(|step| step.contains("idx_events_task_effect_fingerprint_sequence")));
     }
 
     #[test]

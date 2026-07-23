@@ -14,6 +14,8 @@ const COLLABORATION_EVIDENCE_OUTPUT_MAX_CHARS: usize = 2_000;
 
 pub(crate) const WORKFLOW_RESUMABLE_ERROR_PREFIX: &str = "workflow checkpoint saved:";
 pub(crate) const WORKFLOW_SAFETY_ERROR_PREFIX: &str = "workflow safety gate blocked:";
+pub(crate) const COLLABORATION_STEER_INTERRUPTED: &str =
+    "collaboration interrupted for pending user steer";
 
 #[derive(Debug, Clone)]
 pub(crate) struct AgentCollaboration {
@@ -23,7 +25,7 @@ pub(crate) struct AgentCollaboration {
     pub(crate) candidate_models: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct AdaptiveCollaborationSpec {
     pub(crate) step_index: usize,
     pub(crate) step_id: String,

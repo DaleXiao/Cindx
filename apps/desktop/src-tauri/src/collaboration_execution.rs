@@ -1,5 +1,16 @@
 use super::*;
 
+pub(crate) fn collaboration_run_should_interrupt(control: &Arc<AgentRunControl>) -> bool {
+    agent_run_should_stop(control) || control.has_pending_steer()
+}
+
+fn collaboration_stage_should_interrupt(
+    control: &Arc<AgentRunControl>,
+    stage_class: RunStageClass,
+) -> bool {
+    collaboration_run_should_interrupt(control) || control.stage_should_stop(stage_class)
+}
+
 #[derive(Debug)]
 pub(crate) struct CollaborationCandidateSpec {
     pub(crate) stage: String,
@@ -127,6 +138,9 @@ pub(crate) fn synthesize_agent_answer(
         review_prompt,
     )
     .unwrap_or_else(|error| format!("Reviewer unavailable: {error}"));
+    if cancellation.has_pending_steer() {
+        return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
+    }
     if agent_run_should_stop(cancellation) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
@@ -173,6 +187,10 @@ pub(crate) fn synthesize_agent_answer(
             );
         },
     );
+    if cancellation.has_pending_steer() {
+        emit_agent_stream_delta(app, &stream_request_id, session_id, "", false, true, None);
+        return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
+    }
     if agent_run_should_stop(cancellation) {
         emit_agent_stream_delta(app, &stream_request_id, session_id, "", true, true, None);
         return Err(MODEL_REQUEST_CANCELLED.to_string());
@@ -355,9 +373,9 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
             on_delta(delta);
         },
         || {
-            cancellation.as_ref().is_some_and(|control| {
-                agent_run_should_stop(control) || control.stage_should_stop(stage_class)
-            })
+            cancellation
+                .as_ref()
+                .is_some_and(|control| collaboration_stage_should_interrupt(control, stage_class))
         },
     );
     if let Some(control) = cancellation.as_ref() {
@@ -405,9 +423,7 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
                 let quality = match stage_class {
                     RunStageClass::Reviewer => ResultQuality::Verified,
                     RunStageClass::Synthesizer => ResultQuality::Synthesized,
-                    RunStageClass::Candidate | RunStageClass::Worker => {
-                        ResultQuality::Substantive
-                    }
+                    RunStageClass::Candidate | RunStageClass::Worker => ResultQuality::Substantive,
                     _ => ResultQuality::Draft,
                 };
                 control.record_best_known_result(
@@ -429,11 +445,7 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
         }
         Err(error) => {
             if let Some(control) = cancellation.as_ref() {
-                control.record_observation(
-                    "provider_failure",
-                    error.class.label(),
-                    &error.message,
-                );
+                control.record_observation("provider_failure", error.class.label(), &error.message);
             }
             let mut usage = Metadata::new();
             usage.insert(
@@ -569,10 +581,23 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                 evidence,
             };
         }
-        if cancellation.as_ref().is_some_and(agent_run_should_stop) {
+        if cancellation
+            .as_ref()
+            .is_some_and(collaboration_run_should_interrupt)
+        {
             return CollaborationCompletion {
                 content: None,
-                error: Some(MODEL_REQUEST_CANCELLED.to_string()),
+                error: Some(
+                    if cancellation
+                        .as_ref()
+                        .is_some_and(|control| control.has_pending_steer())
+                    {
+                        COLLABORATION_STEER_INTERRUPTED
+                    } else {
+                        MODEL_REQUEST_CANCELLED
+                    }
+                    .to_string(),
+                ),
                 latency_ms: current_time_millis().saturating_sub(started_at_ms),
                 usage,
                 evidence,
@@ -641,7 +666,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
             },
             || {
                 cancellation.as_ref().is_some_and(|control| {
-                    agent_run_should_stop(control) || control.stage_should_stop(stage_class)
+                    collaboration_stage_should_interrupt(control, stage_class)
                 }) || branch_cancellation
                     .as_ref()
                     .is_some_and(|cancelled| cancelled.load(Ordering::SeqCst))
@@ -677,7 +702,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                     latency_ms: current_time_millis().saturating_sub(started_at_ms),
                     usage,
                     evidence,
-                }
+                };
             }
         };
         if let Some(control) = cancellation.as_ref() {
@@ -1110,8 +1135,13 @@ pub(crate) fn run_collaboration_stage_with_delta(
 ) -> Result<String, String> {
     let cancellation =
         active_agent_run_control(state, run_context.get("session_id").map(String::as_str))?;
-    if cancellation.as_ref().is_some_and(agent_run_should_stop) {
-        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    if let Some(control) = cancellation.as_ref() {
+        if control.has_pending_steer() {
+            return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
+        }
+        if agent_run_should_stop(control) {
+            return Err(MODEL_REQUEST_CANCELLED.to_string());
+        }
     }
     let request_id = unique_id("collaboration-model");
     record_collaboration_stage_started(
@@ -1132,7 +1162,7 @@ pub(crate) fn run_collaboration_stage_with_delta(
         model.to_string(),
         collaboration_system_prompt_for_run(&config.agent_system_prompt, run_context),
         prompt,
-        cancellation,
+        cancellation.clone(),
         on_delta,
     );
     record_collaboration_stage_finished(
@@ -1147,6 +1177,12 @@ pub(crate) fn run_collaboration_stage_with_delta(
         &completion,
         &Metadata::new(),
     )?;
+    if cancellation
+        .as_ref()
+        .is_some_and(|control| control.has_pending_steer())
+    {
+        return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
+    }
     completion.content.ok_or_else(|| {
         completion
             .error

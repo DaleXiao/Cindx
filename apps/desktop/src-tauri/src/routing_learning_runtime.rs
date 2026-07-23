@@ -153,10 +153,25 @@ pub(crate) fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTele
         .collect()
 }
 
-fn routing_quality_signals(
-    run_events: &[&Event],
-    terminal: &Event,
-) -> (Option<f32>, Option<bool>) {
+fn routing_quality_signals(run_events: &[&Event], terminal: &Event) -> (Option<f32>, Option<bool>) {
+    if let Some(delivery) = run_events
+        .iter()
+        .rev()
+        .find(|event| event.summary == "Collaboration workflow completed")
+        .filter(|event| event.metadata.contains_key("anytime_selected_candidate"))
+    {
+        let quality_score = delivery
+            .metadata
+            .get("anytime_selected_quality_bps")
+            .and_then(|score| score.parse::<f32>().ok())
+            .map(|score| (score / 10_000.0).clamp(0.0, 1.0));
+        let verification_passed = delivery
+            .metadata
+            .get("anytime_selected_verified")
+            .and_then(|verified| verified.parse::<bool>().ok());
+        return (quality_score, verification_passed);
+    }
+
     if let Some(gate) = run_events
         .iter()
         .rev()
@@ -178,7 +193,9 @@ fn routing_quality_signals(
             .map(|count| count == 0);
         return (
             quality_score,
-            quality_pass.zip(safety_clear).map(|(pass, clear)| pass && clear),
+            quality_pass
+                .zip(safety_clear)
+                .map(|(pass, clear)| pass && clear),
         );
     }
 
@@ -243,6 +260,38 @@ pub(crate) fn routing_outcome_for_run(
         }
     }
 
+    if let Some(delivery) = run_events
+        .iter()
+        .rev()
+        .find(|event| event.summary == "Collaboration workflow completed")
+        .filter(|event| event.metadata.contains_key("anytime_selected_candidate"))
+    {
+        if delivery
+            .metadata
+            .get("anytime_routing_learning_eligible")
+            .is_some_and(|eligible| eligible == "false")
+        {
+            return None;
+        }
+        let verified = delivery
+            .metadata
+            .get("anytime_selected_verified")?
+            .parse::<bool>()
+            .ok()?;
+        let quality_bps = delivery
+            .metadata
+            .get("anytime_selected_quality_bps")?
+            .parse::<u16>()
+            .ok()?;
+        return Some(
+            if verified && quality_bps >= (ADAPTIVE_QUALITY_PASS_SCORE * 10_000.0).round() as u16 {
+                RoutingOutcome::Succeeded
+            } else {
+                RoutingOutcome::Failed
+            },
+        );
+    }
+
     if let Some(gate) = run_events
         .iter()
         .rev()
@@ -305,13 +354,27 @@ pub(crate) fn workflow_execution_telemetry_from_events(
                     "Collaboration workflow completed" | "Collaboration workflow failed"
                 )
             })?;
+            if terminal
+                .metadata
+                .get("anytime_prompt_learning_eligible")
+                .is_some_and(|eligible| eligible == "false")
+            {
+                return None;
+            }
             let task_class = parse_task_class_label(planned.metadata.get("task_class")?)?;
-            let quality_score = workflow_events
-                .iter()
-                .rev()
-                .find(|event| event.summary == "Collaboration quality gate evaluated")
-                .and_then(|event| event.metadata.get("quality_score"))
-                .and_then(|score| score.parse::<f32>().ok());
+            let quality_score = terminal
+                .metadata
+                .get("anytime_selected_quality_bps")
+                .and_then(|score| score.parse::<f32>().ok())
+                .map(|score| (score / 10_000.0).clamp(0.0, 1.0))
+                .or_else(|| {
+                    workflow_events
+                        .iter()
+                        .rev()
+                        .find(|event| event.summary == "Collaboration quality gate evaluated")
+                        .and_then(|event| event.metadata.get("quality_score"))
+                        .and_then(|score| score.parse::<f32>().ok())
+                });
             let total_tokens = workflow_events
                 .iter()
                 .filter(|event| event.kind == EventKind::ModelRequestFinished)
