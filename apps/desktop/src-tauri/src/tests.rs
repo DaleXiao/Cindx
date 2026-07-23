@@ -45,7 +45,8 @@ fn collaboration_candidate_quorum_matches_effort_contract() {
     assert_eq!(collaboration_candidate_quorum(3, "fast"), 1);
     assert_eq!(collaboration_candidate_quorum(2, "auto"), 2);
     assert_eq!(collaboration_candidate_quorum(4, "auto"), 3);
-    assert_eq!(collaboration_candidate_quorum(4, "pro"), 4);
+    assert_eq!(collaboration_candidate_quorum(3, "pro"), 2);
+    assert_eq!(collaboration_candidate_quorum(4, "pro"), 3);
 
     assert_eq!(
         collaboration_candidate_quorum_grace("fast"),
@@ -55,7 +56,37 @@ fn collaboration_candidate_quorum_matches_effort_contract() {
         collaboration_candidate_quorum_grace("auto"),
         Duration::from_millis(400)
     );
-    assert_eq!(collaboration_candidate_quorum_grace("pro"), Duration::ZERO);
+    assert_eq!(
+        collaboration_candidate_quorum_grace("pro"),
+        Duration::from_millis(1_500)
+    );
+}
+
+#[test]
+fn arbiter_failure_handoff_preserves_candidate_work_for_executor() {
+    let candidates = vec![
+        ("model-a".to_string(), "first grounded proposal".to_string()),
+        (
+            "model-b".to_string(),
+            "second independent proposal".to_string(),
+        ),
+    ];
+    let handoff = collaboration_candidate_handoff("solve the task", &candidates, "timeout");
+    assert!(handoff.contains("INTERNAL TEAM HANDOFF"));
+    assert!(handoff.contains("first grounded proposal"));
+    assert!(handoff.contains("second independent proposal"));
+    assert!(handoff.contains("timeout"));
+}
+
+#[test]
+fn only_safety_collaboration_errors_block_the_executor() {
+    assert!(collaboration_error_blocks_executor(&format!(
+        "{WORKFLOW_SAFETY_ERROR_PREFIX} unsafe output"
+    )));
+    assert!(!collaboration_error_blocks_executor(&format!(
+        "{WORKFLOW_RESUMABLE_ERROR_PREFIX} provider timeout"
+    )));
+    assert!(!collaboration_error_blocks_executor("arbiter unavailable"));
 }
 
 fn test_message(role: MessageRole, content: impl Into<String>) -> Message {
@@ -264,6 +295,37 @@ fn adaptive_layer_failure_preserves_every_failed_step() {
 }
 
 #[test]
+fn adaptive_partial_handoff_preserves_completed_branches_without_claiming_completion() {
+    let outputs = BTreeMap::from([
+        (
+            "inspect".to_string(),
+            "Found the failing module and evidence A.".to_string(),
+        ),
+        (
+            "design".to_string(),
+            "Proposed a bounded repair with test B.".to_string(),
+        ),
+    ]);
+    let handoff = adaptive_partial_work_handoff(
+        "repair the project",
+        &outputs,
+        &["step verify failed after recovery: timeout".to_string()],
+    )
+    .expect("completed branches should produce a recoverable handoff");
+
+    assert!(handoff.contains("INTERNAL PARTIAL WORKFLOW HANDOFF"));
+    assert!(handoff.contains("Found the failing module"));
+    assert!(handoff.contains("Proposed a bounded repair"));
+    assert!(handoff.contains("step verify failed"));
+    assert!(adaptive_partial_work_handoff(
+        "repair the project",
+        &BTreeMap::new(),
+        &["failed".to_string()]
+    )
+    .is_none());
+}
+
+#[test]
 fn adaptive_quality_gate_is_bounded_and_requires_safe_passing_score() {
     assert_eq!(
         adaptive_quality_repair_budget(PromptVerification::Minimal),
@@ -298,6 +360,37 @@ fn adaptive_quality_gate_is_bounded_and_requires_safe_passing_score() {
 }
 
 #[test]
+fn adaptive_quality_search_preserves_the_safest_highest_scoring_anchor() {
+    let anchor = CollaborationQualityPayload {
+        pass: false,
+        score: 0.74,
+        issues: vec!["one remaining issue".to_string()],
+        safety_violations: 0,
+    };
+    let regressed_repair = CollaborationQualityPayload {
+        pass: true,
+        score: 0.96,
+        issues: Vec::new(),
+        safety_violations: 1,
+    };
+    assert!(!adaptive_quality_candidate_is_better(
+        &regressed_repair,
+        &anchor
+    ));
+
+    let improved_repair = CollaborationQualityPayload {
+        pass: true,
+        score: ADAPTIVE_QUALITY_PASS_SCORE,
+        issues: Vec::new(),
+        safety_violations: 0,
+    };
+    assert!(adaptive_quality_candidate_is_better(
+        &improved_repair,
+        &anchor
+    ));
+}
+
+#[test]
 fn adaptive_quality_handoff_preserves_issues_and_fails_closed_on_safety() {
     let unresolved = AdaptiveQualityGateResult {
         output: "candidate guidance".to_string(),
@@ -328,7 +421,7 @@ fn adaptive_quality_handoff_preserves_issues_and_fails_closed_on_safety() {
     };
     let error = adaptive_quality_handoff(&unsafe_result)
         .expect_err("safety violations must stop the workflow");
-    assert!(error.starts_with(WORKFLOW_RESUMABLE_ERROR_PREFIX));
+    assert!(error.starts_with(WORKFLOW_SAFETY_ERROR_PREFIX));
 }
 
 #[test]
@@ -2547,6 +2640,48 @@ fn conductor_merges_authorized_evidence_and_deduplicates_provenance() {
 }
 
 #[test]
+fn conductor_bounds_checkpoint_evidence_and_preserves_current_step_observations() {
+    let inherited = (0..40)
+        .map(|index| CollaborationEvidence {
+            source_step: "source".to_string(),
+            tool_call_id: format!("inherited-{index}"),
+            tool_name: "file.read".to_string(),
+            request: "r".repeat(3_000),
+            status: "succeeded".to_string(),
+            output: "o".repeat(3_000),
+        })
+        .collect::<Vec<_>>();
+    let own = (0..4)
+        .map(|index| CollaborationEvidence {
+            source_step: "current".to_string(),
+            tool_call_id: format!("own-{index}"),
+            tool_name: "file.read".to_string(),
+            request: "request".to_string(),
+            status: "succeeded".to_string(),
+            output: "current observation".to_string(),
+        })
+        .collect::<Vec<_>>();
+    let evidence_by_step = BTreeMap::from([("source".to_string(), inherited)]);
+
+    let merged = merge_collaboration_evidence(&["source".to_string()], &evidence_by_step, &own);
+
+    assert_eq!(merged.len(), 32);
+    assert_eq!(
+        merged
+            .iter()
+            .filter(|entry| entry.source_step == "current")
+            .count(),
+        own.len()
+    );
+    assert!(merged
+        .iter()
+        .all(|entry| entry.request.chars().count() <= 2_012));
+    assert!(merged
+        .iter()
+        .all(|entry| entry.output.chars().count() <= 2_012));
+}
+
+#[test]
 fn collaboration_stages_have_visible_timeline_labels() {
     let event = Event {
         id: EventId("candidate-event".to_string()),
@@ -3413,6 +3548,37 @@ fn routing_telemetry_uses_collaboration_quality_gate_as_outcome() {
     let telemetry = routing_telemetry_from_events(&events);
     assert_eq!(telemetry.len(), 1);
     assert_eq!(telemetry[0].outcome, RoutingOutcome::Failed);
+    assert_eq!(telemetry[0].quality_score, Some(0.61));
+    assert_eq!(telemetry[0].verification_passed, Some(false));
+}
+
+#[test]
+fn collaboration_result_frontier_brief_is_bounded_and_excludes_executor_duplicate() {
+    let control = AgentRunControl::new("pro");
+    control.record_best_known_result(
+        "executor",
+        "executor answer",
+        ResultQuality::Grounded,
+        2,
+        false,
+        true,
+    );
+    for index in 0..5 {
+        control.record_best_known_result(
+            &format!("candidate_{index}"),
+            &format!("candidate proposal {index}"),
+            ResultQuality::Substantive,
+            index,
+            false,
+            false,
+        );
+    }
+
+    let brief = collaboration_result_frontier_brief(&control, "executor answer");
+
+    assert!(!brief.contains("executor answer"));
+    assert_eq!(brief.matches("Candidate ").count(), 3);
+    assert!(brief.contains("candidate proposal 4"));
 }
 
 #[test]
@@ -5582,10 +5748,7 @@ fn interactive_observation_tools_do_not_invalidate_workspace_knowledge() {
         "computer.key",
         &ToolRisk::Destructive
     ));
-    assert!(!tool_may_mutate_workspace(
-        "file.read",
-        &ToolRisk::ReadOnly
-    ));
+    assert!(!tool_may_mutate_workspace("file.read", &ToolRisk::ReadOnly));
     assert!(tool_may_mutate_workspace(
         "file.write",
         &ToolRisk::WritesWorkspace

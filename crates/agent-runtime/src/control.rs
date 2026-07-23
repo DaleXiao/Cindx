@@ -116,6 +116,8 @@ pub struct BestKnownResult {
     pub deliverable: bool,
 }
 
+const RESULT_FRONTIER_MAX: usize = 8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RunStageUsageSnapshot {
     pub model_calls: usize,
@@ -255,6 +257,7 @@ pub struct RunControlSnapshot {
     pending_steers: VecDeque<RunSteer>,
     stage_usage: BTreeMap<RunStageClass, RunStageUsageSnapshot>,
     best_known_result: Option<BestKnownResult>,
+    result_frontier: Vec<BestKnownResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -309,6 +312,7 @@ struct RunMutableState {
     pending_steers: VecDeque<RunSteer>,
     stage_usage: BTreeMap<RunStageClass, RunStageUsage>,
     best_known_result: Option<BestKnownResult>,
+    result_frontier: Vec<BestKnownResult>,
 }
 
 #[derive(Debug)]
@@ -327,7 +331,7 @@ impl AgentRunControl {
         Self::with_budget(RunBudget::for_effort(effort))
     }
 
-    fn with_budget(budget: RunBudget) -> Self {
+    pub fn with_budget(budget: RunBudget) -> Self {
         let now = Instant::now();
         Self {
             budget,
@@ -367,6 +371,7 @@ impl AgentRunControl {
                 pending_steers: VecDeque::new(),
                 stage_usage: BTreeMap::new(),
                 best_known_result: None,
+                result_frontier: Vec::new(),
             }),
         }
     }
@@ -406,6 +411,7 @@ impl AgentRunControl {
                 pending_steers: snapshot.pending_steers,
                 stage_usage: restore_stage_usage(snapshot.stage_usage, now),
                 best_known_result: snapshot.best_known_result,
+                result_frontier: snapshot.result_frontier,
             }),
         }
     }
@@ -460,6 +466,7 @@ impl AgentRunControl {
                         pending_steers: snapshot.pending_steers,
                         stage_usage: BTreeMap::new(),
                         best_known_result: snapshot.best_known_result,
+                        result_frontier: snapshot.result_frontier,
                     }),
                 })
             }
@@ -493,6 +500,7 @@ impl AgentRunControl {
             pending_steers: state.pending_steers.clone(),
             stage_usage: snapshot_stage_usage(&state.stage_usage),
             best_known_result: state.best_known_result.clone(),
+            result_frontier: state.result_frontier.clone(),
         }
     }
 
@@ -809,6 +817,7 @@ impl AgentRunControl {
             deliverable,
         };
         let mut state = self.state.lock().expect("run control state poisoned");
+        record_result_frontier(&mut state.result_frontier, candidate.clone());
         let should_replace = state
             .best_known_result
             .as_ref()
@@ -825,6 +834,23 @@ impl AgentRunControl {
             .lock()
             .expect("run control state poisoned")
             .best_known_result
+            .clone()
+    }
+
+    pub fn best_guidance_result(&self) -> Option<BestKnownResult> {
+        self.state
+            .lock()
+            .expect("run control state poisoned")
+            .result_frontier
+            .first()
+            .cloned()
+    }
+
+    pub fn result_frontier(&self) -> Vec<BestKnownResult> {
+        self.state
+            .lock()
+            .expect("run control state poisoned")
+            .result_frontier
             .clone()
     }
 
@@ -1006,6 +1032,24 @@ fn result_rank(result: &BestKnownResult) -> (bool, ResultQuality, bool, usize, u
         result.evidence_count,
         result.content.chars().count(),
     )
+}
+
+fn guidance_rank(result: &BestKnownResult) -> (ResultQuality, bool, usize, bool, usize) {
+    (
+        result.quality,
+        result.verified,
+        result.evidence_count,
+        result.deliverable,
+        result.content.chars().count(),
+    )
+}
+
+fn record_result_frontier(frontier: &mut Vec<BestKnownResult>, candidate: BestKnownResult) {
+    frontier
+        .retain(|result| result.stage != candidate.stage || result.content != candidate.content);
+    frontier.push(candidate);
+    frontier.sort_by_key(|result| std::cmp::Reverse(guidance_rank(result)));
+    frontier.truncate(RESULT_FRONTIER_MAX);
 }
 
 fn snapshot_stage_usage(
@@ -1489,5 +1533,41 @@ mod tests {
         assert_eq!(best.quality, ResultQuality::Verified);
         assert!(best.verified);
         assert!(best.deliverable);
+    }
+
+    #[test]
+    fn result_frontier_keeps_stronger_internal_guidance_without_replacing_deliverable() {
+        let control = AgentRunControl::with_budget(test_budget());
+        assert!(control.record_best_known_result(
+            "draft_delivery",
+            "safe user-facing draft",
+            ResultQuality::Draft,
+            0,
+            false,
+            true,
+        ));
+        assert!(!control.record_best_known_result(
+            "verified_candidate",
+            "strong internal evidence",
+            ResultQuality::Verified,
+            4,
+            true,
+            false,
+        ));
+
+        let resumed = AgentRunControl::from_snapshot(control.snapshot());
+        assert_eq!(
+            resumed
+                .best_known_result()
+                .expect("deliverable should remain available")
+                .content,
+            "safe user-facing draft"
+        );
+        let guidance = resumed
+            .best_guidance_result()
+            .expect("strong guidance should survive resume");
+        assert_eq!(guidance.content, "strong internal evidence");
+        assert!(guidance.verified);
+        assert!(!guidance.deliverable);
     }
 }

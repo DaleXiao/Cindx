@@ -9,6 +9,14 @@ const MRCR_DATASET_REVISION: &str = "2025-12-05-bugfix";
 const EVALUATION_MODEL_CALL_TIMEOUT_SECONDS: u64 = 180;
 const EVALUATION_TREATMENT_DEADLINE_SECONDS: u64 = 300;
 
+fn evaluation_run_control(effort: &str) -> Arc<AgentRunControl> {
+    let mut budget = RunBudget::for_effort(effort);
+    budget.max_duration = Duration::from_secs(EVALUATION_TREATMENT_DEADLINE_SECONDS);
+    budget.model_call_timeout = Duration::from_secs(EVALUATION_MODEL_CALL_TIMEOUT_SECONDS);
+    budget.terminal_time_reserve = Duration::from_secs(30);
+    Arc::new(AgentRunControl::with_budget(budget))
+}
+
 #[derive(Debug, Deserialize)]
 struct GpqaRow {
     #[serde(rename = "Question")]
@@ -295,7 +303,7 @@ fn direct_gpqa_treatment(config: &ProviderConfig, prompt: &str) -> TreatmentOutp
             "Answer the multiple-choice question without tools. Follow the requested answer format exactly."
                 .to_string(),
             prompt.to_string(),
-            Some(Arc::new(AgentRunControl::new("fast"))),
+            Some(evaluation_run_control("fast")),
             |_| {},
         ),
     )
@@ -440,7 +448,7 @@ fn auto_gpqa_treatment(
             prompt,
             policy,
             deterministic_auto_plan(config, prompt, &decision),
-            &Arc::new(AgentRunControl::new("fast")),
+            &evaluation_run_control("auto"),
         ),
     }
 }
@@ -454,7 +462,7 @@ fn conductor_gpqa_treatment(
     policy: String,
 ) -> TreatmentOutput {
     let worker_models = collaboration_candidate_models(config, agent_budget);
-    let control = Arc::new(AgentRunControl::new("fast"));
+    let control = evaluation_run_control(effort);
     let mut candidate = evaluate_conductor_prompt_profile(
         config,
         prompt,
@@ -731,6 +739,22 @@ fn mrcr_prompt_preserves_message_order_and_roles() {
     assert_eq!(messages[0].role, MessageRole::User);
     assert_eq!(messages[1].role, MessageRole::Assistant);
     assert_eq!(messages[2].content, "three");
+}
+
+#[test]
+fn external_effect_treatments_use_the_declared_deadline() {
+    for effort in ["fast", "auto", "pro"] {
+        let budget = evaluation_run_control(effort).budget();
+        assert_eq!(
+            budget.max_duration,
+            Duration::from_secs(EVALUATION_TREATMENT_DEADLINE_SECONDS)
+        );
+        assert_eq!(
+            budget.model_call_timeout,
+            Duration::from_secs(EVALUATION_MODEL_CALL_TIMEOUT_SECONDS)
+        );
+        assert!(budget.terminal_time_reserve < budget.max_duration);
+    }
 }
 
 #[test]

@@ -8,8 +8,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 const COLLABORATION_WORKER_FINALIZATION_TURNS: usize = 1;
+const COLLABORATION_SHARED_EVIDENCE_MAX_ENTRIES: usize = 32;
+const COLLABORATION_EVIDENCE_REQUEST_MAX_CHARS: usize = 2_000;
+const COLLABORATION_EVIDENCE_OUTPUT_MAX_CHARS: usize = 2_000;
 
 pub(crate) const WORKFLOW_RESUMABLE_ERROR_PREFIX: &str = "workflow checkpoint saved:";
+pub(crate) const WORKFLOW_SAFETY_ERROR_PREFIX: &str = "workflow safety gate blocked:";
 
 #[derive(Debug, Clone)]
 pub(crate) struct AgentCollaboration {
@@ -432,13 +436,19 @@ pub(crate) fn merge_collaboration_evidence(
     evidence_by_step: &BTreeMap<String, Vec<CollaborationEvidence>>,
     own_evidence: &[CollaborationEvidence],
 ) -> Vec<CollaborationEvidence> {
+    let own_evidence_count = own_evidence
+        .len()
+        .min(COLLABORATION_SHARED_EVIDENCE_MAX_ENTRIES);
+    let inherited_limit =
+        COLLABORATION_SHARED_EVIDENCE_MAX_ENTRIES.saturating_sub(own_evidence_count);
     let mut merged = dependencies
         .iter()
         .filter_map(|dependency| evidence_by_step.get(dependency))
         .flatten()
+        .take(inherited_limit)
         .cloned()
         .collect::<Vec<_>>();
-    merged.extend(own_evidence.iter().cloned());
+    merged.extend(own_evidence.iter().take(own_evidence_count).cloned());
     let mut seen = BTreeSet::new();
     merged.retain(|entry| {
         seen.insert((
@@ -447,5 +457,11 @@ pub(crate) fn merge_collaboration_evidence(
             entry.tool_name.clone(),
         ))
     });
+    for entry in &mut merged {
+        entry.request =
+            truncate_for_collaboration(&entry.request, COLLABORATION_EVIDENCE_REQUEST_MAX_CHARS);
+        entry.output =
+            truncate_for_collaboration(&entry.output, COLLABORATION_EVIDENCE_OUTPUT_MAX_CHARS);
+    }
     merged
 }

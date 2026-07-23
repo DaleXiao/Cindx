@@ -92,12 +92,27 @@ pub(crate) fn run_collaboration_candidates(
         .get("agent_effort")
         .map(String::as_str)
         .unwrap_or("auto");
-    let required_successes = collaboration_candidate_quorum(specs.len(), effort);
+    let execution_contract = run_context
+        .get("conductor_contract")
+        .map(String::as_str)
+        .and_then(|contract| ConductorExecutionContract::from_json(contract).ok())
+        .map(|contract| match prompt_profile {
+            Some(profile) => contract.with_prompt_commit_strategy(profile.commit_strategy),
+            None => contract,
+        });
+    let required_successes = execution_contract
+        .as_ref()
+        .map(|contract| contract.required_successes_for_layer(specs.len()))
+        .unwrap_or_else(|| collaboration_candidate_quorum(specs.len(), effort));
+    let quorum_grace = execution_contract
+        .as_ref()
+        .map(|contract| Duration::from_millis(contract.quorum_grace_ms()))
+        .unwrap_or_else(|| collaboration_candidate_quorum_grace(effort));
     let execution = run_model_jobs_until_quorum(
         "candidate-worker",
         jobs,
         required_successes,
-        collaboration_candidate_quorum_grace(effort),
+        quorum_grace,
         |completion| {
             completion
                 .content
@@ -129,6 +144,10 @@ pub(crate) fn run_collaboration_candidates(
                     (
                         "cancelled_stragglers".to_string(),
                         execution.cancelled_stragglers.to_string(),
+                    ),
+                    (
+                        "quorum_grace_ms".to_string(),
+                        quorum_grace.as_millis().to_string(),
                     ),
                 ]
                 .into_iter()
@@ -184,7 +203,7 @@ pub(crate) fn run_collaboration_candidates(
     if candidates.len() == 1 {
         return Ok(candidates.remove(0).1);
     }
-    run_collaboration_stage(
+    let arbiter_result = run_collaboration_stage(
         state,
         config,
         task_id,
@@ -194,7 +213,35 @@ pub(crate) fn run_collaboration_candidates(
         ModelRole::Reviewer,
         &config.model_for_role(&ModelRole::Reviewer),
         build_collaboration_arbiter_prompt(prompt, &candidates, conductor_directive.as_deref()),
-    )
+    );
+    match arbiter_result {
+        Ok(guidance) => Ok(guidance),
+        Err(error) => {
+            if let Ok(mut store) = state.store.lock() {
+                let _ = append_event(
+                    &mut store,
+                    task_id,
+                    EventKind::TaskStatusChanged,
+                    "Collaboration arbiter degraded",
+                    metadata_with_context(
+                        [
+                            ("collaboration_id".to_string(), collaboration_id.to_string()),
+                            ("status".to_string(), "degraded".to_string()),
+                            ("candidate_count".to_string(), candidates.len().to_string()),
+                            (
+                                "error".to_string(),
+                                truncate_for_collaboration(&error, 2_000),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        run_context,
+                    ),
+                );
+            }
+            Ok(collaboration_candidate_handoff(prompt, &candidates, &error))
+        }
+    }
 }
 
 pub(crate) fn collaboration_candidate_quorum(candidate_count: usize, effort: &str) -> usize {
@@ -202,7 +249,7 @@ pub(crate) fn collaboration_candidate_quorum(candidate_count: usize, effort: &st
         0 => 0,
         1 => 1,
         _ if effort == "fast" => 1,
-        count if effort == "pro" => count,
+        count if effort == "pro" => count.saturating_mul(2).saturating_add(2) / 3,
         count => count.saturating_sub(1).max(2).min(count),
     }
 }
@@ -210,9 +257,38 @@ pub(crate) fn collaboration_candidate_quorum(candidate_count: usize, effort: &st
 pub(crate) fn collaboration_candidate_quorum_grace(effort: &str) -> Duration {
     match effort {
         "fast" => Duration::from_millis(100),
-        "pro" => Duration::ZERO,
+        "pro" => Duration::from_millis(1_500),
         _ => Duration::from_millis(400),
     }
+}
+
+pub(crate) fn collaboration_candidate_handoff(
+    prompt: &str,
+    candidates: &[(String, String)],
+    arbiter_error: &str,
+) -> String {
+    let candidate_reports = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, (_, report))| {
+            format!(
+                "Candidate {}:\n{}",
+                index + 1,
+                truncate_for_collaboration(report, 12_000)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    format!(
+        "INTERNAL TEAM HANDOFF: Independent candidate work completed, but the arbiter was unavailable. The downstream executor must reconcile conflicts, verify claims and artifacts, and produce the final answer itself. Do not expose this internal note to the user.\n\nUser objective:\n{}\n\nArbiter failure:\n{}\n\nCandidate work:\n{}",
+        truncate_for_collaboration(prompt, 4_000),
+        truncate_for_collaboration(arbiter_error, 1_000),
+        truncate_for_collaboration(&candidate_reports, 30_000),
+    )
+}
+
+pub(crate) fn collaboration_error_blocks_executor(error: &str) -> bool {
+    error.starts_with(WORKFLOW_SAFETY_ERROR_PREFIX)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -331,7 +407,7 @@ pub(crate) fn prepare_agent_collaboration(
             agent_budget,
         )
         .or_else(|error| {
-            if error.starts_with(WORKFLOW_RESUMABLE_ERROR_PREFIX) {
+            if collaboration_error_blocks_executor(&error) {
                 return Err(error);
             }
             let control =
@@ -414,4 +490,88 @@ pub(crate) fn prepare_agent_collaboration(
         guidance,
         candidate_models: models,
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_agent_collaboration_or_degrade(
+    app: &tauri::AppHandle,
+    state: &tauri::State<'_, AppState>,
+    config: &ProviderConfig,
+    task_id: &TaskId,
+    workspace_root: &Path,
+    run_context: &Metadata,
+    policy: &OrchestrationPolicy,
+    prompt: &str,
+    history: &[Message],
+) -> Result<Option<AgentCollaboration>, String> {
+    match prepare_agent_collaboration(
+        app,
+        state,
+        config,
+        task_id,
+        workspace_root,
+        run_context,
+        policy,
+        prompt,
+        history,
+    ) {
+        Ok(collaboration) => Ok(collaboration),
+        Err(error) if collaboration_error_blocks_executor(&error) => Err(error),
+        Err(error) => {
+            let control =
+                active_agent_run_control(state, run_context.get("session_id").map(String::as_str))?;
+            if control.as_ref().is_some_and(agent_run_should_stop) {
+                return Err(error);
+            }
+            let best_known = control
+                .as_ref()
+                .and_then(|control| control.best_guidance_result());
+            let guidance = best_known
+                .as_ref()
+                .filter(|result| !result.content.trim().is_empty())
+                .map(|result| {
+                    format!(
+                        "INTERNAL DEGRADED COLLABORATION HANDOFF: Team orchestration did not finish, but useful work was preserved from stage {} with quality {}. Independently verify it before use and do not expose this note to the user.\n\n{}",
+                        result.stage,
+                        result.quality.as_str(),
+                        result.content,
+                    )
+                });
+            if let Ok(mut store) = state.store.lock() {
+                let _ = append_event(
+                    &mut store,
+                    task_id,
+                    EventKind::TaskStatusChanged,
+                    "Collaboration degraded to executor",
+                    metadata_with_context(
+                        [
+                            ("status".to_string(), "degraded".to_string()),
+                            ("fallback_used".to_string(), "executor".to_string()),
+                            ("policy".to_string(), policy.label().to_string()),
+                            (
+                                "best_known_stage".to_string(),
+                                best_known
+                                    .as_ref()
+                                    .map(|result| result.stage.clone())
+                                    .unwrap_or_default(),
+                            ),
+                            (
+                                "error".to_string(),
+                                truncate_for_collaboration(&error, 2_000),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        run_context,
+                    ),
+                );
+            }
+            Ok(guidance.map(|guidance| AgentCollaboration {
+                id: unique_id("collab-degraded"),
+                policy: policy.label().to_string(),
+                guidance,
+                candidate_models: Vec::new(),
+            }))
+        }
+    }
 }

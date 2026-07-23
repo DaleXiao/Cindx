@@ -723,7 +723,7 @@ impl RoutingOutcome {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutingTelemetry {
     pub task_class: TaskClass,
     pub context_signature: String,
@@ -731,6 +731,10 @@ pub struct RoutingTelemetry {
     pub selected_model: String,
     pub latency_ms: u64,
     pub outcome: RoutingOutcome,
+    #[serde(default)]
+    pub quality_score: Option<f32>,
+    #[serde(default)]
+    pub verification_passed: Option<bool>,
     pub cost_proxy: u64,
     pub tool_count: u64,
     pub retrieval_count: u64,
@@ -746,6 +750,8 @@ pub struct LearnedRoute {
     pub successes: usize,
     pub success_rate: f32,
     pub success_confidence: f64,
+    pub average_quality_score: Option<f32>,
+    pub verification_rate: Option<f32>,
     pub average_latency_ms: u64,
     pub average_cost_proxy: u64,
 }
@@ -872,11 +878,8 @@ fn is_lightweight_direct(context: &RoutingContext) -> bool {
 }
 
 fn requires_ultra(context: &RoutingContext) -> bool {
-    let contract = ConductorExecutionContract::from_routing(
-        context,
-        "auto",
-        OrchestrationPolicy::AutoRouter,
-    );
+    let contract =
+        ConductorExecutionContract::from_routing(context, "auto", OrchestrationPolicy::AutoRouter);
     context.needs_multi_model
         || (!context.latency_sensitive
             && !matches!(context.task_class, TaskClass::Browser | TaskClass::Computer)
@@ -1114,6 +1117,8 @@ impl LearnedModelRouter {
                             successes: accumulator.successes,
                             success_rate: accumulator.success_rate(),
                             success_confidence: accumulator.success_confidence(),
+                            average_quality_score: accumulator.average_quality_score(),
+                            verification_rate: accumulator.verification_rate(),
                             average_latency_ms: accumulator.average_latency_ms(),
                             average_cost_proxy: accumulator.average_cost_proxy(),
                         },
@@ -1159,13 +1164,21 @@ impl LearnedModelRouter {
         );
         decision.model = route.model.clone();
         decision.explanation = format!(
-            "class={} learned_policy={} learned_model={} examples={} success_rate={:.2} confidence={:.3}",
+            "class={} learned_policy={} learned_model={} examples={} success_rate={:.2} confidence={:.3} quality={} verification={}",
             context.task_class.label(),
             route.policy.label(),
             route.model,
             route.examples,
             route.success_rate,
-            route.success_confidence
+            route.success_confidence,
+            route
+                .average_quality_score
+                .map(|score| format!("{score:.3}"))
+                .unwrap_or_else(|| "unrated".to_string()),
+            route
+                .verification_rate
+                .map(|rate| format!("{rate:.3}"))
+                .unwrap_or_else(|| "unrated".to_string())
         );
         decision
             .metadata
@@ -1181,6 +1194,17 @@ impl LearnedModelRouter {
             "learned_success_confidence".to_string(),
             format!("{:.3}", route.success_confidence),
         );
+        if let Some(score) = route.average_quality_score {
+            decision
+                .metadata
+                .insert("learned_quality_score".to_string(), format!("{score:.3}"));
+        }
+        if let Some(rate) = route.verification_rate {
+            decision.metadata.insert(
+                "learned_verification_rate".to_string(),
+                format!("{rate:.3}"),
+            );
+        }
         decision
     }
 
@@ -1201,6 +1225,10 @@ struct RouteAccumulator {
     task_class: Option<TaskClass>,
     examples: usize,
     successes: usize,
+    quality_total: f32,
+    quality_examples: usize,
+    verified: usize,
+    verification_examples: usize,
     latency_ms: u64,
     cost_proxy: u64,
 }
@@ -1209,8 +1237,21 @@ impl RouteAccumulator {
     fn record(&mut self, telemetry: &RoutingTelemetry) {
         self.task_class = Some(telemetry.task_class.clone());
         self.examples += 1;
-        if telemetry.outcome.is_success() {
+        if telemetry.outcome.is_success()
+            && telemetry
+                .quality_score
+                .is_none_or(|score| score >= ADAPTIVE_WORKFLOW_PRIOR_MIN_QUALITY)
+            && telemetry.verification_passed != Some(false)
+        {
             self.successes += 1;
+        }
+        if let Some(score) = telemetry.quality_score {
+            self.quality_total += score.clamp(0.0, 1.0);
+            self.quality_examples += 1;
+        }
+        if let Some(verified) = telemetry.verification_passed {
+            self.verified += usize::from(verified);
+            self.verification_examples += 1;
         }
         self.latency_ms = self.latency_ms.saturating_add(telemetry.latency_ms);
         self.cost_proxy = self.cost_proxy.saturating_add(telemetry.cost_proxy);
@@ -1226,6 +1267,15 @@ impl RouteAccumulator {
 
     fn success_confidence(&self) -> f64 {
         wilson_lower_bound(self.successes, self.examples)
+    }
+
+    fn average_quality_score(&self) -> Option<f32> {
+        (self.quality_examples > 0).then(|| self.quality_total / self.quality_examples as f32)
+    }
+
+    fn verification_rate(&self) -> Option<f32> {
+        (self.verification_examples > 0)
+            .then(|| self.verified as f32 / self.verification_examples as f32)
     }
 
     fn average_latency_ms(&self) -> u64 {
@@ -1247,6 +1297,20 @@ impl RouteAccumulator {
     fn compare_preference(&self, other: &Self) -> std::cmp::Ordering {
         self.success_confidence()
             .total_cmp(&other.success_confidence())
+            .then_with(|| {
+                self.average_quality_score()
+                    .unwrap_or(self.success_rate())
+                    .total_cmp(
+                        &other
+                            .average_quality_score()
+                            .unwrap_or(other.success_rate()),
+                    )
+            })
+            .then_with(|| {
+                self.verification_rate()
+                    .unwrap_or(0.0)
+                    .total_cmp(&other.verification_rate().unwrap_or(0.0))
+            })
             .then_with(|| self.success_rate().total_cmp(&other.success_rate()))
             .then_with(|| self.examples.cmp(&other.examples))
             .then_with(|| other.average_latency_ms().cmp(&self.average_latency_ms()))
