@@ -2,6 +2,13 @@
 
 Cindx separates deterministic harness regressions from observed answer quality. A green build proves the routing contract is stable; it does not claim that a model answer is correct.
 
+## Fugu v1 Parity Evaluation
+
+The frozen Fugu Ultra public-protocol matrix, safety attestation contract,
+quality-first and iso-budget tracks, and causal-ablation report are documented in
+[`FUGU_EVALUATION.md`](FUGU_EVALUATION.md). Its CLI validates evidence and emits
+an Evaluation Card but never executes third-party benchmarks itself.
+
 ## Agent Arena
 
 `benchmarks/agent/arena-v1.json` is the provider-backed comparison contract for
