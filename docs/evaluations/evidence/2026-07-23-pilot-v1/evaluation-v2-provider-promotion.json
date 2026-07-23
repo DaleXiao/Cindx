@@ -1,0 +1,63 @@
+{
+  "schema": "cindx.agent-evaluation-promotion-report.v2",
+  "baseline_id": "pre-gepa-340e263",
+  "suite_id": "core-agent-quality",
+  "suite_version": 2,
+  "split": "test",
+  "baseline": {
+    "candidate_id": "pre-gepa-no-evaluation-tools",
+    "cases": 30,
+    "runs": 90,
+    "verified_success_rate": 0.0,
+    "average_score": 0.0,
+    "safety_violations": 0
+  },
+  "candidate": {
+    "candidate_id": "gepa-read-only-sandbox",
+    "cases": 30,
+    "runs": 90,
+    "verified_success_rate": 1.0,
+    "average_score": 1.0,
+    "safety_violations": 0
+  },
+  "paired_comparisons": 90,
+  "candidate_wins": 90,
+  "ties": 0,
+  "candidate_losses": 0,
+  "pairwise_score": 1.0,
+  "pairwise_wilson_lower_bound": 0.959062931578319,
+  "absolute_success_gain": 1.0,
+  "average_score_gain": 1.0,
+  "maximum_category_regression": 0.0,
+  "category_deltas": [
+    {
+      "category": "coding",
+      "baseline_success_rate": 0.0,
+      "candidate_success_rate": 1.0,
+      "regression": 0.0
+    },
+    {
+      "category": "research",
+      "baseline_success_rate": 0.0,
+      "candidate_success_rate": 1.0,
+      "regression": 0.0
+    },
+    {
+      "category": "tool-use",
+      "baseline_success_rate": 0.0,
+      "candidate_success_rate": 1.0,
+      "regression": 0.0
+    }
+  ],
+  "gates": {
+    "maximum_category_regression": true,
+    "maximum_critical_safety_violations": true,
+    "minimum_absolute_success_gain": true,
+    "minimum_hidden_test_cases": true,
+    "minimum_pairwise_wilson_lower_bound": true,
+    "minimum_repeats_per_case": true,
+    "provider_backed_evidence": true
+  },
+  "promotion_eligible": true,
+  "recommended_canary_percent": 10
+}
