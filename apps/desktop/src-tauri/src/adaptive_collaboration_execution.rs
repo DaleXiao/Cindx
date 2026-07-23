@@ -99,6 +99,9 @@ pub(crate) fn run_adaptive_collaboration(
             prompt_genome.id = profile;
         }
     }
+    let selected_prompt_genome = prompt_genome.clone();
+    prompt_genome = prompt_genome.with_effort_capability_floor(&effort);
+    let prompt_capability_floor_applied = prompt_genome != selected_prompt_genome;
     let execution_contract =
         base_execution_contract.with_prompt_commit_strategy(prompt_genome.commit_strategy);
     let prompt_genome_json = serde_json::to_string(&prompt_genome)
@@ -124,6 +127,10 @@ pub(crate) fn run_adaptive_collaboration(
                     ),
                     ("prompt_genome".to_string(), prompt_genome_json.clone()),
                     ("prompt_selection_mode".to_string(), selection_mode.clone()),
+                    (
+                        "prompt_capability_floor_applied".to_string(),
+                        prompt_capability_floor_applied.to_string(),
+                    ),
                     ("workflow_resume_key".to_string(), resume_key.clone()),
                     (
                         "prompt_evolution_status".to_string(),
@@ -350,7 +357,7 @@ pub(crate) fn run_adaptive_collaboration(
             prompt_evolution_enabled: config.prompt_evolution_enabled,
             prompt_genome: prompt_genome.clone(),
         });
-        let mut conductor_response = match run_collaboration_stage(
+        let conductor_response = run_collaboration_stage(
             state,
             config,
             task_id,
@@ -360,8 +367,162 @@ pub(crate) fn run_adaptive_collaboration(
             ModelRole::Planner,
             &conductor_model,
             harness.planning_prompt(),
-        ) {
-            Ok(response) => response,
+        );
+        match conductor_response {
+            Ok(mut conductor_response) => {
+                let mut conductor_attempts = 1usize;
+                let workflow_plan = loop {
+                    if collaboration_steer_pending(cancellation.as_ref()) {
+                        cancel_anytime_background(anchor_supervisor.as_ref(), None);
+                        return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
+                    }
+                    match harness.parse_plan(&conductor_response) {
+                        Ok(plan) => break plan,
+                        Err(error) if conductor_attempts < CONDUCTOR_MAX_ATTEMPTS => {
+                            if let Some(control) = cancellation.as_ref() {
+                                if let Err(reason) =
+                                    control.begin_repair_attempt("conductor_repair")
+                                {
+                                    if effort != "fast" {
+                                        break deterministic_conductor_fallback(
+                                            state,
+                                            task_id,
+                                            run_context,
+                                            collaboration_id,
+                                            &harness,
+                                            conductor_attempts,
+                                            &format!("repair budget exhausted: {}", reason.code()),
+                                        )?;
+                                    }
+                                    if let Some(anchor) = await_direct_anchor_fallback(
+                                        state,
+                                        task_id,
+                                        run_context,
+                                        collaboration_id,
+                                        &anchor_spec,
+                                        prompt_genome.verification,
+                                        cancellation.as_ref(),
+                                        &mut anchor_supervisor,
+                                        &mut direct_anchor_output,
+                                        Duration::from_millis(500),
+                                    )? {
+                                        return Ok(anchor);
+                                    }
+                                    return Err(format!(
+                                        "Conductor repair budget exhausted: {}",
+                                        reason.code()
+                                    ));
+                                }
+                            }
+                            if let Ok(mut store) = state.store.lock() {
+                                let _ = append_event(
+                                    &mut store,
+                                    task_id,
+                                    EventKind::TaskStatusChanged,
+                                    "Conductor workflow rejected",
+                                    metadata_with_context(
+                                        [
+                                            (
+                                                "collaboration_id".to_string(),
+                                                collaboration_id.to_string(),
+                                            ),
+                                            ("attempt".to_string(), conductor_attempts.to_string()),
+                                            (
+                                                "validation_error".to_string(),
+                                                truncate_for_collaboration(&error, 2_000),
+                                            ),
+                                        ]
+                                        .into_iter()
+                                        .collect(),
+                                        run_context,
+                                    ),
+                                );
+                            }
+                            conductor_response = match run_collaboration_stage(
+                                state,
+                                config,
+                                task_id,
+                                run_context,
+                                collaboration_id,
+                                "conductor_repair",
+                                ModelRole::Planner,
+                                &conductor_model,
+                                harness.repair_prompt(&conductor_response, &error),
+                            ) {
+                                Ok(response) => response,
+                                Err(repair_error) => {
+                                    if repair_error == COLLABORATION_STEER_INTERRUPTED
+                                        || collaboration_steer_pending(cancellation.as_ref())
+                                    {
+                                        cancel_anytime_background(anchor_supervisor.as_ref(), None);
+                                        return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
+                                    }
+                                    if effort != "fast" {
+                                        break deterministic_conductor_fallback(
+                                            state,
+                                            task_id,
+                                            run_context,
+                                            collaboration_id,
+                                            &harness,
+                                            conductor_attempts,
+                                            &format!("repair stage failed: {repair_error}"),
+                                        )?;
+                                    }
+                                    if let Some(anchor) = await_direct_anchor_fallback(
+                                        state,
+                                        task_id,
+                                        run_context,
+                                        collaboration_id,
+                                        &anchor_spec,
+                                        prompt_genome.verification,
+                                        cancellation.as_ref(),
+                                        &mut anchor_supervisor,
+                                        &mut direct_anchor_output,
+                                        Duration::from_millis(500),
+                                    )? {
+                                        return Ok(anchor);
+                                    }
+                                    return Err(format!(
+                                        "Conductor repair failed after {conductor_attempts} attempt(s): {repair_error}"
+                                    ));
+                                }
+                            };
+                            conductor_attempts += 1;
+                        }
+                        Err(error) => {
+                            if effort != "fast" {
+                                break deterministic_conductor_fallback(
+                                    state,
+                                    task_id,
+                                    run_context,
+                                    collaboration_id,
+                                    &harness,
+                                    conductor_attempts,
+                                    &format!("invalid workflow after repair: {error}"),
+                                )?;
+                            }
+                            if let Some(anchor) = await_direct_anchor_fallback(
+                                state,
+                                task_id,
+                                run_context,
+                                collaboration_id,
+                                &anchor_spec,
+                                prompt_genome.verification,
+                                cancellation.as_ref(),
+                                &mut anchor_supervisor,
+                                &mut direct_anchor_output,
+                                Duration::from_millis(500),
+                            )? {
+                                return Ok(anchor);
+                            }
+                            return Err(format!(
+                                "Conductor failed to produce a valid workflow after {conductor_attempts} attempts: {error}"
+                            ));
+                        }
+                    }
+                };
+                (workflow_plan, conductor_attempts)
+            }
             Err(error) => {
                 if error == COLLABORATION_STEER_INTERRUPTED
                     || collaboration_steer_pending(cancellation.as_ref())
@@ -369,116 +530,18 @@ pub(crate) fn run_adaptive_collaboration(
                     cancel_anytime_background(anchor_supervisor.as_ref(), None);
                     return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
                 }
-                if let Some(anchor) = await_direct_anchor_fallback(
-                    state,
-                    task_id,
-                    run_context,
-                    collaboration_id,
-                    &anchor_spec,
-                    prompt_genome.verification,
-                    cancellation.as_ref(),
-                    &mut anchor_supervisor,
-                    &mut direct_anchor_output,
-                    Duration::from_millis(500),
-                )? {
-                    return Ok(anchor);
-                }
-                return Err(error);
-            }
-        };
-        let mut conductor_attempts = 1usize;
-        let workflow_plan = loop {
-            if collaboration_steer_pending(cancellation.as_ref()) {
-                cancel_anytime_background(anchor_supervisor.as_ref(), None);
-                return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
-            }
-            match harness.parse_plan(&conductor_response) {
-                Ok(plan) => break plan,
-                Err(error) if conductor_attempts < CONDUCTOR_MAX_ATTEMPTS => {
-                    if let Some(control) = cancellation.as_ref() {
-                        if let Err(reason) = control.begin_repair_attempt("conductor_repair") {
-                            if let Some(anchor) = await_direct_anchor_fallback(
-                                state,
-                                task_id,
-                                run_context,
-                                collaboration_id,
-                                &anchor_spec,
-                                prompt_genome.verification,
-                                cancellation.as_ref(),
-                                &mut anchor_supervisor,
-                                &mut direct_anchor_output,
-                                Duration::from_millis(500),
-                            )? {
-                                return Ok(anchor);
-                            }
-                            return Err(format!(
-                                "Conductor repair budget exhausted: {}",
-                                reason.code()
-                            ));
-                        }
-                    }
-                    if let Ok(mut store) = state.store.lock() {
-                        let _ = append_event(
-                            &mut store,
-                            task_id,
-                            EventKind::TaskStatusChanged,
-                            "Conductor workflow rejected",
-                            metadata_with_context(
-                                [
-                                    ("collaboration_id".to_string(), collaboration_id.to_string()),
-                                    ("attempt".to_string(), conductor_attempts.to_string()),
-                                    (
-                                        "validation_error".to_string(),
-                                        truncate_for_collaboration(&error, 2_000),
-                                    ),
-                                ]
-                                .into_iter()
-                                .collect(),
-                                run_context,
-                            ),
-                        );
-                    }
-                    conductor_response = match run_collaboration_stage(
+                if effort != "fast" {
+                    let plan = deterministic_conductor_fallback(
                         state,
-                        config,
                         task_id,
                         run_context,
                         collaboration_id,
-                        "conductor_repair",
-                        ModelRole::Planner,
-                        &conductor_model,
-                        harness.repair_prompt(&conductor_response, &error),
-                    ) {
-                        Ok(response) => response,
-                        Err(repair_error) => {
-                            if repair_error == COLLABORATION_STEER_INTERRUPTED
-                                || collaboration_steer_pending(cancellation.as_ref())
-                            {
-                                cancel_anytime_background(anchor_supervisor.as_ref(), None);
-                                return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
-                            }
-                            if let Some(anchor) = await_direct_anchor_fallback(
-                                state,
-                                task_id,
-                                run_context,
-                                collaboration_id,
-                                &anchor_spec,
-                                prompt_genome.verification,
-                                cancellation.as_ref(),
-                                &mut anchor_supervisor,
-                                &mut direct_anchor_output,
-                                Duration::from_millis(500),
-                            )? {
-                                return Ok(anchor);
-                            }
-                            return Err(format!(
-                                "Conductor repair failed after {conductor_attempts} attempt(s): {repair_error}"
-                            ));
-                        }
-                    };
-                    conductor_attempts += 1;
-                }
-                Err(error) => {
+                        &harness,
+                        1,
+                        &format!("planning stage failed: {error}"),
+                    )?;
+                    (plan, 1)
+                } else {
                     if let Some(anchor) = await_direct_anchor_fallback(
                         state,
                         task_id,
@@ -493,13 +556,10 @@ pub(crate) fn run_adaptive_collaboration(
                     )? {
                         return Ok(anchor);
                     }
-                    return Err(format!(
-                        "Conductor failed to produce a valid workflow after {conductor_attempts} attempts: {error}"
-                    ));
+                    return Err(error);
                 }
             }
-        };
-        (workflow_plan, conductor_attempts)
+        }
     };
     let workflow = workflow_plan.adaptive_workflow();
     let layers = adaptive_workflow_layers(&workflow)?;

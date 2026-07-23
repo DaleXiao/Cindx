@@ -342,9 +342,12 @@ pub(crate) fn prepare_agent_collaboration(
     } else {
         None
     };
-    let bounded_profile = bounded_evolution
-        .as_ref()
-        .map(|evaluation| evaluation.next_profile.clone());
+    let bounded_profile = bounded_evolution.as_ref().map(|evaluation| {
+        evaluation
+            .next_profile
+            .clone()
+            .with_effort_capability_floor(&effort)
+    });
     if let (Some(evaluation), Some(profile)) =
         (bounded_evolution.as_ref(), bounded_profile.as_ref())
     {

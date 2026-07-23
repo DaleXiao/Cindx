@@ -120,7 +120,9 @@ impl ConductorExecutionContract {
 
     pub fn with_prompt_commit_strategy(mut self, strategy: PromptCommitStrategy) -> Self {
         self.stop_policy = match (self.effort.as_str(), strategy) {
-            ("fast", _) | (_, PromptCommitStrategy::Adaptive) => self.stop_policy,
+            ("fast", _) => ConductorStopPolicy::FirstVerified,
+            ("pro", _) => ConductorStopPolicy::Exhaustive,
+            (_, PromptCommitStrategy::Adaptive) => self.stop_policy,
             (_, PromptCommitStrategy::Quorum) => ConductorStopPolicy::Quorum,
             (_, PromptCommitStrategy::Exhaustive) => ConductorStopPolicy::Exhaustive,
         };
@@ -257,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn evolved_commit_strategy_changes_auto_and_pro_but_not_fast_semantics() {
+    fn evolved_commit_strategy_respects_effort_capability_floors() {
         let routing = context("Compare independent implementation alternatives in parallel");
         let auto = ConductorExecutionContract::from_routing(
             &routing,
@@ -274,8 +276,8 @@ mod tests {
             OrchestrationPolicy::BestOfN { candidates: 3 },
         )
         .with_prompt_commit_strategy(PromptCommitStrategy::Quorum);
-        assert_eq!(pro.stop_policy, ConductorStopPolicy::Quorum);
-        assert_eq!(pro.quorum_grace_ms(), 1_000);
+        assert_eq!(pro.stop_policy, ConductorStopPolicy::Exhaustive);
+        assert_eq!(pro.quorum_grace_ms(), 20_000);
 
         let fast = ConductorExecutionContract::from_routing(
             &routing,

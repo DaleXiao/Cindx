@@ -492,6 +492,32 @@ impl AnytimeController {
             });
     }
 
+    fn successful_non_anchor_candidates(&self) -> usize {
+        self.candidates
+            .values()
+            .filter(|candidate| candidate.kind != AnytimeCandidateKind::DirectAnchor)
+            .filter(|candidate| {
+                matches!(
+                    candidate.state,
+                    AnytimeCandidateState::Usable | AnytimeCandidateState::Verified
+                )
+            })
+            .count()
+    }
+
+    fn direct_anchor_has_independent_comparison(&self, best_id: &str) -> bool {
+        self.candidates.values().any(|candidate| {
+            candidate.id != best_id
+                && candidate.kind != AnytimeCandidateKind::DirectAnchor
+                && candidate.commit_eligible
+                && matches!(
+                    candidate.state,
+                    AnytimeCandidateState::Usable | AnytimeCandidateState::Verified
+                )
+                && self.verdicts.contains_key(&candidate.id)
+        })
+    }
+
     pub fn decision(&self, remaining_ms: u64, terminal_reserve_ms: u64) -> AnytimeDecision {
         let best = self.best.as_ref();
         if remaining_ms <= terminal_reserve_ms {
@@ -504,8 +530,17 @@ impl AnytimeController {
             let should_commit = match self.config.stop_policy {
                 ConductorStopPolicy::FirstVerified => best.verdict.verified,
                 ConductorStopPolicy::Quorum => {
+                    let best_is_direct_anchor = self
+                        .candidates
+                        .get(&best.candidate_id)
+                        .is_some_and(|candidate| {
+                            candidate.kind == AnytimeCandidateKind::DirectAnchor
+                        });
                     best.verdict.verified
-                        && self.successful_candidates >= self.config.min_successful_candidates
+                        && self.successful_non_anchor_candidates()
+                            >= self.config.min_successful_candidates
+                        && (!best_is_direct_anchor
+                            || self.direct_anchor_has_independent_comparison(&best.candidate_id))
                 }
                 ConductorStopPolicy::Exhaustive => false,
             };
@@ -655,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn quorum_commits_the_best_verified_candidate_without_exhausting_frontier() {
+    fn quorum_commits_the_best_verified_workflow_without_exhausting_frontier() {
         let mut controller = AnytimeController::new(config(ConductorStopPolicy::Quorum));
         for id in ["anchor", "candidate", "straggler"] {
             controller
@@ -682,6 +717,85 @@ mod tests {
         assert_eq!(
             controller.candidate("straggler").unwrap().state,
             AnytimeCandidateState::Pending
+        );
+    }
+
+    #[test]
+    fn direct_anchor_does_not_satisfy_its_own_quorum() {
+        let mut quorum = config(ConductorStopPolicy::Quorum);
+        quorum.min_successful_candidates = 1;
+        let mut controller = AnytimeController::new(quorum);
+        controller
+            .register(AnytimeCandidate::direct_anchor("anchor"))
+            .unwrap();
+        controller
+            .register(AnytimeCandidate::workflow("workflow", Vec::new(), 8_000))
+            .unwrap();
+        controller.mark_running("anchor").unwrap();
+        controller.observe("anchor", verdict(8_000, true)).unwrap();
+
+        assert_eq!(
+            controller.decision(60_000, 5_000),
+            AnytimeDecision::Continue
+        );
+    }
+
+    #[test]
+    fn intermediate_evidence_cannot_make_direct_anchor_commit_before_synthesis() {
+        let mut quorum = config(ConductorStopPolicy::Quorum);
+        quorum.min_successful_candidates = 1;
+        let mut controller = AnytimeController::new(quorum);
+        controller
+            .register(AnytimeCandidate::direct_anchor("anchor"))
+            .unwrap();
+        controller
+            .register(AnytimeCandidate::workflow("evidence", Vec::new(), 7_000).as_intermediate())
+            .unwrap();
+        controller
+            .register(AnytimeCandidate::workflow(
+                "synthesis",
+                vec!["evidence".to_string()],
+                8_000,
+            ))
+            .unwrap();
+
+        controller.mark_running("anchor").unwrap();
+        controller.observe("anchor", verdict(8_000, true)).unwrap();
+        controller.mark_running("evidence").unwrap();
+        controller
+            .observe("evidence", verdict(7_000, true))
+            .unwrap();
+
+        assert_eq!(
+            controller.decision(60_000, 5_000),
+            AnytimeDecision::Continue
+        );
+    }
+
+    #[test]
+    fn direct_anchor_can_win_only_after_an_independent_deliverable_is_compared() {
+        let mut quorum = config(ConductorStopPolicy::Quorum);
+        quorum.min_successful_candidates = 1;
+        let mut controller = AnytimeController::new(quorum);
+        controller
+            .register(AnytimeCandidate::direct_anchor("anchor"))
+            .unwrap();
+        controller
+            .register(AnytimeCandidate::workflow("synthesis", Vec::new(), 8_000))
+            .unwrap();
+
+        controller.mark_running("anchor").unwrap();
+        controller.observe("anchor", verdict(8_000, true)).unwrap();
+        controller.mark_running("synthesis").unwrap();
+        controller
+            .observe("synthesis", verdict(7_000, true))
+            .unwrap();
+
+        assert_eq!(
+            controller.decision(60_000, 5_000),
+            AnytimeDecision::Commit {
+                candidate_id: "anchor".to_string()
+            }
         );
     }
 

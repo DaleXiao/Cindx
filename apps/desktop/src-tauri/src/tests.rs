@@ -4918,6 +4918,75 @@ fn conductor_evaluation_repairs_invalid_structure_before_scoring() {
 }
 
 #[test]
+fn conductor_evaluation_uses_a_collaborative_fallback_after_failed_repair() {
+    let genome =
+        ConductorPromptGenome::seed_for_effort("auto").with_effort_capability_floor("auto");
+    let routing = RoutingContext::from_prompt(
+        "Compare two implementation strategies with evidence",
+        Vec::new(),
+    );
+    let harness = ConductorHarness::new(ConductorRequest {
+        workflow_id: "fallback-evaluation".to_string(),
+        objective: "Compare two implementation strategies with evidence".to_string(),
+        recent_context: String::new(),
+        effort: "auto".to_string(),
+        policy: "best_of_n".to_string(),
+        conductor_model: "planner".to_string(),
+        worker_models: vec!["worker-a".to_string(), "worker-b".to_string()],
+        role_hints: ConductorRoleHints {
+            planner: "worker-a".to_string(),
+            executor: "worker-b".to_string(),
+            reviewer: "worker-b".to_string(),
+            synthesizer: "worker-a".to_string(),
+        },
+        budget: WorkflowBudget {
+            max_steps: 3,
+            max_models: 2,
+            max_model_turns_per_step: 2,
+            max_tool_calls_per_step: 4,
+            max_output_tokens_per_step: 2_048,
+        },
+        execution_contract: ConductorExecutionContract::from_routing(
+            &routing,
+            "auto",
+            OrchestrationPolicy::BestOfN { candidates: 2 },
+        ),
+        prior_hint: None,
+        prompt_evolution_enabled: true,
+        prompt_genome: genome.clone(),
+    });
+    let mut calls = 0usize;
+
+    let candidate = evaluate_conductor_prompt_profile_with_runner(&harness, &genome, |_| {
+        calls += 1;
+        CollaborationCompletion {
+            content: Some("still not a workflow".to_string()),
+            error: None,
+            latency_ms: 5,
+            usage: BTreeMap::new(),
+            evidence: Vec::new(),
+        }
+    });
+
+    let plan = candidate
+        .plan
+        .expect("failed conductor repair should use the deterministic graph");
+    assert_eq!(calls, CONDUCTOR_MAX_ATTEMPTS);
+    assert_eq!(plan.steps.len(), 3);
+    assert_eq!(
+        plan.steps
+            .iter()
+            .take(2)
+            .filter(|step| step.access.is_empty())
+            .count(),
+        2
+    );
+    assert!(candidate
+        .raw_output
+        .contains("Deterministic harness fallback applied"));
+}
+
+#[test]
 fn execution_arena_runs_dependencies_before_final_synthesis() {
     let profile = ConductorPromptGenome::seed_for_effort("auto");
     let plan = WorkflowPlanIr::from_adaptive_with_profile(

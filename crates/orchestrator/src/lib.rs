@@ -854,6 +854,138 @@ impl ConductorHarness {
                 .collect(),
         };
         self.validate_shape(&workflow)?;
+        self.build_plan(&workflow)
+    }
+
+    pub fn fallback_plan(&self) -> Result<WorkflowPlanIr, String> {
+        if self.request.prompt_evolution_enabled {
+            self.request.prompt_genome.validate()?;
+        }
+        let mut worker_models = Vec::new();
+        for model in &self.request.worker_models {
+            let model = model.trim();
+            if !model.is_empty() && !worker_models.iter().any(|selected| selected == model) {
+                worker_models.push(model.to_string());
+            }
+        }
+        worker_models.truncate(self.request.budget.max_models);
+        if worker_models.is_empty() {
+            return Err("deterministic conductor fallback has no worker model".to_string());
+        }
+
+        let needs_verifier = self.request.prompt_genome.verification
+            == PromptVerification::Adversarial
+            && self.request.budget.max_steps >= 4;
+        let reserved_steps = 1 + usize::from(needs_verifier);
+        let branch_capacity = self
+            .request
+            .budget
+            .max_steps
+            .saturating_sub(reserved_steps)
+            .min(self.request.budget.max_models)
+            .min(self.request.execution_contract.max_parallelism)
+            .min(self.request.prompt_genome.max_parallel_branches);
+        let branch_count = match self.request.prompt_genome.topology_strategy {
+            PromptTopologyStrategy::Serial => branch_capacity.min(1),
+            PromptTopologyStrategy::AdaptiveDag => branch_capacity.min(2),
+            PromptTopologyStrategy::ParallelDeliberation => branch_capacity,
+        };
+
+        let hinted_models = [
+            &self.request.role_hints.planner,
+            &self.request.role_hints.executor,
+            &self.request.role_hints.reviewer,
+        ];
+        let mut used_root_models = BTreeSet::new();
+        let mut steps = Vec::new();
+        for index in 0..branch_count {
+            let hinted = hinted_models
+                .get(index)
+                .and_then(|hint| {
+                    worker_models
+                        .iter()
+                        .find(|model| model.as_str() == hint.as_str())
+                })
+                .filter(|model| !used_root_models.contains(model.as_str()));
+            let model = hinted
+                .or_else(|| {
+                    worker_models
+                        .iter()
+                        .find(|model| !used_root_models.contains(model.as_str()))
+                })
+                .unwrap_or_else(|| &worker_models[index % worker_models.len()])
+                .clone();
+            used_root_models.insert(model.clone());
+            let (id, role, subtask) = match index {
+                0 => (
+                    "approach_a".to_string(),
+                    "thinker".to_string(),
+                    "derive the strongest solution and make every assumption explicit".to_string(),
+                ),
+                1 => (
+                    "approach_b".to_string(),
+                    "worker".to_string(),
+                    "develop an independent solution path grounded in concrete evidence"
+                        .to_string(),
+                ),
+                _ => (
+                    format!("approach_{}", (b'a' + index as u8) as char),
+                    "worker".to_string(),
+                    "stress-test failure modes and propose a materially different alternative"
+                        .to_string(),
+                ),
+            };
+            steps.push(AdaptiveWorkflowStep {
+                id,
+                role,
+                model,
+                subtask,
+                access: Vec::new(),
+            });
+        }
+
+        let root_ids = steps.iter().map(|step| step.id.clone()).collect::<Vec<_>>();
+        if needs_verifier {
+            let verifier_model = worker_models
+                .iter()
+                .find(|model| model.as_str() == self.request.role_hints.reviewer)
+                .unwrap_or(&worker_models[worker_models.len().saturating_sub(1)])
+                .clone();
+            steps.push(AdaptiveWorkflowStep {
+                id: "verify".to_string(),
+                role: "verifier".to_string(),
+                model: verifier_model,
+                subtask:
+                    "adversarially audit every independent branch and identify unsupported claims"
+                        .to_string(),
+                access: root_ids.clone(),
+            });
+        }
+
+        let synthesizer_model = worker_models
+            .iter()
+            .find(|model| model.as_str() == self.request.role_hints.synthesizer)
+            .unwrap_or(&worker_models[0])
+            .clone();
+        let mut synthesis_access = root_ids;
+        if needs_verifier {
+            synthesis_access.push("verify".to_string());
+        }
+        steps.push(AdaptiveWorkflowStep {
+            id: "synthesize".to_string(),
+            role: "synthesizer".to_string(),
+            model: synthesizer_model,
+            subtask: "compare all authorized branches, resolve disagreements, and produce one checkable final result"
+                .to_string(),
+            access: synthesis_access,
+        });
+
+        let workflow = AdaptiveWorkflow { steps };
+        self.validate_shape(&workflow)?;
+        self.build_plan(&workflow)
+    }
+
+    fn build_plan(&self, workflow: &AdaptiveWorkflow) -> Result<WorkflowPlanIr, String> {
         let mut budget = self.request.budget.clone();
         if self.request.prompt_evolution_enabled {
             budget.max_model_turns_per_step = budget
@@ -881,7 +1013,7 @@ impl ConductorHarness {
             } else {
                 "legacy-baseline-v1".to_string()
             },
-            &workflow,
+            workflow,
             budget,
         );
         if self.request.prompt_evolution_enabled {
@@ -1925,6 +2057,79 @@ mod tests {
         assert!(error.contains("at least 2 independent branches"));
         assert!(repair.contains("deterministic Cindx Harness"));
         assert!(repair.contains(&error));
+    }
+
+    #[test]
+    fn deterministic_pro_fallback_preserves_independent_review_and_synthesis() {
+        let mut request = conductor_request();
+        request.budget.max_steps = 5;
+        let harness = ConductorHarness::new(request);
+
+        let plan = harness
+            .fallback_plan()
+            .expect("pro fallback should produce a valid collaboration graph");
+        let roots = plan
+            .steps
+            .iter()
+            .take(plan.steps.len() - 1)
+            .filter(|step| step.access.is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(roots.len(), 2);
+        assert_ne!(roots[0].model, roots[1].model);
+        let verifier = plan
+            .steps
+            .iter()
+            .find(|step| step.role == "verifier")
+            .expect("pro fallback should retain adversarial verification");
+        assert!(roots.iter().all(|root| verifier.access.contains(&root.id)));
+        assert_eq!(plan.steps.last().unwrap().role, "synthesizer");
+        plan.validate(&harness.request().worker_models).unwrap();
+        harness
+            .request()
+            .execution_contract
+            .validate_plan(&plan)
+            .unwrap();
+    }
+
+    #[test]
+    fn deterministic_auto_fallback_compares_two_independent_branches() {
+        let routing = RoutingContext::from_prompt(
+            "Compare two implementation strategies with evidence",
+            Vec::new(),
+        );
+        let mut request = conductor_request();
+        request.effort = "auto".to_string();
+        request.prompt_genome =
+            ConductorPromptGenome::seed_for_effort("auto").with_effort_capability_floor("auto");
+        request.execution_contract = ConductorExecutionContract::from_routing(
+            &routing,
+            "auto",
+            OrchestrationPolicy::BestOfN { candidates: 2 },
+        );
+        let harness = ConductorHarness::new(request);
+
+        let plan = harness
+            .fallback_plan()
+            .expect("auto fallback should produce a valid comparison graph");
+        assert_eq!(plan.steps.len(), 3);
+        assert_eq!(
+            plan.steps
+                .iter()
+                .take(2)
+                .filter(|step| step.access.is_empty())
+                .count(),
+            2
+        );
+        assert_eq!(
+            plan.steps.last().unwrap().access,
+            vec!["approach_a".to_string(), "approach_b".to_string()]
+        );
+        plan.validate(&harness.request().worker_models).unwrap();
+        harness
+            .request()
+            .execution_contract
+            .validate_plan(&plan)
+            .unwrap();
     }
 
     #[test]
