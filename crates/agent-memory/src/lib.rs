@@ -391,10 +391,17 @@ pub fn fuse_memory_recalls_at(
     limit: usize,
     now_ms: u64,
 ) -> Vec<MemoryRecall> {
+    let lexical_scores = calibrated_memory_channel_scores(
+        lexical_recalls
+            .iter()
+            .map(|recall| (recall.record.id.clone(), recall.score))
+            .collect(),
+    );
     let mut fused = lexical_recalls
         .into_iter()
         .map(|recall| (recall.record.id.clone(), recall))
         .collect::<BTreeMap<_, _>>();
+    let mut semantic_candidates = Vec::new();
 
     for record in &ledger.records {
         let Some(semantic_score) = semantic_scores
@@ -423,16 +430,47 @@ pub fn fuse_memory_recalls_at(
             * (0.85 + f64::from(record.importance) / 100.0 * 0.15)
             * if cross_session { 1.08 } else { 0.92 };
 
-        if let Some(existing) = fused.get_mut(&record.id) {
-            existing.score = existing.score * 0.7 + semantic_score * 0.3;
-            if !existing
-                .reasons
+        semantic_candidates.push((record.id.clone(), semantic_score));
+    }
+    let semantic_scores = calibrated_memory_channel_scores(semantic_candidates);
+
+    for record in &ledger.records {
+        let lexical_score = lexical_scores.get(&record.id).copied();
+        let semantic_score = semantic_scores.get(&record.id).copied();
+        if lexical_score.is_none() && semantic_score.is_none() {
+            continue;
+        }
+        let cross_session = current_session_id.is_some_and(|session_id| {
+            !record
+                .source_session_ids
                 .iter()
-                .any(|reason| reason == "semantic_vector")
+                .any(|source| source == session_id)
+        });
+        if let Some(existing) = fused.get_mut(&record.id) {
+            existing.score = match (lexical_score, semantic_score) {
+                (Some(lexical), Some(semantic)) => lexical * 0.52 + semantic * 0.36 + 0.12,
+                (Some(lexical), None) => lexical * 0.72,
+                (None, Some(semantic)) => semantic * 0.68,
+                (None, None) => unreachable!("a recall channel was checked above"),
+            };
+            if semantic_score.is_some()
+                && !existing
+                    .reasons
+                    .iter()
+                    .any(|reason| reason == "semantic_vector")
             {
                 existing.reasons.push("semantic_vector".to_string());
             }
-        } else if semantic_score >= 0.18 {
+            if lexical_score.is_some()
+                && semantic_score.is_some()
+                && !existing
+                    .reasons
+                    .iter()
+                    .any(|reason| reason == "hybrid_consensus")
+            {
+                existing.reasons.push("hybrid_consensus".to_string());
+            }
+        } else if let Some(semantic_score) = semantic_score {
             let mut reasons = vec![
                 "semantic_vector".to_string(),
                 format!("trust:{}", record.trust.label()),
@@ -444,7 +482,7 @@ pub fn fuse_memory_recalls_at(
                 record.id.clone(),
                 MemoryRecall {
                     record: record.clone(),
-                    score: semantic_score,
+                    score: semantic_score * 0.68,
                     reasons,
                 },
             );
@@ -483,6 +521,34 @@ pub fn fuse_memory_recalls_at(
         }
     }
     diversified
+}
+
+fn calibrated_memory_channel_scores(entries: Vec<(String, f64)>) -> BTreeMap<String, f64> {
+    let mut ranked = entries
+        .into_iter()
+        .filter(|(_, score)| score.is_finite() && *score > 0.0)
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    let ceiling = ranked
+        .first()
+        .map(|(_, score)| *score)
+        .unwrap_or(1.0)
+        .max(f64::EPSILON);
+    ranked
+        .into_iter()
+        .enumerate()
+        .map(|(rank, (id, score))| {
+            let evidence_score = (score / ceiling).clamp(0.0, 1.0);
+            let rank_score = 1.0 / (1.0 + rank as f64 * 0.5);
+            (id, evidence_score * 0.7 + rank_score * 0.3)
+        })
+        .collect()
 }
 
 pub fn record_memory_recalls(
@@ -1762,6 +1828,104 @@ mod tests {
             .reasons
             .contains(&"trust:user_stated".to_string()));
         assert!(recalls[0].reasons.contains(&"cross_session".to_string()));
+    }
+
+    #[test]
+    fn hybrid_memory_consensus_outranks_single_channel_candidates() {
+        let events = vec![
+            event(
+                1,
+                EventKind::MessageAdded,
+                "User message",
+                [
+                    ("role", "user"),
+                    ("content", "Always preserve the translucent title material"),
+                ],
+            ),
+            event(2, EventKind::TaskStatusChanged, "Agent task completed", []),
+        ];
+        let mut ledger = MemoryLedger::new("project-a");
+        merge_memory_records(
+            &mut ledger,
+            extract_durable_memories(&events, "project-a", "session-a"),
+            32,
+        );
+        let lexical_only = ledger.records[0].clone();
+        let mut hybrid = lexical_only.clone();
+        hybrid.id = "memory-hybrid".to_string();
+        hybrid.fingerprint = "fingerprint-hybrid".to_string();
+        hybrid.content = "Keep the frosted header visually consistent".to_string();
+        let mut semantic_only = lexical_only.clone();
+        semantic_only.id = "memory-semantic".to_string();
+        semantic_only.fingerprint = "fingerprint-semantic".to_string();
+        semantic_only.content = "Retain the glass surface".to_string();
+        ledger.records = vec![lexical_only.clone(), hybrid.clone(), semantic_only.clone()];
+        let lexical = vec![
+            MemoryRecall {
+                record: lexical_only,
+                score: 0.9,
+                reasons: vec!["term_overlap:3".to_string()],
+            },
+            MemoryRecall {
+                record: hybrid.clone(),
+                score: 0.8,
+                reasons: vec!["term_overlap:2".to_string()],
+            },
+        ];
+        let semantic_scores = [(hybrid.id.clone(), 0.9), (semantic_only.id.clone(), 0.95)]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+
+        let recalls =
+            fuse_memory_recalls_at(&ledger, lexical, &semantic_scores, Some("session-b"), 4, 10);
+
+        assert_eq!(recalls[0].record.id, "memory-hybrid");
+        assert!(recalls[0].reasons.contains(&"hybrid_consensus".to_string()));
+        assert!(recalls.iter().all(|recall| recall.score.is_finite()));
+    }
+
+    #[test]
+    fn semantic_memory_calibration_preserves_trust_ordering() {
+        let events = vec![
+            event(
+                1,
+                EventKind::MessageAdded,
+                "User message",
+                [
+                    ("role", "user"),
+                    ("content", "Always preserve the white sidebar material"),
+                ],
+            ),
+            event(2, EventKind::TaskStatusChanged, "Agent task completed", []),
+        ];
+        let mut ledger = MemoryLedger::new("project-a");
+        merge_memory_records(
+            &mut ledger,
+            extract_durable_memories(&events, "project-a", "session-a"),
+            32,
+        );
+        let trusted = ledger.records[0].clone();
+        let mut reported = trusted.clone();
+        reported.id = "memory-reported".to_string();
+        reported.fingerprint = "fingerprint-reported".to_string();
+        reported.trust = MemoryTrust::AssistantReported;
+        reported.content = "Preserve the white sidebar appearance".to_string();
+        ledger.records.push(reported.clone());
+        let semantic_scores = [(trusted.id.clone(), 0.9), (reported.id.clone(), 0.9)]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+
+        let recalls = fuse_memory_recalls_at(
+            &ledger,
+            Vec::new(),
+            &semantic_scores,
+            Some("session-b"),
+            4,
+            10,
+        );
+
+        assert_eq!(recalls[0].record.id, trusted.id);
+        assert!(recalls[0].score > recalls[1].score);
     }
 
     #[test]

@@ -141,7 +141,7 @@ pub(crate) fn execute_agent_tool_invocation(
     });
     let mutates_workspace = registry
         .get(&tool_name)
-        .is_some_and(|tool| !matches!(tool.spec().risk, ToolRisk::ReadOnly));
+        .is_some_and(|tool| tool_may_mutate_workspace(&tool_name, &tool.spec().risk));
     let tool_started = budget_stop.is_none();
     let mut result = if let Some(reason) = budget_stop {
         ToolResult::text(
@@ -183,6 +183,10 @@ pub(crate) fn execute_agent_tool_invocation(
             progress.checkpoints.to_string(),
         );
         result.metadata.insert(
+            "run_observations".to_string(),
+            progress.observations.to_string(),
+        );
+        result.metadata.insert(
             "run_budget_extensions".to_string(),
             progress.budget_extensions.to_string(),
         );
@@ -216,6 +220,13 @@ pub(crate) fn execute_agent_tool_invocation(
     )
     .map_err(|error| error.to_string())?;
     Ok(result)
+}
+
+pub(crate) fn tool_may_mutate_workspace(tool_name: &str, risk: &ToolRisk) -> bool {
+    if tool_name.starts_with("browser.") || tool_name.starts_with("computer.") {
+        return false;
+    }
+    !matches!(risk, ToolRisk::ReadOnly)
 }
 
 pub(crate) fn observation_from_agent_tool_result(tool_name: &str, result: &ToolResult) -> String {

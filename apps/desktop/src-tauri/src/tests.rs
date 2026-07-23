@@ -4361,14 +4361,24 @@ fn agent_runtime_turn_budget_tracks_effort_and_extends_on_resume() {
 }
 
 #[test]
-fn agent_run_budget_extends_only_after_unique_progress_and_stops_cycles() {
+fn agent_run_budget_extends_only_after_material_progress_and_stops_cycles() {
     let control = AgentRunControl::new("fast");
     for call in 1..=6 {
         assert_eq!(control.begin_model_call("executor"), Ok(call));
     }
-    assert!(control.record_checkpoint("model_result", "executor", "new evidence"));
+    assert!(control.record_observation("model_result", "executor", "new model wording"));
+    assert_eq!(
+        control.begin_model_call("executor"),
+        Err(RunStopReason::ModelCallBudgetExceeded)
+    );
+
+    let control = AgentRunControl::new("fast");
+    for call in 1..=6 {
+        assert_eq!(control.begin_model_call("executor"), Ok(call));
+    }
+    assert!(control.record_checkpoint("tool_result", "file.read", "new evidence"));
     assert_eq!(control.begin_model_call("executor"), Ok(7));
-    assert!(!control.record_checkpoint("model_result", "executor", "new evidence"));
+    assert!(!control.record_checkpoint("tool_result", "file.read", "new evidence"));
 
     let cycle_control = AgentRunControl::new("fast");
     for input in ["a", "b", "a", "b", "a", "b", "a"] {
@@ -5535,6 +5545,30 @@ fn workspace_cache_ttl_advances_only_after_validation_or_index_change() {
 }
 
 #[test]
+fn interactive_observation_tools_do_not_invalidate_workspace_knowledge() {
+    assert!(!tool_may_mutate_workspace(
+        "browser.click",
+        &ToolRisk::UsesNetwork
+    ));
+    assert!(!tool_may_mutate_workspace(
+        "computer.key",
+        &ToolRisk::Destructive
+    ));
+    assert!(!tool_may_mutate_workspace(
+        "file.read",
+        &ToolRisk::ReadOnly
+    ));
+    assert!(tool_may_mutate_workspace(
+        "file.write",
+        &ToolRisk::WritesWorkspace
+    ));
+    assert!(tool_may_mutate_workspace(
+        "shell.run",
+        &ToolRisk::ExecutesProcess
+    ));
+}
+
+#[test]
 fn graph_walk_seed_fusion_includes_semantic_and_file_evidence() {
     let root = temp_test_root("phase7-graph-seeds");
     fs::create_dir_all(&root).expect("temp root should exist");
@@ -5772,6 +5806,119 @@ fn retrieval_fusion_deduplicates_and_preserves_channel_reasons() {
     assert_eq!(sources.len(), 2);
     assert!(sources[0].reason.contains("semantic_rag"));
     assert!(sources[0].reason.contains("file_search"));
+}
+
+#[test]
+fn retrieval_fusion_prefers_independent_consensus_over_one_channel_outlier() {
+    let root = temp_test_root("phase7-calibrated-consensus");
+    fs::create_dir_all(&root).expect("temp root should exist");
+    fs::write(root.join("a.md"), "single channel outlier").expect("fixture should write");
+    fs::write(root.join("b.md"), "independently corroborated evidence")
+        .expect("fixture should write");
+    let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+    let outlier = index
+        .chunks
+        .iter()
+        .find(|chunk| chunk.path == "a.md")
+        .expect("outlier chunk should exist")
+        .clone();
+    let corroborated = index
+        .chunks
+        .iter()
+        .find(|chunk| chunk.path == "b.md")
+        .expect("corroborated chunk should exist")
+        .clone();
+    let channels = vec![
+        RetrievalChannelOutcome {
+            name: "semantic_rag".to_string(),
+            duration_ms: 1,
+            results: vec![
+                RagSearchResult {
+                    chunk: outlier,
+                    score: 100.0,
+                },
+                RagSearchResult {
+                    chunk: corroborated.clone(),
+                    score: 0.4,
+                },
+            ],
+            error: None,
+        },
+        RetrievalChannelOutcome {
+            name: "file_search".to_string(),
+            duration_ms: 1,
+            results: vec![RagSearchResult {
+                chunk: corroborated,
+                score: 0.5,
+            }],
+            error: None,
+        },
+    ];
+
+    let (results, sources) = fuse_retrieval_channels(&channels, 4);
+
+    assert_eq!(results[0].chunk.path, "b.md");
+    assert!(sources[0].reason.contains("consensus:2"));
+    assert!(results.iter().all(|result| result.score.is_finite()));
+}
+
+#[test]
+fn retrieval_fusion_does_not_double_count_correlated_graph_routes() {
+    let root = temp_test_root("phase7-calibrated-graph-family");
+    fs::create_dir_all(&root).expect("temp root should exist");
+    fs::write(root.join("a.md"), "graph-only evidence").expect("fixture should write");
+    fs::write(root.join("b.md"), "semantic evidence").expect("fixture should write");
+    let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+    let graph = index
+        .chunks
+        .iter()
+        .find(|chunk| chunk.path == "a.md")
+        .expect("graph chunk should exist")
+        .clone();
+    let semantic = index
+        .chunks
+        .iter()
+        .find(|chunk| chunk.path == "b.md")
+        .expect("semantic chunk should exist")
+        .clone();
+    let channels = vec![
+        RetrievalChannelOutcome {
+            name: "graph_recall".to_string(),
+            duration_ms: 1,
+            results: vec![RagSearchResult {
+                chunk: graph.clone(),
+                score: 1.0,
+            }],
+            error: None,
+        },
+        RetrievalChannelOutcome {
+            name: "graph_walk".to_string(),
+            duration_ms: 1,
+            results: vec![RagSearchResult {
+                chunk: graph,
+                score: 1.0,
+            }],
+            error: None,
+        },
+        RetrievalChannelOutcome {
+            name: "semantic_rag".to_string(),
+            duration_ms: 1,
+            results: vec![RagSearchResult {
+                chunk: semantic,
+                score: 1.0,
+            }],
+            error: None,
+        },
+    ];
+
+    let (results, sources) = fuse_retrieval_channels(&channels, 4);
+
+    assert_eq!(results[0].chunk.path, "b.md");
+    let graph_source = sources
+        .iter()
+        .find(|source| source.path == "a.md")
+        .expect("graph source should remain available");
+    assert!(!graph_source.reason.contains("consensus:"));
 }
 
 #[test]

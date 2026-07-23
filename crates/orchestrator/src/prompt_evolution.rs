@@ -47,12 +47,36 @@ pub enum PromptRetryPolicy {
     AlternateModel,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptTopologyStrategy {
+    Serial,
+    AdaptiveDag,
+    ParallelDeliberation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptRoleStrategy {
+    Flexible,
+    Specialists,
+    DiverseSpecialists,
+}
+
 fn default_prompt_tool_policy() -> PromptToolPolicy {
     PromptToolPolicy::EvidenceOnly
 }
 
 fn default_prompt_retry_policy() -> PromptRetryPolicy {
     PromptRetryPolicy::AlternateModel
+}
+
+fn default_prompt_topology_strategy() -> PromptTopologyStrategy {
+    PromptTopologyStrategy::AdaptiveDag
+}
+
+fn default_prompt_role_strategy() -> PromptRoleStrategy {
+    PromptRoleStrategy::Specialists
 }
 
 fn default_max_step_attempts() -> usize {
@@ -82,6 +106,10 @@ pub struct ConductorPromptGenome {
     pub tool_policy: PromptToolPolicy,
     #[serde(default = "default_prompt_retry_policy")]
     pub retry_policy: PromptRetryPolicy,
+    #[serde(default = "default_prompt_topology_strategy")]
+    pub topology_strategy: PromptTopologyStrategy,
+    #[serde(default = "default_prompt_role_strategy")]
+    pub role_strategy: PromptRoleStrategy,
     #[serde(default = "default_max_step_attempts")]
     pub max_step_attempts: usize,
     #[serde(default = "default_max_model_turns_per_step")]
@@ -104,6 +132,8 @@ impl ConductorPromptGenome {
                 1,
                 PromptToolPolicy::Disabled,
                 PromptRetryPolicy::FailFast,
+                PromptTopologyStrategy::Serial,
+                PromptRoleStrategy::Flexible,
                 1,
                 1,
                 0,
@@ -116,6 +146,8 @@ impl ConductorPromptGenome {
                 3,
                 PromptToolPolicy::ReadOnlyExploration,
                 PromptRetryPolicy::AlternateModel,
+                PromptTopologyStrategy::ParallelDeliberation,
+                PromptRoleStrategy::DiverseSpecialists,
                 3,
                 3,
                 6,
@@ -128,6 +160,8 @@ impl ConductorPromptGenome {
                 2,
                 PromptToolPolicy::EvidenceOnly,
                 PromptRetryPolicy::AlternateModel,
+                PromptTopologyStrategy::AdaptiveDag,
+                PromptRoleStrategy::Specialists,
                 2,
                 2,
                 4,
@@ -144,6 +178,8 @@ impl ConductorPromptGenome {
         max_parallel_branches: usize,
         tool_policy: PromptToolPolicy,
         retry_policy: PromptRetryPolicy,
+        topology_strategy: PromptTopologyStrategy,
+        role_strategy: PromptRoleStrategy,
         max_step_attempts: usize,
         max_model_turns_per_step: usize,
         max_tool_calls_per_step: usize,
@@ -159,6 +195,8 @@ impl ConductorPromptGenome {
             max_parallel_branches,
             tool_policy,
             retry_policy,
+            topology_strategy,
+            role_strategy,
             max_step_attempts,
             max_model_turns_per_step,
             max_tool_calls_per_step,
@@ -268,9 +306,31 @@ impl ConductorPromptGenome {
                 "Replan a failed branch and retry it with a different configured model."
             }
         };
+        let topology = match self.topology_strategy {
+            PromptTopologyStrategy::Serial => {
+                "Use one dependency chain; do not create parallel root branches."
+            }
+            PromptTopologyStrategy::AdaptiveDag => {
+                "Choose serial or parallel dependencies from the query's actual uncertainty."
+            }
+            PromptTopologyStrategy::ParallelDeliberation => {
+                "Start with independent root branches and reconcile them only after they produce separate work."
+            }
+        };
+        let roles = match self.role_strategy {
+            PromptRoleStrategy::Flexible => {
+                "Assign the fewest useful roles; generalists are acceptable."
+            }
+            PromptRoleStrategy::Specialists => {
+                "Give each independent root a distinct specialist subtask and model when available."
+            }
+            PromptRoleStrategy::DiverseSpecialists => {
+                "Use cross-functional independent roots: include both analytical and implementation roles, with distinct subtasks and models when available."
+            }
+        };
         let custom = self.custom_directive.trim();
         format!(
-            "Prompt profile {} (generation {}). {} {} {} {} {} Never create more than {} independent branches, {} attempts, {} model turns, or {} read-only tool calls per step.{}",
+            "Prompt profile {} (generation {}). {} {} {} {} {} {} {} Never create more than {} independent branches, {} attempts, {} model turns, or {} read-only tool calls per step.{}",
             self.id,
             self.generation,
             graph,
@@ -278,6 +338,8 @@ impl ConductorPromptGenome {
             context,
             tools,
             retries,
+            topology,
+            roles,
             self.max_parallel_branches,
             self.max_step_attempts,
             self.effective_max_model_turns_per_step(),
@@ -309,9 +371,9 @@ impl ConductorPromptGenome {
             concat!(
                 "You are evolving a Cindx Conductor prompt genome from measured end-to-end agent outcomes. ",
                 "Return one strict JSON object matching the parent schema and no commentary. ",
-                "Change one or two mutable genes only: graph_depth, verification, context_policy, max_parallel_branches, tool_policy, retry_policy, max_step_attempts, max_model_turns_per_step, max_tool_calls_per_step, or custom_directive. ",
+                "Change one or two mutable genes only: graph_depth, verification, context_policy, max_parallel_branches, tool_policy, retry_policy, topology_strategy, role_strategy, max_step_attempts, max_model_turns_per_step, max_tool_calls_per_step, or custom_directive. ",
                 "Keep max_parallel_branches between 1 and 3, max_step_attempts and max_model_turns_per_step between 1 and 4, max_tool_calls_per_step between 0 and 8, custom_directive under 1200 characters, ",
-                "and use only these exact enum values: graph_depth=lean|balanced|deep, verification=minimal|evidence|adversarial, context_policy=recent|relevant|comprehensive, tool_policy=disabled|evidence_only|read_only_exploration, retry_policy=fail_fast|same_model|alternate_model. ",
+                "and use only these exact enum values: graph_depth=lean|balanced|deep, verification=minimal|evidence|adversarial, context_policy=recent|relevant|comprehensive, tool_policy=disabled|evidence_only|read_only_exploration, retry_policy=fail_fast|same_model|alternate_model, topology_strategy=serial|adaptive_dag|parallel_deliberation, role_strategy=flexible|specialists|diverse_specialists. ",
                 "and do not embed user requests, secrets, benchmark answers, or model names. Optimize the feedback while preserving generality.\n\n",
                 "Parent genome:\n{}\n\nEvaluation feedback:\n{}"
             ),
@@ -338,9 +400,9 @@ impl ConductorPromptGenome {
                 "Read every full execution trajectory, including module inputs, outputs, tool results, errors, deterministic checks, and actionable side information. ",
                 "Diagnose which parent instruction or harness gene caused each failure, preserve behavior that passed, and generalize across examples rather than memorizing answers. ",
                 "Return one strict JSON object matching the parent genome schema and no commentary. ",
-                "Change one or two mutable genes only: graph_depth, verification, context_policy, max_parallel_branches, tool_policy, retry_policy, max_step_attempts, max_model_turns_per_step, max_tool_calls_per_step, or custom_directive. ",
+                "Change one or two mutable genes only: graph_depth, verification, context_policy, max_parallel_branches, tool_policy, retry_policy, topology_strategy, role_strategy, max_step_attempts, max_model_turns_per_step, max_tool_calls_per_step, or custom_directive. ",
                 "Keep max_parallel_branches between 1 and 3, max_step_attempts and max_model_turns_per_step between 1 and 4, max_tool_calls_per_step between 0 and 8, custom_directive under 1200 characters, ",
-                "and use only these exact enum values: graph_depth=lean|balanced|deep, verification=minimal|evidence|adversarial, context_policy=recent|relevant|comprehensive, tool_policy=disabled|evidence_only|read_only_exploration, retry_policy=fail_fast|same_model|alternate_model. ",
+                "and use only these exact enum values: graph_depth=lean|balanced|deep, verification=minimal|evidence|adversarial, context_policy=recent|relevant|comprehensive, tool_policy=disabled|evidence_only|read_only_exploration, retry_policy=fail_fast|same_model|alternate_model, topology_strategy=serial|adaptive_dag|parallel_deliberation, role_strategy=flexible|specialists|diverse_specialists. ",
                 "and never embed user requests, secrets, benchmark answers, case ids, or model names.\n\n",
                 "Parent genome:\n{}\n\nFeedback trajectories:\n{}"
             ),
@@ -356,7 +418,7 @@ impl ConductorPromptGenome {
                 "Repair a rejected Cindx prompt-genome mutation. Return one strict JSON object and no commentary. ",
                 "Preserve the intended one-or-two-gene improvement, but correct only schema, enum, bound, identity, or changed-gene-count errors. ",
                 "Use exact enum values: graph_depth=lean|balanced|deep, verification=minimal|evidence|adversarial, context_policy=recent|relevant|comprehensive, ",
-                "tool_policy=disabled|evidence_only|read_only_exploration, retry_policy=fail_fast|same_model|alternate_model. ",
+                "tool_policy=disabled|evidence_only|read_only_exploration, retry_policy=fail_fast|same_model|alternate_model, topology_strategy=serial|adaptive_dag|parallel_deliberation, role_strategy=flexible|specialists|diverse_specialists. ",
                 "Never add user data, secrets, benchmark answers, case ids, or model names.\n\n",
                 "Parent genome:\n{}\n\nValidation error:\n{}\n\nRejected mutation:\n{}"
             ),
@@ -393,6 +455,8 @@ impl ConductorPromptGenome {
             + usize::from(mutation.max_parallel_branches != self.max_parallel_branches)
             + usize::from(mutation.tool_policy != self.tool_policy)
             + usize::from(mutation.retry_policy != self.retry_policy)
+            + usize::from(mutation.topology_strategy != self.topology_strategy)
+            + usize::from(mutation.role_strategy != self.role_strategy)
             + usize::from(mutation.max_step_attempts != self.max_step_attempts)
             + usize::from(
                 mutation.effective_max_model_turns_per_step()
@@ -477,6 +541,31 @@ impl ConductorPromptGenome {
                 variants.push(variant);
             }
         }
+        for (suffix, topology_strategy) in [
+            ("topology-serial", PromptTopologyStrategy::Serial),
+            ("topology-adaptive", PromptTopologyStrategy::AdaptiveDag),
+            (
+                "topology-parallel",
+                PromptTopologyStrategy::ParallelDeliberation,
+            ),
+        ] {
+            if topology_strategy != self.topology_strategy {
+                let mut variant = self.child(format!("{}-g{}-{suffix}", self.id, next_generation));
+                variant.topology_strategy = topology_strategy;
+                variants.push(variant);
+            }
+        }
+        for (suffix, role_strategy) in [
+            ("roles-flexible", PromptRoleStrategy::Flexible),
+            ("roles-specialists", PromptRoleStrategy::Specialists),
+            ("roles-diverse", PromptRoleStrategy::DiverseSpecialists),
+        ] {
+            if role_strategy != self.role_strategy {
+                let mut variant = self.child(format!("{}-g{}-{suffix}", self.id, next_generation));
+                variant.role_strategy = role_strategy;
+                variants.push(variant);
+            }
+        }
         for attempts in 1..=4 {
             if attempts != self.max_step_attempts {
                 let mut variant =
@@ -519,6 +608,8 @@ impl ConductorPromptGenome {
             max_parallel_branches: left.max_parallel_branches.min(right.max_parallel_branches),
             tool_policy: right.tool_policy,
             retry_policy: left.retry_policy,
+            topology_strategy: left.topology_strategy,
+            role_strategy: right.role_strategy,
             max_step_attempts: left.max_step_attempts.min(right.max_step_attempts),
             max_model_turns_per_step: left
                 .effective_max_model_turns_per_step()
@@ -589,6 +680,12 @@ impl ConductorPromptGenome {
         if self.retry_policy != ancestor.retry_policy {
             changes.insert(PromptGenomeGene::RetryPolicy);
         }
+        if self.topology_strategy != ancestor.topology_strategy {
+            changes.insert(PromptGenomeGene::TopologyStrategy);
+        }
+        if self.role_strategy != ancestor.role_strategy {
+            changes.insert(PromptGenomeGene::RoleStrategy);
+        }
         if self.max_step_attempts != ancestor.max_step_attempts {
             changes.insert(PromptGenomeGene::MaxStepAttempts);
         }
@@ -617,6 +714,10 @@ impl ConductorPromptGenome {
             }
             PromptGenomeGene::ToolPolicy => self.tool_policy = source.tool_policy,
             PromptGenomeGene::RetryPolicy => self.retry_policy = source.retry_policy,
+            PromptGenomeGene::TopologyStrategy => {
+                self.topology_strategy = source.topology_strategy;
+            }
+            PromptGenomeGene::RoleStrategy => self.role_strategy = source.role_strategy,
             PromptGenomeGene::MaxStepAttempts => {
                 self.max_step_attempts = source.max_step_attempts;
             }
@@ -650,6 +751,8 @@ enum PromptGenomeGene {
     MaxParallelBranches,
     ToolPolicy,
     RetryPolicy,
+    TopologyStrategy,
+    RoleStrategy,
     MaxStepAttempts,
     MaxModelTurnsPerStep,
     MaxToolCallsPerStep,
@@ -1598,6 +1701,12 @@ mod tests {
             .any(|genome| genome.retry_policy != auto.retry_policy));
         assert!(mutations
             .iter()
+            .any(|genome| genome.topology_strategy != auto.topology_strategy));
+        assert!(mutations
+            .iter()
+            .any(|genome| genome.role_strategy != auto.role_strategy));
+        assert!(mutations
+            .iter()
             .any(|genome| genome.max_step_attempts != auto.max_step_attempts));
         assert!(mutations.iter().any(|genome| {
             genome.effective_max_model_turns_per_step() != auto.effective_max_model_turns_per_step()
@@ -1629,6 +1738,11 @@ mod tests {
 
         assert_eq!(genome.tool_policy, PromptToolPolicy::EvidenceOnly);
         assert_eq!(genome.retry_policy, PromptRetryPolicy::AlternateModel);
+        assert_eq!(
+            genome.topology_strategy,
+            PromptTopologyStrategy::AdaptiveDag
+        );
+        assert_eq!(genome.role_strategy, PromptRoleStrategy::Specialists);
         assert_eq!(genome.max_step_attempts, 2);
         assert_eq!(genome.effective_max_model_turns_per_step(), 2);
         assert_eq!(genome.effective_max_tool_calls_per_step(), 4);

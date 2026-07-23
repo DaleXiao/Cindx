@@ -657,56 +657,116 @@ pub(crate) fn retrieval_channel_weight(name: &str) -> f32 {
     }
 }
 
+fn retrieval_channel_family(name: &str) -> &'static str {
+    match name {
+        "semantic_rag" => "semantic",
+        "graph_recall" | "graph_walk" => "graph",
+        "file_search" => "file",
+        _ => "other",
+    }
+}
+
+fn calibrated_retrieval_scores(results: &[RagSearchResult]) -> Vec<f32> {
+    let raw_ceiling = results
+        .iter()
+        .filter_map(|result| result.score.is_finite().then_some(result.score.max(0.0)))
+        .fold(0.0f32, f32::max)
+        .max(f32::EPSILON);
+    results
+        .iter()
+        .enumerate()
+        .map(|(rank, result)| {
+            let rank_score = 1.0 / (1.0 + rank as f32 * 0.75);
+            let evidence_score = if result.score.is_finite() {
+                result.score.max(0.0) / raw_ceiling
+            } else {
+                0.0
+            };
+            rank_score * 0.65 + evidence_score * 0.35
+        })
+        .collect()
+}
+
+#[derive(Debug)]
+struct FusedRetrievalCandidate {
+    result: RagSearchResult,
+    best_contribution: f32,
+    family_scores: BTreeMap<String, f32>,
+    channels: Vec<String>,
+}
+
+impl FusedRetrievalCandidate {
+    fn score(&self) -> f32 {
+        let base = self.family_scores.values().sum::<f32>();
+        let family_count = self.family_scores.len();
+        if family_count <= 1 {
+            return base;
+        }
+        let average = base / family_count as f32;
+        let consensus_depth = family_count.saturating_sub(1).min(3) as f32;
+        base + average * 0.12 * consensus_depth
+    }
+}
+
 pub(crate) fn fuse_retrieval_channels(
     channels: &[RetrievalChannelOutcome],
     limit: usize,
 ) -> (Vec<RagSearchResult>, Vec<RagSourceView>) {
-    let mut fused = Vec::<(RagSearchResult, f32, Vec<String>)>::new();
+    let mut fused = Vec::<FusedRetrievalCandidate>::new();
     for channel in channels {
         let weight = retrieval_channel_weight(&channel.name);
-        let raw_ceiling = channel
-            .results
-            .iter()
-            .map(|result| result.score.max(0.0))
-            .fold(0.0f32, f32::max)
-            .max(f32::EPSILON);
-        for (rank, result) in channel.results.iter().enumerate() {
-            let rank_score = weight / (60.0 + rank as f32 + 1.0);
-            let evidence_score = weight * (result.score.max(0.0) / raw_ceiling) * 0.0125;
-            let contribution = rank_score + evidence_score;
-            let existing = fused.iter().position(|(candidate, _, _)| {
-                candidate.chunk.id == result.chunk.id
-                    || (candidate.chunk.path == result.chunk.path
-                        && retrieval_ranges_overlap(&candidate.chunk, &result.chunk))
+        let family = retrieval_channel_family(&channel.name).to_string();
+        let calibrated = calibrated_retrieval_scores(&channel.results);
+        for (result, calibrated_score) in channel.results.iter().zip(calibrated) {
+            let contribution = weight * calibrated_score;
+            let existing = fused.iter().position(|candidate| {
+                candidate.result.chunk.id == result.chunk.id
+                    || (candidate.result.chunk.path == result.chunk.path
+                        && retrieval_ranges_overlap(&candidate.result.chunk, &result.chunk))
             });
             let entry = if let Some(index) = existing {
                 &mut fused[index]
             } else {
-                fused.push((result.clone(), 0.0, Vec::new()));
+                fused.push(FusedRetrievalCandidate {
+                    result: result.clone(),
+                    best_contribution: contribution,
+                    family_scores: BTreeMap::new(),
+                    channels: Vec::new(),
+                });
                 fused.last_mut().expect("fused result was just inserted")
             };
-            entry.1 += contribution;
-            if !entry.2.contains(&channel.name) {
-                entry.2.push(channel.name.clone());
+            entry
+                .family_scores
+                .entry(family.clone())
+                .and_modify(|score| *score = score.max(contribution))
+                .or_insert(contribution);
+            if !entry.channels.contains(&channel.name) {
+                entry.channels.push(channel.name.clone());
             }
-            if result.score > entry.0.score {
-                entry.0 = result.clone();
+            if contribution > entry.best_contribution {
+                entry.result = result.clone();
+                entry.best_contribution = contribution;
             }
         }
     }
     fused.sort_by(|left, right| {
         right
-            .1
-            .partial_cmp(&left.1)
+            .score()
+            .partial_cmp(&left.score())
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.0.chunk.path.cmp(&right.0.chunk.path))
-            .then_with(|| left.0.chunk.start_line.cmp(&right.0.chunk.start_line))
+            .then_with(|| left.result.chunk.path.cmp(&right.result.chunk.path))
+            .then_with(|| {
+                left.result
+                    .chunk
+                    .start_line
+                    .cmp(&right.result.chunk.start_line)
+            })
     });
     let mut path_counts = BTreeMap::<String, usize>::new();
     let mut selected = Vec::new();
     for candidate in fused {
         let count = path_counts
-            .entry(candidate.0.chunk.path.clone())
+            .entry(candidate.result.chunk.path.clone())
             .or_default();
         if *count >= 2 {
             continue;
@@ -720,26 +780,34 @@ pub(crate) fn fuse_retrieval_channels(
     let fused = selected;
     let max_score = fused
         .first()
-        .map(|item| item.1)
+        .map(FusedRetrievalCandidate::score)
         .unwrap_or(1.0)
         .max(f32::EPSILON);
     let results = fused
         .iter()
-        .map(|(result, score, _)| RagSearchResult {
-            chunk: result.chunk.clone(),
-            score: score / max_score,
+        .map(|candidate| RagSearchResult {
+            chunk: candidate.result.chunk.clone(),
+            score: candidate.score() / max_score,
         })
         .collect::<Vec<_>>();
     let sources = fused
         .into_iter()
-        .map(|(result, score, reasons)| RagSourceView {
-            path: result.chunk.path,
-            start_line: result.chunk.start_line,
-            end_line: result.chunk.end_line,
-            file_hash: result.chunk.file_hash,
-            score: score / max_score,
-            reason: reasons.join(" + "),
-            text: result.chunk.text,
+        .map(|candidate| {
+            let score = candidate.score() / max_score;
+            let family_count = candidate.family_scores.len();
+            let mut reasons = candidate.channels;
+            if family_count > 1 {
+                reasons.push(format!("consensus:{family_count}"));
+            }
+            RagSourceView {
+                path: candidate.result.chunk.path,
+                start_line: candidate.result.chunk.start_line,
+                end_line: candidate.result.chunk.end_line,
+                file_hash: candidate.result.chunk.file_hash,
+                score,
+                reason: reasons.join(" + "),
+                text: candidate.result.chunk.text,
+            }
         })
         .collect::<Vec<_>>();
     (results, sources)

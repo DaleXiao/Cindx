@@ -3,7 +3,7 @@ use agent_core::{
     ToolOutcomeStatus, ToolRisk, ToolSpec,
 };
 use model_provider::{tool_function_name, ModelCallMode, ModelRequest, ModelResponse};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const DSML_TOOL_CALLS_OPEN: &str = "<｜DSML｜tool_calls>";
 const DSML_TOOL_CALLS_CLOSE: &str = "</｜DSML｜tool_calls>";
@@ -48,6 +48,31 @@ pub struct AgentLoopState {
     pub successful_mutations: usize,
     pub verified_after_last_mutation: bool,
     pub verification_gate_requests: usize,
+    pub pending_interaction_verifications:
+        BTreeMap<InteractionSurface, PendingInteractionVerification>,
+    pub verified_interactions: usize,
+    pub interaction_verification_gate_requests: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum InteractionSurface {
+    Browser,
+    Computer,
+}
+
+impl InteractionSurface {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Browser => "browser",
+            Self::Computer => "computer",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingInteractionVerification {
+    pub surface: InteractionSurface,
+    pub action_tool: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +236,9 @@ pub fn start_agent_loop(
         successful_mutations: 0,
         verified_after_last_mutation: false,
         verification_gate_requests: 0,
+        pending_interaction_verifications: BTreeMap::new(),
+        verified_interactions: 0,
+        interaction_verification_gate_requests: 0,
     }
 }
 
@@ -237,6 +265,9 @@ pub fn start_agent_loop_with_history(
         successful_mutations: 0,
         verified_after_last_mutation: false,
         verification_gate_requests: 0,
+        pending_interaction_verifications: BTreeMap::new(),
+        verified_interactions: 0,
+        interaction_verification_gate_requests: 0,
     }
 }
 
@@ -263,7 +294,7 @@ pub fn resume_agent_loop_from_messages(
         .iter()
         .filter(|message| matches!(message.role, MessageRole::Assistant))
         .count();
-    AgentLoopState {
+    let mut state = AgentLoopState {
         task_id,
         user_prompt: user_prompt.into(),
         messages,
@@ -274,7 +305,12 @@ pub fn resume_agent_loop_from_messages(
         successful_mutations: 0,
         verified_after_last_mutation: false,
         verification_gate_requests: 0,
-    }
+        pending_interaction_verifications: BTreeMap::new(),
+        verified_interactions: 0,
+        interaction_verification_gate_requests: 0,
+    };
+    rebuild_interaction_verification_state(&mut state);
+    state
 }
 
 pub fn model_request_for_turn(state: &AgentLoopState, tools: &[ToolSpec]) -> ModelRequest {
@@ -554,6 +590,9 @@ pub fn record_tool_outcome_with_risk(
     if !matches!(status, ToolOutcomeStatus::Succeeded) {
         return;
     }
+    if record_interaction_tool_success(state, tool_name) {
+        return;
+    }
     match risk.or_else(|| inferred_builtin_tool_risk(tool_name)) {
         Some(ToolRisk::WritesWorkspace | ToolRisk::Destructive) => {
             state.successful_mutations = state.successful_mutations.saturating_add(1);
@@ -571,6 +610,170 @@ pub fn record_tool_outcome_with_risk(
         }
         _ => {}
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractionToolKind {
+    Action(InteractionSurface),
+    Observation(InteractionSurface),
+}
+
+fn interaction_tool_kind(tool_name: &str) -> Option<InteractionToolKind> {
+    match tool_name {
+        "browser.open" | "browser.click" | "browser.type" | "browser.scroll"
+        | "browser.select_tab" => Some(InteractionToolKind::Action(InteractionSurface::Browser)),
+        "browser.extract_text" | "browser.capture" | "browser.tabs" => Some(
+            InteractionToolKind::Observation(InteractionSurface::Browser),
+        ),
+        "computer.click" | "computer.type" | "computer.key" | "computer.scroll" => {
+            Some(InteractionToolKind::Action(InteractionSurface::Computer))
+        }
+        "computer.screenshot" => Some(InteractionToolKind::Observation(
+            InteractionSurface::Computer,
+        )),
+        _ => None,
+    }
+}
+
+fn interaction_observation_verifies(action_tool: &str, observation_tool: &str) -> bool {
+    match action_tool {
+        "browser.open" | "browser.select_tab" => matches!(
+            observation_tool,
+            "browser.extract_text" | "browser.capture" | "browser.tabs"
+        ),
+        "browser.click" | "browser.type" | "browser.scroll" => {
+            matches!(observation_tool, "browser.extract_text" | "browser.capture")
+        }
+        "computer.click" | "computer.type" | "computer.key" | "computer.scroll" => {
+            observation_tool == "computer.screenshot"
+        }
+        _ => false,
+    }
+}
+
+fn record_interaction_tool_success(state: &mut AgentLoopState, tool_name: &str) -> bool {
+    let Some(kind) = interaction_tool_kind(tool_name) else {
+        return false;
+    };
+    match kind {
+        InteractionToolKind::Action(surface) => {
+            state.pending_interaction_verifications.insert(
+                surface,
+                PendingInteractionVerification {
+                    surface,
+                    action_tool: tool_name.to_string(),
+                },
+            );
+            state.interaction_verification_gate_requests = 0;
+        }
+        InteractionToolKind::Observation(surface) => {
+            let verifies_pending = state
+                .pending_interaction_verifications
+                .get(&surface)
+                .is_some_and(|pending| {
+                    interaction_observation_verifies(&pending.action_tool, tool_name)
+                });
+            if verifies_pending {
+                state.pending_interaction_verifications.remove(&surface);
+                state.verified_interactions = state.verified_interactions.saturating_add(1);
+                state.interaction_verification_gate_requests = 0;
+            }
+        }
+    }
+    true
+}
+
+fn rebuild_interaction_verification_state(state: &mut AgentLoopState) {
+    let successful_tools = state
+        .messages
+        .iter()
+        .filter(|message| message.role == MessageRole::Tool)
+        .filter_map(|message| successful_tool_observation_name(&message.content))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    for tool_name in successful_tools {
+        record_interaction_tool_success(state, &tool_name);
+    }
+    state.interaction_verification_gate_requests = 0;
+}
+
+fn successful_tool_observation_name(content: &str) -> Option<&str> {
+    let mut tool_name = None;
+    let mut succeeded = false;
+    for line in content.lines().take(4) {
+        if let Some(value) = line.strip_prefix("tool=") {
+            tool_name = Some(value.trim());
+        } else if let Some(value) = line.strip_prefix("status=") {
+            succeeded = value.trim() == "succeeded";
+        }
+    }
+    succeeded
+        .then_some(tool_name?)
+        .filter(|name| !name.is_empty())
+}
+
+pub fn interaction_completion_verification_instruction(
+    state: &mut AgentLoopState,
+    tools: &[ToolSpec],
+) -> Option<String> {
+    const MAX_GATE_REQUESTS: usize = 2;
+    if state.pending_interaction_verifications.is_empty()
+        || state.interaction_verification_gate_requests >= MAX_GATE_REQUESTS
+    {
+        return None;
+    }
+
+    let available_tools = tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut requirements = Vec::new();
+    for pending in state.pending_interaction_verifications.values() {
+        let observers = match pending.surface {
+            InteractionSurface::Browser => {
+                let candidates = if matches!(
+                    pending.action_tool.as_str(),
+                    "browser.open" | "browser.select_tab"
+                ) {
+                    ["browser.capture", "browser.extract_text", "browser.tabs"].as_slice()
+                } else {
+                    ["browser.capture", "browser.extract_text"].as_slice()
+                };
+                candidates
+                    .iter()
+                    .copied()
+                    .filter(|tool| available_tools.contains(tool))
+                    .collect::<Vec<_>>()
+            }
+            InteractionSurface::Computer => ["computer.screenshot"]
+                .into_iter()
+                .filter(|tool| available_tools.contains(tool))
+                .collect::<Vec<_>>(),
+        };
+        if !observers.is_empty() {
+            requirements.push(format!(
+                "{} action `{}` with {}",
+                pending.surface.label(),
+                pending.action_tool,
+                observers
+                    .iter()
+                    .map(|tool| format!("`{tool}`"))
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            ));
+        }
+    }
+    if requirements.is_empty() {
+        return None;
+    }
+
+    state.interaction_verification_gate_requests = state
+        .interaction_verification_gate_requests
+        .saturating_add(1);
+    Some(format!(
+        "The task performed interactive actions whose postconditions have not been observed. Before finishing, verify {}. Compare the fresh observation with the user's requested outcome. If the state did not change as intended, retry or replan. Unrelated file, shell, browser-tab, or tool success is not verification.",
+        requirements.join("; ")
+    ))
 }
 
 pub fn completion_verification_instruction(
@@ -857,6 +1060,15 @@ mod tests {
     }
 
     #[test]
+    fn core_prompt_requires_same_interface_postcondition_observation() {
+        let prompt = compose_base_agent_system_prompt(None);
+
+        assert!(prompt.contains("fresh observation from that same interface"));
+        assert!(prompt.contains("intended postcondition"));
+        assert!(prompt.contains("click, keystroke"));
+    }
+
+    #[test]
     fn trusted_runtime_context_is_separate_from_custom_instructions() {
         let prompt = compose_agent_system_prompt(
             Some("Answer in Chinese."),
@@ -1005,9 +1217,7 @@ mod tests {
             "Visible answer"
         );
         assert_eq!(
-            sanitize_assistant_content(
-                "<THINK >\nprivate\nreasoning\n</THINK >\n\nVisible answer"
-            ),
+            sanitize_assistant_content("<THINK >\nprivate\nreasoning\n</THINK >\n\nVisible answer"),
             "Visible answer"
         );
     }
@@ -1073,7 +1283,13 @@ mod tests {
         let advance = advance_with_model_response(&mut state, response, &tools);
 
         assert!(matches!(advance, AgentAdvance::ToolCalls { .. }));
-        assert_eq!(state.messages.last().map(|message| message.content.as_str()), Some(""));
+        assert_eq!(
+            state
+                .messages
+                .last()
+                .map(|message| message.content.as_str()),
+            Some("")
+        );
         assert!(state
             .messages
             .last()
@@ -1274,6 +1490,143 @@ mod tests {
             Some(&ToolRisk::WritesWorkspace),
         );
         assert!(completion_verification_instruction(&mut state, false, &tools).is_none());
+    }
+
+    #[test]
+    fn browser_action_requires_same_surface_postcondition_evidence() {
+        let mut state = start_agent_loop(
+            TaskId("task-browser-verify".to_string()),
+            "submit the form",
+            AgentRuntimeConfig::default(),
+        );
+        let tools = vec![
+            ToolSpec::builtin(
+                "browser.capture",
+                "browser",
+                "Capture the current page",
+                ToolRisk::UsesNetwork,
+                r#"{"type":"object"}"#,
+            ),
+            ToolSpec::builtin(
+                "file.read",
+                "file",
+                "Read a file",
+                ToolRisk::ReadOnly,
+                r#"{"type":"object"}"#,
+            ),
+        ];
+
+        record_tool_outcome_with_risk(
+            &mut state,
+            "browser.click",
+            r#"{"role":"button","name":"Submit"}"#,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::UsesNetwork),
+        );
+        assert_eq!(state.pending_interaction_verifications.len(), 1);
+        assert_eq!(state.successful_mutations, 0);
+        let instruction = interaction_completion_verification_instruction(&mut state, &tools)
+            .expect("browser action should require observation");
+        assert!(instruction.contains("browser.capture"));
+
+        record_tool_outcome_with_risk(
+            &mut state,
+            "file.read",
+            r#"{"path":"README.md"}"#,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ReadOnly),
+        );
+        assert_eq!(state.pending_interaction_verifications.len(), 1);
+
+        record_tool_outcome_with_risk(
+            &mut state,
+            "browser.capture",
+            "{}",
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::UsesNetwork),
+        );
+        assert!(state.pending_interaction_verifications.is_empty());
+        assert_eq!(state.verified_interactions, 1);
+        assert!(interaction_completion_verification_instruction(&mut state, &tools).is_none());
+    }
+
+    #[test]
+    fn interaction_verification_isolated_by_surface() {
+        let mut state = start_agent_loop(
+            TaskId("task-mixed-verify".to_string()),
+            "update both interfaces",
+            AgentRuntimeConfig::default(),
+        );
+        for (tool_name, risk) in [
+            ("browser.type", ToolRisk::SensitiveContext),
+            ("computer.key", ToolRisk::Destructive),
+        ] {
+            record_tool_outcome_with_risk(
+                &mut state,
+                tool_name,
+                "{}",
+                &ToolOutcomeStatus::Succeeded,
+                Some(&risk),
+            );
+        }
+        assert_eq!(state.pending_interaction_verifications.len(), 2);
+        assert_eq!(state.successful_mutations, 0);
+
+        record_tool_outcome_with_risk(
+            &mut state,
+            "browser.capture",
+            "{}",
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::UsesNetwork),
+        );
+        assert_eq!(state.pending_interaction_verifications.len(), 1);
+        assert!(state
+            .pending_interaction_verifications
+            .contains_key(&InteractionSurface::Computer));
+
+        record_tool_outcome_with_risk(
+            &mut state,
+            "computer.screenshot",
+            "{}",
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::SensitiveContext),
+        );
+        assert!(state.pending_interaction_verifications.is_empty());
+        assert_eq!(state.verified_interactions, 2);
+    }
+
+    #[test]
+    fn resumed_loop_rebuilds_pending_interaction_verification() {
+        let messages = vec![
+            Message {
+                role: MessageRole::User,
+                content: "click save".to_string(),
+                metadata: Metadata::new(),
+            },
+            Message {
+                role: MessageRole::Tool,
+                content: observation_from_tool_result("computer.click", "succeeded", "clicked"),
+                metadata: Metadata::new(),
+            },
+        ];
+        let mut state = resume_agent_loop_from_messages(
+            TaskId("task-resume-verify".to_string()),
+            "click save",
+            messages,
+            AgentRuntimeConfig::default(),
+        );
+        assert!(state
+            .pending_interaction_verifications
+            .contains_key(&InteractionSurface::Computer));
+
+        record_tool_outcome_with_risk(
+            &mut state,
+            "computer.screenshot",
+            "{}",
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::SensitiveContext),
+        );
+        assert!(state.pending_interaction_verifications.is_empty());
     }
 
     fn tool(name: &str, schema: &str) -> ToolSpec {

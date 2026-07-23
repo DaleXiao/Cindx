@@ -113,6 +113,8 @@ pub struct RunControlSnapshot {
     partial_output: String,
     action_history: BTreeMap<String, (u64, usize)>,
     recent_actions: BTreeMap<String, VecDeque<u64>>,
+    observation_fingerprints: BTreeSet<u64>,
+    observation_count: usize,
     checkpoint_fingerprints: BTreeSet<u64>,
     checkpoint_count: usize,
     model_extension_checkpoint: usize,
@@ -134,6 +136,7 @@ pub struct RunProgressSnapshot {
     pub tool_calls: usize,
     pub model_call_limit: usize,
     pub tool_call_limit: usize,
+    pub observations: usize,
     pub checkpoints: usize,
     pub budget_extensions: usize,
 }
@@ -147,6 +150,8 @@ struct RunMutableState {
     partial_output: String,
     action_history: BTreeMap<String, (u64, usize)>,
     recent_actions: BTreeMap<String, VecDeque<u64>>,
+    observation_fingerprints: BTreeSet<u64>,
+    observation_count: usize,
     checkpoint_fingerprints: BTreeSet<u64>,
     checkpoint_count: usize,
     model_extension_checkpoint: usize,
@@ -189,6 +194,8 @@ impl AgentRunControl {
                 partial_output: String::new(),
                 action_history: BTreeMap::new(),
                 recent_actions: BTreeMap::new(),
+                observation_fingerprints: BTreeSet::new(),
+                observation_count: 0,
                 checkpoint_fingerprints: BTreeSet::new(),
                 checkpoint_count: 0,
                 model_extension_checkpoint: 0,
@@ -223,6 +230,8 @@ impl AgentRunControl {
                 partial_output: snapshot.partial_output,
                 action_history: snapshot.action_history,
                 recent_actions: snapshot.recent_actions,
+                observation_fingerprints: snapshot.observation_fingerprints,
+                observation_count: snapshot.observation_count,
                 checkpoint_fingerprints: snapshot.checkpoint_fingerprints,
                 checkpoint_count: snapshot.checkpoint_count,
                 model_extension_checkpoint: snapshot.model_extension_checkpoint,
@@ -260,6 +269,8 @@ impl AgentRunControl {
                         partial_output: snapshot.partial_output,
                         action_history: snapshot.action_history,
                         recent_actions: snapshot.recent_actions,
+                        observation_fingerprints: snapshot.observation_fingerprints,
+                        observation_count: snapshot.observation_count,
                         checkpoint_fingerprints: snapshot.checkpoint_fingerprints,
                         checkpoint_count: snapshot.checkpoint_count,
                         model_extension_checkpoint: snapshot.checkpoint_count,
@@ -293,6 +304,8 @@ impl AgentRunControl {
             partial_output: state.partial_output.clone(),
             action_history: state.action_history.clone(),
             recent_actions: state.recent_actions.clone(),
+            observation_fingerprints: state.observation_fingerprints.clone(),
+            observation_count: state.observation_count,
             checkpoint_fingerprints: state.checkpoint_fingerprints.clone(),
             checkpoint_count: state.checkpoint_count,
             model_extension_checkpoint: state.model_extension_checkpoint,
@@ -493,6 +506,24 @@ impl AgentRunControl {
         state.last_progress_at = Instant::now();
     }
 
+    /// Records distinct model or protocol output for liveness and diagnostics.
+    /// Observations deliberately do not unlock more run budget; only verified
+    /// material checkpoints may extend a bounded segment.
+    pub fn record_observation(&self, stage: &str, detail: &str, evidence: &str) -> bool {
+        let evidence = fingerprint(&(stage, evidence));
+        let mut state = self.state.lock().expect("run control state poisoned");
+        if state.stop_reason.is_some() || !state.observation_fingerprints.insert(evidence) {
+            return false;
+        }
+        state.observation_count = state.observation_count.saturating_add(1);
+        state.stage = stage.to_string();
+        state.detail = detail.to_string();
+        state.last_progress_at = Instant::now();
+        true
+    }
+
+    /// Records objective progress such as applied user steering, acquired tool
+    /// evidence, workspace mutation, verification, or a completed evaluation.
     pub fn record_checkpoint(&self, stage: &str, detail: &str, evidence: &str) -> bool {
         let evidence = fingerprint(&(stage, evidence));
         let mut state = self.state.lock().expect("run control state poisoned");
@@ -539,6 +570,7 @@ impl AgentRunControl {
             tool_calls: self.tool_calls.load(Ordering::SeqCst),
             model_call_limit: state.model_call_limit,
             tool_call_limit: state.tool_call_limit,
+            observations: state.observation_count,
             checkpoints: state.checkpoint_count,
             budget_extensions: state.budget_extensions,
         }
@@ -673,12 +705,20 @@ mod tests {
     }
 
     #[test]
-    fn unique_checkpoints_extend_a_segment_but_chatter_does_not() {
+    fn material_checkpoints_extend_a_segment_but_new_observations_do_not() {
         let mut budget = test_budget();
         budget.initial_model_calls = 1;
         budget.max_model_calls = 3;
         let control = AgentRunControl::with_budget(budget);
 
+        assert_eq!(control.begin_model_call("one"), Ok(1));
+        assert!(control.record_observation("model", "answer", "novel chatter"));
+        assert_eq!(
+            control.begin_model_call("two"),
+            Err(RunStopReason::ModelCallBudgetExceeded)
+        );
+
+        let control = AgentRunControl::with_budget(budget);
         assert_eq!(control.begin_model_call("one"), Ok(1));
         assert!(control.record_checkpoint("model", "answer", "evidence-a"));
         assert_eq!(control.begin_model_call("two"), Ok(2));
@@ -688,6 +728,7 @@ mod tests {
             Err(RunStopReason::ModelCallBudgetExceeded)
         );
         assert_eq!(control.progress().budget_extensions, 1);
+        assert_eq!(control.progress().observations, 0);
     }
 
     #[test]
@@ -794,6 +835,8 @@ mod tests {
             .begin_model_call("planning")
             .expect("model call should start");
         control.record_partial_output("verified work");
+        assert!(control.record_observation("model_result", "planning", "draft-a"));
+        assert!(control.record_checkpoint("tool_result", "file.read", "evidence-a"));
         control.finish_model_call();
         let snapshot = control.snapshot();
         thread::sleep(Duration::from_millis(35));
@@ -801,6 +844,8 @@ mod tests {
         assert_eq!(resumed.stop_reason(), None);
         assert_eq!(resumed.partial_output(), "verified work");
         assert_eq!(resumed.progress().model_calls, 1);
+        assert_eq!(resumed.progress().observations, 1);
+        assert_eq!(resumed.progress().checkpoints, 1);
     }
 
     #[test]

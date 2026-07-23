@@ -2,6 +2,37 @@
 
 Cindx separates deterministic harness regressions from observed answer quality. A green build proves the routing contract is stable; it does not claim that a model answer is correct.
 
+## Agent Arena
+
+`benchmarks/agent/arena-v1.json` is the provider-backed comparison contract for
+single-model, Fast, Auto, and Pro. It contains 120 versioned tasks across 12
+capability families, uses the same wall-time, model-call, tool-call, and token
+budget for every mode, and requires three matched seeds per case. A complete
+comparison therefore contains 1,440 observations.
+
+The checked-in gate validates the suite but deliberately reports `ready=false`
+because CI has no provider credentials:
+
+```bash
+cargo run -p orchestrator --example arena_lab --locked -- \
+  --report target/agent-arena-contract.json
+```
+
+Controlled evaluation supplies JSONL observations and turns on the hard gate:
+
+```bash
+cargo run -p orchestrator --example arena_lab --locked -- \
+  --observations path/to/provider-arena-observations.jsonl \
+  --report target/agent-arena-report.json \
+  --require-ready
+```
+
+Every observation is bound to the suite version, case, seed, mode, candidate,
+and exact shared-budget fingerprint. Readiness requires a complete one-to-one
+matrix, provider-backed provenance, deterministic verifier evidence, zero
+budget overruns, and no duplicate run keys. Missing evidence remains visible;
+synthetic scores cannot make the arena green.
+
 ## Evaluation v2 Foundation
 
 The pre-GEPA baseline is frozen at commit `340e263c6207cb043655a870661fb2be317f95bd` in `benchmarks/agent/evaluation-v2-baseline.json`. It records SHA-256 fingerprints for the 72-case routing suite and baseline. The foundation command verifies those files before reporting any optimization readiness:
@@ -102,6 +133,15 @@ Correctness, evidence, completion, and safety use a 0–5 rubric. A run passes q
 Use human review or an explicitly requested judge-model run for release claims. Runtime Genetic Pareto evaluation is a separate, visible feature: it runs only when the user-facing setting is enabled and a request already enters adaptive Auto/Pro collaboration, publishes paired/replay evidence in Settings, and never turns Fast or lightweight single-model requests into hidden multi-model work.
 
 Pairwise evaluation waits until all foreground agent runs have finished and the app has remained idle briefly. A new foreground request cancels an in-flight evaluation so learning cannot compete with interactive responses. One idle lease may advance a bounded batch of at most four mutation/evaluation steps; this lets offline evolution make progress without coupling work to dozens of later user turns. Each comparison is judged in both candidate orders to reduce position bias, then persisted as one atomic observation pair. Offline train/holdout assignments are recorded in a durable split manifest so adding later cases cannot move old evidence across the evaluation boundary. Token and estimated-cost telemetry remain observable, but model price and token volume do not participate in Pareto dominance; selection prioritizes quality, safety, generalization, task coverage, and latency.
+
+The operational campaign is derived deterministically from durable dataset, reflection, pair,
+replay, frontier, and rollout evidence. Its stages are `collect_dataset -> collect_feedback ->
+reflect_and_mutate -> paired_train -> holdout_replay -> select_frontier -> canary -> stable`.
+Mutation, paired-execution, and replay events carry the current stage, next action, and a
+dataset-bound resume token through their run context. An in-flight process does not change the
+token, while a dataset digest change does, so a restart resumes the same scientific campaign
+without treating an interrupted request as new evidence. Rollback and canary safety states take
+precedence over exploration stages.
 
 ## Runtime Harness Evolution
 

@@ -106,6 +106,12 @@ pub(crate) struct AgentRecoveryEnvelope {
     pub(crate) attempts: u32,
     pub(crate) model_calls: usize,
     pub(crate) tool_calls: usize,
+    #[serde(default)]
+    pub(crate) material_checkpoints: usize,
+    #[serde(default)]
+    pub(crate) observations: usize,
+    #[serde(default)]
+    pub(crate) budget_extensions: usize,
     pub(crate) created_at_ms: u64,
     pub(crate) updated_at_ms: u64,
 }

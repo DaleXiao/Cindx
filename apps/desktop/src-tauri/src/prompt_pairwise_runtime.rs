@@ -92,6 +92,67 @@ pub(crate) fn schedule_prompt_pairwise_evaluation(
     }
 }
 
+fn prompt_pairwise_campaign_snapshot(
+    config: &ProviderConfig,
+    effort: &str,
+    dataset: &[PromptOfflineCase],
+    evaluation: &PromptEvolutionEvaluation,
+    rollout: Option<&PromptRolloutState>,
+) -> Result<PromptEvolutionCampaignSnapshot, String> {
+    let paired_runs = evaluation
+        .observations
+        .iter()
+        .filter(|observation| observation.mode.is_paired_execution())
+        .map(|observation| observation.evaluation_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let replay_runs = evaluation
+        .observations
+        .iter()
+        .filter(|observation| observation.mode.is_replay_execution())
+        .map(|observation| observation.evaluation_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let reflection_packets = evaluation
+        .observations
+        .iter()
+        .filter(|observation| {
+            observation.split == PromptEvaluationSplit::Train
+                && observation.mode.is_paired_execution()
+                && observation.reflection_packet.is_some()
+        })
+        .count();
+    let learned_profiles = evaluation
+        .population
+        .iter()
+        .filter(|genome| genome.id.starts_with("learned-"))
+        .count();
+    let rollout = rollout
+        .cloned()
+        .unwrap_or_else(|| default_prompt_rollout(effort));
+    derive_prompt_evolution_campaign(&PromptEvolutionCampaignInput {
+        effort: effort.to_string(),
+        applicable: effort != "fast",
+        enabled: config.prompt_evolution_enabled,
+        evaluation_inflight: true,
+        dataset_digest: prompt_offline_dataset_digest(dataset),
+        dataset_cases: dataset.len(),
+        minimum_dataset_cases: PROMPT_EVOLUTION_OFFLINE_MIN_CASES,
+        reflection_packets,
+        learned_profiles,
+        paired_runs,
+        required_paired_runs: PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
+        replay_runs,
+        required_replay_runs: PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS,
+        ready_profiles: evaluation.frontier_ids.len(),
+        stable_profile_id: rollout.stable_profile_id,
+        canary_profile_id: rollout.canary_profile_id,
+        canary_percent: rollout.canary_percent,
+        rollout_status: rollout.status,
+        frozen: evaluation.freeze_reason.is_some(),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_background_prompt_pairwise_evaluation(
     state: &tauri::State<'_, AppState>,
@@ -164,6 +225,22 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         }
         return Ok(false);
     }
+    let campaign =
+        prompt_pairwise_campaign_snapshot(config, effort, &dataset, &evaluation, rollout.as_ref())?;
+    let mut campaign_run_context = run_context.clone();
+    campaign_run_context.insert(
+        "prompt_campaign_stage".to_string(),
+        campaign.stage.as_str().to_string(),
+    );
+    campaign_run_context.insert(
+        "prompt_campaign_next_action".to_string(),
+        campaign.next_action.clone(),
+    );
+    campaign_run_context.insert(
+        "prompt_campaign_resume_token".to_string(),
+        campaign.resume_token.clone(),
+    );
+    let run_context = &campaign_run_context;
     let attempted_mutation_parent = evaluation
         .mutation_parent
         .as_ref()

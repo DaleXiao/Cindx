@@ -433,6 +433,9 @@ export type PromptEvolutionEffortState = {
   rollbackCount: number;
   rolloutStatus: string;
   readiness: string;
+  campaignStage: string;
+  campaignNextAction: string;
+  campaignResumeToken: string;
   datasetCases: number;
   datasetTrainCases: number;
   datasetHoldoutCases: number;
@@ -923,6 +926,9 @@ let browserPhase4State: Phase4State = {
       rollbackCount: 0,
       rolloutStatus: "stable",
       readiness: effort === "fast" ? "not_applicable" : "collecting_dataset",
+      campaignStage: effort === "fast" ? "not_applicable" : "collect_dataset",
+      campaignNextAction: effort === "fast" ? "use_single_model_path" : "collect_completed_tasks",
+      campaignResumeToken: "",
       datasetCases: 0,
       datasetTrainCases: 0,
       datasetHoldoutCases: 0,

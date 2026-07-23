@@ -2,21 +2,24 @@ use agent_core::{Metadata, ModelRole};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod arena;
 mod benchmark;
 mod evaluation;
+mod evolution_campaign;
 mod policy;
 mod prompt_evolution;
 mod routing;
 
+pub use arena::*;
 pub use benchmark::*;
 pub use evaluation::*;
+pub use evolution_campaign::*;
 pub use policy::*;
 pub use prompt_evolution::*;
 pub use routing::*;
 
 #[cfg(test)]
 use routing::LEARNED_ROUTER_MIN_SUCCESS_CONFIDENCE;
-
 
 pub const MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 5;
 pub const MAX_ADAPTIVE_WORKFLOW_AGENTS: usize = 3;
@@ -213,8 +216,7 @@ impl WorkflowPlanIr {
             return Err("workflow exceeds its declared model budget".to_string());
         }
         if self.steps.iter().any(|step| {
-            step.tool_policy != WorkflowToolPolicy::None
-                && self.budget.max_tool_calls_per_step == 0
+            step.tool_policy != WorkflowToolPolicy::None && self.budget.max_tool_calls_per_step == 0
         }) {
             return Err("workflow enables evidence tools with a zero tool budget".to_string());
         }
@@ -323,7 +325,10 @@ impl WorkflowExecutionCheckpoint {
 
     pub fn validate(&self, allowed_models: &[String]) -> Result<(), String> {
         if self.schema != WORKFLOW_CHECKPOINT_SCHEMA {
-            return Err(format!("unsupported workflow checkpoint schema: {}", self.schema));
+            return Err(format!(
+                "unsupported workflow checkpoint schema: {}",
+                self.schema
+            ));
         }
         if self.resume_key.trim().is_empty() {
             return Err("workflow checkpoint resume key is empty".to_string());
@@ -335,7 +340,11 @@ impl WorkflowExecutionCheckpoint {
             .iter()
             .map(|step| step.id.as_str())
             .collect::<BTreeSet<_>>();
-        let actual = self.steps.keys().map(String::as_str).collect::<BTreeSet<_>>();
+        let actual = self
+            .steps
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
         if expected != actual {
             return Err("workflow checkpoint steps do not match the plan".to_string());
         }
@@ -345,9 +354,14 @@ impl WorkflowExecutionCheckpoint {
                 .get(&step.id)
                 .ok_or_else(|| format!("workflow checkpoint is missing step {}", step.id))?;
             if checkpoint.step_id != step.id
-                || !allowed_models.iter().any(|model| model == &checkpoint.model)
+                || !allowed_models
+                    .iter()
+                    .any(|model| model == &checkpoint.model)
             {
-                return Err(format!("workflow checkpoint step {} changed identity", step.id));
+                return Err(format!(
+                    "workflow checkpoint step {} changed identity",
+                    step.id
+                ));
             }
             if checkpoint.status == WorkflowStepStatus::Completed
                 && checkpoint.output.as_deref().is_none_or(str::is_empty)
@@ -514,11 +528,10 @@ impl WorkflowExecutionCheckpoint {
     pub fn runnable_step_indices(&self, layer: &[usize]) -> Result<Vec<usize>, String> {
         let mut runnable = Vec::new();
         for index in layer {
-            let plan_step = self
-                .plan
-                .steps
-                .get(*index)
-                .ok_or_else(|| format!("workflow layer references unknown step index {index}"))?;
+            let plan_step =
+                self.plan.steps.get(*index).ok_or_else(|| {
+                    format!("workflow layer references unknown step index {index}")
+                })?;
             let checkpoint = self
                 .steps
                 .get(&plan_step.id)
@@ -527,9 +540,9 @@ impl WorkflowExecutionCheckpoint {
                 continue;
             }
             if plan_step.access.iter().any(|dependency| {
-                self.steps.get(dependency).is_none_or(|step| {
-                    step.status != WorkflowStepStatus::Completed
-                })
+                self.steps
+                    .get(dependency)
+                    .is_none_or(|step| step.status != WorkflowStepStatus::Completed)
             }) {
                 return Err(format!(
                     "workflow step {} is blocked by an incomplete dependency",
@@ -665,6 +678,17 @@ impl ConductorHarness {
             "Prompt evolution is disabled. Use only the baseline harness constraints above."
                 .to_string()
         };
+        let branch_role_constraint = match request.prompt_genome.role_strategy {
+            PromptRoleStrategy::Flexible => {
+                "- Assign the smallest useful root roles; model and role reuse is allowed when it reduces waste."
+            }
+            PromptRoleStrategy::Specialists => {
+                "- Give independent root branches non-overlapping subtasks and use distinct models when the pool permits."
+            }
+            PromptRoleStrategy::DiverseSpecialists => {
+                "- Give independent root branches non-overlapping subtasks, distinct models when possible, and complementary thinker/worker roles."
+            }
+        };
         format!(
             concat!(
                 "You are the Conductor Agent for a Fugu-style Cindx workflow. Design a query-specific dependency graph instead of answering the user. Return only strict JSON matching this example:\n",
@@ -676,7 +700,7 @@ impl ConductorHarness {
                 "- Preserve listed order: access may reference only earlier step ids.\n",
                 "- Obey the evolved profile's branch and verification policy; do not add decorative agents.\n",
                 "- Keep workers isolated and expose an earlier result only through access.\n",
-                "- Give independent root branches non-overlapping subtasks and use distinct models when the pool permits.\n",
+                "{branch_role_constraint}\n",
                 "- A verifier must directly access every independent root branch it audits.\n",
                 "- Every branch must reach the final synthesizer; retain dissenting or failed branches.\n",
                 "- Use exact model strings from the worker pool. The Conductor model is not implicitly a worker.\n",
@@ -688,9 +712,12 @@ impl ConductorHarness {
                 "User request:\n{objective}\n\nRecent session memory:\n{recent_context}"
             ),
             schema_example = conductor_schema_example(
+                request.budget.max_steps,
                 request.budget.max_models,
                 request.prompt_genome.max_parallel_branches,
+                request.prompt_genome.graph_depth,
                 request.prompt_genome.verification,
+                request.prompt_genome.topology_strategy,
                 &request.role_hints,
             ),
             max_steps = request.budget.max_steps,
@@ -702,6 +729,7 @@ impl ConductorHarness {
             worker_pool = worker_pool,
             prior_hint = prior_hint,
             evolved_directive = evolved_directive,
+            branch_role_constraint = branch_role_constraint,
             objective = request.objective,
             recent_context = if request.recent_context.trim().is_empty() {
                 "(none)"
@@ -797,10 +825,7 @@ impl ConductorHarness {
         );
         if self.request.prompt_evolution_enabled {
             for step in &mut plan.steps {
-                step.tool_policy = self
-                    .request
-                    .prompt_genome
-                    .workflow_tool_policy(&step.role);
+                step.tool_policy = self.request.prompt_genome.workflow_tool_policy(&step.role);
             }
         }
         plan.validate(&self.request.worker_models)?;
@@ -833,22 +858,41 @@ impl ConductorHarness {
                 step.access.is_empty() && matches!(step.role.as_str(), "thinker" | "worker")
             })
             .collect::<Vec<_>>();
-        let branch_limit = self
-            .request
-            .prompt_genome
-            .max_parallel_branches
+        let root_step_capacity = if self.request.prompt_genome.require_final_synthesis {
+            self.request.budget.max_steps.saturating_sub(1)
+        } else {
+            self.request.budget.max_steps
+        };
+        let evolved_branch_limit = match self.request.prompt_genome.topology_strategy {
+            PromptTopologyStrategy::Serial => 1,
+            PromptTopologyStrategy::AdaptiveDag | PromptTopologyStrategy::ParallelDeliberation => {
+                self.request.prompt_genome.max_parallel_branches
+            }
+        };
+        let branch_limit = evolved_branch_limit
             .min(self.request.budget.max_models)
-            .max(1);
-        let required_branches = if workflow.steps.len() == 1
-            && self.request.prompt_genome.graph_depth == PromptGraphDepth::Lean
-        {
+            .min(root_step_capacity);
+        let required_branches = if branch_limit == 0 {
             0
         } else {
-            match self.request.prompt_genome.graph_depth {
-                PromptGraphDepth::Lean => 1,
-                PromptGraphDepth::Balanced | PromptGraphDepth::Deep => {
-                    usize::from(self.request.budget.max_models >= 2) + 1
+            match self.request.prompt_genome.topology_strategy {
+                PromptTopologyStrategy::Serial => usize::from(
+                    workflow.steps.len() > 1
+                        || self.request.prompt_genome.graph_depth != PromptGraphDepth::Lean,
+                ),
+                PromptTopologyStrategy::AdaptiveDag => {
+                    if workflow.steps.len() == 1
+                        && self.request.prompt_genome.graph_depth == PromptGraphDepth::Lean
+                    {
+                        0
+                    } else {
+                        match self.request.prompt_genome.graph_depth {
+                            PromptGraphDepth::Lean => 1,
+                            PromptGraphDepth::Balanced | PromptGraphDepth::Deep => 2,
+                        }
+                    }
                 }
+                PromptTopologyStrategy::ParallelDeliberation => 2,
             }
             .min(branch_limit)
         };
@@ -865,38 +909,54 @@ impl ConductorHarness {
                 "conductor workflow exceeds the selected prompt profile's {branch_limit}-branch limit"
             ));
         }
-        let distinct_available_models = self
-            .request
-            .worker_models
-            .iter()
-            .collect::<BTreeSet<_>>()
-            .len();
-        let required_branch_models = required_branches.min(distinct_available_models);
-        let distinct_branch_models = independent_branches
-            .iter()
-            .map(|step| step.model.as_str())
-            .collect::<BTreeSet<_>>()
-            .len();
-        if required_branch_models >= 2 && distinct_branch_models < required_branch_models {
-            return Err(format!(
-                "conductor workflow requires {required_branch_models} distinct models across independent branches"
-            ));
+        if self.request.prompt_genome.role_strategy != PromptRoleStrategy::Flexible {
+            let distinct_available_models = self
+                .request
+                .worker_models
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .len();
+            let required_branch_models = required_branches.min(distinct_available_models);
+            let distinct_branch_models = independent_branches
+                .iter()
+                .map(|step| step.model.as_str())
+                .collect::<BTreeSet<_>>()
+                .len();
+            if required_branch_models >= 2 && distinct_branch_models < required_branch_models {
+                return Err(format!(
+                    "conductor workflow requires {required_branch_models} distinct models across independent branches"
+                ));
+            }
+            let distinct_branch_subtasks = independent_branches
+                .iter()
+                .map(|step| {
+                    step.subtask
+                        .split_whitespace()
+                        .flat_map(str::chars)
+                        .flat_map(char::to_lowercase)
+                        .collect::<String>()
+                })
+                .collect::<BTreeSet<_>>()
+                .len();
+            if independent_branches.len() >= 2
+                && distinct_branch_subtasks < independent_branches.len()
+            {
+                return Err("conductor independent branches repeat the same subtask".to_string());
+            }
         }
-        let distinct_branch_subtasks = independent_branches
-            .iter()
-            .map(|step| {
-                step.subtask
-                    .split_whitespace()
-                    .flat_map(str::chars)
-                    .flat_map(char::to_lowercase)
-                    .collect::<String>()
-            })
-            .collect::<BTreeSet<_>>()
-            .len();
-        if independent_branches.len() >= 2
-            && distinct_branch_subtasks < independent_branches.len()
+        if self.request.prompt_genome.role_strategy == PromptRoleStrategy::DiverseSpecialists
+            && independent_branches.len() >= 2
         {
-            return Err("conductor independent branches repeat the same subtask".to_string());
+            let branch_roles = independent_branches
+                .iter()
+                .map(|step| step.role.as_str())
+                .collect::<BTreeSet<_>>();
+            if !branch_roles.contains("thinker") || !branch_roles.contains("worker") {
+                return Err(
+                    "conductor diverse-specialist branches require complementary thinker and worker roles"
+                        .to_string(),
+                );
+            }
         }
         if self.request.prompt_genome.require_final_synthesis
             && workflow
@@ -938,9 +998,12 @@ impl ConductorHarness {
 }
 
 fn conductor_schema_example(
+    max_steps: usize,
     max_models: usize,
     max_parallel_branches: usize,
+    graph_depth: PromptGraphDepth,
     verification: PromptVerification,
+    topology_strategy: PromptTopologyStrategy,
     role_hints: &ConductorRoleHints,
 ) -> String {
     let branch_executor = if role_hints.executor != role_hints.planner {
@@ -950,8 +1013,28 @@ fn conductor_schema_example(
     } else {
         &role_hints.executor
     };
-    match max_models.min(max_parallel_branches.max(1)) {
-        0 | 1 => serde_json::json!({
+    let root_capacity = max_steps.saturating_sub(1).min(max_models);
+    let branch_capacity = match topology_strategy {
+        PromptTopologyStrategy::Serial => root_capacity.min(1),
+        PromptTopologyStrategy::AdaptiveDag | PromptTopologyStrategy::ParallelDeliberation => {
+            root_capacity.min(max_parallel_branches)
+        }
+    };
+    if topology_strategy == PromptTopologyStrategy::Serial && graph_depth == PromptGraphDepth::Lean
+    {
+        return serde_json::json!({
+            "steps": [{
+                "id": "synthesize",
+                "role": "synthesizer",
+                "model": role_hints.synthesizer,
+                "subtask": "produce a checkable execution brief",
+                "access": [],
+            }]
+        })
+        .to_string();
+    }
+    match branch_capacity {
+        0 if graph_depth == PromptGraphDepth::Lean => serde_json::json!({
             "steps": [{
                 "id": "synthesize",
                 "role": "synthesizer",
@@ -960,7 +1043,25 @@ fn conductor_schema_example(
                 "access": [],
             }]
         }),
-        2 => serde_json::json!({
+        0 | 1 => serde_json::json!({
+            "steps": [
+                {
+                    "id": "approach",
+                    "role": "thinker",
+                    "model": role_hints.planner,
+                    "subtask": "analyze the request and produce the strongest approach",
+                    "access": [],
+                },
+                {
+                    "id": "synthesize",
+                    "role": "synthesizer",
+                    "model": role_hints.synthesizer,
+                    "subtask": "turn the analysis into one checkable execution brief",
+                    "access": ["approach"],
+                },
+            ]
+        }),
+        2 if verification != PromptVerification::Adversarial || max_steps < 4 => serde_json::json!({
             "steps": [
                 {
                     "id": "approach_a",
@@ -985,7 +1086,7 @@ fn conductor_schema_example(
                 },
             ]
         }),
-        _ if verification == PromptVerification::Adversarial => serde_json::json!({
+        _ if verification == PromptVerification::Adversarial && max_steps >= 4 => serde_json::json!({
             "steps": [
                 {
                     "id": "approach_a",
@@ -1404,11 +1505,15 @@ mod tests {
         let allowed_models = vec!["planner".to_string(), "reviewer".to_string()];
         let plan = workflow_plan("workflow-resume", false);
         let layers = adaptive_workflow_layers(&plan.adaptive_workflow()).unwrap();
-        let mut checkpoint =
-            WorkflowExecutionCheckpoint::new("resume-key", plan.clone(), 1_000);
+        let mut checkpoint = WorkflowExecutionCheckpoint::new("resume-key", plan.clone(), 1_000);
 
-        assert_eq!(checkpoint.runnable_step_indices(&layers[0]).unwrap(), vec![0, 1]);
-        checkpoint.begin_step("approach_a", "planner", 1_010).unwrap();
+        assert_eq!(
+            checkpoint.runnable_step_indices(&layers[0]).unwrap(),
+            vec![0, 1]
+        );
+        checkpoint
+            .begin_step("approach_a", "planner", 1_010)
+            .unwrap();
         checkpoint
             .complete_step(
                 "approach_a",
@@ -1418,13 +1523,17 @@ mod tests {
                 1_020,
             )
             .unwrap();
-        assert_eq!(checkpoint.runnable_step_indices(&layers[0]).unwrap(), vec![1]);
+        assert_eq!(
+            checkpoint.runnable_step_indices(&layers[0]).unwrap(),
+            vec![1]
+        );
         assert!(checkpoint.runnable_step_indices(&layers[1]).is_err());
 
         let json = checkpoint.to_json().unwrap();
-        let mut restored =
-            WorkflowExecutionCheckpoint::from_json(&json, &allowed_models).unwrap();
-        restored.begin_step("approach_b", "reviewer", 1_030).unwrap();
+        let mut restored = WorkflowExecutionCheckpoint::from_json(&json, &allowed_models).unwrap();
+        restored
+            .begin_step("approach_b", "reviewer", 1_030)
+            .unwrap();
         restored
             .complete_step(
                 "approach_b",
@@ -1436,7 +1545,9 @@ mod tests {
             .unwrap();
         assert_eq!(restored.runnable_step_indices(&layers[1]).unwrap(), vec![2]);
         restored.begin_step("synthesize", "planner", 1_050).unwrap();
-        restored.fail_step("synthesize", "transient", 1_060).unwrap();
+        restored
+            .fail_step("synthesize", "transient", 1_060)
+            .unwrap();
         assert_eq!(restored.runnable_step_indices(&layers[1]).unwrap(), vec![2]);
         restored
             .complete_step(
@@ -1447,7 +1558,9 @@ mod tests {
                 1_070,
             )
             .unwrap();
-        restored.record_step_metrics("synthesize", 420, 900).unwrap();
+        restored
+            .record_step_metrics("synthesize", 420, 900)
+            .unwrap();
         let credits = restored.assign_step_credits(0.9);
         assert_eq!(credits.len(), 3);
         assert!(credits
@@ -1455,11 +1568,22 @@ mod tests {
             .find(|step| step.step_id == "synthesize")
             .is_some_and(|step| step.credit > 0.7 && step.total_tokens == 900));
         assert!(!restored.is_complete());
-        restored.finalize("quality-gated final".to_string(), 1_080).unwrap();
+        restored
+            .finalize("quality-gated final".to_string(), 1_080)
+            .unwrap();
         assert!(restored.is_complete());
-        assert_eq!(restored.completed_outputs().get("approach_a").map(String::as_str), Some("primary"));
         assert_eq!(
-            restored.completed_outputs().get("synthesize").map(String::as_str),
+            restored
+                .completed_outputs()
+                .get("approach_a")
+                .map(String::as_str),
+            Some("primary")
+        );
+        assert_eq!(
+            restored
+                .completed_outputs()
+                .get("synthesize")
+                .map(String::as_str),
             Some("quality-gated final")
         );
     }
@@ -1470,14 +1594,20 @@ mod tests {
         plan.budget.max_model_turns_per_step = 1;
         let mut checkpoint = WorkflowExecutionCheckpoint::new("resume-budget", plan, 2_000);
 
-        checkpoint.begin_step("approach_a", "planner", 2_010).unwrap();
-        checkpoint.fail_step("approach_a", "timeout", 2_020).unwrap();
+        checkpoint
+            .begin_step("approach_a", "planner", 2_010)
+            .unwrap();
+        checkpoint
+            .fail_step("approach_a", "timeout", 2_020)
+            .unwrap();
         assert!(checkpoint
             .begin_step("approach_a", "planner", 2_030)
             .unwrap_err()
             .contains("exhausted"));
         checkpoint.continue_with_budget(1, 2_040);
-        checkpoint.begin_step("approach_a", "planner", 2_050).unwrap();
+        checkpoint
+            .begin_step("approach_a", "planner", 2_050)
+            .unwrap();
         assert_eq!(checkpoint.continuations, 1);
         assert_eq!(checkpoint.steps["approach_a"].attempts, 2);
     }
@@ -1702,6 +1832,50 @@ mod tests {
             pro_plan.steps.last().unwrap().tool_policy,
             WorkflowToolPolicy::None
         );
+    }
+
+    #[test]
+    fn conductor_harness_applies_evolved_topology_and_role_strategies() {
+        let mut serial_request = conductor_request();
+        serial_request.prompt_genome = ConductorPromptGenome::seed_for_effort("fast");
+        serial_request.prompt_genome.graph_depth = PromptGraphDepth::Balanced;
+        let serial = ConductorHarness::new(serial_request);
+        serial
+            .parse_plan(
+                r#"{"steps":[{"id":"work","role":"worker","model":"planner","subtask":"solve","access":[]},{"id":"final","role":"synthesizer","model":"planner","subtask":"report","access":["work"]}]}"#,
+            )
+            .expect("serial topology should accept one root chain");
+        let parallel_error = serial
+            .parse_plan(
+                r#"{"steps":[{"id":"a","role":"worker","model":"planner","subtask":"same","access":[]},{"id":"b","role":"worker","model":"planner","subtask":"same","access":[]},{"id":"final","role":"synthesizer","model":"planner","subtask":"report","access":["a","b"]}]}"#,
+            )
+            .expect_err("serial topology must reject parallel roots");
+        assert!(
+            parallel_error.contains("1-branch limit"),
+            "{parallel_error}"
+        );
+
+        let mut flexible_request = conductor_request();
+        flexible_request.budget.max_steps = 5;
+        flexible_request.prompt_genome.role_strategy = PromptRoleStrategy::Flexible;
+        let flexible = ConductorHarness::new(flexible_request);
+        flexible
+            .parse_plan(
+                r#"{"steps":[{"id":"a","role":"worker","model":"planner","subtask":"same","access":[]},{"id":"b","role":"worker","model":"planner","subtask":"same","access":[]},{"id":"verify","role":"verifier","model":"reviewer","subtask":"audit","access":["a","b"]},{"id":"final","role":"synthesizer","model":"planner","subtask":"report","access":["a","b","verify"]}]}"#,
+            )
+            .expect("flexible roles should allow generalist root reuse");
+
+        let diverse = ConductorHarness::new({
+            let mut request = conductor_request();
+            request.budget.max_steps = 5;
+            request
+        });
+        let diversity_error = diverse
+            .parse_plan(
+                r#"{"steps":[{"id":"a","role":"worker","model":"planner","subtask":"analysis","access":[]},{"id":"b","role":"worker","model":"reviewer","subtask":"implementation","access":[]},{"id":"verify","role":"verifier","model":"reviewer","subtask":"audit","access":["a","b"]},{"id":"final","role":"synthesizer","model":"planner","subtask":"report","access":["a","b","verify"]}]}"#,
+            )
+            .expect_err("diverse specialists must include complementary root roles");
+        assert!(diversity_error.contains("complementary thinker and worker"));
     }
 
     #[test]
