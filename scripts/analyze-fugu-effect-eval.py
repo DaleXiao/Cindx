@@ -213,13 +213,15 @@ def fmt_ms(value: float | None) -> str:
     return f"{value:.0f}ms"
 
 
-def render_markdown(report: dict[str, Any], output_path: Path) -> None:
+def render_markdown(
+    report: dict[str, Any], output_path: Path, title: str
+) -> None:
     aggregate_by_benchmark: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in report["aggregates"]:
         aggregate_by_benchmark[row["benchmark"]].append(row)
 
     lines = [
-        "# Cindx Fugu External Effect Pilot V1",
+        f"# {title}",
         "",
         f"- Generated: `{report['generated_at_ms']}`",
         f"- Source commit: `{report['git_commit']}`",
@@ -272,11 +274,22 @@ def render_markdown(report: dict[str, Any], output_path: Path) -> None:
             )
         lines.append("")
 
+    domain_sample_sizes = sorted({row["n"] for row in report["gpqa_domains"]})
+    if len(domain_sample_sizes) == 1:
+        domain_sample_description = (
+            f"each cell contains {domain_sample_sizes[0]} frozen "
+            f"question{'s' if domain_sample_sizes[0] != 1 else ''}"
+        )
+    else:
+        domain_sample_description = (
+            "cell sizes range from "
+            f"{domain_sample_sizes[0]} to {domain_sample_sizes[-1]} frozen questions"
+        )
     lines.extend(
         [
             "## GPQA-Diamond by Domain (Diagnostic)",
             "",
-            "This breakdown is diagnostic only: each cell contains four frozen questions, so differences are highly uncertain.",
+            f"This breakdown is diagnostic only: {domain_sample_description}, so differences are highly uncertain.",
             "",
             "| Treatment | Domain | Completed | Correct | Budgeted score | Completed-only |",
             "| --- | --- | ---: | ---: | ---: | ---: |",
@@ -330,16 +343,31 @@ def render_markdown(report: dict[str, Any], output_path: Path) -> None:
         for row in report["aggregates"]
         if row["benchmark"] == "mrcr_v2_8_needle"
     )
+    pro_latency_finding = (
+        f"p50 latency was {fmt_ms(pro_gpqa['latency_ms_p50'])} and p95 was "
+        f"{fmt_ms(pro_gpqa['latency_ms_p95'])}"
+    )
+    treatment_deadline_seconds = report["evaluation_limits"].get(
+        "treatment_deadline_seconds"
+    )
+    if (
+        treatment_deadline_seconds is not None
+        and pro_gpqa["latency_ms_p95"] is not None
+        and pro_gpqa["latency_ms_p95"] >= treatment_deadline_seconds * 1000 * 0.99
+    ):
+        pro_latency_finding += (
+            f", reaching the {treatment_deadline_seconds}s treatment cap"
+        )
     lines.extend(
         [
             "## Observed Findings",
             "",
             f"- Under the fixed budget, the direct GPQA baseline scored **{fmt_percent(direct_gpqa['mean_score'])}**, versus **{fmt_percent(auto_gpqa['mean_score'])}** for Cindx Auto and **{fmt_percent(pro_gpqa['mean_score'])}** for Cindx Pro. This pilot therefore does not demonstrate orchestration uplift.",
-            f"- Cindx Pro completed **{pro_gpqa['completed']}/{pro_gpqa['n']}** GPQA cases. Every completed case was correct (**{fmt_percent(pro_gpqa['completed_mean_score'])}** completed-only), while p50 and p95 both reached the {report['evaluation_limits'].get('treatment_deadline_seconds', 'n/a')}s treatment cap. The dominant observed failure is delivery within budget, not completed-answer accuracy.",
+            f"- Cindx Pro completed **{pro_gpqa['completed']}/{pro_gpqa['n']}** GPQA cases. Every completed case was correct (**{fmt_percent(pro_gpqa['completed_mean_score'])}** completed-only); {pro_latency_finding}. The dominant observed failure is delivery within budget, not completed-answer accuracy.",
             f"- Cindx Auto completed **{auto_gpqa['completed']}/{auto_gpqa['n']}** GPQA cases and answered **{fmt_percent(auto_gpqa['completed_mean_score'])}** of completed cases correctly. Chemistry was the weakest diagnostic slice; the sample is too small for a domain-level conclusion.",
-            f"- MRCR scored **{fmt_percent(direct_mrcr['mean_score'])}** for direct and **{fmt_percent(auto_mrcr['mean_score'])}** for Auto across all four frozen length points. Both treatments selected `{', '.join(mrcr_models)}`, so this confirms strong long-context behavior but measures no routing uplift.",
+            f"- MRCR scored **{fmt_percent(direct_mrcr['mean_score'])}** for direct and **{fmt_percent(auto_mrcr['mean_score'])}** for Auto across all {direct_mrcr['n']} frozen length points. Both treatments selected `{', '.join(mrcr_models)}`, so this confirms strong long-context behavior but measures no routing uplift.",
             f"- Token telemetry was recorded for **{gpqa_telemetry}/{gpqa_runs}** GPQA runs and **{mrcr_telemetry}/{mrcr_runs}** MRCR runs. Runs without final usage make treatment token totals lower bounds, so this pilot cannot support a complete cost-efficiency comparison.",
-            "- None of the paired GPQA comparisons reached conventional significance; the exact tests are included only to prevent overclaiming from 12 questions.",
+            f"- None of the paired GPQA comparisons reached conventional significance; the exact tests are included only to prevent overclaiming from {max((row['n'] for row in report['paired_gpqa']), default=0)} questions.",
             "",
         ]
     )
@@ -395,6 +423,7 @@ def main() -> None:
     parser.add_argument("raw", type=Path)
     parser.add_argument("sanitized", type=Path)
     parser.add_argument("--markdown", type=Path)
+    parser.add_argument("--title", default="Cindx Fugu External Effect Pilot V1")
     args = parser.parse_args()
 
     raw_bytes = args.raw.read_bytes()
@@ -421,7 +450,7 @@ def main() -> None:
     args.sanitized.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     if args.markdown:
         args.markdown.parent.mkdir(parents=True, exist_ok=True)
-        render_markdown(report, args.markdown)
+        render_markdown(report, args.markdown, args.title)
 
 
 if __name__ == "__main__":

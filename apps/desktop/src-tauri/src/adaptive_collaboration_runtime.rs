@@ -28,7 +28,7 @@ pub(crate) fn run_adaptive_collaboration(
         .get("collaboration_policy")
         .cloned()
         .unwrap_or_else(|| "best_of_n".to_string());
-    let execution_contract = run_context
+    let base_execution_contract = run_context
         .get("conductor_contract")
         .map(String::as_str)
         .map(ConductorExecutionContract::from_json)
@@ -99,6 +99,8 @@ pub(crate) fn run_adaptive_collaboration(
             prompt_genome.id = profile;
         }
     }
+    let execution_contract =
+        base_execution_contract.with_prompt_commit_strategy(prompt_genome.commit_strategy);
     let prompt_genome_json = serde_json::to_string(&prompt_genome)
         .map_err(|error| format!("failed to serialize prompt genome: {error}"))?;
     {
@@ -865,7 +867,138 @@ pub(crate) fn run_adaptive_collaboration(
                 &workflow_checkpoint,
             )?;
         }
+        let independent_layer = specs.iter().all(|spec| spec.access.is_empty());
+        let successful_steps = specs
+            .iter()
+            .filter(|spec| {
+                workflow_checkpoint
+                    .steps
+                    .get(&spec.step_id)
+                    .is_some_and(|step| step.status == WorkflowStepStatus::Completed)
+            })
+            .count();
+        let required_successes = execution_contract.required_successes_for_layer(specs.len());
+        if independent_layer && !layer_failures.is_empty() && successful_steps >= required_successes
+        {
+            for spec in &specs {
+                let Some(step) = workflow_checkpoint.steps.get(&spec.step_id) else {
+                    continue;
+                };
+                if step.status != WorkflowStepStatus::Failed {
+                    continue;
+                }
+                let error = step
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "worker returned no usable result".to_string());
+                let degraded = adaptive_degraded_branch_output(&spec.step_id, &error);
+                workflow_checkpoint.degrade_step(
+                    &spec.step_id,
+                    degraded.clone(),
+                    error,
+                    current_time_millis(),
+                )?;
+                outputs.insert(spec.step_id.clone(), degraded);
+                append_workflow_checkpoint_event(
+                    state,
+                    task_id,
+                    run_context,
+                    collaboration_id,
+                    "Collaboration workflow branch degraded",
+                    "degraded",
+                    Some(&spec.step_id),
+                    &workflow_checkpoint,
+                )?;
+            }
+            if let Ok(mut store) = state.store.lock() {
+                let _ = append_event(
+                    &mut store,
+                    task_id,
+                    EventKind::TaskStatusChanged,
+                    "Collaboration quorum preserved",
+                    metadata_with_context(
+                        [
+                            ("collaboration_id".to_string(), collaboration_id.to_string()),
+                            (
+                                "successful_branches".to_string(),
+                                successful_steps.to_string(),
+                            ),
+                            (
+                                "required_branches".to_string(),
+                                required_successes.to_string(),
+                            ),
+                            (
+                                "degraded_branches".to_string(),
+                                layer_failures.len().to_string(),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        run_context,
+                    ),
+                );
+            }
+            layer_failures.clear();
+        }
         if let Some(error) = adaptive_layer_failure_error(&layer_failures) {
+            if let Some(handoff) = adaptive_partial_work_handoff(prompt, &outputs, &layer_failures)
+            {
+                append_workflow_checkpoint_event(
+                    state,
+                    task_id,
+                    run_context,
+                    collaboration_id,
+                    "Collaboration workflow checkpoint preserved",
+                    "degraded",
+                    None,
+                    &workflow_checkpoint,
+                )?;
+                if let Some(control) = cancellation.as_ref() {
+                    control.record_best_known_result(
+                        "workflow_partial_handoff",
+                        &handoff,
+                        ResultQuality::Grounded,
+                        evidence_by_step.values().flatten().count(),
+                        false,
+                        false,
+                    );
+                }
+                if let Ok(mut store) = state.store.lock() {
+                    let _ = append_event(
+                        &mut store,
+                        task_id,
+                        EventKind::TaskStatusChanged,
+                        "Collaboration workflow failed",
+                        metadata_with_context(
+                            [
+                                ("collaboration_id".to_string(), collaboration_id.to_string()),
+                                (
+                                    "workflow_schema".to_string(),
+                                    WORKFLOW_IR_SCHEMA.to_string(),
+                                ),
+                                ("status".to_string(), "degraded".to_string()),
+                                ("fallback_used".to_string(), "true".to_string()),
+                                ("completed_steps".to_string(), outputs.len().to_string()),
+                                ("failed_steps".to_string(), layer_failures.len().to_string()),
+                                (
+                                    "error".to_string(),
+                                    truncate_for_collaboration(&error, 2_000),
+                                ),
+                                (
+                                    "latency_ms".to_string(),
+                                    current_time_millis()
+                                        .saturating_sub(workflow_started_at_ms)
+                                        .to_string(),
+                                ),
+                            ]
+                            .into_iter()
+                            .collect(),
+                            run_context,
+                        ),
+                    );
+                }
+                return Ok(handoff);
+            }
             return Err(error);
         }
         if cancellation.as_ref().is_some_and(agent_run_should_stop) {
@@ -895,6 +1028,7 @@ pub(crate) fn run_adaptive_collaboration(
         prompt,
         &final_output,
         prompt_genome.verification,
+        evidence_count,
     );
     let final_output = match adaptive_quality_handoff(&quality_gate) {
         Ok(output) => output,
@@ -1212,10 +1346,37 @@ pub(crate) fn adaptive_quality_gate_passes(gate: &CollaborationQualityPayload) -
         && gate.safety_violations == 0
 }
 
+pub(crate) fn adaptive_quality_candidate_is_better(
+    candidate: &CollaborationQualityPayload,
+    anchor: &CollaborationQualityPayload,
+) -> bool {
+    if candidate.safety_violations != anchor.safety_violations {
+        return candidate.safety_violations < anchor.safety_violations;
+    }
+    let candidate_passes = adaptive_quality_gate_passes(candidate);
+    let anchor_passes = adaptive_quality_gate_passes(anchor);
+    if candidate_passes != anchor_passes {
+        return candidate_passes;
+    }
+    candidate.score.is_finite() && (!anchor.score.is_finite() || candidate.score > anchor.score)
+}
+
+fn adaptive_quality_result_quality(gate: &CollaborationQualityPayload) -> ResultQuality {
+    if adaptive_quality_gate_passes(gate) {
+        ResultQuality::Verified
+    } else if gate.score >= ADAPTIVE_QUALITY_PASS_SCORE {
+        ResultQuality::Grounded
+    } else if gate.score >= 0.5 {
+        ResultQuality::Substantive
+    } else {
+        ResultQuality::Draft
+    }
+}
+
 pub(crate) fn adaptive_quality_handoff(gate: &AdaptiveQualityGateResult) -> Result<String, String> {
     if gate.safety_violations > 0 {
         return Err(format!(
-            "{WORKFLOW_RESUMABLE_ERROR_PREFIX} adaptive quality gate found {} safety violation(s)",
+            "{WORKFLOW_SAFETY_ERROR_PREFIX} adaptive quality gate found {} safety violation(s)",
             gate.safety_violations
         ));
     }
@@ -1317,6 +1478,7 @@ pub(crate) fn quality_gate_adaptive_output(
     user_prompt: &str,
     output: &str,
     verification: PromptVerification,
+    evidence_count: usize,
 ) -> AdaptiveQualityGateResult {
     if verification == PromptVerification::Minimal {
         return AdaptiveQualityGateResult {
@@ -1332,15 +1494,21 @@ pub(crate) fn quality_gate_adaptive_output(
     let repair_budget = adaptive_quality_repair_budget(verification);
     let mut candidate = output.to_string();
     let mut last_gate = None;
+    let mut best_evaluated = None::<(String, CollaborationQualityPayload)>;
     let mut review_errors = Vec::new();
-    let cancellation = active_agent_run_control(
-        state,
-        run_context.get("session_id").map(String::as_str),
-    )
-    .ok()
-    .flatten();
+    let cancellation =
+        active_agent_run_control(state, run_context.get("session_id").map(String::as_str))
+            .ok()
+            .flatten();
 
     for review_index in 0..=repair_budget {
+        if cancellation
+            .as_ref()
+            .is_some_and(|control| control.stage_should_stop(RunStageClass::Reviewer))
+        {
+            review_errors.push("quality review stopped at the run deadline".to_string());
+            break;
+        }
         let reviewer_model = reviewer_models
             .get(review_index % reviewer_models.len().max(1))
             .cloned()
@@ -1411,6 +1579,22 @@ pub(crate) fn quality_gate_adaptive_output(
             review_index,
             repair_budget,
         );
+        if let Some(control) = cancellation.as_ref() {
+            control.record_best_known_result(
+                &format!("quality_gate_revision_{review_index}"),
+                &candidate,
+                adaptive_quality_result_quality(&gate),
+                evidence_count,
+                adaptive_quality_gate_passes(&gate),
+                false,
+            );
+        }
+        if best_evaluated
+            .as_ref()
+            .is_none_or(|(_, anchor)| adaptive_quality_candidate_is_better(&gate, anchor))
+        {
+            best_evaluated = Some((candidate.clone(), gate.clone()));
+        }
         if adaptive_quality_gate_passes(&gate) {
             return AdaptiveQualityGateResult {
                 output: candidate,
@@ -1433,6 +1617,10 @@ pub(crate) fn quality_gate_adaptive_output(
 
         let repair_stage = format!("quality_repair_{}", review_index + 1);
         if let Some(control) = cancellation.as_ref() {
+            if control.stage_should_stop(RunStageClass::Repair) {
+                review_errors.push("quality repair stopped at the run deadline".to_string());
+                break;
+            }
             if let Err(reason) = control.begin_repair_attempt(&repair_stage) {
                 review_errors.push(format!(
                     "quality repair budget exhausted: {}",
@@ -1467,7 +1655,10 @@ pub(crate) fn quality_gate_adaptive_output(
         candidate = repaired;
     }
 
-    let (score, safety_violations, mut issues) = last_gate
+    let (candidate, best_gate) = best_evaluated
+        .map(|(candidate, gate)| (candidate, Some(gate)))
+        .unwrap_or((candidate, last_gate));
+    let (score, safety_violations, mut issues) = best_gate
         .map(|gate| {
             (
                 gate.score.clamp(0.0, 1.0) as f64,

@@ -205,7 +205,7 @@ use collaboration_service::{
     effective_workflow_step_attempt_budget, merge_collaboration_evidence,
     prepare_collaboration_worker_turn, truncate_for_collaboration, workflow_role_coverage,
     AdaptiveCollaborationSpec, AgentCollaboration, CollaborationCompletion, CollaborationEvidence,
-    WORKFLOW_RESUMABLE_ERROR_PREFIX,
+    WORKFLOW_RESUMABLE_ERROR_PREFIX, WORKFLOW_SAFETY_ERROR_PREFIX,
 };
 use parallel_execution::{
     run_model_jobs_ordered, run_model_jobs_until_quorum, CancellableParallelJob, ParallelJob,

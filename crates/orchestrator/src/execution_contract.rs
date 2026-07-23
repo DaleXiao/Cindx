@@ -1,4 +1,4 @@
-use crate::{OrchestrationPolicy, RoutingContext, TaskClass, WorkflowPlanIr};
+use crate::{OrchestrationPolicy, PromptCommitStrategy, RoutingContext, TaskClass, WorkflowPlanIr};
 use serde::{Deserialize, Serialize};
 
 pub const AUTO_COLLABORATION_MIN_UPLIFT_BPS: u16 = 3_000;
@@ -84,7 +84,9 @@ impl ConductorExecutionContract {
         let min_successful_branches = match stop_policy {
             ConductorStopPolicy::FirstVerified => 1,
             ConductorStopPolicy::Quorum => max_parallelism.saturating_sub(1).max(1),
-            ConductorStopPolicy::Exhaustive => max_parallelism,
+            ConductorStopPolicy::Exhaustive => {
+                max_parallelism.saturating_mul(2).saturating_add(2) / 3
+            }
         };
         let terminal_model_call_reserve = match effort.as_str() {
             "fast" => 1,
@@ -114,6 +116,34 @@ impl ConductorExecutionContract {
     pub fn should_auto_collaborate(&self) -> bool {
         self.expected_uplift_bps >= AUTO_COLLABORATION_MIN_UPLIFT_BPS
             && self.confidence_bps >= AUTO_COLLABORATION_MIN_CONFIDENCE_BPS
+    }
+
+    pub fn with_prompt_commit_strategy(mut self, strategy: PromptCommitStrategy) -> Self {
+        self.stop_policy = match (self.effort.as_str(), strategy) {
+            ("fast", _) | (_, PromptCommitStrategy::Adaptive) => self.stop_policy,
+            (_, PromptCommitStrategy::Quorum) => ConductorStopPolicy::Quorum,
+            (_, PromptCommitStrategy::Exhaustive) => ConductorStopPolicy::Exhaustive,
+        };
+        self.min_successful_branches = match self.stop_policy {
+            ConductorStopPolicy::FirstVerified => 1,
+            ConductorStopPolicy::Quorum => self.max_parallelism.saturating_sub(1).max(1),
+            ConductorStopPolicy::Exhaustive => {
+                self.max_parallelism.saturating_mul(2).saturating_add(2) / 3
+            }
+        };
+        self
+    }
+
+    pub fn required_successes_for_layer(&self, branch_count: usize) -> usize {
+        self.min_successful_branches.min(branch_count).max(1)
+    }
+
+    pub fn quorum_grace_ms(&self) -> u64 {
+        match self.stop_policy {
+            ConductorStopPolicy::FirstVerified => 100,
+            ConductorStopPolicy::Quorum => 1_000,
+            ConductorStopPolicy::Exhaustive => 20_000,
+        }
     }
 
     pub fn validate_plan(&self, plan: &WorkflowPlanIr) -> Result<(), String> {
@@ -208,6 +238,53 @@ mod tests {
         assert!(complex.should_auto_collaborate());
         assert_eq!(complex.stop_policy, ConductorStopPolicy::Quorum);
         assert_eq!(complex.min_successful_branches, 2);
+    }
+
+    #[test]
+    fn pro_launches_every_branch_but_commits_on_a_supermajority() {
+        let contract = ConductorExecutionContract::from_routing(
+            &context("Investigate three independent hypotheses and verify the strongest answer"),
+            "pro",
+            OrchestrationPolicy::BestOfN { candidates: 3 },
+        );
+
+        assert_eq!(contract.stop_policy, ConductorStopPolicy::Exhaustive);
+        assert_eq!(contract.max_parallelism, 3);
+        assert_eq!(contract.min_successful_branches, 2);
+        assert_eq!(contract.required_successes_for_layer(2), 2);
+        assert_eq!(contract.required_successes_for_layer(3), 2);
+        assert_eq!(contract.quorum_grace_ms(), 20_000);
+    }
+
+    #[test]
+    fn evolved_commit_strategy_changes_auto_and_pro_but_not_fast_semantics() {
+        let routing = context("Compare independent implementation alternatives in parallel");
+        let auto = ConductorExecutionContract::from_routing(
+            &routing,
+            "auto",
+            OrchestrationPolicy::BestOfN { candidates: 3 },
+        )
+        .with_prompt_commit_strategy(PromptCommitStrategy::Exhaustive);
+        assert_eq!(auto.stop_policy, ConductorStopPolicy::Exhaustive);
+        assert_eq!(auto.quorum_grace_ms(), 20_000);
+
+        let pro = ConductorExecutionContract::from_routing(
+            &routing,
+            "pro",
+            OrchestrationPolicy::BestOfN { candidates: 3 },
+        )
+        .with_prompt_commit_strategy(PromptCommitStrategy::Quorum);
+        assert_eq!(pro.stop_policy, ConductorStopPolicy::Quorum);
+        assert_eq!(pro.quorum_grace_ms(), 1_000);
+
+        let fast = ConductorExecutionContract::from_routing(
+            &routing,
+            "fast",
+            OrchestrationPolicy::BestOfN { candidates: 3 },
+        )
+        .with_prompt_commit_strategy(PromptCommitStrategy::Exhaustive);
+        assert_eq!(fast.stop_policy, ConductorStopPolicy::FirstVerified);
+        assert_eq!(fast.quorum_grace_ms(), 100);
     }
 
     #[test]

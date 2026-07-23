@@ -4,9 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod arena;
 mod benchmark;
-mod execution_contract;
 mod evaluation;
 mod evolution_campaign;
+mod execution_contract;
 mod fugu_evaluation;
 mod policy;
 mod prompt_evolution;
@@ -14,9 +14,9 @@ mod routing;
 
 pub use arena::*;
 pub use benchmark::*;
-pub use execution_contract::*;
 pub use evaluation::*;
 pub use evolution_campaign::*;
+pub use execution_contract::*;
 pub use fugu_evaluation::*;
 pub use policy::*;
 pub use prompt_evolution::*;
@@ -30,6 +30,9 @@ pub const MAX_ADAPTIVE_WORKFLOW_AGENTS: usize = 3;
 pub const WORKFLOW_IR_SCHEMA: &str = "cindx.workflow.v1";
 pub const WORKFLOW_CHECKPOINT_SCHEMA: &str = "cindx.workflow.checkpoint.v1";
 pub const CONDUCTOR_MAX_ATTEMPTS: usize = 2;
+const ADAPTIVE_WORKER_SHARED_MEMORY_MAX_CHARS: usize = 24_000;
+const ADAPTIVE_WORKER_DEPENDENCY_MAX_CHARS: usize = 16_000;
+const ADAPTIVE_WORKER_AUTHORIZED_OUTPUTS_MAX_CHARS: usize = 32_000;
 
 fn default_prompt_profile() -> String {
     "legacy-baseline-v1".to_string()
@@ -246,7 +249,14 @@ pub enum WorkflowStepStatus {
     Pending,
     Running,
     Completed,
+    Degraded,
     Failed,
+}
+
+impl WorkflowStepStatus {
+    fn dependency_resolved(&self) -> bool {
+        matches!(self, Self::Completed | Self::Degraded)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -367,10 +377,10 @@ impl WorkflowExecutionCheckpoint {
                     step.id
                 ));
             }
-            if checkpoint.status == WorkflowStepStatus::Completed
+            if checkpoint.status.dependency_resolved()
                 && checkpoint.output.as_deref().is_none_or(str::is_empty)
             {
-                return Err(format!("completed workflow step {} has no output", step.id));
+                return Err(format!("resolved workflow step {} has no output", step.id));
             }
         }
         Ok(())
@@ -397,7 +407,7 @@ impl WorkflowExecutionCheckpoint {
             .steps
             .get_mut(step_id)
             .ok_or_else(|| format!("unknown workflow checkpoint step: {step_id}"))?;
-        if step.status == WorkflowStepStatus::Completed {
+        if step.status.dependency_resolved() {
             return Ok(());
         }
         if step.attempts >= attempt_limit {
@@ -518,11 +528,32 @@ impl WorkflowExecutionCheckpoint {
         Ok(())
     }
 
+    pub fn degrade_step(
+        &mut self,
+        step_id: &str,
+        output: String,
+        error: impl Into<String>,
+        now_ms: u64,
+    ) -> Result<(), String> {
+        let step = self
+            .steps
+            .get_mut(step_id)
+            .ok_or_else(|| format!("unknown workflow checkpoint step: {step_id}"))?;
+        step.status = WorkflowStepStatus::Degraded;
+        step.attempts = step.attempts.max(1);
+        step.output = Some(output);
+        step.error = Some(error.into());
+        step.updated_at_ms = now_ms;
+        self.updated_at_ms = now_ms;
+        Ok(())
+    }
+
     pub fn completed_outputs(&self) -> BTreeMap<String, String> {
         self.steps
             .iter()
             .filter_map(|(id, step)| {
-                (step.status == WorkflowStepStatus::Completed)
+                step.status
+                    .dependency_resolved()
                     .then(|| step.output.clone().map(|output| (id.clone(), output)))
                     .flatten()
             })
@@ -540,13 +571,13 @@ impl WorkflowExecutionCheckpoint {
                 .steps
                 .get(&plan_step.id)
                 .ok_or_else(|| format!("workflow checkpoint is missing step {}", plan_step.id))?;
-            if checkpoint.status == WorkflowStepStatus::Completed {
+            if checkpoint.status.dependency_resolved() {
                 continue;
             }
             if plan_step.access.iter().any(|dependency| {
                 self.steps
                     .get(dependency)
-                    .is_none_or(|step| step.status != WorkflowStepStatus::Completed)
+                    .is_none_or(|step| !step.status.dependency_resolved())
             }) {
                 return Err(format!(
                     "workflow step {} is blocked by an incomplete dependency",
@@ -565,8 +596,15 @@ impl WorkflowExecutionCheckpoint {
             .count()
     }
 
+    pub fn resolved_step_count(&self) -> usize {
+        self.steps
+            .values()
+            .filter(|step| step.status.dependency_resolved())
+            .count()
+    }
+
     pub fn is_complete(&self) -> bool {
-        self.finalized && self.completed_step_count() == self.plan.steps.len()
+        self.finalized && self.resolved_step_count() == self.plan.steps.len()
     }
 
     pub fn continue_with_budget(&mut self, additional_turns_per_step: usize, now_ms: u64) {
@@ -1172,6 +1210,24 @@ fn truncate_conductor_text(value: &str, max_chars: usize) -> String {
     output
 }
 
+fn bounded_workflow_context(value: &str, max_chars: usize) -> String {
+    let total_chars = value.chars().count();
+    if total_chars <= max_chars {
+        return value.to_string();
+    }
+
+    let tail_chars = max_chars / 4;
+    let head_chars = max_chars.saturating_sub(tail_chars);
+    let head = value.chars().take(head_chars).collect::<String>();
+    let mut tail = value.chars().rev().take(tail_chars).collect::<Vec<_>>();
+    tail.reverse();
+    format!(
+        "{head}\n[... {} characters omitted by the workflow context boundary ...]\n{}",
+        total_chars.saturating_sub(max_chars),
+        tail.into_iter().collect::<String>()
+    )
+}
+
 pub fn validate_adaptive_workflow(
     workflow: &AdaptiveWorkflow,
     allowed_models: &[String],
@@ -1359,6 +1415,11 @@ pub fn adaptive_worker_prompt(
             "Work product; Evidence used or needed; Risks; Handoff.",
         ),
     };
+    let bounded_shared_memory = if shared_memory.trim().is_empty() {
+        "(none)".to_string()
+    } else {
+        bounded_workflow_context(shared_memory, ADAPTIVE_WORKER_SHARED_MEMORY_MAX_CHARS)
+    };
     let mut prompt = format!(
         "You are isolated {} {} in a Cindx adaptive multi-model workflow. {} Complete only the assigned subtask. Do not assume you can see other agents unless their output is explicitly included below. Use exposed read-only evidence tools when the subtask depends on workspace facts. Return concrete findings for a later agent, not a user-facing answer. Do not merely restate authorized outputs; transform, test, or reconcile them for your role.\n\nOutput contract:\n{}\n\nUser request:\n{}\n\nAssigned subtask:\n{}\n\nShared memory from earlier user turns:\n{}",
         step.role,
@@ -1367,19 +1428,26 @@ pub fn adaptive_worker_prompt(
         output_contract,
         user_prompt,
         step.subtask,
-        if shared_memory.trim().is_empty() {
-            "(none)"
-        } else {
-            shared_memory
-        }
+        bounded_shared_memory
     );
     prompt.push_str("\n\nAuthorized prior step outputs:\n");
     if step.access.is_empty() {
         prompt.push_str("(none - work independently)\n");
     } else {
+        let mut remaining_chars = ADAPTIVE_WORKER_AUTHORIZED_OUTPUTS_MAX_CHARS;
         for dependency in &step.access {
             let output = outputs.get(dependency)?;
-            prompt.push_str(&format!("[{dependency}]\n{output}\n\n"));
+            if remaining_chars == 0 {
+                prompt.push_str(&format!(
+                    "[{dependency}]\n[omitted: authorized workflow context budget exhausted]\n\n"
+                ));
+                continue;
+            }
+            let output_budget = remaining_chars.min(ADAPTIVE_WORKER_DEPENDENCY_MAX_CHARS);
+            let bounded = bounded_workflow_context(output, output_budget);
+            remaining_chars =
+                remaining_chars.saturating_sub(bounded.chars().count().min(output_budget));
+            prompt.push_str(&format!("[{dependency}]\n{bounded}\n\n"));
         }
     }
     Some(prompt)
@@ -1469,10 +1537,7 @@ mod tests {
     }
 
     fn conductor_request() -> ConductorRequest {
-        let routing = RoutingContext::from_prompt(
-            "Compare implementation strategies",
-            Vec::new(),
-        );
+        let routing = RoutingContext::from_prompt("Compare implementation strategies", Vec::new());
         ConductorRequest {
             workflow_id: "workflow-conductor".to_string(),
             objective: "Compare implementation strategies".to_string(),
@@ -1611,6 +1676,56 @@ mod tests {
                 .get("synthesize")
                 .map(String::as_str),
             Some("quality-gated final")
+        );
+    }
+
+    #[test]
+    fn degraded_branch_preserves_dag_progress_without_claiming_success() {
+        let allowed_models = vec!["planner".to_string(), "reviewer".to_string()];
+        let plan = workflow_plan("workflow-degraded", false);
+        let layers = adaptive_workflow_layers(&plan.adaptive_workflow()).unwrap();
+        let mut checkpoint = WorkflowExecutionCheckpoint::new("degraded-key", plan, 1_000);
+
+        checkpoint
+            .complete_step(
+                "approach_a",
+                "planner",
+                "grounded branch".to_string(),
+                "[]".to_string(),
+                1_010,
+            )
+            .unwrap();
+        checkpoint
+            .fail_step("approach_b", "provider timeout", 1_020)
+            .unwrap();
+        checkpoint
+            .degrade_step(
+                "approach_b",
+                "INTERNAL DEGRADED BRANCH approach_b".to_string(),
+                "provider timeout",
+                1_030,
+            )
+            .unwrap();
+
+        assert_eq!(checkpoint.completed_step_count(), 1);
+        assert_eq!(checkpoint.resolved_step_count(), 2);
+        assert_eq!(
+            checkpoint.runnable_step_indices(&layers[1]).unwrap(),
+            vec![2]
+        );
+        assert_eq!(
+            checkpoint
+                .completed_outputs()
+                .get("approach_b")
+                .map(String::as_str),
+            Some("INTERNAL DEGRADED BRANCH approach_b")
+        );
+        let restored =
+            WorkflowExecutionCheckpoint::from_json(&checkpoint.to_json().unwrap(), &allowed_models)
+                .unwrap();
+        assert_eq!(
+            restored.steps["approach_b"].status,
+            WorkflowStepStatus::Degraded
         );
     }
 
@@ -2107,6 +2222,47 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_worker_context_is_bounded_without_losing_conclusions() {
+        let workflow = AdaptiveWorkflow {
+            steps: vec![
+                AdaptiveWorkflowStep {
+                    id: "source".to_string(),
+                    role: "worker".to_string(),
+                    model: "fast-mini".to_string(),
+                    subtask: "Investigate.".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "consumer".to_string(),
+                    role: "synthesizer".to_string(),
+                    model: "fast-mini".to_string(),
+                    subtask: "Synthesize.".to_string(),
+                    access: vec!["source".to_string()],
+                },
+            ],
+        };
+        let long_output = format!(
+            "BEGIN_EVIDENCE{}FINAL_CONCLUSION",
+            "x".repeat(ADAPTIVE_WORKER_DEPENDENCY_MAX_CHARS * 2)
+        );
+        let outputs = BTreeMap::from([("source".to_string(), long_output)]);
+
+        let prompt = adaptive_worker_prompt(
+            &workflow,
+            1,
+            "Investigate",
+            &"m".repeat(ADAPTIVE_WORKER_SHARED_MEMORY_MAX_CHARS * 2),
+            &outputs,
+        )
+        .expect("bounded worker prompt should build");
+
+        assert!(prompt.contains("BEGIN_EVIDENCE"));
+        assert!(prompt.contains("FINAL_CONCLUSION"));
+        assert!(prompt.contains("characters omitted by the workflow context boundary"));
+        assert!(prompt.chars().count() < 60_000);
+    }
+
+    #[test]
     fn adaptive_workflow_rejects_forward_access_and_unknown_models() {
         let workflow = AdaptiveWorkflow {
             steps: vec![
@@ -2327,6 +2483,8 @@ mod tests {
                 selected_model: "strong-vision".to_string(),
                 latency_ms: 900,
                 outcome: RoutingOutcome::Succeeded,
+                quality_score: None,
+                verification_passed: None,
                 cost_proxy: 120,
                 tool_count: 0,
                 retrieval_count: 2,
@@ -2340,6 +2498,8 @@ mod tests {
             selected_model: "fast-mini".to_string(),
             latency_ms: 200,
             outcome: RoutingOutcome::Failed,
+            quality_score: None,
+            verification_passed: None,
             cost_proxy: 20,
             tool_count: 0,
             retrieval_count: 0,
@@ -2375,6 +2535,8 @@ mod tests {
                 selected_model: "fast-mini".to_string(),
                 latency_ms: 250,
                 outcome: RoutingOutcome::Succeeded,
+                quality_score: None,
+                verification_passed: None,
                 cost_proxy: 80,
                 tool_count: 0,
                 retrieval_count: 0,
@@ -2401,6 +2563,8 @@ mod tests {
                 selected_model: "fast-mini".to_string(),
                 latency_ms: 250,
                 outcome: RoutingOutcome::Succeeded,
+                quality_score: None,
+                verification_passed: None,
                 cost_proxy: 80,
                 tool_count: 0,
                 retrieval_count: 0,
@@ -2429,6 +2593,8 @@ mod tests {
                 selected_model: "fast-mini".to_string(),
                 latency_ms: 250,
                 outcome: RoutingOutcome::Succeeded,
+                quality_score: None,
+                verification_passed: None,
                 cost_proxy: 80,
                 tool_count: 0,
                 retrieval_count: 0,
@@ -2455,6 +2621,8 @@ mod tests {
                 selected_model: "fast-mini".to_string(),
                 latency_ms: 250,
                 outcome: RoutingOutcome::Succeeded,
+                quality_score: None,
+                verification_passed: None,
                 cost_proxy: 80,
                 tool_count: 0,
                 retrieval_count: 0,
@@ -2472,6 +2640,8 @@ mod tests {
             } else {
                 RoutingOutcome::Failed
             },
+            quality_score: None,
+            verification_passed: None,
             cost_proxy: 120,
             tool_count: 0,
             retrieval_count: 0,
@@ -2481,6 +2651,64 @@ mod tests {
         let decision = LearnedModelRouter::train(&telemetry).route(&context);
         assert_eq!(decision.policy, OrchestrationPolicy::Single);
         assert_eq!(decision.model, "fast-mini");
+    }
+
+    #[test]
+    fn learned_router_rejects_nominal_success_without_quality() {
+        let prompt =
+            "Discuss this topic clearly and summarize the important distinctions. ".repeat(10);
+        let context = RoutingContext::from_prompt(&prompt, candidates());
+        let signature = context.learning_signature();
+        let mut telemetry = (0..6)
+            .map(|_| RoutingTelemetry {
+                task_class: TaskClass::General,
+                context_signature: signature.clone(),
+                selected_policy: OrchestrationPolicy::Single,
+                selected_model: "fast-mini".to_string(),
+                latency_ms: 120,
+                outcome: RoutingOutcome::Succeeded,
+                quality_score: Some(0.42),
+                verification_passed: Some(true),
+                cost_proxy: 20,
+                tool_count: 0,
+                retrieval_count: 0,
+                user_override: false,
+            })
+            .collect::<Vec<_>>();
+        telemetry.extend((0..6).map(|_| RoutingTelemetry {
+            task_class: TaskClass::General,
+            context_signature: signature.clone(),
+            selected_policy: OrchestrationPolicy::PlanExecuteReview,
+            selected_model: "strong-vision".to_string(),
+            latency_ms: 1_200,
+            outcome: RoutingOutcome::Succeeded,
+            quality_score: Some(0.91),
+            verification_passed: Some(true),
+            cost_proxy: 240,
+            tool_count: 0,
+            retrieval_count: 0,
+            user_override: false,
+        }));
+
+        let router = LearnedModelRouter::train(&telemetry);
+        let decision = router.route(&context);
+
+        assert_eq!(decision.policy, OrchestrationPolicy::PlanExecuteReview);
+        assert_eq!(decision.model, "strong-vision");
+        assert_eq!(
+            decision
+                .metadata
+                .get("learned_quality_score")
+                .map(String::as_str),
+            Some("0.910")
+        );
+        assert_eq!(
+            decision
+                .metadata
+                .get("learned_verification_rate")
+                .map(String::as_str),
+            Some("1.000")
+        );
     }
 
     #[test]
@@ -2554,6 +2782,8 @@ mod tests {
             selected_model: "strong-vision".to_string(),
             latency_ms: 10_000,
             outcome: RoutingOutcome::Succeeded,
+            quality_score: None,
+            verification_passed: None,
             cost_proxy: 1_000,
             tool_count: 4,
             retrieval_count: 4,
@@ -2575,6 +2805,8 @@ mod tests {
             selected_model: "strong-vision".to_string(),
             latency_ms: 30_000,
             outcome: RoutingOutcome::Succeeded,
+            quality_score: None,
+            verification_passed: None,
             cost_proxy: 4_000,
             tool_count: 0,
             retrieval_count: 4,
@@ -2672,6 +2904,8 @@ mod tests {
                 selected_model: "fast-mini".to_string(),
                 latency_ms: 100,
                 outcome: RoutingOutcome::Succeeded,
+                quality_score: None,
+                verification_passed: None,
                 cost_proxy: 20,
                 tool_count: 1,
                 retrieval_count: 0,
@@ -2684,6 +2918,8 @@ mod tests {
                 selected_model: "strong-vision".to_string(),
                 latency_ms: 500,
                 outcome: RoutingOutcome::Failed,
+                quality_score: None,
+                verification_passed: None,
                 cost_proxy: 180,
                 tool_count: 3,
                 retrieval_count: 4,

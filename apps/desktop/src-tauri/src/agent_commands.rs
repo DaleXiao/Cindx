@@ -823,7 +823,7 @@ pub(crate) fn run_agent_task_blocking_inner(
         "Preparing execution strategy",
     )?;
     append_single_model_policy_guidance(&mut history, &collaboration_policy);
-    let collaboration = match prepare_agent_collaboration(
+    let collaboration = match prepare_agent_collaboration_or_degrade(
         app,
         &state,
         &config,
@@ -1303,7 +1303,7 @@ pub(crate) fn retry_agent_task_blocking_inner(
         "Preparing execution strategy",
     )?;
     append_single_model_policy_guidance(&mut history, &collaboration_policy);
-    let collaboration = match prepare_agent_collaboration(
+    let collaboration = match prepare_agent_collaboration_or_degrade(
         app,
         &state,
         &config,

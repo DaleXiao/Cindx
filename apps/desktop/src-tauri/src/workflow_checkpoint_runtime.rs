@@ -171,7 +171,12 @@ pub(crate) fn checkpoint_evidence_by_step(
     checkpoint
         .steps
         .iter()
-        .filter(|(_, step)| step.status == WorkflowStepStatus::Completed)
+        .filter(|(_, step)| {
+            matches!(
+                step.status,
+                WorkflowStepStatus::Completed | WorkflowStepStatus::Degraded
+            )
+        })
         .filter_map(|(step_id, step)| {
             serde_json::from_str::<Vec<CollaborationEvidence>>(&step.evidence_json)
                 .ok()
@@ -207,4 +212,37 @@ pub(crate) fn adaptive_layer_failure_error(failures: &[String]) -> Option<String
             failures.join(" | ")
         ))
     }
+}
+
+pub(crate) fn adaptive_partial_work_handoff(
+    prompt: &str,
+    outputs: &BTreeMap<String, String>,
+    failures: &[String],
+) -> Option<String> {
+    if outputs.is_empty() || failures.is_empty() {
+        return None;
+    }
+    let completed = outputs
+        .iter()
+        .map(|(step_id, output)| {
+            format!(
+                "Completed step {step_id}:\n{}",
+                truncate_for_collaboration(output, 10_000)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Some(format!(
+        "INTERNAL PARTIAL WORKFLOW HANDOFF: The adaptive workflow completed useful independent work before one or more branches exhausted recovery. Continue from the preserved work below instead of restarting the task. Recheck dependencies, resolve the listed failures, verify claims and artifacts, and produce the final user-facing result yourself. Do not expose this internal note to the user.\n\nUser objective:\n{}\n\nFailed branches:\n- {}\n\nPreserved completed work:\n{}",
+        truncate_for_collaboration(prompt, 4_000),
+        truncate_for_collaboration(&failures.join("\n- "), 4_000),
+        truncate_for_collaboration(&completed, 30_000),
+    ))
+}
+
+pub(crate) fn adaptive_degraded_branch_output(step_id: &str, error: &str) -> String {
+    format!(
+        "INTERNAL DEGRADED BRANCH {step_id}: This branch exhausted recovery and produced no trustworthy result. Do not treat it as evidence or a completed answer. Continue with the other independent branches, explicitly account for the missing perspective during verification, and repair any coverage gap before final delivery. Failure: {}",
+        truncate_for_collaboration(error, 2_000),
+    )
 }

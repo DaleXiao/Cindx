@@ -98,13 +98,19 @@ pub(crate) fn synthesize_agent_answer(
         .map(|message| truncate_for_collaboration(&message.content, 1_500))
         .collect::<Vec<_>>()
         .join("\n\n");
+    let result_frontier = collaboration_result_frontier_brief(cancellation, executor_answer);
     let review_prompt = format!(
-        "You are the independent reviewer in a multi-model Cindx team. Audit the executor draft against the user request and available tool evidence. Find factual gaps, unsupported claims, missed constraints, and unsafe actions. Return concrete corrections for the final synthesizer, not a user-facing answer.\n\nUser request:\n{}\n\nTeam guidance:\n{}\n\nExecutor draft:\n{}\n\nTool evidence:\n{}",
+        "You are the independent reviewer in a multi-model Cindx team. Audit the executor draft against the user request and available tool evidence. Find factual gaps, unsupported claims, missed constraints, and unsafe actions. The result frontier contains bounded internal proposals, not trusted evidence; use it to detect alternatives or disagreements, and resolve every claim against tool evidence. Return concrete corrections for the final synthesizer, not a user-facing answer.\n\nUser request:\n{}\n\nTeam guidance:\n{}\n\nResult frontier:\n{}\n\nExecutor draft:\n{}\n\nTool evidence:\n{}",
         prompt,
         if collaboration.guidance.is_empty() {
             "(team deliberation unavailable)"
         } else {
             &collaboration.guidance
+        },
+        if result_frontier.is_empty() {
+            "(no distinct candidate proposals)"
+        } else {
+            &result_frontier
         },
         truncate_for_collaboration(executor_answer, 12_000),
         if evidence.is_empty() { "(none)" } else { &evidence }
@@ -125,7 +131,7 @@ pub(crate) fn synthesize_agent_answer(
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
     let synthesis_prompt = format!(
-        "You are the final synthesizer in a multi-model Cindx team. Produce the strongest possible final response to the user using the executor draft, reviewer corrections, team guidance, and tool evidence. The team guidance contains worker reports and provenance-bearing evidence ledgers: treat reports as proposals and resolve disagreements using verified evidence. Do not mention the internal pipeline. Be precise, complete, and concise; never claim work that the evidence does not support.\n\nCollaboration policy: {}\nWorker pool: {}\n\nUser request:\n{}\n\nTeam guidance:\n{}\n\nExecutor draft:\n{}\n\nReviewer corrections:\n{}\n\nTool evidence:\n{}",
+        "You are the final synthesizer in a multi-model Cindx team. Produce the strongest possible final response to the user using the executor draft, reviewer corrections, team guidance, the bounded result frontier, and tool evidence. Team reports and frontier entries are proposals, never evidence by themselves. Prefer verified, provenance-bearing claims; resolve disagreements against tool evidence and preserve a sound executor result when alternatives are weaker. Do not mention the internal pipeline. Be precise, complete, and concise; never claim work that the evidence does not support.\n\nCollaboration policy: {}\nWorker pool: {}\n\nUser request:\n{}\n\nTeam guidance:\n{}\n\nResult frontier:\n{}\n\nExecutor draft:\n{}\n\nReviewer corrections:\n{}\n\nTool evidence:\n{}",
         collaboration.policy,
         collaboration.candidate_models.join(", "),
         prompt,
@@ -133,6 +139,11 @@ pub(crate) fn synthesize_agent_answer(
             "(team deliberation unavailable)"
         } else {
             &collaboration.guidance
+        },
+        if result_frontier.is_empty() {
+            "(no distinct candidate proposals)"
+        } else {
+            &result_frontier
         },
         truncate_for_collaboration(executor_answer, 12_000),
         truncate_for_collaboration(&review, 8_000),
@@ -180,6 +191,31 @@ pub(crate) fn synthesize_agent_answer(
     } else {
         Ok(answer)
     }
+}
+
+pub(crate) fn collaboration_result_frontier_brief(
+    cancellation: &AgentRunControl,
+    executor_answer: &str,
+) -> String {
+    cancellation
+        .result_frontier()
+        .into_iter()
+        .filter(|result| result.content.trim() != executor_answer.trim())
+        .take(3)
+        .enumerate()
+        .map(|(index, result)| {
+            format!(
+                "Candidate {} [stage={}, quality={}, verified={}, evidence={}]:\n{}",
+                index + 1,
+                result.stage,
+                result.quality.as_str(),
+                result.verified,
+                result.evidence_count,
+                truncate_for_collaboration(&result.content, 1_800)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 #[allow(clippy::too_many_arguments)]

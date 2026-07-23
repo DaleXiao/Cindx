@@ -111,6 +111,8 @@ pub(crate) fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTele
                 )
             })?;
             let outcome = routing_outcome_for_run(&run_events, terminal)?;
+            let (quality_score, verification_passed) =
+                routing_quality_signals(&run_events, terminal);
             let cost_proxy = run_events
                 .iter()
                 .filter(|event| event.kind == EventKind::ModelRequestFinished)
@@ -136,6 +138,8 @@ pub(crate) fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTele
                 selected_model,
                 latency_ms: terminal.timestamp_ms.saturating_sub(started.timestamp_ms),
                 outcome,
+                quality_score,
+                verification_passed,
                 cost_proxy,
                 tool_count,
                 retrieval_count,
@@ -147,6 +151,59 @@ pub(crate) fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTele
             })
         })
         .collect()
+}
+
+fn routing_quality_signals(
+    run_events: &[&Event],
+    terminal: &Event,
+) -> (Option<f32>, Option<bool>) {
+    if let Some(gate) = run_events
+        .iter()
+        .rev()
+        .find(|event| event.summary == "Collaboration quality gate evaluated")
+    {
+        let quality_score = gate
+            .metadata
+            .get("quality_score")
+            .and_then(|score| score.parse::<f32>().ok())
+            .map(|score| score.clamp(0.0, 1.0));
+        let quality_pass = gate
+            .metadata
+            .get("quality_pass")
+            .and_then(|pass| pass.parse::<bool>().ok());
+        let safety_clear = gate
+            .metadata
+            .get("safety_violations")
+            .and_then(|count| count.parse::<usize>().ok())
+            .map(|count| count == 0);
+        return (
+            quality_score,
+            quality_pass.zip(safety_clear).map(|(pass, clear)| pass && clear),
+        );
+    }
+
+    let verification_passed = match terminal
+        .metadata
+        .get("completion_evidence")
+        .map(String::as_str)
+    {
+        Some("verified_mutation") => Some(true),
+        Some("unverified_mutation") => Some(false),
+        _ => {
+            let requested = terminal
+                .metadata
+                .get("verification_gate_requests")
+                .and_then(|count| count.parse::<usize>().ok())
+                .unwrap_or(0);
+            let pending = terminal
+                .metadata
+                .get("pending_interaction_verifications")
+                .and_then(|count| count.parse::<usize>().ok())
+                .unwrap_or(0);
+            (requested > 0).then_some(pending == 0)
+        }
+    };
+    (None, verification_passed)
 }
 
 pub(crate) fn completion_learning_signal(
