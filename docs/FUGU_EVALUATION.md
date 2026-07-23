@@ -13,6 +13,12 @@ The first provider-backed internal mechanism report is
 It validates bounded read-only evidence grounding but deliberately does not
 claim completion of the external Fugu matrix described below.
 
+The first provider-backed external-effect pilot is
+[`Cindx Fugu External Effect Pilot V1`](evaluations/CINDX_FUGU_EXTERNAL_EFFECT_PILOT_V1.md).
+It applies fixed GPQA-Diamond and MRCR v2 samples to the configured direct,
+Auto, and Pro paths, preserves failures in the denominator, and publishes only
+sanitized hashes, scores, latency, and routing evidence.
+
 The frozen source is [Fugu: A Model Family for Agentic Intelligence, v1](https://arxiv.org/html/2606.21228v1), Table 1 and Appendix A. The v1 LiveCodeBench score is 92.0. Later values on the product page are not silently substituted.
 
 ## Safety boundary

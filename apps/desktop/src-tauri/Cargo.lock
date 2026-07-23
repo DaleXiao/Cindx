@@ -1003,6 +1003,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "chrono-tz",
+ "csv",
  "model-provider",
  "objc2",
  "objc2-app-kit",
