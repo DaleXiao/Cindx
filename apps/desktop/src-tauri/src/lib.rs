@@ -226,4 +226,6 @@ use session_projection::{
 use session_title_service::*;
 
 #[cfg(test)]
+mod external_effect_eval_tests;
+#[cfg(test)]
 mod tests;
