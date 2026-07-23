@@ -500,7 +500,15 @@ pub(crate) fn finish_agent_run_for_control_stop(
                 "tool_call_limit".to_string(),
                 progress.tool_call_limit.to_string(),
             ),
+            (
+                "material_checkpoints".to_string(),
+                progress.checkpoints.to_string(),
+            ),
             ("checkpoints".to_string(), progress.checkpoints.to_string()),
+            (
+                "observations".to_string(),
+                progress.observations.to_string(),
+            ),
             (
                 "budget_extensions".to_string(),
                 progress.budget_extensions.to_string(),
@@ -539,6 +547,18 @@ pub(crate) fn finish_agent_run_for_control_stop(
             (
                 "elapsed_ms".to_string(),
                 progress.elapsed.as_millis().to_string(),
+            ),
+            (
+                "material_checkpoints".to_string(),
+                progress.checkpoints.to_string(),
+            ),
+            (
+                "observations".to_string(),
+                progress.observations.to_string(),
+            ),
+            (
+                "budget_extensions".to_string(),
+                progress.budget_extensions.to_string(),
             ),
             ("last_stage".to_string(), progress.stage),
             ("last_detail".to_string(), progress.detail),

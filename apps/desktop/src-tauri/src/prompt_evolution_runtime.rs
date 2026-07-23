@@ -701,6 +701,7 @@ pub(crate) fn prompt_evolution_evaluation_for_run(
     Ok(evaluation)
 }
 
+#[cfg(test)]
 pub(crate) fn prompt_evolution_readiness(
     applicable: bool,
     enabled: bool,
@@ -711,33 +712,29 @@ pub(crate) fn prompt_evolution_readiness(
     evaluation_inflight: bool,
     rollout_status: &str,
 ) -> String {
-    if !applicable {
-        return "not_applicable".to_string();
-    }
-    if !enabled {
-        return "disabled".to_string();
-    }
-    if evaluation_inflight {
-        return "evaluating".to_string();
-    }
-    if dataset_cases < PROMPT_EVOLUTION_OFFLINE_MIN_CASES {
-        return "collecting_dataset".to_string();
-    }
-    if paired_runs < PROMPT_EVOLUTION_MIN_TRAIN_RUNS {
-        return "collecting_train_evidence".to_string();
-    }
-    if replay_runs < PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS {
-        return "collecting_holdout_evidence".to_string();
-    }
-    if ready_profiles == 0 {
-        return "selecting_frontier".to_string();
-    }
-    match rollout_status {
-        "canary" => "canary".to_string(),
-        "rolled_back" => "rolled_back".to_string(),
-        "promoted" => "promoted".to_string(),
-        _ => "ready".to_string(),
-    }
+    derive_prompt_evolution_campaign(&PromptEvolutionCampaignInput {
+        effort: "legacy".to_string(),
+        applicable,
+        enabled,
+        evaluation_inflight,
+        dataset_digest: String::new(),
+        dataset_cases,
+        minimum_dataset_cases: PROMPT_EVOLUTION_OFFLINE_MIN_CASES,
+        reflection_packets: usize::from(dataset_cases >= PROMPT_EVOLUTION_OFFLINE_MIN_CASES),
+        learned_profiles: usize::from(dataset_cases >= PROMPT_EVOLUTION_OFFLINE_MIN_CASES),
+        paired_runs,
+        required_paired_runs: PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
+        replay_runs,
+        required_replay_runs: PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS,
+        ready_profiles,
+        stable_profile_id: "legacy-stable".to_string(),
+        canary_profile_id: (rollout_status == "canary").then(|| "legacy-canary".to_string()),
+        canary_percent: u8::from(rollout_status == "canary") * 10,
+        rollout_status: rollout_status.to_string(),
+        frozen: false,
+    })
+    .map(|campaign| campaign.readiness().to_string())
+    .unwrap_or_else(|_| "collecting_dataset".to_string())
 }
 
 pub(crate) fn prompt_evolution_state(
@@ -826,18 +823,34 @@ pub(crate) fn prompt_evolution_state(
         let dataset_holdout_cases = dataset
             .map(|dataset| dataset.holdout_count)
             .unwrap_or_default();
+        let dataset_digest = dataset
+            .map(|dataset| dataset.digest.clone())
+            .unwrap_or_default();
         let applicable = effort != "fast";
         let evaluation_inflight = inflight_efforts.contains(effort);
-        let readiness = prompt_evolution_readiness(
+        let campaign = derive_prompt_evolution_campaign(&PromptEvolutionCampaignInput {
+            effort: effort.to_string(),
             applicable,
-            config.prompt_evolution_enabled,
-            dataset_cases,
-            effort_paired_runs,
-            effort_replay_runs,
-            ready_profiles,
+            enabled: config.prompt_evolution_enabled,
             evaluation_inflight,
-            &rollout.status,
-        );
+            dataset_digest,
+            dataset_cases,
+            minimum_dataset_cases: PROMPT_EVOLUTION_OFFLINE_MIN_CASES,
+            reflection_packets: effort_reflection_packets,
+            learned_profiles: effort_learned_profiles,
+            paired_runs: effort_paired_runs,
+            required_paired_runs: PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
+            replay_runs: effort_replay_runs,
+            required_replay_runs: PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS,
+            ready_profiles,
+            stable_profile_id: rollout.stable_profile_id.clone(),
+            canary_profile_id: rollout.canary_profile_id.clone(),
+            canary_percent: rollout.canary_percent,
+            rollout_status: rollout.status.clone(),
+            frozen: evaluation.freeze_reason.is_some(),
+        })
+        .map_err(StorageError::new)?;
+        let readiness = campaign.readiness().to_string();
         effort_rows.push(PromptEvolutionEffortState {
             effort: effort.to_string(),
             applicable,
@@ -869,6 +882,9 @@ pub(crate) fn prompt_evolution_state(
             rollback_count: rollout.rollback_count,
             rollout_status: rollout.status,
             readiness,
+            campaign_stage: campaign.stage.as_str().to_string(),
+            campaign_next_action: campaign.next_action,
+            campaign_resume_token: campaign.resume_token,
             dataset_cases,
             dataset_train_cases,
             dataset_holdout_cases,

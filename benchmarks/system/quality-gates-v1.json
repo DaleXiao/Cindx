@@ -26,11 +26,13 @@
       "performance-comparator-contract",
       "routing-contract",
       "evaluation-foundation",
+      "agent-arena-contract",
       "memory-contract"
     ],
     "control-plane": [
       "routing-contract",
       "evaluation-foundation",
+      "agent-arena-contract",
       "memory-contract",
       "workspace-tests",
       "desktop-tests"
@@ -50,6 +52,7 @@
       "computer-sidecar",
       "routing-contract",
       "evaluation-foundation",
+      "agent-arena-contract",
       "memory-contract",
       "workspace-tests",
       "desktop-tests",
@@ -128,6 +131,29 @@
       "report": "target/evaluation-v2-foundation.json",
       "assertions": [
         { "path": "routing_contract_verified", "equals": true }
+      ]
+    },
+    {
+      "id": "agent-arena-contract",
+      "category": "agent_quality",
+      "command": [
+        "cargo",
+        "run",
+        "--locked",
+        "-p",
+        "orchestrator",
+        "--example",
+        "arena_lab",
+        "--",
+        "--report",
+        "target/agent-arena-contract.json"
+      ],
+      "report": "target/agent-arena-contract.json",
+      "assertions": [
+        { "path": "cases", "equals": 120 },
+        { "path": "observed_runs", "equals": 0 },
+        { "path": "missing_runs", "equals_path": "required_observations" },
+        { "path": "ready_for_scientific_comparison", "equals": false }
       ]
     },
     {

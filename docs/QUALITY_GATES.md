@@ -7,7 +7,8 @@ does not claim Fugu Ultra equivalence.
 ## Profiles
 
 - `quick`: version, desktop layout, and structural UX contracts.
-- `ci-contract`: quick checks plus routing, Evaluation v2 foundation, and memory.
+- `ci-contract`: quick checks plus routing, Evaluation v2 foundation, the
+  120-case arena contract, and memory.
 - `control-plane`: deterministic agent contracts plus Rust workspace and desktop tests.
 - `performance`: long-session incremental projection, bounded context governance,
   and 20k-chunk RAG diagnostics.
@@ -49,6 +50,8 @@ comparisons remain diagnostic only.
 - Existing desktop layout and interaction contracts remain unchanged.
 - Auto routing passes all 72 versioned cases without over- or under-orchestration.
 - Evaluation v2 remains bound to its frozen pre-GEPA routing baseline.
+- The Agent Arena validates all 120 versioned cases and remains explicitly
+  unmeasured until all 1,440 provider-backed paired runs exist.
 - Memory recall is 100% at top-1 and recall@3 with no trust or dedup failures.
 - Queue, steer, permission suspension, recovery, and session projections pass the
   desktop Rust control-plane tests.

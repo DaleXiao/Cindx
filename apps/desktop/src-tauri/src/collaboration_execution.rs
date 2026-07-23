@@ -312,7 +312,7 @@ pub(crate) fn complete_collaboration_model_with_control(
                 Ok(content) => content,
                 Err(error) => {
                     if let Some(control) = cancellation.as_ref() {
-                        control.record_checkpoint("model_protocol_error", &role_name, &error);
+                        control.record_observation("model_protocol_error", &role_name, &error);
                     }
                     return CollaborationCompletion {
                         content: None,
@@ -325,7 +325,7 @@ pub(crate) fn complete_collaboration_model_with_control(
             };
             if let Some(control) = cancellation.as_ref() {
                 control.record_partial_output(&content);
-                control.record_checkpoint("model_result", &role_name, &content);
+                control.record_observation("model_result", &role_name, &content);
             }
             CollaborationCompletion {
                 content: Some(content),
@@ -549,7 +549,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
             .filter(|content| !content.is_empty());
         if let Some(control) = cancellation.as_ref() {
             if let Some(evidence) = model_response_checkpoint_evidence(&response) {
-                control.record_checkpoint("model_result", &stage, &evidence);
+                control.record_observation("model_result", &stage, &evidence);
             }
         }
 

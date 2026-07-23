@@ -807,7 +807,8 @@ pub fn build_agent_evaluation_promotion_report(
         errors.push("promotion candidate must differ from the frozen baseline".to_string());
     }
     if baseline_scores.dataset_sha256 != candidate_scores.dataset_sha256 {
-        errors.push("baseline and candidate score sets target different hidden datasets".to_string());
+        errors
+            .push("baseline and candidate score sets target different hidden datasets".to_string());
     }
     let baseline_by_key = score_records_by_key(baseline_scores, &mut errors);
     let candidate_by_key = score_records_by_key(candidate_scores, &mut errors);

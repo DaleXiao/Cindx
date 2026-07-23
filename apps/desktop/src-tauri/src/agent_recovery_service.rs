@@ -81,6 +81,16 @@ pub(super) fn build_agent_recovery_envelope(
             .filter(|value| !value.trim().is_empty())
             .cloned()
     });
+    let latest_counter = |keys: &[&str]| {
+        events.iter().rev().find_map(|event| {
+            keys.iter().find_map(|key| {
+                event
+                    .metadata
+                    .get(*key)
+                    .and_then(|value| value.parse::<usize>().ok())
+            })
+        })
+    };
     Some(AgentRecoveryEnvelope {
         schema: AGENT_RECOVERY_SCHEMA.to_string(),
         resume_key,
@@ -114,6 +124,15 @@ pub(super) fn build_agent_recovery_envelope(
             .iter()
             .filter(|event| event.kind == EventKind::ToolCallFinished)
             .count(),
+        material_checkpoints: latest_counter(&["material_checkpoints", "run_checkpoints"])
+            .or_else(|| prior.as_ref().map(|envelope| envelope.material_checkpoints))
+            .unwrap_or_default(),
+        observations: latest_counter(&["observations", "run_observations"])
+            .or_else(|| prior.as_ref().map(|envelope| envelope.observations))
+            .unwrap_or_default(),
+        budget_extensions: latest_counter(&["budget_extensions", "run_budget_extensions"])
+            .or_else(|| prior.as_ref().map(|envelope| envelope.budget_extensions))
+            .unwrap_or_default(),
         created_at_ms: prior
             .as_ref()
             .map(|envelope| envelope.created_at_ms)
@@ -147,6 +166,18 @@ pub(super) fn agent_recovery_metadata(
     metadata.insert(
         "recovery_attempts".to_string(),
         envelope.attempts.to_string(),
+    );
+    metadata.insert(
+        "material_checkpoints".to_string(),
+        envelope.material_checkpoints.to_string(),
+    );
+    metadata.insert(
+        "observations".to_string(),
+        envelope.observations.to_string(),
+    );
+    metadata.insert(
+        "budget_extensions".to_string(),
+        envelope.budget_extensions.to_string(),
     );
     metadata.insert(
         "source_agent_run_id".to_string(),

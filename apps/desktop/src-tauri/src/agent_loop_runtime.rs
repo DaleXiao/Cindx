@@ -409,7 +409,7 @@ pub(crate) fn continue_agent_loop(
             cancellation.record_partial_output(&response.message.content);
         }
         if let Some(evidence) = model_response_checkpoint_evidence(&response) {
-            cancellation.record_checkpoint("model_result", "executor", &evidence);
+            cancellation.record_observation("model_result", "executor", &evidence);
         }
         let should_synthesize = collaboration.is_some()
             && response.tool_calls.is_empty()
@@ -463,6 +463,10 @@ pub(crate) fn continue_agent_loop(
             metadata.insert(
                 "run_checkpoints".to_string(),
                 progress.checkpoints.to_string(),
+            );
+            metadata.insert(
+                "run_observations".to_string(),
+                progress.observations.to_string(),
             );
             metadata.insert(
                 "run_budget_extensions".to_string(),
@@ -522,9 +526,12 @@ pub(crate) fn continue_agent_loop(
             let verification_required = run_context
                 .get("verification_required")
                 .is_some_and(|value| value == "true");
-            if let Some(instruction) =
+            let interaction_instruction =
+                interaction_completion_verification_instruction(&mut runtime, &tools);
+            let verification_instruction = interaction_instruction.or_else(|| {
                 completion_verification_instruction(&mut runtime, verification_required, &tools)
-            {
+            });
+            if let Some(instruction) = verification_instruction {
                 runtime.messages.truncate(previous_message_count);
                 append_internal_instruction(
                     &mut runtime,
@@ -682,8 +689,24 @@ pub(crate) fn continue_agent_loop(
                                 runtime.verification_gate_requests.to_string(),
                             ),
                             (
+                                "interaction_verification_gate_requests".to_string(),
+                                runtime.interaction_verification_gate_requests.to_string(),
+                            ),
+                            (
+                                "verified_interactions".to_string(),
+                                runtime.verified_interactions.to_string(),
+                            ),
+                            (
+                                "pending_interaction_verifications".to_string(),
+                                runtime.pending_interaction_verifications.len().to_string(),
+                            ),
+                            (
                                 "checkpoints".to_string(),
                                 completion_progress.checkpoints.to_string(),
+                            ),
+                            (
+                                "observations".to_string(),
+                                completion_progress.observations.to_string(),
                             ),
                             (
                                 "budget_extensions".to_string(),
