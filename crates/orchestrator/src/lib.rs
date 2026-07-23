@@ -2,6 +2,7 @@ use agent_core::{Metadata, ModelRole};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod anytime;
 mod arena;
 mod benchmark;
 mod evaluation;
@@ -12,6 +13,7 @@ mod policy;
 mod prompt_evolution;
 mod routing;
 
+pub use anytime::*;
 pub use arena::*;
 pub use benchmark::*;
 pub use evaluation::*;
@@ -287,6 +289,10 @@ pub struct WorkflowExecutionCheckpoint {
     pub plan: WorkflowPlanIr,
     #[serde(default)]
     pub prompt_genome_json: String,
+    #[serde(default)]
+    pub anytime_controller_json: String,
+    #[serde(default)]
+    pub anytime_outputs: BTreeMap<String, String>,
     pub steps: BTreeMap<String, WorkflowStepCheckpoint>,
     #[serde(default)]
     pub finalized: bool,
@@ -328,6 +334,8 @@ impl WorkflowExecutionCheckpoint {
             resume_key: resume_key.into(),
             plan,
             prompt_genome_json: String::new(),
+            anytime_controller_json: String::new(),
+            anytime_outputs: BTreeMap::new(),
             steps,
             finalized: false,
             continuations: 0,
@@ -1649,6 +1657,10 @@ mod tests {
                 1_070,
             )
             .unwrap();
+        restored.anytime_outputs.insert(
+            "__direct_anchor".to_string(),
+            "recoverable anchor".to_string(),
+        );
         restored
             .record_step_metrics("synthesize", 420, 900)
             .unwrap();
@@ -1676,6 +1688,13 @@ mod tests {
                 .get("synthesize")
                 .map(String::as_str),
             Some("quality-gated final")
+        );
+        assert_eq!(
+            restored
+                .anytime_outputs
+                .get("__direct_anchor")
+                .map(String::as_str),
+            Some("recoverable anchor")
         );
     }
 

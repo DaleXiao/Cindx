@@ -19,8 +19,8 @@ pub use control::{
     RunStopReason,
 };
 pub use parallel::{
-    BoundedParallelExecutor, CancellableParallelJob, ParallelJob, ParallelTaskError,
-    QuorumExecution,
+    BoundedParallelExecutor, CancellableParallelJob, InterruptibleQuorumExecution, ParallelJob,
+    ParallelJobCompletion, ParallelJobSupervisor, ParallelTaskError, QuorumExecution,
 };
 
 pub const DEFAULT_MAX_AGENT_TURNS: usize = 24;

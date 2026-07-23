@@ -108,18 +108,29 @@ pub(crate) fn run_collaboration_candidates(
         .as_ref()
         .map(|contract| Duration::from_millis(contract.quorum_grace_ms()))
         .unwrap_or_else(|| collaboration_candidate_quorum_grace(effort));
-    let execution = run_model_jobs_until_quorum(
+    let execution = run_model_jobs_until_quorum_interruptible(
         "candidate-worker",
         jobs,
         required_successes,
         quorum_grace,
+        Duration::from_millis(20),
         |completion| {
             completion
                 .content
                 .as_ref()
                 .is_some_and(|content| !content.trim().is_empty())
         },
+        || {
+            cancellation
+                .as_ref()
+                .is_some_and(collaboration_run_should_interrupt)
+        },
     );
+    let interrupted_for_steer = execution.interrupted
+        && cancellation
+            .as_ref()
+            .is_some_and(|control| control.has_pending_steer());
+    let execution = execution.execution;
     if let Ok(mut store) = state.store.lock() {
         let _ = append_event(
             &mut store,
@@ -155,6 +166,13 @@ pub(crate) fn run_collaboration_candidates(
                 run_context,
             ),
         );
+    }
+    if interrupted_for_steer
+        || cancellation
+            .as_ref()
+            .is_some_and(|control| control.has_pending_steer())
+    {
+        return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
     }
     let completions = execution
         .results
@@ -288,7 +306,7 @@ pub(crate) fn collaboration_candidate_handoff(
 }
 
 pub(crate) fn collaboration_error_blocks_executor(error: &str) -> bool {
-    error.starts_with(WORKFLOW_SAFETY_ERROR_PREFIX)
+    error.starts_with(WORKFLOW_SAFETY_ERROR_PREFIX) || error == COLLABORATION_STEER_INTERRUPTED
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -407,6 +425,9 @@ pub(crate) fn prepare_agent_collaboration(
             agent_budget,
         )
         .or_else(|error| {
+            if error == COLLABORATION_STEER_INTERRUPTED {
+                return Err(error);
+            }
             if collaboration_error_blocks_executor(&error) {
                 return Err(error);
             }
@@ -516,6 +537,7 @@ pub(crate) fn prepare_agent_collaboration_or_degrade(
         history,
     ) {
         Ok(collaboration) => Ok(collaboration),
+        Err(error) if error == COLLABORATION_STEER_INTERRUPTED => Ok(None),
         Err(error) if collaboration_error_blocks_executor(&error) => Err(error),
         Err(error) => {
             let control =

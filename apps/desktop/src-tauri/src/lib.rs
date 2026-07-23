@@ -31,9 +31,8 @@ use agent_runtime::{
     repeated_tool_failure_count, resume_agent_loop_from_messages, sanitize_assistant_content,
     start_agent_loop, start_agent_loop_with_history, tool_invocation_from_request, AgentAdvance,
     AgentRunControl, AgentRuntimeConfig, ResultQuality, RunBudget, RunControlSnapshot,
-    RunStageClass, RunStopReason,
-    DEFAULT_COLLABORATION_WORKER_TURNS, MAX_COLLABORATION_WORKER_TOOL_CALLS,
-    MAX_IDENTICAL_TOOL_FAILURES,
+    RunStageClass, RunStopReason, DEFAULT_COLLABORATION_WORKER_TURNS,
+    MAX_COLLABORATION_WORKER_TOOL_CALLS, MAX_IDENTICAL_TOOL_FAILURES,
 };
 use agent_skills::{
     install_skill_archive as install_skill_archive_package, SkillCatalog, SkillPreference,
@@ -43,13 +42,13 @@ use agent_storage::{
     EventStore, PermissionAuditRecord, PermissionStore, SqliteStore, StorageError,
 };
 use base64::Engine;
+#[cfg(test)]
+use model_provider::ModelError;
 use model_provider::{
     EmbeddingRequest, ModelCallMode, ModelRequest, OpenAiCompatibleConfig,
     OpenAiCompatibleImageConfig, OpenAiCompatibleImageProvider, OpenAiCompatibleProvider,
     MODEL_REQUEST_CANCELLED,
 };
-#[cfg(test)]
-use model_provider::ModelError;
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindow, NSWindowButton};
 #[cfg(test)]
@@ -61,10 +60,11 @@ use orchestrator::{
     ActionableSideInformation, AgentEvaluationCaseScore, AgentEvaluationCheck,
     AgentEvaluationEvidenceSource, AgentEvaluationReflectionPacket, AgentEvaluationSplit,
     AgentEvaluationToolTrace, AgentEvaluationTrace, AgentEvaluationTraceStep,
-    AgentEvaluationVerifierOutcome, ConductorExecutionContract, ConductorHarness,
-    ConductorPromptGenome, ConductorRequest, ConductorRoleHints, LearnedModelRouter,
-    ModelCandidate, OrchestrationPolicy,
-    PromptEvaluationMode, PromptEvaluationSplit, PromptEvolutionCampaignInput,
+    AgentEvaluationVerifierOutcome, AnytimeCandidate, AnytimeCandidateKind, AnytimeCandidateState,
+    AnytimeController, AnytimeControllerConfig, AnytimeControllerSnapshot, AnytimeDecision,
+    AnytimeVerdict, ConductorExecutionContract, ConductorHarness, ConductorPromptGenome,
+    ConductorRequest, ConductorRoleHints, ConductorStopPolicy, LearnedModelRouter, ModelCandidate,
+    OrchestrationPolicy, PromptEvaluationMode, PromptEvaluationSplit, PromptEvolutionCampaignInput,
     PromptEvolutionCampaignSnapshot, PromptEvolutionObservation, PromptInstanceParetoArchive,
     PromptParetoArchive, PromptPromotionConfidence, PromptRetryPolicy, PromptStepCredit,
     PromptVerification, RoutingContext, RoutingDecision, RoutingOutcome, RoutingTelemetry,
@@ -92,6 +92,7 @@ use tools::{
     WebSearchConfig,
 };
 
+mod adaptive_collaboration_execution;
 mod adaptive_collaboration_runtime;
 mod agent_collaboration_runtime;
 mod agent_commands;
@@ -142,6 +143,7 @@ mod view_models;
 mod workflow_checkpoint_runtime;
 mod workflow_routing_runtime;
 
+use adaptive_collaboration_execution::*;
 use adaptive_collaboration_runtime::*;
 use agent_collaboration_runtime::*;
 use agent_commands::*;
@@ -205,10 +207,11 @@ use collaboration_service::{
     effective_workflow_step_attempt_budget, merge_collaboration_evidence,
     prepare_collaboration_worker_turn, truncate_for_collaboration, workflow_role_coverage,
     AdaptiveCollaborationSpec, AgentCollaboration, CollaborationCompletion, CollaborationEvidence,
-    WORKFLOW_RESUMABLE_ERROR_PREFIX, WORKFLOW_SAFETY_ERROR_PREFIX,
+    COLLABORATION_STEER_INTERRUPTED, WORKFLOW_RESUMABLE_ERROR_PREFIX, WORKFLOW_SAFETY_ERROR_PREFIX,
 };
 use parallel_execution::{
-    run_model_jobs_ordered, run_model_jobs_until_quorum, CancellableParallelJob, ParallelJob,
+    model_job_supervisor, run_model_jobs_ordered, run_model_jobs_until_quorum_interruptible,
+    CancellableParallelJob, ParallelJob, ParallelJobCompletion, ParallelJobSupervisor,
 };
 use permission_service::{
     agent_session_permission_granted, pending_agent_permissions_for_run, permission_decision_label,

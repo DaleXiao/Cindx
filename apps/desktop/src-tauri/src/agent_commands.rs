@@ -1021,7 +1021,14 @@ pub(crate) fn resume_suspended_agent_run(
         claim_agent_recovery_envelope(&mut store, &run_context, &["paused"], "user_continued")?
     };
     if let Some(recovery) = recovery {
-        run_context.insert("recovery_resume_key".to_string(), recovery.resume_key);
+        run_context.insert(
+            "recovery_resume_key".to_string(),
+            recovery.resume_key.clone(),
+        );
+        run_context.insert(
+            "source_agent_run_id".to_string(),
+            recovery.source_run_id.clone(),
+        );
         run_context.insert(
             "recovery_attempts".to_string(),
             recovery.attempts.to_string(),
@@ -1573,7 +1580,14 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         &["blocked"],
         "permission_resolved",
     )? {
-        run_context.insert("recovery_resume_key".to_string(), recovery.resume_key);
+        run_context.insert(
+            "recovery_resume_key".to_string(),
+            recovery.resume_key.clone(),
+        );
+        run_context.insert(
+            "source_agent_run_id".to_string(),
+            recovery.source_run_id.clone(),
+        );
         run_context.insert(
             "recovery_attempts".to_string(),
             recovery.attempts.to_string(),

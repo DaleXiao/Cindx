@@ -163,6 +163,7 @@ pub(crate) fn continue_agent_loop(
         .exposure_plan(&prompt, config.context_window_tokens)
         .inline;
     let mut runtime_context = agent_runtime_context_for_run(&run_context);
+    let mut active_collaboration = collaboration;
 
     'agent_loop: loop {
         if let Some(steer_prompt) = apply_pending_agent_steers(
@@ -172,6 +173,7 @@ pub(crate) fn continue_agent_loop(
             &run_context,
             cancellation,
         )? {
+            active_collaboration = None;
             prompt = steer_prompt;
             add_image_generation_run_context(&mut run_context, config, &prompt);
             tools = registry
@@ -194,7 +196,7 @@ pub(crate) fn continue_agent_loop(
                 &runtime,
                 &prompt,
                 &run_context,
-                collaboration,
+                active_collaboration,
                 cancellation,
             );
         }
@@ -252,7 +254,7 @@ pub(crate) fn continue_agent_loop(
             ]
             .into_iter()
             .collect::<Metadata>();
-            if let Some(collaboration) = collaboration {
+            if let Some(collaboration) = active_collaboration {
                 metadata.insert("collaboration_id".to_string(), collaboration.id.clone());
                 metadata.insert("stage".to_string(), "executor".to_string());
                 metadata.insert("role".to_string(), "executor".to_string());
@@ -268,7 +270,7 @@ pub(crate) fn continue_agent_loop(
             .map_err(|error| error.to_string())?;
         }
 
-        let visible_stream = collaboration.is_none();
+        let visible_stream = active_collaboration.is_none();
         let mut streamed_output = false;
         let mut partial_stream = String::new();
         let mut stream_progress = ModelStreamProgress::new();
@@ -327,8 +329,7 @@ pub(crate) fn continue_agent_loop(
                         cancellation.finish_model_call();
                         continue 'agent_loop;
                     }
-                    if error.is_cancelled() || agent_run_should_stop(cancellation)
-                    {
+                    if error.is_cancelled() || agent_run_should_stop(cancellation) {
                         emit_agent_stream_delta(app, &request_id, session_id, "", true, true, None);
                         cancellation.finish_model_call();
                         return pause_agent_loop_for_control_stop(
@@ -338,7 +339,7 @@ pub(crate) fn continue_agent_loop(
                             &runtime,
                             &prompt,
                             &run_context,
-                            collaboration,
+                            active_collaboration,
                             cancellation,
                         );
                     }
@@ -392,7 +393,7 @@ pub(crate) fn continue_agent_loop(
                             &runtime,
                             &prompt,
                             &run_context,
-                            collaboration,
+                            active_collaboration,
                             cancellation,
                         );
                     }
@@ -416,7 +417,7 @@ pub(crate) fn continue_agent_loop(
                 &runtime,
                 &prompt,
                 &run_context,
-                collaboration,
+                active_collaboration,
                 cancellation,
             );
         }
@@ -433,7 +434,7 @@ pub(crate) fn continue_agent_loop(
         if let Some(evidence) = model_response_checkpoint_evidence(&response) {
             cancellation.record_observation("model_result", "executor", &evidence);
         }
-        let should_synthesize = collaboration.is_some()
+        let should_synthesize = active_collaboration.is_some()
             && response.tool_calls.is_empty()
             && !response.message.content.trim().is_empty();
         if should_synthesize {
@@ -528,7 +529,7 @@ pub(crate) fn continue_agent_loop(
             if let Some(raw_tool_calls_json) = response.raw_tool_calls_json.clone() {
                 metadata.insert("raw_tool_calls_json".to_string(), raw_tool_calls_json);
             }
-            if let Some(collaboration) = collaboration {
+            if let Some(collaboration) = active_collaboration {
                 metadata.insert("collaboration_id".to_string(), collaboration.id.clone());
                 metadata.insert("stage".to_string(), "executor".to_string());
                 metadata.insert("role".to_string(), "executor".to_string());
@@ -622,7 +623,8 @@ pub(crate) fn continue_agent_loop(
                     false,
                     true,
                 );
-                let (final_answer, synthesized) = if let Some(collaboration) = collaboration {
+                let (final_answer, synthesized) = if let Some(collaboration) = active_collaboration
+                {
                     match synthesize_agent_answer(
                         app,
                         state,
@@ -635,6 +637,22 @@ pub(crate) fn continue_agent_loop(
                         cancellation,
                     ) {
                         Ok(answer) => (answer, true),
+                        Err(_)
+                            if cancellation.has_pending_steer()
+                                && !agent_run_should_stop(cancellation) =>
+                        {
+                            emit_agent_stream_delta(
+                                app,
+                                &request_id,
+                                session_id,
+                                "",
+                                false,
+                                true,
+                                None,
+                            );
+                            active_collaboration = None;
+                            continue 'agent_loop;
+                        }
                         Err(_) if agent_run_should_stop(cancellation) => {
                             return pause_agent_loop_for_control_stop(
                                 app,
@@ -739,7 +757,7 @@ pub(crate) fn continue_agent_loop(
                             ("answer_length".to_string(), final_answer.len().to_string()),
                             (
                                 "collaboration".to_string(),
-                                collaboration.is_some().to_string(),
+                                active_collaboration.is_some().to_string(),
                             ),
                             (
                                 "collaboration_synthesized".to_string(),
@@ -850,7 +868,7 @@ pub(crate) fn continue_agent_loop(
                     &runtime,
                     &prompt,
                     &run_context,
-                    collaboration,
+                    active_collaboration,
                     cancellation,
                 );
             }
@@ -878,8 +896,16 @@ pub(crate) fn continue_agent_loop(
                 return agent_state_with_error_in_context(state, &run_context, message);
             }
             AgentAdvance::ToolCalls { calls } => {
+                if cancellation.has_pending_steer() && !agent_run_should_stop(cancellation) {
+                    active_collaboration = None;
+                    continue 'agent_loop;
+                }
                 let mut waiting_for_permission = false;
                 for call in calls {
+                    if cancellation.has_pending_steer() && !agent_run_should_stop(cancellation) {
+                        active_collaboration = None;
+                        continue 'agent_loop;
+                    }
                     if agent_run_should_stop(cancellation) {
                         return pause_agent_loop_for_control_stop(
                             app,
@@ -888,7 +914,7 @@ pub(crate) fn continue_agent_loop(
                             &runtime,
                             &prompt,
                             &run_context,
-                            collaboration,
+                            active_collaboration,
                             cancellation,
                         );
                     }
@@ -1084,6 +1110,10 @@ pub(crate) fn continue_agent_loop(
                     )
                     .map_err(|error| error.to_string())?;
                     drop(store);
+                    if cancellation.has_pending_steer() && !agent_run_should_stop(cancellation) {
+                        active_collaboration = None;
+                        continue 'agent_loop;
+                    }
                     if agent_run_should_stop(cancellation) {
                         return pause_agent_loop_for_control_stop(
                             app,
@@ -1092,7 +1122,7 @@ pub(crate) fn continue_agent_loop(
                             &runtime,
                             &prompt,
                             &run_context,
-                            collaboration,
+                            active_collaboration,
                             cancellation,
                         );
                     }
@@ -1127,7 +1157,7 @@ pub(crate) fn continue_agent_loop(
                             prompt: prompt.clone(),
                             run_context: run_context.clone(),
                             workspace_root: workspace_root.to_path_buf(),
-                            collaboration: collaboration.cloned(),
+                            collaboration: active_collaboration.cloned(),
                             run_control: cancellation.snapshot(),
                         },
                     )?;
