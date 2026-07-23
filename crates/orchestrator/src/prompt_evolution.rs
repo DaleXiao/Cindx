@@ -183,6 +183,32 @@ impl ConductorPromptGenome {
         }
     }
 
+    pub fn with_effort_capability_floor(mut self, effort: &str) -> Self {
+        match effort.trim().to_ascii_lowercase().as_str() {
+            "pro" => {
+                self.graph_depth = PromptGraphDepth::Deep;
+                self.verification = PromptVerification::Adversarial;
+                self.commit_strategy = PromptCommitStrategy::Exhaustive;
+                self.topology_strategy = PromptTopologyStrategy::ParallelDeliberation;
+                self.role_strategy = PromptRoleStrategy::DiverseSpecialists;
+                self.max_parallel_branches = self.max_parallel_branches.max(2);
+                self.require_final_synthesis = true;
+            }
+            "auto" => {
+                self.graph_depth = self.graph_depth.max(PromptGraphDepth::Balanced);
+                self.verification = self.verification.max(PromptVerification::Evidence);
+                self.topology_strategy = self
+                    .topology_strategy
+                    .max(PromptTopologyStrategy::AdaptiveDag);
+                self.role_strategy = self.role_strategy.max(PromptRoleStrategy::Specialists);
+                self.max_parallel_branches = self.max_parallel_branches.max(2);
+                self.require_final_synthesis = true;
+            }
+            _ => {}
+        }
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn seed(
         id: &str,
@@ -1766,6 +1792,46 @@ mod tests {
         assert_eq!(child.parents, vec![auto.id, pro.id]);
         assert_eq!(child.generation, 1);
         child.validate().unwrap();
+    }
+
+    #[test]
+    fn effort_capability_floor_prevents_learned_profiles_from_weakening_auto_or_pro() {
+        let mut weak_auto = ConductorPromptGenome::seed_for_effort("fast");
+        weak_auto.require_final_synthesis = false;
+        let effective_auto = weak_auto.with_effort_capability_floor("auto");
+        assert_eq!(effective_auto.graph_depth, PromptGraphDepth::Balanced);
+        assert_eq!(effective_auto.verification, PromptVerification::Evidence);
+        assert_eq!(
+            effective_auto.topology_strategy,
+            PromptTopologyStrategy::AdaptiveDag
+        );
+        assert_eq!(
+            effective_auto.role_strategy,
+            PromptRoleStrategy::Specialists
+        );
+        assert_eq!(effective_auto.max_parallel_branches, 2);
+        assert!(effective_auto.require_final_synthesis);
+
+        let mut weak_pro = ConductorPromptGenome::seed_for_effort("fast");
+        weak_pro.commit_strategy = PromptCommitStrategy::Quorum;
+        weak_pro.require_final_synthesis = false;
+        let effective_pro = weak_pro.with_effort_capability_floor("pro");
+        assert_eq!(effective_pro.graph_depth, PromptGraphDepth::Deep);
+        assert_eq!(effective_pro.verification, PromptVerification::Adversarial);
+        assert_eq!(
+            effective_pro.commit_strategy,
+            PromptCommitStrategy::Exhaustive
+        );
+        assert_eq!(
+            effective_pro.topology_strategy,
+            PromptTopologyStrategy::ParallelDeliberation
+        );
+        assert_eq!(
+            effective_pro.role_strategy,
+            PromptRoleStrategy::DiverseSpecialists
+        );
+        assert_eq!(effective_pro.max_parallel_branches, 2);
+        assert!(effective_pro.require_final_synthesis);
     }
 
     #[test]

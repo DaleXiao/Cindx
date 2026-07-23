@@ -97,10 +97,18 @@ where
                 prompt = harness.repair_prompt(&raw_output, &error);
             }
             Err(error) => {
+                let fallback = harness.fallback_plan();
                 return PromptPlanCandidate {
                     genome: genome.clone(),
-                    plan: None,
-                    raw_output: format!("{raw_output}\n\nValidation error: {error}"),
+                    plan: fallback.clone().ok(),
+                    raw_output: match fallback {
+                        Ok(_) => format!(
+                            "{raw_output}\n\nValidation error: {error}\nDeterministic harness fallback applied."
+                        ),
+                        Err(fallback_error) => format!(
+                            "{raw_output}\n\nValidation error: {error}\nDeterministic fallback error: {fallback_error}"
+                        ),
+                    },
                     latency_ms,
                     total_tokens,
                 };
