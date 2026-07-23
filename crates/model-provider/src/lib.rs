@@ -10,6 +10,15 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
+mod error;
+mod usage;
+
+pub use error::{classify_provider_failure, ProviderFailureClass};
+pub use usage::{
+    estimate_completion_tokens, estimate_request_tokens, estimate_text_tokens,
+    normalize_model_usage, UsageSource,
+};
+
 pub const MODEL_REQUEST_CANCELLED: &str = "model request cancelled";
 const STREAMING_HARD_TIMEOUT_MULTIPLIER: u64 = 4;
 const HTTP_POLL_INTERVAL: Duration = Duration::from_millis(40);
@@ -107,13 +116,40 @@ pub struct ProviderCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelError {
     pub message: String,
+    pub class: ProviderFailureClass,
+    pub status_code: Option<u16>,
+    pub retryable: bool,
 }
 
 impl ModelError {
     pub fn new(message: impl Into<String>) -> Self {
+        let message = message.into();
+        let class = classify_provider_failure(&message, None);
         Self {
-            message: message.into(),
+            message,
+            class,
+            status_code: None,
+            retryable: class.is_retryable(),
         }
+    }
+
+    pub fn with_status(status_code: u16, message: impl Into<String>) -> Self {
+        let message = message.into();
+        let class = classify_provider_failure(&message, Some(status_code));
+        Self {
+            message,
+            class,
+            status_code: Some(status_code),
+            retryable: class.is_retryable(),
+        }
+    }
+
+    pub fn is_retryable(&self) -> bool {
+        self.retryable
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.class == ProviderFailureClass::Cancelled
     }
 }
 
@@ -534,6 +570,11 @@ fn finish_streaming_response(
     metadata.insert("model".to_string(), model.to_string());
     metadata.insert("base_url".to_string(), base_url.to_string());
     metadata.insert("streamed".to_string(), "true".to_string());
+    for field in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+        if let Some(value) = extract_json_number_field(&raw_response, field) {
+            metadata.insert(field.to_string(), value);
+        }
+    }
     let mut tool_calls = streamed_tool_calls
         .into_iter()
         .filter_map(|(index, call)| call.finish(index))
@@ -691,7 +732,7 @@ async fn consume_streaming_response(
         .await?;
         let text = String::from_utf8_lossy(&body).into_owned();
         let provider_error = parse_provider_error(&text).unwrap_or_default();
-        return Err(ModelError::new(if provider_error.trim().is_empty() {
+        return Err(ModelError::with_status(status.as_u16(), if provider_error.trim().is_empty() {
             format!("model request failed with status {status}")
         } else {
             provider_error
@@ -734,7 +775,7 @@ impl OpenAiCompatibleProvider {
         let stdout = String::from_utf8_lossy(&output.body).to_string();
         if !output.status.is_success() {
             let provider_error = parse_provider_error(&stdout).unwrap_or_default();
-            return Err(ModelError::new(if provider_error.is_empty() {
+            return Err(ModelError::with_status(output.status.as_u16(), if provider_error.is_empty() {
                 format!("model list request failed with status {}", output.status)
             } else {
                 provider_error
@@ -762,6 +803,7 @@ impl OpenAiCompatibleProvider {
             return Err(ModelError::new("provider config is incomplete"));
         }
 
+        let estimated_prompt_tokens = estimate_request_tokens(&request.messages, &request.tools);
         let max_output_tokens = request
             .metadata
             .get("max_output_tokens")
@@ -778,16 +820,16 @@ impl OpenAiCompatibleProvider {
         let hard_timeout =
             Duration::from_secs(streaming_hard_timeout_seconds(self.config.timeout_seconds));
         let deadline = Instant::now() + hard_timeout;
-        let request = http_request(
+        let http_request = http_request(
             &self.config.chat_completions_url(),
             &self.config.api_key,
             Some(&request_body),
             hard_timeout,
             true,
         )?;
-        run_http(async {
+        let mut response = run_http(async {
             let response = await_http(
-                request.send(),
+                http_request.send(),
                 deadline,
                 hard_timeout,
                 "model stream request",
@@ -805,7 +847,9 @@ impl OpenAiCompatibleProvider {
                 &mut should_cancel,
             )
             .await
-        })
+        })?;
+        normalize_model_usage(&mut response, estimated_prompt_tokens);
+        Ok(response)
     }
 
     pub fn complete_once(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
@@ -813,6 +857,7 @@ impl OpenAiCompatibleProvider {
             return Err(ModelError::new("provider config is incomplete"));
         }
 
+        let estimated_prompt_tokens = estimate_request_tokens(&request.messages, &request.tools);
         let max_output_tokens = request
             .metadata
             .get("max_output_tokens")
@@ -836,14 +881,16 @@ impl OpenAiCompatibleProvider {
         let stdout = String::from_utf8_lossy(&output.body).to_string();
         if !output.status.is_success() {
             let provider_error = parse_provider_error(&stdout).unwrap_or_default();
-            return Err(ModelError::new(if provider_error.is_empty() {
+            return Err(ModelError::with_status(output.status.as_u16(), if provider_error.is_empty() {
                 format!("model request failed with status {}", output.status)
             } else {
                 provider_error
             }));
         }
 
-        parse_model_response(&stdout)
+        let mut response = parse_model_response(&stdout)?;
+        normalize_model_usage(&mut response, estimated_prompt_tokens);
+        Ok(response)
     }
 
     pub fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ModelError> {
@@ -879,7 +926,7 @@ impl OpenAiCompatibleProvider {
         let stdout = String::from_utf8_lossy(&output.body).to_string();
         if !output.status.is_success() {
             let provider_error = parse_provider_error(&stdout).unwrap_or_default();
-            return Err(ModelError::new(if provider_error.is_empty() {
+            return Err(ModelError::with_status(output.status.as_u16(), if provider_error.is_empty() {
                 format!("embedding request failed with status {}", output.status)
             } else {
                 provider_error
@@ -935,7 +982,7 @@ impl OpenAiCompatibleImageProvider {
         if image_endpoint_probe_succeeded(output.status) {
             Ok(endpoint)
         } else {
-            Err(ModelError::new(format!(
+            Err(ModelError::with_status(output.status.as_u16(), format!(
                 "image endpoint probe returned status {}",
                 output.status
             )))
@@ -989,7 +1036,7 @@ impl OpenAiCompatibleImageProvider {
         let stdout = String::from_utf8_lossy(&output.body).to_string();
         if !output.status.is_success() {
             let provider_error = parse_provider_error(&stdout).unwrap_or_default();
-            return Err(ModelError::new(if provider_error.is_empty() {
+            return Err(ModelError::with_status(output.status.as_u16(), if provider_error.is_empty() {
                 format!(
                     "image generation request failed with status {}",
                     output.status
@@ -1026,7 +1073,7 @@ impl OpenAiCompatibleImageProvider {
                         &mut should_cancel,
                     )?;
                     if !output.status.is_success() {
-                        return Err(ModelError::new(format!(
+                        return Err(ModelError::with_status(output.status.as_u16(), format!(
                             "generated image download failed with status {}",
                             output.status
                         )));

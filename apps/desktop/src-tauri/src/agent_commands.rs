@@ -661,6 +661,11 @@ pub(crate) fn run_agent_task_blocking_inner(
     } else {
         requested_policy.clone()
     };
+    let conductor_contract = ConductorExecutionContract::from_routing(
+        &routing_context,
+        effort.label(),
+        collaboration_policy.clone(),
+    );
     run_context.insert(
         "task_class".to_string(),
         routing_context.task_class.label().to_string(),
@@ -683,6 +688,14 @@ pub(crate) fn run_agent_task_blocking_inner(
     run_context.insert(
         "collaboration_profile".to_string(),
         collaboration_profile(effort, &routing_context).to_string(),
+    );
+    run_context.insert(
+        "conductor_contract".to_string(),
+        conductor_contract.to_json()?,
+    );
+    run_context.insert(
+        "expected_collaboration_uplift_bps".to_string(),
+        conductor_contract.expected_uplift_bps.to_string(),
     );
     run_context.insert(
         "agent_model".to_string(),
@@ -1138,6 +1151,11 @@ pub(crate) fn retry_agent_task_blocking_inner(
     } else {
         requested_policy.clone()
     };
+    let conductor_contract = ConductorExecutionContract::from_routing(
+        &routing_context,
+        effort.label(),
+        collaboration_policy.clone(),
+    );
     run_context.insert(
         "task_class".to_string(),
         routing_context.task_class.label().to_string(),
@@ -1160,6 +1178,14 @@ pub(crate) fn retry_agent_task_blocking_inner(
     run_context.insert(
         "collaboration_profile".to_string(),
         collaboration_profile(effort, &routing_context).to_string(),
+    );
+    run_context.insert(
+        "conductor_contract".to_string(),
+        conductor_contract.to_json()?,
+    );
+    run_context.insert(
+        "expected_collaboration_uplift_bps".to_string(),
+        conductor_contract.expected_uplift_bps.to_string(),
     );
     run_context.insert(
         "agent_model".to_string(),

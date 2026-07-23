@@ -28,6 +28,18 @@ pub(crate) fn run_adaptive_collaboration(
         .get("collaboration_policy")
         .cloned()
         .unwrap_or_else(|| "best_of_n".to_string());
+    let execution_contract = run_context
+        .get("conductor_contract")
+        .map(String::as_str)
+        .map(ConductorExecutionContract::from_json)
+        .transpose()?
+        .unwrap_or_else(|| {
+            ConductorExecutionContract::from_routing(
+                &RoutingContext::from_prompt(prompt, Vec::new()),
+                &effort,
+                parse_policy(&policy).unwrap_or(OrchestrationPolicy::AutoRouter),
+            )
+        });
     let (resume_key, mut workflow_checkpoint) = load_workflow_checkpoint_for_run(
         state,
         task_id,
@@ -193,6 +205,7 @@ pub(crate) fn run_adaptive_collaboration(
                 max_tool_calls_per_step: MAX_COLLABORATION_WORKER_TOOL_CALLS,
                 max_output_tokens_per_step: COLLABORATION_MAX_OUTPUT_TOKENS as usize,
             },
+            execution_contract: execution_contract.clone(),
             prior_hint: prior.as_ref().map(WorkflowTopologyPrior::prompt_hint),
             prompt_evolution_enabled: config.prompt_evolution_enabled,
             prompt_genome: prompt_genome.clone(),
@@ -209,10 +222,22 @@ pub(crate) fn run_adaptive_collaboration(
             harness.planning_prompt(),
         )?;
         let mut conductor_attempts = 1usize;
+        let cancellation =
+            active_agent_run_control(state, run_context.get("session_id").map(String::as_str))?;
         let workflow_plan = loop {
             match harness.parse_plan(&conductor_response) {
                 Ok(plan) => break plan,
                 Err(error) if conductor_attempts < CONDUCTOR_MAX_ATTEMPTS => {
+                    if let Some(control) = cancellation.as_ref() {
+                        control
+                            .begin_repair_attempt("conductor_repair")
+                            .map_err(|reason| {
+                                format!(
+                                    "Conductor repair budget exhausted: {}",
+                                    reason.code()
+                                )
+                            })?;
+                    }
                     if let Ok(mut store) = state.store.lock() {
                         let _ = append_event(
                             &mut store,
@@ -338,6 +363,14 @@ pub(crate) fn run_adaptive_collaboration(
                     ),
                     ("conductor_version".to_string(), "agent_v2".to_string()),
                     ("conductor_model".to_string(), conductor_model.clone()),
+                    (
+                        "conductor_contract".to_string(),
+                        execution_contract.to_json()?,
+                    ),
+                    (
+                        "expected_collaboration_uplift_bps".to_string(),
+                        execution_contract.expected_uplift_bps.to_string(),
+                    ),
                     (
                         "conductor_attempts".to_string(),
                         conductor_attempts.to_string(),
@@ -580,6 +613,7 @@ pub(crate) fn run_adaptive_collaboration(
                         max_model_turns,
                         max_tool_calls,
                         cancellation,
+                        None,
                     )
                 }) as ParallelJob<CollaborationCompletion>
             })
@@ -1145,6 +1179,7 @@ pub(crate) fn recover_adaptive_worker(
         spec.max_model_turns,
         spec.max_tool_calls,
         cancellation,
+        None,
     );
     record_collaboration_stage_finished(
         state,
@@ -1298,6 +1333,12 @@ pub(crate) fn quality_gate_adaptive_output(
     let mut candidate = output.to_string();
     let mut last_gate = None;
     let mut review_errors = Vec::new();
+    let cancellation = active_agent_run_control(
+        state,
+        run_context.get("session_id").map(String::as_str),
+    )
+    .ok()
+    .flatten();
 
     for review_index in 0..=repair_budget {
         let reviewer_model = reviewer_models
@@ -1391,6 +1432,15 @@ pub(crate) fn quality_gate_adaptive_output(
         }
 
         let repair_stage = format!("quality_repair_{}", review_index + 1);
+        if let Some(control) = cancellation.as_ref() {
+            if let Err(reason) = control.begin_repair_attempt(&repair_stage) {
+                review_errors.push(format!(
+                    "quality repair budget exhausted: {}",
+                    reason.code()
+                ));
+                break;
+            }
+        }
         let synthesizer_model = repair_models
             .get(review_index % repair_models.len().max(1))
             .cloned()

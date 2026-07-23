@@ -228,12 +228,42 @@ pub(crate) fn complete_collaboration_model_with_control(
     system_prompt: String,
     prompt: String,
     cancellation: Option<Arc<AgentRunControl>>,
+    on_delta: impl FnMut(&str),
+) -> CollaborationCompletion {
+    let stage = role_label(&role).to_string();
+    complete_collaboration_model_for_stage_with_control(
+        config,
+        stage,
+        role,
+        model,
+        system_prompt,
+        prompt,
+        cancellation,
+        on_delta,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn complete_collaboration_model_for_stage_with_control(
+    config: ProviderConfig,
+    stage: String,
+    role: ModelRole,
+    model: String,
+    system_prompt: String,
+    prompt: String,
+    cancellation: Option<Arc<AgentRunControl>>,
     mut on_delta: impl FnMut(&str),
 ) -> CollaborationCompletion {
     let started_at_ms = current_time_millis();
     let role_name = role_label(&role).to_string();
+    let inferred_stage_class = RunStageClass::from_label(&stage);
+    let stage_class = if inferred_stage_class == RunStageClass::Other {
+        RunStageClass::from_label(&role_name)
+    } else {
+        inferred_stage_class
+    };
     if let Some(control) = cancellation.as_ref() {
-        if let Err(reason) = control.begin_model_call(&role_name) {
+        if let Err(reason) = control.begin_stage_model_call(&stage, stage_class) {
             return CollaborationCompletion::failed(format!(
                 "Run stopped before model call: {}",
                 reason.code()
@@ -284,11 +314,15 @@ pub(crate) fn complete_collaboration_model_with_control(
                 partial_output.push_str(delta);
             }
             if let Some(control) = cancellation.as_ref() {
-                stream_progress.observe(control, "model_stream", &role_name, &partial_output);
+                stream_progress.observe(control, "model_stream", &stage, &partial_output);
             }
             on_delta(delta);
         },
-        || cancellation.as_ref().is_some_and(agent_run_should_stop),
+        || {
+            cancellation.as_ref().is_some_and(|control| {
+                agent_run_should_stop(control) || control.stage_should_stop(stage_class)
+            })
+        },
     );
     if let Some(control) = cancellation.as_ref() {
         control.finish_model_call();
@@ -297,7 +331,13 @@ pub(crate) fn complete_collaboration_model_with_control(
     match response {
         Ok(response) => {
             let mut usage = Metadata::new();
-            for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+            for key in [
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+                "usage_source",
+                "usage_estimated",
+            ] {
                 if let Some(value) = response.metadata.get(key) {
                     usage.insert(key.to_string(), value.clone());
                 }
@@ -325,7 +365,23 @@ pub(crate) fn complete_collaboration_model_with_control(
             };
             if let Some(control) = cancellation.as_ref() {
                 control.record_partial_output(&content);
-                control.record_observation("model_result", &role_name, &content);
+                control.record_observation("model_result", &stage, &content);
+                let quality = match stage_class {
+                    RunStageClass::Reviewer => ResultQuality::Verified,
+                    RunStageClass::Synthesizer => ResultQuality::Synthesized,
+                    RunStageClass::Candidate | RunStageClass::Worker => {
+                        ResultQuality::Substantive
+                    }
+                    _ => ResultQuality::Draft,
+                };
+                control.record_best_known_result(
+                    &stage,
+                    &content,
+                    quality,
+                    0,
+                    false,
+                    stage_class == RunStageClass::Synthesizer,
+                );
             }
             CollaborationCompletion {
                 content: Some(content),
@@ -335,13 +391,34 @@ pub(crate) fn complete_collaboration_model_with_control(
                 evidence: Vec::new(),
             }
         }
-        Err(error) => CollaborationCompletion {
-            content: None,
-            error: Some(error.to_string()),
-            latency_ms,
-            usage: Metadata::new(),
-            evidence: Vec::new(),
-        },
+        Err(error) => {
+            if let Some(control) = cancellation.as_ref() {
+                control.record_observation(
+                    "provider_failure",
+                    error.class.label(),
+                    &error.message,
+                );
+            }
+            let mut usage = Metadata::new();
+            usage.insert(
+                "provider_failure_class".to_string(),
+                error.class.label().to_string(),
+            );
+            usage.insert(
+                "provider_failure_retryable".to_string(),
+                error.retryable.to_string(),
+            );
+            if let Some(status_code) = error.status_code {
+                usage.insert("provider_status_code".to_string(), status_code.to_string());
+            }
+            CollaborationCompletion {
+                content: None,
+                error: Some(error.to_string()),
+                latency_ms,
+                usage,
+                evidence: Vec::new(),
+            }
+        }
     }
 }
 
@@ -374,6 +451,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
     max_model_turns: usize,
     max_tool_calls: usize,
     cancellation: Option<Arc<AgentRunControl>>,
+    branch_cancellation: Option<Arc<AtomicBool>>,
 ) -> CollaborationCompletion {
     let started_at_ms = current_time_millis();
     let state = app.state::<AppState>();
@@ -440,8 +518,21 @@ pub(crate) fn complete_collaboration_worker_with_tools(
     let mut evidence = Vec::new();
     let mut tool_call_count = 0usize;
     let mut first_delta_at_ms = None;
+    let stage_class = RunStageClass::Worker;
 
     loop {
+        if branch_cancellation
+            .as_ref()
+            .is_some_and(|cancelled| cancelled.load(Ordering::SeqCst))
+        {
+            return CollaborationCompletion {
+                content: None,
+                error: Some("collaboration branch cancelled after quorum".to_string()),
+                latency_ms: current_time_millis().saturating_sub(started_at_ms),
+                usage,
+                evidence,
+            };
+        }
         if cancellation.as_ref().is_some_and(agent_run_should_stop) {
             return CollaborationCompletion {
                 content: None,
@@ -453,7 +544,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
         }
 
         if let Some(control) = cancellation.as_ref() {
-            if let Err(reason) = control.begin_model_call(&stage) {
+            if let Err(reason) = control.begin_stage_model_call(&stage, stage_class) {
                 return CollaborationCompletion {
                     content: None,
                     error: Some(format!(
@@ -512,7 +603,13 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                     stream_progress.observe(control, "model_stream", &stage, &partial_output);
                 }
             },
-            || cancellation.as_ref().is_some_and(agent_run_should_stop),
+            || {
+                cancellation.as_ref().is_some_and(|control| {
+                    agent_run_should_stop(control) || control.stage_should_stop(stage_class)
+                }) || branch_cancellation
+                    .as_ref()
+                    .is_some_and(|cancelled| cancelled.load(Ordering::SeqCst))
+            },
         );
         if let Some(control) = cancellation.as_ref() {
             control.finish_model_call();
@@ -520,6 +617,24 @@ pub(crate) fn complete_collaboration_worker_with_tools(
         let response = match response {
             Ok(response) => response,
             Err(error) => {
+                if let Some(control) = cancellation.as_ref() {
+                    control.record_observation(
+                        "provider_failure",
+                        error.class.label(),
+                        &error.message,
+                    );
+                }
+                usage.insert(
+                    "provider_failure_class".to_string(),
+                    error.class.label().to_string(),
+                );
+                usage.insert(
+                    "provider_failure_retryable".to_string(),
+                    error.retryable.to_string(),
+                );
+                if let Some(status_code) = error.status_code {
+                    usage.insert("provider_status_code".to_string(), status_code.to_string());
+                }
                 return CollaborationCompletion {
                     content: None,
                     error: Some(error.to_string()),
@@ -529,6 +644,20 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                 }
             }
         };
+        if let Some(control) = cancellation.as_ref() {
+            if let Err(reason) = control.record_agent_turn(&stage) {
+                return CollaborationCompletion {
+                    content: None,
+                    error: Some(format!(
+                        "Run stopped after worker model turn: {}",
+                        reason.code()
+                    )),
+                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
+                    usage,
+                    evidence,
+                };
+            }
+        }
         for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
             let previous = usage
                 .get(key)
@@ -544,6 +673,28 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                 previous.saturating_add(additional).to_string(),
             );
         }
+        let previous_source = usage.get("usage_source").map(String::as_str);
+        let additional_source = response.metadata.get("usage_source").map(String::as_str);
+        let combined_source = if [previous_source, additional_source]
+            .into_iter()
+            .flatten()
+            .any(|source| source == "estimated")
+        {
+            "estimated"
+        } else if [previous_source, additional_source]
+            .into_iter()
+            .flatten()
+            .any(|source| source == "provider_partial")
+        {
+            "provider_partial"
+        } else {
+            "provider"
+        };
+        usage.insert("usage_source".to_string(), combined_source.to_string());
+        usage.insert(
+            "usage_estimated".to_string(),
+            (combined_source != "provider").to_string(),
+        );
         let finalization_content = finalizing
             .then(|| response.message.content.trim().to_string())
             .filter(|content| !content.is_empty());
@@ -557,6 +708,18 @@ pub(crate) fn complete_collaboration_worker_with_tools(
             AgentAdvance::Completed { answer } => {
                 if let Some(control) = cancellation.as_ref() {
                     control.record_partial_output(&answer);
+                    control.record_best_known_result(
+                        &stage,
+                        &answer,
+                        if evidence.is_empty() {
+                            ResultQuality::Substantive
+                        } else {
+                            ResultQuality::Grounded
+                        },
+                        evidence.len(),
+                        false,
+                        false,
+                    );
                 }
                 usage.insert("worker_turns".to_string(), runtime.turn.to_string());
                 usage.insert("worker_tool_calls".to_string(), tool_call_count.to_string());
@@ -610,6 +773,20 @@ pub(crate) fn complete_collaboration_worker_with_tools(
             AgentAdvance::ToolCalls { calls } => {
                 if finalizing {
                     if let Some(answer) = finalization_content {
+                        if let Some(control) = cancellation.as_ref() {
+                            control.record_best_known_result(
+                                &stage,
+                                &answer,
+                                if evidence.is_empty() {
+                                    ResultQuality::Substantive
+                                } else {
+                                    ResultQuality::Grounded
+                                },
+                                evidence.len(),
+                                false,
+                                false,
+                            );
+                        }
                         usage.insert("worker_turns".to_string(), runtime.turn.to_string());
                         usage.insert(
                             "worker_tool_calls".to_string(),
@@ -912,8 +1089,9 @@ pub(crate) fn run_collaboration_stage_with_delta(
         &request_id,
         &Metadata::new(),
     )?;
-    let completion = complete_collaboration_model_with_control(
+    let completion = complete_collaboration_model_for_stage_with_control(
         config.clone(),
+        stage.to_string(),
         role.clone(),
         model.to_string(),
         collaboration_system_prompt_for_run(&config.agent_system_prompt, run_context),

@@ -67,7 +67,7 @@ pub(crate) fn run_collaboration_candidates(
             let model = spec.model.clone();
             let prompt = spec.prompt.clone();
             let cancellation = cancellation.clone();
-            Box::new(move || {
+            Box::new(move |branch_cancellation| {
                 complete_collaboration_worker_with_tools(
                     app,
                     config,
@@ -83,11 +83,62 @@ pub(crate) fn run_collaboration_candidates(
                     max_model_turns,
                     max_tool_calls,
                     cancellation,
+                    Some(branch_cancellation),
                 )
-            }) as ParallelJob<CollaborationCompletion>
+            }) as CancellableParallelJob<CollaborationCompletion>
         })
         .collect::<Vec<_>>();
-    let completions = run_model_jobs_ordered("candidate-worker", jobs)
+    let effort = run_context
+        .get("agent_effort")
+        .map(String::as_str)
+        .unwrap_or("auto");
+    let required_successes = collaboration_candidate_quorum(specs.len(), effort);
+    let execution = run_model_jobs_until_quorum(
+        "candidate-worker",
+        jobs,
+        required_successes,
+        collaboration_candidate_quorum_grace(effort),
+        |completion| {
+            completion
+                .content
+                .as_ref()
+                .is_some_and(|content| !content.trim().is_empty())
+        },
+    );
+    if let Ok(mut store) = state.store.lock() {
+        let _ = append_event(
+            &mut store,
+            task_id,
+            EventKind::TaskStatusChanged,
+            "Collaboration candidate quorum resolved",
+            metadata_with_context(
+                [
+                    ("collaboration_id".to_string(), collaboration_id.to_string()),
+                    (
+                        "quorum_required".to_string(),
+                        required_successes.to_string(),
+                    ),
+                    (
+                        "quorum_successful".to_string(),
+                        execution.successful.to_string(),
+                    ),
+                    (
+                        "quorum_reached".to_string(),
+                        execution.quorum_reached.to_string(),
+                    ),
+                    (
+                        "cancelled_stragglers".to_string(),
+                        execution.cancelled_stragglers.to_string(),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                run_context,
+            ),
+        );
+    }
+    let completions = execution
+        .results
         .into_iter()
         .map(|result| {
             result.unwrap_or_else(|error| {
@@ -144,6 +195,24 @@ pub(crate) fn run_collaboration_candidates(
         &config.model_for_role(&ModelRole::Reviewer),
         build_collaboration_arbiter_prompt(prompt, &candidates, conductor_directive.as_deref()),
     )
+}
+
+pub(crate) fn collaboration_candidate_quorum(candidate_count: usize, effort: &str) -> usize {
+    match candidate_count {
+        0 => 0,
+        1 => 1,
+        _ if effort == "fast" => 1,
+        count if effort == "pro" => count,
+        count => count.saturating_sub(1).max(2).min(count),
+    }
+}
+
+pub(crate) fn collaboration_candidate_quorum_grace(effort: &str) -> Duration {
+    match effort {
+        "fast" => Duration::from_millis(100),
+        "pro" => Duration::ZERO,
+        _ => Duration::from_millis(400),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

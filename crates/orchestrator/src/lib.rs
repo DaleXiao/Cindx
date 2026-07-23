@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod arena;
 mod benchmark;
+mod execution_contract;
 mod evaluation;
 mod evolution_campaign;
 mod fugu_evaluation;
@@ -13,6 +14,7 @@ mod routing;
 
 pub use arena::*;
 pub use benchmark::*;
+pub use execution_contract::*;
 pub use evaluation::*;
 pub use evolution_campaign::*;
 pub use fugu_evaluation::*;
@@ -627,6 +629,7 @@ pub struct ConductorRequest {
     pub worker_models: Vec<String>,
     pub role_hints: ConductorRoleHints,
     pub budget: WorkflowBudget,
+    pub execution_contract: ConductorExecutionContract,
     pub prior_hint: Option<String>,
     pub prompt_evolution_enabled: bool,
     pub prompt_genome: ConductorPromptGenome,
@@ -696,6 +699,7 @@ impl ConductorHarness {
                 "You are the Conductor Agent for a Fugu-style Cindx workflow. Design a query-specific dependency graph instead of answering the user. Return only strict JSON matching this example:\n",
                 "{schema_example}\n\n",
                 "Harness constraints:\n",
+                "- Execution contract: task_class={task_class}, expected_uplift={expected_uplift_bps}bps, confidence={confidence_bps}bps, max_parallelism={contract_parallelism}, quorum={contract_quorum}, verification_required={contract_verification}, terminal_reserve={terminal_reserve}, stop={stop_policy:?}, fallback={fallback_policy:?}.\n",
                 "- Use between 1 and {max_steps} workflow steps, including the final synthesizer. Choose the smallest useful graph.\n",
                 "- Use no more than {max_models} distinct worker models.\n",
                 "- role must be exactly thinker, worker, verifier, or synthesizer.\n",
@@ -724,6 +728,15 @@ impl ConductorHarness {
             ),
             max_steps = request.budget.max_steps,
             max_models = request.budget.max_models,
+            task_class = request.execution_contract.task_class.label(),
+            expected_uplift_bps = request.execution_contract.expected_uplift_bps,
+            confidence_bps = request.execution_contract.confidence_bps,
+            contract_parallelism = request.execution_contract.max_parallelism,
+            contract_quorum = request.execution_contract.min_successful_branches,
+            contract_verification = request.execution_contract.verification_required,
+            terminal_reserve = request.execution_contract.terminal_model_call_reserve,
+            stop_policy = request.execution_contract.stop_policy,
+            fallback_policy = request.execution_contract.fallback_policy,
             planner = request.role_hints.planner,
             executor = request.role_hints.executor,
             reviewer = request.role_hints.reviewer,
@@ -831,6 +844,7 @@ impl ConductorHarness {
             }
         }
         plan.validate(&self.request.worker_models)?;
+        self.request.execution_contract.validate_plan(&plan)?;
         Ok(plan)
     }
 
@@ -873,6 +887,7 @@ impl ConductorHarness {
         };
         let branch_limit = evolved_branch_limit
             .min(self.request.budget.max_models)
+            .min(self.request.execution_contract.max_parallelism)
             .min(root_step_capacity);
         let required_branches = if branch_limit == 0 {
             0
@@ -1454,6 +1469,10 @@ mod tests {
     }
 
     fn conductor_request() -> ConductorRequest {
+        let routing = RoutingContext::from_prompt(
+            "Compare implementation strategies",
+            Vec::new(),
+        );
         ConductorRequest {
             workflow_id: "workflow-conductor".to_string(),
             objective: "Compare implementation strategies".to_string(),
@@ -1475,6 +1494,11 @@ mod tests {
                 max_tool_calls_per_step: 6,
                 max_output_tokens_per_step: 4_096,
             },
+            execution_contract: ConductorExecutionContract::from_routing(
+                &routing,
+                "pro",
+                OrchestrationPolicy::BestOfN { candidates: 2 },
+            ),
             prior_hint: Some("Prefer two independent branches.".to_string()),
             prompt_evolution_enabled: true,
             prompt_genome: ConductorPromptGenome::seed_for_effort("pro"),
