@@ -310,6 +310,26 @@ def render_markdown(report: dict[str, Any], output_path: Path) -> None:
             for model in run.get("models", [])
         }
     )
+    gpqa_telemetry = sum(
+        row["token_telemetry_complete"]
+        for row in report["aggregates"]
+        if row["benchmark"] == "gpqa_diamond"
+    )
+    gpqa_runs = sum(
+        row["n"]
+        for row in report["aggregates"]
+        if row["benchmark"] == "gpqa_diamond"
+    )
+    mrcr_telemetry = sum(
+        row["token_telemetry_complete"]
+        for row in report["aggregates"]
+        if row["benchmark"] == "mrcr_v2_8_needle"
+    )
+    mrcr_runs = sum(
+        row["n"]
+        for row in report["aggregates"]
+        if row["benchmark"] == "mrcr_v2_8_needle"
+    )
     lines.extend(
         [
             "## Observed Findings",
@@ -318,7 +338,7 @@ def render_markdown(report: dict[str, Any], output_path: Path) -> None:
             f"- Cindx Pro completed **{pro_gpqa['completed']}/{pro_gpqa['n']}** GPQA cases. Every completed case was correct (**{fmt_percent(pro_gpqa['completed_mean_score'])}** completed-only), while p50 and p95 both reached the {report['evaluation_limits'].get('treatment_deadline_seconds', 'n/a')}s treatment cap. The dominant observed failure is delivery within budget, not completed-answer accuracy.",
             f"- Cindx Auto completed **{auto_gpqa['completed']}/{auto_gpqa['n']}** GPQA cases and answered **{fmt_percent(auto_gpqa['completed_mean_score'])}** of completed cases correctly. Chemistry was the weakest diagnostic slice; the sample is too small for a domain-level conclusion.",
             f"- MRCR scored **{fmt_percent(direct_mrcr['mean_score'])}** for direct and **{fmt_percent(auto_mrcr['mean_score'])}** for Auto across all four frozen length points. Both treatments selected `{', '.join(mrcr_models)}`, so this confirms strong long-context behavior but measures no routing uplift.",
-            "- Token telemetry was absent for direct/Auto GPQA and MRCR calls, so this pilot cannot support a reliable cost-efficiency comparison.",
+            f"- Token telemetry was recorded for **{gpqa_telemetry}/{gpqa_runs}** GPQA runs and **{mrcr_telemetry}/{mrcr_runs}** MRCR runs. Runs without final usage make treatment token totals lower bounds, so this pilot cannot support a complete cost-efficiency comparison.",
             "- None of the paired GPQA comparisons reached conventional significance; the exact tests are included only to prevent overclaiming from 12 questions.",
             "",
         ]
