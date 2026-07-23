@@ -8,6 +8,11 @@ without mixing their evidence:
 2. Does adaptive orchestration beat the configured worker models and a fixed ensemble?
 3. Which Cindx subsystem causes a measured gain or regression?
 
+The first provider-backed internal mechanism report is
+[`Cindx Scientific Evaluation Card: Pilot v1`](evaluations/CINDX_SCIENTIFIC_PILOT_V1.md).
+It validates bounded read-only evidence grounding but deliberately does not
+claim completion of the external Fugu matrix described below.
+
 The frozen source is [Fugu: A Model Family for Agentic Intelligence, v1](https://arxiv.org/html/2606.21228v1), Table 1 and Appendix A. The v1 LiveCodeBench score is 92.0. Later values on the product page are not silently substituted.
 
 ## Safety boundary
