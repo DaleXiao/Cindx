@@ -126,7 +126,7 @@ const toolsSource = readRustCrateSource("tools");
 const agentStorageSource = read("crates/agent-storage/src/lib.rs");
 const agentSkillsSource = read("crates/agent-skills/src/lib.rs");
 const builtinSkillCreator = read("crates/agent-skills/builtins/skill-creator/SKILL.md");
-const modelProviderSource = read("crates/model-provider/src/lib.rs");
+const modelProviderSource = readRustCrateSource("model-provider");
 const modelProviderCargo = read("crates/model-provider/Cargo.toml");
 const ragSource = read("crates/agent-rag/src/lib.rs");
 const graphSource = read("crates/agent-graph/src/lib.rs");
@@ -1109,7 +1109,8 @@ assert(
   rustLib.includes("pause_agent_loop_for_control_stop") &&
     rustLib.includes("resume_suspended_agent_run") &&
     rustLib.includes("MAX_AGENT_MODEL_TRANSPORT_ATTEMPTS") &&
-    rustLib.includes("is_transient_model_transport_error") &&
+    rustLib.includes("error.is_retryable()") &&
+    modelProviderSource.includes("classify_provider_failure") &&
     rustLib.includes('"continuation_available".to_string()') &&
     agentRecoveryServiceSource.includes(
       '"stop_reason".to_string(), "app_restarted".to_string()'

@@ -17,6 +17,8 @@ pub enum RunStopReason {
     ProviderUnavailable,
     NoProgress,
     RepeatedAction,
+    StageBudgetExhausted,
+    RepairBudgetExhausted,
 }
 
 impl RunStopReason {
@@ -30,12 +32,94 @@ impl RunStopReason {
             Self::ProviderUnavailable => "provider_unavailable",
             Self::NoProgress => "no_progress",
             Self::RepeatedAction => "repeated_action",
+            Self::StageBudgetExhausted => "stage_budget_exhausted",
+            Self::RepairBudgetExhausted => "repair_budget_exhausted",
         }
     }
 
     pub fn is_user_cancelled(self) -> bool {
         self == Self::UserCancelled
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RunStageClass {
+    Conductor,
+    Candidate,
+    Worker,
+    Reviewer,
+    Synthesizer,
+    Repair,
+    Other,
+}
+
+impl RunStageClass {
+    pub fn from_label(label: &str) -> Self {
+        let label = label.to_ascii_lowercase();
+        if label.contains("repair") || label.contains("recover") || label.contains("retry") {
+            Self::Repair
+        } else if label.contains("conductor") || label.contains("planner") {
+            Self::Conductor
+        } else if label.contains("candidate") {
+            Self::Candidate
+        } else if label.contains("review") || label.contains("critic") {
+            Self::Reviewer
+        } else if label.contains("synth") || label.contains("summar") || label.contains("final") {
+            Self::Synthesizer
+        } else if label.contains("worker") {
+            Self::Worker
+        } else {
+            Self::Other
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Reviewer | Self::Synthesizer | Self::Repair)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunStageBudget {
+    pub max_model_calls: usize,
+    pub max_duration: Duration,
+    pub terminal: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ResultQuality {
+    Draft,
+    Substantive,
+    Grounded,
+    Verified,
+    Synthesized,
+}
+
+impl ResultQuality {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Substantive => "substantive",
+            Self::Grounded => "grounded",
+            Self::Verified => "verified",
+            Self::Synthesized => "synthesized",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BestKnownResult {
+    pub content: String,
+    pub stage: String,
+    pub quality: ResultQuality,
+    pub evidence_count: usize,
+    pub verified: bool,
+    pub deliverable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RunStageUsageSnapshot {
+    pub model_calls: usize,
+    pub elapsed: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +135,12 @@ pub struct RunBudget {
     pub tool_calls_per_extension: usize,
     pub no_progress_timeout: Duration,
     pub max_identical_actions: usize,
+    pub initial_agent_turns: usize,
+    pub max_agent_turns: usize,
+    pub agent_turns_per_extension: usize,
+    pub max_repair_attempts: usize,
+    pub terminal_model_call_reserve: usize,
+    pub terminal_time_reserve: Duration,
 }
 
 impl RunBudget {
@@ -68,6 +158,12 @@ impl RunBudget {
                 tool_calls_per_extension: 6,
                 no_progress_timeout: Duration::from_secs(90),
                 max_identical_actions: 3,
+                initial_agent_turns: 6,
+                max_agent_turns: 12,
+                agent_turns_per_extension: 3,
+                max_repair_attempts: 2,
+                terminal_model_call_reserve: 2,
+                terminal_time_reserve: Duration::from_secs(30),
             },
             "pro" => Self {
                 max_duration: Duration::from_secs(4 * 60 * 60),
@@ -81,6 +177,12 @@ impl RunBudget {
                 tool_calls_per_extension: 96,
                 no_progress_timeout: Duration::from_secs(5 * 60),
                 max_identical_actions: 4,
+                initial_agent_turns: 48,
+                max_agent_turns: 384,
+                agent_turns_per_extension: 48,
+                max_repair_attempts: 8,
+                terminal_model_call_reserve: 8,
+                terminal_time_reserve: Duration::from_secs(10 * 60),
             },
             _ => Self {
                 max_duration: Duration::from_secs(45 * 60),
@@ -94,7 +196,30 @@ impl RunBudget {
                 tool_calls_per_extension: 36,
                 no_progress_timeout: Duration::from_secs(2 * 60),
                 max_identical_actions: 3,
+                initial_agent_turns: 18,
+                max_agent_turns: 72,
+                agent_turns_per_extension: 18,
+                max_repair_attempts: 4,
+                terminal_model_call_reserve: 4,
+                terminal_time_reserve: Duration::from_secs(2 * 60),
             },
+        }
+    }
+
+    pub fn stage_budget(self, class: RunStageClass) -> RunStageBudget {
+        let (max_model_calls, duration_divisor) = match class {
+            RunStageClass::Conductor => (self.max_repair_attempts.saturating_add(1), 5),
+            RunStageClass::Candidate => (self.max_model_calls.saturating_div(3).max(2), 2),
+            RunStageClass::Worker => (self.max_model_calls.saturating_div(2).max(2), 2),
+            RunStageClass::Reviewer => (self.max_repair_attempts.saturating_add(2), 4),
+            RunStageClass::Synthesizer => (self.max_repair_attempts.saturating_add(2), 3),
+            RunStageClass::Repair => (self.max_repair_attempts, 4),
+            RunStageClass::Other => (self.max_model_calls, 1),
+        };
+        RunStageBudget {
+            max_model_calls: max_model_calls.min(self.max_model_calls).max(1),
+            max_duration: self.max_duration / duration_divisor,
+            terminal: class.is_terminal(),
         }
     }
 }
@@ -110,6 +235,8 @@ pub struct RunControlSnapshot {
     elapsed_active: Duration,
     model_calls: usize,
     tool_calls: usize,
+    agent_turns: usize,
+    repair_attempts: usize,
     partial_output: String,
     action_history: BTreeMap<String, (u64, usize)>,
     recent_actions: BTreeMap<String, VecDeque<u64>>,
@@ -119,11 +246,15 @@ pub struct RunControlSnapshot {
     checkpoint_count: usize,
     model_extension_checkpoint: usize,
     tool_extension_checkpoint: usize,
+    agent_turn_extension_checkpoint: usize,
     model_call_limit: usize,
     tool_call_limit: usize,
+    agent_turn_limit: usize,
     budget_extensions: usize,
     stop_reason: Option<RunStopReason>,
     pending_steers: VecDeque<RunSteer>,
+    stage_usage: BTreeMap<RunStageClass, RunStageUsageSnapshot>,
+    best_known_result: Option<BestKnownResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -134,11 +265,22 @@ pub struct RunProgressSnapshot {
     pub remaining: Duration,
     pub model_calls: usize,
     pub tool_calls: usize,
+    pub agent_turns: usize,
+    pub repair_attempts: usize,
     pub model_call_limit: usize,
     pub tool_call_limit: usize,
+    pub agent_turn_limit: usize,
     pub observations: usize,
     pub checkpoints: usize,
     pub budget_extensions: usize,
+    pub stage_usage: BTreeMap<RunStageClass, RunStageUsageSnapshot>,
+    pub best_known_result: Option<BestKnownResult>,
+}
+
+#[derive(Debug, Clone)]
+struct RunStageUsage {
+    started_at: Instant,
+    model_calls: usize,
 }
 
 #[derive(Debug)]
@@ -156,13 +298,17 @@ struct RunMutableState {
     checkpoint_count: usize,
     model_extension_checkpoint: usize,
     tool_extension_checkpoint: usize,
+    agent_turn_extension_checkpoint: usize,
     model_call_limit: usize,
     tool_call_limit: usize,
+    agent_turn_limit: usize,
     budget_extensions: usize,
     stop_reason: Option<RunStopReason>,
     active_model_calls: usize,
     active_tool_calls: usize,
     pending_steers: VecDeque<RunSteer>,
+    stage_usage: BTreeMap<RunStageClass, RunStageUsage>,
+    best_known_result: Option<BestKnownResult>,
 }
 
 #[derive(Debug)]
@@ -171,6 +317,8 @@ pub struct AgentRunControl {
     user_cancelled: AtomicBool,
     model_calls: AtomicUsize,
     tool_calls: AtomicUsize,
+    agent_turns: AtomicUsize,
+    repair_attempts: AtomicUsize,
     state: Mutex<RunMutableState>,
 }
 
@@ -186,6 +334,8 @@ impl AgentRunControl {
             user_cancelled: AtomicBool::new(false),
             model_calls: AtomicUsize::new(0),
             tool_calls: AtomicUsize::new(0),
+            agent_turns: AtomicUsize::new(0),
+            repair_attempts: AtomicUsize::new(0),
             state: Mutex::new(RunMutableState {
                 started_at: now,
                 last_progress_at: now,
@@ -200,16 +350,23 @@ impl AgentRunControl {
                 checkpoint_count: 0,
                 model_extension_checkpoint: 0,
                 tool_extension_checkpoint: 0,
+                agent_turn_extension_checkpoint: 0,
                 model_call_limit: budget
                     .initial_model_calls
                     .min(budget.max_model_calls)
                     .max(1),
                 tool_call_limit: budget.initial_tool_calls.min(budget.max_tool_calls).max(1),
+                agent_turn_limit: budget
+                    .initial_agent_turns
+                    .min(budget.max_agent_turns)
+                    .max(1),
                 budget_extensions: 0,
                 stop_reason: None,
                 active_model_calls: 0,
                 active_tool_calls: 0,
                 pending_steers: VecDeque::new(),
+                stage_usage: BTreeMap::new(),
+                best_known_result: None,
             }),
         }
     }
@@ -222,6 +379,8 @@ impl AgentRunControl {
             user_cancelled: AtomicBool::new(false),
             model_calls: AtomicUsize::new(snapshot.model_calls),
             tool_calls: AtomicUsize::new(snapshot.tool_calls),
+            agent_turns: AtomicUsize::new(snapshot.agent_turns),
+            repair_attempts: AtomicUsize::new(snapshot.repair_attempts),
             state: Mutex::new(RunMutableState {
                 started_at,
                 last_progress_at: now,
@@ -236,13 +395,17 @@ impl AgentRunControl {
                 checkpoint_count: snapshot.checkpoint_count,
                 model_extension_checkpoint: snapshot.model_extension_checkpoint,
                 tool_extension_checkpoint: snapshot.tool_extension_checkpoint,
+                agent_turn_extension_checkpoint: snapshot.agent_turn_extension_checkpoint,
                 model_call_limit: snapshot.model_call_limit,
                 tool_call_limit: snapshot.tool_call_limit,
+                agent_turn_limit: snapshot.agent_turn_limit,
                 budget_extensions: snapshot.budget_extensions,
                 stop_reason: snapshot.stop_reason,
                 active_model_calls: 0,
                 active_tool_calls: 0,
                 pending_steers: snapshot.pending_steers,
+                stage_usage: restore_stage_usage(snapshot.stage_usage, now),
+                best_known_result: snapshot.best_known_result,
             }),
         }
     }
@@ -261,6 +424,8 @@ impl AgentRunControl {
                     user_cancelled: AtomicBool::new(false),
                     model_calls: AtomicUsize::new(0),
                     tool_calls: AtomicUsize::new(0),
+                    agent_turns: AtomicUsize::new(0),
+                    repair_attempts: AtomicUsize::new(0),
                     state: Mutex::new(RunMutableState {
                         started_at: now,
                         last_progress_at: now,
@@ -275,6 +440,7 @@ impl AgentRunControl {
                         checkpoint_count: snapshot.checkpoint_count,
                         model_extension_checkpoint: snapshot.checkpoint_count,
                         tool_extension_checkpoint: snapshot.checkpoint_count,
+                        agent_turn_extension_checkpoint: snapshot.checkpoint_count,
                         model_call_limit: budget
                             .initial_model_calls
                             .min(budget.max_model_calls)
@@ -283,11 +449,17 @@ impl AgentRunControl {
                             .initial_tool_calls
                             .min(budget.max_tool_calls)
                             .max(1),
+                        agent_turn_limit: budget
+                            .initial_agent_turns
+                            .min(budget.max_agent_turns)
+                            .max(1),
                         budget_extensions: snapshot.budget_extensions,
                         stop_reason: None,
                         active_model_calls: 0,
                         active_tool_calls: 0,
                         pending_steers: snapshot.pending_steers,
+                        stage_usage: BTreeMap::new(),
+                        best_known_result: snapshot.best_known_result,
                     }),
                 })
             }
@@ -301,6 +473,8 @@ impl AgentRunControl {
             elapsed_active: state.started_at.elapsed().min(self.budget.max_duration),
             model_calls: self.model_calls.load(Ordering::SeqCst),
             tool_calls: self.tool_calls.load(Ordering::SeqCst),
+            agent_turns: self.agent_turns.load(Ordering::SeqCst),
+            repair_attempts: self.repair_attempts.load(Ordering::SeqCst),
             partial_output: state.partial_output.clone(),
             action_history: state.action_history.clone(),
             recent_actions: state.recent_actions.clone(),
@@ -310,11 +484,15 @@ impl AgentRunControl {
             checkpoint_count: state.checkpoint_count,
             model_extension_checkpoint: state.model_extension_checkpoint,
             tool_extension_checkpoint: state.tool_extension_checkpoint,
+            agent_turn_extension_checkpoint: state.agent_turn_extension_checkpoint,
             model_call_limit: state.model_call_limit,
             tool_call_limit: state.tool_call_limit,
+            agent_turn_limit: state.agent_turn_limit,
             budget_extensions: state.budget_extensions,
             stop_reason: state.stop_reason,
             pending_steers: state.pending_steers.clone(),
+            stage_usage: snapshot_stage_usage(&state.stage_usage),
+            best_known_result: state.best_known_result.clone(),
         }
     }
 
@@ -375,6 +553,109 @@ impl AgentRunControl {
             state.last_progress_at = Instant::now();
         }
         Ok(call)
+    }
+
+    /// Starts a model call owned by a bounded collaboration stage. Exhausting
+    /// this local allocation never stops the parent run, so a slow candidate or
+    /// repair branch cannot consume the final reviewer/synthesizer reserve.
+    pub fn begin_stage_model_call(
+        &self,
+        stage: &str,
+        class: RunStageClass,
+    ) -> Result<usize, RunStopReason> {
+        if let Some(reason) = self.stop_reason() {
+            return Err(reason);
+        }
+        let stage_budget = self.budget.stage_budget(class);
+        {
+            let now = Instant::now();
+            let mut state = self.state.lock().expect("run control state poisoned");
+            let remaining = self
+                .budget
+                .max_duration
+                .saturating_sub(now.duration_since(state.started_at));
+            if !stage_budget.terminal
+                && (remaining <= self.budget.terminal_time_reserve
+                    || self.model_calls.load(Ordering::SeqCst)
+                        >= state
+                            .model_call_limit
+                            .saturating_sub(self.budget.terminal_model_call_reserve)
+                            .max(1))
+            {
+                return Err(RunStopReason::StageBudgetExhausted);
+            }
+            let usage = state.stage_usage.entry(class).or_insert(RunStageUsage {
+                started_at: now,
+                model_calls: 0,
+            });
+            if usage.model_calls >= stage_budget.max_model_calls
+                || now.duration_since(usage.started_at) >= stage_budget.max_duration
+            {
+                return Err(RunStopReason::StageBudgetExhausted);
+            }
+            usage.model_calls = usage.model_calls.saturating_add(1);
+        }
+
+        match self.begin_model_call(stage) {
+            Ok(call) => Ok(call),
+            Err(reason) => {
+                let mut state = self.state.lock().expect("run control state poisoned");
+                if let Some(usage) = state.stage_usage.get_mut(&class) {
+                    usage.model_calls = usage.model_calls.saturating_sub(1);
+                }
+                Err(reason)
+            }
+        }
+    }
+
+    pub fn stage_should_stop(&self, class: RunStageClass) -> bool {
+        if self.should_stop() {
+            return true;
+        }
+        let stage_budget = self.budget.stage_budget(class);
+        self.state
+            .lock()
+            .expect("run control state poisoned")
+            .stage_usage
+            .get(&class)
+            .is_some_and(|usage| usage.started_at.elapsed() >= stage_budget.max_duration)
+    }
+
+    pub fn record_agent_turn(&self, stage: &str) -> Result<usize, RunStopReason> {
+        if let Some(reason) = self.stop_reason() {
+            return Err(reason);
+        }
+        let turn = self.agent_turns.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut state = self.state.lock().expect("run control state poisoned");
+        if turn > state.agent_turn_limit
+            && !extend_agent_turn_budget_if_progressed(&self.budget, &mut state, turn)
+        {
+            self.agent_turns.fetch_sub(1, Ordering::SeqCst);
+            state.stop_reason = Some(RunStopReason::TurnBudgetExhausted);
+            return Err(RunStopReason::TurnBudgetExhausted);
+        }
+        state.stage = stage.to_string();
+        state.detail = "agent turn completed".to_string();
+        state.last_progress_at = Instant::now();
+        Ok(turn)
+    }
+
+    /// Counts a bounded repair attempt without poisoning the whole run when a
+    /// local recovery strategy has exhausted its own allowance.
+    pub fn begin_repair_attempt(&self, stage: &str) -> Result<usize, RunStopReason> {
+        if let Some(reason) = self.stop_reason() {
+            return Err(reason);
+        }
+        let attempt = self.repair_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        if attempt > self.budget.max_repair_attempts {
+            self.repair_attempts.fetch_sub(1, Ordering::SeqCst);
+            return Err(RunStopReason::RepairBudgetExhausted);
+        }
+        let mut state = self.state.lock().expect("run control state poisoned");
+        state.stage = stage.to_string();
+        state.detail = "repair attempt started".to_string();
+        state.last_progress_at = Instant::now();
+        Ok(attempt)
     }
 
     pub fn finish_model_call(&self) {
@@ -506,6 +787,47 @@ impl AgentRunControl {
         state.last_progress_at = Instant::now();
     }
 
+    pub fn record_best_known_result(
+        &self,
+        stage: &str,
+        content: &str,
+        quality: ResultQuality,
+        evidence_count: usize,
+        verified: bool,
+        deliverable: bool,
+    ) -> bool {
+        let content = bounded_result_content(content);
+        if content.is_empty() {
+            return false;
+        }
+        let candidate = BestKnownResult {
+            content,
+            stage: stage.to_string(),
+            quality,
+            evidence_count,
+            verified,
+            deliverable,
+        };
+        let mut state = self.state.lock().expect("run control state poisoned");
+        let should_replace = state
+            .best_known_result
+            .as_ref()
+            .is_none_or(|current| result_rank(&candidate) > result_rank(current));
+        if should_replace {
+            state.best_known_result = Some(candidate);
+            state.last_progress_at = Instant::now();
+        }
+        should_replace
+    }
+
+    pub fn best_known_result(&self) -> Option<BestKnownResult> {
+        self.state
+            .lock()
+            .expect("run control state poisoned")
+            .best_known_result
+            .clone()
+    }
+
     /// Records distinct model or protocol output for liveness and diagnostics.
     /// Observations deliberately do not unlock more run budget; only verified
     /// material checkpoints may extend a bounded segment.
@@ -568,11 +890,16 @@ impl AgentRunControl {
             remaining: self.budget.max_duration.saturating_sub(elapsed),
             model_calls: self.model_calls.load(Ordering::SeqCst),
             tool_calls: self.tool_calls.load(Ordering::SeqCst),
+            agent_turns: self.agent_turns.load(Ordering::SeqCst),
+            repair_attempts: self.repair_attempts.load(Ordering::SeqCst),
             model_call_limit: state.model_call_limit,
             tool_call_limit: state.tool_call_limit,
+            agent_turn_limit: state.agent_turn_limit,
             observations: state.observation_count,
             checkpoints: state.checkpoint_count,
             budget_extensions: state.budget_extensions,
+            stage_usage: snapshot_stage_usage(&state.stage_usage),
+            best_known_result: state.best_known_result.clone(),
         }
     }
 
@@ -582,14 +909,14 @@ impl AgentRunControl {
 
     pub fn runtime_config(&self) -> AgentRuntimeConfig {
         AgentRuntimeConfig {
-            max_turns: self.budget.max_model_calls.max(1),
+            max_turns: self.budget.max_agent_turns.max(1),
         }
     }
 
     pub fn extend_runtime_budget(&self, runtime: &mut AgentLoopState) {
         runtime.max_turns = runtime
             .turn
-            .saturating_add(self.budget.max_model_calls.max(1));
+            .saturating_add(self.budget.max_agent_turns.max(1));
     }
 
     fn set_stop_reason(&self, reason: RunStopReason) {
@@ -642,6 +969,80 @@ fn extend_tool_budget_if_progressed(
     requested_call <= state.tool_call_limit
 }
 
+fn extend_agent_turn_budget_if_progressed(
+    budget: &RunBudget,
+    state: &mut RunMutableState,
+    requested_turn: usize,
+) -> bool {
+    if requested_turn > budget.max_agent_turns
+        || state.checkpoint_count <= state.agent_turn_extension_checkpoint
+    {
+        return false;
+    }
+    state.agent_turn_limit = state
+        .agent_turn_limit
+        .saturating_add(budget.agent_turns_per_extension.max(1))
+        .min(budget.max_agent_turns);
+    state.agent_turn_extension_checkpoint = state.checkpoint_count;
+    state.budget_extensions = state.budget_extensions.saturating_add(1);
+    requested_turn <= state.agent_turn_limit
+}
+
+fn bounded_result_content(content: &str) -> String {
+    let content = content.trim();
+    content
+        .char_indices()
+        .rev()
+        .nth(PARTIAL_OUTPUT_MAX_CHARS.saturating_sub(1))
+        .map(|(start, _)| content[start..].to_string())
+        .unwrap_or_else(|| content.to_string())
+}
+
+fn result_rank(result: &BestKnownResult) -> (bool, ResultQuality, bool, usize, usize) {
+    (
+        result.deliverable,
+        result.quality,
+        result.verified,
+        result.evidence_count,
+        result.content.chars().count(),
+    )
+}
+
+fn snapshot_stage_usage(
+    usage: &BTreeMap<RunStageClass, RunStageUsage>,
+) -> BTreeMap<RunStageClass, RunStageUsageSnapshot> {
+    usage
+        .iter()
+        .map(|(class, usage)| {
+            (
+                *class,
+                RunStageUsageSnapshot {
+                    model_calls: usage.model_calls,
+                    elapsed: usage.started_at.elapsed(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn restore_stage_usage(
+    usage: BTreeMap<RunStageClass, RunStageUsageSnapshot>,
+    now: Instant,
+) -> BTreeMap<RunStageClass, RunStageUsage> {
+    usage
+        .into_iter()
+        .map(|(class, usage)| {
+            (
+                class,
+                RunStageUsage {
+                    started_at: now.checked_sub(usage.elapsed).unwrap_or(now),
+                    model_calls: usage.model_calls,
+                },
+            )
+        })
+        .collect()
+}
+
 fn has_repeated_action_cycle(actions: &VecDeque<u64>, repetitions: usize) -> bool {
     let repetitions = repetitions.max(2);
     (1..=3).any(|period| {
@@ -673,6 +1074,12 @@ mod tests {
             tool_calls_per_extension: 1,
             no_progress_timeout: Duration::from_millis(25),
             max_identical_actions: 2,
+            initial_agent_turns: 2,
+            max_agent_turns: 2,
+            agent_turns_per_extension: 1,
+            max_repair_attempts: 2,
+            terminal_model_call_reserve: 1,
+            terminal_time_reserve: Duration::from_millis(5),
         }
     }
 
@@ -687,6 +1094,9 @@ mod tests {
         assert_eq!(budget.initial_tool_calls, 96);
         assert_eq!(budget.max_tool_calls, 768);
         assert_eq!(budget.no_progress_timeout, Duration::from_secs(5 * 60));
+        assert_eq!(budget.max_agent_turns, 384);
+        assert_eq!(budget.max_repair_attempts, 8);
+        assert_eq!(budget.terminal_model_call_reserve, 8);
     }
 
     #[test]
@@ -999,5 +1409,85 @@ mod tests {
         assert_eq!(partial.chars().count(), PARTIAL_OUTPUT_MAX_CHARS);
         assert!(partial.ends_with("latest verified result 你好"));
         assert_ne!(partial, output);
+    }
+
+    #[test]
+    fn agent_turns_repairs_and_model_calls_are_accounted_independently() {
+        let control = AgentRunControl::with_budget(test_budget());
+
+        assert_eq!(control.begin_model_call("executor"), Ok(1));
+        control.finish_model_call();
+        assert_eq!(control.record_agent_turn("executor"), Ok(1));
+        assert_eq!(control.begin_repair_attempt("protocol_repair"), Ok(1));
+
+        let progress = control.progress();
+        assert_eq!(progress.model_calls, 1);
+        assert_eq!(progress.agent_turns, 1);
+        assert_eq!(progress.repair_attempts, 1);
+        assert_eq!(progress.tool_calls, 0);
+    }
+
+    #[test]
+    fn stage_exhaustion_is_local_and_preserves_terminal_reserve() {
+        let mut budget = test_budget();
+        budget.initial_model_calls = 4;
+        budget.max_model_calls = 4;
+        budget.terminal_model_call_reserve = 1;
+        let control = AgentRunControl::with_budget(budget);
+
+        assert!(control
+            .begin_stage_model_call("candidate_1", RunStageClass::Candidate)
+            .is_ok());
+        control.finish_model_call();
+        assert!(control
+            .begin_stage_model_call("candidate_2", RunStageClass::Candidate)
+            .is_ok());
+        control.finish_model_call();
+        assert_eq!(
+            control.begin_stage_model_call("candidate_3", RunStageClass::Candidate),
+            Err(RunStopReason::StageBudgetExhausted)
+        );
+        assert_eq!(control.stop_reason(), None);
+        assert!(control
+            .begin_stage_model_call("synthesizer", RunStageClass::Synthesizer)
+            .is_ok());
+    }
+
+    #[test]
+    fn best_known_result_is_ranked_and_survives_resume() {
+        let control = AgentRunControl::with_budget(test_budget());
+        assert!(control.record_best_known_result(
+            "candidate",
+            "grounded candidate",
+            ResultQuality::Grounded,
+            2,
+            false,
+            false,
+        ));
+        assert!(!control.record_best_known_result(
+            "draft",
+            "longer but weaker draft",
+            ResultQuality::Draft,
+            0,
+            false,
+            false,
+        ));
+        assert!(control.record_best_known_result(
+            "verification",
+            "verified answer",
+            ResultQuality::Verified,
+            3,
+            true,
+            true,
+        ));
+
+        let resumed = AgentRunControl::from_snapshot(control.snapshot());
+        let best = resumed
+            .best_known_result()
+            .expect("best result should persist");
+        assert_eq!(best.content, "verified answer");
+        assert_eq!(best.quality, ResultQuality::Verified);
+        assert!(best.verified);
+        assert!(best.deliverable);
     }
 }

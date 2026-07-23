@@ -28,8 +28,9 @@ pub(crate) fn run_background_prompt_mutation_stage(
         &request_id,
         &Metadata::new(),
     )?;
-    let completion = complete_collaboration_model_with_control(
+    let completion = complete_collaboration_model_for_stage_with_control(
         config.clone(),
+        stage.to_string(),
         role.clone(),
         model.clone(),
         collaboration_system_prompt_for_run(&config.agent_system_prompt, run_context),

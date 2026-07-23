@@ -872,13 +872,19 @@ fn is_lightweight_direct(context: &RoutingContext) -> bool {
 }
 
 fn requires_ultra(context: &RoutingContext) -> bool {
+    let contract = ConductorExecutionContract::from_routing(
+        context,
+        "auto",
+        OrchestrationPolicy::AutoRouter,
+    );
     context.needs_multi_model
         || (!context.latency_sensitive
             && !matches!(context.task_class, TaskClass::Browser | TaskClass::Computer)
             && ((context.high_stakes && context.complexity_score >= 3)
                 || (context.parallelizable
                     && context.complexity_score >= 4
-                    && context.estimated_steps >= 4)))
+                    && context.estimated_steps >= 4))
+            && contract.should_auto_collaborate())
 }
 
 fn ultra_candidate_count(context: &RoutingContext) -> usize {

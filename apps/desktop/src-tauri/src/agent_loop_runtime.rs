@@ -309,7 +309,7 @@ pub(crate) fn continue_agent_loop(
             match result {
                 Ok(response) => break response,
                 Err(error) => {
-                    if error.message == MODEL_REQUEST_CANCELLED
+                    if error.is_cancelled()
                         && cancellation.has_pending_steer()
                         && !agent_run_should_stop(cancellation)
                     {
@@ -327,8 +327,7 @@ pub(crate) fn continue_agent_loop(
                         cancellation.finish_model_call();
                         continue 'agent_loop;
                     }
-                    if error.message == MODEL_REQUEST_CANCELLED
-                        || agent_run_should_stop(cancellation)
+                    if error.is_cancelled() || agent_run_should_stop(cancellation)
                     {
                         emit_agent_stream_delta(app, &request_id, session_id, "", true, true, None);
                         cancellation.finish_model_call();
@@ -344,7 +343,10 @@ pub(crate) fn continue_agent_loop(
                         );
                     }
                     if transport_attempt < MAX_AGENT_MODEL_TRANSPORT_ATTEMPTS
-                        && is_transient_model_transport_error(&error.message)
+                        && error.is_retryable()
+                        && cancellation
+                            .begin_repair_attempt("provider_transport_retry")
+                            .is_ok()
                     {
                         if visible_stream && streamed_output {
                             emit_agent_stream_delta(
@@ -376,7 +378,12 @@ pub(crate) fn continue_agent_loop(
                         cancellation.record_partial_output(&partial_stream);
                     }
                     cancellation.finish_model_call();
-                    if let Some(reason) = exhausted_model_transport_stop_reason(&error.message) {
+                    cancellation.record_observation(
+                        "provider_failure",
+                        error.class.label(),
+                        &error.message,
+                    );
+                    if let Some(reason) = exhausted_model_transport_error_stop_reason(&error) {
                         cancellation.request_stop(reason);
                         return pause_agent_loop_for_control_stop(
                             app,
@@ -398,6 +405,21 @@ pub(crate) fn continue_agent_loop(
             }
         };
         cancellation.finish_model_call();
+        if cancellation.record_agent_turn("executor").is_err() {
+            if !partial_stream.trim().is_empty() {
+                cancellation.record_partial_output(&partial_stream);
+            }
+            return pause_agent_loop_for_control_stop(
+                app,
+                state,
+                workspace_root,
+                &runtime,
+                &prompt,
+                &run_context,
+                collaboration,
+                cancellation,
+            );
+        }
         let raw_response_content = response.message.content.clone();
         response.message.content = sanitize_assistant_content(&raw_response_content);
         let reasoning_markup_removed = response.message.content != raw_response_content.trim();
@@ -480,7 +502,25 @@ pub(crate) fn continue_agent_loop(
                 "run_tool_call_limit".to_string(),
                 progress.tool_call_limit.to_string(),
             );
-            for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+            metadata.insert(
+                "run_agent_turns".to_string(),
+                progress.agent_turns.to_string(),
+            );
+            metadata.insert(
+                "run_agent_turn_limit".to_string(),
+                progress.agent_turn_limit.to_string(),
+            );
+            metadata.insert(
+                "run_repair_attempts".to_string(),
+                progress.repair_attempts.to_string(),
+            );
+            for key in [
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+                "usage_source",
+                "usage_estimated",
+            ] {
                 if let Some(value) = response.metadata.get(key) {
                     metadata.insert(key.to_string(), value.clone());
                 }
@@ -565,7 +605,24 @@ pub(crate) fn continue_agent_loop(
                 clear_suspended_agent_run_for_context(state, &run_context)?;
                 let (completion_evidence, routing_learning_eligible) =
                     completion_learning_signal(&runtime);
-                let final_answer = if let Some(collaboration) = collaboration {
+                let completion_evidence_count = runtime
+                    .messages
+                    .iter()
+                    .filter(|message| matches!(message.role, MessageRole::Tool))
+                    .count();
+                cancellation.record_best_known_result(
+                    "executor",
+                    &answer,
+                    if completion_evidence_count > 0 {
+                        ResultQuality::Grounded
+                    } else {
+                        ResultQuality::Substantive
+                    },
+                    completion_evidence_count,
+                    false,
+                    true,
+                );
+                let (final_answer, synthesized) = if let Some(collaboration) = collaboration {
                     match synthesize_agent_answer(
                         app,
                         state,
@@ -577,7 +634,7 @@ pub(crate) fn continue_agent_loop(
                         collaboration,
                         cancellation,
                     ) {
-                        Ok(answer) => answer,
+                        Ok(answer) => (answer, true),
                         Err(_) if agent_run_should_stop(cancellation) => {
                             return pause_agent_loop_for_control_stop(
                                 app,
@@ -609,7 +666,7 @@ pub(crate) fn continue_agent_loop(
                                 false,
                                 None,
                             );
-                            answer.clone()
+                            (answer.clone(), false)
                         }
                     }
                 } else {
@@ -624,14 +681,34 @@ pub(crate) fn continue_agent_loop(
                             None,
                         );
                     }
-                    answer.clone()
+                    (answer.clone(), false)
                 };
+                cancellation.record_best_known_result(
+                    if synthesized {
+                        "synthesizer"
+                    } else if completion_evidence_count > 0 {
+                        "verified_executor"
+                    } else {
+                        "executor"
+                    },
+                    &final_answer,
+                    if synthesized {
+                        ResultQuality::Synthesized
+                    } else if completion_evidence_count > 0 {
+                        ResultQuality::Verified
+                    } else {
+                        ResultQuality::Substantive
+                    },
+                    completion_evidence_count,
+                    completion_evidence_count > 0,
+                    true,
+                );
                 let completion_progress = cancellation.progress();
                 let mut store = state
                     .store
                     .lock()
                     .map_err(|error| format!("store lock poisoned: {error}"))?;
-                if collaboration.is_some() {
+                if synthesized {
                     append_message_event_with_metadata(
                         &mut store,
                         &runtime.task_id,
@@ -665,6 +742,10 @@ pub(crate) fn continue_agent_loop(
                                 collaboration.is_some().to_string(),
                             ),
                             (
+                                "collaboration_synthesized".to_string(),
+                                synthesized.to_string(),
+                            ),
+                            (
                                 "elapsed_ms".to_string(),
                                 completion_progress.elapsed.as_millis().to_string(),
                             ),
@@ -675,6 +756,14 @@ pub(crate) fn continue_agent_loop(
                             (
                                 "tool_calls".to_string(),
                                 completion_progress.tool_calls.to_string(),
+                            ),
+                            (
+                                "agent_turns".to_string(),
+                                completion_progress.agent_turns.to_string(),
+                            ),
+                            (
+                                "repair_attempts".to_string(),
+                                completion_progress.repair_attempts.to_string(),
                             ),
                             (
                                 "completion_evidence".to_string(),

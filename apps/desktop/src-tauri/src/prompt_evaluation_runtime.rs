@@ -13,6 +13,8 @@ pub(crate) fn evaluate_conductor_prompt_profile(
     control: &Arc<AgentRunControl>,
 ) -> PromptPlanCandidate {
     let conductor_model = config.model_for_conductor();
+    let routing = RoutingContext::from_prompt(objective, Vec::new());
+    let contract_policy = parse_policy(policy).unwrap_or(OrchestrationPolicy::Single);
     let harness = ConductorHarness::new(ConductorRequest {
         workflow_id: format!("{evaluation_id}-{}", genome.id),
         objective: objective.to_string(),
@@ -29,6 +31,11 @@ pub(crate) fn evaluate_conductor_prompt_profile(
             max_tool_calls_per_step: MAX_COLLABORATION_WORKER_TOOL_CALLS,
             max_output_tokens_per_step: COLLABORATION_MAX_OUTPUT_TOKENS as usize,
         },
+        execution_contract: ConductorExecutionContract::from_routing(
+            &routing,
+            effort,
+            contract_policy,
+        ),
         prior_hint: None,
         prompt_evolution_enabled: true,
         prompt_genome: genome.clone(),
@@ -284,7 +291,13 @@ pub(crate) fn complete_prompt_evaluation_worker(
                 }
             }
         };
-        for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+        for key in [
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "usage_source",
+            "usage_estimated",
+        ] {
             let previous = usage
                 .get(key)
                 .and_then(|value| value.parse::<u64>().ok())

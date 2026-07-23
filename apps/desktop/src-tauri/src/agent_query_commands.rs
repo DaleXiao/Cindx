@@ -467,8 +467,13 @@ pub(crate) fn finish_agent_run_for_control_stop(
         return cancelled_agent_state(state, session_id);
     }
 
+    let best_known = control
+        .best_known_result()
+        .filter(|result| result.deliverable);
     let partial = control.partial_output();
-    let answer = if partial.trim().is_empty() {
+    let answer = if let Some(result) = best_known.as_ref() {
+        result.content.clone()
+    } else if partial.trim().is_empty() {
         format!(
             "Cindx paused this run at a safety checkpoint ({}). No verified partial result was available. Continue to resume with a fresh run budget.",
             reason.code()
@@ -520,6 +525,22 @@ pub(crate) fn finish_agent_run_for_control_stop(
         .collect(),
         run_context,
     );
+    if let Some(result) = best_known.as_ref() {
+        metadata.insert("degraded_delivery".to_string(), "true".to_string());
+        metadata.insert("best_known_stage".to_string(), result.stage.clone());
+        metadata.insert(
+            "best_known_quality".to_string(),
+            result.quality.as_str().to_string(),
+        );
+        metadata.insert(
+            "best_known_evidence_count".to_string(),
+            result.evidence_count.to_string(),
+        );
+        metadata.insert(
+            "best_known_verified".to_string(),
+            result.verified.to_string(),
+        );
+    }
     metadata.insert("model".to_string(), "run-control".to_string());
     let mut store = state
         .store

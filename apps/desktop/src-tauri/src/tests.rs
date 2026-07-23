@@ -3,6 +3,7 @@ use orchestrator::{AdaptiveWorkflow, AdaptiveWorkflowStep};
 use tools::encode_input;
 
 fn test_conductor_harness(models: Vec<String>, agent_budget: usize) -> ConductorHarness {
+    let routing = RoutingContext::from_prompt("Test the conductor", Vec::new());
     ConductorHarness::new(ConductorRequest {
         workflow_id: "test-workflow".to_string(),
         objective: "Test the conductor".to_string(),
@@ -24,10 +25,37 @@ fn test_conductor_harness(models: Vec<String>, agent_budget: usize) -> Conductor
             max_tool_calls_per_step: MAX_COLLABORATION_WORKER_TOOL_CALLS,
             max_output_tokens_per_step: COLLABORATION_MAX_OUTPUT_TOKENS as usize,
         },
+        execution_contract: ConductorExecutionContract::from_routing(
+            &routing,
+            "pro",
+            OrchestrationPolicy::BestOfN {
+                candidates: agent_budget,
+            },
+        ),
         prior_hint: None,
         prompt_evolution_enabled: true,
         prompt_genome: ConductorPromptGenome::seed_for_effort("pro"),
     })
+}
+
+#[test]
+fn collaboration_candidate_quorum_matches_effort_contract() {
+    assert_eq!(collaboration_candidate_quorum(0, "fast"), 0);
+    assert_eq!(collaboration_candidate_quorum(1, "auto"), 1);
+    assert_eq!(collaboration_candidate_quorum(3, "fast"), 1);
+    assert_eq!(collaboration_candidate_quorum(2, "auto"), 2);
+    assert_eq!(collaboration_candidate_quorum(4, "auto"), 3);
+    assert_eq!(collaboration_candidate_quorum(4, "pro"), 4);
+
+    assert_eq!(
+        collaboration_candidate_quorum_grace("fast"),
+        Duration::from_millis(100)
+    );
+    assert_eq!(
+        collaboration_candidate_quorum_grace("auto"),
+        Duration::from_millis(400)
+    );
+    assert_eq!(collaboration_candidate_quorum_grace("pro"), Duration::ZERO);
 }
 
 fn test_message(role: MessageRole, content: impl Into<String>) -> Message {
@@ -305,27 +333,21 @@ fn adaptive_quality_handoff_preserves_issues_and_fails_closed_on_safety() {
 
 #[test]
 fn transient_provider_failures_are_retryable_but_invalid_requests_are_not() {
-    assert!(is_transient_model_transport_error(
-        "failed to configure curl: Broken pipe (os error 32)"
-    ));
-    assert!(is_transient_model_transport_error(
-        "model stream timed out after 180 seconds without receiving data"
-    ));
-    assert!(!is_transient_model_transport_error(
-        "400 invalid_request_error: Unexpected item type in content"
-    ));
+    let broken_pipe = ModelError::new("failed to configure curl: Broken pipe (os error 32)");
+    let timeout =
+        ModelError::new("model stream timed out after 180 seconds without receiving data");
+    let invalid = ModelError::with_status(
+        400,
+        "invalid_request_error: Unexpected item type in content",
+    );
+    assert!(broken_pipe.is_retryable());
+    assert!(timeout.is_retryable());
+    assert!(!invalid.is_retryable());
     assert_eq!(
-        exhausted_model_transport_stop_reason(
-            "failed to configure curl: Broken pipe (os error 32)"
-        ),
+        exhausted_model_transport_error_stop_reason(&broken_pipe),
         Some(RunStopReason::ProviderUnavailable)
     );
-    assert_eq!(
-        exhausted_model_transport_stop_reason(
-            "400 invalid_request_error: Unexpected item type in content"
-        ),
-        None
-    );
+    assert_eq!(exhausted_model_transport_error_stop_reason(&invalid), None);
 }
 
 #[test]
@@ -4448,6 +4470,7 @@ fn image_generation_run_cannot_complete_without_the_configured_tool() {
 #[test]
 fn conductor_evaluation_repairs_invalid_structure_before_scoring() {
     let genome = ConductorPromptGenome::seed_for_effort("fast");
+    let routing = RoutingContext::from_prompt("Answer a focused question", Vec::new());
     let harness = ConductorHarness::new(ConductorRequest {
         workflow_id: "repair-evaluation".to_string(),
         objective: "Answer a focused question".to_string(),
@@ -4469,6 +4492,11 @@ fn conductor_evaluation_repairs_invalid_structure_before_scoring() {
             max_tool_calls_per_step: 0,
             max_output_tokens_per_step: 1_024,
         },
+        execution_contract: ConductorExecutionContract::from_routing(
+            &routing,
+            "fast",
+            OrchestrationPolicy::Single,
+        ),
         prior_hint: None,
         prompt_evolution_enabled: true,
         prompt_genome: genome.clone(),

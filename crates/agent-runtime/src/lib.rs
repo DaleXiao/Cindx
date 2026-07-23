@@ -10,10 +10,17 @@ const DSML_TOOL_CALLS_CLOSE: &str = "</｜DSML｜tool_calls>";
 
 mod context_governor;
 mod control;
+mod parallel;
 
 pub use context_governor::{bounded_max_output_tokens, ContextGovernorReport};
 pub use control::{
-    AgentRunControl, RunBudget, RunControlSnapshot, RunProgressSnapshot, RunSteer, RunStopReason,
+    AgentRunControl, BestKnownResult, ResultQuality, RunBudget, RunControlSnapshot,
+    RunProgressSnapshot, RunStageBudget, RunStageClass, RunStageUsageSnapshot, RunSteer,
+    RunStopReason,
+};
+pub use parallel::{
+    BoundedParallelExecutor, CancellableParallelJob, ParallelJob, ParallelTaskError,
+    QuorumExecution,
 };
 
 pub const DEFAULT_MAX_AGENT_TURNS: usize = 24;

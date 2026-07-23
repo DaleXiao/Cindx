@@ -30,7 +30,8 @@ use agent_runtime::{
     observation_from_tool_result, record_tool_outcome, record_tool_outcome_with_risk,
     repeated_tool_failure_count, resume_agent_loop_from_messages, sanitize_assistant_content,
     start_agent_loop, start_agent_loop_with_history, tool_invocation_from_request, AgentAdvance,
-    AgentRunControl, AgentRuntimeConfig, RunBudget, RunControlSnapshot, RunStopReason,
+    AgentRunControl, AgentRuntimeConfig, ResultQuality, RunBudget, RunControlSnapshot,
+    RunStageClass, RunStopReason,
     DEFAULT_COLLABORATION_WORKER_TURNS, MAX_COLLABORATION_WORKER_TOOL_CALLS,
     MAX_IDENTICAL_TOOL_FAILURES,
 };
@@ -47,6 +48,8 @@ use model_provider::{
     OpenAiCompatibleImageConfig, OpenAiCompatibleImageProvider, OpenAiCompatibleProvider,
     MODEL_REQUEST_CANCELLED,
 };
+#[cfg(test)]
+use model_provider::ModelError;
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindow, NSWindowButton};
 #[cfg(test)]
@@ -58,8 +61,9 @@ use orchestrator::{
     ActionableSideInformation, AgentEvaluationCaseScore, AgentEvaluationCheck,
     AgentEvaluationEvidenceSource, AgentEvaluationReflectionPacket, AgentEvaluationSplit,
     AgentEvaluationToolTrace, AgentEvaluationTrace, AgentEvaluationTraceStep,
-    AgentEvaluationVerifierOutcome, ConductorHarness, ConductorPromptGenome, ConductorRequest,
-    ConductorRoleHints, LearnedModelRouter, ModelCandidate, OrchestrationPolicy,
+    AgentEvaluationVerifierOutcome, ConductorExecutionContract, ConductorHarness,
+    ConductorPromptGenome, ConductorRequest, ConductorRoleHints, LearnedModelRouter,
+    ModelCandidate, OrchestrationPolicy,
     PromptEvaluationMode, PromptEvaluationSplit, PromptEvolutionCampaignInput,
     PromptEvolutionCampaignSnapshot, PromptEvolutionObservation, PromptInstanceParetoArchive,
     PromptParetoArchive, PromptPromotionConfidence, PromptRetryPolicy, PromptStepCredit,
@@ -188,8 +192,8 @@ use agent_application::{
     SessionLifecycleInput, SessionTitleState,
 };
 use agent_loop_service::{
-    exhausted_model_transport_stop_reason, is_transient_model_transport_error,
-    model_response_checkpoint_evidence, model_transport_retry_delay, ModelStreamProgress,
+    exhausted_model_transport_error_stop_reason, model_response_checkpoint_evidence,
+    model_transport_retry_delay, ModelStreamProgress,
 };
 use agent_recovery_service::*;
 use collaboration_service::{
@@ -203,7 +207,9 @@ use collaboration_service::{
     AdaptiveCollaborationSpec, AgentCollaboration, CollaborationCompletion, CollaborationEvidence,
     WORKFLOW_RESUMABLE_ERROR_PREFIX,
 };
-use parallel_execution::{run_model_jobs_ordered, ParallelJob};
+use parallel_execution::{
+    run_model_jobs_ordered, run_model_jobs_until_quorum, CancellableParallelJob, ParallelJob,
+};
 use permission_service::{
     agent_session_permission_granted, pending_agent_permissions_for_run, permission_decision_label,
     permission_decision_past_tense, permission_risk_label,

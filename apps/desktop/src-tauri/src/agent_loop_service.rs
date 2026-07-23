@@ -1,35 +1,13 @@
 use agent_runtime::{AgentRunControl, RunStopReason};
-use model_provider::ModelResponse;
+use model_provider::{ModelError, ModelResponse};
 use std::time::{Duration, Instant};
 
-pub(crate) fn is_transient_model_transport_error(message: &str) -> bool {
-    let message = message.to_ascii_lowercase();
-    [
-        "broken pipe",
-        "timed out",
-        "timeout",
-        "connection reset",
-        "connection refused",
-        "empty reply",
-        "temporarily unavailable",
-        "service unavailable",
-        "too many requests",
-        "rate limit",
-        "status 429",
-        "status 500",
-        "status 502",
-        "status 503",
-        "status 504",
-        "failed to start curl",
-        "failed to configure curl",
-        "failed to wait for curl",
-    ]
-    .iter()
-    .any(|needle| message.contains(needle))
-}
-
-pub(crate) fn exhausted_model_transport_stop_reason(message: &str) -> Option<RunStopReason> {
-    is_transient_model_transport_error(message).then_some(RunStopReason::ProviderUnavailable)
+pub(crate) fn exhausted_model_transport_error_stop_reason(
+    error: &ModelError,
+) -> Option<RunStopReason> {
+    error
+        .is_retryable()
+        .then_some(RunStopReason::ProviderUnavailable)
 }
 
 pub(crate) fn model_response_checkpoint_evidence(response: &ModelResponse) -> Option<String> {
@@ -94,11 +72,9 @@ mod tests {
 
     #[test]
     fn transport_retry_classification_is_narrow_and_stable() {
-        assert!(is_transient_model_transport_error("curl: Broken pipe"));
-        assert!(is_transient_model_transport_error("HTTP status 503"));
-        assert!(!is_transient_model_transport_error(
-            "400 invalid messages input"
-        ));
+        assert!(ModelError::new("curl: Broken pipe").is_retryable());
+        assert!(ModelError::new("HTTP status 503").is_retryable());
+        assert!(!ModelError::new("400 invalid messages input").is_retryable());
     }
 
     #[test]
