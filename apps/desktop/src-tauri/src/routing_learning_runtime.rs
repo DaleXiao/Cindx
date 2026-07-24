@@ -3,6 +3,19 @@ use super::*;
 pub(crate) fn load_routing_telemetry_read_model(
     store: &mut SqliteStore,
 ) -> Result<Vec<RoutingTelemetry>, StorageError> {
+    load_routing_telemetry_read_model_inner(store, true)
+}
+
+pub(crate) fn load_routing_telemetry_read_model_snapshot(
+    store: &mut SqliteStore,
+) -> Result<Vec<RoutingTelemetry>, StorageError> {
+    load_routing_telemetry_read_model_inner(store, false)
+}
+
+fn load_routing_telemetry_read_model_inner(
+    store: &mut SqliteStore,
+    persist: bool,
+) -> Result<Vec<RoutingTelemetry>, StorageError> {
     let task_id = phase16_task_id();
     let revision = store.event_revision(&task_id)?;
     let stored = store
@@ -68,12 +81,14 @@ pub(crate) fn load_routing_telemetry_read_model(
     let payload = serde_json::to_string(&model).map_err(|error| {
         StorageError::new(format!("routing telemetry serialization failed: {error}"))
     })?;
-    store.save_read_model(
-        ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
-        ROUTING_TELEMETRY_READ_MODEL_KEY,
-        model.revision,
-        &payload,
-    )?;
+    if persist {
+        store.save_read_model(
+            ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
+            ROUTING_TELEMETRY_READ_MODEL_KEY,
+            model.revision,
+            &payload,
+        )?;
+    }
     Ok(model
         .entries
         .into_iter()
