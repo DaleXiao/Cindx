@@ -163,8 +163,8 @@ import {
   queueAgentMessage
 } from "./tauri";
 import {
-  SESSION_AUXILIARY_CACHE_LIMIT,
   SESSION_STATE_CACHE_LIMIT,
+  SessionRuntimeCache,
   agentStateUnchanged,
   agentTraceUnchanged,
   containsOptimisticUserMessage,
@@ -173,9 +173,7 @@ import {
   mergeAgentStateSnapshot,
   mergeQueuedAgentMessage,
   mergeSequencedItems,
-  messagesWithOptimisticUserMessages,
-  readSessionState,
-  rememberSessionState
+  messagesWithOptimisticUserMessages
 } from "./sessionRuntimeModel";
 
 const appIconUrl = new URL("../src-tauri/icons/icon.png", import.meta.url).href;
@@ -565,10 +563,7 @@ export function App() {
   const agentStateRevisionsRef = useRef<
     Map<string, { eventCount: number; latestSequence: number; latestTimestampMs: number }>
   >(new Map());
-  const agentStateCacheRef = useRef<Map<string, AgentState>>(new Map());
-  const agentTraceCacheRef = useRef<Map<string, AgentTraceState>>(new Map());
-  const contextStateCacheRef = useRef<Map<string, ContextState>>(new Map());
-  const agentStateRequestsRef = useRef<Map<string, Promise<AgentState>>>(new Map());
+  const [sessionRuntimeCache] = useState(() => new SessionRuntimeCache());
   const agentHistoryRequestsRef = useRef<Set<string>>(new Set());
   const [loadingOlderSessionId, setLoadingOlderSessionId] = useState<string | null>(null);
   const sessionSelectionRequestRef = useRef(0);
@@ -602,25 +597,16 @@ export function App() {
   const [settingsToast, setSettingsToast] = useState<{ id: number; message: string } | null>(null);
 
   function requestSessionAgentState(sessionId: string) {
-    const existing = agentStateRequestsRef.current.get(sessionId);
-    if (existing) return existing;
-    const request = getAgentState(sessionId)
-      .then((next) => {
+    return sessionRuntimeCache.requestAgent(sessionId, () =>
+      getAgentState(sessionId).then((next) => {
         agentStateRevisionsRef.current.set(sessionId, {
           eventCount: next.eventCount,
           latestSequence: next.latestSequence,
           latestTimestampMs: 0
         });
-        rememberSessionState(agentStateCacheRef.current, sessionId, next);
         return next;
       })
-      .finally(() => {
-        if (agentStateRequestsRef.current.get(sessionId) === request) {
-          agentStateRequestsRef.current.delete(sessionId);
-        }
-      });
-    agentStateRequestsRef.current.set(sessionId, request);
-    return request;
+    );
   }
 
   function applySelectedSessionAgentState(
@@ -659,13 +645,11 @@ export function App() {
   }
 
   function restoreCachedSessionState(sessionId: string) {
-    const cachedAgentState = readSessionState(agentStateCacheRef.current, sessionId);
-    const cachedTraceState = readSessionState(agentTraceCacheRef.current, sessionId);
-    const cachedContextState = readSessionState(contextStateCacheRef.current, sessionId);
-    setSessionLoadingId(cachedAgentState ? null : sessionId);
-    setAgentState(cachedAgentState);
-    setAgentTraceState(cachedTraceState);
-    setContextState(cachedContextState);
+    const cached = sessionRuntimeCache.read(sessionId);
+    setSessionLoadingId(cached.agent ? null : sessionId);
+    setAgentState(cached.agent);
+    setAgentTraceState(cached.trace);
+    setContextState(cached.context);
   }
 
   const handleThreadSelection = useCallback((selection: SessionThreadSelection) => {
@@ -771,7 +755,7 @@ export function App() {
       getProjectSessionState().then((state) => {
         setProjectSessionState(state);
         setSessionLoadingId(
-          state.activeSessionId && !agentStateCacheRef.current.has(state.activeSessionId)
+          state.activeSessionId && !sessionRuntimeCache.hasAgent(state.activeSessionId)
             ? state.activeSessionId
             : null
         );
@@ -784,7 +768,7 @@ export function App() {
             latestSequence: state.latestSequence,
             latestTimestampMs: 0
           });
-          rememberSessionState(agentStateCacheRef.current, state.sessionId, state);
+          sessionRuntimeCache.rememberAgent(state.sessionId, state);
         }
         setAgentState(state);
         setSessionLoadingId(null);
@@ -1062,18 +1046,13 @@ export function App() {
 
   useEffect(() => {
     if (!agentState?.sessionId) return;
-    rememberSessionState(agentStateCacheRef.current, agentState.sessionId, agentState);
-  }, [agentState]);
+    sessionRuntimeCache.rememberAgent(agentState.sessionId, agentState);
+  }, [agentState, sessionRuntimeCache]);
 
   useEffect(() => {
     if (!agentTraceState?.sessionId) return;
-    rememberSessionState(
-      agentTraceCacheRef.current,
-      agentTraceState.sessionId,
-      agentTraceState,
-      SESSION_AUXILIARY_CACHE_LIMIT
-    );
-  }, [agentTraceState]);
+    sessionRuntimeCache.rememberTrace(agentTraceState.sessionId, agentTraceState);
+  }, [agentTraceState, sessionRuntimeCache]);
 
   const sessionPrefetchKey = useMemo(() => {
     if (!projectSessionState?.activeProjectId) return "";
@@ -1110,7 +1089,7 @@ export function App() {
     const prefetch = async () => {
       if (disposed) return;
       const pending = sessionIds.filter(
-        (sessionId) => !agentStateCacheRef.current.has(sessionId)
+        (sessionId) => !sessionRuntimeCache.hasAgent(sessionId)
       );
       let nextIndex = 0;
       const worker = async () => {
@@ -1132,7 +1111,7 @@ export function App() {
       if (idleCallback !== null) window.cancelIdleCallback(idleCallback);
       if (fallbackTimer !== null) window.clearTimeout(fallbackTimer);
     };
-  }, [activeSessionBusy, sessionPrefetchKey]);
+  }, [activeSessionBusy, sessionPrefetchKey, sessionRuntimeCache]);
 
   useEffect(() => {
     const sessionId = activeSession?.id;
@@ -1226,18 +1205,8 @@ export function App() {
     void Promise.all([getAgentTraceState(sessionId), getContextState(sessionId)])
       .then(([nextTrace, nextContext]) => {
         if (disposed || activeSessionIdRef.current !== sessionId) return;
-        rememberSessionState(
-          agentTraceCacheRef.current,
-          sessionId,
-          nextTrace,
-          SESSION_AUXILIARY_CACHE_LIMIT
-        );
-        rememberSessionState(
-          contextStateCacheRef.current,
-          sessionId,
-          nextContext,
-          SESSION_AUXILIARY_CACHE_LIMIT
-        );
+        sessionRuntimeCache.rememberTrace(sessionId, nextTrace);
+        sessionRuntimeCache.rememberContext(sessionId, nextContext);
         startTransition(() => {
           setAgentTraceState((current) =>
             agentTraceUnchanged(current, nextTrace) ? current : nextTrace
@@ -1252,7 +1221,7 @@ export function App() {
     return () => {
       disposed = true;
     };
-  }, [activeSession?.id, activeSessionBusy, inspectorOpen]);
+  }, [activeSession?.id, activeSessionBusy, inspectorOpen, sessionRuntimeCache]);
 
   const composerDraft = activeSession ? composerDrafts[activeSession.id] ?? "" : "";
   const composerAttachments = activeSession ? attachmentDrafts[activeSession.id] ?? [] : [];
@@ -1915,10 +1884,7 @@ export function App() {
     );
     deleted.forEach((sessionId) => {
       agentStateRevisionsRef.current.delete(sessionId);
-      agentStateCacheRef.current.delete(sessionId);
-      agentTraceCacheRef.current.delete(sessionId);
-      contextStateCacheRef.current.delete(sessionId);
-      agentStateRequestsRef.current.delete(sessionId);
+      sessionRuntimeCache.forget(sessionId);
     });
   }
 
@@ -2461,7 +2427,7 @@ export function App() {
       latestSequence: effectiveNext.latestSequence,
       latestTimestampMs: 0
     });
-    rememberSessionState(agentStateCacheRef.current, sessionId, effectiveNext);
+    sessionRuntimeCache.rememberAgent(sessionId, effectiveNext);
     acknowledgeOptimisticUserMessage(sessionId, effectiveNext.messages);
     updateSessionStatus(sessionId, effectiveNext.status, effectiveNext.canContinue);
     if (activeSessionIdRef.current === sessionId) {
@@ -2479,22 +2445,22 @@ export function App() {
         ? current
         : { ...current, queuedMessages };
     };
-    const cached = agentStateCacheRef.current.get(sessionId);
+    const cached = sessionRuntimeCache.peekAgent(sessionId);
     if (cached) {
-      rememberSessionState(agentStateCacheRef.current, sessionId, updateState(cached));
+      sessionRuntimeCache.rememberAgent(sessionId, updateState(cached));
     }
     if (activeSessionIdRef.current === sessionId) {
       setAgentState((current) => {
         if (!current || current.sessionId !== sessionId) return current;
         const next = updateState(current);
-        rememberSessionState(agentStateCacheRef.current, sessionId, next);
+        sessionRuntimeCache.rememberAgent(sessionId, next);
         return next;
       });
     }
   }
 
   function queuedMessageForSession(sessionId: string, queueId: string) {
-    const cached = agentStateCacheRef.current.get(sessionId);
+    const cached = sessionRuntimeCache.peekAgent(sessionId);
     const state = agentState?.sessionId === sessionId ? agentState : cached;
     return state?.queuedMessages.find((message) => message.id === queueId) ?? null;
   }
@@ -2526,13 +2492,13 @@ export function App() {
       latestSequence: Math.max(current.latestSequence, receipt.latestSequence),
       queuedMessages: mergeQueuedAgentMessage(current.queuedMessages, receipt.message)
     });
-    const cached = agentStateCacheRef.current.get(sessionId);
-    if (cached) rememberSessionState(agentStateCacheRef.current, sessionId, mergeReceipt(cached));
+    const cached = sessionRuntimeCache.peekAgent(sessionId);
+    if (cached) sessionRuntimeCache.rememberAgent(sessionId, mergeReceipt(cached));
     if (activeSessionIdRef.current === sessionId) {
       setAgentState((current) => {
         if (!current || current.sessionId !== sessionId) return current;
         const next = mergeReceipt(current);
-        rememberSessionState(agentStateCacheRef.current, sessionId, next);
+        sessionRuntimeCache.rememberAgent(sessionId, next);
         return next;
       });
     }
@@ -2565,13 +2531,13 @@ export function App() {
         queuedMessages
       };
     };
-    const cached = agentStateCacheRef.current.get(sessionId);
-    if (cached) rememberSessionState(agentStateCacheRef.current, sessionId, applyReceipt(cached));
+    const cached = sessionRuntimeCache.peekAgent(sessionId);
+    if (cached) sessionRuntimeCache.rememberAgent(sessionId, applyReceipt(cached));
     if (activeSessionIdRef.current === sessionId) {
       setAgentState((current) => {
         if (!current || current.sessionId !== sessionId) return current;
         const next = applyReceipt(current);
-        rememberSessionState(agentStateCacheRef.current, sessionId, next);
+        sessionRuntimeCache.rememberAgent(sessionId, next);
         return next;
       });
     }
@@ -2741,7 +2707,7 @@ export function App() {
     const sessionAgentState =
       activeAgentState?.sessionId === sessionId
         ? activeAgentState
-        : agentStateCacheRef.current.get(sessionId);
+        : sessionRuntimeCache.peekAgent(sessionId);
     if (
       busySessionIds.has(sessionId) ||
       sessionAgentState?.status === "running" ||

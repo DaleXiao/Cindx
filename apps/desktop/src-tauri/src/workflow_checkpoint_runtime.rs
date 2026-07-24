@@ -192,15 +192,7 @@ pub(crate) fn ensure_adaptive_step_attempt_started(
     attempt_limit: usize,
     now_ms: u64,
 ) -> Result<bool, String> {
-    let is_running = checkpoint
-        .steps
-        .get(step_id)
-        .is_some_and(|step| step.status == WorkflowStepStatus::Running);
-    if is_running {
-        return Ok(false);
-    }
-    checkpoint.begin_step_with_attempt_limit(step_id, model, attempt_limit, now_ms)?;
-    Ok(true)
+    checkpoint.prepare_step_attempt(step_id, model, attempt_limit, now_ms)
 }
 
 pub(crate) fn adaptive_layer_failure_error(failures: &[String]) -> Option<String> {

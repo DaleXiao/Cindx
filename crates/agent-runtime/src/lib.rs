@@ -8,19 +8,36 @@ use std::collections::{BTreeMap, BTreeSet};
 const DSML_TOOL_CALLS_OPEN: &str = "<｜DSML｜tool_calls>";
 const DSML_TOOL_CALLS_CLOSE: &str = "</｜DSML｜tool_calls>";
 
+mod context_engine;
 mod context_governor;
 mod control;
+mod kernel;
 mod parallel;
+mod tool_runtime;
 
+pub use context_engine::{
+    context_prompt_reserve, estimate_context_tokens, estimate_message_tokens, estimate_text_tokens,
+    is_user_turn_start, ContextCompactionPlan, ContextCompactionPolicy, ContextEngine,
+    ContextSourceKind, CONTEXT_SOURCE_SCHEMA,
+};
 pub use context_governor::{bounded_max_output_tokens, ContextGovernorReport};
 pub use control::{
     AgentRunControl, BestKnownResult, ResultQuality, RunBudget, RunControlSnapshot,
     RunProgressSnapshot, RunStageBudget, RunStageClass, RunStageUsageSnapshot, RunSteer,
     RunStopReason,
 };
+pub use kernel::{
+    AgentKernel, AgentKernelInstruction, AgentKernelInstructionKind, PreparedAgentTurn,
+};
 pub use parallel::{
     BoundedParallelExecutor, CancellableParallelJob, InterruptibleQuorumExecution, ParallelJob,
     ParallelJobCompletion, ParallelJobSupervisor, ParallelTaskError, QuorumExecution,
+};
+pub use tool_runtime::{
+    decode_persisted_tool_artifacts, finalize_tool_result, recovery_source_scope_matches,
+    supports_recovery_effect_replay, tool_execution_scope_matches, tool_input_fingerprint,
+    tool_invocation_context, tool_invocation_event_metadata, EFFECT_LEDGER_SCHEMA,
+    TOOL_RESULT_SCHEMA,
 };
 
 pub const DEFAULT_MAX_AGENT_TURNS: usize = 24;

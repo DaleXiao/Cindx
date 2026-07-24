@@ -132,6 +132,7 @@ const ragSource = read("crates/agent-rag/src/lib.rs");
 const graphSource = read("crates/agent-graph/src/lib.rs");
 const agentMemorySource = read("crates/agent-memory/src/lib.rs");
 const agentRuntimeSource = read("crates/agent-runtime/src/lib.rs");
+const agentToolRuntimeSource = read("crates/agent-runtime/src/tool_runtime.rs");
 const runControlSource = read("crates/agent-runtime/src/control.rs");
 const coreAgentPrompt = read("crates/agent-runtime/src/core_prompt.txt");
 const orchestratorSource = readRustCrateSource("orchestrator");
@@ -322,7 +323,7 @@ assert(
     appSource.includes("document.fonts.ready") &&
     appSource.includes("window.setTimeout(resolve, 120)") &&
     appSource.includes("await revealMainWindow()") &&
-    appSource.includes("!agentStateCacheRef.current.has(state.activeSessionId)") &&
+    appSource.includes("!sessionRuntimeCache.hasAgent(state.activeSessionId)") &&
     !appSource.includes("agentState?.sessionId !== projectSessionState.activeSessionId") &&
     !appSource.includes("revealAfterStableFrame"),
   "The native window must reveal a stable loading frame and repair native controls only after size or scale relayouts"
@@ -483,7 +484,7 @@ assert(
 assert(
   rustLib.includes("mod tool_runtime_service;") &&
     rustLib.includes("completed_tool_result(&store, &invocation, workspace_root)") &&
-    toolRuntimeServiceSource.includes('TOOL_RESULT_SCHEMA: &str = "cindx.tool-result.v1"') &&
+    agentToolRuntimeSource.includes('TOOL_RESULT_SCHEMA: &str = "cindx.tool-result.v1"') &&
     toolRuntimeServiceSource.includes("tool_input_fingerprint") &&
     toolRuntimeServiceSource.includes("idempotent_replay") &&
     toolRuntimeServiceSource.includes("retryable_failure_is_not_replayed") &&
@@ -526,10 +527,12 @@ assert(
 );
 assert(
   sessionRuntimeModelSource.includes("SESSION_STATE_CACHE_LIMIT = 24") &&
+    sessionRuntimeModelSource.includes("class SessionRuntimeCache") &&
     appSource.includes("SESSION_STATE_CACHE_LIMIT") &&
-    appSource.includes("agentStateCacheRef") &&
-    appSource.includes("agentTraceCacheRef") &&
-    appSource.includes("contextStateCacheRef") &&
+    appSource.includes("sessionRuntimeCache") &&
+    !appSource.includes("agentStateCacheRef") &&
+    !appSource.includes("agentTraceCacheRef") &&
+    !appSource.includes("contextStateCacheRef") &&
     appSource.includes("requestSessionAgentState(sessionId)") &&
     appSource.includes("applySelectedSessionAgentState") &&
     appSource.includes("prefetchedAgentState") &&
@@ -1002,7 +1005,10 @@ assert(
     appSource.includes("const sessionPrefetchKey = useMemo") &&
     appSource.includes("requestSessionAgentState(sessionId).catch(() => null)") &&
     appSource.includes("await Promise.all([worker(), worker()])") &&
-    appSource.includes("setAgentState(cachedAgentState)") &&
+    appSource.includes("const cached = sessionRuntimeCache.read(sessionId)") &&
+    appSource.includes("setAgentState(cached.agent)") &&
+    sessionRuntimeModelSource.includes("private readonly agentRequests") &&
+    sessionRuntimeModelSource.includes("const existing = this.agentRequests.get(sessionId)") &&
     !styles.includes('.session-thread[data-content-ready="false"]'),
   "Initial session hydration must restore cached rows immediately and prewarm uncached sessions with bounded concurrency"
 );

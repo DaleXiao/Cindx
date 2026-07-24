@@ -68,15 +68,15 @@ pub(crate) fn append_observations_to_suspended_run(
         return Ok(());
     };
     for resolved in observations {
-        record_tool_outcome(
-            &mut suspended.runtime,
-            &resolved.tool_name,
-            &resolved.input_json,
+        let request = agent_runtime::AgentToolRequest {
+            call_id: resolved.call_id.clone(),
+            tool_name: resolved.tool_name.clone(),
+            input: resolved.input_json.clone(),
+        };
+        AgentKernel::new(&mut suspended.runtime, &[]).apply_tool_observation(
+            &request,
             &resolved.status,
-        );
-        append_tool_observation(
-            &mut suspended.runtime,
-            resolved.call_id.clone(),
+            None,
             &resolved.observation,
         );
         append_visual_reference_message(

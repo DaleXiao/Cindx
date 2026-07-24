@@ -12,6 +12,7 @@ mod fugu_evaluation;
 mod policy;
 mod prompt_evolution;
 mod routing;
+mod task_graph;
 
 pub use anytime::*;
 pub use arena::*;
@@ -23,6 +24,7 @@ pub use fugu_evaluation::*;
 pub use policy::*;
 pub use prompt_evolution::*;
 pub use routing::*;
+pub use task_graph::*;
 
 #[cfg(test)]
 use routing::LEARNED_ROUTER_MIN_SUCCESS_CONFIDENCE;

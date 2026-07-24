@@ -67,10 +67,7 @@ pub(crate) fn apply_pending_agent_steers(
         return Ok(None);
     };
     let pending = {
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let mut store = open_app_read_store()?;
         let model = load_agent_session_read_model(&mut store, session_id)
             .map_err(|error| error.to_string())?;
         pending_ids
@@ -202,14 +199,14 @@ pub(crate) fn continue_agent_loop(
         }
         let max_output_tokens =
             bounded_max_output_tokens(config.context_window_tokens, AGENT_MAX_OUTPUT_TOKENS);
-        let (mut request, context_governor) = model_request_for_turn_with_context_budget(
-            &runtime,
-            &tools,
+        let prepared_turn = AgentKernel::new(&mut runtime, &tools).prepare_model_turn(
             Some(&config.agent_system_prompt),
             runtime_context.as_deref(),
             config.context_window_tokens,
             max_output_tokens,
         );
+        let mut request = prepared_turn.request;
+        let context_governor = prepared_turn.context;
         request.metadata.insert(
             "max_output_tokens".to_string(),
             max_output_tokens.to_string(),
@@ -546,7 +543,7 @@ pub(crate) fn continue_agent_loop(
         }
 
         let previous_message_count = runtime.messages.len();
-        let advance = advance_with_model_response(&mut runtime, response, &tools);
+        let advance = AgentKernel::new(&mut runtime, &tools).advance_model_response(response);
         if matches!(&advance, AgentAdvance::Completed { .. })
             && !required_image_generation_satisfied(&runtime, &run_context)
         {
@@ -567,18 +564,11 @@ pub(crate) fn continue_agent_loop(
             let verification_required = run_context
                 .get("verification_required")
                 .is_some_and(|value| value == "true");
-            let interaction_instruction =
-                interaction_completion_verification_instruction(&mut runtime, &tools);
-            let verification_instruction = interaction_instruction.or_else(|| {
-                completion_verification_instruction(&mut runtime, verification_required, &tools)
-            });
+            let verification_instruction =
+                AgentKernel::new(&mut runtime, &tools).completion_gate(verification_required);
             if let Some(instruction) = verification_instruction {
                 runtime.messages.truncate(previous_message_count);
-                append_internal_instruction(
-                    &mut runtime,
-                    "completion_verification_gate",
-                    &instruction,
-                );
+                AgentKernel::new(&mut runtime, &tools).apply_instruction(&instruction);
                 cancellation.mark_progress(
                     "verification",
                     "Waiting for post-change verification evidence",
@@ -874,7 +864,7 @@ pub(crate) fn continue_agent_loop(
             }
             AgentAdvance::Retry { instruction } => {
                 let previous_message_count = runtime.messages.len();
-                append_internal_instruction(&mut runtime, "empty_model_retry", &instruction);
+                AgentKernel::new(&mut runtime, &tools).apply_empty_response_retry(instruction);
                 let mut store = state
                     .store
                     .lock()
@@ -918,7 +908,7 @@ pub(crate) fn continue_agent_loop(
                             cancellation,
                         );
                     }
-                    let invocation = tool_invocation_from_request(&runtime.task_id, &call);
+                    let invocation = AgentKernel::new(&mut runtime, &tools).tool_invocation(&call);
                     let mut store = state
                         .store
                         .lock()
@@ -926,7 +916,7 @@ pub(crate) fn continue_agent_loop(
                     append_tool_proposed_event(&mut store, &invocation, Some(&run_context))
                         .map_err(|error| error.to_string())?;
 
-                    if repeated_tool_failure_count(&runtime, &call.tool_name, &call.input)
+                    if AgentKernel::new(&mut runtime, &tools).repeated_tool_failure_count(&call)
                         >= MAX_IDENTICAL_TOOL_FAILURES
                     {
                         let observation = observation_from_tool_result(
@@ -1087,15 +1077,13 @@ pub(crate) fn continue_agent_loop(
                     )?;
                     let observation = observation_from_agent_tool_result(&tool_name, &result);
                     let image_paths = tool_result_image_paths(&result);
-                    record_tool_outcome_with_risk(
-                        &mut runtime,
-                        &call.tool_name,
-                        &call.input,
+                    let previous_message_count = runtime.messages.len();
+                    AgentKernel::new(&mut runtime, &tools).apply_tool_observation(
+                        &call,
                         &result.status,
                         Some(&tool_risk),
+                        &observation,
                     );
-                    let previous_message_count = runtime.messages.len();
-                    append_tool_observation(&mut runtime, call.call_id.clone(), &observation);
                     append_visual_reference_message(&mut runtime, &tool_name, &image_paths);
                     let mut store = state
                         .store

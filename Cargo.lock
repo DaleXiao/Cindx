@@ -76,7 +76,9 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "model-provider",
+ "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
