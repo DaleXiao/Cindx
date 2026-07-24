@@ -47,6 +47,12 @@ const mermaidDiagramSource = read(
 const markmapDiagramSource = read(
   "apps/desktop/src/components/MarkmapDiagram.tsx"
 );
+const diagramFullscreenSource = read(
+  "apps/desktop/src/components/DiagramFullscreen.tsx"
+);
+const resolvedThemeSource = read(
+  "apps/desktop/src/components/useResolvedTheme.ts"
+);
 const markdownDiagramModelSource = read(
   "apps/desktop/src/components/markdownDiagramModel.ts"
 );
@@ -428,18 +434,32 @@ assert(
     mermaidDiagramSource.includes('import("mermaid")') &&
     mermaidDiagramSource.includes('securityLevel: "strict"') &&
     mermaidDiagramSource.includes("MAX_DIAGRAM_SOURCE_LENGTH") &&
+    mermaidDiagramSource.includes("useResolvedTheme") &&
+    mermaidDiagramSource.includes("themeVariables") &&
     markmapDiagramSource.includes('import("markmap-lib")') &&
     markmapDiagramSource.includes('import("markmap-view")') &&
     markmapDiagramSource.includes("MAX_MINDMAP_SOURCE_LENGTH") &&
     markmapDiagramSource.includes("transformer.md.set({ html: false })") &&
+    markmapDiagramSource.includes('theme === "dark" ? "markmap-dark"') &&
+    resolvedThemeSource.includes("MutationObserver") &&
     markdownDiagramModelSource.includes('normalizedLanguage !== "mindmap"') &&
     sessionThreadSource.includes("component: MarkdownCodeBlock") &&
+    sessionThreadSource.includes("<DiagramFullscreen") &&
+    sessionThreadSource.includes("<Maximize2") &&
     sessionThreadSource.includes('aria-label="Copy code"') &&
+    diagramFullscreenSource.includes("downloadDiagramPng") &&
+    diagramFullscreenSource.includes("replaceForeignObjectsWithSvgText") &&
+    diagramFullscreenSource.includes("createPortal") &&
+    diagramFullscreenSource.includes("<ZoomOut") &&
+    diagramFullscreenSource.includes("<ZoomIn") &&
+    diagramFullscreenSource.includes("<Download") &&
     sessionThreadSource.includes('role={!isUser && !isAssistant ? "button" : undefined}') &&
     sessionThreadSource.includes('showClipboardToast("Copied to clipboard")') &&
     sessionThreadSource.includes("navigator.clipboard.writeText(content)") &&
     styles.includes(".thread-markdown pre code") &&
     styles.includes(".thread-code-block-header") &&
+    styles.includes(".thread-diagram-fullscreen") &&
+    styles.includes(".thread-diagram-zoom-controls") &&
     styles.includes(".clipboard-toast") &&
     styles.includes(".thread-markdown table"),
   "Assistant messages must render safe Markdown, lazy Mermaid and Markmap mind maps, copyable code, and clipboard feedback"
@@ -1026,8 +1046,15 @@ assert(
 );
 assert(
   sessionThreadSource.includes("thread-message-actions") &&
-    sessionThreadSource.includes("onEditMessage"),
-  "User messages must expose copy and edit actions"
+    sessionThreadSource.includes("threadTimeFormatter") &&
+    sessionThreadSource.includes("editableStoppedUserMessageId") &&
+    sessionThreadSource.includes('status === "cancelled"') &&
+    sessionThreadSource.includes('latestEvent?.label === "Agent task cancelled"') &&
+    sessionThreadSource.includes('aria-label="Edit stopped message"') &&
+    sessionThreadSource.includes("onEditMessage") &&
+    styles.includes(".thread-message-actions time") &&
+    styles.includes(".thread-message-user:hover .thread-message-actions time"),
+  "User messages must expose hover time, copy, and stop-only edit actions"
 );
 assert(
   sessionThreadSource.includes('event.key.toLowerCase() === "f"') &&
@@ -1102,12 +1129,11 @@ assert(
   "Agent thinking state must align uncropped progress text without a spinner"
 );
 assert(
-  !sessionThreadSource.includes("threadTimeFormatter") &&
-    !sessionThreadSource.includes("formatThreadTime") &&
-    !sessionThreadSource.includes("<time") &&
-    !styles.includes(".thread-message-actions time") &&
+  sessionThreadSource.includes("threadTimeFormatter") &&
+    sessionThreadSource.includes("formatThreadTime") &&
+    sessionThreadSource.includes("<time") &&
     !styles.includes(".thread-message-agent-meta"),
-  "Session messages and activity must keep timestamps exclusively in Agent Trace"
+  "User messages must reveal a compact 24-hour timestamp without restoring agent metadata"
 );
 assert(
   composerSource.includes("pendingApproval") && composerSource.includes("composer-permission"),
