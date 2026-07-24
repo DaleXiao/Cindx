@@ -5,11 +5,88 @@ import type {
   AgentTraceState,
   AgentTraceStepView,
   ChatMessageView,
+  ContextState,
   QueuedAgentMessage
 } from "./tauri";
 
 export const SESSION_STATE_CACHE_LIMIT = 24;
 export const SESSION_AUXILIARY_CACHE_LIMIT = 8;
+
+export type CachedSessionRuntimeState = {
+  agent: AgentState | null;
+  trace: AgentTraceState | null;
+  context: ContextState | null;
+};
+
+export class SessionRuntimeCache {
+  private readonly agentStates = new Map<string, AgentState>();
+  private readonly traceStates = new Map<string, AgentTraceState>();
+  private readonly contextStates = new Map<string, ContextState>();
+  private readonly agentRequests = new Map<string, Promise<AgentState>>();
+
+  hasAgent(sessionId: string) {
+    return this.agentStates.has(sessionId);
+  }
+
+  peekAgent(sessionId: string) {
+    return this.agentStates.get(sessionId) ?? null;
+  }
+
+  read(sessionId: string): CachedSessionRuntimeState {
+    return {
+      agent: readSessionState(this.agentStates, sessionId),
+      trace: readSessionState(this.traceStates, sessionId),
+      context: readSessionState(this.contextStates, sessionId)
+    };
+  }
+
+  rememberAgent(sessionId: string, state: AgentState) {
+    rememberSessionState(this.agentStates, sessionId, state);
+  }
+
+  rememberTrace(sessionId: string, state: AgentTraceState) {
+    rememberSessionState(
+      this.traceStates,
+      sessionId,
+      state,
+      SESSION_AUXILIARY_CACHE_LIMIT
+    );
+  }
+
+  rememberContext(sessionId: string, state: ContextState) {
+    rememberSessionState(
+      this.contextStates,
+      sessionId,
+      state,
+      SESSION_AUXILIARY_CACHE_LIMIT
+    );
+  }
+
+  requestAgent(sessionId: string, load: () => Promise<AgentState>) {
+    const existing = this.agentRequests.get(sessionId);
+    if (existing) return existing;
+    const request = load().then((state) => {
+      this.rememberAgent(sessionId, state);
+      return state;
+    });
+    this.agentRequests.set(sessionId, request);
+    void request
+      .finally(() => {
+        if (this.agentRequests.get(sessionId) === request) {
+          this.agentRequests.delete(sessionId);
+        }
+      })
+      .catch(() => {});
+    return request;
+  }
+
+  forget(sessionId: string) {
+    this.agentStates.delete(sessionId);
+    this.traceStates.delete(sessionId);
+    this.contextStates.delete(sessionId);
+    this.agentRequests.delete(sessionId);
+  }
+}
 
 export function rememberSessionState<Value>(
   cache: Map<string, Value>,

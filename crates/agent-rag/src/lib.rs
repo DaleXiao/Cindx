@@ -6,6 +6,13 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod retrieval_fusion;
+
+pub use retrieval_fusion::{
+    fuse_retrieval_channels, merge_retrieval_channel, retrieval_ranges_overlap, FusedRagSource,
+    RetrievalChannelOutcome, RetrievalFusionResult,
+};
+
 #[cfg(feature = "lancedb-store")]
 use arrow_array::{
     types::Float32Type, Array, ArrayRef, FixedSizeListArray, Float32Array, RecordBatch,

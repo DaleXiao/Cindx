@@ -140,6 +140,10 @@ pub(crate) fn prepare_agent_knowledge_context(
         metadata: [
             ("internal".to_string(), "true".to_string()),
             ("kind".to_string(), "knowledge_context".to_string()),
+            (
+                "context_source_schema".to_string(),
+                agent_runtime::CONTEXT_SOURCE_SCHEMA.to_string(),
+            ),
             ("retrieval_mode".to_string(), retrieval_mode.to_string()),
             (
                 "selected_count".to_string(),
@@ -532,43 +536,6 @@ pub(crate) fn graph_walk_has_novel_enrichment_seeds(
     })
 }
 
-pub(crate) fn merge_retrieval_channel(
-    channel: &mut RetrievalChannelOutcome,
-    enrichment: RetrievalChannelOutcome,
-    limit: usize,
-) {
-    channel.duration_ms = channel.duration_ms.saturating_add(enrichment.duration_ms);
-    channel.results.extend(enrichment.results);
-    channel.results.sort_by(|left, right| {
-        right
-            .score
-            .partial_cmp(&left.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.chunk.path.cmp(&right.chunk.path))
-            .then_with(|| left.chunk.start_line.cmp(&right.chunk.start_line))
-    });
-    let mut unique = Vec::new();
-    for result in channel.results.drain(..) {
-        if unique.iter().any(|candidate: &RagSearchResult| {
-            candidate.chunk.id == result.chunk.id
-                || (candidate.chunk.path == result.chunk.path
-                    && retrieval_ranges_overlap(&candidate.chunk, &result.chunk))
-        }) {
-            continue;
-        }
-        unique.push(result);
-        if unique.len() >= limit.max(1) {
-            break;
-        }
-    }
-    channel.results = unique;
-    if !channel.results.is_empty() {
-        channel.error = None;
-    } else if channel.error.is_none() {
-        channel.error = enrichment.error;
-    }
-}
-
 pub(crate) fn timed_retrieval_channel(
     name: &str,
     run: impl FnOnce() -> Result<Vec<RagSearchResult>, String>,
@@ -647,174 +614,25 @@ pub(crate) fn query_embedding_for_chunks(
     Ok(embedding)
 }
 
-pub(crate) fn retrieval_channel_weight(name: &str) -> f32 {
-    match name {
-        "semantic_rag" => 1.0,
-        "graph_recall" => 0.9,
-        "graph_walk" => 0.8,
-        "file_search" => 0.85,
-        _ => 0.5,
-    }
-}
-
-fn retrieval_channel_family(name: &str) -> &'static str {
-    match name {
-        "semantic_rag" => "semantic",
-        "graph_recall" | "graph_walk" => "graph",
-        "file_search" => "file",
-        _ => "other",
-    }
-}
-
-fn calibrated_retrieval_scores(results: &[RagSearchResult]) -> Vec<f32> {
-    let raw_ceiling = results
-        .iter()
-        .filter_map(|result| result.score.is_finite().then_some(result.score.max(0.0)))
-        .fold(0.0f32, f32::max)
-        .max(f32::EPSILON);
-    results
-        .iter()
-        .enumerate()
-        .map(|(rank, result)| {
-            let rank_score = 1.0 / (1.0 + rank as f32 * 0.75);
-            let evidence_score = if result.score.is_finite() {
-                result.score.max(0.0) / raw_ceiling
-            } else {
-                0.0
-            };
-            rank_score * 0.65 + evidence_score * 0.35
-        })
-        .collect()
-}
-
-#[derive(Debug)]
-struct FusedRetrievalCandidate {
-    result: RagSearchResult,
-    best_contribution: f32,
-    family_scores: BTreeMap<String, f32>,
-    channels: Vec<String>,
-}
-
-impl FusedRetrievalCandidate {
-    fn score(&self) -> f32 {
-        let base = self.family_scores.values().sum::<f32>();
-        let family_count = self.family_scores.len();
-        if family_count <= 1 {
-            return base;
-        }
-        let average = base / family_count as f32;
-        let consensus_depth = family_count.saturating_sub(1).min(3) as f32;
-        base + average * 0.12 * consensus_depth
-    }
-}
-
 pub(crate) fn fuse_retrieval_channels(
     channels: &[RetrievalChannelOutcome],
     limit: usize,
 ) -> (Vec<RagSearchResult>, Vec<RagSourceView>) {
-    let mut fused = Vec::<FusedRetrievalCandidate>::new();
-    for channel in channels {
-        let weight = retrieval_channel_weight(&channel.name);
-        let family = retrieval_channel_family(&channel.name).to_string();
-        let calibrated = calibrated_retrieval_scores(&channel.results);
-        for (result, calibrated_score) in channel.results.iter().zip(calibrated) {
-            let contribution = weight * calibrated_score;
-            let existing = fused.iter().position(|candidate| {
-                candidate.result.chunk.id == result.chunk.id
-                    || (candidate.result.chunk.path == result.chunk.path
-                        && retrieval_ranges_overlap(&candidate.result.chunk, &result.chunk))
-            });
-            let entry = if let Some(index) = existing {
-                &mut fused[index]
-            } else {
-                fused.push(FusedRetrievalCandidate {
-                    result: result.clone(),
-                    best_contribution: contribution,
-                    family_scores: BTreeMap::new(),
-                    channels: Vec::new(),
-                });
-                fused.last_mut().expect("fused result was just inserted")
-            };
-            entry
-                .family_scores
-                .entry(family.clone())
-                .and_modify(|score| *score = score.max(contribution))
-                .or_insert(contribution);
-            if !entry.channels.contains(&channel.name) {
-                entry.channels.push(channel.name.clone());
-            }
-            if contribution > entry.best_contribution {
-                entry.result = result.clone();
-                entry.best_contribution = contribution;
-            }
-        }
-    }
-    fused.sort_by(|left, right| {
-        right
-            .score()
-            .partial_cmp(&left.score())
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.result.chunk.path.cmp(&right.result.chunk.path))
-            .then_with(|| {
-                left.result
-                    .chunk
-                    .start_line
-                    .cmp(&right.result.chunk.start_line)
-            })
-    });
-    let mut path_counts = BTreeMap::<String, usize>::new();
-    let mut selected = Vec::new();
-    for candidate in fused {
-        let count = path_counts
-            .entry(candidate.result.chunk.path.clone())
-            .or_default();
-        if *count >= 2 {
-            continue;
-        }
-        *count += 1;
-        selected.push(candidate);
-        if selected.len() >= limit.max(1) {
-            break;
-        }
-    }
-    let fused = selected;
-    let max_score = fused
-        .first()
-        .map(FusedRetrievalCandidate::score)
-        .unwrap_or(1.0)
-        .max(f32::EPSILON);
-    let results = fused
-        .iter()
-        .map(|candidate| RagSearchResult {
-            chunk: candidate.result.chunk.clone(),
-            score: candidate.score() / max_score,
-        })
-        .collect::<Vec<_>>();
+    let fused = fuse_rag_retrieval_channels(channels, limit);
     let sources = fused
+        .sources
         .into_iter()
-        .map(|candidate| {
-            let score = candidate.score() / max_score;
-            let family_count = candidate.family_scores.len();
-            let mut reasons = candidate.channels;
-            if family_count > 1 {
-                reasons.push(format!("consensus:{family_count}"));
-            }
-            RagSourceView {
-                path: candidate.result.chunk.path,
-                start_line: candidate.result.chunk.start_line,
-                end_line: candidate.result.chunk.end_line,
-                file_hash: candidate.result.chunk.file_hash,
-                score,
-                reason: reasons.join(" + "),
-                text: candidate.result.chunk.text,
-            }
+        .map(|source| RagSourceView {
+            path: source.path,
+            start_line: source.start_line,
+            end_line: source.end_line,
+            file_hash: source.file_hash,
+            score: source.score,
+            reason: source.reason,
+            text: source.text,
         })
-        .collect::<Vec<_>>();
-    (results, sources)
-}
-
-pub(crate) fn retrieval_ranges_overlap(left: &RagChunk, right: &RagChunk) -> bool {
-    left.start_line <= right.end_line && right.start_line <= left.end_line
+        .collect();
+    (fused.results, sources)
 }
 
 #[cfg(test)]
@@ -1064,87 +882,6 @@ pub(crate) fn provider_config_state(config: &ProviderConfig) -> ProviderConfigSt
         agent_system_prompt: config.agent_system_prompt.clone(),
         api_key_set: !config.api_key.trim().is_empty(),
     }
-}
-
-pub(crate) fn model_candidates_for_config(config: &ProviderConfig) -> Vec<ModelCandidate> {
-    [
-        (ModelRole::Executor, config.model.clone(), 1, 1),
-        (
-            ModelRole::Planner,
-            config.model_for_role(&ModelRole::Planner),
-            3,
-            2,
-        ),
-        (
-            ModelRole::Executor,
-            config.model_for_role(&ModelRole::Executor),
-            2,
-            1,
-        ),
-        (
-            ModelRole::Reviewer,
-            config.model_for_role(&ModelRole::Reviewer),
-            2,
-            2,
-        ),
-        (
-            ModelRole::Summarizer,
-            config.model_for_role(&ModelRole::Summarizer),
-            1,
-            1,
-        ),
-    ]
-    .into_iter()
-    .map(|(role, name, cost_tier, latency_tier)| ModelCandidate {
-        name,
-        role,
-        supports_tools: true,
-        supports_vision: true,
-        cost_tier,
-        latency_tier,
-    })
-    .collect()
-}
-
-pub(crate) fn route_with_local_telemetry(
-    state: &tauri::State<'_, AppState>,
-    context: &RoutingContext,
-) -> Result<(RoutingDecision, usize), String> {
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let telemetry =
-        load_routing_telemetry_read_model(&mut store).map_err(|error| error.to_string())?;
-    drop(store);
-    let router = LearnedModelRouter::train(&telemetry);
-    let learned_examples = router
-        .learned_route_for_context(context)
-        .map(|route| route.examples)
-        .unwrap_or(0);
-    let learned_evidence_ready = router
-        .learned_route_for_context(context)
-        .is_some_and(|route| route.evidence_ready());
-    let learned_model_available = router
-        .learned_route_for_context(context)
-        .map(|route| {
-            context
-                .model_candidates
-                .iter()
-                .any(|candidate| candidate.name == route.model)
-        })
-        .unwrap_or(false);
-    let decision = if learned_evidence_ready && learned_model_available {
-        router.route(context)
-    } else {
-        let mut decision = RuleBasedRouter.route(context);
-        decision
-            .metadata
-            .entry("router".to_string())
-            .or_insert_with(|| "rule_based_v2".to_string());
-        decision
-    };
-    Ok((decision, learned_examples))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1762,10 +1499,7 @@ pub(crate) fn recall_project_memory_for_prompt(
     let started_at = Instant::now();
     let now_ms = current_time_millis();
     let ledger = {
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let mut store = open_app_read_store()?;
         load_project_memory_ledger(&mut store, project_id).map_err(|error| error.to_string())?
     };
     if ledger.records.is_empty() {
@@ -1911,6 +1645,10 @@ pub(crate) fn recall_project_memory_for_prompt(
         metadata: [
             ("internal".to_string(), "true".to_string()),
             ("kind".to_string(), "project_memory".to_string()),
+            (
+                "context_source_schema".to_string(),
+                agent_runtime::CONTEXT_SOURCE_SCHEMA.to_string(),
+            ),
             ("selected_count".to_string(), recalls.len().to_string()),
             (
                 "memory_ids".to_string(),

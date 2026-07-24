@@ -1,3 +1,6 @@
+use crate::context_engine::{
+    estimate_model_message_tokens, estimate_text_tokens, ContextSourceKind, CONTEXT_SOURCE_SCHEMA,
+};
 use agent_core::{Message, MessageRole, Metadata, ToolSpec};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -15,6 +18,8 @@ pub struct ContextGovernorReport {
     pub omitted_messages: usize,
     pub truncated_messages: usize,
     pub hard_limit_satisfied: bool,
+    pub selected_context_sources: Vec<String>,
+    pub omitted_context_sources: Vec<String>,
 }
 
 impl ContextGovernorReport {
@@ -51,6 +56,20 @@ impl ContextGovernorReport {
             "context_hard_limit_satisfied".to_string(),
             self.hard_limit_satisfied.to_string(),
         );
+        metadata.insert(
+            "context_source_schema".to_string(),
+            CONTEXT_SOURCE_SCHEMA.to_string(),
+        );
+        metadata.insert(
+            "context_selected_sources_json".to_string(),
+            serde_json::to_string(&self.selected_context_sources)
+                .unwrap_or_else(|_| "[]".to_string()),
+        );
+        metadata.insert(
+            "context_omitted_sources_json".to_string(),
+            serde_json::to_string(&self.omitted_context_sources)
+                .unwrap_or_else(|_| "[]".to_string()),
+        );
     }
 }
 
@@ -73,10 +92,10 @@ pub(crate) fn govern_model_messages(
         content: system_prompt,
         metadata: Metadata::new(),
     };
-    let system_tokens = estimated_message_tokens(&system_message);
+    let system_tokens = estimate_model_message_tokens(&system_message);
     let state_message_tokens = state_messages
         .iter()
-        .map(estimated_message_tokens)
+        .map(estimate_model_message_tokens)
         .collect::<Vec<_>>();
     let tool_tokens = estimate_tool_tokens(tools);
     let estimated_original_tokens = system_tokens
@@ -86,6 +105,7 @@ pub(crate) fn govern_model_messages(
         let mut messages = Vec::with_capacity(state_messages.len() + 1);
         messages.push(system_message);
         messages.extend(state_messages.iter().cloned());
+        let selected_context_sources = context_source_labels(&messages);
         return (
             messages,
             ContextGovernorReport {
@@ -99,6 +119,8 @@ pub(crate) fn govern_model_messages(
                 omitted_messages: 0,
                 truncated_messages: 0,
                 hard_limit_satisfied: true,
+                selected_context_sources,
+                omitted_context_sources: Vec::new(),
             },
         );
     }
@@ -121,9 +143,10 @@ pub(crate) fn govern_model_messages(
     let selected_system_tokens = selected
         .iter()
         .map(|index| {
-            replacements
-                .get(index)
-                .map_or_else(|| state_message_tokens[*index], estimated_message_tokens)
+            replacements.get(index).map_or_else(
+                || state_message_tokens[*index],
+                estimate_model_message_tokens,
+            )
         })
         .sum::<u64>();
 
@@ -144,7 +167,7 @@ pub(crate) fn govern_model_messages(
         });
         if let Some((message, truncated)) = fitted {
             selected.insert(index);
-            selected_conversation_tokens = estimated_message_tokens(&message);
+            selected_conversation_tokens = estimate_model_message_tokens(&message);
             if truncated {
                 replacements.insert(index, message);
                 truncated_messages += 1;
@@ -184,9 +207,10 @@ pub(crate) fn govern_model_messages(
     let selected_tokens = selected
         .iter()
         .map(|index| {
-            replacements
-                .get(index)
-                .map_or_else(|| state_message_tokens[*index], estimated_message_tokens)
+            replacements.get(index).map_or_else(
+                || state_message_tokens[*index],
+                estimate_model_message_tokens,
+            )
         })
         .sum::<u64>();
     let digest_budget = available_tokens.saturating_sub(selected_tokens);
@@ -227,6 +251,16 @@ pub(crate) fn govern_model_messages(
 
     let estimated_projected_tokens =
         estimate_messages_tokens(&messages).saturating_add(tool_tokens);
+    let selected_context_sources = context_source_labels(&messages);
+    let omitted_context_sources = omitted_indices
+        .iter()
+        .filter_map(|index| state_messages.get(*index))
+        .filter_map(ContextSourceKind::from_message)
+        .map(ContextSourceKind::as_str)
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     let report = ContextGovernorReport {
         applied: true,
         context_window_tokens,
@@ -238,6 +272,8 @@ pub(crate) fn govern_model_messages(
         omitted_messages: omitted_indices.len(),
         truncated_messages,
         hard_limit_satisfied: estimated_projected_tokens <= input_budget_tokens,
+        selected_context_sources,
+        omitted_context_sources,
     };
     (messages, report)
 }
@@ -252,50 +288,7 @@ fn input_budget_tokens(context_window_tokens: u64, requested_output_tokens: u64)
 }
 
 fn estimate_messages_tokens(messages: &[Message]) -> u64 {
-    messages.iter().map(estimated_message_tokens).sum()
-}
-
-fn estimated_message_tokens(message: &Message) -> u64 {
-    let raw_tool_tokens = message
-        .metadata
-        .get("raw_tool_calls_json")
-        .map(|value| estimate_text_tokens(value))
-        .unwrap_or_default();
-    let image_tokens = message
-        .metadata
-        .get("image_paths")
-        .map(|paths| paths.lines().filter(|path| !path.trim().is_empty()).count() as u64 * 1_024)
-        .unwrap_or_default();
-    estimate_text_tokens(&message.content)
-        .saturating_add(raw_tool_tokens)
-        .saturating_add(image_tokens)
-        .saturating_add(8)
-}
-
-fn estimate_text_tokens(value: &str) -> u64 {
-    if value.is_ascii() {
-        return (value.len() as u64)
-            .saturating_add(2)
-            .checked_div(3)
-            .unwrap_or_default()
-            .saturating_add(u64::from(!value.is_empty()));
-    }
-
-    let mut ascii = 0u64;
-    let mut non_ascii = 0u64;
-    for character in value.chars() {
-        if character.is_ascii() {
-            ascii += 1;
-        } else {
-            non_ascii += 1;
-        }
-    }
-    ascii
-        .saturating_add(2)
-        .checked_div(3)
-        .unwrap_or_default()
-        .saturating_add(non_ascii)
-        .saturating_add(u64::from(!value.is_empty()))
+    messages.iter().map(estimate_model_message_tokens).sum()
 }
 
 fn estimate_tool_tokens(tools: &[ToolSpec]) -> u64 {
@@ -315,18 +308,22 @@ fn is_user_turn_start(message: &Message) -> bool {
         && message.metadata.get("kind").map(String::as_str) != Some("tool_observation")
 }
 
+fn context_source_labels(messages: &[Message]) -> Vec<String> {
+    messages
+        .iter()
+        .skip(1)
+        .filter_map(ContextSourceKind::from_message)
+        .map(ContextSourceKind::as_str)
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn system_context_priority(message: &Message) -> u8 {
-    match message.metadata.get("kind").map(String::as_str) {
-        Some("image_generation_policy") => 100,
-        Some("context_restore_pack") => 95,
-        Some("artifact_manifest") => 90,
-        Some("knowledge_context") => 85,
-        Some("project_memory") => 80,
-        Some("skill_context") => 75,
-        Some("single_model_policy_guidance") => 70,
-        _ if message.metadata.contains_key("collaboration_stage") => 68,
-        _ => 50,
-    }
+    ContextSourceKind::from_message(message)
+        .map(ContextSourceKind::priority)
+        .unwrap_or_default()
 }
 
 fn system_context_key(message: &Message, index: usize) -> String {
@@ -369,7 +366,7 @@ fn select_system_contexts(
         else {
             continue;
         };
-        let tokens = estimated_message_tokens(&fitted);
+        let tokens = estimate_model_message_tokens(&fitted);
         if tokens > remaining {
             continue;
         }
@@ -471,7 +468,7 @@ fn select_recent_messages(
 }
 
 fn fit_message_to_budget(message: &Message, budget: u64) -> Option<(Message, bool)> {
-    fit_message_to_budget_with_estimate(message, budget, estimated_message_tokens(message))
+    fit_message_to_budget_with_estimate(message, budget, estimate_model_message_tokens(message))
 }
 
 fn fit_message_to_budget_with_estimate(
@@ -488,7 +485,7 @@ fn fit_message_to_budget_with_estimate(
     let empty_content_tokens = {
         let mut empty = message.clone();
         empty.content.clear();
-        estimated_message_tokens(&empty)
+        estimate_model_message_tokens(&empty)
     };
     if empty_content_tokens >= budget {
         return None;
@@ -502,7 +499,7 @@ fn fit_message_to_budget_with_estimate(
     let mut fitted = message.clone();
     for _ in 0..5 {
         fitted.content = truncate_middle(&message.content, max_characters);
-        if estimated_message_tokens(&fitted) <= budget {
+        if estimate_model_message_tokens(&fitted) <= budget {
             return Some((fitted, true));
         }
         max_characters = max_characters.saturating_mul(4) / 5;
@@ -546,7 +543,7 @@ fn fit_required_user_message_to_budget(message: &Message, budget: u64) -> Option
             }
             let mut empty = projected.clone();
             empty.content.clear();
-            if estimated_message_tokens(&empty) < budget || retained == 0 {
+            if estimate_model_message_tokens(&empty) < budget || retained == 0 {
                 break;
             }
             retained -= 1;
@@ -742,6 +739,30 @@ mod tests {
         assert!(!report.applied);
         assert_eq!(projected.len(), 2);
         assert_eq!(projected[1], history[0]);
+    }
+
+    #[test]
+    fn model_request_reports_selected_context_provenance() {
+        let mut knowledge = message(MessageRole::System, "retrieved evidence");
+        knowledge
+            .metadata
+            .insert("kind".to_string(), "knowledge_context".to_string());
+        let history = vec![knowledge, message(MessageRole::User, "Inspect README")];
+
+        let (_, report) =
+            govern_model_messages(&history, "system".to_string(), &[tool()], 128_000, 4_096);
+        let mut metadata = Metadata::new();
+        report.insert_metadata(&mut metadata);
+
+        assert_eq!(
+            report.selected_context_sources,
+            vec!["knowledge_context".to_string()]
+        );
+        assert_eq!(metadata["context_source_schema"], CONTEXT_SOURCE_SCHEMA);
+        assert_eq!(
+            metadata["context_selected_sources_json"],
+            r#"["knowledge_context"]"#
+        );
     }
 
     #[test]

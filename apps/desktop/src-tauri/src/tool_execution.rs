@@ -1483,14 +1483,6 @@ pub(crate) fn orchestration_step_from_event(event: &Event) -> Option<Orchestrati
 }
 
 #[derive(Debug)]
-pub(crate) struct RetrievalChannelOutcome {
-    pub(crate) name: String,
-    pub(crate) duration_ms: u64,
-    pub(crate) results: Vec<RagSearchResult>,
-    pub(crate) error: Option<String>,
-}
-
-#[derive(Debug)]
 pub(crate) struct ParallelRetrievalResult {
     pub(crate) results: Vec<RagSearchResult>,
     pub(crate) sources: Vec<RagSourceView>,

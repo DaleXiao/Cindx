@@ -76,7 +76,9 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "model-provider",
+ "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -989,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "cindx-desktop"
-version = "0.1.29"
+version = "0.1.30"
 dependencies = [
  "agent-application",
  "agent-core",

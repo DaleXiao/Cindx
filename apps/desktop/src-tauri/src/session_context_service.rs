@@ -1,14 +1,11 @@
 use super::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct SessionCompactionPlan {
-    pub(super) estimated_history_tokens: u64,
-    pub(super) estimated_request_tokens: u64,
-    pub(super) recent_budget_tokens: u64,
-    pub(super) recent_start: usize,
-    pub(super) recent_tokens: u64,
-    pub(super) should_compact: bool,
-}
+pub(super) use agent_runtime::{estimate_context_tokens, estimate_message_tokens};
+#[cfg(test)]
+pub(super) use agent_runtime::{
+    estimate_text_tokens as estimate_text_tokens_for_context, is_user_turn_start,
+};
+pub(super) type SessionCompactionPlan = agent_runtime::ContextCompactionPlan;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ContextCheckpointCoverage<'a> {
@@ -130,6 +127,10 @@ pub(super) fn history_with_context_checkpoint(
             ("internal".to_string(), "true".to_string()),
             ("kind".to_string(), "context_restore_pack".to_string()),
             (
+                "context_source_schema".to_string(),
+                agent_runtime::CONTEXT_SOURCE_SCHEMA.to_string(),
+            ),
+            (
                 "compaction_version".to_string(),
                 CONTEXT_COMPACTION_VERSION.to_string(),
             ),
@@ -147,49 +148,6 @@ pub(super) fn history_with_context_checkpoint(
     });
     compacted.extend(tail.iter().cloned());
     Some(compacted)
-}
-
-pub(super) fn estimate_message_tokens(message: &Message) -> u64 {
-    let content_tokens = estimate_text_tokens_for_context(&message.content);
-    let tool_call_tokens = message
-        .metadata
-        .get("raw_tool_calls_json")
-        .map(|value| estimate_text_tokens_for_context(value))
-        .unwrap_or(0);
-    let image_tokens = message
-        .metadata
-        .get("image_paths")
-        .map(|paths| paths.lines().filter(|path| !path.trim().is_empty()).count() as u64 * 1_024)
-        .unwrap_or(0);
-    content_tokens
-        .saturating_add(tool_call_tokens)
-        .saturating_add(image_tokens)
-        .saturating_add(6)
-}
-
-pub(super) fn estimate_text_tokens_for_context(value: &str) -> u64 {
-    let mut ascii = 0_u64;
-    let mut non_ascii = 0_u64;
-    for character in value.chars() {
-        if character.is_ascii() {
-            ascii += 1;
-        } else {
-            non_ascii += 1;
-        }
-    }
-    ascii
-        .saturating_add(2)
-        .checked_div(3)
-        .unwrap_or_default()
-        .saturating_add(non_ascii)
-        .saturating_add(u64::from(!value.is_empty()))
-}
-
-pub(super) fn estimate_context_tokens(messages: &[Message]) -> u64 {
-    if messages.is_empty() {
-        return 0;
-    }
-    512_u64.saturating_add(messages.iter().map(estimate_message_tokens).sum::<u64>())
 }
 
 pub(super) fn effective_context_usage_from_event(event: &Event) -> Option<(u64, bool)> {
@@ -230,72 +188,16 @@ pub(super) fn effective_context_usage_from_event(event: &Event) -> Option<(u64, 
     }
 }
 
-fn context_prompt_reserve(context_window_tokens: u64) -> u64 {
-    let context_window_tokens = context_window_tokens.max(1);
-    (context_window_tokens / 8)
-        .clamp(2_048, 16_384)
-        .min(context_window_tokens / 4)
-}
-
-pub(super) fn is_user_turn_start(message: &Message) -> bool {
-    matches!(message.role, MessageRole::User)
-        && message.metadata.get("kind").map(String::as_str) != Some("tool_observation")
-}
-
+#[cfg(test)]
 pub(super) fn recent_history_start(history: &[Message], token_budget: u64) -> (usize, u64) {
-    if history.is_empty() {
-        return (0, 0);
-    }
-    let mut start = history.len();
-    let mut selected = 0usize;
-    let mut tokens = 0_u64;
-    while start > 0 && selected < CONTEXT_RECENT_MAX_MESSAGES {
-        let message_tokens = estimate_message_tokens(&history[start - 1]);
-        if selected > 0 && tokens.saturating_add(message_tokens) > token_budget {
-            break;
-        }
-        start -= 1;
-        selected += 1;
-        tokens = tokens.saturating_add(message_tokens);
-    }
-    if start > 0 && !is_user_turn_start(&history[start]) {
-        if let Some(offset) = history[start..].iter().position(is_user_turn_start) {
-            start += offset;
-        } else if let Some(previous_turn) = history[..start].iter().rposition(is_user_turn_start) {
-            start = previous_turn;
-        }
-    }
-    if start == history.len() {
-        start = history.len() - 1;
-    }
-    let tokens = history[start..].iter().map(estimate_message_tokens).sum();
-    (start, tokens)
+    agent_runtime::ContextEngine::default().recent_history_start(history, token_budget)
 }
 
 pub(super) fn session_compaction_plan(
     history: &[Message],
     context_window_tokens: u64,
 ) -> SessionCompactionPlan {
-    let context_window_tokens = context_window_tokens.max(1);
-    let estimated_history_tokens = estimate_context_tokens(history);
-    let estimated_request_tokens =
-        estimated_history_tokens.saturating_add(context_prompt_reserve(context_window_tokens));
-    let should_compact = estimated_request_tokens
-        >= context_window_tokens.saturating_mul(CONTEXT_COMPACTION_TRIGGER_PERCENT) / 100
-        || history.len() > 80;
-    let recent_floor = 8_000.min(context_window_tokens / 2).max(1);
-    let recent_budget = (context_window_tokens.saturating_mul(CONTEXT_RECENT_TARGET_PERCENT) / 100)
-        .min(CONTEXT_RECENT_MAX_TOKENS)
-        .max(recent_floor);
-    let (recent_start, recent_tokens) = recent_history_start(history, recent_budget);
-    SessionCompactionPlan {
-        estimated_history_tokens,
-        estimated_request_tokens,
-        recent_budget_tokens: recent_budget,
-        recent_start,
-        recent_tokens,
-        should_compact,
-    }
+    agent_runtime::ContextEngine::default().compaction_plan(history, context_window_tokens)
 }
 
 pub(super) fn context_checkpoint_is_within_reuse_window(
@@ -304,21 +206,12 @@ pub(super) fn context_checkpoint_is_within_reuse_window(
     plan: SessionCompactionPlan,
     context_window_tokens: u64,
 ) -> bool {
-    if checkpoint.covered_messages > history.len() {
-        return false;
-    }
-    let retained = &history[checkpoint.covered_messages..];
-    if retained.len() > CONTEXT_RECENT_REUSE_MAX_MESSAGES {
-        return false;
-    }
-    let retained_tokens = retained.iter().map(estimate_message_tokens).sum::<u64>();
-    let reuse_budget = (context_window_tokens
-        .max(1)
-        .saturating_mul(CONTEXT_RECENT_REUSE_PERCENT)
-        / 100)
-        .min(CONTEXT_RECENT_REUSE_MAX_TOKENS)
-        .max(plan.recent_budget_tokens);
-    retained_tokens <= reuse_budget
+    agent_runtime::ContextEngine::default().checkpoint_is_reusable(
+        checkpoint.covered_messages,
+        history,
+        plan,
+        context_window_tokens,
+    )
 }
 
 pub(super) fn context_events_for_covered_history_prefix(
@@ -525,7 +418,7 @@ pub(super) fn prepare_session_history_context(
     .map_err(|error| error.to_string())?;
 
     let context_tokens_used = estimate_context_tokens(&compacted)
-        .saturating_add(context_prompt_reserve(context_window_tokens))
+        .saturating_add(agent_runtime::context_prompt_reserve(context_window_tokens))
         .min(context_window_tokens.max(1));
     append_event(
         &mut store,

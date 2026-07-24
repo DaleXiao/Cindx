@@ -16,23 +16,23 @@ use agent_memory::{
 };
 use agent_rag::{
     apply_embeddings_to_index_cancellable, build_grounded_answer_prompt,
-    export_lancedb_records_jsonl, index_workspace, index_workspace_cancellable,
-    lancedb_index_exists, local_query_embedding, replace_lancedb_index, search_chunks_literal,
-    search_lancedb_index, workspace_index_is_fresh, EmbeddingBatch, FileRagAdapter, IndexOptions,
-    RagAdapter, RagChunk, RagEmbedder, RagError, RagIndex, RagIndexStats, RagSearchResult,
-    RAG_INDEX_CANCELLED,
+    export_lancedb_records_jsonl, fuse_retrieval_channels as fuse_rag_retrieval_channels,
+    index_workspace, index_workspace_cancellable, lancedb_index_exists, local_query_embedding,
+    merge_retrieval_channel, replace_lancedb_index, retrieval_ranges_overlap,
+    search_chunks_literal, search_lancedb_index, workspace_index_is_fresh, EmbeddingBatch,
+    FileRagAdapter, IndexOptions, RagAdapter, RagChunk, RagEmbedder, RagError, RagIndex,
+    RagIndexStats, RagSearchResult, RetrievalChannelOutcome, RAG_INDEX_CANCELLED,
 };
+#[cfg(test)]
+use agent_runtime::{advance_with_model_response, model_request_for_turn_with_context_budget};
 use agent_runtime::{
-    advance_with_model_response, append_internal_instruction, append_steering_instruction,
-    append_tool_observation, bounded_max_output_tokens, completion_verification_instruction,
-    compose_agent_system_prompt, evidence_worker_tools,
-    interaction_completion_verification_instruction, model_request_for_turn_with_context_budget,
-    observation_from_tool_result, record_tool_outcome, record_tool_outcome_with_risk,
-    repeated_tool_failure_count, resume_agent_loop_from_messages, sanitize_assistant_content,
-    start_agent_loop, start_agent_loop_with_history, tool_invocation_from_request, AgentAdvance,
-    AgentRunControl, AgentRuntimeConfig, ResultQuality, RunBudget, RunControlSnapshot,
-    RunStageClass, RunStopReason, DEFAULT_COLLABORATION_WORKER_TURNS,
-    MAX_COLLABORATION_WORKER_TOOL_CALLS, MAX_IDENTICAL_TOOL_FAILURES,
+    append_steering_instruction, append_tool_observation, bounded_max_output_tokens,
+    compose_agent_system_prompt, evidence_worker_tools, observation_from_tool_result,
+    resume_agent_loop_from_messages, sanitize_assistant_content, start_agent_loop,
+    start_agent_loop_with_history, AgentAdvance, AgentKernel, AgentRunControl, AgentRuntimeConfig,
+    ResultQuality, RunBudget, RunControlSnapshot, RunStageClass, RunStopReason,
+    DEFAULT_COLLABORATION_WORKER_TURNS, MAX_COLLABORATION_WORKER_TOOL_CALLS,
+    MAX_IDENTICAL_TOOL_FAILURES,
 };
 use agent_skills::{
     install_skill_archive as install_skill_archive_package, SkillCatalog, SkillPreference,

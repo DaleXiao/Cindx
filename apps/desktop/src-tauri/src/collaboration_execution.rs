@@ -627,14 +627,14 @@ pub(crate) fn complete_collaboration_worker_with_tools(
             config.context_window_tokens,
             COLLABORATION_MAX_OUTPUT_TOKENS,
         );
-        let (mut request, governor) = model_request_for_turn_with_context_budget(
-            &runtime,
-            request_tools,
+        let prepared_turn = AgentKernel::new(&mut runtime, request_tools).prepare_model_turn(
             Some(&config.agent_system_prompt),
             Some(&trusted_context),
             config.context_window_tokens,
             max_output_tokens,
         );
+        let mut request = prepared_turn.request;
+        let governor = prepared_turn.context;
         request.role = role.clone();
         request
             .metadata
@@ -765,7 +765,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
             }
         }
 
-        match advance_with_model_response(&mut runtime, response, request_tools) {
+        match AgentKernel::new(&mut runtime, request_tools).advance_model_response(response) {
             AgentAdvance::Completed { answer } => {
                 if let Some(control) = cancellation.as_ref() {
                     control.record_partial_output(&answer);
@@ -828,7 +828,8 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                 }
             }
             AgentAdvance::Retry { instruction } => {
-                append_internal_instruction(&mut runtime, "empty_model_retry", &instruction);
+                AgentKernel::new(&mut runtime, request_tools)
+                    .apply_empty_response_retry(instruction);
                 continue;
             }
             AgentAdvance::ToolCalls { calls } => {
@@ -880,7 +881,8 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                 for call in calls {
                     tool_call_count += 1;
                     let tool_call_id = call.call_id.0.clone();
-                    let mut invocation = tool_invocation_from_request(&runtime.task_id, &call);
+                    let mut invocation =
+                        AgentKernel::new(&mut runtime, request_tools).tool_invocation(&call);
                     invocation.proposed_by_model = "collaboration-worker".to_string();
                     invocation
                         .metadata
@@ -904,11 +906,9 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                     let budget_exhausted = tool_call_count > max_tool_calls;
                     let rejection = if budget_exhausted {
                         Some("This collaboration worker exhausted its evidence-tool budget. Stop searching and return the best concise brief from existing evidence.")
-                    } else if repeated_tool_failure_count(
-                        &runtime,
-                        &call.tool_name,
-                        &call.input,
-                    ) >= MAX_IDENTICAL_TOOL_FAILURES
+                    } else if AgentKernel::new(&mut runtime, request_tools)
+                        .repeated_tool_failure_count(&call)
+                        >= MAX_IDENTICAL_TOOL_FAILURES
                     {
                         Some("Cindx blocked this identical worker tool call after repeated failures. Change the arguments or use a different approach.")
                     } else if !tools.iter().any(|tool| tool.name == call.tool_name) {
@@ -916,13 +916,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                     } else {
                         None
                     };
-                    let observation = if let Some(reason) = rejection {
-                        record_tool_outcome(
-                            &mut runtime,
-                            &call.tool_name,
-                            &call.input,
-                            &ToolOutcomeStatus::Failed,
-                        );
+                    let (status, observation) = if let Some(reason) = rejection {
                         let observation =
                             observation_from_tool_result(&call.tool_name, "failed", reason);
                         evidence.push(CollaborationEvidence {
@@ -960,7 +954,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                         ) {
                             return CollaborationCompletion::failed(error.to_string());
                         }
-                        observation
+                        (ToolOutcomeStatus::Failed, observation)
                     } else {
                         let result = registry.as_ref().ok_or_else(|| {
                             "collaboration worker tool registry is unavailable".to_string()
@@ -975,6 +969,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                             )
                         }) {
                             Ok(result) => {
+                                let status = result.status.clone();
                                 evidence.push(CollaborationEvidence {
                                     source_step: evidence_source.clone(),
                                     tool_call_id: tool_call_id.clone(),
@@ -983,13 +978,10 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                                     status: tool_outcome_label(&result.status).to_string(),
                                     output: truncate_for_collaboration(&result.output, 2_000),
                                 });
-                                record_tool_outcome(
-                                    &mut runtime,
-                                    &call.tool_name,
-                                    &call.input,
-                                    &result.status,
-                                );
-                                observation_from_agent_tool_result(&call.tool_name, &result)
+                                (
+                                    status,
+                                    observation_from_agent_tool_result(&call.tool_name, &result),
+                                )
                             }
                             Err(error) => {
                                 evidence.push(CollaborationEvidence {
@@ -1000,21 +992,23 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                                     status: "failed".to_string(),
                                     output: truncate_for_collaboration(&error, 2_000),
                                 });
-                                record_tool_outcome(
-                                    &mut runtime,
-                                    &call.tool_name,
-                                    &call.input,
-                                    &ToolOutcomeStatus::Failed,
-                                );
-                                observation_from_tool_result(
-                                    &call.tool_name,
-                                    "failed",
-                                    &error,
+                                (
+                                    ToolOutcomeStatus::Failed,
+                                    observation_from_tool_result(
+                                        &call.tool_name,
+                                        "failed",
+                                        &error,
+                                    ),
                                 )
                             }
                         }
                     };
-                    append_tool_observation(&mut runtime, call.call_id, &observation);
+                    AgentKernel::new(&mut runtime, request_tools).apply_tool_observation(
+                        &call,
+                        &status,
+                        None,
+                        &observation,
+                    );
                 }
             }
         }

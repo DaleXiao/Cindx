@@ -257,14 +257,14 @@ pub(crate) fn complete_prompt_evaluation_worker(
             config.context_window_tokens,
             COLLABORATION_MAX_OUTPUT_TOKENS,
         );
-        let (mut model_request, governor) = model_request_for_turn_with_context_budget(
-            &runtime,
-            request_tools,
+        let prepared_turn = AgentKernel::new(&mut runtime, request_tools).prepare_model_turn(
             Some(&config.agent_system_prompt),
             Some(&trusted_context),
             config.context_window_tokens,
             max_output_tokens,
         );
+        let mut model_request = prepared_turn.request;
+        let governor = prepared_turn.context;
         model_request.role = request.role.clone();
         model_request.metadata.insert(
             "max_output_tokens".to_string(),
@@ -326,7 +326,7 @@ pub(crate) fn complete_prompt_evaluation_worker(
         if let Some(evidence) = model_response_checkpoint_evidence(&response) {
             control.record_checkpoint("model_result", "prompt_evaluation_worker", &evidence);
         }
-        match advance_with_model_response(&mut runtime, response, request_tools) {
+        match AgentKernel::new(&mut runtime, request_tools).advance_model_response(response) {
             AgentAdvance::Completed { answer } => {
                 usage.insert("worker_turns".to_string(), runtime.turn.to_string());
                 usage.insert("worker_tool_calls".to_string(), tool_call_count.to_string());
@@ -367,7 +367,8 @@ pub(crate) fn complete_prompt_evaluation_worker(
                 }
             }
             AgentAdvance::Retry { instruction } => {
-                append_internal_instruction(&mut runtime, "empty_model_retry", &instruction);
+                AgentKernel::new(&mut runtime, request_tools)
+                    .apply_empty_response_retry(instruction);
                 continue;
             }
             AgentAdvance::ToolCalls { calls } => {
@@ -414,7 +415,8 @@ pub(crate) fn complete_prompt_evaluation_worker(
                                 .to_string(),
                         )
                     } else {
-                        let mut invocation = tool_invocation_from_request(&runtime.task_id, &call);
+                        let mut invocation =
+                            AgentKernel::new(&mut runtime, request_tools).tool_invocation(&call);
                         invocation.proposed_by_model = "prompt-evaluation-worker".to_string();
                         invocation.metadata.insert(
                             "evaluation_sandbox".to_string(),
@@ -437,7 +439,6 @@ pub(crate) fn complete_prompt_evaluation_worker(
                             ),
                         }
                     };
-                    record_tool_outcome(&mut runtime, &call.tool_name, &call.input, &status);
                     evidence.push(CollaborationEvidence {
                         source_step: "evaluation".to_string(),
                         tool_call_id: call.call_id.0.clone(),
@@ -451,7 +452,12 @@ pub(crate) fn complete_prompt_evaluation_worker(
                         tool_outcome_label(&status),
                         &output,
                     );
-                    append_tool_observation(&mut runtime, call.call_id, &observation);
+                    AgentKernel::new(&mut runtime, request_tools).apply_tool_observation(
+                        &call,
+                        &status,
+                        None,
+                        &observation,
+                    );
                 }
             }
         }
