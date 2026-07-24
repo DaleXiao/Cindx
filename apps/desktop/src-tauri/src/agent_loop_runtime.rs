@@ -74,8 +74,8 @@ pub(crate) fn apply_pending_agent_steers(
         return Ok(None);
     };
     let pending = {
-        let mut store = open_app_read_store()?;
-        let model = load_agent_session_read_model(&mut store, session_id)
+        let store = open_app_read_store()?;
+        let model = load_agent_session_read_model_snapshot(&store, session_id)
             .map_err(|error| error.to_string())?;
         pending_ids
             .into_iter()

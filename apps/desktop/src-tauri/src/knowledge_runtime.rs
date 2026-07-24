@@ -901,6 +901,21 @@ pub(crate) fn load_project_memory_ledger(
     store: &mut SqliteStore,
     project_id: &str,
 ) -> Result<MemoryLedger, StorageError> {
+    load_project_memory_ledger_inner(store, project_id, true)
+}
+
+pub(crate) fn load_project_memory_ledger_snapshot(
+    store: &mut SqliteStore,
+    project_id: &str,
+) -> Result<MemoryLedger, StorageError> {
+    load_project_memory_ledger_inner(store, project_id, false)
+}
+
+fn load_project_memory_ledger_inner(
+    store: &mut SqliteStore,
+    project_id: &str,
+    persist: bool,
+) -> Result<MemoryLedger, StorageError> {
     let task_id = phase16_task_id();
     let revision = store.event_revision_by_metadata(&task_id, "project_id", project_id)?;
     let stored = store
@@ -983,7 +998,9 @@ pub(crate) fn load_project_memory_ledger(
     }
     ledger.revision = revision.latest_sequence;
     ledger.event_count = revision.event_count;
-    save_project_memory_ledger(store, &ledger)?;
+    if persist {
+        save_project_memory_ledger(store, &ledger)?;
+    }
     Ok(ledger)
 }
 
@@ -1500,7 +1517,8 @@ pub(crate) fn recall_project_memory_for_prompt(
     let now_ms = current_time_millis();
     let ledger = {
         let mut store = open_app_read_store()?;
-        load_project_memory_ledger(&mut store, project_id).map_err(|error| error.to_string())?
+        load_project_memory_ledger_snapshot(&mut store, project_id)
+            .map_err(|error| error.to_string())?
     };
     if ledger.records.is_empty() {
         return Ok(None);
