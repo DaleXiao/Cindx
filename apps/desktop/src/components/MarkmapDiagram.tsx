@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from "react";
+import { useResolvedTheme } from "./useResolvedTheme";
 
 type MarkmapDiagramProps = {
   source: string;
@@ -37,6 +38,7 @@ export const MarkmapDiagram = memo(function MarkmapDiagram({
 }: MarkmapDiagramProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [renderState, setRenderState] = useState<RenderState>({ status: "loading" });
+  const theme = useResolvedTheme();
 
   useEffect(() => {
     const svg = svgRef.current;
@@ -56,7 +58,7 @@ export const MarkmapDiagram = memo(function MarkmapDiagram({
         const transformer = new Transformer();
         transformer.md.set({ html: false });
         const { root } = transformer.transform(source);
-        const dark = document.documentElement.dataset.theme === "dark";
+        const dark = theme === "dark";
         const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
         markmap = new Markmap(svg, {
           autoFit: true,
@@ -96,11 +98,12 @@ export const MarkmapDiagram = memo(function MarkmapDiagram({
       markmap?.destroy();
       svg.replaceChildren();
     };
-  }, [source]);
+  }, [source, theme]);
 
   return (
     <div
-      className="thread-markmap-diagram"
+      className={`thread-markmap-diagram ${theme === "dark" ? "markmap-dark" : ""}`}
+      data-theme={theme}
       data-status={renderState.status}
       role="img"
       aria-label="Mind map"
