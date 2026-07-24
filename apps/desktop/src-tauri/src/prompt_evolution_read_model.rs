@@ -106,14 +106,6 @@ pub(crate) fn prompt_evolution_observations_from_events(
                     "Collaboration workflow completed" | "Collaboration workflow failed"
                 )
             });
-            if workflow_terminal.is_some_and(|terminal| {
-                terminal
-                    .metadata
-                    .get("anytime_prompt_learning_eligible")
-                    .is_some_and(|eligible| eligible == "false")
-            }) {
-                return None;
-            }
             let run_events = profile_event
                 .metadata
                 .get("agent_run_id")
@@ -128,28 +120,37 @@ pub(crate) fn prompt_evolution_observations_from_events(
             } else {
                 workflow_terminal
             }?;
-            if terminal.summary == "Agent task cancelled" {
-                return None;
-            }
-            if terminal.summary == "Agent task completed"
-                && terminal
-                    .metadata
-                    .get("routing_learning_eligible")
-                    .is_some_and(|eligible| eligible == "false")
-            {
-                return None;
-            }
-            let succeeded = matches!(
+            let agent_completed = matches!(
                 terminal.summary.as_str(),
                 "Agent task completed" | "Collaboration workflow completed"
             );
+            let native_effort_success = workflow_terminal
+                .and_then(|event| event.metadata.get("anytime_native_effort_success"))
+                .and_then(|value| value.parse::<bool>().ok())
+                .or_else(|| {
+                    workflow_terminal.map(|event| {
+                        event.summary == "Collaboration workflow completed"
+                            && !event
+                                .metadata
+                                .get("anytime_prompt_learning_eligible")
+                                .is_some_and(|eligible| eligible == "false")
+                    })
+                })
+                .unwrap_or(agent_completed);
+            let succeeded = agent_completed && native_effort_success;
             let quality_event = workflow_events
                 .iter()
                 .rev()
                 .find(|event| event.summary == "Collaboration quality gate evaluated");
-            let measured_quality = quality_event
-                .and_then(|event| event.metadata.get("quality_score"))
-                .and_then(|score| score.parse::<f64>().ok());
+            let measured_quality = workflow_terminal
+                .and_then(|event| event.metadata.get("anytime_selected_quality_bps"))
+                .and_then(|score| score.parse::<f64>().ok())
+                .map(|score| (score / 10_000.0).clamp(0.0, 1.0))
+                .or_else(|| {
+                    quality_event
+                        .and_then(|event| event.metadata.get("quality_score"))
+                        .and_then(|score| score.parse::<f64>().ok())
+                });
             let measured_safety_violations = quality_event
                 .and_then(|event| event.metadata.get("safety_violations"))
                 .and_then(|count| count.parse::<u64>().ok())
@@ -178,6 +179,25 @@ pub(crate) fn prompt_evolution_observations_from_events(
                 .find_map(|event| event.metadata.get("step_credits"))
                 .and_then(|encoded| serde_json::from_str::<Vec<PromptStepCredit>>(encoded).ok())
                 .unwrap_or_default();
+            let measured_uplift = workflow_terminal
+                .and_then(|event| event.metadata.get("anytime_team_uplift_bps"))
+                .and_then(|uplift| uplift.parse::<i16>().ok())
+                .map(|uplift| (f64::from(uplift) / 10_000.0).clamp(-1.0, 1.0));
+            let relative_reward = if succeeded {
+                measured_uplift
+            } else {
+                let failure_floor = match terminal.summary.as_str() {
+                    "Agent task cancelled"
+                        if terminal.metadata.get("reason").map(String::as_str)
+                            == Some("user_cancelled") =>
+                    {
+                        -0.25
+                    }
+                    "Agent task failed" | "Collaboration workflow failed" => -1.0,
+                    _ => -0.5,
+                };
+                Some(measured_uplift.unwrap_or(failure_floor).min(-0.05))
+            };
             Some((
                 profile_event.sequence,
                 effort,
@@ -203,7 +223,7 @@ pub(crate) fn prompt_evolution_observations_from_events(
                     estimated_cost_microusd: 0,
                     safety_violations: measured_safety_violations
                         .saturating_add(permission_denials),
-                    relative_reward: None,
+                    relative_reward,
                     step_credits,
                     reflection_packet: None,
                 },

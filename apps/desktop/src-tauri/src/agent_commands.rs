@@ -1248,8 +1248,8 @@ pub(crate) fn retry_agent_task_blocking_inner(
         .map_err(|error| error.to_string())?;
     }
 
-    let (mut history, artifact_manifest) = {
-        let store = state
+    let (mut history, artifact_manifest, restored_task_state) = {
+        let mut store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
@@ -1268,7 +1268,38 @@ pub(crate) fn retry_agent_task_blocking_inner(
         {
             messages.pop();
         }
-        (messages, artifact_manifest_message(&session_events))
+        let restored_task_state = recovery
+            .as_ref()
+            .and_then(|recovery| recovery.task_state.as_ref())
+            .and_then(|snapshot| match snapshot.restore(prompt.clone(), messages.clone()) {
+                Ok(runtime) => Some(runtime),
+                Err(error) => {
+                    let _ = append_event(
+                        &mut store,
+                        &task_id,
+                        EventKind::TaskStatusChanged,
+                        "Agent task checkpoint fallback",
+                        metadata_with_context(
+                            [
+                                (
+                                    "recovery_code".to_string(),
+                                    "task_state_lineage_mismatch".to_string(),
+                                ),
+                                ("recovery_detail".to_string(), error.to_string()),
+                            ]
+                            .into_iter()
+                            .collect(),
+                            &run_context,
+                        ),
+                    );
+                    None
+                }
+            });
+        (
+            messages,
+            artifact_manifest_message(&session_events),
+            restored_task_state,
+        )
     };
     history = prepare_session_history_context(
         &state,
@@ -1357,7 +1388,16 @@ pub(crate) fn retry_agent_task_blocking_inner(
     cancellation.mark_progress("executor", "Starting execution");
     append_agent_progress_event(&state, &task_id, &run_context, "Starting execution")?;
     let runtime_config = cancellation.runtime_config();
-    let runtime = if history.is_empty() {
+    let runtime = if let Some(mut runtime) = restored_task_state {
+        runtime.messages = history;
+        runtime.messages.push(Message {
+            role: MessageRole::User,
+            content: prompt.clone(),
+            metadata: Metadata::new(),
+        });
+        cancellation.extend_runtime_budget(&mut runtime);
+        runtime
+    } else if history.is_empty() {
         start_agent_loop(task_id, prompt.clone(), runtime_config.clone())
     } else {
         start_agent_loop_with_history(task_id, prompt.clone(), history, runtime_config)

@@ -1,7 +1,7 @@
 use crate::{ConductorExecutionContract, ConductorStopPolicy};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const ANYTIME_BPS_MAX: u16 = 10_000;
 
@@ -43,6 +43,8 @@ impl AnytimeCandidateState {
 pub struct AnytimeCandidate {
     pub id: String,
     pub kind: AnytimeCandidateKind,
+    #[serde(default)]
+    pub contribution_signature: Option<String>,
     #[serde(default = "default_true")]
     pub commit_eligible: bool,
     #[serde(default)]
@@ -60,6 +62,7 @@ impl AnytimeCandidate {
         Self {
             id: id.into(),
             kind: AnytimeCandidateKind::DirectAnchor,
+            contribution_signature: None,
             commit_eligible: true,
             dependencies: Vec::new(),
             expected_uplift_bps: 2_500,
@@ -79,6 +82,7 @@ impl AnytimeCandidate {
         Self {
             id: id.into(),
             kind: AnytimeCandidateKind::Workflow,
+            contribution_signature: None,
             commit_eligible: true,
             dependencies,
             expected_uplift_bps: expected_uplift_bps.min(ANYTIME_BPS_MAX),
@@ -92,6 +96,17 @@ impl AnytimeCandidate {
 
     pub fn as_intermediate(mut self) -> Self {
         self.commit_eligible = false;
+        self
+    }
+
+    pub fn with_kind(mut self, kind: AnytimeCandidateKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    pub fn with_contribution_signature(mut self, signature: impl Into<String>) -> Self {
+        let signature = signature.into();
+        self.contribution_signature = (!signature.trim().is_empty()).then_some(signature);
         self
     }
 
@@ -126,6 +141,8 @@ pub struct AnytimeVerdict {
     pub safety_violations: u64,
     pub deliverable: bool,
     pub verified: bool,
+    #[serde(default)]
+    pub anchor_uplift_bps: Option<i16>,
 }
 
 impl AnytimeVerdict {
@@ -136,8 +153,9 @@ impl AnytimeVerdict {
         self
     }
 
-    fn rank(&self) -> (bool, u16, u16, u16, usize) {
+    fn rank(&self, relative_rank_bps: i16) -> (i16, bool, u16, u16, u16, usize) {
         (
+            relative_rank_bps,
             self.verified,
             self.quality_bps,
             self.constraint_coverage_bps,
@@ -160,6 +178,14 @@ pub struct AnytimeControllerConfig {
     pub max_candidates: usize,
     pub min_usable_quality_bps: u16,
     pub stop_policy: ConductorStopPolicy,
+    #[serde(default)]
+    pub min_team_uplift_bps: u16,
+    #[serde(default)]
+    pub min_distinct_contributions: usize,
+    #[serde(default)]
+    pub requires_synthesis: bool,
+    #[serde(default)]
+    pub verification_required: bool,
 }
 
 impl AnytimeControllerConfig {
@@ -175,8 +201,24 @@ impl AnytimeControllerConfig {
             max_candidates,
             min_usable_quality_bps: 4_500,
             stop_policy: contract.stop_policy,
+            min_team_uplift_bps: contract.min_team_uplift_bps,
+            min_distinct_contributions: contract.min_distinct_contributions,
+            requires_synthesis: contract.requires_synthesis,
+            verification_required: contract.verification_required,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnytimeSelectionAssessment {
+    pub candidate_id: String,
+    pub candidate_kind: AnytimeCandidateKind,
+    pub native_effort_success: bool,
+    pub degradation_reasons: Vec<String>,
+    pub selected_quality_bps: u16,
+    pub anchor_quality_bps: Option<u16>,
+    pub paired_uplift_bps: Option<i16>,
+    pub distinct_contributions: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,6 +325,25 @@ impl AnytimeController {
         candidate.latency_risk_bps = candidate.latency_risk_bps.min(ANYTIME_BPS_MAX);
         candidate.failure_risk_bps = candidate.failure_risk_bps.min(ANYTIME_BPS_MAX);
         self.candidates.insert(candidate.id.clone(), candidate);
+        Ok(())
+    }
+
+    pub fn annotate_candidate(
+        &mut self,
+        candidate_id: &str,
+        kind: AnytimeCandidateKind,
+        contribution_signature: Option<String>,
+        commit_eligible: bool,
+    ) -> Result<(), String> {
+        let candidate = self
+            .candidates
+            .get_mut(candidate_id)
+            .ok_or_else(|| format!("unknown anytime candidate {candidate_id}"))?;
+        candidate.kind = kind;
+        candidate.contribution_signature = contribution_signature
+            .filter(|signature| !signature.trim().is_empty());
+        candidate.commit_eligible = commit_eligible;
+        self.recompute_best();
         Ok(())
     }
 
@@ -469,6 +530,7 @@ impl AnytimeController {
     }
 
     fn recompute_best(&mut self) {
+        let anchor_available = self.usable_anchor().is_some();
         self.best = self
             .verdicts
             .iter()
@@ -482,8 +544,22 @@ impl AnytimeController {
                 })
             })
             .max_by(|(left_id, left), (right_id, right)| {
-                left.rank()
-                    .cmp(&right.rank())
+                let left_kind = self
+                    .candidates
+                    .get(*left_id)
+                    .map(|candidate| candidate.kind)
+                    .unwrap_or(AnytimeCandidateKind::Workflow);
+                let right_kind = self
+                    .candidates
+                    .get(*right_id)
+                    .map(|candidate| candidate.kind)
+                    .unwrap_or(AnytimeCandidateKind::Workflow);
+                left.rank(relative_rank_bps(left_kind, left, anchor_available))
+                    .cmp(&right.rank(relative_rank_bps(
+                        right_kind,
+                        right,
+                        anchor_available,
+                    )))
                     .then_with(|| right_id.cmp(left_id))
             })
             .map(|(candidate_id, verdict)| AnytimeBestCandidate {
@@ -503,6 +579,81 @@ impl AnytimeController {
                 )
             })
             .count()
+    }
+
+    fn usable_anchor(&self) -> Option<(&AnytimeCandidate, &AnytimeVerdict)> {
+        self.candidates.values().find_map(|candidate| {
+            (candidate.kind == AnytimeCandidateKind::DirectAnchor
+                && matches!(
+                    candidate.state,
+                    AnytimeCandidateState::Usable | AnytimeCandidateState::Verified
+                ))
+            .then(|| self.verdicts.get(&candidate.id).map(|verdict| (candidate, verdict)))
+            .flatten()
+        })
+    }
+
+    fn distinct_successful_contributions(&self) -> usize {
+        self.candidates
+            .values()
+            .filter(|candidate| candidate.kind == AnytimeCandidateKind::Workflow)
+            .filter(|candidate| {
+                matches!(
+                    candidate.state,
+                    AnytimeCandidateState::Usable | AnytimeCandidateState::Verified
+                )
+            })
+            .filter_map(|candidate| candidate.contribution_signature.as_deref())
+            .filter(|signature| !signature.trim().is_empty())
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
+    pub fn selection_assessment(
+        &self,
+        candidate_id: &str,
+    ) -> Option<AnytimeSelectionAssessment> {
+        let candidate = self.candidates.get(candidate_id)?;
+        let verdict = self.verdicts.get(candidate_id)?;
+        let anchor = self.usable_anchor();
+        let distinct_contributions = self.distinct_successful_contributions();
+        let mut degradation_reasons = Vec::new();
+        if !verdict.deliverable || verdict.safety_violations > 0 {
+            degradation_reasons.push("selected candidate is not a safe deliverable".to_string());
+        }
+        if self.config.verification_required && !verdict.verified {
+            degradation_reasons.push("selected candidate is not independently verified".to_string());
+        }
+        if self.config.requires_synthesis && candidate.kind != AnytimeCandidateKind::Synthesis {
+            degradation_reasons.push("selected candidate is not an explicit synthesis".to_string());
+        }
+        if distinct_contributions < self.config.min_distinct_contributions {
+            degradation_reasons.push(format!(
+                "only {distinct_contributions} distinct successful contribution(s); {} required",
+                self.config.min_distinct_contributions
+            ));
+        }
+        if candidate.kind != AnytimeCandidateKind::DirectAnchor && anchor.is_some() {
+            match verdict.anchor_uplift_bps {
+                Some(uplift) if uplift >= self.config.min_team_uplift_bps as i16 => {}
+                Some(uplift) => degradation_reasons.push(format!(
+                    "paired team uplift {uplift} bps is below the required {} bps",
+                    self.config.min_team_uplift_bps
+                )),
+                None => degradation_reasons
+                    .push("paired comparison against the direct anchor is missing".to_string()),
+            }
+        }
+        Some(AnytimeSelectionAssessment {
+            candidate_id: candidate_id.to_string(),
+            candidate_kind: candidate.kind,
+            native_effort_success: degradation_reasons.is_empty(),
+            degradation_reasons,
+            selected_quality_bps: verdict.quality_bps,
+            anchor_quality_bps: anchor.map(|(_, verdict)| verdict.quality_bps),
+            paired_uplift_bps: verdict.anchor_uplift_bps,
+            distinct_contributions,
+        })
     }
 
     fn direct_anchor_has_independent_comparison(&self, best_id: &str) -> bool {
@@ -527,8 +678,11 @@ impl AnytimeController {
         }
 
         if let Some(best) = best {
+            let native_success = self
+                .selection_assessment(&best.candidate_id)
+                .is_some_and(|assessment| assessment.native_effort_success);
             let should_commit = match self.config.stop_policy {
-                ConductorStopPolicy::FirstVerified => best.verdict.verified,
+                ConductorStopPolicy::FirstVerified => native_success,
                 ConductorStopPolicy::Quorum => {
                     let best_is_direct_anchor = self
                         .candidates
@@ -536,7 +690,7 @@ impl AnytimeController {
                         .is_some_and(|candidate| {
                             candidate.kind == AnytimeCandidateKind::DirectAnchor
                         });
-                    best.verdict.verified
+                    native_success
                         && self.successful_non_anchor_candidates()
                             >= self.config.min_successful_candidates
                         && (!best_is_direct_anchor
@@ -582,6 +736,20 @@ impl AnytimeController {
     }
 }
 
+fn relative_rank_bps(
+    kind: AnytimeCandidateKind,
+    verdict: &AnytimeVerdict,
+    anchor_available: bool,
+) -> i16 {
+    if !anchor_available {
+        return 0;
+    }
+    if kind == AnytimeCandidateKind::DirectAnchor {
+        return 0;
+    }
+    verdict.anchor_uplift_bps.unwrap_or_default()
+}
+
 fn default_true() -> bool {
     true
 }
@@ -598,6 +766,10 @@ mod tests {
             max_candidates: 8,
             min_usable_quality_bps: 4_500,
             stop_policy,
+            min_team_uplift_bps: 0,
+            min_distinct_contributions: 0,
+            requires_synthesis: false,
+            verification_required: true,
         }
     }
 
@@ -610,6 +782,7 @@ mod tests {
             safety_violations: 0,
             deliverable: true,
             verified,
+            anchor_uplift_bps: None,
         }
     }
 
@@ -773,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_anchor_can_win_only_after_an_independent_deliverable_is_compared() {
+    fn direct_anchor_can_win_after_an_independent_deliverable_is_compared() {
         let mut quorum = config(ConductorStopPolicy::Quorum);
         quorum.min_successful_candidates = 1;
         let mut controller = AnytimeController::new(quorum);
@@ -797,6 +970,136 @@ mod tests {
                 candidate_id: "anchor".to_string()
             }
         );
+    }
+
+    #[test]
+    fn pro_requires_distinct_contributors_synthesis_and_paired_uplift() {
+        let mut config = config(ConductorStopPolicy::Quorum);
+        config.min_successful_candidates = 2;
+        config.min_distinct_contributions = 2;
+        config.min_team_uplift_bps = 250;
+        config.requires_synthesis = true;
+        let mut controller = AnytimeController::new(config);
+        controller
+            .register(AnytimeCandidate::direct_anchor("anchor"))
+            .unwrap();
+        controller
+            .register(
+                AnytimeCandidate::workflow("worker_a", Vec::new(), 8_000)
+                    .with_contribution_signature("model_a")
+                    .as_intermediate(),
+            )
+            .unwrap();
+        controller
+            .register(
+                AnytimeCandidate::workflow("worker_b", Vec::new(), 8_000)
+                    .with_contribution_signature("model_b")
+                    .as_intermediate(),
+            )
+            .unwrap();
+        controller
+            .register(
+                AnytimeCandidate::workflow(
+                    "synthesis",
+                    vec!["worker_a".to_string(), "worker_b".to_string()],
+                    9_000,
+                )
+                .with_kind(AnytimeCandidateKind::Synthesis),
+            )
+            .unwrap();
+
+        for (id, quality) in [("anchor", 7_000), ("worker_a", 7_500), ("worker_b", 7_500)] {
+            controller.mark_running(id).unwrap();
+            controller.observe(id, verdict(quality, true)).unwrap();
+        }
+        controller.mark_running("synthesis").unwrap();
+        let mut team = verdict(8_000, true);
+        team.anchor_uplift_bps = Some(600);
+        controller.observe("synthesis", team).unwrap();
+
+        let assessment = controller.selection_assessment("synthesis").unwrap();
+        assert!(assessment.native_effort_success);
+        assert_eq!(assessment.distinct_contributions, 2);
+        assert_eq!(assessment.paired_uplift_bps, Some(600));
+        assert_eq!(
+            controller.decision(60_000, 5_000),
+            AnytimeDecision::Commit {
+                candidate_id: "synthesis".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn pro_team_below_anchor_is_degraded_and_anchor_remains_best() {
+        let mut config = config(ConductorStopPolicy::Quorum);
+        config.min_distinct_contributions = 2;
+        config.min_team_uplift_bps = 250;
+        config.requires_synthesis = true;
+        let mut controller = AnytimeController::new(config);
+        controller
+            .register(AnytimeCandidate::direct_anchor("anchor"))
+            .unwrap();
+        for (id, model) in [("worker_a", "model_a"), ("worker_b", "model_b")] {
+            controller
+                .register(
+                    AnytimeCandidate::workflow(id, Vec::new(), 8_000)
+                        .with_contribution_signature(model)
+                        .as_intermediate(),
+                )
+                .unwrap();
+        }
+        controller
+            .register(
+                AnytimeCandidate::workflow(
+                    "synthesis",
+                    vec!["worker_a".to_string(), "worker_b".to_string()],
+                    9_000,
+                )
+                .with_kind(AnytimeCandidateKind::Synthesis),
+            )
+            .unwrap();
+        for id in ["anchor", "worker_a", "worker_b"] {
+            controller.mark_running(id).unwrap();
+            controller.observe(id, verdict(7_500, true)).unwrap();
+        }
+        controller.mark_running("synthesis").unwrap();
+        let mut team = verdict(9_500, true);
+        team.anchor_uplift_bps = Some(-500);
+        controller.observe("synthesis", team).unwrap();
+
+        assert_eq!(controller.best().unwrap().candidate_id, "anchor");
+        let assessment = controller.selection_assessment("synthesis").unwrap();
+        assert!(!assessment.native_effort_success);
+        assert!(assessment
+            .degradation_reasons
+            .iter()
+            .any(|reason| reason.contains("below the required")));
+    }
+
+    #[test]
+    fn terminal_reserve_can_return_a_degraded_anchor_without_calling_it_pro_success() {
+        let mut config = config(ConductorStopPolicy::Quorum);
+        config.min_distinct_contributions = 2;
+        config.requires_synthesis = true;
+        let mut controller = AnytimeController::new(config);
+        controller
+            .register(AnytimeCandidate::direct_anchor("anchor"))
+            .unwrap();
+        controller.mark_running("anchor").unwrap();
+        controller.observe("anchor", verdict(7_000, true)).unwrap();
+
+        assert_eq!(
+            controller.decision(4_999, 5_000),
+            AnytimeDecision::Commit {
+                candidate_id: "anchor".to_string()
+            }
+        );
+        let assessment = controller.selection_assessment("anchor").unwrap();
+        assert!(!assessment.native_effort_success);
+        assert!(assessment
+            .degradation_reasons
+            .iter()
+            .any(|reason| reason.contains("not an explicit synthesis")));
     }
 
     #[test]
@@ -904,6 +1207,9 @@ mod tests {
             terminal_model_call_reserve: 2,
             stop_policy: ConductorStopPolicy::Quorum,
             fallback_policy: ConductorFallbackPolicy::BestKnownResult,
+            min_team_uplift_bps: 0,
+            min_distinct_contributions: 1,
+            requires_synthesis: true,
         };
         let mut controller =
             AnytimeController::new(AnytimeControllerConfig::from_contract(&contract));

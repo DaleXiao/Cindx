@@ -62,6 +62,13 @@ impl ContextSourceKind {
             Self::Other => 50,
         }
     }
+
+    pub(crate) const fn is_protected(self) -> bool {
+        matches!(
+            self,
+            Self::ImageGenerationPolicy | Self::RestorePack | Self::ArtifactManifest
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -102,6 +102,23 @@ pub(super) fn direct_anchor_verdict(
         safety_violations: 0,
         deliverable,
         verified: deliverable && verification == PromptVerification::Minimal,
+        anchor_uplift_bps: None,
+    }
+}
+
+fn anytime_step_kind(
+    role: &str,
+    index: usize,
+    final_step_index: usize,
+) -> AnytimeCandidateKind {
+    if index == final_step_index {
+        AnytimeCandidateKind::Synthesis
+    } else if role == "verifier" {
+        AnytimeCandidateKind::Verification
+    } else if role == "repair" {
+        AnytimeCandidateKind::Repair
+    } else {
+        AnytimeCandidateKind::Workflow
     }
 }
 
@@ -120,7 +137,24 @@ pub(super) fn initialize_anytime_controller(
             .config
             .max_candidates
             .max(snapshot.candidates.len().saturating_add(1));
-        return AnytimeController::from_snapshot(snapshot);
+        snapshot.config.min_team_uplift_bps = contract.min_team_uplift_bps;
+        snapshot.config.min_distinct_contributions = contract.min_distinct_contributions;
+        snapshot.config.requires_synthesis = contract.requires_synthesis;
+        snapshot.config.verification_required = contract.verification_required;
+        let mut controller = AnytimeController::from_snapshot(snapshot)?;
+        let final_step_index = workflow.steps.len().saturating_sub(1);
+        for (index, step) in workflow.steps.iter().enumerate() {
+            if controller.candidate(&step.id).is_none() {
+                continue;
+            }
+            controller.annotate_candidate(
+                &step.id,
+                anytime_step_kind(&step.role, index, final_step_index),
+                Some(step.model.clone()),
+                index == final_step_index,
+            )?;
+        }
+        return Ok(controller);
     }
 
     let mut config = AnytimeControllerConfig::from_contract(contract);
@@ -135,7 +169,9 @@ pub(super) fn initialize_anytime_controller(
             .expected_uplift_bps
             .saturating_add(u16::try_from(index.saturating_mul(250)).unwrap_or(u16::MAX))
             .min(10_000);
-        let mut candidate = AnytimeCandidate::workflow(&step.id, step.access.clone(), uplift);
+        let mut candidate = AnytimeCandidate::workflow(&step.id, step.access.clone(), uplift)
+            .with_kind(anytime_step_kind(&step.role, index, final_step_index))
+            .with_contribution_signature(step.model.clone());
         if index != final_step_index {
             candidate = candidate.as_intermediate();
         }
@@ -150,23 +186,34 @@ pub(super) fn initialize_anytime_controller(
         match step_checkpoint.status {
             WorkflowStepStatus::Completed | WorkflowStepStatus::Degraded => {
                 controller.mark_running(&step.id)?;
+                let semantic = &step_checkpoint.semantic;
+                let lineage_complete = semantic.completion_satisfied
+                    && !semantic.output_digest.trim().is_empty()
+                    && semantic.input_digests.len() == step.access.len();
+                let verified = semantic.verification == WorkflowVerificationState::Passed;
+                let evidence_count = step_checkpoint
+                    .evidence_count
+                    .max(semantic.evidence_count);
                 controller.observe(
                     &step.id,
                     AnytimeVerdict {
-                        quality_bps: if step_checkpoint.status == WorkflowStepStatus::Completed {
-                            6_500
-                        } else {
-                            4_750
+                        quality_bps: match (step_checkpoint.status.clone(), verified) {
+                            (WorkflowStepStatus::Completed, true) => 7_250,
+                            (WorkflowStepStatus::Completed, false) => 6_250,
+                            (WorkflowStepStatus::Degraded, _) => 4_500,
+                            _ => 0,
                         },
-                        confidence_bps: 5_500,
-                        constraint_coverage_bps: 6_000,
-                        evidence_count: step_checkpoint.evidence_count,
+                        confidence_bps: if verified { 7_000 } else { 5_250 },
+                        constraint_coverage_bps: if lineage_complete { 6_500 } else { 0 },
+                        evidence_count,
                         safety_violations: 0,
-                        deliverable: step_checkpoint
-                            .output
-                            .as_ref()
-                            .is_some_and(|output| !output.trim().is_empty()),
-                        verified: false,
+                        deliverable: lineage_complete
+                            && step_checkpoint
+                                .output
+                                .as_ref()
+                                .is_some_and(|output| !output.trim().is_empty()),
+                        verified,
+                        anchor_uplift_bps: None,
                     },
                 )?;
             }
@@ -261,6 +308,7 @@ pub(crate) fn register_partial_handoff_candidate(
         controller.register(AnytimeCandidate {
             id: PARTIAL_HANDOFF_CANDIDATE_ID.to_string(),
             kind: AnytimeCandidateKind::Synthesis,
+            contribution_signature: None,
             commit_eligible: true,
             dependencies: Vec::new(),
             expected_uplift_bps: 6_000,
@@ -303,6 +351,7 @@ pub(crate) fn register_partial_handoff_candidate(
                 safety_violations: 0,
                 deliverable: true,
                 verified: false,
+                anchor_uplift_bps: None,
             },
         )?;
     }
@@ -608,6 +657,7 @@ pub(super) fn settle_direct_anchor_verifier(
         safety_violations: gate.safety_violations,
         deliverable: !anchor_output.trim().is_empty(),
         verified: passed,
+        anchor_uplift_bps: None,
     };
     if controller
         .candidate(DIRECT_ANCHOR_CANDIDATE_ID)
@@ -1367,6 +1417,122 @@ pub(crate) fn quality_gate_adaptive_output(
         passed: false,
         issues,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compare_team_guidance_with_anchor(
+    state: &tauri::State<'_, AppState>,
+    config: &ProviderConfig,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    collaboration_id: &str,
+    user_prompt: &str,
+    team_output: &str,
+    anchor_output: &str,
+) -> Result<AdaptivePairwiseComparison, String> {
+    if team_output.trim().is_empty() || anchor_output.trim().is_empty() {
+        return Err("paired comparison requires both team and anchor guidance".to_string());
+    }
+    let team_is_a = sha256_hex(collaboration_id.as_bytes())
+        .as_bytes()
+        .first()
+        .is_none_or(|byte| byte % 2 == 0);
+    let (candidate_a, candidate_b) = if team_is_a {
+        (team_output, anchor_output)
+    } else {
+        (anchor_output, team_output)
+    };
+    let reviewer_model = config.model_for_role(&ModelRole::Reviewer);
+    let raw = run_collaboration_stage(
+        state,
+        config,
+        task_id,
+        run_context,
+        collaboration_id,
+        "team_anchor_pairwise",
+        ModelRole::Reviewer,
+        &reviewer_model,
+        format!(
+            "Blindly compare two internal execution-guidance candidates for the same user request. Judge objective fidelity, constraint coverage, evidence discipline, concrete executable next actions, robustness, and safety. Do not reward verbosity. Candidate labels are randomized and reveal no source. Return only strict JSON: {{\"score_a\":0.0,\"score_b\":0.0,\"safety_violations_a\":0,\"safety_violations_b\":0}}. Scores must be finite numbers from 0 to 1.\n\nUser request:\n{}\n\nCandidate A:\n{}\n\nCandidate B:\n{}",
+            truncate_for_collaboration(user_prompt, 12_000),
+            truncate_for_collaboration(candidate_a, 14_000),
+            truncate_for_collaboration(candidate_b, 14_000),
+        ),
+    )?;
+    let payload = parse_prompt_pairwise_payload(&raw)?;
+    for (label, score) in [("A", payload.score_a), ("B", payload.score_b)] {
+        if !score.is_finite() || !(0.0..=1.0).contains(&score) {
+            return Err(format!(
+                "paired comparison score {label} must be finite and between 0 and 1"
+            ));
+        }
+    }
+    let score_a_bps = (payload.score_a * 10_000.0).round() as u16;
+    let score_b_bps = (payload.score_b * 10_000.0).round() as u16;
+    let (team_score_bps, anchor_score_bps, team_safety_violations, anchor_safety_violations) =
+        if team_is_a {
+            (
+                score_a_bps,
+                score_b_bps,
+                payload.safety_violations_a,
+                payload.safety_violations_b,
+            )
+        } else {
+            (
+                score_b_bps,
+                score_a_bps,
+                payload.safety_violations_b,
+                payload.safety_violations_a,
+            )
+        };
+    let team_uplift_bps = i32::from(team_score_bps)
+        .saturating_sub(i32::from(anchor_score_bps))
+        .clamp(-10_000, 10_000) as i16;
+    let comparison = AdaptivePairwiseComparison {
+        team_score_bps,
+        anchor_score_bps,
+        team_uplift_bps,
+        team_safety_violations,
+        anchor_safety_violations,
+    };
+    if let Ok(mut store) = state.store.lock() {
+        let _ = append_event(
+            &mut store,
+            task_id,
+            EventKind::TaskStatusChanged,
+            "Collaboration team compared with direct anchor",
+            metadata_with_context(
+                [
+                    ("collaboration_id".to_string(), collaboration_id.to_string()),
+                    ("comparison_blind".to_string(), "true".to_string()),
+                    ("comparison_team_label".to_string(), if team_is_a { "A" } else { "B" }.to_string()),
+                    ("team_score_bps".to_string(), team_score_bps.to_string()),
+                    ("anchor_score_bps".to_string(), anchor_score_bps.to_string()),
+                    ("team_uplift_bps".to_string(), team_uplift_bps.to_string()),
+                    ("team_safety_violations".to_string(), team_safety_violations.to_string()),
+                    ("anchor_safety_violations".to_string(), anchor_safety_violations.to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                run_context,
+            ),
+        );
+    }
+    Ok(comparison)
+}
+
+fn parse_prompt_pairwise_payload(
+    response: &str,
+) -> Result<PromptPairwiseEvaluationPayload, String> {
+    let start = response
+        .find('{')
+        .ok_or_else(|| "paired comparison did not return JSON".to_string())?;
+    let end = response
+        .rfind('}')
+        .filter(|end| *end >= start)
+        .ok_or_else(|| "paired comparison returned incomplete JSON".to_string())?;
+    serde_json::from_str(&response[start..=end])
+        .map_err(|error| format!("paired comparison JSON is invalid: {error}"))
 }
 
 pub(crate) fn parse_collaboration_quality(

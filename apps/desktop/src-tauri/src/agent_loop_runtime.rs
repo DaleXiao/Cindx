@@ -49,7 +49,14 @@ pub(crate) fn pause_agent_loop_for_control_stop(
             },
         )?;
     }
-    finish_agent_run_for_control_stop(app, state, run_context, cancellation)
+    let task_state = AgentTaskStateSnapshot::capture(runtime);
+    finish_agent_run_for_control_stop_with_task_state(
+        app,
+        state,
+        run_context,
+        cancellation,
+        Some(&task_state),
+    )
 }
 
 pub(crate) fn apply_pending_agent_steers(
@@ -98,7 +105,7 @@ pub(crate) fn apply_pending_agent_steers(
         .into_iter()
         .collect::<Metadata>();
         add_attachment_metadata(&mut metadata, &attachments);
-        append_steering_instruction(runtime, model_prompt.clone(), metadata);
+        AgentKernel::new(runtime, &[]).apply_steer(model_prompt.clone(), metadata);
 
         let mut store = state
             .store
@@ -863,8 +870,11 @@ pub(crate) fn continue_agent_loop(
                 );
             }
             AgentAdvance::Retry { instruction } => {
+                if visible_stream && streamed_output {
+                    emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
+                }
                 let previous_message_count = runtime.messages.len();
-                AgentKernel::new(&mut runtime, &tools).apply_empty_response_retry(instruction);
+                AgentKernel::new(&mut runtime, &tools).apply_model_response_retry(instruction);
                 let mut store = state
                     .store
                     .lock()
@@ -878,7 +888,7 @@ pub(crate) fn continue_agent_loop(
                 )
                 .map_err(|error| error.to_string())?;
                 drop(store);
-                cancellation.mark_progress("model_retry", "Empty model response");
+                cancellation.mark_progress("model_retry", "Recovering incomplete model response");
                 continue;
             }
             AgentAdvance::Failed { message } => {
@@ -941,7 +951,12 @@ pub(crate) fn continue_agent_loop(
                         )
                         .map_err(|error| error.to_string())?;
                         let previous_message_count = runtime.messages.len();
-                        append_tool_observation(&mut runtime, call.call_id.clone(), &observation);
+                        AgentKernel::new(&mut runtime, &tools).apply_tool_observation(
+                            &call,
+                            &ToolOutcomeStatus::Failed,
+                            None,
+                            &observation,
+                        );
                         persist_new_runtime_messages(
                             &mut store,
                             &runtime.task_id,
@@ -971,7 +986,12 @@ pub(crate) fn continue_agent_loop(
                         )
                         .map_err(|error| error.to_string())?;
                         let previous_message_count = runtime.messages.len();
-                        append_tool_observation(&mut runtime, call.call_id.clone(), &observation);
+                        AgentKernel::new(&mut runtime, &tools).apply_tool_observation(
+                            &call,
+                            &ToolOutcomeStatus::Failed,
+                            None,
+                            &observation,
+                        );
                         persist_new_runtime_messages(
                             &mut store,
                             &runtime.task_id,

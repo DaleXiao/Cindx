@@ -1,5 +1,6 @@
 use agent_core::{Metadata, ModelRole};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod anytime;
@@ -91,6 +92,66 @@ pub struct WorkflowBudget {
     pub max_output_tokens_per_step: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowOutputKind {
+    #[default]
+    Analysis,
+    Evidence,
+    Verification,
+    Synthesis,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowCompletionCriteria {
+    #[serde(default = "default_true")]
+    pub require_non_empty_output: bool,
+    #[serde(default = "default_true")]
+    pub require_resolved_inputs: bool,
+    #[serde(default)]
+    pub minimum_evidence_items: usize,
+}
+
+impl Default for WorkflowCompletionCriteria {
+    fn default() -> Self {
+        Self {
+            require_non_empty_output: true,
+            require_resolved_inputs: true,
+            minimum_evidence_items: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WorkflowStepContract {
+    #[serde(default)]
+    pub input_steps: Vec<String>,
+    #[serde(default)]
+    pub output_kind: WorkflowOutputKind,
+    #[serde(default)]
+    pub completion: WorkflowCompletionCriteria,
+}
+
+impl WorkflowStepContract {
+    fn inferred(role: &str, access: &[String], tool_policy: &WorkflowToolPolicy) -> Self {
+        let output_kind = match role {
+            "verifier" => WorkflowOutputKind::Verification,
+            "synthesizer" => WorkflowOutputKind::Synthesis,
+            "worker" if *tool_policy != WorkflowToolPolicy::None => WorkflowOutputKind::Evidence,
+            _ => WorkflowOutputKind::Analysis,
+        };
+        Self {
+            input_steps: access.to_vec(),
+            output_kind,
+            completion: WorkflowCompletionCriteria::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowPlanStep {
     pub id: String,
@@ -99,6 +160,8 @@ pub struct WorkflowPlanStep {
     pub subtask: String,
     pub access: Vec<String>,
     pub tool_policy: WorkflowToolPolicy,
+    #[serde(default)]
+    pub contract: WorkflowStepContract,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +230,11 @@ impl WorkflowPlanIr {
                     subtask: step.subtask.clone(),
                     access: step.access.clone(),
                     tool_policy: WorkflowToolPolicy::ReadOnlyEvidence,
+                    contract: WorkflowStepContract::inferred(
+                        &step.role,
+                        &step.access,
+                        &WorkflowToolPolicy::ReadOnlyEvidence,
+                    ),
                 })
                 .collect(),
             budget,
@@ -231,6 +299,14 @@ impl WorkflowPlanIr {
         }) {
             return Err("workflow enables evidence tools with a zero tool budget".to_string());
         }
+        for step in &self.steps {
+            if step.contract.input_steps != step.access {
+                return Err(format!(
+                    "workflow step {} contract inputs do not match its dependencies",
+                    step.id
+                ));
+            }
+        }
         validate_adaptive_workflow(&self.adaptive_workflow(), allowed_models)
     }
 
@@ -240,10 +316,25 @@ impl WorkflowPlanIr {
     }
 
     pub fn from_json(value: &str, allowed_models: &[String]) -> Result<Self, String> {
-        let workflow = serde_json::from_str::<Self>(value)
+        let mut workflow = serde_json::from_str::<Self>(value)
             .map_err(|error| format!("workflow JSON is invalid: {error}"))?;
+        workflow.reconcile_step_contracts();
         workflow.validate(allowed_models)?;
         Ok(workflow)
+    }
+
+    fn reconcile_step_contracts(&mut self) {
+        for step in &mut self.steps {
+            if step.contract == WorkflowStepContract::default() {
+                step.contract = WorkflowStepContract::inferred(
+                    &step.role,
+                    &step.access,
+                    &step.tool_policy,
+                );
+            } else if step.contract.input_steps.is_empty() && !step.access.is_empty() {
+                step.contract.input_steps = step.access.clone();
+            }
+        }
     }
 }
 
@@ -255,6 +346,33 @@ pub enum WorkflowStepStatus {
     Completed,
     Degraded,
     Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowVerificationState {
+    #[default]
+    NotRequired,
+    Passed,
+    Degraded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WorkflowStepSemanticState {
+    #[serde(default)]
+    pub input_digests: BTreeMap<String, String>,
+    #[serde(default)]
+    pub output_digest: String,
+    #[serde(default)]
+    pub output_kind: WorkflowOutputKind,
+    #[serde(default)]
+    pub evidence_count: usize,
+    #[serde(default)]
+    pub verification: WorkflowVerificationState,
+    #[serde(default)]
+    pub completion_satisfied: bool,
+    #[serde(default)]
+    pub completed_at_ms: Option<u64>,
 }
 
 impl WorkflowStepStatus {
@@ -280,6 +398,8 @@ pub struct WorkflowStepCheckpoint {
     pub total_tokens: u64,
     #[serde(default)]
     pub credit: Option<f64>,
+    #[serde(default)]
+    pub semantic: WorkflowStepSemanticState,
     pub error: Option<String>,
     pub updated_at_ms: u64,
 }
@@ -325,6 +445,10 @@ impl WorkflowExecutionCheckpoint {
                         latency_ms: 0,
                         total_tokens: 0,
                         credit: None,
+                        semantic: WorkflowStepSemanticState {
+                            output_kind: step.contract.output_kind.clone(),
+                            ..WorkflowStepSemanticState::default()
+                        },
                         error: None,
                         updated_at_ms: now_ms,
                     },
@@ -392,6 +516,15 @@ impl WorkflowExecutionCheckpoint {
             {
                 return Err(format!("resolved workflow step {} has no output", step.id));
             }
+            if checkpoint.status == WorkflowStepStatus::Completed
+                && !checkpoint.semantic.output_digest.is_empty()
+                && !checkpoint.semantic.completion_satisfied
+            {
+                return Err(format!(
+                    "completed workflow step {} does not satisfy its semantic contract",
+                    step.id
+                ));
+            }
         }
         Ok(())
     }
@@ -442,6 +575,67 @@ impl WorkflowExecutionCheckpoint {
         evidence_json: String,
         now_ms: u64,
     ) -> Result<(), String> {
+        let plan_step = self
+            .plan
+            .steps
+            .iter()
+            .find(|step| step.id == step_id)
+            .ok_or_else(|| format!("workflow plan is missing step: {step_id}"))?;
+        let output = output.trim().to_string();
+        if plan_step.contract.completion.require_non_empty_output && output.is_empty() {
+            return Err(format!(
+                "workflow step {step_id} cannot complete with an empty output"
+            ));
+        }
+        let input_digests = if plan_step.contract.completion.require_resolved_inputs {
+            let mut digests = BTreeMap::new();
+            for dependency in &plan_step.contract.input_steps {
+                let dependency_step = self.steps.get(dependency).ok_or_else(|| {
+                    format!("workflow step {step_id} references missing input {dependency}")
+                })?;
+                if !dependency_step.status.dependency_resolved() {
+                    return Err(format!(
+                        "workflow step {step_id} cannot complete before input {dependency}"
+                    ));
+                }
+                let digest = if dependency_step.semantic.output_digest.is_empty() {
+                    dependency_step
+                        .output
+                        .as_deref()
+                        .map(workflow_output_digest)
+                        .unwrap_or_default()
+                } else {
+                    dependency_step.semantic.output_digest.clone()
+                };
+                digests.insert(dependency.clone(), digest);
+            }
+            digests
+        } else {
+            BTreeMap::new()
+        };
+        let evidence_count = serde_json::from_str::<serde_json::Value>(&evidence_json)
+            .ok()
+            .and_then(|value| value.as_array().map(Vec::len))
+            .unwrap_or_default();
+        if evidence_count < plan_step.contract.completion.minimum_evidence_items {
+            return Err(format!(
+                "workflow step {step_id} produced {evidence_count} evidence items but requires {}",
+                plan_step.contract.completion.minimum_evidence_items
+            ));
+        }
+        let semantic = WorkflowStepSemanticState {
+            input_digests,
+            output_digest: workflow_output_digest(&output),
+            output_kind: plan_step.contract.output_kind.clone(),
+            evidence_count,
+            verification: if plan_step.role == "verifier" {
+                WorkflowVerificationState::Passed
+            } else {
+                WorkflowVerificationState::NotRequired
+            },
+            completion_satisfied: true,
+            completed_at_ms: Some(now_ms),
+        };
         let step = self
             .steps
             .get_mut(step_id)
@@ -450,11 +644,9 @@ impl WorkflowExecutionCheckpoint {
         step.attempts = step.attempts.max(1);
         step.model = model.to_string();
         step.output = Some(output);
-        step.evidence_count = serde_json::from_str::<serde_json::Value>(&evidence_json)
-            .ok()
-            .and_then(|value| value.as_array().map(Vec::len))
-            .unwrap_or_default();
+        step.evidence_count = evidence_count;
         step.evidence_json = evidence_json;
+        step.semantic = semantic;
         step.error = None;
         step.updated_at_ms = now_ms;
         self.updated_at_ms = now_ms;
@@ -551,7 +743,19 @@ impl WorkflowExecutionCheckpoint {
             .ok_or_else(|| format!("unknown workflow checkpoint step: {step_id}"))?;
         step.status = WorkflowStepStatus::Degraded;
         step.attempts = step.attempts.max(1);
-        step.output = Some(output);
+        let output = output.trim().to_string();
+        step.output = Some(output.clone());
+        step.semantic.output_digest = workflow_output_digest(&output);
+        step.semantic.output_kind = self
+            .plan
+            .steps
+            .iter()
+            .find(|plan_step| plan_step.id == step_id)
+            .map(|plan_step| plan_step.contract.output_kind.clone())
+            .unwrap_or_default();
+        step.semantic.verification = WorkflowVerificationState::Degraded;
+        step.semantic.completion_satisfied = false;
+        step.semantic.completed_at_ms = Some(now_ms);
         step.error = Some(error.into());
         step.updated_at_ms = now_ms;
         self.updated_at_ms = now_ms;
@@ -651,11 +855,63 @@ impl WorkflowExecutionCheckpoint {
     }
 
     pub fn from_json(value: &str, allowed_models: &[String]) -> Result<Self, String> {
-        let checkpoint = serde_json::from_str::<Self>(value)
+        let mut checkpoint = serde_json::from_str::<Self>(value)
             .map_err(|error| format!("workflow checkpoint JSON is invalid: {error}"))?;
+        checkpoint.plan.reconcile_step_contracts();
+        checkpoint.reconcile_semantic_state()?;
         checkpoint.validate(allowed_models)?;
         Ok(checkpoint)
     }
+
+    fn reconcile_semantic_state(&mut self) -> Result<(), String> {
+        for plan_step in &self.plan.steps {
+            let recovered_input_digests = plan_step
+                .contract
+                .input_steps
+                .iter()
+                .filter_map(|dependency| {
+                    self.steps.get(dependency).and_then(|input| {
+                        input
+                            .output
+                            .as_deref()
+                            .map(|output| (dependency.clone(), workflow_output_digest(output)))
+                    })
+                })
+                .collect::<BTreeMap<_, _>>();
+            let step = self
+                .steps
+                .get_mut(&plan_step.id)
+                .ok_or_else(|| format!("workflow checkpoint is missing step {}", plan_step.id))?;
+            step.semantic.output_kind = plan_step.contract.output_kind.clone();
+            if step.status.dependency_resolved() {
+                if step.semantic.output_digest.is_empty() {
+                    step.semantic.output_digest = step
+                        .output
+                        .as_deref()
+                        .map(workflow_output_digest)
+                        .unwrap_or_default();
+                }
+                if step.semantic.input_digests.is_empty() {
+                    step.semantic.input_digests = recovered_input_digests;
+                }
+                step.semantic.evidence_count = step.evidence_count;
+                step.semantic.completion_satisfied =
+                    step.status == WorkflowStepStatus::Completed;
+                step.semantic.completed_at_ms.get_or_insert(step.updated_at_ms);
+                if plan_step.role == "verifier"
+                    && step.status == WorkflowStepStatus::Completed
+                    && step.semantic.verification == WorkflowVerificationState::NotRequired
+                {
+                    step.semantic.verification = WorkflowVerificationState::Passed;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn workflow_output_digest(output: &str) -> String {
+    format!("{:x}", Sha256::digest(output.as_bytes()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2164,6 +2420,15 @@ mod tests {
     #[test]
     fn conductor_harness_enforces_the_selected_prompt_genome() {
         let mut lean_request = conductor_request();
+        let lean_routing =
+            RoutingContext::from_prompt("Compare implementation strategies", Vec::new());
+        lean_request.effort = "fast".to_string();
+        lean_request.policy = "single".to_string();
+        lean_request.execution_contract = ConductorExecutionContract::from_routing(
+            &lean_routing,
+            "fast",
+            OrchestrationPolicy::Single,
+        );
         lean_request.prompt_genome = ConductorPromptGenome::seed_for_effort("fast");
         let lean = ConductorHarness::new(lean_request);
         let lean_plan = lean.parse_plan(
@@ -2204,6 +2469,15 @@ mod tests {
     #[test]
     fn conductor_harness_applies_evolved_topology_and_role_strategies() {
         let mut serial_request = conductor_request();
+        let serial_routing =
+            RoutingContext::from_prompt("Compare implementation strategies", Vec::new());
+        serial_request.effort = "fast".to_string();
+        serial_request.policy = "single".to_string();
+        serial_request.execution_contract = ConductorExecutionContract::from_routing(
+            &serial_routing,
+            "fast",
+            OrchestrationPolicy::Single,
+        );
         serial_request.prompt_genome = ConductorPromptGenome::seed_for_effort("fast");
         serial_request.prompt_genome.graph_depth = PromptGraphDepth::Balanced;
         let serial = ConductorHarness::new(serial_request);
@@ -2228,9 +2502,9 @@ mod tests {
         let flexible = ConductorHarness::new(flexible_request);
         flexible
             .parse_plan(
-                r#"{"steps":[{"id":"a","role":"worker","model":"planner","subtask":"same","access":[]},{"id":"b","role":"worker","model":"planner","subtask":"same","access":[]},{"id":"verify","role":"verifier","model":"reviewer","subtask":"audit","access":["a","b"]},{"id":"final","role":"synthesizer","model":"planner","subtask":"report","access":["a","b","verify"]}]}"#,
+                r#"{"steps":[{"id":"a","role":"worker","model":"planner","subtask":"same","access":[]},{"id":"b","role":"worker","model":"reviewer","subtask":"same","access":[]},{"id":"verify","role":"verifier","model":"reviewer","subtask":"audit","access":["a","b"]},{"id":"final","role":"synthesizer","model":"planner","subtask":"report","access":["a","b","verify"]}]}"#,
             )
-            .expect("flexible roles should allow generalist root reuse");
+            .expect("flexible roles should allow repeated worker roles across models");
 
         let diverse = ConductorHarness::new({
             let mut request = conductor_request();

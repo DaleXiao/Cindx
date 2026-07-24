@@ -1652,6 +1652,7 @@ pub(crate) fn run_adaptive_collaboration(
                                 .as_ref()
                                 .is_some_and(|output| !output.trim().is_empty()),
                             verified: false,
+                            anchor_uplift_bps: None,
                         },
                     )?;
                 }
@@ -1669,6 +1670,7 @@ pub(crate) fn run_adaptive_collaboration(
                                 .as_ref()
                                 .is_some_and(|output| !output.trim().is_empty()),
                             verified: false,
+                            anchor_uplift_bps: None,
                         },
                     )?;
                 }
@@ -1894,7 +1896,7 @@ pub(crate) fn run_adaptive_collaboration(
         )?;
         return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
     }
-    let mut final_output = match adaptive_quality_handoff(&quality_gate) {
+    let final_output = match adaptive_quality_handoff(&quality_gate) {
         Ok(output) => output,
         Err(error) => {
             controller_mark_running_if_pending(&mut anytime_controller, &final_step.id)?;
@@ -1912,6 +1914,7 @@ pub(crate) fn run_adaptive_collaboration(
                         safety_violations: quality_gate.safety_violations,
                         deliverable: false,
                         verified: false,
+                        anchor_uplift_bps: None,
                     },
                 )?;
             }
@@ -1948,251 +1951,52 @@ pub(crate) fn run_adaptive_collaboration(
             return Err(error);
         }
     };
-    controller_mark_running_if_pending(&mut anytime_controller, &final_step.id)?;
-    if anytime_controller
-        .candidate(&final_step.id)
-        .is_some_and(|candidate| candidate.state == AnytimeCandidateState::Running)
-    {
-        anytime_controller.observe(
-            &final_step.id,
-            AnytimeVerdict {
-                quality_bps: (quality_gate.score.clamp(0.0, 1.0) * 10_000.0).round() as u16,
-                confidence_bps: if quality_gate.passed { 8_000 } else { 5_000 },
-                constraint_coverage_bps: if quality_gate.passed { 8_500 } else { 6_000 },
-                evidence_count,
-                safety_violations: quality_gate.safety_violations,
-                deliverable: !final_output.trim().is_empty(),
-                verified: quality_gate.passed,
-            },
-        )?;
-    }
-    workflow_checkpoint
-        .anytime_outputs
-        .insert(final_step.id.clone(), final_output.clone());
-    persist_anytime_controller(&mut workflow_checkpoint, &anytime_controller)?;
-    if let Some(control) = cancellation.as_ref() {
-        control.record_best_known_result(
-            "anytime_workflow_final",
-            &final_output,
-            if quality_gate.passed {
-                ResultQuality::Verified
-            } else {
-                ResultQuality::Grounded
-            },
-            evidence_count,
-            quality_gate.passed,
-            false,
-        );
-    }
-    let (remaining_ms, terminal_reserve_ms) =
-        cancellation.as_ref().map_or((u64::MAX, 0), |control| {
-            let progress = control.progress();
-            let budget = control.budget();
-            (
-                u64::try_from(progress.remaining.as_millis()).unwrap_or(u64::MAX),
-                u64::try_from(budget.terminal_time_reserve.as_millis()).unwrap_or(u64::MAX),
-            )
-        });
-    let selected_candidate = match anytime_controller.decision(remaining_ms, terminal_reserve_ms) {
-        AnytimeDecision::Commit { candidate_id } => Some(candidate_id),
-        AnytimeDecision::Continue | AnytimeDecision::Wait | AnytimeDecision::Exhausted => {
-            anytime_controller
-                .best()
-                .map(|best| best.candidate_id.clone())
-        }
-    };
-    let mut selected_candidate_id = final_step.id.clone();
-    if let Some(candidate_id) = selected_candidate.as_deref() {
-        if let Some(output) = workflow_checkpoint
-            .anytime_outputs
-            .get(candidate_id)
-            .filter(|output| !output.trim().is_empty())
+    if direct_anchor_output.is_none() {
+        if let Some(completion) = anchor_supervisor
+            .as_mut()
+            .and_then(|supervisor| supervisor.recv_timeout(Duration::from_millis(750)))
         {
-            final_output = output.clone();
-            selected_candidate_id = candidate_id.to_string();
+            let completion = parallel_completion_or_failure(completion);
+            direct_anchor_output = settle_direct_anchor_candidate(
+                state,
+                task_id,
+                run_context,
+                collaboration_id,
+                &anchor_spec,
+                &completion,
+                prompt_genome.verification,
+                cancellation.as_ref(),
+                &mut anytime_controller,
+                &mut workflow_checkpoint,
+            )?;
         }
     }
-    let selected_verdict = anytime_controller.verdict(&selected_candidate_id).cloned();
-    let selected_candidate_kind = anytime_controller
-        .candidate(&selected_candidate_id)
-        .map(|candidate| match candidate.kind {
-            AnytimeCandidateKind::DirectAnchor => "direct_anchor",
-            AnytimeCandidateKind::Workflow => "workflow",
-            AnytimeCandidateKind::Verification => "verification",
-            AnytimeCandidateKind::Repair => "repair",
-            AnytimeCandidateKind::Synthesis => "synthesis",
-        })
-        .unwrap_or("unknown")
-        .to_string();
-    let selected_verified = selected_verdict
-        .as_ref()
-        .is_some_and(|verdict| verdict.verified && verdict.safety_violations == 0);
-    let routing_learning_eligible = selected_verified;
-    let prompt_learning_eligible = selected_candidate_id == final_step.id
-        && selected_verified
-        && quality_gate.passed
-        && quality_gate.safety_violations == 0;
-    if collaboration_steer_pending(cancellation.as_ref()) {
-        pause_anytime_for_steer(
-            state,
-            task_id,
-            run_context,
-            collaboration_id,
-            &mut workflow_checkpoint,
-            &anytime_controller,
-            anchor_supervisor.as_ref(),
-            direct_anchor_verifier.as_ref(),
-        )?;
-        return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
-    }
-    let unfinished_candidate_ids = anytime_controller
-        .snapshot()
-        .candidates
-        .into_iter()
-        .filter(|candidate| candidate.id != selected_candidate_id)
-        .filter(|candidate| {
-            matches!(
-                candidate.state,
-                AnytimeCandidateState::Pending | AnytimeCandidateState::Running
-            )
-        })
-        .map(|candidate| candidate.id)
-        .collect::<Vec<_>>();
-    for candidate_id in &unfinished_candidate_ids {
-        anytime_controller.cancel(candidate_id)?;
-    }
-    cancel_anytime_background(anchor_supervisor.as_ref(), direct_anchor_verifier.as_ref());
-    persist_anytime_controller(&mut workflow_checkpoint, &anytime_controller)?;
-    let recovered_steps = workflow_checkpoint
-        .steps
-        .values()
-        .filter(|step| step.attempts > 1)
-        .count();
-    let step_credits = workflow_checkpoint.assign_step_credits(quality_gate.score);
-    workflow_checkpoint.finalize(final_output.clone(), current_time_millis())?;
-    append_workflow_checkpoint_event(
+    finalize_adaptive_collaboration(AdaptiveCollaborationFinalization {
+        app,
         state,
+        config,
         task_id,
         run_context,
         collaboration_id,
-        "Collaboration workflow checkpoint finalized",
-        "completed",
-        Some(&final_step.id),
-        &workflow_checkpoint,
-    )?;
-    {
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|error| format!("store lock poisoned: {error}"))?;
-        append_event(
-            &mut store,
-            task_id,
-            EventKind::TaskStatusChanged,
-            "Collaboration workflow completed",
-            metadata_with_context(
-                [
-                    ("collaboration_id".to_string(), collaboration_id.to_string()),
-                    (
-                        "workflow_schema".to_string(),
-                        WORKFLOW_IR_SCHEMA.to_string(),
-                    ),
-                    ("status".to_string(), "completed".to_string()),
-                    ("fallback_used".to_string(), "false".to_string()),
-                    (
-                        "workflow_steps".to_string(),
-                        workflow_plan.steps.len().to_string(),
-                    ),
-                    ("workflow_layers".to_string(), layer_count.to_string()),
-                    ("evidence_count".to_string(), evidence_count.to_string()),
-                    ("recovered_steps".to_string(), recovered_steps.to_string()),
-                    (
-                        "role_aligned_steps".to_string(),
-                        role_coverage.aligned_steps.to_string(),
-                    ),
-                    (
-                        "role_total_steps".to_string(),
-                        role_coverage.total_steps.to_string(),
-                    ),
-                    (
-                        "independent_branch_models".to_string(),
-                        role_coverage.independent_models.to_string(),
-                    ),
-                    (
-                        "cross_reviewed".to_string(),
-                        role_coverage.cross_reviewed.to_string(),
-                    ),
-                    (
-                        "step_credits".to_string(),
-                        serde_json::to_string(&step_credits).unwrap_or_else(|_| "[]".to_string()),
-                    ),
-                    ("quality_pass".to_string(), quality_gate.passed.to_string()),
-                    (
-                        "quality_score".to_string(),
-                        format!("{:.3}", quality_gate.score.clamp(0.0, 1.0)),
-                    ),
-                    (
-                        "quality_issues".to_string(),
-                        truncate_for_collaboration(&quality_gate.issues.join(" | "), 4_000),
-                    ),
-                    (
-                        "safety_violations".to_string(),
-                        quality_gate.safety_violations.to_string(),
-                    ),
-                    (
-                        "anytime_selected_candidate".to_string(),
-                        selected_candidate_id.clone(),
-                    ),
-                    ("anytime_selected_kind".to_string(), selected_candidate_kind),
-                    (
-                        "anytime_selected_verified".to_string(),
-                        selected_verified.to_string(),
-                    ),
-                    (
-                        "anytime_selected_quality_bps".to_string(),
-                        selected_verdict
-                            .as_ref()
-                            .map(|verdict| verdict.quality_bps.to_string())
-                            .unwrap_or_default(),
-                    ),
-                    (
-                        "anytime_cancelled_candidates".to_string(),
-                        unfinished_candidate_ids.len().to_string(),
-                    ),
-                    (
-                        "anytime_routing_learning_eligible".to_string(),
-                        routing_learning_eligible.to_string(),
-                    ),
-                    (
-                        "anytime_prompt_learning_eligible".to_string(),
-                        prompt_learning_eligible.to_string(),
-                    ),
-                    (
-                        "latency_ms".to_string(),
-                        current_time_millis()
-                            .saturating_sub(workflow_started_at_ms)
-                            .to_string(),
-                    ),
-                ]
-                .into_iter()
-                .collect(),
-                run_context,
-            ),
-        )
-        .map_err(|error| error.to_string())?;
-    }
-    if config.prompt_evolution_enabled && effort != "fast" {
-        schedule_prompt_pairwise_evaluation(
-            app.clone(),
-            config.clone(),
-            task_id.clone(),
-            run_context.clone(),
-            effort,
-            policy,
-            models.to_vec(),
-            agent_budget,
-            prompt_genome,
-        );
-    }
-    Ok(final_output)
+        prompt,
+        models,
+        agent_budget,
+        effort,
+        policy,
+        prompt_genome,
+        workflow_started_at_ms,
+        final_step_id: final_step.id.clone(),
+        workflow_steps: workflow_plan.steps.len(),
+        layer_count,
+        role_coverage,
+        evidence_count,
+        quality_gate,
+        final_output,
+        direct_anchor_output: direct_anchor_output.as_deref(),
+        cancellation: cancellation.as_ref(),
+        anchor_supervisor: anchor_supervisor.as_ref(),
+        direct_anchor_verifier: direct_anchor_verifier.as_ref(),
+        anytime_controller: &mut anytime_controller,
+        workflow_checkpoint: &mut workflow_checkpoint,
+    })
 }

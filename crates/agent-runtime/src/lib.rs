@@ -2,7 +2,9 @@ use agent_core::{
     Message, MessageRole, Metadata, ModelRole, TaskId, ToolCallId, ToolInvocation,
     ToolOutcomeStatus, ToolRisk, ToolSpec,
 };
-use model_provider::{tool_function_name, ModelCallMode, ModelRequest, ModelResponse};
+use model_provider::{
+    tool_function_name, ModelCallMode, ModelRequest, ModelResponse, ModelResponseDisposition,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 const DSML_TOOL_CALLS_OPEN: &str = "<｜DSML｜tool_calls>";
@@ -13,6 +15,7 @@ mod context_governor;
 mod control;
 mod kernel;
 mod parallel;
+mod task_state;
 mod tool_runtime;
 
 pub use context_engine::{
@@ -20,7 +23,9 @@ pub use context_engine::{
     is_user_turn_start, ContextCompactionPlan, ContextCompactionPolicy, ContextEngine,
     ContextSourceKind, CONTEXT_SOURCE_SCHEMA,
 };
-pub use context_governor::{bounded_max_output_tokens, ContextGovernorReport};
+pub use context_governor::{
+    bounded_max_output_tokens, ContextBudgetAllocation, ContextGovernorReport,
+};
 pub use control::{
     AgentRunControl, BestKnownResult, ResultQuality, RunBudget, RunControlSnapshot,
     RunProgressSnapshot, RunStageBudget, RunStageClass, RunStageUsageSnapshot, RunSteer,
@@ -32,6 +37,10 @@ pub use kernel::{
 pub use parallel::{
     BoundedParallelExecutor, CancellableParallelJob, InterruptibleQuorumExecution, ParallelJob,
     ParallelJobCompletion, ParallelJobSupervisor, ParallelTaskError, QuorumExecution,
+};
+pub use task_state::{
+    AgentTaskStateError, AgentTaskStateSnapshot, PersistedInteractionSurface,
+    PersistedInteractionVerification, AGENT_TASK_STATE_SCHEMA,
 };
 pub use tool_runtime::{
     decode_persisted_tool_artifacts, finalize_tool_result, recovery_source_scope_matches,
@@ -419,6 +428,7 @@ pub fn advance_with_model_response(
 ) -> AgentAdvance {
     state.turn += 1;
 
+    let assessment = response.assessment();
     let content = sanitize_assistant_content(&response.message.content);
     let tool_call_count = response.tool_calls.len();
     if !content.is_empty() || tool_call_count > 0 {
@@ -427,6 +437,16 @@ pub fn advance_with_model_response(
             metadata.entry(key).or_insert(value);
         }
         metadata.insert("tool_call_count".to_string(), tool_call_count.to_string());
+        metadata.insert(
+            "model_response_disposition".to_string(),
+            format!("{:?}", assessment.disposition).to_ascii_lowercase(),
+        );
+        if matches!(
+            assessment.disposition,
+            ModelResponseDisposition::IncompleteOutput | ModelResponseDisposition::Filtered
+        ) {
+            metadata.insert("internal".to_string(), "true".to_string());
+        }
         if let Some(raw_tool_calls_json) = response.raw_tool_calls_json.clone() {
             metadata.insert("raw_tool_calls_json".to_string(), raw_tool_calls_json);
         }
@@ -456,16 +476,31 @@ pub fn advance_with_model_response(
         };
     }
 
-    if content.is_empty() && response.tool_calls.is_empty() {
+    let retry_instruction = match assessment.disposition {
+        ModelResponseDisposition::IncompleteOutput => Some(
+            "The previous response reached its output limit before completion. Continue from the preserved partial response without repeating it. Finish the pending reasoning or make the next necessary tool call, then provide a complete answer."
+        ),
+        ModelResponseDisposition::Filtered => Some(
+            "The previous response was blocked by the provider safety filter. Reformulate the next step in a policy-compliant way while preserving the user's legitimate goal. Do not repeat the blocked wording."
+        ),
+        ModelResponseDisposition::Empty => Some(
+            "The previous model response was empty. Continue from the preserved task state: either make the next necessary tool call or provide a substantive final answer grounded in available evidence. Do not return an empty response."
+        ),
+        ModelResponseDisposition::Usable | ModelResponseDisposition::ToolCalls => None,
+    };
+    if let Some(instruction) = retry_instruction {
         state.consecutive_empty_responses = state.consecutive_empty_responses.saturating_add(1);
         if state.consecutive_empty_responses <= 2 {
             return AgentAdvance::Retry {
-                instruction: "The previous model response was empty. Continue from the preserved task state: either make the next necessary tool call or provide a substantive final answer grounded in available evidence. Do not return an empty response."
-                    .to_string(),
+                instruction: instruction.to_string(),
             };
         }
         return AgentAdvance::Failed {
-            message: "model returned three consecutive empty responses".to_string(),
+            message: format!(
+                "model returned three consecutive {:?} responses",
+                assessment.disposition
+            )
+            .to_ascii_lowercase(),
         };
     }
     state.consecutive_empty_responses = 0;
@@ -1231,6 +1266,40 @@ mod tests {
             advance_with_model_response(&mut state, empty_response(), &[]),
             AgentAdvance::Failed { .. }
         ));
+    }
+
+    #[test]
+    fn output_limited_responses_are_preserved_internally_and_retried() {
+        let mut state = start_agent_loop(
+            TaskId("truncated".to_string()),
+            "produce a complete answer",
+            AgentRuntimeConfig { max_turns: 6 },
+        );
+        let response = ModelResponse {
+            message: Message {
+                role: MessageRole::Assistant,
+                content: "partial result".to_string(),
+                metadata: Metadata::new(),
+            },
+            raw_tool_calls_json: None,
+            tool_calls: Vec::new(),
+            metadata: [("finish_reason".to_string(), "length".to_string())]
+                .into_iter()
+                .collect(),
+        };
+
+        let advance = advance_with_model_response(&mut state, response, &[]);
+
+        assert!(matches!(advance, AgentAdvance::Retry { .. }));
+        let preserved = state
+            .messages
+            .last()
+            .expect("partial output should persist");
+        assert_eq!(preserved.content, "partial result");
+        assert_eq!(
+            preserved.metadata.get("internal").map(String::as_str),
+            Some("true")
+        );
     }
 
     #[test]

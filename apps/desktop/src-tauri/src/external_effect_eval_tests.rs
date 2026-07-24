@@ -902,3 +902,5 @@ fn provider_backed_fugu_external_effect_pilot() {
     write_external_effect_checkpoint(&output_path, &config, &sources, &runs);
     eprintln!("[external-eval] raw evidence: {}", output_path.display());
 }
+
+mod pilot_v2;

@@ -134,9 +134,12 @@ pub(crate) fn prompt_offline_dataset(events: &[Event], project_id: &str) -> Vec<
     let mut cases = BTreeMap::<String, PromptOfflineCase>::new();
     for (run_id, mut run_events) in runs {
         run_events.sort_by_key(|event| event.sequence);
-        if !run_events
-            .iter()
-            .any(|event| event.summary == "Agent task completed")
+        if !run_events.iter().any(|event| {
+            matches!(
+                event.summary.as_str(),
+                "Agent task completed" | "Agent task failed" | "Agent task cancelled"
+            )
+        })
             || !run_events.iter().any(|event| {
                 event.metadata.get("project_id").map(String::as_str) == Some(project_id)
             })

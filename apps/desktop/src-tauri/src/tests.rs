@@ -354,6 +354,10 @@ fn anytime_best_known_output_tracks_verification_and_rejection() {
         max_candidates: 3,
         min_usable_quality_bps: 4_500,
         stop_policy: ConductorStopPolicy::FirstVerified,
+        min_team_uplift_bps: 0,
+        min_distinct_contributions: 0,
+        requires_synthesis: false,
+        verification_required: false,
     });
     controller
         .register(AnytimeCandidate::direct_anchor(DIRECT_ANCHOR_CANDIDATE_ID))
@@ -373,6 +377,7 @@ fn anytime_best_known_output_tracks_verification_and_rejection() {
                 safety_violations: 0,
                 deliverable: true,
                 verified: false,
+                anchor_uplift_bps: None,
             },
         )
         .unwrap();
@@ -388,6 +393,7 @@ fn anytime_best_known_output_tracks_verification_and_rejection() {
                 safety_violations: 0,
                 deliverable: true,
                 verified: true,
+                anchor_uplift_bps: None,
             },
         )
         .unwrap();
@@ -428,6 +434,10 @@ fn partial_handoff_enters_the_anytime_frontier_and_checkpoint() {
         max_candidates: 2,
         min_usable_quality_bps: 4_500,
         stop_policy: ConductorStopPolicy::Quorum,
+        min_team_uplift_bps: 0,
+        min_distinct_contributions: 0,
+        requires_synthesis: false,
+        verification_required: false,
     });
     controller
         .register(AnytimeCandidate::direct_anchor(DIRECT_ANCHOR_CANDIDATE_ID))
@@ -444,6 +454,7 @@ fn partial_handoff_enters_the_anytime_frontier_and_checkpoint() {
                 safety_violations: 0,
                 deliverable: true,
                 verified: false,
+                anchor_uplift_bps: None,
             },
         )
         .unwrap();
@@ -4370,7 +4381,11 @@ fn replay_holdout_uses_only_a_different_completed_workflow() {
 #[test]
 fn offline_prompt_dataset_is_project_scoped_deterministic_and_split_stable() {
     let run_events =
-        |sequence: u64, run_id: &str, project_id: &str, objective: &str, completed: bool| {
+        |sequence: u64,
+         run_id: &str,
+         project_id: &str,
+         objective: &str,
+         terminal_summary: Option<&str>| {
             let metadata = [
                 ("agent_run_id".to_string(), run_id.to_string()),
                 ("project_id".to_string(), project_id.to_string()),
@@ -4389,14 +4404,14 @@ fn offline_prompt_dataset_is_project_scoped_deterministic_and_split_stable() {
                 summary: "Agent task started".to_string(),
                 metadata: metadata.clone(),
             }];
-            if completed {
+            if let Some(terminal_summary) = terminal_summary {
                 events.push(Event {
                     id: EventId(format!("completed-{run_id}")),
                     task_id: phase16_task_id(),
                     sequence: sequence + 1,
                     timestamp_ms: (sequence + 1) * 10,
                     kind: EventKind::TaskStatusChanged,
-                    summary: "Agent task completed".to_string(),
+                    summary: terminal_summary.to_string(),
                     metadata,
                 });
             }
@@ -4408,42 +4423,56 @@ fn offline_prompt_dataset_is_project_scoped_deterministic_and_split_stable() {
         "a",
         "project-a",
         "Audit the agent loop",
-        true,
+        Some("Agent task completed"),
     ));
     events.extend(run_events(
         3,
         "b",
         "project-a",
         "Improve retrieval fusion",
-        true,
+        Some("Agent task completed"),
     ));
     events.extend(run_events(
         5,
         "c",
         "project-a",
         "Verify queue steering",
-        true,
+        Some("Agent task completed"),
     ));
     events.extend(run_events(
         7,
-        "other",
-        "project-b",
-        "Unrelated project",
-        true,
+        "failed",
+        "project-a",
+        "Recover a failed long-running task",
+        Some("Agent task failed"),
     ));
     events.extend(run_events(
         9,
+        "cancelled",
+        "project-a",
+        "Preserve state after cancellation",
+        Some("Agent task cancelled"),
+    ));
+    events.extend(run_events(
+        11,
+        "other",
+        "project-b",
+        "Unrelated project",
+        Some("Agent task completed"),
+    ));
+    events.extend(run_events(
+        13,
         "incomplete",
         "project-a",
         "Incomplete run",
-        false,
+        None,
     ));
 
     let first = prompt_offline_dataset(&events, "project-a");
     let second = prompt_offline_dataset(&events, "project-a");
 
     assert_eq!(first, second);
-    assert_eq!(first.len(), 3);
+    assert_eq!(first.len(), 5);
     assert!(first.iter().all(|case| case.project_id == "project-a"));
     assert!(
         first
@@ -4456,6 +4485,12 @@ fn offline_prompt_dataset_is_project_scoped_deterministic_and_split_stable() {
         .iter()
         .any(|case| case.split == PromptEvaluationSplit::Holdout));
     assert!(!first.iter().any(|case| case.objective == "Incomplete run"));
+    assert!(first
+        .iter()
+        .any(|case| case.objective == "Recover a failed long-running task"));
+    assert!(first
+        .iter()
+        .any(|case| case.objective == "Preserve state after cancellation"));
 
     let split_manifest = first
         .iter()
@@ -4464,8 +4499,8 @@ fn offline_prompt_dataset_is_project_scoped_deterministic_and_split_stable() {
     events.push(Event {
         id: EventId("offline-split-snapshot".to_string()),
         task_id: phase16_task_id(),
-        sequence: 11,
-        timestamp_ms: 110,
+        sequence: 15,
+        timestamp_ms: 150,
         kind: EventKind::TaskStatusChanged,
         summary: "Conductor offline dataset selected".to_string(),
         metadata: [
@@ -4479,18 +4514,18 @@ fn offline_prompt_dataset_is_project_scoped_deterministic_and_split_stable() {
         .collect(),
     });
     events.extend(run_events(
-        12,
+        16,
         "d",
         "project-a",
         "Check recovery checkpoints",
-        true,
+        Some("Agent task completed"),
     ));
     events.extend(run_events(
-        14,
+        18,
         "e",
         "project-a",
         "Review quality gates",
-        true,
+        Some("Agent task completed"),
     ));
 
     let grown = prompt_offline_dataset(&events, "project-a");
@@ -5812,7 +5847,7 @@ fn prompt_evolution_waits_for_the_final_agent_outcome() {
 }
 
 #[test]
-fn prompt_evolution_does_not_credit_a_profile_when_anchor_was_delivered() {
+fn prompt_evolution_penalizes_a_profile_when_anchor_was_delivered() {
     let seed = ConductorPromptGenome::seed_for_effort("pro");
     let context = [
         ("collaboration_id".to_string(), "collab-anchor".to_string()),
@@ -5854,6 +5889,7 @@ fn prompt_evolution_does_not_credit_a_profile_when_anchor_was_delivered() {
                         "anytime_prompt_learning_eligible".to_string(),
                         "false".to_string(),
                     ),
+                    ("anytime_team_uplift_bps".to_string(), "-800".to_string()),
                 ]
                 .into_iter()
                 .collect(),
@@ -5876,7 +5912,72 @@ fn prompt_evolution_does_not_credit_a_profile_when_anchor_was_delivered() {
         },
     ];
 
-    assert!(prompt_evolution_observations_from_events(&events).is_empty());
+    let observations = prompt_evolution_observations_from_events(&events);
+    assert_eq!(observations.len(), 1);
+    assert!(!observations[0].1.succeeded);
+    assert_eq!(observations[0].1.relative_reward, Some(-0.08));
+}
+
+#[test]
+fn prompt_evolution_treats_user_cancellation_as_a_mild_negative_signal() {
+    let seed = ConductorPromptGenome::seed_for_effort("pro");
+    let context = [
+        ("collaboration_id".to_string(), "collab-cancelled".to_string()),
+        ("agent_run_id".to_string(), "run-cancelled".to_string()),
+        ("prompt_profile".to_string(), seed.id.clone()),
+        ("prompt_effort".to_string(), "pro".to_string()),
+        (
+            "prompt_genome".to_string(),
+            serde_json::to_string(&seed).unwrap(),
+        ),
+        ("collaboration_profile".to_string(), "bounded".to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    let events = vec![
+        Event {
+            id: EventId("profile-cancelled".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 1,
+            timestamp_ms: 100,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Conductor prompt profile selected".to_string(),
+            metadata: context.clone(),
+        },
+        Event {
+            id: EventId("workflow-cancelled".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 2,
+            timestamp_ms: 200,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Collaboration workflow failed".to_string(),
+            metadata: metadata_with_context(
+                [("anytime_native_effort_success".to_string(), "false".to_string())]
+                    .into_iter()
+                    .collect(),
+                &context,
+            ),
+        },
+        Event {
+            id: EventId("agent-cancelled".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 3,
+            timestamp_ms: 300,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Agent task cancelled".to_string(),
+            metadata: metadata_with_context(
+                [("reason".to_string(), "user_cancelled".to_string())]
+                    .into_iter()
+                    .collect(),
+                &context,
+            ),
+        },
+    ];
+
+    let observations = prompt_evolution_observations_from_events(&events);
+    assert_eq!(observations.len(), 1);
+    assert!(!observations[0].1.succeeded);
+    assert_eq!(observations[0].1.relative_reward, Some(-0.25));
 }
 
 #[test]
@@ -7087,6 +7188,78 @@ fn recovery_envelope_is_bound_to_the_latest_external_user_turn() {
     assert!(!recovery_envelope_matches_active_turn(
         &envelope, &events, &context
     ));
+}
+
+#[test]
+fn recovery_envelope_round_trips_the_kernel_task_checkpoint() {
+    let context = [
+        ("project_id".to_string(), "project-a".to_string()),
+        ("session_id".to_string(), "session-a".to_string()),
+        ("agent_run_id".to_string(), "run-a".to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    let events = vec![
+        Event {
+            id: EventId("start".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 1,
+            timestamp_ms: 10,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Agent task started".to_string(),
+            metadata: metadata_with_context(
+                [("prompt".to_string(), "finish alpha".to_string())]
+                    .into_iter()
+                    .collect(),
+                &context,
+            ),
+        },
+        Event {
+            id: EventId("user-alpha".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 2,
+            timestamp_ms: 20,
+            kind: EventKind::MessageAdded,
+            summary: "user message".to_string(),
+            metadata: metadata_with_context(
+                [
+                    ("role".to_string(), "user".to_string()),
+                    ("content".to_string(), "finish alpha".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                &context,
+            ),
+        },
+    ];
+    let mut runtime = start_agent_loop(
+        phase16_task_id(),
+        "finish alpha",
+        AgentRuntimeConfig::default(),
+    );
+    runtime.turn = 3;
+    runtime.successful_mutations = 1;
+    let checkpoint = AgentTaskStateSnapshot::capture(&runtime);
+    let envelope = build_agent_recovery_envelope_with_task_state(
+        &events,
+        &context,
+        "paused",
+        "deadline_exceeded",
+        30,
+        Some(&checkpoint),
+    )
+    .expect("envelope should build");
+    let encoded = serde_json::to_string(&envelope).expect("envelope encodes");
+    let decoded = serde_json::from_str::<AgentRecoveryEnvelope>(&encoded)
+        .expect("envelope decodes");
+    let restored = decoded
+        .task_state
+        .expect("task checkpoint persists")
+        .restore("finish alpha", runtime.messages.clone())
+        .expect("checkpoint restores");
+
+    assert_eq!(restored.turn, 3);
+    assert_eq!(restored.successful_mutations, 1);
 }
 
 #[test]

@@ -79,7 +79,8 @@ impl WorkflowExecutionCheckpoint {
 mod tests {
     use super::*;
     use crate::{
-        WorkflowBudget, WorkflowPlanIr, WorkflowPlanStep, WorkflowToolPolicy, WORKFLOW_IR_SCHEMA,
+        WorkflowBudget, WorkflowPlanIr, WorkflowPlanStep, WorkflowStepContract,
+        WorkflowToolPolicy, WORKFLOW_IR_SCHEMA,
     };
 
     fn checkpoint() -> WorkflowExecutionCheckpoint {
@@ -101,6 +102,11 @@ mod tests {
                         subtask: "inspect".to_string(),
                         access: Vec::new(),
                         tool_policy: WorkflowToolPolicy::ReadOnlyEvidence,
+                        contract: WorkflowStepContract::inferred(
+                            "worker",
+                            &[],
+                            &WorkflowToolPolicy::ReadOnlyEvidence,
+                        ),
                     },
                     WorkflowPlanStep {
                         id: "synthesize".to_string(),
@@ -109,6 +115,11 @@ mod tests {
                         subtask: "synthesize".to_string(),
                         access: vec!["inspect".to_string()],
                         tool_policy: WorkflowToolPolicy::None,
+                        contract: WorkflowStepContract::inferred(
+                            "synthesizer",
+                            &["inspect".to_string()],
+                            &WorkflowToolPolicy::None,
+                        ),
                     },
                 ],
                 budget: WorkflowBudget {
@@ -156,5 +167,87 @@ mod tests {
             checkpoint.step_disposition("inspect", 2).unwrap(),
             WorkflowStepDisposition::Exhausted
         );
+    }
+
+    #[test]
+    fn completion_contract_records_stable_semantic_lineage() {
+        let mut checkpoint = checkpoint();
+        let blocked = checkpoint
+            .complete_step(
+                "synthesize",
+                "planner",
+                "premature".to_string(),
+                "[]".to_string(),
+                2,
+            )
+            .expect_err("dependent step must not complete before its input");
+        assert!(blocked.contains("before input inspect"));
+
+        checkpoint
+            .complete_step(
+                "inspect",
+                "worker",
+                "evidence result".to_string(),
+                r#"[{"source":"workspace"}]"#.to_string(),
+                3,
+            )
+            .unwrap();
+        let inspect = &checkpoint.steps["inspect"];
+        assert!(inspect.semantic.completion_satisfied);
+        assert_eq!(inspect.semantic.evidence_count, 1);
+        assert_eq!(inspect.semantic.output_digest.len(), 64);
+        let inspect_digest = inspect.semantic.output_digest.clone();
+
+        checkpoint
+            .complete_step(
+                "synthesize",
+                "planner",
+                "final result".to_string(),
+                "[]".to_string(),
+                4,
+            )
+            .unwrap();
+        let synthesize = &checkpoint.steps["synthesize"];
+        assert_eq!(
+            synthesize.semantic.input_digests.get("inspect"),
+            Some(&inspect_digest)
+        );
+        assert_eq!(
+            synthesize.semantic.output_kind,
+            crate::WorkflowOutputKind::Synthesis
+        );
+    }
+
+    #[test]
+    fn legacy_v1_checkpoint_recovers_contracts_and_semantic_state() {
+        let mut checkpoint = checkpoint();
+        checkpoint
+            .complete_step(
+                "inspect",
+                "worker",
+                "legacy output".to_string(),
+                "[]".to_string(),
+                2,
+            )
+            .unwrap();
+        let mut value = serde_json::to_value(&checkpoint).unwrap();
+        for step in value["plan"]["steps"].as_array_mut().unwrap() {
+            step.as_object_mut().unwrap().remove("contract");
+        }
+        for step in value["steps"].as_object_mut().unwrap().values_mut() {
+            step.as_object_mut().unwrap().remove("semantic");
+        }
+        let restored = WorkflowExecutionCheckpoint::from_json(
+            &serde_json::to_string(&value).unwrap(),
+            &["worker".to_string(), "planner".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            restored.plan.steps[1].contract.input_steps,
+            vec!["inspect".to_string()]
+        );
+        assert!(restored.steps["inspect"].semantic.completion_satisfied);
+        assert_eq!(restored.steps["inspect"].semantic.output_digest.len(), 64);
     }
 }

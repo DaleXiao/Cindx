@@ -57,6 +57,72 @@ pub struct ModelResponse {
     pub metadata: Metadata,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelResponseTermination {
+    Complete,
+    ToolCalls,
+    OutputLimit,
+    ContentFiltered,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelResponseDisposition {
+    Usable,
+    ToolCalls,
+    Empty,
+    IncompleteOutput,
+    Filtered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelResponseAssessment {
+    pub termination: ModelResponseTermination,
+    pub disposition: ModelResponseDisposition,
+}
+
+impl ModelResponse {
+    pub fn assessment(&self) -> ModelResponseAssessment {
+        let finish_reason = self
+            .metadata
+            .get("finish_reason")
+            .map(|value| value.trim().to_ascii_lowercase());
+        let termination = if !self.tool_calls.is_empty()
+            || matches!(finish_reason.as_deref(), Some("tool_calls" | "function_call"))
+        {
+            ModelResponseTermination::ToolCalls
+        } else {
+            match finish_reason.as_deref() {
+                Some("stop" | "end_turn" | "completed") => ModelResponseTermination::Complete,
+                Some("length" | "max_tokens" | "max_output_tokens") => {
+                    ModelResponseTermination::OutputLimit
+                }
+                Some("content_filter" | "safety" | "blocked") => {
+                    ModelResponseTermination::ContentFiltered
+                }
+                _ => ModelResponseTermination::Unknown,
+            }
+        };
+        let disposition = match termination {
+            ModelResponseTermination::ToolCalls => ModelResponseDisposition::ToolCalls,
+            ModelResponseTermination::OutputLimit => ModelResponseDisposition::IncompleteOutput,
+            ModelResponseTermination::ContentFiltered => ModelResponseDisposition::Filtered,
+            ModelResponseTermination::Complete | ModelResponseTermination::Unknown => {
+                if self.message.content.trim().is_empty() {
+                    ModelResponseDisposition::Empty
+                } else {
+                    ModelResponseDisposition::Usable
+                }
+            }
+        };
+
+        ModelResponseAssessment {
+            termination,
+            disposition,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelToolCall {
     pub id: String,
@@ -520,9 +586,13 @@ fn apply_stream_line(
     line: &str,
     answer: &mut String,
     streamed_tool_calls: &mut BTreeMap<usize, StreamingToolCall>,
+    finish_reason: &mut Option<String>,
     on_delta: &mut impl FnMut(&str),
 ) -> Result<(), ModelError> {
     if let Some(event) = parse_stream_event(line)? {
+        if event.finish_reason.is_some() {
+            *finish_reason = event.finish_reason;
+        }
         if let Some(delta) = event.content {
             answer.push_str(&delta);
             on_delta(&delta);
@@ -541,6 +611,7 @@ fn apply_complete_stream_lines(
     pending: &mut Vec<u8>,
     answer: &mut String,
     streamed_tool_calls: &mut BTreeMap<usize, StreamingToolCall>,
+    finish_reason: &mut Option<String>,
     on_delta: &mut impl FnMut(&str),
 ) -> Result<(), ModelError> {
     let mut consumed = 0;
@@ -549,7 +620,13 @@ fn apply_complete_stream_lines(
             continue;
         }
         let line = String::from_utf8_lossy(&pending[consumed..=index]);
-        apply_stream_line(&line, answer, streamed_tool_calls, on_delta)?;
+        apply_stream_line(
+            &line,
+            answer,
+            streamed_tool_calls,
+            finish_reason,
+            on_delta,
+        )?;
         consumed = index + 1;
     }
     if consumed > 0 {
@@ -562,6 +639,7 @@ fn finish_streaming_response(
     raw_response: String,
     mut answer: String,
     streamed_tool_calls: BTreeMap<usize, StreamingToolCall>,
+    mut finish_reason: Option<String>,
     model: &str,
     base_url: &str,
 ) -> Result<ModelResponse, ModelError> {
@@ -585,6 +663,9 @@ fn finish_streaming_response(
         answer = fallback.message.content;
         tool_calls = fallback.tool_calls;
         raw_tool_calls_json = fallback.raw_tool_calls_json;
+        if finish_reason.is_none() {
+            finish_reason = fallback.metadata.get("finish_reason").cloned();
+        }
         for key in [
             "prompt_tokens",
             "completion_tokens",
@@ -600,6 +681,9 @@ fn finish_streaming_response(
         metadata.insert("tool_protocol".to_string(), "dsml".to_string());
     }
     metadata.insert("tool_calls".to_string(), tool_calls.len().to_string());
+    if let Some(finish_reason) = finish_reason.filter(|value| !value.trim().is_empty()) {
+        metadata.insert("finish_reason".to_string(), finish_reason);
+    }
     if raw_tool_calls_json.is_none() && !tool_calls.is_empty() {
         raw_tool_calls_json = Some(serialize_tool_calls(&tool_calls));
     }
@@ -642,6 +726,7 @@ where
     let mut pending = Vec::new();
     let mut answer = String::new();
     let mut streamed_tool_calls = BTreeMap::<usize, StreamingToolCall>::new();
+    let mut finish_reason = None;
     let mut last_activity = Instant::now();
     let mut dsml_filter = DsmlStreamDeltaFilter::default();
     let mut filtered_on_delta = |delta: &str| dsml_filter.push(delta, on_delta);
@@ -669,6 +754,7 @@ where
                     &mut pending,
                     &mut answer,
                     &mut streamed_tool_calls,
+                    &mut finish_reason,
                     &mut filtered_on_delta,
                 )?;
             }
@@ -695,6 +781,7 @@ where
             &line,
             &mut answer,
             &mut streamed_tool_calls,
+            &mut finish_reason,
             &mut filtered_on_delta,
         )?;
     }
@@ -703,6 +790,7 @@ where
         String::from_utf8_lossy(&raw_response).into_owned(),
         answer,
         streamed_tool_calls,
+        finish_reason,
         model,
         base_url,
     )
@@ -1618,6 +1706,7 @@ struct StreamingToolCallDelta {
 struct StreamEvent {
     content: Option<String>,
     tool_calls: Vec<StreamingToolCallDelta>,
+    finish_reason: Option<String>,
 }
 
 fn parse_stream_event(line: &str) -> Result<Option<StreamEvent>, ModelError> {
@@ -1638,7 +1727,13 @@ fn parse_stream_event(line: &str) -> Result<Option<StreamEvent>, ModelError> {
     let value = serde_json::from_str::<serde_json::Value>(payload)
         .map_err(|error| ModelError::new(format!("invalid model stream event: {error}")))?;
     let Some(delta) = value.pointer("/choices/0/delta") else {
-        return Ok(Some(StreamEvent::default()));
+        return Ok(Some(StreamEvent {
+            finish_reason: value
+                .pointer("/choices/0/finish_reason")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            ..StreamEvent::default()
+        }));
     };
     let content = delta
         .get("content")
@@ -1672,6 +1767,10 @@ fn parse_stream_event(line: &str) -> Result<Option<StreamEvent>, ModelError> {
     Ok(Some(StreamEvent {
         content,
         tool_calls,
+        finish_reason: value
+            .pointer("/choices/0/finish_reason")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
     }))
 }
 
@@ -1702,6 +1801,15 @@ pub fn parse_model_response(text: &str) -> Result<ModelResponse, ModelError> {
         metadata.insert("tool_protocol".to_string(), "dsml".to_string());
     }
     metadata.insert("tool_calls".to_string(), tool_calls.len().to_string());
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+        if let Some(finish_reason) = value
+            .pointer("/choices/0/finish_reason")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            metadata.insert("finish_reason".to_string(), finish_reason.to_string());
+        }
+    }
     if raw_tool_calls_json.is_none() && !tool_calls.is_empty() {
         raw_tool_calls_json = Some(serialize_tool_calls(&tool_calls));
     }
@@ -2884,6 +2992,7 @@ mod tests {
             r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"file_read","arguments":"{\"input\":\"path=README.md\"}"}}]}}]}"#.to_string(),
             String::new(),
             BTreeMap::new(),
+            None,
             "test-model",
             "http://example.test/v1",
         )
@@ -2910,6 +3019,7 @@ mod tests {
             String::new(),
             dsml.to_string(),
             BTreeMap::new(),
+            None,
             "test-model",
             "http://example.test/v1",
         )
@@ -2996,6 +3106,7 @@ mod tests {
             String::new(),
             "<｜DSML｜tool_calls><｜DSML｜invoke name=\"shell_run\">".to_string(),
             BTreeMap::new(),
+            None,
             "test-model",
             "http://example.test/v1",
         );
@@ -3026,7 +3137,7 @@ mod tests {
     #[test]
     fn parses_non_streaming_tool_calls() {
         let response = parse_model_response(
-            r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"file_read","arguments":"{\"input\":\"path=README.md\"}"}}]}}]}"#,
+            r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"file_read","arguments":"{\"input\":\"path=README.md\"}"}}]},"finish_reason":"tool_calls"}]}"#,
         )
         .expect("response should parse");
 
@@ -3039,6 +3150,66 @@ mod tests {
             r#"{"input":"path=README.md"}"#
         );
         assert!(response.raw_tool_calls_json.is_some());
+        assert_eq!(
+            response.assessment(),
+            ModelResponseAssessment {
+                termination: ModelResponseTermination::ToolCalls,
+                disposition: ModelResponseDisposition::ToolCalls,
+            }
+        );
+    }
+
+    #[test]
+    fn model_response_assessment_rejects_incomplete_filtered_and_empty_outputs() {
+        let incomplete = parse_model_response(
+            r#"{"choices":[{"message":{"role":"assistant","content":"partial"},"finish_reason":"length"}]}"#,
+        )
+        .expect("length response should parse");
+        assert_eq!(
+            incomplete.assessment().disposition,
+            ModelResponseDisposition::IncompleteOutput
+        );
+
+        let filtered = parse_model_response(
+            r#"{"choices":[{"message":{"role":"assistant","content":""},"finish_reason":"content_filter"}]}"#,
+        )
+        .expect("filtered response should parse");
+        assert_eq!(
+            filtered.assessment().disposition,
+            ModelResponseDisposition::Filtered
+        );
+
+        let empty = parse_model_response(
+            r#"{"choices":[{"message":{"role":"assistant","content":"  "},"finish_reason":"stop"}]}"#,
+        )
+        .expect("empty response should parse");
+        assert_eq!(
+            empty.assessment().disposition,
+            ModelResponseDisposition::Empty
+        );
+
+        let complete = parse_model_response(
+            r#"{"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}"#,
+        )
+        .expect("complete response should parse");
+        assert_eq!(
+            complete.assessment(),
+            ModelResponseAssessment {
+                termination: ModelResponseTermination::Complete,
+                disposition: ModelResponseDisposition::Usable,
+            }
+        );
+    }
+
+    #[test]
+    fn streaming_events_preserve_finish_reason() {
+        let event = parse_stream_event(
+            r#"data: {"choices":[{"delta":{},"finish_reason":"length"}]}"#,
+        )
+        .expect("stream event should parse")
+        .expect("stream event should exist");
+
+        assert_eq!(event.finish_reason.as_deref(), Some("length"));
     }
 
     #[test]

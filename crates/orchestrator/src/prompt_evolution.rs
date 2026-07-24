@@ -940,10 +940,16 @@ impl PromptEvolutionObservation {
             return 0.0;
         }
         let quality = self.quality_score.clamp(0.0, 1.0);
-        if self.succeeded {
+        let absolute = if self.succeeded {
             0.5 + quality * 0.5
         } else {
             quality * 0.5
+        };
+        if let Some(relative) = self.relative_reward {
+            let relative = (relative.clamp(-1.0, 1.0) + 1.0) * 0.5;
+            absolute * 0.7 + relative * 0.3
+        } else {
+            absolute
         }
     }
 
@@ -2152,7 +2158,8 @@ mod tests {
     #[test]
     fn malformed_or_unsafe_workflows_receive_zero_reward() {
         let mut entry = observation("profile", PromptEvaluationSplit::Holdout, 1.0, 1_000, 1_000);
-        assert_eq!(entry.reward(), 1.0);
+        assert!(entry.reward() > 0.8);
+        assert!(entry.reward() < 1.0);
         entry.format_valid = false;
         assert_eq!(entry.reward(), 0.0);
         entry.format_valid = true;

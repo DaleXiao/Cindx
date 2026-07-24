@@ -906,6 +906,39 @@ impl AgentRunControl {
         self.timeout_seconds(self.budget.model_call_timeout.as_secs().max(1))
     }
 
+    pub fn stage_model_call_timeout(&self, class: RunStageClass) -> Duration {
+        let now = Instant::now();
+        let state = self.state.lock().expect("run control state poisoned");
+        let global_remaining = self
+            .budget
+            .max_duration
+            .saturating_sub(now.duration_since(state.started_at));
+        let stage_budget = self.budget.stage_budget(class);
+        let stage_remaining = state
+            .stage_usage
+            .get(&class)
+            .map(|usage| {
+                stage_budget
+                    .max_duration
+                    .saturating_sub(now.duration_since(usage.started_at))
+            })
+            .unwrap_or(stage_budget.max_duration);
+        let global_stage_allowance = if stage_budget.terminal {
+            global_remaining
+        } else {
+            global_remaining.saturating_sub(self.budget.terminal_time_reserve)
+        };
+
+        self.budget
+            .model_call_timeout
+            .min(stage_remaining)
+            .min(global_stage_allowance)
+    }
+
+    pub fn stage_model_call_timeout_seconds(&self, class: RunStageClass) -> u64 {
+        self.stage_model_call_timeout(class).as_secs().max(1)
+    }
+
     pub fn progress(&self) -> RunProgressSnapshot {
         let state = self.state.lock().expect("run control state poisoned");
         let elapsed = state.started_at.elapsed().min(self.budget.max_duration);
@@ -1495,6 +1528,23 @@ mod tests {
         assert!(control
             .begin_stage_model_call("synthesizer", RunStageClass::Synthesizer)
             .is_ok());
+    }
+
+    #[test]
+    fn nonterminal_model_timeout_cannot_consume_terminal_time_reserve() {
+        let mut budget = test_budget();
+        budget.max_duration = Duration::from_secs(100);
+        budget.model_call_timeout = Duration::from_secs(90);
+        budget.terminal_time_reserve = Duration::from_secs(60);
+        let control = AgentRunControl::with_budget(budget);
+
+        let nonterminal = control.stage_model_call_timeout(RunStageClass::Other);
+        assert!(nonterminal <= Duration::from_secs(40));
+        assert!(nonterminal > Duration::from_secs(39));
+
+        let terminal = control.stage_model_call_timeout(RunStageClass::Synthesizer);
+        assert!(terminal < Duration::from_secs(34));
+        assert!(terminal > Duration::from_secs(33));
     }
 
     #[test]

@@ -6,6 +6,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const CONTEXT_GOVERNOR_SCHEMA: &str = "cindx.context-governor.v1";
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContextBudgetAllocation {
+    pub core_tokens: u64,
+    pub current_request_tokens: u64,
+    pub protected_context_tokens: u64,
+    pub supplemental_context_tokens: u64,
+    pub recent_conversation_tokens: u64,
+    pub archive_digest_tokens: u64,
+    pub unused_tokens: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextGovernorReport {
     pub applied: bool,
@@ -20,6 +31,12 @@ pub struct ContextGovernorReport {
     pub hard_limit_satisfied: bool,
     pub selected_context_sources: Vec<String>,
     pub omitted_context_sources: Vec<String>,
+    pub selected_source_tokens: BTreeMap<String, u64>,
+    pub omitted_source_tokens: BTreeMap<String, u64>,
+    pub current_request_preserved: bool,
+    pub protected_sources_satisfied: bool,
+    pub tool_round_integrity_satisfied: bool,
+    pub allocation: ContextBudgetAllocation,
 }
 
 impl ContextGovernorReport {
@@ -70,6 +87,49 @@ impl ContextGovernorReport {
             serde_json::to_string(&self.omitted_context_sources)
                 .unwrap_or_else(|_| "[]".to_string()),
         );
+        metadata.insert(
+            "context_selected_source_tokens_json".to_string(),
+            serde_json::to_string(&self.selected_source_tokens)
+                .unwrap_or_else(|_| "{}".to_string()),
+        );
+        metadata.insert(
+            "context_omitted_source_tokens_json".to_string(),
+            serde_json::to_string(&self.omitted_source_tokens).unwrap_or_else(|_| "{}".to_string()),
+        );
+        metadata.insert(
+            "context_current_request_preserved".to_string(),
+            self.current_request_preserved.to_string(),
+        );
+        metadata.insert(
+            "context_protected_sources_satisfied".to_string(),
+            self.protected_sources_satisfied.to_string(),
+        );
+        metadata.insert(
+            "context_tool_round_integrity_satisfied".to_string(),
+            self.tool_round_integrity_satisfied.to_string(),
+        );
+        metadata.insert(
+            "context_budget_allocation_json".to_string(),
+            serde_json::to_string(&[
+                ("core", self.allocation.core_tokens),
+                ("current_request", self.allocation.current_request_tokens),
+                (
+                    "protected_context",
+                    self.allocation.protected_context_tokens,
+                ),
+                (
+                    "supplemental_context",
+                    self.allocation.supplemental_context_tokens,
+                ),
+                (
+                    "recent_conversation",
+                    self.allocation.recent_conversation_tokens,
+                ),
+                ("archive_digest", self.allocation.archive_digest_tokens),
+                ("unused", self.allocation.unused_tokens),
+            ])
+            .unwrap_or_else(|_| "[]".to_string()),
+        );
     }
 }
 
@@ -106,6 +166,10 @@ pub(crate) fn govern_model_messages(
         messages.push(system_message);
         messages.extend(state_messages.iter().cloned());
         let selected_context_sources = context_source_labels(&messages);
+        let selected_source_tokens = context_source_token_ledger(&messages);
+        let current_request_preserved = current_request_preserved(state_messages, &messages);
+        let protected_sources_satisfied = protected_sources_satisfied(state_messages, &messages);
+        let tool_round_integrity_satisfied = tool_round_integrity_satisfied(&messages);
         return (
             messages,
             ContextGovernorReport {
@@ -121,6 +185,35 @@ pub(crate) fn govern_model_messages(
                 hard_limit_satisfied: true,
                 selected_context_sources,
                 omitted_context_sources: Vec::new(),
+                selected_source_tokens,
+                omitted_source_tokens: BTreeMap::new(),
+                current_request_preserved,
+                protected_sources_satisfied,
+                tool_round_integrity_satisfied,
+                allocation: ContextBudgetAllocation {
+                    core_tokens: fixed_core_tokens(system_tokens, tool_tokens),
+                    current_request_tokens: state_messages
+                        .iter()
+                        .rposition(is_user_turn_start)
+                        .map(|index| state_message_tokens[index])
+                        .unwrap_or_default(),
+                    protected_context_tokens: selected_system_context_tokens(
+                        state_messages,
+                        &state_message_tokens,
+                        true,
+                    ),
+                    supplemental_context_tokens: selected_system_context_tokens(
+                        state_messages,
+                        &state_message_tokens,
+                        false,
+                    ),
+                    recent_conversation_tokens: conversation_tokens_except_current(
+                        state_messages,
+                        &state_message_tokens,
+                    ),
+                    archive_digest_tokens: 0,
+                    unused_tokens: input_budget_tokens.saturating_sub(estimated_original_tokens),
+                },
             },
         );
     }
@@ -131,29 +224,10 @@ pub(crate) fn govern_model_messages(
     let mut replacements = BTreeMap::new();
     let mut truncated_messages = 0usize;
 
-    let system_context_budget = available_tokens.saturating_mul(30) / 100;
-    select_system_contexts(
-        state_messages,
-        &state_message_tokens,
-        system_context_budget,
-        &mut selected,
-        &mut replacements,
-        &mut truncated_messages,
-    );
-    let selected_system_tokens = selected
-        .iter()
-        .map(|index| {
-            replacements.get(index).map_or_else(
-                || state_message_tokens[*index],
-                estimate_model_message_tokens,
-            )
-        })
-        .sum::<u64>();
-
     let current_user_index = state_messages.iter().rposition(is_user_turn_start);
     let mut selected_conversation_tokens = 0u64;
     if let Some(index) = current_user_index {
-        let maximum_user_budget = available_tokens.saturating_sub(selected_system_tokens);
+        let maximum_user_budget = available_tokens;
         let preferred_user_budget = (available_tokens.saturating_mul(45) / 100)
             .max(256)
             .min(maximum_user_budget);
@@ -174,6 +248,28 @@ pub(crate) fn govern_model_messages(
             }
         }
     }
+
+    let system_context_budget = available_tokens
+        .saturating_sub(selected_conversation_tokens)
+        .min(available_tokens.saturating_mul(35) / 100);
+    select_system_contexts(
+        state_messages,
+        &state_message_tokens,
+        system_context_budget,
+        &mut selected,
+        &mut replacements,
+        &mut truncated_messages,
+    );
+    let selected_system_tokens = selected
+        .iter()
+        .filter(|index| matches!(state_messages[**index].role, MessageRole::System))
+        .map(|index| {
+            replacements.get(index).map_or_else(
+                || state_message_tokens[*index],
+                estimate_model_message_tokens,
+            )
+        })
+        .sum::<u64>();
 
     let digest_reserve = (available_tokens / 10).clamp(128, 8_192);
     let mut recent_budget = available_tokens
@@ -252,6 +348,7 @@ pub(crate) fn govern_model_messages(
     let estimated_projected_tokens =
         estimate_messages_tokens(&messages).saturating_add(tool_tokens);
     let selected_context_sources = context_source_labels(&messages);
+    let selected_source_tokens = context_source_token_ledger(&messages);
     let omitted_context_sources = omitted_indices
         .iter()
         .filter_map(|index| state_messages.get(*index))
@@ -261,6 +358,36 @@ pub(crate) fn govern_model_messages(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+    let omitted_source_tokens = context_source_token_ledger_for_indices(
+        state_messages,
+        &state_message_tokens,
+        &omitted_indices,
+    );
+    let current_request_preserved = current_request_preserved(state_messages, &messages);
+    let protected_sources_satisfied = protected_sources_satisfied(state_messages, &messages);
+    let tool_round_integrity_satisfied = tool_round_integrity_satisfied(&messages);
+    let archive_digest_tokens = messages
+        .iter()
+        .find(|message| {
+            message.metadata.get("kind").map(String::as_str) == Some("context_governor_digest")
+        })
+        .map(estimate_model_message_tokens)
+        .unwrap_or_default();
+    let protected_context_tokens =
+        selected_context_tokens_by_protection(state_messages, &selected, &replacements, true);
+    let supplemental_context_tokens =
+        selected_context_tokens_by_protection(state_messages, &selected, &replacements, false);
+    let recent_conversation_tokens = selected
+        .iter()
+        .filter(|index| Some(**index) != current_user_index)
+        .filter(|index| !matches!(state_messages[**index].role, MessageRole::System))
+        .map(|index| {
+            replacements.get(index).map_or_else(
+                || state_message_tokens[*index],
+                estimate_model_message_tokens,
+            )
+        })
+        .sum::<u64>();
     let report = ContextGovernorReport {
         applied: true,
         context_window_tokens,
@@ -274,6 +401,20 @@ pub(crate) fn govern_model_messages(
         hard_limit_satisfied: estimated_projected_tokens <= input_budget_tokens,
         selected_context_sources,
         omitted_context_sources,
+        selected_source_tokens,
+        omitted_source_tokens,
+        current_request_preserved,
+        protected_sources_satisfied,
+        tool_round_integrity_satisfied,
+        allocation: ContextBudgetAllocation {
+            core_tokens: fixed_core_tokens(system_tokens, tool_tokens),
+            current_request_tokens: selected_conversation_tokens,
+            protected_context_tokens,
+            supplemental_context_tokens,
+            recent_conversation_tokens,
+            archive_digest_tokens,
+            unused_tokens: input_budget_tokens.saturating_sub(estimated_projected_tokens),
+        },
     };
     (messages, report)
 }
@@ -318,6 +459,141 @@ fn context_source_labels(messages: &[Message]) -> Vec<String> {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn fixed_core_tokens(system_tokens: u64, tool_tokens: u64) -> u64 {
+    system_tokens.saturating_add(tool_tokens)
+}
+
+fn context_source_token_ledger(messages: &[Message]) -> BTreeMap<String, u64> {
+    let mut ledger = BTreeMap::new();
+    for message in messages.iter().skip(1) {
+        let Some(source) = ContextSourceKind::from_message(message) else {
+            continue;
+        };
+        let entry = ledger.entry(source.as_str().to_string()).or_insert(0u64);
+        *entry = (*entry).saturating_add(estimate_model_message_tokens(message));
+    }
+    ledger
+}
+
+fn context_source_token_ledger_for_indices(
+    messages: &[Message],
+    message_tokens: &[u64],
+    indices: &[usize],
+) -> BTreeMap<String, u64> {
+    let mut ledger = BTreeMap::new();
+    for index in indices {
+        let Some(message) = messages.get(*index) else {
+            continue;
+        };
+        let Some(source) = ContextSourceKind::from_message(message) else {
+            continue;
+        };
+        let entry = ledger.entry(source.as_str().to_string()).or_insert(0u64);
+        *entry = (*entry).saturating_add(message_tokens.get(*index).copied().unwrap_or_default());
+    }
+    ledger
+}
+
+fn selected_system_context_tokens(
+    messages: &[Message],
+    message_tokens: &[u64],
+    protected: bool,
+) -> u64 {
+    messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            let source = ContextSourceKind::from_message(message)?;
+            (source.is_protected() == protected).then_some(message_tokens[index])
+        })
+        .sum()
+}
+
+fn selected_context_tokens_by_protection(
+    messages: &[Message],
+    selected: &BTreeSet<usize>,
+    replacements: &BTreeMap<usize, Message>,
+    protected: bool,
+) -> u64 {
+    selected
+        .iter()
+        .filter_map(|index| {
+            let message = messages.get(*index)?;
+            let source = ContextSourceKind::from_message(message)?;
+            (source.is_protected() == protected).then(|| {
+                replacements.get(index).map_or_else(
+                    || estimate_model_message_tokens(message),
+                    estimate_model_message_tokens,
+                )
+            })
+        })
+        .sum()
+}
+
+fn conversation_tokens_except_current(messages: &[Message], message_tokens: &[u64]) -> u64 {
+    let current = messages.iter().rposition(is_user_turn_start);
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(index, message)| {
+            Some(*index) != current && !matches!(message.role, MessageRole::System)
+        })
+        .map(|(index, _)| message_tokens[index])
+        .sum()
+}
+
+fn current_request_preserved(original: &[Message], projected: &[Message]) -> bool {
+    let Some(current) = original.iter().rfind(|message| is_user_turn_start(message)) else {
+        return true;
+    };
+    let Some(selected) = projected
+        .iter()
+        .rfind(|message| is_user_turn_start(message))
+    else {
+        return false;
+    };
+    let prefix = current.content.chars().take(64).collect::<String>();
+    prefix.is_empty() || selected.content.starts_with(&prefix)
+}
+
+fn protected_sources_satisfied(original: &[Message], projected: &[Message]) -> bool {
+    let required = original
+        .iter()
+        .filter_map(ContextSourceKind::from_message)
+        .filter(|source| source.is_protected())
+        .collect::<BTreeSet<_>>();
+    let selected = projected
+        .iter()
+        .filter_map(ContextSourceKind::from_message)
+        .filter(|source| source.is_protected())
+        .collect::<BTreeSet<_>>();
+    required.is_subset(&selected)
+}
+
+fn tool_round_integrity_satisfied(messages: &[Message]) -> bool {
+    let mut proposed = BTreeSet::new();
+    let mut observed = BTreeSet::new();
+    for message in messages {
+        if let Some(raw_calls) = message.metadata.get("raw_tool_calls_json") {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_calls) {
+                if let Some(calls) = value.as_array() {
+                    proposed.extend(calls.iter().filter_map(|call| {
+                        call.get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    }));
+                }
+            }
+        }
+        if matches!(message.role, MessageRole::Tool) {
+            if let Some(call_id) = message.metadata.get("tool_call_id") {
+                observed.insert(call_id.clone());
+            }
+        }
+    }
+    proposed == observed
 }
 
 fn system_context_priority(message: &Message) -> u8 {
@@ -833,6 +1109,12 @@ mod tests {
         assert!(report.applied);
         assert!(report.hard_limit_satisfied);
         assert!(report.omitted_messages > 0);
+        assert!(report.current_request_preserved);
+        assert!(report.protected_sources_satisfied);
+        assert!(report.tool_round_integrity_satisfied);
+        assert!(report
+            .selected_source_tokens
+            .contains_key("artifact_manifest"));
         assert!(projected.iter().any(|message| {
             message
                 .content
@@ -861,6 +1143,51 @@ mod tests {
             history, original,
             "canonical runtime history must remain lossless"
         );
+    }
+
+    #[test]
+    fn context_report_accounts_for_selected_and_omitted_sources() {
+        let mut restore = message(MessageRole::System, "restore ".repeat(4_000));
+        restore
+            .metadata
+            .insert("kind".to_string(), "context_restore_pack".to_string());
+        let mut knowledge = message(MessageRole::System, "knowledge ".repeat(7_000));
+        knowledge
+            .metadata
+            .insert("kind".to_string(), "knowledge_context".to_string());
+        let history = vec![
+            restore,
+            knowledge,
+            message(
+                MessageRole::User,
+                "Keep the restored objective and finish it",
+            ),
+        ];
+
+        let (_, report) =
+            govern_model_messages(&history, "system".to_string(), &[tool()], 8_192, 1_024);
+
+        assert!(report.applied);
+        assert!(report.current_request_preserved);
+        assert!(report.protected_sources_satisfied);
+        assert!(report
+            .selected_source_tokens
+            .contains_key("context_restore_pack"));
+        assert!(report
+            .selected_source_tokens
+            .values()
+            .chain(report.omitted_source_tokens.values())
+            .all(|tokens| *tokens > 0));
+        let accounted = report
+            .allocation
+            .core_tokens
+            .saturating_add(report.allocation.current_request_tokens)
+            .saturating_add(report.allocation.protected_context_tokens)
+            .saturating_add(report.allocation.supplemental_context_tokens)
+            .saturating_add(report.allocation.recent_conversation_tokens)
+            .saturating_add(report.allocation.archive_digest_tokens)
+            .saturating_add(report.allocation.unused_tokens);
+        assert_eq!(accounted, report.input_budget_tokens);
     }
 
     #[test]
