@@ -1620,6 +1620,39 @@ fn routing_telemetry_read_model_deduplicates_completed_runs() {
 }
 
 #[test]
+fn read_only_runtime_snapshots_do_not_write_projection_caches() {
+    let root = std::env::temp_dir().join(format!(
+        "cindx-read-only-snapshot-test-{}-{}",
+        std::process::id(),
+        current_time_millis()
+    ));
+    fs::create_dir_all(&root).expect("snapshot test directory should exist");
+    let database = root.join("state.sqlite3");
+    drop(SqliteStore::open(&database).expect("writable store should initialize"));
+
+    let mut store = SqliteStore::open_read_only(&database).expect("read-only store should open");
+    assert!(load_routing_telemetry_read_model_snapshot(&mut store)
+        .expect("routing snapshot should remain read-only")
+        .is_empty());
+    assert!(
+        load_project_memory_ledger_snapshot(&mut store, "project-read-only")
+            .expect("memory snapshot should remain read-only")
+            .records
+            .is_empty()
+    );
+    assert!(
+        load_agent_session_read_model_snapshot(&store, "session-read-only")
+            .expect("session snapshot should remain read-only")
+            .state
+            .messages
+            .is_empty()
+    );
+
+    drop(store);
+    fs::remove_dir_all(root).expect("snapshot test directory should be removed");
+}
+
+#[test]
 fn prompt_evolution_read_model_only_indexes_evaluation_evidence() {
     let mut store = SqliteStore::in_memory().expect("store should open");
     let genome = ConductorPromptGenome::seed_for_effort("auto");
