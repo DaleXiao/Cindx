@@ -9,6 +9,7 @@ import {
   FileText,
   FolderOpen,
   Image as ImageIcon,
+  Maximize2,
   Pencil,
   Search,
   ShieldCheck,
@@ -48,6 +49,7 @@ import type {
   TimelineEntry
 } from "../tauri";
 import { readSessionState, rememberSessionState } from "../sessionRuntimeModel";
+import { DiagramFullscreen } from "./DiagramFullscreen";
 import { DisclosureTriangle } from "./DisclosureTriangle";
 import { MarkmapDiagram } from "./MarkmapDiagram";
 import { MermaidDiagram } from "./MermaidDiagram";
@@ -112,6 +114,15 @@ const MAX_MINIMAP_MARKERS = 32;
 const MINIMAP_MARKER_GAP = 12;
 const LATEST_OUTPUT_THRESHOLD = 48;
 const SESSION_THREAD_PROJECTION_CACHE_LIMIT = 4;
+const threadTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23"
+});
+
+function formatThreadTime(timestampMs: number) {
+  return Number.isFinite(timestampMs) ? threadTimeFormatter.format(timestampMs) : "";
+}
 
 function ThreadFind({
   open,
@@ -652,6 +663,7 @@ type MarkdownLinkProps = ComponentPropsWithoutRef<"a"> & {
 
 type MarkdownCodeBlockProps = ComponentPropsWithoutRef<"pre"> & {
   onCopyCode?: (content: string) => void;
+  onDiagramError?: (message: string) => void;
   renderDiagrams?: boolean;
 };
 
@@ -735,9 +747,12 @@ function markdownNodeText(node: ReactNode): string {
 function MarkdownCodeBlock({
   children,
   onCopyCode,
+  onDiagramError,
   renderDiagrams = true,
   ...props
 }: MarkdownCodeBlockProps) {
+  const fullscreenTriggerRef = useRef<HTMLButtonElement>(null);
+  const [fullscreen, setFullscreen] = useState(false);
   const codeElement = Children.toArray(children).find((child) =>
     isValidElement<{ className?: string }>(child)
   );
@@ -747,22 +762,44 @@ function MarkdownCodeBlock({
   const language = codeClassName.match(/(?:language|lang)-([^\s]+)/)?.[1] ?? "code";
   const code = markdownNodeText(children).replace(/\n$/, "");
   const diagram = renderDiagrams ? markdownDiagramForCode(language, code) : null;
+  const closeFullscreen = useCallback(() => {
+    setFullscreen(false);
+    window.requestAnimationFrame(() =>
+      fullscreenTriggerRef.current?.focus({ preventScroll: true })
+    );
+  }, []);
 
   return (
     <div className="thread-code-block">
       <header className="thread-code-block-header">
         <span>{language}</span>
-        <button
-          type="button"
-          aria-label="Copy code"
-          title="Copy code"
-          onClick={(event) => {
-            event.stopPropagation();
-            onCopyCode?.(code);
-          }}
-        >
-          <Copy aria-hidden="true" />
-        </button>
+        <div className="thread-code-block-actions">
+          {diagram && (
+            <button
+              ref={fullscreenTriggerRef}
+              type="button"
+              aria-label={`Open ${diagram.kind === "mindmap" ? "mind map" : "Mermaid diagram"} fullscreen`}
+              title="Full screen"
+              onClick={(event) => {
+                event.stopPropagation();
+                setFullscreen(true);
+              }}
+            >
+              <Maximize2 aria-hidden="true" />
+            </button>
+          )}
+          <button
+            type="button"
+            aria-label="Copy code"
+            title="Copy code"
+            onClick={(event) => {
+              event.stopPropagation();
+              onCopyCode?.(code);
+            }}
+          >
+            <Copy aria-hidden="true" />
+          </button>
+        </div>
       </header>
       {diagram?.kind === "mindmap" ? (
         <MarkmapDiagram source={diagram.source} />
@@ -771,6 +808,13 @@ function MarkdownCodeBlock({
       ) : (
         <pre {...props}>{children}</pre>
       )}
+      {fullscreen && diagram ? (
+        <DiagramFullscreen
+          diagram={diagram}
+          onClose={closeFullscreen}
+          onError={(message) => onDiagramError?.(message)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -842,7 +886,7 @@ const MarkdownChunk = memo(function MarkdownChunk({
           },
           pre: {
             component: MarkdownCodeBlock,
-            props: { onCopyCode, renderDiagrams: !streaming }
+            props: { onCopyCode, onDiagramError: onOpenError, renderDiagrams: !streaming }
           }
         }
       }}
@@ -1082,6 +1126,19 @@ export const SessionThread = memo(function SessionThread({
     return next;
   }, [messages, sessionId, timeline]);
   const { items, rows: threadRows, rowIndexByItemId } = projection;
+  const editableStoppedUserMessageId = useMemo(() => {
+    const latestEvent = timeline[timeline.length - 1];
+    const userStoppedRun =
+      status === "cancelled" &&
+      (latestEvent?.label === "Agent task cancelled" ||
+        latestEvent?.detail === "Agent task cancelled");
+    if (!userStoppedRun) return null;
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index];
+      if (item.type === "message" && item.message.role === "user") return item.id;
+    }
+    return null;
+  }, [items, status, timeline]);
   const { artifactsByMessageId, trailingArtifacts } = useMemo(
     () => associateOutputArtifacts(projection, outputArtifacts),
     [outputArtifacts, projection]
@@ -1746,6 +1803,12 @@ export const SessionThread = memo(function SessionThread({
               ) : null}
               {isUser && (
                 <footer className="thread-message-actions">
+                  <time
+                    dateTime={new Date(item.message.timestampMs).toISOString()}
+                    title={new Date(item.message.timestampMs).toLocaleString()}
+                  >
+                    {formatThreadTime(item.message.timestampMs)}
+                  </time>
                   <button
                     type="button"
                     aria-label={copiedId === item.id ? "Message copied" : "Copy message"}
@@ -1757,17 +1820,19 @@ export const SessionThread = memo(function SessionThread({
                   >
                     <Copy aria-hidden="true" />
                   </button>
-                  <button
-                    type="button"
-                    aria-label="Edit message"
-                    title="Edit"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onEditMessage(item.message.content);
-                    }}
-                  >
-                    <Pencil aria-hidden="true" />
-                  </button>
+                  {editableStoppedUserMessageId === item.id ? (
+                    <button
+                      type="button"
+                      aria-label="Edit stopped message"
+                      title="Edit"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onEditMessage(item.message.content);
+                      }}
+                    >
+                      <Pencil aria-hidden="true" />
+                    </button>
+                  ) : null}
                 </footer>
               )}
             </article>

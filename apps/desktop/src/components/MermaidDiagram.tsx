@@ -1,4 +1,5 @@
 import { memo, useEffect, useState } from "react";
+import { useResolvedTheme, type ResolvedTheme } from "./useResolvedTheme";
 
 type MermaidDiagramProps = {
   source: string;
@@ -22,18 +23,36 @@ function enqueueRender<T>(task: () => Promise<T>): Promise<T> {
   return result;
 }
 
-async function renderDiagram(source: string) {
+async function renderDiagram(source: string, theme: ResolvedTheme) {
   if (source.length > MAX_DIAGRAM_SOURCE_LENGTH) {
     throw new Error("Diagram source is too large to render safely");
   }
   return enqueueRender(async () => {
     const { default: mermaid } = await import("mermaid");
-    const dark = document.documentElement.dataset.theme === "dark";
+    const dark = theme === "dark";
     mermaid.initialize({
       startOnLoad: false,
       securityLevel: "strict",
       suppressErrorRendering: true,
       theme: dark ? "dark" : "neutral",
+      themeVariables: dark
+        ? {
+            background: "#171717",
+            primaryColor: "#292929",
+            primaryTextColor: "#f3f3f3",
+            primaryBorderColor: "#858585",
+            lineColor: "#c2c2c2",
+            secondaryColor: "#242424",
+            tertiaryColor: "#303030",
+            textColor: "#f3f3f3",
+            edgeLabelBackground: "#171717",
+            clusterBkg: "#202020",
+            clusterBorder: "#6f6f6f",
+            noteBkgColor: "#303030",
+            noteTextColor: "#f3f3f3",
+            noteBorderColor: "#858585"
+          }
+        : undefined,
       flowchart: { htmlLabels: false },
       maxTextSize: MAX_DIAGRAM_SOURCE_LENGTH
     });
@@ -52,11 +71,12 @@ export const MermaidDiagram = memo(function MermaidDiagram({
   source
 }: MermaidDiagramProps) {
   const [renderState, setRenderState] = useState<RenderState>({ status: "loading" });
+  const theme = useResolvedTheme();
 
   useEffect(() => {
     let active = true;
     setRenderState({ status: "loading" });
-    void renderDiagram(source).then(
+    void renderDiagram(source, theme).then(
       (svg) => {
         if (active) setRenderState({ status: "ready", svg });
       },
@@ -69,7 +89,7 @@ export const MermaidDiagram = memo(function MermaidDiagram({
     return () => {
       active = false;
     };
-  }, [source]);
+  }, [source, theme]);
 
   if (renderState.status === "loading") {
     return (
@@ -91,6 +111,7 @@ export const MermaidDiagram = memo(function MermaidDiagram({
   return (
     <div
       className="thread-mermaid-diagram"
+      data-theme={theme}
       role="img"
       aria-label="Mermaid diagram"
       dangerouslySetInnerHTML={{ __html: renderState.svg }}

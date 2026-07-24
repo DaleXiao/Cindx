@@ -2380,6 +2380,13 @@ pre {
   white-space: nowrap;
 }
 
+.thread-code-block-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
 .thread-code-block-header button {
   display: grid;
   width: 24px;
@@ -2444,6 +2451,11 @@ pre {
   transition: opacity 160ms ease;
 }
 
+.thread-markmap-diagram > svg.markmap {
+  --markmap-text-color: #252525;
+  --markmap-circle-open-bg: #ffffff;
+}
+
 .thread-markmap-diagram[data-status="loading"] > svg {
   opacity: 0;
 }
@@ -2485,6 +2497,104 @@ pre {
 
 .thread-diagram-error pre {
   border-top: 0.5px solid #dedede;
+}
+
+.thread-diagram-fullscreen {
+  position: fixed;
+  z-index: 1200;
+  inset: 0;
+  color: var(--text);
+  background: var(--bg);
+}
+
+.thread-diagram-fullscreen-actions,
+.thread-diagram-zoom-controls {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 5px 18px rgb(0 0 0 / 10%);
+  backdrop-filter: blur(18px) saturate(125%);
+  -webkit-backdrop-filter: blur(18px) saturate(125%);
+}
+
+.thread-diagram-fullscreen-actions {
+  top: 18px;
+  right: 18px;
+}
+
+.thread-diagram-zoom-controls {
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.thread-diagram-fullscreen-actions button,
+.thread-diagram-zoom-controls button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--control-fg);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-md);
+  place-items: center;
+}
+
+.thread-diagram-fullscreen-actions button:hover:not(:disabled),
+.thread-diagram-zoom-controls button:hover:not(:disabled) {
+  color: var(--control-fg-hover);
+  background: var(--surface-active);
+}
+
+.thread-diagram-fullscreen-actions svg,
+.thread-diagram-zoom-controls svg {
+  width: 15px;
+  height: 15px;
+}
+
+.thread-diagram-fullscreen-viewport {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  overflow: auto;
+  align-items: safe center;
+  justify-content: safe center;
+  padding: 64px 56px 74px;
+}
+
+.thread-diagram-fullscreen-surface {
+  min-width: 60%;
+  min-height: 60%;
+  flex: 0 0 auto;
+}
+
+.thread-diagram-fullscreen-surface .thread-markmap-diagram {
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+  background: transparent;
+}
+
+.thread-diagram-fullscreen-surface .thread-mermaid-diagram {
+  display: grid;
+  width: 100%;
+  min-height: 100%;
+  background: transparent;
+  place-items: center;
+}
+
+.thread-diagram-fullscreen-surface .thread-mermaid-diagram svg {
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: 100%;
 }
 
 .thread-markdown table {
@@ -2545,6 +2655,26 @@ pre {
   justify-content: flex-end;
   gap: 2px;
   margin-top: 4px;
+}
+
+.thread-message-actions time {
+  margin-right: 3px;
+  color: var(--subtle);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 24px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(1px);
+  transition:
+    opacity 120ms ease,
+    transform 120ms var(--ease-out-quart);
+}
+
+.thread-message-user:hover .thread-message-actions time,
+.thread-message-user:focus-within .thread-message-actions time {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .thread-message-actions button {
@@ -7321,6 +7451,27 @@ details[open] > summary .settings-disclosure-chevron > svg {
 :root[data-theme="dark"] .thread-diagram-error > p {
   color: var(--text);
   background: var(--surface);
+}
+
+:root[data-theme="dark"] .thread-markmap-diagram > svg.markmap {
+  --markmap-text-color: #f4f4f4;
+  --markmap-code-bg: #292929;
+  --markmap-code-color: #f1f1f1;
+  --markmap-circle-open-bg: #202020;
+}
+
+:root[data-theme="dark"] .thread-diagram-fullscreen,
+:root[data-theme="dark"] .thread-diagram-fullscreen-surface .thread-markmap-diagram,
+:root[data-theme="dark"] .thread-diagram-fullscreen-surface .thread-mermaid-diagram {
+  color: var(--text);
+  background: var(--bg);
+}
+
+:root[data-theme="dark"] .thread-diagram-fullscreen-actions,
+:root[data-theme="dark"] .thread-diagram-zoom-controls {
+  background: rgb(32 32 32 / 90%);
+  border-color: var(--border-strong);
+  box-shadow: 0 5px 20px rgb(0 0 0 / 34%);
 }
 
 :root[data-theme="dark"] .thread-diagram-error pre {
