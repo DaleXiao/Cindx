@@ -319,13 +319,23 @@ def markdown_report(report: dict) -> str:
                 "",
                 "## Root-Cause Signals",
                 "",
-                "- Auto Chemistry recovered on the second pass, indicating deadline-sensitive variance rather than a deterministic wrong answer.",
-                "- Pro Chemistry exhausted the 300-second treatment deadline twice, confirming a persistent orchestration critical-path problem.",
-                "- Fast multi-file synthesis repeatedly spent its evidence turns listing directories and never read the decisive files.",
-                "- Pro MRCR at 141k characters returned the same token usage twice with an empty visible answer and no provider error; empty-success validation and long-context model routing are insufficient.",
-                "- The contradiction case recovered on the second pass; scoring is case-insensitive so capitalization alone does not count as failure.",
             ]
         )
+        first_pass_by_key = {
+            (item["case_id"], item["treatment"]): item
+            for item in analysis["first_pass_diagnostics"]
+        }
+        for outcome, label in (
+            (analysis["persistent_anomalies"], "Persistent"),
+            (analysis["recovered_anomalies"], "Recovered"),
+        ):
+            for item in outcome:
+                first = first_pass_by_key[(item["case_id"], item["treatment"])]
+                lines.append(
+                    f"- {label}: `{item['case_id']}` / `{item['treatment']}` moved from "
+                    f"`{first['failure_kind']}` at quality `{first['task_score']:.3f}` to "
+                    f"`{item['failure_kind']}` at quality `{item['task_score']:.3f}` on the second pass."
+                )
     lines.extend(
         [
             "",
