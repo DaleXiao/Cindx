@@ -112,6 +112,8 @@ pub(crate) struct AgentRecoveryEnvelope {
     pub(crate) observations: usize,
     #[serde(default)]
     pub(crate) budget_extensions: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) task_state: Option<AgentTaskStateSnapshot>,
     pub(crate) created_at_ms: u64,
     pub(crate) updated_at_ms: u64,
 }

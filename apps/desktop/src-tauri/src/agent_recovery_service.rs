@@ -63,12 +63,31 @@ pub(super) fn agent_recovery_identity(
     ))
 }
 
+#[cfg(test)]
 pub(super) fn build_agent_recovery_envelope(
     events: &[Event],
     run_context: &Metadata,
     state: &str,
     reason: &str,
     now_ms: u64,
+) -> Option<AgentRecoveryEnvelope> {
+    build_agent_recovery_envelope_with_task_state(
+        events,
+        run_context,
+        state,
+        reason,
+        now_ms,
+        None,
+    )
+}
+
+pub(super) fn build_agent_recovery_envelope_with_task_state(
+    events: &[Event],
+    run_context: &Metadata,
+    state: &str,
+    reason: &str,
+    now_ms: u64,
+    task_state: Option<&AgentTaskStateSnapshot>,
 ) -> Option<AgentRecoveryEnvelope> {
     let (resume_key, source_run_id, user_turn_sequence, prompt_fingerprint, _) =
         agent_recovery_identity(events, run_context)?;
@@ -133,6 +152,9 @@ pub(super) fn build_agent_recovery_envelope(
         budget_extensions: latest_counter(&["budget_extensions", "run_budget_extensions"])
             .or_else(|| prior.as_ref().map(|envelope| envelope.budget_extensions))
             .unwrap_or_default(),
+        task_state: task_state
+            .cloned()
+            .or_else(|| prior.as_ref().and_then(|envelope| envelope.task_state.clone())),
         created_at_ms: prior
             .as_ref()
             .map(|envelope| envelope.created_at_ms)
@@ -146,13 +168,37 @@ pub(super) fn agent_recovery_metadata(
     run_context: &Metadata,
     state: &str,
     reason: &str,
-    mut metadata: Metadata,
+    metadata: Metadata,
 ) -> Result<Metadata, String> {
-    let envelope =
-        build_agent_recovery_envelope(events, run_context, state, reason, current_time_millis())
-            .ok_or_else(|| {
-                "agent recovery checkpoint is missing a durable session prompt".to_string()
-            })?;
+    agent_recovery_metadata_with_task_state(
+        events,
+        run_context,
+        state,
+        reason,
+        metadata,
+        None,
+    )
+}
+
+pub(super) fn agent_recovery_metadata_with_task_state(
+    events: &[Event],
+    run_context: &Metadata,
+    state: &str,
+    reason: &str,
+    mut metadata: Metadata,
+    task_state: Option<&AgentTaskStateSnapshot>,
+) -> Result<Metadata, String> {
+    let envelope = build_agent_recovery_envelope_with_task_state(
+        events,
+        run_context,
+        state,
+        reason,
+        current_time_millis(),
+        task_state,
+    )
+    .ok_or_else(|| {
+        "agent recovery checkpoint is missing a durable session prompt".to_string()
+    })?;
     metadata.insert(
         "recovery_schema".to_string(),
         AGENT_RECOVERY_SCHEMA.to_string(),

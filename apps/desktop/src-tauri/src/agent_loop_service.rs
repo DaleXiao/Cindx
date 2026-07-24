@@ -1,5 +1,5 @@
 use agent_runtime::{AgentRunControl, RunStopReason};
-use model_provider::{ModelError, ModelResponse};
+use model_provider::{ModelError, ModelResponse, ModelResponseDisposition};
 use std::time::{Duration, Instant};
 
 pub(crate) fn exhausted_model_transport_error_stop_reason(
@@ -11,6 +11,12 @@ pub(crate) fn exhausted_model_transport_error_stop_reason(
 }
 
 pub(crate) fn model_response_checkpoint_evidence(response: &ModelResponse) -> Option<String> {
+    if !matches!(
+        response.assessment().disposition,
+        ModelResponseDisposition::Usable | ModelResponseDisposition::ToolCalls
+    ) {
+        return None;
+    }
     let mut evidence = response.message.content.clone();
     for call in &response.tool_calls {
         evidence.push('\n');

@@ -458,6 +458,22 @@ pub(crate) fn finish_agent_run_for_control_stop(
     run_context: &Metadata,
     control: &Arc<AgentRunControl>,
 ) -> Result<AgentState, String> {
+    finish_agent_run_for_control_stop_with_task_state(
+        app,
+        state,
+        run_context,
+        control,
+        None,
+    )
+}
+
+pub(crate) fn finish_agent_run_for_control_stop_with_task_state(
+    app: &tauri::AppHandle,
+    state: &tauri::State<'_, AppState>,
+    run_context: &Metadata,
+    control: &Arc<AgentRunControl>,
+    task_state: Option<&AgentTaskStateSnapshot>,
+) -> Result<AgentState, String> {
     let Some(reason) = control.stop_reason() else {
         return Err("agent run stopped without a reason".to_string());
     };
@@ -557,7 +573,7 @@ pub(crate) fn finish_agent_run_for_control_stop(
     let events = agent_events_for_session(&store, &phase16_task_id(), session_id)
         .map_err(|error| error.to_string())?;
     let active_events = active_agent_events_for_session(&events, session_id);
-    let recovery_metadata = agent_recovery_metadata(
+    let recovery_metadata = agent_recovery_metadata_with_task_state(
         &active_events,
         run_context,
         "paused",
@@ -586,6 +602,7 @@ pub(crate) fn finish_agent_run_for_control_stop(
         ]
         .into_iter()
         .collect(),
+        task_state,
     )?;
     append_event(
         &mut store,

@@ -24,13 +24,15 @@ use agent_rag::{
     RagIndexStats, RagSearchResult, RetrievalChannelOutcome, RAG_INDEX_CANCELLED,
 };
 #[cfg(test)]
-use agent_runtime::{advance_with_model_response, model_request_for_turn_with_context_budget};
 use agent_runtime::{
-    append_steering_instruction, append_tool_observation, bounded_max_output_tokens,
-    compose_agent_system_prompt, evidence_worker_tools, observation_from_tool_result,
-    resume_agent_loop_from_messages, sanitize_assistant_content, start_agent_loop,
-    start_agent_loop_with_history, AgentAdvance, AgentKernel, AgentRunControl, AgentRuntimeConfig,
-    ResultQuality, RunBudget, RunControlSnapshot, RunStageClass, RunStopReason,
+    advance_with_model_response, append_tool_observation, model_request_for_turn_with_context_budget,
+};
+use agent_runtime::{
+    bounded_max_output_tokens, compose_agent_system_prompt, evidence_worker_tools,
+    observation_from_tool_result, resume_agent_loop_from_messages, sanitize_assistant_content,
+    start_agent_loop, start_agent_loop_with_history, AgentAdvance, AgentKernel, AgentRunControl,
+    AgentRuntimeConfig, AgentTaskStateSnapshot, ResultQuality, RunBudget, RunControlSnapshot,
+    RunStageClass, RunStopReason,
     DEFAULT_COLLABORATION_WORKER_TURNS, MAX_COLLABORATION_WORKER_TOOL_CALLS,
     MAX_IDENTICAL_TOOL_FAILURES,
 };
@@ -70,7 +72,8 @@ use orchestrator::{
     PromptVerification, RoutingContext, RoutingDecision, RoutingOutcome, RoutingTelemetry,
     RuleBasedRouter, TaskClass, WorkflowBudget, WorkflowExecutionCheckpoint,
     WorkflowExecutionTelemetry, WorkflowPlanIr, WorkflowSearchTeacher, WorkflowStepStatus,
-    WorkflowToolPolicy, WorkflowTopologyPrior, AGENT_EVALUATION_TRACE_SCHEMA,
+    WorkflowToolPolicy, WorkflowTopologyPrior, WorkflowVerificationState,
+    AGENT_EVALUATION_TRACE_SCHEMA,
     CONDUCTOR_MAX_ATTEMPTS, MAX_ADAPTIVE_WORKFLOW_AGENTS, WORKFLOW_CHECKPOINT_SCHEMA,
     WORKFLOW_IR_SCHEMA,
 };
@@ -93,6 +96,7 @@ use tools::{
 };
 
 mod adaptive_collaboration_execution;
+mod adaptive_collaboration_finalization;
 mod adaptive_collaboration_runtime;
 mod agent_collaboration_runtime;
 mod agent_commands;
@@ -145,6 +149,7 @@ mod workflow_checkpoint_runtime;
 mod workflow_routing_runtime;
 
 use adaptive_collaboration_execution::*;
+use adaptive_collaboration_finalization::*;
 use adaptive_collaboration_runtime::*;
 use agent_collaboration_runtime::*;
 use agent_commands::*;

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub const AUTO_COLLABORATION_MIN_UPLIFT_BPS: u16 = 3_000;
 pub const AUTO_COLLABORATION_MIN_CONFIDENCE_BPS: u16 = 5_500;
+pub const PRO_MIN_TEAM_UPLIFT_BPS: u16 = 250;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,6 +33,12 @@ pub struct ConductorExecutionContract {
     pub terminal_model_call_reserve: usize,
     pub stop_policy: ConductorStopPolicy,
     pub fallback_policy: ConductorFallbackPolicy,
+    #[serde(default)]
+    pub min_team_uplift_bps: u16,
+    #[serde(default)]
+    pub min_distinct_contributions: usize,
+    #[serde(default)]
+    pub requires_synthesis: bool,
 }
 
 impl ConductorExecutionContract {
@@ -93,6 +100,14 @@ impl ConductorExecutionContract {
             "pro" => 3,
             _ => 2,
         };
+        let collaboration_path = !matches!(policy, OrchestrationPolicy::Single);
+        let (min_team_uplift_bps, min_distinct_contributions, requires_synthesis) =
+            match effort.as_str() {
+                "fast" => (0, 0, false),
+                "pro" => (PRO_MIN_TEAM_UPLIFT_BPS, 2, true),
+                _ if collaboration_path => (0, 1, true),
+                _ => (0, 0, false),
+            };
 
         Self {
             task_class: context.task_class.clone(),
@@ -110,6 +125,9 @@ impl ConductorExecutionContract {
             } else {
                 ConductorFallbackPolicy::SinglePath
             },
+            min_team_uplift_bps,
+            min_distinct_contributions,
+            requires_synthesis,
         }
     }
 
@@ -179,6 +197,30 @@ impl ConductorExecutionContract {
                 .any(|step| matches!(step.role.as_str(), "verifier" | "synthesizer"))
         {
             return Err("workflow execution contract requires a verification path".to_string());
+        }
+        if self.requires_synthesis {
+            let Some(final_step) = plan.steps.last() else {
+                return Err("collaboration workflow requires a synthesis step".to_string());
+            };
+            if final_step.role != "synthesizer" {
+                return Err(
+                    "collaboration workflow must end with an explicit synthesizer".to_string(),
+                );
+            }
+            let distinct_contributors = plan
+                .steps
+                .iter()
+                .take(plan.steps.len().saturating_sub(1))
+                .filter(|step| step.role != "verifier")
+                .map(|step| step.model.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            if distinct_contributors < self.min_distinct_contributions {
+                return Err(format!(
+                    "collaboration workflow has {distinct_contributors} distinct contributor model(s), but {} are required",
+                    self.min_distinct_contributions
+                ));
+            }
         }
         Ok(())
     }
@@ -256,6 +298,9 @@ mod tests {
         assert_eq!(contract.required_successes_for_layer(2), 2);
         assert_eq!(contract.required_successes_for_layer(3), 2);
         assert_eq!(contract.quorum_grace_ms(), 20_000);
+        assert_eq!(contract.min_team_uplift_bps, PRO_MIN_TEAM_UPLIFT_BPS);
+        assert_eq!(contract.min_distinct_contributions, 2);
+        assert!(contract.requires_synthesis);
     }
 
     #[test]

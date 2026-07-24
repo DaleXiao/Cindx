@@ -3,7 +3,7 @@ use crate::{
     append_tool_observation, completion_verification_instruction,
     interaction_completion_verification_instruction, model_request_for_turn_with_context_budget,
     record_tool_outcome_with_risk, repeated_tool_failure_count, tool_invocation_from_request,
-    AgentAdvance, AgentLoopState, AgentToolRequest, ContextGovernorReport,
+    AgentAdvance, AgentLoopState, AgentTaskStateSnapshot, AgentToolRequest, ContextGovernorReport,
 };
 use agent_core::{Metadata, ToolInvocation, ToolOutcomeStatus, ToolRisk, ToolSpec};
 use model_provider::{ModelRequest, ModelResponse};
@@ -11,14 +11,14 @@ use model_provider::{ModelRequest, ModelResponse};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentKernelInstructionKind {
     CompletionVerification,
-    EmptyModelRetry,
+    ModelResponseRetry,
 }
 
 impl AgentKernelInstructionKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::CompletionVerification => "completion_verification_gate",
-            Self::EmptyModelRetry => "empty_model_retry",
+            Self::ModelResponseRetry => "model_response_retry",
         }
     }
 }
@@ -58,6 +58,10 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         self.state
     }
 
+    pub fn snapshot(&self) -> AgentTaskStateSnapshot {
+        AgentTaskStateSnapshot::capture(self.state)
+    }
+
     pub fn prepare_model_turn(
         &self,
         user_instructions: Option<&str>,
@@ -88,9 +92,9 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         append_internal_instruction(self.state, instruction.kind.as_str(), &instruction.content);
     }
 
-    pub fn apply_empty_response_retry(&mut self, instruction: impl Into<String>) {
+    pub fn apply_model_response_retry(&mut self, instruction: impl Into<String>) {
         self.apply_instruction(&AgentKernelInstruction {
-            kind: AgentKernelInstructionKind::EmptyModelRetry,
+            kind: AgentKernelInstructionKind::ModelResponseRetry,
             content: instruction.into(),
         });
     }

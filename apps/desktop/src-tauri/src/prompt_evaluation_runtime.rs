@@ -368,7 +368,7 @@ pub(crate) fn complete_prompt_evaluation_worker(
             }
             AgentAdvance::Retry { instruction } => {
                 AgentKernel::new(&mut runtime, request_tools)
-                    .apply_empty_response_retry(instruction);
+                    .apply_model_response_retry(instruction);
                 continue;
             }
             AgentAdvance::ToolCalls { calls } => {

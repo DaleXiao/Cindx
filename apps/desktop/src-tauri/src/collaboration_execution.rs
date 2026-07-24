@@ -326,7 +326,7 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
     }
     let timeout_seconds = cancellation
         .as_ref()
-        .map(|control| control.model_call_timeout_seconds())
+        .map(|control| control.stage_model_call_timeout_seconds(stage_class))
         .unwrap_or(180);
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
         base_url: config.base_url.clone(),
@@ -474,11 +474,29 @@ fn no_tool_collaboration_content(
     response: model_provider::ModelResponse,
     role_name: &str,
 ) -> Result<String, String> {
-    if !response.tool_calls.is_empty() {
-        return Err(format!(
-            "collaboration {role_name} attempted {} tool call(s) in a no-tool stage",
-            response.tool_calls.len()
-        ));
+    match response.assessment().disposition {
+        model_provider::ModelResponseDisposition::ToolCalls => {
+            return Err(format!(
+                "collaboration {role_name} attempted {} tool call(s) in a no-tool stage",
+                response.tool_calls.len()
+            ));
+        }
+        model_provider::ModelResponseDisposition::IncompleteOutput => {
+            return Err(format!(
+                "collaboration {role_name} response reached its output limit before completion"
+            ));
+        }
+        model_provider::ModelResponseDisposition::Filtered => {
+            return Err(format!(
+                "collaboration {role_name} response was blocked by the provider filter"
+            ));
+        }
+        model_provider::ModelResponseDisposition::Empty => {
+            return Err(format!(
+                "collaboration {role_name} returned an empty response"
+            ));
+        }
+        model_provider::ModelResponseDisposition::Usable => {}
     }
     Ok(response.message.content)
 }
@@ -522,17 +540,6 @@ pub(crate) fn complete_collaboration_worker_with_tools(
     };
     let has_tools = !tools.is_empty();
     let evidence_turn_limit = max_model_turns.max(1);
-    let timeout_seconds = cancellation
-        .as_ref()
-        .map(|control| control.model_call_timeout_seconds())
-        .unwrap_or(180);
-    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
-        base_url: config.base_url.clone(),
-        api_key: config.api_key.clone(),
-        model,
-        embedding_model: config.model_for_role(&ModelRole::Embedder),
-        timeout_seconds,
-    });
     let mut runtime = start_agent_loop(
         task_id,
         prompt.clone(),
@@ -618,6 +625,18 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                 };
             }
         }
+
+        let timeout_seconds = cancellation
+            .as_ref()
+            .map(|control| control.stage_model_call_timeout_seconds(stage_class))
+            .unwrap_or(180);
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url: config.base_url.clone(),
+            api_key: config.api_key.clone(),
+            model: model.clone(),
+            embedding_model: config.model_for_role(&ModelRole::Embedder),
+            timeout_seconds,
+        });
 
         let finalizing =
             prepare_collaboration_worker_turn(&mut runtime, has_tools, evidence_turn_limit);
@@ -829,7 +848,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
             }
             AgentAdvance::Retry { instruction } => {
                 AgentKernel::new(&mut runtime, request_tools)
-                    .apply_empty_response_retry(instruction);
+                    .apply_model_response_retry(instruction);
                 continue;
             }
             AgentAdvance::ToolCalls { calls } => {

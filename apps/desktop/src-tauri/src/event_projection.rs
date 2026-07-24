@@ -787,6 +787,15 @@ pub(crate) struct AdaptiveQualityGateResult {
     pub(crate) issues: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AdaptivePairwiseComparison {
+    pub(crate) team_score_bps: u16,
+    pub(crate) anchor_score_bps: u16,
+    pub(crate) team_uplift_bps: i16,
+    pub(crate) team_safety_violations: u64,
+    pub(crate) anchor_safety_violations: u64,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct PromptPairwiseEvaluationPayload {
     pub(crate) score_a: f64,
