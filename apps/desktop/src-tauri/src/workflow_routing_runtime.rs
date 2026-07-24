@@ -83,8 +83,8 @@ pub(crate) fn route_with_local_telemetry(
     context: &RoutingContext,
 ) -> Result<(RoutingDecision, usize), String> {
     let mut store = open_app_read_store()?;
-    let telemetry =
-        load_routing_telemetry_read_model(&mut store).map_err(|error| error.to_string())?;
+    let telemetry = load_routing_telemetry_read_model_snapshot(&mut store)
+        .map_err(|error| error.to_string())?;
     let router = LearnedModelRouter::train(&telemetry);
     let learned_examples = router
         .learned_route_for_context(context)
