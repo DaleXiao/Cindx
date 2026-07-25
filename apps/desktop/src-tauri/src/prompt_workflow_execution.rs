@@ -62,16 +62,32 @@ pub(super) fn execute_prompt_workflow_candidate_with_runner_impl(
         .collect::<Vec<_>>();
 
     loop {
+        let Ok(delivery) = checkpoint.delivery_frontier_with_partial_recovery(max_attempts) else {
+            return failed_execution(candidate);
+        };
+        if delivery.remaining_steps.is_empty() {
+            break;
+        }
         let Ok(frontier) = checkpoint.execution_frontier_with_partial_recovery(max_attempts) else {
             return failed_execution(candidate);
         };
-        if frontier.is_complete(plan.steps.len()) {
-            break;
-        }
-        let runnable = frontier
+        let mut runnable = frontier
             .runnable_steps()
             .into_iter()
             .collect::<BTreeSet<_>>();
+        let delivery_runnable = delivery
+            .runnable_steps
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        runnable.retain(|step_id| delivery_runnable.contains(step_id));
+        let target_runnable = delivery
+            .target_step_id
+            .as_ref()
+            .is_some_and(|target| runnable.contains(target));
+        if target_runnable {
+            runnable.retain(|step_id| delivery.target_step_id.as_ref() == Some(step_id));
+        }
         if runnable.is_empty() {
             for step in &plan.steps {
                 if execution_steps

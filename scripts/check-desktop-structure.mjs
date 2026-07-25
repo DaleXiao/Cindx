@@ -21,6 +21,17 @@ const readRustSourceTree = (sourceDirectory) =>
 const readRustCrateSource = (crateName) =>
   readRustSourceTree(path.join(root, "crates", crateName, "src"));
 
+const listRustSourceFiles = (sourceDirectory) =>
+  fs
+    .readdirSync(sourceDirectory, { withFileTypes: true })
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .flatMap((entry) => {
+      const entryPath = path.join(sourceDirectory, entry.name);
+      if (entry.isDirectory()) return listRustSourceFiles(entryPath);
+      if (!entry.name.endsWith(".rs")) return [];
+      return [entryPath];
+    });
+
 const parseJson = (relativePath) => JSON.parse(read(relativePath));
 
 const assert = (condition, message) => {
@@ -34,6 +45,8 @@ const packageLock = parseJson("apps/desktop/package-lock.json");
 const tauriConfig = parseJson("apps/desktop/src-tauri/tauri.conf.json");
 const capability = parseJson("apps/desktop/src-tauri/capabilities/default.json");
 const appSource = read("apps/desktop/src/App.tsx");
+const settingsPageSource = read("apps/desktop/src/components/SettingsPage.tsx");
+const settingsUiSource = `${appSource}\n${settingsPageSource}`;
 const sessionRuntimeModelSource = read(
   "apps/desktop/src/sessionRuntimeModel.ts"
 );
@@ -69,7 +82,26 @@ const knowledgeGraphSource = read(
 );
 const traceStatusIconSource = read("apps/desktop/src/components/TraceStatusIcon.tsx");
 const artifactProjectionSource = read("crates/agent-application/src/artifacts.rs");
-const styles = read("apps/desktop/src/styles.css");
+const styleEntry = read("apps/desktop/src/styles.css");
+const styleModuleDirectory = path.join(root, "apps/desktop/src/styles");
+const styleModuleEntries = [
+  "foundation.css",
+  "sidebar.css",
+  "workspace.css",
+  "thread.css",
+  "composer.css",
+  "trace.css",
+  "schedule.css",
+  "settings.css",
+  "inspector.css",
+  "dark.css",
+];
+const styles = [
+  styleEntry,
+  ...styleModuleEntries.map((entry) =>
+    fs.readFileSync(path.join(styleModuleDirectory, entry), "utf8")
+  ),
+].join("\n");
 const tauriBridge = read("apps/desktop/src/tauri.ts");
 const localBuildScript = read("scripts/build-local-app.mjs");
 const browserSidecarSource = read("scripts/sidecars/browser-sidecar.js");
@@ -184,10 +216,37 @@ const sessionRefreshEnd = appSource.indexOf(
 const sessionRefreshBlock = appSource.slice(sessionRefreshStart, sessionRefreshEnd);
 
 const rustCompositionRootLineCount = rustCompositionRoot.split("\n").length;
+const appLineCount = appSource.split("\n").length;
+const settingsPageLineCount = settingsPageSource.split("\n").length;
+const oversizedStyleModules = styleModuleEntries
+  .map((entry) => ({
+    entry,
+    lines: fs
+      .readFileSync(path.join(styleModuleDirectory, entry), "utf8")
+      .split("\n").length,
+  }))
+  .filter(({ lines }) => lines > 1_900);
 const oversizedProductionRustModules = desktopRustModules
   .filter(({ entry }) => entry !== "tests.rs")
   .map(({ entry, source }) => ({ entry, lines: source.split("\n").length }))
   .filter(({ lines }) => lines > 2_200);
+const oversizedAgentCoreModules = ["agent-runtime", "agent-memory", "orchestrator"]
+  .flatMap((crateName) =>
+    listRustSourceFiles(path.join(root, "crates", crateName, "src"))
+      .filter((file) => {
+        const name = path.basename(file);
+        return name !== "tests.rs" && !name.endsWith("_tests.rs");
+      })
+      .map((file) => {
+        const source = fs.readFileSync(file, "utf8");
+        const productionSource = source.split("#[cfg(test)]", 1)[0];
+        return {
+          file: path.relative(root, file),
+          lines: productionSource.split("\n").length,
+        };
+      })
+  )
+  .filter(({ lines }) => lines > 1_450);
 
 assert(
   rustCompositionRootLineCount <= 250 &&
@@ -198,6 +257,43 @@ assert(
 assert(
   oversizedProductionRustModules.length === 0,
   `Desktop Rust production modules exceeded the 2,200-line cohesion budget: ${oversizedProductionRustModules
+    .map(({ entry, lines }) => `${entry} (${lines})`)
+    .join(", ")}`
+);
+assert(
+  oversizedAgentCoreModules.length === 0,
+  `Agent-core production modules exceeded the 1,450-line cohesion budget: ${oversizedAgentCoreModules
+    .map(({ file, lines }) => `${file} (${lines})`)
+    .join(", ")}`
+);
+const workflowTopologyLearningSource = read(
+  "crates/orchestrator/src/routing/workflow_topology_learning.rs"
+);
+assert(
+  orchestratorSource.includes("mod workflow_topology_learning;") &&
+    orchestratorSource.includes("pub use workflow_topology_learning::*;") &&
+    workflowTopologyLearningSource.includes("pub struct WorkflowSearchTeacher") &&
+    workflowTopologyLearningSource.includes("pub fn pareto_front") &&
+    !workflowTopologyLearningSource.includes("use super::*;"),
+  "Offline topology learning must remain isolated from the online router with explicit dependencies"
+);
+assert(
+  appLineCount <= 3_800 &&
+    settingsPageLineCount <= 2_400 &&
+    appSource.includes('import("./components/SettingsPage")') &&
+    appSource.includes("<SettingsPage") &&
+    appSource.includes("<Suspense") &&
+    !appSource.includes('className="settings-sidebar"'),
+  `App composition must keep Settings isolated and lazy-loaded (App=${appLineCount}, Settings=${settingsPageLineCount})`
+);
+assert(
+  styleModuleEntries.every((entry) =>
+    styleEntry.includes(`@import "./styles/${entry}";`)
+  ) &&
+    (styleEntry.match(/@import /g)?.length ?? 0) === styleModuleEntries.length &&
+    !styleEntry.includes("{") &&
+    oversizedStyleModules.length === 0,
+  `Desktop styles must retain ordered domain modules below 1,900 lines: ${oversizedStyleModules
     .map(({ entry, lines }) => `${entry} (${lines})`)
     .join(", ")}`
 );
@@ -781,7 +877,7 @@ assert(
 assert(
   appSource.includes('DEBUG_ALWAYS_VISIBLE_STORAGE_KEY = "cindx.debug.always-visible"') &&
     appSource.includes("loadDebugAlwaysVisible") &&
-    appSource.includes("Always show Debug") &&
+    settingsPageSource.includes("Always show Debug") &&
     appSource.includes("showDebug={debugAlwaysVisible}") &&
     inspectorSource.includes('hidden={!showDebug}') &&
     inspectorSource.includes("showDebug: boolean"),
@@ -1114,10 +1210,10 @@ assert(
     !disclosureTriangleSource.includes('import { Triangle }') &&
     (sessionThreadSource.match(/<DisclosureTriangle/g)?.length ?? 0) >= 2 &&
     !inspectorSource.includes("DisclosureTriangle") &&
-    !appSource.includes("DisclosureTriangle") &&
-    appSource.includes("function SettingsChevron") &&
-    (appSource.match(/<SettingsChevron/g)?.length ?? 0) === 9 &&
-    appSource.includes('className={action ? "settings-action-chevron" : "settings-disclosure-chevron"}') &&
+    !settingsPageSource.includes("DisclosureTriangle") &&
+    settingsPageSource.includes("function SettingsChevron") &&
+    (settingsPageSource.match(/<SettingsChevron/g)?.length ?? 0) === 9 &&
+    settingsPageSource.includes('className={action ? "settings-action-chevron" : "settings-disclosure-chevron"}') &&
     (inspectorSource.match(/<ChevronRight/g)?.length ?? 0) >= 1 &&
     inspectorSource.includes('className="inspector-debug-chevron"') &&
     !styles.includes("advanced-settings summary::before") &&
@@ -1318,10 +1414,10 @@ assert(
   "Sidebar search must expose matching sessions across projects and navigate to a selected result"
 );
 assert(
-  (appSource.match(/<span>Back to App<\/span>/g)?.length ?? 0) === 1 &&
+  (settingsPageSource.match(/<span>Back to App<\/span>/g)?.length ?? 0) === 1 &&
     !appSource.includes('className="workspace-page-navigation"') &&
-    appSource.includes('className="settings-sidebar"') &&
-    appSource.includes('className="workspace-return-button settings-app-return"') &&
+    settingsPageSource.includes('className="settings-sidebar"') &&
+    settingsPageSource.includes('className="workspace-return-button settings-app-return"') &&
     styles.includes(".workspace-return-button"),
   "Settings must expose the only in-page return to the app"
 );
@@ -1444,25 +1540,26 @@ assert(
   !styles.includes(".session-menu"),
   "Session actions must not retain a custom-drawn menu"
 );
-assert(appSource.includes('id: "runtime"'), "Settings must expose Runtime");
-assert(appSource.includes('id: "permissions"'), "Settings must expose Permissions");
+assert(settingsPageSource.includes('id: "runtime"'), "Settings must expose Runtime");
+assert(settingsPageSource.includes('id: "permissions"'), "Settings must expose Permissions");
 assert(
-  appSource.includes('id: "about"') &&
-    appSource.includes('data-settings-group="about"') &&
-    appSource.includes("runtime?.appVersion") &&
-    appSource.includes("about-app"),
+  settingsPageSource.includes('id: "about"') &&
+    settingsPageSource.includes('data-settings-group="about"') &&
+    settingsPageSource.includes("runtime?.appVersion") &&
+    settingsPageSource.includes("about-app"),
   "Settings must expose an About page with the packaged runtime version"
 );
 assert(
-  appSource.indexOf('id: "personalization"') < appSource.indexOf('id: "about"') &&
-    appSource.includes('data-settings-group="personalization"') &&
-    appSource.includes("What should Cindx call you?") &&
-    appSource.includes("Response tone") &&
-    appSource.includes("Response length") &&
-    appSource.includes("Appearance") &&
-    appSource.includes('["light", "Light", Sun]') &&
-    appSource.includes('["dark", "Dark", Moon]') &&
-    appSource.includes('["system", "System", Monitor]') &&
+  settingsPageSource.indexOf('id: "personalization"') <
+      settingsPageSource.indexOf('id: "about"') &&
+    settingsPageSource.includes('data-settings-group="personalization"') &&
+    settingsPageSource.includes("What should Cindx call you?") &&
+    settingsPageSource.includes("Response tone") &&
+    settingsPageSource.includes("Response length") &&
+    settingsPageSource.includes("Appearance") &&
+    settingsPageSource.includes('["light", "Light", Sun]') &&
+    settingsPageSource.includes('["dark", "Dark", Moon]') &&
+    settingsPageSource.includes('["system", "System", Monitor]') &&
     tauriBridge.includes("getPersonalizationConfig") &&
     tauriBridge.includes("savePersonalizationConfig") &&
     rustLib.includes("personalized_agent_instructions") &&
@@ -1472,7 +1569,7 @@ assert(
 assert(
   appSource.includes("personalizationSaveQueueRef") &&
     appSource.includes("updatePersonalizationDraft") &&
-    appSource.includes("flushPersonalization(false)") &&
+    settingsPageSource.includes("flushPersonalization(false)") &&
     rustLib.includes("The user's preferred name is") &&
     rustLib.includes("If the user asks what their name is"),
   "Personalization changes must auto-save and expose the preferred name as agent identity context"
@@ -1524,15 +1621,16 @@ assert(
 );
 assert(
   appSource.includes('className="settings-saved-toast"') &&
-    appSource.includes("showSettingsSaved();") &&
-    (appSource.match(/showSettingsSaved\(\);/g)?.length ?? 0) === 5 &&
+    settingsUiSource.includes("showSettingsSaved();") &&
+    (settingsUiSource.match(/showSettingsSaved\(\);/g)?.length ?? 0) === 5 &&
     appSource.includes("<CheckCircle2 aria-hidden=\"true\" />") &&
     styles.includes(".settings-saved-toast") &&
     styles.includes("color: #2f9e64;"),
   "Every explicit Settings save must show one green SVG Saved toast"
 );
 assert(
-  appSource.includes("<dt>Created by</dt>") && appSource.includes("<dd>Dale, 2026</dd>"),
+  settingsPageSource.includes("<dt>Created by</dt>") &&
+    settingsPageSource.includes("<dd>Dale, 2026</dd>"),
   "About must show the project credit instead of a generic platform label"
 );
 assert(
@@ -1546,11 +1644,11 @@ assert(
   "macOS quit paths must use a native AppKit confirmation with persistent suppression"
 );
 assert(
-  appSource.includes('id: "agent"') &&
-    appSource.includes("Agent instructions") &&
-    appSource.includes("Custom instructions") &&
-    appSource.includes("cannot replace permission or") &&
-    appSource.includes("providerDraft.agentSystemPrompt") &&
+  settingsPageSource.includes('id: "agent"') &&
+    settingsPageSource.includes("Agent instructions") &&
+    settingsPageSource.includes("Custom instructions") &&
+    settingsPageSource.includes("cannot replace permission or") &&
+    settingsPageSource.includes("providerDraft.agentSystemPrompt") &&
     tauriBridge.includes("agentSystemPrompt: string") &&
     rustLib.includes("agent_system_prompt_hex") &&
     rustLib.includes("model_request_for_turn_with_context") &&
@@ -1676,11 +1774,11 @@ assert(
   "Outputs must show an upward-pointing chevron when expanded and a downward-pointing chevron when collapsed"
 );
 assert(!tauriBridge.includes("apiKeyPreview"), "Provider state must not expose API key suffixes");
-assert(appSource.includes("<ModelSelect"), "Provider models must use select controls");
+assert(settingsPageSource.includes("<ModelSelect"), "Provider models must use select controls");
 assert(appSource.includes("listProviderModels"), "Provider settings must load the remote model catalog");
 assert(
-  appSource.includes('label="Conductor"') &&
-    appSource.includes("providerDraft.conductorModel") &&
+  settingsPageSource.includes('label="Conductor"') &&
+    settingsPageSource.includes("providerDraft.conductorModel") &&
     tauriBridge.includes("conductorModel: string") &&
     rustLib.includes("conductor_model: String") &&
     rustLib.includes("model_for_conductor"),
@@ -1703,10 +1801,10 @@ assert(
   "Chat title and status controls must remain hidden in Settings and optically aligned elsewhere"
 );
 assert(
-  appSource.includes('className="settings-tabs"') &&
-    appSource.includes('aria-current={settingsCategory === category.id ? "page" : undefined}') &&
+  settingsPageSource.includes('className="settings-tabs"') &&
+    settingsPageSource.includes('aria-current={settingsCategory === category.id ? "page" : undefined}') &&
     styles.includes(".settings-tabs > button.active span") &&
-    !appSource.includes('aria-label="Back to Settings"'),
+    !settingsPageSource.includes('aria-label="Back to Settings"'),
   "Settings must keep a persistent vertical category tab list with a bold active title"
 );
 assert(
@@ -1714,23 +1812,23 @@ assert(
   "Session title, context usage, and runtime status must be integrated into the window titlebar"
 );
 assert(
-  appSource.includes("Default effort") &&
-    appSource.includes("Cindx Fast") &&
-    appSource.includes("Cindx Auto") &&
-    appSource.includes("Cindx Pro"),
+  settingsPageSource.includes("Default effort") &&
+    settingsPageSource.includes("Cindx Fast") &&
+    settingsPageSource.includes("Cindx Auto") &&
+    settingsPageSource.includes("Cindx Pro"),
   "Provider settings must expose the three Cindx effort modes"
 );
-assert(appSource.includes("Archived sessions"), "Settings must expose archived session recovery");
+assert(settingsPageSource.includes("Archived sessions"), "Settings must expose archived session recovery");
 assert(
-  (appSource.match(/className="runtime-state-value"/g)?.length ?? 0) === 3 &&
-    appSource.includes('data-state={sidecarState?.autoConfigure ? "auto" : "manual"}') &&
+  (settingsPageSource.match(/className="runtime-state-value"/g)?.length ?? 0) === 3 &&
+    settingsPageSource.includes('data-state={sidecarState?.autoConfigure ? "auto" : "manual"}') &&
     /\.runtime-state-value\[data-state="ready"\],[\s\S]*?color: #2f9e64;/.test(styles),
   "Runtime Ready and Auto states must use green SVG status indicators"
 );
 assert(
-  appSource.includes("skillRefreshTurn") &&
-    appSource.includes("providerModelsRefreshTurn") &&
-    (appSource.match(/settings-refresh-turn/g)?.length ?? 0) >= 2 &&
+  settingsPageSource.includes("skillRefreshTurn") &&
+    settingsPageSource.includes("providerModelsRefreshTurn") &&
+    (settingsPageSource.match(/settings-refresh-turn/g)?.length ?? 0) >= 2 &&
     styles.includes("@keyframes settings-refresh-turn"),
   "Settings refresh actions must replay a one-turn icon animation for every click"
 );
@@ -1743,8 +1841,8 @@ assert(
   "The trusted Claude Code Skill Creator must ship inside the Rust skill catalog"
 );
 assert(
-  !appSource.includes("Local folder") &&
-    appSource.includes(".skill package") &&
+  !settingsPageSource.includes("Local folder") &&
+    settingsPageSource.includes(".skill package") &&
     appSource.includes("installSkillUrl") &&
     !rustLib.includes("install_skill_directory") &&
     rustLib.includes("install_skill_package") &&
@@ -1762,17 +1860,17 @@ assert(
   "Cindx branding and the send action must retain their bundled type and blue accent"
 );
 assert(
-  appSource.includes("Knowledge sources") &&
-    appSource.includes("knowledge-results") &&
+  settingsPageSource.includes("Knowledge sources") &&
+    settingsPageSource.includes("knowledge-results") &&
     appSource.includes("phase7.stats.chunksIndexed === 0") &&
-    !appSource.includes("Test retrieval") &&
+    !settingsPageSource.includes("Test retrieval") &&
     tauriBridge.includes("if (isTauriRuntime()) throw error"),
   "Knowledge search must auto-index, expose results inline, and surface real Tauri errors"
 );
 assert(
-  appSource.includes("Web search API") &&
-    appSource.includes("Save web search") &&
-    appSource.includes("registered-tools-details") &&
+  settingsPageSource.includes("Web search API") &&
+    settingsPageSource.includes("Save web search") &&
+    settingsPageSource.includes("registered-tools-details") &&
     tauriBridge.includes('invoke<WebSearchConfigState>("save_web_search_config"') &&
     rustLib.includes("fn save_web_search_config(") &&
     rustLib.includes("web-search.conf") &&
@@ -1782,11 +1880,11 @@ assert(
   "Tools settings must persist a private custom web search API and expand built-in tool details"
 );
 assert(
-  appSource.includes('label="Image generation"') &&
-    appSource.includes("Image API endpoint") &&
-    appSource.includes("provider-endpoint-check") &&
+  settingsPageSource.includes('label="Image generation"') &&
+    settingsPageSource.includes("Image API endpoint") &&
+    settingsPageSource.includes("provider-endpoint-check") &&
     appSource.includes("validateImageEndpoint") &&
-    appSource.includes('emptyLabel="Not configured"') &&
+    settingsPageSource.includes('emptyLabel="Not configured"') &&
     styles.includes("grid-template-columns: minmax(0, 1fr) 18px") &&
     styles.includes(".provider-endpoint-check") &&
     !/\.provider-endpoint-check \{[^}]*position: absolute;/.test(styles) &&
@@ -1811,11 +1909,11 @@ assert(
   "Workspace indexing must migrate incompatible embedding defaults and retain a local fallback"
 );
 assert(
-  appSource.includes("Pending Reviews") &&
-    appSource.includes("permission-review-list") &&
+  settingsPageSource.includes("Pending Reviews") &&
+    settingsPageSource.includes("permission-review-list") &&
     appSource.includes("handleResolvePermissionReview") &&
     appSource.includes("handleIgnorePermissionReview") &&
-    appSource.includes("review.sessionName") &&
+    settingsPageSource.includes("review.sessionName") &&
     tauriBridge.includes("getPermissionReviewState") &&
     rustLib.includes("async fn get_permission_review_state(") &&
     rustLib.includes("let store = open_app_read_store()?") &&
@@ -1825,17 +1923,17 @@ assert(
 );
 assert(
   styles.includes(".advanced-settings summary::-webkit-details-marker") &&
-    appSource.includes("function SettingsChevron") &&
+    settingsPageSource.includes("function SettingsChevron") &&
     styles.includes(".settings-disclosure-chevron"),
   "Expandable settings must use a consistent trailing chevron"
 );
 assert(
-  appSource.includes('className="settings-sidebar"') &&
-    appSource.includes('className="settings-detail"') &&
-    appSource.includes('{settingsCategory === "skills" && (') &&
-    appSource.includes('{settingsCategory === "permissions" && (') &&
-    appSource.includes('{settingsCategory === "knowledge" && (') &&
-    !appSource.includes("settings-index") &&
+  settingsPageSource.includes('className="settings-sidebar"') &&
+    settingsPageSource.includes('className="settings-detail"') &&
+    settingsPageSource.includes('{settingsCategory === "skills" && (') &&
+    settingsPageSource.includes('{settingsCategory === "permissions" && (') &&
+    settingsPageSource.includes('{settingsCategory === "knowledge" && (') &&
+    !settingsPageSource.includes("settings-index") &&
     styles.includes("grid-template-columns: 168px minmax(0, 760px)") &&
     /\.settings-app-return \{[\s\S]*?top: -12px;/.test(styles),
   "Settings must use persistent left tabs and right-side details"
@@ -2044,7 +2142,7 @@ assert(
     rustLib.includes('"Project memory utilization measured"') &&
     rustLib.includes("should_recall_agent_memory") &&
     rustLib.includes("delete_project_memory") &&
-    appSource.includes('aria-label="Project memory stats"'),
+    settingsPageSource.includes('aria-label="Project memory stats"'),
   "Project memory must be durable, deduplicated, explainable, trust-scoped, and deleted with its project"
 );
 assert(
@@ -2058,7 +2156,7 @@ assert(
     rustLib.includes("let graph_seeds = search_chunks_literal") &&
     rustLib.includes("search_lancedb_index(") &&
     tauriBridge.includes("indexCacheHit") &&
-    appSource.includes('"index cached"'),
+    settingsPageSource.includes('"index cached"'),
   "Knowledge retrieval must reuse a bounded index cache and keep graph walk inside the parallel channel"
 );
 assert(
@@ -2131,21 +2229,21 @@ assert(
     tauriBridge.includes("averageStepCredit") &&
     tauriBridge.includes("promotionConfidence") &&
     tauriBridge.includes("canaryPercent") &&
-    appSource.includes('if (category === "tools") return <Wrench aria-hidden="true" />;') &&
-    /<Wrench size=\{17\} aria-hidden="true" \/>\s*<h2>Tools<\/h2>/.test(appSource) &&
-    /<Dna size=\{17\} aria-hidden="true" \/>\s*<h2>Genetic Pareto<\/h2>/.test(appSource) &&
-    appSource.includes("Genetic Pareto") &&
-    appSource.includes("Candidate harnesses execute in an isolated arena before promotion") &&
-    appSource.includes("direct stable-versus-challenger Wilson gate controls staged canary rollout") &&
-    appSource.includes("Evaluating in background") &&
-    appSource.includes("Rollout by effort") &&
-    appSource.includes("Candidate profiles") &&
-    appSource.includes("prompt-evolution-table") &&
-    appSource.includes("prompt-evolution-summary") &&
-    appSource.includes("Rollbacks") &&
+    settingsPageSource.includes('if (category === "tools") return <Wrench aria-hidden="true" />;') &&
+    /<Wrench size=\{17\} aria-hidden="true" \/>\s*<h2>Tools<\/h2>/.test(settingsPageSource) &&
+    /<Dna size=\{17\} aria-hidden="true" \/>\s*<h2>Genetic Pareto<\/h2>/.test(settingsPageSource) &&
+    settingsPageSource.includes("Genetic Pareto") &&
+    settingsPageSource.includes("Candidate harnesses execute in an isolated arena before promotion") &&
+    settingsPageSource.includes("direct stable-versus-challenger Wilson gate controls staged canary rollout") &&
+    settingsPageSource.includes("Evaluating in background") &&
+    settingsPageSource.includes("Rollout by effort") &&
+    settingsPageSource.includes("Candidate profiles") &&
+    settingsPageSource.includes("prompt-evolution-table") &&
+    settingsPageSource.includes("prompt-evolution-summary") &&
+    settingsPageSource.includes("Rollbacks") &&
     styles.includes(".prompt-evolution-table") &&
-    !appSource.includes("prompt-evolution-efforts") &&
-    !appSource.includes("prompt-evolution-profiles"),
+    !settingsPageSource.includes("prompt-evolution-efforts") &&
+    !settingsPageSource.includes("prompt-evolution-profiles"),
   "Conductor workflows must run executable harness evolution with confidence-gated canary rollout"
 );
 
@@ -2183,18 +2281,18 @@ assert(
   nonGrayColors.length === 0,
   "Desktop theme must remain grayscale except for brand, message, and session-state accents"
 );
-assert(appSource.includes("Pending Reviews"), "App must render pending permission reviews");
+assert(settingsPageSource.includes("Pending Reviews"), "App must render pending permission reviews");
 assert(
-  !appSource.includes("<h2>Orchestration</h2>") &&
-    !appSource.includes("Manual workflow test") &&
+  !settingsPageSource.includes("<h2>Orchestration</h2>") &&
+    !settingsPageSource.includes("Manual workflow test") &&
     tauriBridge.includes('invoke<Phase6State>("run_orchestration"'),
   "Manual orchestration must stay out of user settings while remaining available to diagnostics"
 );
-assert(appSource.includes("Provider"), "App must render provider UI");
-assert(appSource.includes("Save workspace"), "App must render workspace save action");
+assert(settingsPageSource.includes("Provider"), "App must render provider UI");
+assert(settingsPageSource.includes("Save workspace"), "App must render workspace save action");
 assert(
   appSource.includes("handlePickWorkspace") &&
-    appSource.includes("workspace-folder-selector") &&
+    settingsPageSource.includes("workspace-folder-selector") &&
     appSource.includes("pickWorkspaceFolder"),
   "Workspace settings must use the native folder selector"
 );
@@ -2204,20 +2302,21 @@ assert(
     styles.includes(".nav-heading-with-icon"),
   "Projects heading must render an aligned SVG icon"
 );
-assert(appSource.includes("Save provider"), "App must render provider save action");
-assert(appSource.includes("Run tool"), "App must render the Phase 5 tool runner");
-assert(appSource.includes("Index workspace"), "App must render the Phase 7 RAG index action");
+assert(settingsPageSource.includes("Save provider"), "App must render provider save action");
+assert(settingsPageSource.includes("Run tool"), "App must render the Phase 5 tool runner");
+assert(settingsPageSource.includes("Index workspace"), "App must render the Phase 7 RAG index action");
 assert(appSource.includes("answerWithRag"), "App must render the Phase 7 RAG answer flow");
-assert(appSource.includes("Search web"), "App must render the Phase 8 web search action");
+assert(settingsPageSource.includes("Search web"), "App must render the Phase 8 web search action");
 assert(appSource.includes("runBrowserTool"), "App must render the Phase 8 browser flow");
 assert(
-  appSource.includes('handleRunBrowserTool("browser.tabs")') &&
-    appSource.includes('handleRunBrowserTool("browser.select_tab")'),
+  settingsPageSource.includes('handleRunBrowserTool("browser.tabs")') &&
+    settingsPageSource.includes('handleRunBrowserTool("browser.select_tab")'),
   "Browser settings must expose tab listing and selection"
 );
 assert(appSource.includes("getRuntimeStatus"), "App must call the runtime bridge");
 assert(
-  !appSource.includes("Request review") && appSource.includes("Approve once"),
+  !settingsPageSource.includes("Request review") &&
+    settingsPageSource.includes("Approve once"),
   "Permission settings must review real pending actions instead of creating mock requests"
 );
 
@@ -2389,7 +2488,7 @@ assert(
   "Knowledge retrieval must select two or four channels, fuse results, and feed the agent"
 );
 assert(
-  appSource.includes("Graph Explorer") &&
+  settingsPageSource.includes("Graph Explorer") &&
     knowledgeGraphSource.includes('aria-label="Workspace knowledge graph"') &&
     knowledgeGraphSource.includes('from "d3-force"') &&
     knowledgeGraphSource.includes("forceSimulation(positioned)") &&
@@ -2422,8 +2521,8 @@ assert(
   "Knowledge settings must expose a restrained force-directed graph with connected ambient node motion"
 );
 assert(
-  appSource.includes("const KnowledgeGraph = lazy(() =>") &&
-    appSource.includes("knowledgeGraphOpen ? (") &&
+  settingsPageSource.includes("const KnowledgeGraph = lazy(() =>") &&
+    settingsPageSource.includes("knowledgeGraphOpen ? (") &&
     appSource.includes("BACKGROUND_AGENT_POLL_INTERVAL_MS = 5_000") &&
     appSource.includes('document.visibilityState === "hidden"') &&
     appSource.includes('document.addEventListener("visibilitychange"'),

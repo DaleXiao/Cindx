@@ -1,0 +1,654 @@
+:root[data-theme="dark"] .thread-message-user p,
+:root[data-theme="dark"] .thread-message-attachment {
+  color: var(--text);
+  background: rgba(37, 99, 235, 0.22);
+}
+
+:root[data-theme="dark"] .thread-message-user.selected p,
+:root[data-theme="dark"] .thread-message-attachment:hover {
+  background: rgba(37, 99, 235, 0.3);
+}
+
+:root[data-theme="dark"] .thread-message-tool,
+:root[data-theme="dark"] .thread-message-system,
+:root[data-theme="dark"] .thread-message-reviewer {
+  color: var(--text);
+  background: var(--panel);
+}
+
+:root[data-theme="dark"] .thread-message p,
+:root[data-theme="dark"] .thread-markdown,
+:root[data-theme="dark"] .thread-markdown h1,
+:root[data-theme="dark"] .thread-markdown h2,
+:root[data-theme="dark"] .thread-markdown h3,
+:root[data-theme="dark"] .thread-markdown h4,
+:root[data-theme="dark"] .thread-markdown h5,
+:root[data-theme="dark"] .thread-markdown h6 {
+  color: var(--text);
+}
+
+:root[data-theme="dark"] .thread-message {
+  border-bottom-color: var(--border);
+}
+
+:root[data-theme="dark"] .thread-message:hover,
+:root[data-theme="dark"] .thread-message.selected {
+  border-bottom-color: var(--border-strong);
+}
+
+:root[data-theme="dark"] .thread-output-image-preview,
+:root[data-theme="dark"] .thread-output-link {
+  background: var(--surface-hover);
+  border-color: var(--border);
+}
+
+:root[data-theme="dark"] .thread-output-name,
+:root[data-theme="dark"] .thread-output-link {
+  color: #8ab8f7;
+}
+
+:root[data-theme="dark"] .thread-output-name:hover,
+:root[data-theme="dark"] .thread-output-name:focus-visible,
+:root[data-theme="dark"] .thread-output-link:hover,
+:root[data-theme="dark"] .thread-output-link:focus-visible {
+  color: #b5d2fa;
+  background: var(--surface-active);
+}
+
+:root[data-theme="dark"] .thread-markdown th,
+:root[data-theme="dark"] .thread-markdown td {
+  border-color: var(--border-strong);
+}
+
+:root[data-theme="dark"] .thread-markdown th {
+  background: var(--surface-hover);
+}
+
+:root[data-theme="dark"] .window-pane-toggle,
+:root[data-theme="dark"] .icon-button,
+:root[data-theme="dark"] .workspace-return-button,
+:root[data-theme="dark"] .session-more,
+:root[data-theme="dark"] .thread-event-disclosure > summary,
+:root[data-theme="dark"] .thread-tool-message > summary,
+:root[data-theme="dark"] .thread-tool-chain-item,
+:root[data-theme="dark"] .thread-event-icon,
+:root[data-theme="dark"] .thread-message-icon,
+:root[data-theme="dark"] .section-title svg,
+:root[data-theme="dark"] .inspector-outputs > header svg,
+:root[data-theme="dark"] .inspector-output > svg,
+:root[data-theme="dark"] .inspector-output-toggle,
+:root[data-theme="dark"] .inspector-output-reveal,
+:root[data-theme="dark"] .inspector-debug-toggle > svg:first-child,
+:root[data-theme="dark"] .inspector-debug-chevron {
+  color: var(--muted);
+}
+
+:root[data-theme="dark"] .window-pane-toggle:hover,
+:root[data-theme="dark"] .icon-button:hover,
+:root[data-theme="dark"] .icon-button.active,
+:root[data-theme="dark"] .session-more:hover,
+:root[data-theme="dark"] .session-more.active,
+:root[data-theme="dark"] .inspector-output-toggle:hover,
+:root[data-theme="dark"] .inspector-output-toggle:focus-visible,
+:root[data-theme="dark"] .inspector-output-reveal:hover,
+:root[data-theme="dark"] .inspector-output-reveal:focus-visible {
+  color: var(--text);
+}
+
+:root[data-theme="dark"] .trace-status-icon[data-state="waiting"],
+:root[data-theme="dark"] .trace-status-icon[data-state="failed"],
+:root[data-theme="dark"] .trace-status-icon[data-state="cancelled"] {
+  color: var(--muted);
+}
+
+:root[data-theme="dark"] .thread-jump-latest {
+  color: var(--text);
+  background: rgb(39 39 39 / 78%);
+  border-color: var(--border-strong);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 28%);
+}
+
+:root[data-theme="dark"] .thread-jump-latest:hover {
+  background: rgb(48 48 48 / 90%);
+}
+
+:root[data-theme="dark"] .delete-confirmation-dialog,
+:root[data-theme="dark"] .delete-confirmation-actions button {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border-strong);
+}
+
+:root[data-theme="dark"] .delete-confirmation-actions button:hover:not(:disabled) {
+  background: var(--surface-active);
+}
+
+:root[data-theme="dark"] .thread-markdown blockquote {
+  color: var(--muted);
+  border-left-color: var(--border-strong);
+}
+
+:root[data-theme="dark"] .thread-markdown code,
+:root[data-theme="dark"] .thread-markdown pre,
+:root[data-theme="dark"] .thread-code-block,
+:root[data-theme="dark"] .thread-code-block-header {
+  color: var(--text);
+  background: #222222;
+  border-color: var(--border);
+}
+
+:root[data-theme="dark"] .thread-mermaid-diagram,
+:root[data-theme="dark"] .thread-markmap-diagram,
+:root[data-theme="dark"] .thread-markmap-loading,
+:root[data-theme="dark"] .thread-markmap-diagram > .thread-diagram-error,
+:root[data-theme="dark"] .thread-diagram-loading,
+:root[data-theme="dark"] .thread-diagram-error > p {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.thread-mermaid-diagram[data-theme="dark"] svg text {
+  fill: #f3f3f3 !important;
+}
+
+.thread-mermaid-diagram[data-theme="dark"] svg foreignObject,
+.thread-mermaid-diagram[data-theme="dark"] svg foreignObject * {
+  color: #f3f3f3 !important;
+}
+
+:root[data-theme="dark"] .thread-markmap-diagram > svg.markmap {
+  --markmap-text-color: #f4f4f4;
+  --markmap-code-bg: #292929;
+  --markmap-code-color: #f1f1f1;
+  --markmap-circle-open-bg: #202020;
+}
+
+:root[data-theme="dark"] .thread-diagram-fullscreen,
+:root[data-theme="dark"] .thread-diagram-fullscreen-surface .thread-markmap-diagram,
+:root[data-theme="dark"] .thread-diagram-fullscreen-surface .thread-mermaid-diagram {
+  color: var(--text);
+  background: var(--bg);
+}
+
+:root[data-theme="dark"] .thread-diagram-fullscreen-actions,
+:root[data-theme="dark"] .thread-diagram-zoom-controls {
+  background: rgb(32 32 32 / 90%);
+  border-color: var(--border-strong);
+  box-shadow: 0 5px 20px rgb(0 0 0 / 34%);
+}
+
+:root[data-theme="dark"] .thread-diagram-error pre {
+  border-top-color: var(--border);
+}
+
+:root[data-theme="dark"] .queued-message-stack,
+:root[data-theme="dark"] .queued-message-menu,
+:root[data-theme="dark"] .composer-effort-menu,
+:root[data-theme="dark"] .settings-saved-toast,
+:root[data-theme="dark"] .clipboard-toast {
+  color: var(--text);
+  background: rgba(31, 31, 31, 0.97);
+  border-color: var(--border-strong);
+}
+
+:root[data-theme="dark"] .queued-message + .queued-message {
+  border-top-color: var(--border);
+}
+
+:root[data-theme="dark"] .queued-message-edit,
+:root[data-theme="dark"] .composer-primary-button[data-mode="stop"],
+:root[data-theme="dark"] .composer-permission-actions button {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border-strong);
+}
+
+:root[data-theme="dark"] .queued-message-menu button,
+:root[data-theme="dark"] .queued-message-edit-actions button,
+:root[data-theme="dark"] .queued-message-menu-trigger,
+:root[data-theme="dark"] .composer-effort-control,
+:root[data-theme="dark"] .composer-attachment,
+:root[data-theme="dark"] .composer-permission,
+:root[data-theme="dark"] .permission-review-actions button,
+:root[data-theme="dark"] .permission-ignored-row button {
+  color: var(--text);
+}
+
+:root[data-theme="dark"] .queued-message-menu button:hover,
+:root[data-theme="dark"] .queued-message-menu button:focus-visible,
+:root[data-theme="dark"] .queued-message-edit-actions button:hover:not(:disabled),
+:root[data-theme="dark"] .queued-message-menu-trigger:hover:not(:disabled),
+:root[data-theme="dark"] .composer-effort-menu > button:hover,
+:root[data-theme="dark"] .composer-effort-menu > button:focus-visible,
+:root[data-theme="dark"] .composer-effort-menu > button[data-selected="true"],
+:root[data-theme="dark"] .permission-review-actions button:hover:not(:disabled),
+:root[data-theme="dark"] .permission-ignored-row button:hover:not(:disabled) {
+  background: var(--surface-active);
+}
+
+:root[data-theme="dark"] .queued-message-edit:focus {
+  border-color: #60a5fa;
+  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.18);
+}
+
+:root[data-theme="dark"] .composer-permission-actions button.permission-once,
+:root[data-theme="dark"] .permission-review-actions button.permission-approve {
+  color: #ffffff;
+  background: #2563eb;
+  border-color: #2563eb;
+}
+
+:root[data-theme="dark"] .composer-permission-actions button.permission-once:hover,
+:root[data-theme="dark"] .permission-review-actions button.permission-approve:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+:root[data-theme="dark"] .composer-permission-actions button.permission-session,
+:root[data-theme="dark"] .permission-review-actions button.permission-session {
+  color: #bfdbfe;
+  background: rgba(37, 99, 235, 0.16);
+  border-color: rgba(96, 165, 250, 0.48);
+}
+
+:root[data-theme="dark"] .composer-permission-actions button.permission-deny,
+:root[data-theme="dark"] .permission-review-actions button.permission-deny {
+  color: #fca5a5;
+  background: var(--surface);
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+:root[data-theme="dark"] .composer-attach-button,
+:root[data-theme="dark"] .composer-effort-trigger,
+:root[data-theme="dark"] .composer-attachment,
+:root[data-theme="dark"] .composer-permission {
+  color: var(--text);
+  background: var(--surface-hover);
+  border-color: var(--border);
+}
+
+:root[data-theme="dark"] .settings-switch-track {
+  background: var(--border-strong);
+}
+
+:root[data-theme="dark"] .prompt-evolution-summary strong,
+:root[data-theme="dark"] .skill-install-error,
+:root[data-theme="dark"] .knowledge-result p,
+:root[data-theme="dark"] .permission-review-row > header em,
+:root[data-theme="dark"] .permission-review-row > p,
+:root[data-theme="dark"] .permission-review-meta dd {
+  color: var(--text);
+}
+
+:root[data-theme="dark"] .skill-url-row,
+:root[data-theme="dark"] .integration-row,
+:root[data-theme="dark"] .tool-schema,
+:root[data-theme="dark"] .tool-output,
+:root[data-theme="dark"] .source-preview,
+:root[data-theme="dark"] .knowledge-graph-canvas,
+:root[data-theme="dark"] .knowledge-graph-empty,
+:root[data-theme="dark"] .permission-review-row,
+:root[data-theme="dark"] .permission-review-input pre,
+:root[data-theme="dark"] .permission-review-actions button,
+:root[data-theme="dark"] .permission-ignored-row button {
+  color: var(--text);
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+:root[data-theme="dark"] .skill-url-row > svg {
+  color: var(--muted);
+}
+
+:root[data-theme="dark"] .permission-review-actions button:hover:not(:disabled),
+:root[data-theme="dark"] .permission-ignored-row button:hover:not(:disabled) {
+  background: var(--surface-active);
+}
+
+:root[data-theme="dark"] .knowledge-graph-edges line {
+  stroke: var(--border-strong);
+}
+
+:root[data-theme="dark"] .knowledge-graph-edges line[data-related="true"] {
+  stroke: var(--text);
+}
+
+:root[data-theme="dark"] .knowledge-graph-node-core {
+  stroke: var(--surface);
+}
+
+:root[data-theme="dark"] .knowledge-graph-node-label {
+  fill: var(--muted);
+  stroke: var(--surface);
+}
+
+:root[data-theme="dark"] .knowledge-graph-node[data-active="true"] .knowledge-graph-node-label {
+  fill: var(--text);
+}
+
+:root[data-theme="dark"] .composer-attach-button:hover:not(:disabled),
+:root[data-theme="dark"] .composer-effort-trigger:hover:not(:disabled) {
+  background: var(--surface-active);
+}
+
+:root[data-theme="dark"] .prompt-evolution-table caption,
+:root[data-theme="dark"] .prompt-evolution-table tbody th,
+:root[data-theme="dark"] .inspector-output-name strong,
+:root[data-theme="dark"] .inspector-text-preview,
+:root[data-theme="dark"] .inspector-debug-session code {
+  color: var(--text);
+}
+
+:root[data-theme="dark"] .prompt-evolution-table tbody th,
+:root[data-theme="dark"] .prompt-evolution-table tbody td,
+:root[data-theme="dark"] .settings-inline-error,
+:root[data-theme="dark"] .permission-review-input pre {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+:root[data-theme="dark"] .prompt-evolution-table tbody tr:hover th,
+:root[data-theme="dark"] .prompt-evolution-table tbody tr:hover td {
+  background: var(--surface-active);
+}
+
+:root[data-theme="dark"] .inspector-output-row:hover,
+:root[data-theme="dark"] .inspector-output-row:focus-within,
+:root[data-theme="dark"] .inspector-output-toggle:hover,
+:root[data-theme="dark"] .inspector-output-toggle:focus-visible,
+:root[data-theme="dark"] .inspector-output-reveal:hover,
+:root[data-theme="dark"] .inspector-output-reveal:focus-visible {
+  color: var(--text);
+  background: var(--surface-active);
+}
+
+:root[data-theme="dark"] .inspector-output-name small,
+:root[data-theme="dark"] .inspector-output-action-error {
+  color: var(--muted);
+  background: var(--surface-active);
+}
+
+:root[data-theme="dark"] .inspector-output-detail,
+:root[data-theme="dark"] .inspector-output-detail-body,
+:root[data-theme="dark"] .inspector-markdown-preview,
+:root[data-theme="dark"] .inspector-text-preview,
+:root[data-theme="dark"] .inspector-output-detail[data-fullscreen="true"] {
+  color: var(--text);
+  background: var(--bg);
+  border-color: var(--border);
+}
+
+:root[data-theme="dark"] .inspector-output-detail[data-fullscreen="true"] > header {
+  background: var(--toolbar-solid);
+}
+
+:root[data-theme="dark"] .inspector-debug::before {
+  background: rgba(29, 29, 29, 0.9);
+  border-top-color: var(--border);
+}
+
+:root[data-theme="dark"] .inspector-code {
+  color: var(--text);
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+:root[data-theme="dark"] .detail-list > div {
+  border-bottom-color: var(--border);
+}
+
+:root[data-theme="dark"] .inspector-debug-toggle:hover,
+:root[data-theme="dark"] .inspector-debug-toggle:focus-visible {
+  background: rgb(255 255 255 / 5%);
+}
+
+:root[data-theme="dark"] .trace-sequence-item:not(:last-child)::after,
+:root[data-theme="dark"] .trace-sequence-marker,
+:root[data-theme="dark"] .trace-step-icon {
+  color: var(--muted);
+  background: var(--surface-hover);
+  border-color: var(--border);
+}
+
+:root[data-theme="dark"] .schedule-notice,
+:root[data-theme="dark"] .schedule-list-icon,
+:root[data-theme="dark"] .schedule-prompt-preview p {
+  color: var(--text);
+  background: var(--surface-hover);
+  border-color: var(--border);
+}
+
+:root[data-theme="dark"] .schedule-list-icon[data-enabled="true"] {
+  color: var(--accent);
+  background: rgba(37, 99, 235, 0.18);
+  border-color: rgba(37, 99, 235, 0.36);
+}
+
+:root[data-theme="dark"] .schedule-segmented {
+  background: var(--surface-hover);
+}
+
+:root[data-theme="dark"] .schedule-segmented button.active {
+  color: var(--text);
+  background: var(--surface-active);
+}
+
+:root[data-theme="dark"] .schedule-summary-actions .danger:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--border);
+}
+
+@media (max-width: 1180px) {
+  .app-shell {
+    --inspector-layout-width: min(var(--inspector-width, 320px), calc(100vw - 240px));
+  }
+
+  .app-shell,
+  .app-shell[data-inspector-open="false"] {
+    grid-template-columns: var(--sidebar-layout-width) minmax(0, 1fr) 0;
+  }
+
+  .app-shell[data-sidebar-open="false"],
+  .app-shell[data-sidebar-open="false"][data-inspector-open="false"] {
+    grid-template-columns: 0 minmax(0, 1fr) 0;
+  }
+
+  .inspector[data-open="true"] {
+    position: fixed;
+    z-index: 20;
+    top: var(--titlebar-height);
+    right: 0;
+    bottom: 0;
+    width: var(--inspector-layout-width);
+  }
+}
+
+@media (max-width: 760px) {
+  .app-shell {
+    --inspector-layout-width: min(88vw, 420px);
+  }
+
+  body {
+    overflow: auto;
+  }
+
+  .app-shell,
+  .app-shell[data-inspector-open="false"],
+  .app-shell[data-sidebar-open="false"],
+  .app-shell[data-sidebar-open="false"][data-inspector-open="false"] {
+    grid-template-columns: 1fr;
+    grid-template-rows: var(--titlebar-height) minmax(0, 1fr);
+    height: auto;
+    min-height: 100%;
+  }
+
+  .sidebar {
+    display: none;
+  }
+
+  .workspace {
+    grid-column: 1;
+    grid-row: 2;
+    min-height: 100vh;
+  }
+
+  .window-workspace-header {
+    grid-column: 1;
+    padding-left: 80px;
+  }
+
+  .app-shell[data-active-view="settings"] .window-workspace-header {
+    padding-left: 80px;
+  }
+
+  .sidebar-pane-toggle {
+    display: none;
+  }
+
+  .app-shell::before,
+  .sidebar-resize-handle {
+    display: none;
+  }
+
+  .window-toolbar-panel-left {
+    display: none;
+  }
+
+  .runtime-pill {
+    display: none;
+  }
+
+  .session-thread {
+    padding-right: 14px;
+    padding-left: 38px;
+  }
+
+  .thread-minimap {
+    left: 6px;
+  }
+
+  .thread-message-user {
+    width: 88%;
+  }
+
+  .composer {
+    padding-inline: 14px;
+  }
+
+  .composer-permission {
+    grid-template-columns: 20px minmax(0, 1fr);
+  }
+
+  .composer-permission-actions {
+    grid-column: 2;
+    flex-wrap: wrap;
+  }
+
+  .settings-view {
+    grid-template-columns: 140px minmax(0, 1fr);
+    gap: 14px;
+    padding: 14px;
+  }
+
+  .settings-sidebar {
+    top: 14px;
+  }
+
+  .schedule-toolbar {
+    padding-inline: 14px;
+  }
+
+  .schedule-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(110px, 32vh) minmax(0, 1fr);
+    overflow: auto;
+  }
+
+  .schedule-layout[data-empty="true"] {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .schedule-list {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .schedule-detail {
+    overflow: visible;
+    padding: 16px 14px 28px;
+  }
+
+  .schedule-field-grid,
+  .schedule-status-band {
+    grid-template-columns: 1fr;
+  }
+
+  .schedule-status-band > div + div {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .schedule-enabled-switch {
+    justify-self: start;
+    margin: 0 0 10px;
+  }
+
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell,
+  .sidebar,
+  .inspector,
+  .window-pane-toggle-icon svg,
+  .disclosure-triangle,
+  .thread-tool-chain-chevron,
+  .settings-disclosure-chevron,
+  .settings-action-chevron,
+  .settings-refresh-turn,
+  .composer-effort-trigger > svg,
+  .composer-effort-menu,
+  .project-disclosure-chevron,
+  .inspector-output-chevron,
+  .inspector-debug-chevron,
+  .inspector-debug-chevron > svg,
+  .knowledge-graph-scene,
+  .knowledge-graph-edges line,
+  .knowledge-graph-node,
+  .knowledge-graph-node-core,
+  .knowledge-graph-node-label,
+  .metadata-disclosure-icon,
+  .metadata-details-body,
+  .brand-mark-shell::after,
+  .brand-name-shimmer {
+    transition: none;
+    animation: none;
+  }
+
+  .thread-jump-latest {
+    transition: none;
+    animation: none;
+  }
+
+  .app-shell::after,
+  .window-toolbar::before,
+  .window-toolbar-panel {
+    transition: none;
+  }
+
+  .thread-minimap-marker {
+    transition: none;
+  }
+
+  .thread-minimap-marker[data-edge-fade] {
+    animation: none;
+  }
+
+  .thread-minimap-preview {
+    animation: none;
+  }
+
+  .inspector-debug::before,
+  .inspector-debug-body {
+    transition: none;
+  }
+}
+

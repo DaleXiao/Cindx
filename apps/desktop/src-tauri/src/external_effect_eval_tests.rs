@@ -8,12 +8,13 @@ const MRCR_SOURCE_URL: &str = "https://huggingface.co/datasets/openai/mrcr";
 const MRCR_DATASET_REVISION: &str = "2025-12-05-bugfix";
 const EVALUATION_MODEL_CALL_TIMEOUT_SECONDS: u64 = 180;
 const EVALUATION_TREATMENT_DEADLINE_SECONDS: u64 = 300;
+const EVALUATION_TERMINAL_RESERVE_SECONDS: u64 = 90;
 
 fn evaluation_run_control(effort: &str) -> Arc<AgentRunControl> {
     let mut budget = RunBudget::for_effort(effort);
     budget.max_duration = Duration::from_secs(EVALUATION_TREATMENT_DEADLINE_SECONDS);
     budget.model_call_timeout = Duration::from_secs(EVALUATION_MODEL_CALL_TIMEOUT_SECONDS);
-    budget.terminal_time_reserve = Duration::from_secs(30);
+    budget.terminal_time_reserve = Duration::from_secs(EVALUATION_TERMINAL_RESERVE_SECONDS);
     Arc::new(AgentRunControl::with_budget(budget))
 }
 

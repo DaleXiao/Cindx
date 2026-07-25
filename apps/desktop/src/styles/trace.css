@@ -1,0 +1,167 @@
+/* Trace */
+
+.workspace-return-button {
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  color: #454545;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.workspace-return-button:hover,
+.workspace-return-button:focus-visible {
+  color: var(--text);
+  background: var(--surface-active);
+}
+
+.workspace-return-button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.trace-status-icon {
+  display: inline-grid;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: var(--subtle);
+  vertical-align: middle;
+  place-items: center;
+}
+
+.trace-status-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.trace-status-icon[data-state="done"] {
+  color: #2f9e64;
+}
+
+.trace-status-icon[data-state="running"] {
+  color: #2563eb;
+}
+
+.trace-status-icon[data-state="waiting"] {
+  color: #707070;
+}
+
+.trace-status-icon[data-state="failed"] {
+  color: #555555;
+}
+
+.trace-status-icon[data-state="cancelled"] {
+  color: #707070;
+}
+
+.trace-sequence-item {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: start;
+  gap: 5px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 46px;
+}
+
+.trace-sequence-item:not(:last-child)::after {
+  position: absolute;
+  z-index: 0;
+  top: 21px;
+  bottom: -5px;
+  left: 9px;
+  width: 1px;
+  background: #dedede;
+  content: "";
+}
+
+.trace-sequence-marker {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 19px;
+  height: 19px;
+  margin-top: 7px;
+  color: #777777;
+  background: #ffffff;
+  border: 1px solid #d8d8d8;
+  border-radius: 50%;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  place-items: center;
+}
+
+.trace-step {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+}
+
+.trace-step:hover,
+.trace-step.selected {
+  background: var(--surface-hover);
+  border-color: var(--border);
+}
+
+.trace-step-icon {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  color: #555555;
+  background: #eeeeee;
+  border-radius: var(--radius-xs);
+}
+
+.trace-step-icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.trace-step-body {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.trace-step-body strong {
+  font-size: 12px;
+}
+
+.trace-step-body small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-step-meta {
+  display: grid;
+  min-width: 62px;
+  gap: 2px;
+  justify-items: end;
+}
+
+.trace-step-meta small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+
