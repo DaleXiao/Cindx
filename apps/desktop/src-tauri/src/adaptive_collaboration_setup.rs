@@ -119,8 +119,8 @@ pub(super) fn prepare_adaptive_collaboration(
         }
     }
     let selected_prompt_genome = prompt_genome.clone();
-    prompt_genome = prompt_genome.with_effort_capability_floor(&effort);
-    let prompt_capability_floor_applied = prompt_genome != selected_prompt_genome;
+    prompt_genome = prompt_genome.with_effort_delivery_contract(&effort);
+    let prompt_delivery_contract_applied = prompt_genome != selected_prompt_genome;
     let execution_contract =
         base_execution_contract.with_prompt_commit_strategy(prompt_genome.commit_strategy);
     let prompt_genome_json = serde_json::to_string(&prompt_genome)
@@ -135,7 +135,7 @@ pub(super) fn prepare_adaptive_collaboration(
         &resume_key,
         resumed_from_checkpoint,
         &selection_mode,
-        prompt_capability_floor_applied,
+        prompt_delivery_contract_applied,
         &prompt_genome,
         &prompt_genome_json,
         evolution.as_ref(),
@@ -181,7 +181,7 @@ fn record_prompt_profile_selection(
     resume_key: &str,
     resumed_from_checkpoint: bool,
     selection_mode: &str,
-    prompt_capability_floor_applied: bool,
+    prompt_delivery_contract_applied: bool,
     prompt_genome: &ConductorPromptGenome,
     prompt_genome_json: &str,
     evolution: Option<&PromptEvolutionEvaluation>,
@@ -210,8 +210,8 @@ fn record_prompt_profile_selection(
                     selection_mode.to_string(),
                 ),
                 (
-                    "prompt_capability_floor_applied".to_string(),
-                    prompt_capability_floor_applied.to_string(),
+                    "prompt_delivery_contract_applied".to_string(),
+                    prompt_delivery_contract_applied.to_string(),
                 ),
                 ("workflow_resume_key".to_string(), resume_key.to_string()),
                 (

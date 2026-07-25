@@ -102,6 +102,33 @@ fn output_contract_makes_a_mislabeled_final_step_terminal() {
 }
 
 #[test]
+fn terminal_delivery_layer_survives_the_reserved_time_boundary() {
+    let mut budget = RunBudget::for_effort("pro");
+    budget.max_duration = Duration::from_secs(60);
+    budget.terminal_time_reserve = budget.max_duration;
+    let control = AgentRunControl::with_budget(budget);
+
+    assert!(
+        prompt_workflow_execution::prompt_evaluation_layer_should_stop(
+            &control,
+            [RunStageClass::Candidate, RunStageClass::Worker],
+        )
+    );
+    assert!(
+        !prompt_workflow_execution::prompt_evaluation_layer_should_stop(
+            &control,
+            [RunStageClass::Synthesizer],
+        )
+    );
+    assert!(
+        !prompt_workflow_execution::prompt_evaluation_layer_should_stop(
+            &control,
+            [RunStageClass::Worker, RunStageClass::Reviewer],
+        )
+    );
+}
+
+#[test]
 fn execution_arena_preserves_a_valid_branch_when_a_sibling_fails() {
     let mut genome = ConductorPromptGenome::seed_for_effort("pro");
     genome.max_step_attempts = 1;
@@ -162,6 +189,73 @@ fn execution_arena_preserves_a_valid_branch_when_a_sibling_fails() {
         .expect("final step should remain visible in the trajectory");
     assert_eq!(degraded_final.status, WorkflowStepStatus::Degraded);
     assert_eq!(degraded_final.attempts, 1);
+}
+
+#[test]
+fn execution_arena_delivers_a_degraded_direct_synthesis_after_all_branches_fail() {
+    let mut genome = ConductorPromptGenome::seed_for_effort("pro");
+    genome.max_step_attempts = 1;
+    genome.retry_policy = PromptRetryPolicy::FailFast;
+    let candidate = workflow_candidate(
+        genome,
+        vec![
+            workflow_step("approach-a", "worker", "worker-a", &[]),
+            workflow_step("approach-b", "worker", "worker-b", &[]),
+            workflow_step(
+                "verify",
+                "verifier",
+                "reviewer",
+                &["approach-a", "approach-b"],
+            ),
+            workflow_step(
+                "final",
+                "synthesizer",
+                "synthesizer",
+                &["approach-a", "approach-b", "verify"],
+            ),
+        ],
+    );
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let captured = Arc::clone(&calls);
+    let runner: PromptEvaluationRunner = Arc::new(move |request, _| {
+        captured
+            .lock()
+            .expect("call capture lock")
+            .push(request.model.clone());
+        match request.model.as_str() {
+            "worker-a" | "worker-b" => failed(AgentFailure::new(
+                "provider_deadline",
+                "analysis branch exhausted its bounded attempt",
+                AgentFailureClass::ProviderTransient,
+                true,
+            )),
+            "synthesizer" => completed("The best direct answer is (A)."),
+            unexpected => panic!("blocked intermediate node ran unexpectedly: {unexpected}"),
+        }
+    });
+
+    let result = execute_prompt_workflow_candidate_with_runner(
+        "Solve the assigned problem",
+        candidate,
+        runner,
+    );
+
+    assert!(result.execution.succeeded);
+    assert!(!result.execution.quality_gate_met);
+    assert_eq!(
+        result.execution.final_output,
+        "The best direct answer is (A)."
+    );
+    let final_step = result
+        .execution
+        .steps
+        .iter()
+        .find(|step| step.id == "final")
+        .expect("the direct delivery attempt should remain in the trace");
+    assert_eq!(final_step.status, WorkflowStepStatus::Degraded);
+    let calls = calls.lock().expect("call capture lock");
+    assert!(calls.contains(&"synthesizer".to_string()));
+    assert!(!calls.contains(&"reviewer".to_string()));
 }
 
 #[test]
@@ -325,7 +419,9 @@ fn execution_arena_never_resolves_a_dependency_with_a_failure_placeholder() {
     assert!(!result.execution.succeeded);
     assert!(result.execution.final_output.is_empty());
     let prompts = prompts.lock().expect("prompt capture lock");
-    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].contains("Missing dependency ids:\nsource"));
+    assert!(!prompts[1].contains("source failed"));
     assert!(!prompts
         .iter()
         .any(|prompt| prompt.contains("[execution failed:")));

@@ -5145,7 +5145,7 @@ fn conductor_evaluation_repairs_invalid_structure_before_scoring() {
 #[test]
 fn conductor_evaluation_uses_a_collaborative_fallback_after_failed_repair() {
     let genome =
-        ConductorPromptGenome::seed_for_effort("auto").with_effort_capability_floor("auto");
+        ConductorPromptGenome::seed_for_effort("auto").with_effort_delivery_contract("auto");
     let routing = RoutingContext::from_prompt(
         "Compare two implementation strategies with evidence",
         Vec::new(),

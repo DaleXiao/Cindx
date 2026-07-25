@@ -305,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn evolved_commit_strategy_respects_effort_capability_floors() {
+    fn evolved_commit_strategy_controls_the_execution_contract() {
         let routing = context("Compare independent implementation alternatives in parallel");
         let auto = ConductorExecutionContract::from_routing(
             &routing,

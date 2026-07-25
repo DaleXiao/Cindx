@@ -746,21 +746,25 @@ fn pilot_v2_safety_boundary_accepts_batch_reads_but_rejects_writes() {
 fn provider_backed_pilot_v2() {
     let config = load_provider_config();
     assert!(config.is_ready(), "provider configuration is required");
-    let gpqa_path = PathBuf::from(
-        std::env::var("CINDX_PILOT_V2_GPQA_CSV")
-            .expect("CINDX_PILOT_V2_GPQA_CSV must point to gpqa_diamond.csv"),
-    );
-    let mrcr_paths = std::env::var("CINDX_PILOT_V2_MRCR_JSONS")
-        .expect("CINDX_PILOT_V2_MRCR_JSONS must contain two page JSON files")
-        .split(',')
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| PathBuf::from(value.trim()))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        mrcr_paths.len(),
-        2,
-        "Pilot v2 requires exactly two MRCR rows"
-    );
+    let pair_filter = pilot_pair_filter();
+    let workspace_cases = workspace_cases();
+    let workspace_case_ids = workspace_cases
+        .iter()
+        .map(|case| case.case_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let selects_workspace = pair_filter.as_ref().is_none_or(|pairs| {
+        pairs
+            .iter()
+            .any(|(case_id, _)| workspace_case_ids.contains(case_id.as_str()))
+    });
+    let selects_mrcr = pair_filter
+        .as_ref()
+        .is_none_or(|pairs| pairs.iter().any(|(case_id, _)| case_id.starts_with("row-")));
+    let selects_gpqa = pair_filter.as_ref().is_none_or(|pairs| {
+        pairs.iter().any(|(case_id, _)| {
+            !case_id.starts_with("row-") && !workspace_case_ids.contains(case_id.as_str())
+        })
+    });
     let output_path = PathBuf::from(
         std::env::var("CINDX_PILOT_V2_OUTPUT")
             .expect("CINDX_PILOT_V2_OUTPUT must point to a private raw result path"),
@@ -773,36 +777,59 @@ fn provider_backed_pilot_v2() {
         git_commit
     );
 
-    let gpqa_cases = load_gpqa_cases(&gpqa_path, 1).expect("GPQA cases should load");
-    assert_eq!(gpqa_cases.len(), 3);
-    let mut sources = vec![PilotSource {
-        benchmark: "gpqa_diamond".to_string(),
-        source_url: GPQA_SOURCE_URL.to_string(),
-        revision: GPQA_SOURCE_REVISION.to_string(),
-        file_sha256: file_sha256(&gpqa_path).expect("GPQA file should hash"),
-        sample_count: gpqa_cases.len(),
-        protocol: "Official zero-shot multiple choice with deterministic option shuffle. The direct baseline is protocol evidence; Cindx treatments are product-mechanism evidence."
-            .to_string(),
-    }];
-    let workspace_cases = workspace_cases();
-    sources.push(PilotSource {
-        benchmark: "cindx_read_only_workspace".to_string(),
-        source_url: "local-generated-fixture".to_string(),
-        revision: "pilot-v2-fixture-v1".to_string(),
-        file_sha256: sha256_hex(
-            workspace_cases
-                .iter()
-                .flat_map(|case| case.files.iter())
-                .flat_map(|(path, content)| [path.as_bytes(), content.as_bytes()])
-                .flatten()
-                .copied()
-                .collect::<Vec<_>>()
-                .as_slice(),
-        ),
-        sample_count: workspace_cases.len(),
-        protocol: "Deterministic temporary fixtures. Baseline receives the same evidence inline; Cindx modes receive only bounded read-only workspace tools."
-            .to_string(),
-    });
+    let mut sources = Vec::new();
+    let gpqa_cases = if selects_gpqa {
+        let gpqa_path = PathBuf::from(
+            std::env::var("CINDX_PILOT_V2_GPQA_CSV")
+                .expect("CINDX_PILOT_V2_GPQA_CSV must point to gpqa_diamond.csv"),
+        );
+        let cases = load_gpqa_cases(&gpqa_path, 1).expect("GPQA cases should load");
+        assert_eq!(cases.len(), 3);
+        sources.push(PilotSource {
+            benchmark: "gpqa_diamond".to_string(),
+            source_url: GPQA_SOURCE_URL.to_string(),
+            revision: GPQA_SOURCE_REVISION.to_string(),
+            file_sha256: file_sha256(&gpqa_path).expect("GPQA file should hash"),
+            sample_count: cases.len(),
+            protocol: "Official zero-shot multiple choice with deterministic option shuffle. The direct baseline is protocol evidence; Cindx treatments are product-mechanism evidence."
+                .to_string(),
+        });
+        cases
+    } else {
+        Vec::new()
+    };
+    if selects_workspace {
+        sources.push(PilotSource {
+            benchmark: "cindx_read_only_workspace".to_string(),
+            source_url: "local-generated-fixture".to_string(),
+            revision: "pilot-v2-fixture-v1".to_string(),
+            file_sha256: sha256_hex(
+                workspace_cases
+                    .iter()
+                    .flat_map(|case| case.files.iter())
+                    .flat_map(|(path, content)| [path.as_bytes(), content.as_bytes()])
+                    .flatten()
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            ),
+            sample_count: workspace_cases.len(),
+            protocol: "Deterministic temporary fixtures. Baseline receives the same evidence inline; Cindx modes receive only bounded read-only workspace tools."
+                .to_string(),
+        });
+    }
+    let mrcr_paths = if selects_mrcr {
+        let paths = std::env::var("CINDX_PILOT_V2_MRCR_JSONS")
+            .expect("CINDX_PILOT_V2_MRCR_JSONS must contain two page JSON files")
+            .split(',')
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| PathBuf::from(value.trim()))
+            .collect::<Vec<_>>();
+        assert_eq!(paths.len(), 2, "Pilot v2 requires exactly two MRCR rows");
+        paths
+    } else {
+        Vec::new()
+    };
     let mut mrcr_rows = Vec::new();
     for path in &mrcr_paths {
         let bytes = fs::read(path).expect("MRCR page should read");
@@ -831,7 +858,6 @@ fn provider_backed_pilot_v2() {
         "cindx_auto",
         "cindx_pro",
     ];
-    let pair_filter = pilot_pair_filter();
     let expected_runs = pair_filter.as_ref().map_or(32, BTreeSet::len);
     let mut runs = Vec::new();
 

@@ -12,11 +12,12 @@ pub(crate) fn evaluate_conductor_prompt_profile(
     evaluation_id: &str,
     control: &Arc<AgentRunControl>,
 ) -> PromptPlanCandidate {
+    let effective_genome = genome.clone().with_effort_delivery_contract(effort);
     let conductor_model = config.model_for_conductor();
     let routing = RoutingContext::from_prompt(objective, Vec::new());
     let contract_policy = parse_policy(policy).unwrap_or(OrchestrationPolicy::Single);
     let harness = ConductorHarness::new(ConductorRequest {
-        workflow_id: format!("{evaluation_id}-{}", genome.id),
+        workflow_id: format!("{evaluation_id}-{}", effective_genome.id),
         objective: objective.to_string(),
         recent_context: String::new(),
         effort: effort.to_string(),
@@ -38,11 +39,11 @@ pub(crate) fn evaluate_conductor_prompt_profile(
         ),
         prior_hint: None,
         prompt_evolution_enabled: true,
-        prompt_genome: genome.clone(),
+        prompt_genome: effective_genome.clone(),
     });
     let system_prompt =
         collaboration_system_prompt_for_run(&config.agent_system_prompt, &Metadata::new());
-    evaluate_conductor_prompt_profile_with_runner(&harness, genome, |prompt| {
+    evaluate_conductor_prompt_profile_with_runner(&harness, &effective_genome, |prompt| {
         complete_collaboration_model_with_control(
             config.clone(),
             ModelRole::Planner,

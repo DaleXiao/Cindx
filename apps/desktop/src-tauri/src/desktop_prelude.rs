@@ -95,7 +95,7 @@ pub(crate) use std::io::Write;
 pub(crate) use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-pub(crate) use std::sync::{Arc, Mutex, OnceLock};
+pub(crate) use std::sync::{Arc, Mutex};
 pub(crate) use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub(crate) use tauri::{Emitter, Manager};
 pub(crate) use tools::{

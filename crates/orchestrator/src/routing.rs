@@ -549,6 +549,18 @@ fn is_lightweight_direct(context: &RoutingContext) -> bool {
         && context.estimated_steps <= 2
 }
 
+fn is_self_contained_direct(context: &RoutingContext) -> bool {
+    matches!(context.task_class, TaskClass::General | TaskClass::Coding)
+        && !context.needs_tools
+        && !context.needs_retrieval
+        && !context.needs_vision
+        && !context.verification_required
+        && !context.high_stakes
+        && !context.parallelizable
+        && context.estimated_steps <= 2
+        && context.complexity_score <= 1
+}
+
 fn requires_ultra(context: &RoutingContext) -> bool {
     let contract =
         ConductorExecutionContract::from_routing(context, "auto", OrchestrationPolicy::AutoRouter);
@@ -599,9 +611,9 @@ impl RuleBasedRouter {
                 OrchestrationPolicy::PlanExecuteReview,
                 "interactive tool use needs planning and review",
             ),
-            TaskClass::Coding if is_lightweight_direct(context) => (
+            TaskClass::Coding if is_self_contained_direct(context) => (
                 OrchestrationPolicy::Single,
-                "short coding question does not need tools or workspace context",
+                "self-contained coding question does not need tools or workspace context",
             ),
             TaskClass::Coding => (
                 OrchestrationPolicy::PlanExecuteReview,
@@ -615,9 +627,9 @@ impl RuleBasedRouter {
                 OrchestrationPolicy::PlanExecuteReview,
                 "ordinary research needs one planned execution path",
             ),
-            TaskClass::General if is_lightweight_direct(context) => (
+            TaskClass::General if is_self_contained_direct(context) => (
                 OrchestrationPolicy::Single,
-                "short general prompt can run directly",
+                "self-contained general prompt can run directly",
             ),
             TaskClass::General => (
                 OrchestrationPolicy::PlanExecuteReview,

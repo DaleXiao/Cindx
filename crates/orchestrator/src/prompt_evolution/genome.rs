@@ -180,30 +180,9 @@ impl ConductorPromptGenome {
         }
     }
 
-    pub fn with_effort_capability_floor(mut self, effort: &str) -> Self {
-        match effort.trim().to_ascii_lowercase().as_str() {
-            "pro" => {
-                self.graph_depth = PromptGraphDepth::Deep;
-                self.verification = PromptVerification::Adversarial;
-                if self.commit_strategy == PromptCommitStrategy::Adaptive {
-                    self.commit_strategy = PromptCommitStrategy::Quorum;
-                }
-                self.topology_strategy = PromptTopologyStrategy::ParallelDeliberation;
-                self.role_strategy = PromptRoleStrategy::DiverseSpecialists;
-                self.max_parallel_branches = self.max_parallel_branches.max(2);
-                self.require_final_synthesis = true;
-            }
-            "auto" => {
-                self.graph_depth = self.graph_depth.max(PromptGraphDepth::Balanced);
-                self.verification = self.verification.max(PromptVerification::Evidence);
-                self.topology_strategy = self
-                    .topology_strategy
-                    .max(PromptTopologyStrategy::AdaptiveDag);
-                self.role_strategy = self.role_strategy.max(PromptRoleStrategy::Specialists);
-                self.max_parallel_branches = self.max_parallel_branches.max(2);
-                self.require_final_synthesis = true;
-            }
-            _ => {}
+    pub fn with_effort_delivery_contract(mut self, effort: &str) -> Self {
+        if matches!(effort.trim().to_ascii_lowercase().as_str(), "auto" | "pro") {
+            self.require_final_synthesis = true;
         }
         self
     }
