@@ -179,6 +179,57 @@ pub(super) fn is_automatic_session_name(name: &str) -> bool {
     )
 }
 
+fn diagram_request_title(value: &str) -> Option<String> {
+    let request = value.trim().strip_prefix('用')?.trim_start();
+    let (format, topic) = [
+        "表示一下",
+        "表示下",
+        "描述一下",
+        "描述下",
+        "展示一下",
+        "展示下",
+        "说明一下",
+        "说明下",
+        "解释一下",
+        "解释下",
+        "画一下",
+        "画下",
+    ]
+    .into_iter()
+    .find_map(|marker| request.split_once(marker))?;
+    let lowercase_format = format.trim().to_ascii_lowercase();
+    let format = if lowercase_format.contains("mindmap")
+        || lowercase_format.contains("mind map")
+        || format.contains("脑图")
+        || format.contains("思维导图")
+    {
+        "思维导图"
+    } else if lowercase_format.contains("mermaid") || format.contains("流程图") {
+        "流程图"
+    } else {
+        return None;
+    };
+    let topic = topic
+        .trim_start_matches(|character| matches!(character, '：' | ':' | '，' | ',' | ' '))
+        .trim_start_matches("关于")
+        .trim_end_matches(|character| {
+            matches!(
+                character,
+                '，' | ',' | '。' | '；' | ';' | '！' | '!' | '？' | '?' | '吗' | '呢' | '吧'
+            )
+        })
+        .replace(" 的", " ");
+    let topic = topic.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut characters = topic.chars();
+    let first = characters.next()?;
+    let topic = if first.is_ascii_lowercase() {
+        format!("{}{}", first.to_ascii_uppercase(), characters.as_str())
+    } else {
+        topic
+    };
+    (!topic.is_empty()).then(|| format!("{topic}{format}"))
+}
+
 pub(super) fn automatic_session_title(prompt: &str) -> String {
     let first_line = prompt
         .lines()
@@ -186,6 +237,10 @@ pub(super) fn automatic_session_title(prompt: &str) -> String {
         .find(|line| !line.is_empty())
         .unwrap_or_default()
         .trim_start_matches(|character| matches!(character, '#' | '-' | '*' | '>' | ' '));
+    if let Some(title) = diagram_request_title(first_line) {
+        return cleaned_generated_session_title(&title)
+            .unwrap_or_else(|| "New Session".to_string());
+    }
     let mut title = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
     for _ in 0..3 {
         let mut stripped = None;
@@ -275,65 +330,6 @@ fn session_title_character_limit(value: &str) -> usize {
     }
 }
 
-fn source_is_already_title_like(value: &str) -> bool {
-    let value = value.trim();
-    if value.is_empty()
-        || value.contains('\n')
-        || value.chars().any(|character| {
-            matches!(
-                character,
-                '，' | ',' | '。' | '；' | ';' | '！' | '!' | '？' | '?' | '：' | ':'
-            )
-        })
-    {
-        return false;
-    }
-    let normalized = normalized_session_title_signal(value);
-    if [
-        "我",
-        "你",
-        "请",
-        "能否",
-        "可以",
-        "帮我",
-        "麻烦",
-        "这是",
-        "这个",
-        "为什么",
-    ]
-    .iter()
-    .any(|prefix| normalized.starts_with(prefix))
-    {
-        return false;
-    }
-    let lowercase = value.to_ascii_lowercase();
-    if [
-        "i ",
-        "please ",
-        "can you ",
-        "could you ",
-        "would you ",
-        "why ",
-        "how ",
-    ]
-    .iter()
-    .any(|prefix| lowercase.starts_with(prefix))
-    {
-        return false;
-    }
-    let contains_cjk = value.chars().any(|character| {
-        matches!(
-            character as u32,
-            0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF
-        )
-    });
-    if contains_cjk {
-        value.chars().count() <= session_title_character_limit(value)
-    } else {
-        value.split_whitespace().count() <= 8
-    }
-}
-
 pub(super) fn generated_session_title_copies_conversation(
     title: &str,
     turns: &[SessionTitleTurn],
@@ -343,10 +339,9 @@ pub(super) fn generated_session_title_copies_conversation(
         return false;
     }
     turns.iter().any(|turn| {
-        [&turn.prompt, &turn.answer].into_iter().any(|source| {
-            normalized_title == normalized_session_title_signal(source)
-                && !source_is_already_title_like(source)
-        })
+        [&turn.prompt, &turn.answer]
+            .into_iter()
+            .any(|source| normalized_title == normalized_session_title_signal(source))
     })
 }
 
@@ -514,7 +509,26 @@ pub(super) fn validated_generated_session_title(
 
 pub(super) fn fallback_session_title(turns: &[SessionTitleTurn]) -> Option<String> {
     let prompt = turns.first()?.prompt.as_str();
-    validated_generated_session_title(&automatic_session_title(prompt), turns)
+    let automatic = automatic_session_title(prompt);
+    validated_generated_session_title(&automatic, turns).or_else(|| {
+        let contains_cjk = automatic.chars().any(|character| {
+            matches!(
+                character as u32,
+                0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF
+            )
+        });
+        let suffix = if contains_cjk { "概览" } else { " Overview" };
+        let prefix_limit = session_title_character_limit(&automatic)
+            .saturating_sub(suffix.chars().count())
+            .max(1);
+        let prefix = automatic
+            .chars()
+            .take(prefix_limit)
+            .collect::<String>()
+            .trim()
+            .to_string();
+        validated_generated_session_title(&format!("{prefix}{suffix}"), turns)
+    })
 }
 
 pub(super) fn semantic_session_title(
