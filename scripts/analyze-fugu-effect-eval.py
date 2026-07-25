@@ -219,6 +219,15 @@ def render_markdown(
     aggregate_by_benchmark: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in report["aggregates"]:
         aggregate_by_benchmark[row["benchmark"]].append(row)
+    has_mrcr = bool(aggregate_by_benchmark.get("mrcr_v2_8_needle"))
+    references = [
+        "[Fugu technical report](https://arxiv.org/abs/2606.21228)",
+        "[GPQA repository](https://github.com/idavidrein/gpqa)",
+    ]
+    if has_mrcr:
+        references.append(
+            "[MRCR v2 dataset](https://huggingface.co/datasets/openai/mrcr)"
+        )
 
     lines = [
         f"# {title}",
@@ -233,16 +242,24 @@ def render_markdown(
         "## Protocol",
         "",
         "- **GPQA-Diamond:** deterministic stratified sample across Biology, Chemistry, and Physics; EvalScope-compatible zero-shot prompt; no tools; exact answer parsing.",
-        "- **MRCR v2:** official multi-message transcript preserved; 8 needles; official random-prefix gate and Python `difflib.SequenceMatcher` ratio.",
         "- Raw benchmark prompts, expected answers, and complete model outputs remain outside the repository. Committed evidence contains hashes and scores only.",
-        "- References: [Fugu technical report](https://arxiv.org/abs/2606.21228), [GPQA repository](https://github.com/idavidrein/gpqa), and [MRCR v2 dataset](https://huggingface.co/datasets/openai/mrcr).",
+        f"- References: {', '.join(references)}.",
         "",
     ]
+    if has_mrcr:
+        lines.insert(
+            lines.index(
+                "- Raw benchmark prompts, expected answers, and complete model outputs remain outside the repository. Committed evidence contains hashes and scores only."
+            ),
+            "- **MRCR v2:** official multi-message transcript preserved; 8 needles; official random-prefix gate and Python `difflib.SequenceMatcher` ratio.",
+        )
 
     for benchmark, title in [
         ("gpqa_diamond", "GPQA-Diamond"),
         ("mrcr_v2_8_needle", "MRCR v2 (8-needle)"),
     ]:
+        if benchmark not in aggregate_by_benchmark:
+            continue
         lines.extend(
             [
                 f"## {title}",
@@ -313,8 +330,8 @@ def render_markdown(
     direct_gpqa = aggregates[("gpqa_diamond", "direct_default")]
     auto_gpqa = aggregates[("gpqa_diamond", "cindx_auto")]
     pro_gpqa = aggregates[("gpqa_diamond", "cindx_pro")]
-    direct_mrcr = aggregates[("mrcr_v2_8_needle", "direct_default")]
-    auto_mrcr = aggregates[("mrcr_v2_8_needle", "cindx_auto_model_route")]
+    direct_mrcr = aggregates.get(("mrcr_v2_8_needle", "direct_default"))
+    auto_mrcr = aggregates.get(("mrcr_v2_8_needle", "cindx_auto_model_route"))
     mrcr_models = sorted(
         {
             model
@@ -358,19 +375,37 @@ def render_markdown(
         pro_latency_finding += (
             f", reaching the {treatment_deadline_seconds}s treatment cap"
         )
-    lines.extend(
+    observed_uplift = max(auto_gpqa["mean_score"], pro_gpqa["mean_score"]) > direct_gpqa[
+        "mean_score"
+    ]
+    findings = [
+        "## Observed Findings",
+        "",
+        f"- Under the fixed budget, the direct GPQA baseline scored **{fmt_percent(direct_gpqa['mean_score'])}**, versus **{fmt_percent(auto_gpqa['mean_score'])}** for Cindx Auto and **{fmt_percent(pro_gpqa['mean_score'])}** for Cindx Pro. "
+        + (
+            "An orchestration uplift was observed on this sample, but requires paired significance and replication before it can support a product claim."
+            if observed_uplift
+            else "This pilot therefore does not demonstrate orchestration uplift."
+        ),
+        f"- Cindx Pro completed **{pro_gpqa['completed']}/{pro_gpqa['n']}** GPQA cases and answered **{fmt_percent(pro_gpqa['completed_mean_score'])}** of completed cases correctly; {pro_latency_finding}.",
+        f"- Cindx Auto completed **{auto_gpqa['completed']}/{auto_gpqa['n']}** GPQA cases and answered **{fmt_percent(auto_gpqa['completed_mean_score'])}** of completed cases correctly. Chemistry was the weakest diagnostic slice; the sample is too small for a domain-level conclusion.",
+    ]
+    if direct_mrcr is not None and auto_mrcr is not None:
+        findings.append(
+            f"- MRCR scored **{fmt_percent(direct_mrcr['mean_score'])}** for direct and **{fmt_percent(auto_mrcr['mean_score'])}** for Auto across all {direct_mrcr['n']} frozen length points. Both treatments selected `{', '.join(mrcr_models)}`, so this confirms strong long-context behavior but measures no routing uplift."
+        )
+    telemetry = f"- Token telemetry was recorded for **{gpqa_telemetry}/{gpqa_runs}** GPQA runs"
+    if has_mrcr:
+        telemetry += f" and **{mrcr_telemetry}/{mrcr_runs}** MRCR runs"
+    findings.extend(
         [
-            "## Observed Findings",
-            "",
-            f"- Under the fixed budget, the direct GPQA baseline scored **{fmt_percent(direct_gpqa['mean_score'])}**, versus **{fmt_percent(auto_gpqa['mean_score'])}** for Cindx Auto and **{fmt_percent(pro_gpqa['mean_score'])}** for Cindx Pro. This pilot therefore does not demonstrate orchestration uplift.",
-            f"- Cindx Pro completed **{pro_gpqa['completed']}/{pro_gpqa['n']}** GPQA cases. Every completed case was correct (**{fmt_percent(pro_gpqa['completed_mean_score'])}** completed-only); {pro_latency_finding}. The dominant observed failure is delivery within budget, not completed-answer accuracy.",
-            f"- Cindx Auto completed **{auto_gpqa['completed']}/{auto_gpqa['n']}** GPQA cases and answered **{fmt_percent(auto_gpqa['completed_mean_score'])}** of completed cases correctly. Chemistry was the weakest diagnostic slice; the sample is too small for a domain-level conclusion.",
-            f"- MRCR scored **{fmt_percent(direct_mrcr['mean_score'])}** for direct and **{fmt_percent(auto_mrcr['mean_score'])}** for Auto across all {direct_mrcr['n']} frozen length points. Both treatments selected `{', '.join(mrcr_models)}`, so this confirms strong long-context behavior but measures no routing uplift.",
-            f"- Token telemetry was recorded for **{gpqa_telemetry}/{gpqa_runs}** GPQA runs and **{mrcr_telemetry}/{mrcr_runs}** MRCR runs. Runs without final usage make treatment token totals lower bounds, so this pilot cannot support a complete cost-efficiency comparison.",
-            f"- None of the paired GPQA comparisons reached conventional significance; the exact tests are included only to prevent overclaiming from {max((row['n'] for row in report['paired_gpqa']), default=0)} questions.",
+            telemetry
+            + ". Runs without final usage make treatment token totals lower bounds, so incomplete telemetry cannot support a complete cost-efficiency comparison.",
+            f"- Paired GPQA significance is reported with exact McNemar tests to prevent overclaiming from {max((row['n'] for row in report['paired_gpqa']), default=0)} questions.",
             "",
         ]
     )
+    lines.extend(findings)
 
     lines.extend(
         [
@@ -390,13 +425,11 @@ def render_markdown(
         )
     lines.append("")
 
-    lines.extend(
-        [
+    interpretation = [
             "## Interpretation Boundaries",
             "",
             "- This pilot estimates behavior on a small, frozen sample. It must not be compared numerically with Fugu-Ultra's full-table scores as if sample size, model access, and serving stack were identical.",
             "- GPQA treatments compare a direct configured model with Cindx Auto routing/workflow and Cindx Pro Conductor execution. Different role models are part of the product treatment and therefore also a confound when attributing uplift solely to orchestration.",
-            "- MRCR preserves the official raw multi-message protocol. `cindx_auto_model_route` evaluates model selection only; a Pro workflow was intentionally omitted because flattening or rewriting the transcript would change the benchmark protocol.",
             "- LiveCodeBench and SciCode were not run because this machine did not expose a trusted disposable code-execution container. Untrusted generated code was never executed on the host.",
             "- The frozen Fugu parity matrix remains separate; this pilot does not convert subset results into protocol-equivalent parity cells.",
             "",
@@ -409,12 +442,20 @@ def render_markdown(
             "",
             "## Reproduction",
             "",
-            "1. Obtain GPQA-Diamond from the pinned public repository revision and MRCR v2 from the official Hugging Face dataset.",
+            "1. Obtain GPQA-Diamond from the pinned public repository revision.",
             "2. Run the ignored Rust test `provider_backed_fugu_external_effect_pilot` with the documented dataset environment variables.",
             "3. Run `scripts/analyze-fugu-effect-eval.py` on the private raw result to produce the sanitized JSON and this report.",
             "",
         ]
-    )
+    if has_mrcr:
+        interpretation.insert(
+            4,
+            "- MRCR preserves the official raw multi-message protocol. `cindx_auto_model_route` evaluates model selection only; a Pro workflow was intentionally omitted because flattening or rewriting the transcript would change the benchmark protocol.",
+        )
+        interpretation[interpretation.index(
+            "1. Obtain GPQA-Diamond from the pinned public repository revision."
+        )] = "1. Obtain GPQA-Diamond from the pinned public repository revision and MRCR v2 from the official Hugging Face dataset."
+    lines.extend(interpretation)
     output_path.write_text("\n".join(lines), encoding="utf-8")
 
 
