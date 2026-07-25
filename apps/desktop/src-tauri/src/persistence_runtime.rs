@@ -1930,24 +1930,6 @@ pub(crate) fn add_image_generation_run_context(
     );
 }
 
-pub(crate) fn required_image_generation_satisfied(
-    runtime: &agent_runtime::AgentLoopState,
-    run_context: &Metadata,
-) -> bool {
-    if run_context
-        .get("image_generation_required")
-        .map(String::as_str)
-        != Some("true")
-    {
-        return true;
-    }
-    runtime.messages.iter().any(|message| {
-        matches!(message.role, MessageRole::Tool)
-            && message.content.contains("tool=image.generate")
-            && message.content.contains("status=succeeded")
-    })
-}
-
 pub(crate) fn agent_runtime_context_for_run(run_context: &Metadata) -> Option<String> {
     let mut sections = Vec::new();
     if let Some(current_time) = run_context.get("current_time") {

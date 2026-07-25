@@ -23,6 +23,23 @@ pub struct InterruptibleQuorumExecution<T> {
     pub interrupted: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterruptibleQuorumPolicy {
+    pub required_successes: usize,
+    pub grace_period: Duration,
+    pub poll_interval: Duration,
+}
+
+impl InterruptibleQuorumPolicy {
+    pub fn new(required_successes: usize, grace_period: Duration, poll_interval: Duration) -> Self {
+        Self {
+            required_successes,
+            grace_period,
+            poll_interval,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ParallelJobCompletion<T> {
     pub job_id: usize,
@@ -162,23 +179,23 @@ impl<T: Send + 'static> ParallelJobSupervisor<T> {
     }
 
     pub fn recv(&mut self) -> Option<ParallelJobCompletion<T>> {
-        self.receiver.recv().ok().map(|completion| {
+        self.receiver.recv().ok().inspect(|completion| {
             self.cancellations.remove(&completion.job_id);
-            completion
         })
     }
 
     pub fn recv_timeout(&mut self, timeout: Duration) -> Option<ParallelJobCompletion<T>> {
-        self.receiver.recv_timeout(timeout).ok().map(|completion| {
-            self.cancellations.remove(&completion.job_id);
-            completion
-        })
+        self.receiver
+            .recv_timeout(timeout)
+            .ok()
+            .inspect(|completion| {
+                self.cancellations.remove(&completion.job_id);
+            })
     }
 
     pub fn try_recv(&mut self) -> Option<ParallelJobCompletion<T>> {
-        self.receiver.try_recv().ok().map(|completion| {
+        self.receiver.try_recv().ok().inspect(|completion| {
             self.cancellations.remove(&completion.job_id);
-            completion
         })
     }
 
@@ -346,9 +363,7 @@ impl BoundedParallelExecutor {
         &self,
         thread_label: &str,
         jobs: Vec<CancellableParallelJob<T>>,
-        required_successes: usize,
-        grace_period: Duration,
-        poll_interval: Duration,
+        policy: InterruptibleQuorumPolicy,
         is_success: F,
         mut should_interrupt: I,
     ) -> InterruptibleQuorumExecution<T>
@@ -369,7 +384,8 @@ impl BoundedParallelExecutor {
                 interrupted: false,
             };
         }
-        let required_successes = required_successes.clamp(1, total);
+        let required_successes = policy.required_successes.clamp(1, total);
+        let grace_period = policy.grace_period;
         let mut supervisor = self.supervisor();
         let mut slots = (0..total).map(|_| None).collect::<Vec<_>>();
 
@@ -379,7 +395,7 @@ impl BoundedParallelExecutor {
             }
         }
 
-        let poll_interval = poll_interval.max(Duration::from_millis(1));
+        let poll_interval = policy.poll_interval.max(Duration::from_millis(1));
         let mut received = 0usize;
         let mut successful = 0usize;
         let spawned = supervisor.pending();
@@ -559,9 +575,7 @@ mod tests {
         let output = executor.run_until_quorum_interruptible(
             "interrupt-test",
             jobs,
-            2,
-            Duration::ZERO,
-            Duration::from_millis(5),
+            InterruptibleQuorumPolicy::new(2, Duration::ZERO, Duration::from_millis(5)),
             |_| true,
             || started.elapsed() >= Duration::from_millis(20),
         );

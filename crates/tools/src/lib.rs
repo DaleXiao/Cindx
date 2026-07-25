@@ -17,6 +17,7 @@ use model_provider::{
     MODEL_REQUEST_CANCELLED,
 };
 mod desktop_control;
+mod file_batch;
 
 #[cfg(test)]
 use desktop_control::{
@@ -24,6 +25,7 @@ use desktop_control::{
     BROWSER_CONTROL_RESPONSE_SCHEMA, COMPUTER_CONTROL_RESPONSE_SCHEMA,
 };
 pub use desktop_control::{BrowserTool, ComputerTool};
+pub use file_batch::ReadFilesTool;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolError {
@@ -169,6 +171,7 @@ impl ToolRegistry {
         let workspace_root = workspace_root.into();
         let mut registry = Self::new();
         registry.register(Box::new(ReadFileTool::new(workspace_root.clone())));
+        registry.register(Box::new(ReadFilesTool::new(workspace_root.clone())));
         registry.register(Box::new(ListDirectoryTool::new(workspace_root.clone())));
         registry.register(Box::new(SearchFilesTool::new(workspace_root.clone())));
         registry.register(Box::new(WriteFileTool::new(workspace_root.clone())));

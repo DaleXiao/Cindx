@@ -779,6 +779,7 @@ pub(crate) struct CollaborationQualityPayload {
     pub(crate) safety_violations: u64,
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct AdaptiveQualityGateResult {
     pub(crate) output: String,
     pub(crate) score: f64,

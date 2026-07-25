@@ -167,29 +167,40 @@ fn tool_registry_cache_is_versioned_and_bounded() {
 
 #[test]
 fn collaboration_tool_worker_reserves_a_terminal_answer_turn() {
+    let turn_policy = WorkerTurnPolicy::isolated_evidence(3, true);
     let mut runtime = start_agent_loop(
         TaskId("worker-finalization".to_string()),
         "Inspect evidence",
         AgentRuntimeConfig {
-            max_turns: collaboration_worker_runtime_turn_limit(3, true),
+            max_turns: turn_policy.runtime_turn_limit(),
         },
     );
 
-    assert_eq!(runtime.max_turns, 4);
+    assert_eq!(runtime.max_turns, 5);
+    assert!(turn_policy.supports_evidence_repair());
     runtime.turn = 2;
-    assert!(!prepare_collaboration_worker_turn(&mut runtime, true, 3));
+    assert_eq!(
+        turn_policy.prepare_turn(&mut runtime),
+        WorkerTurnPhase::Evidence
+    );
     runtime.turn = 3;
-    assert!(prepare_collaboration_worker_turn(&mut runtime, true, 3));
+    assert_eq!(
+        turn_policy.prepare_turn(&mut runtime),
+        WorkerTurnPhase::Finalization
+    );
     assert_eq!(
         runtime
             .messages
             .last()
             .and_then(|message| message.metadata.get("kind"))
             .map(String::as_str),
-        Some("collaboration_worker_finalization")
+        Some("worker_finalization")
     );
     let message_count = runtime.messages.len();
-    assert!(prepare_collaboration_worker_turn(&mut runtime, true, 3));
+    assert_eq!(
+        turn_policy.prepare_turn(&mut runtime),
+        WorkerTurnPhase::Finalization
+    );
     assert_eq!(runtime.messages.len(), message_count);
 }
 
@@ -250,6 +261,12 @@ fn adaptive_recovery_model_obeys_policy_and_rotates_alternates() {
         "worker-b".to_string(),
         "worker-c".to_string(),
     ];
+    let transient = AgentFailure::new(
+        "provider_timeout",
+        "failed",
+        AgentFailureClass::ProviderTransient,
+        true,
+    );
 
     assert_eq!(
         adaptive_recovery_model(
@@ -258,7 +275,7 @@ fn adaptive_recovery_model_obeys_policy_and_rotates_alternates() {
             2,
             &models,
             PromptRetryPolicy::AlternateModel,
-            Some("failed"),
+            &transient,
         )
         .expect("alternate should exist"),
         "worker-b"
@@ -270,7 +287,7 @@ fn adaptive_recovery_model_obeys_policy_and_rotates_alternates() {
             3,
             &models,
             PromptRetryPolicy::AlternateModel,
-            Some("failed"),
+            &transient,
         )
         .expect("second alternate should exist"),
         "worker-c"
@@ -282,7 +299,7 @@ fn adaptive_recovery_model_obeys_policy_and_rotates_alternates() {
             2,
             &models,
             PromptRetryPolicy::SameModel,
-            Some("failed"),
+            &transient,
         )
         .expect("same-model retry should remain available"),
         "worker-a"
@@ -293,10 +310,22 @@ fn adaptive_recovery_model_obeys_policy_and_rotates_alternates() {
         2,
         &models,
         PromptRetryPolicy::FailFast,
-        Some("failed"),
+        &transient,
     )
     .expect_err("fail-fast should reject recovery")
     .contains("fail-fast"));
+
+    let budget = AgentFailure::budget("turn_budget", "spent");
+    assert!(adaptive_recovery_model(
+        "inspect",
+        "worker-a",
+        2,
+        &models,
+        PromptRetryPolicy::AlternateModel,
+        &budget,
+    )
+    .expect_err("budget exhaustion must not trigger another model")
+    .contains("cannot recover"));
 }
 
 #[test]
@@ -1754,28 +1783,86 @@ fn prompt_evolution_read_model_indexes_dataset_readiness_without_case_content() 
 
 #[test]
 fn prompt_evolution_readiness_reports_each_scientific_gate() {
+    let incomplete_dataset = PROMPT_EVOLUTION_OFFLINE_MIN_CASES.saturating_sub(1);
+    let incomplete_train = PROMPT_EVOLUTION_MIN_TRAIN_RUNS.saturating_sub(1);
+    let incomplete_holdout = PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS.saturating_sub(1);
+
     assert_eq!(
-        prompt_evolution_readiness(false, true, 0, 0, 0, 0, false, "stable"),
+        prompt_evolution_readiness(PromptEvolutionReadinessInput {
+            applicable: false,
+            enabled: true,
+            dataset_cases: 0,
+            paired_runs: 0,
+            replay_runs: 0,
+            ready_profiles: 0,
+            evaluation_inflight: false,
+            rollout_status: "stable",
+        }),
         "not_applicable"
     );
     assert_eq!(
-        prompt_evolution_readiness(true, true, 2, 0, 0, 0, false, "stable"),
+        prompt_evolution_readiness(PromptEvolutionReadinessInput {
+            applicable: true,
+            enabled: true,
+            dataset_cases: incomplete_dataset,
+            paired_runs: 0,
+            replay_runs: 0,
+            ready_profiles: 0,
+            evaluation_inflight: false,
+            rollout_status: "stable",
+        }),
         "collecting_dataset"
     );
     assert_eq!(
-        prompt_evolution_readiness(true, true, 3, 2, 0, 0, false, "stable"),
+        prompt_evolution_readiness(PromptEvolutionReadinessInput {
+            applicable: true,
+            enabled: true,
+            dataset_cases: PROMPT_EVOLUTION_OFFLINE_MIN_CASES,
+            paired_runs: incomplete_train,
+            replay_runs: 0,
+            ready_profiles: 0,
+            evaluation_inflight: false,
+            rollout_status: "stable",
+        }),
         "collecting_train_evidence"
     );
     assert_eq!(
-        prompt_evolution_readiness(true, true, 3, 3, 3, 0, false, "stable"),
+        prompt_evolution_readiness(PromptEvolutionReadinessInput {
+            applicable: true,
+            enabled: true,
+            dataset_cases: PROMPT_EVOLUTION_OFFLINE_MIN_CASES,
+            paired_runs: PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
+            replay_runs: incomplete_holdout,
+            ready_profiles: 0,
+            evaluation_inflight: false,
+            rollout_status: "stable",
+        }),
         "collecting_holdout_evidence"
     );
     assert_eq!(
-        prompt_evolution_readiness(true, true, 3, 3, 4, 0, false, "stable"),
+        prompt_evolution_readiness(PromptEvolutionReadinessInput {
+            applicable: true,
+            enabled: true,
+            dataset_cases: PROMPT_EVOLUTION_OFFLINE_MIN_CASES,
+            paired_runs: PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
+            replay_runs: PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS,
+            ready_profiles: 0,
+            evaluation_inflight: false,
+            rollout_status: "stable",
+        }),
         "selecting_frontier"
     );
     assert_eq!(
-        prompt_evolution_readiness(true, true, 3, 3, 4, 1, false, "canary"),
+        prompt_evolution_readiness(PromptEvolutionReadinessInput {
+            applicable: true,
+            enabled: true,
+            dataset_cases: PROMPT_EVOLUTION_OFFLINE_MIN_CASES,
+            paired_runs: PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
+            replay_runs: PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS,
+            ready_profiles: 1,
+            evaluation_inflight: false,
+            rollout_status: "canary",
+        }),
         "canary"
     );
 }
@@ -2022,16 +2109,30 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
             reflection_packet: None,
         };
     for index in 0..3 {
-        model.observations.push((
-            "auto".to_string(),
-            direct_observation(index, PromptEvaluationSplit::Train),
-        ));
+        let candidate_observation = direct_observation(index, PromptEvaluationSplit::Train);
+        let mut stable_observation = candidate_observation.clone();
+        stable_observation.profile_id = stable.id.clone();
+        stable_observation.opponent_profile_id = Some(candidate.id.clone());
+        stable_observation.relative_reward = Some(-0.4);
+        model
+            .observations
+            .push(("auto".to_string(), candidate_observation));
+        model
+            .observations
+            .push(("auto".to_string(), stable_observation));
     }
     for index in 0..4 {
-        model.observations.push((
-            "auto".to_string(),
-            direct_observation(index + 3, PromptEvaluationSplit::Holdout),
-        ));
+        let candidate_observation = direct_observation(index + 3, PromptEvaluationSplit::Holdout);
+        let mut stable_observation = candidate_observation.clone();
+        stable_observation.profile_id = stable.id.clone();
+        stable_observation.opponent_profile_id = Some(candidate.id.clone());
+        stable_observation.relative_reward = Some(-0.4);
+        model
+            .observations
+            .push(("auto".to_string(), candidate_observation));
+        model
+            .observations
+            .push(("auto".to_string(), stable_observation));
     }
 
     let started = reconcile_prompt_rollout(&mut model, "auto", &evaluation(4));
@@ -2061,10 +2162,17 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
         },
     ));
     for index in 0..2 {
-        model.observations.push((
-            "auto".to_string(),
-            direct_observation(index + 7, PromptEvaluationSplit::Holdout),
-        ));
+        let candidate_observation = direct_observation(index + 7, PromptEvaluationSplit::Holdout);
+        let mut stable_observation = candidate_observation.clone();
+        stable_observation.profile_id = stable.id.clone();
+        stable_observation.opponent_profile_id = Some(candidate.id.clone());
+        stable_observation.relative_reward = Some(-0.4);
+        model
+            .observations
+            .push(("auto".to_string(), candidate_observation));
+        model
+            .observations
+            .push(("auto".to_string(), stable_observation));
     }
     let advanced = reconcile_prompt_rollout(&mut model, "auto", &evaluation(6));
     assert_eq!(advanced.canary_percent, 25);
@@ -4380,43 +4488,42 @@ fn replay_holdout_uses_only_a_different_completed_workflow() {
 
 #[test]
 fn offline_prompt_dataset_is_project_scoped_deterministic_and_split_stable() {
-    let run_events =
-        |sequence: u64,
-         run_id: &str,
-         project_id: &str,
-         objective: &str,
-         terminal_summary: Option<&str>| {
-            let metadata = [
-                ("agent_run_id".to_string(), run_id.to_string()),
-                ("project_id".to_string(), project_id.to_string()),
-                ("session_id".to_string(), format!("session-{run_id}")),
-                ("task_class".to_string(), "coding".to_string()),
-                ("prompt".to_string(), objective.to_string()),
-            ]
-            .into_iter()
-            .collect::<Metadata>();
-            let mut events = vec![Event {
-                id: EventId(format!("started-{run_id}")),
+    let run_events = |sequence: u64,
+                      run_id: &str,
+                      project_id: &str,
+                      objective: &str,
+                      terminal_summary: Option<&str>| {
+        let metadata = [
+            ("agent_run_id".to_string(), run_id.to_string()),
+            ("project_id".to_string(), project_id.to_string()),
+            ("session_id".to_string(), format!("session-{run_id}")),
+            ("task_class".to_string(), "coding".to_string()),
+            ("prompt".to_string(), objective.to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        let mut events = vec![Event {
+            id: EventId(format!("started-{run_id}")),
+            task_id: phase16_task_id(),
+            sequence,
+            timestamp_ms: sequence * 10,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Agent task started".to_string(),
+            metadata: metadata.clone(),
+        }];
+        if let Some(terminal_summary) = terminal_summary {
+            events.push(Event {
+                id: EventId(format!("completed-{run_id}")),
                 task_id: phase16_task_id(),
-                sequence,
-                timestamp_ms: sequence * 10,
+                sequence: sequence + 1,
+                timestamp_ms: (sequence + 1) * 10,
                 kind: EventKind::TaskStatusChanged,
-                summary: "Agent task started".to_string(),
-                metadata: metadata.clone(),
-            }];
-            if let Some(terminal_summary) = terminal_summary {
-                events.push(Event {
-                    id: EventId(format!("completed-{run_id}")),
-                    task_id: phase16_task_id(),
-                    sequence: sequence + 1,
-                    timestamp_ms: (sequence + 1) * 10,
-                    kind: EventKind::TaskStatusChanged,
-                    summary: terminal_summary.to_string(),
-                    metadata,
-                });
-            }
-            events
-        };
+                summary: terminal_summary.to_string(),
+                metadata,
+            });
+        }
+        events
+    };
     let mut events = Vec::new();
     events.extend(run_events(
         1,
@@ -4481,9 +4588,13 @@ fn offline_prompt_dataset_is_project_scoped_deterministic_and_split_stable() {
             .count()
             >= 2
     );
-    assert!(first
-        .iter()
-        .any(|case| case.split == PromptEvaluationSplit::Holdout));
+    assert!(
+        first
+            .iter()
+            .filter(|case| case.split == PromptEvaluationSplit::Holdout)
+            .count()
+            >= 2
+    );
     assert!(!first.iter().any(|case| case.objective == "Incomplete run"));
     assert!(first
         .iter()
@@ -4635,6 +4746,26 @@ fn bidirectional_pairwise_judging_normalizes_position_and_merges_feedback() {
 }
 
 #[test]
+fn bidirectional_pairwise_judging_rejects_material_disagreement() {
+    let payload = |score_a, score_b| PromptPairwiseEvaluationPayload {
+        score_a,
+        score_b,
+        safety_violations_a: 0,
+        safety_violations_b: 0,
+        step_scores_a: BTreeMap::new(),
+        step_scores_b: BTreeMap::new(),
+        feedback_a: ActionableSideInformation::default(),
+        feedback_b: ActionableSideInformation::default(),
+    };
+    let forward = payload(0.8, 0.2);
+    let reverse_aligned = payload(0.3, 0.7);
+
+    let error = validate_prompt_pairwise_agreement(&forward, &reverse_aligned).unwrap_err();
+
+    assert!(error.contains("reviewer disagreement"));
+}
+
+#[test]
 fn pairwise_observation_keeps_relative_and_per_step_credit() {
     let profile = ConductorPromptGenome::seed_for_effort("auto");
     let opponent_profile = ConductorPromptGenome {
@@ -4689,7 +4820,7 @@ fn pairwise_observation_keeps_relative_and_per_step_credit() {
                 model: "reviewer-model".to_string(),
                 prompt: "verify the result".to_string(),
                 attempts: 1,
-                succeeded: true,
+                status: WorkflowStepStatus::Completed,
                 output: "verified".to_string(),
                 tool_calls: Vec::new(),
                 errors: Vec::new(),
@@ -4712,7 +4843,7 @@ fn pairwise_observation_keeps_relative_and_per_step_credit() {
                 model: "reviewer-model".to_string(),
                 prompt: "review the result".to_string(),
                 attempts: 1,
-                succeeded: true,
+                status: WorkflowStepStatus::Completed,
                 output: "reviewed".to_string(),
                 tool_calls: Vec::new(),
                 errors: Vec::new(),
@@ -4875,15 +5006,22 @@ fn image_generation_run_cannot_complete_without_the_configured_tool() {
     let run_context = [("image_generation_required".to_string(), "true".to_string())]
         .into_iter()
         .collect();
-    assert!(!required_image_generation_satisfied(&runtime, &run_context));
+    apply_run_task_contract(&mut runtime, &run_context);
+    assert!(!runtime
+        .task_contract
+        .required_tool_satisfied("image.generate"));
 
-    append_tool_observation(
+    record_tool_outcome_with_risk(
         &mut runtime,
-        agent_core::ToolCallId("image-call".to_string()),
-        "tool=image.generate\nstatus=succeeded\noutput=generated-images/cat.png",
+        "image.generate",
+        r#"{"prompt":"cat"}"#,
+        &ToolOutcomeStatus::Succeeded,
+        Some(&ToolRisk::UsesNetwork),
     );
 
-    assert!(required_image_generation_satisfied(&runtime, &run_context));
+    assert!(runtime
+        .task_contract
+        .required_tool_satisfied("image.generate"));
 }
 
 #[test]
@@ -4932,7 +5070,9 @@ fn conductor_evaluation_repairs_invalid_structure_before_scoring() {
             } else {
                 r#"{"steps":[{"id":"final","role":"synthesizer","model":"worker-a","subtask":"answer directly","access":[]}]}"#.to_string()
             }),
+            partial_content: None,
             error: None,
+            failure: None,
             latency_ms: if calls == 1 { 7 } else { 11 },
             usage: [(
                 "total_tokens".to_string(),
@@ -4996,7 +5136,9 @@ fn conductor_evaluation_uses_a_collaborative_fallback_after_failed_repair() {
         calls += 1;
         CollaborationCompletion {
             content: Some("still not a workflow".to_string()),
+            partial_content: None,
             error: None,
+            failure: None,
             latency_ms: 5,
             usage: BTreeMap::new(),
             evidence: Vec::new(),
@@ -5059,7 +5201,7 @@ fn execution_arena_runs_dependencies_before_final_synthesis() {
     );
     let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
     let captured = Arc::clone(&prompts);
-    let runner: PromptEvaluationRunner = Arc::new(move |request| {
+    let runner: PromptEvaluationRunner = Arc::new(move |request, _| {
         captured
             .lock()
             .expect("prompt capture lock")
@@ -5070,7 +5212,9 @@ fn execution_arena_runs_dependencies_before_final_synthesis() {
             } else {
                 "final-output".to_string()
             }),
+            partial_content: None,
             error: None,
+            failure: None,
             latency_ms: 10,
             usage: [("total_tokens".to_string(), "20".to_string())]
                 .into_iter()
@@ -5097,7 +5241,7 @@ fn execution_arena_runs_dependencies_before_final_synthesis() {
     assert_eq!(candidate.execution.total_tokens, 40);
     let prompts = prompts.lock().expect("prompt capture lock");
     assert_eq!(prompts.len(), 2);
-    assert!(prompts[1].contains("[investigate]\nbranch-output"));
+    assert!(prompts[1].contains("[investigate status=completed]\nbranch-output"));
 }
 
 #[test]
@@ -5720,12 +5864,21 @@ fn evaluation_arena_applies_retry_and_alternate_model_genes() {
     plan.steps[0].tool_policy = WorkflowToolPolicy::ReadOnlyEvidence;
     let requests = Arc::new(Mutex::new(Vec::<PromptEvaluationWorkerRequest>::new()));
     let captured = Arc::clone(&requests);
-    let runner: PromptEvaluationRunner = Arc::new(move |request| {
+    let runner: PromptEvaluationRunner = Arc::new(move |request, _| {
         let should_fail = request.model == "worker-a";
         captured.lock().expect("request capture lock").push(request);
         CollaborationCompletion {
             content: (!should_fail).then(|| "recovered output".to_string()),
+            partial_content: None,
             error: should_fail.then(|| "worker-a failed".to_string()),
+            failure: should_fail.then(|| {
+                AgentFailure::new(
+                    "provider_unavailable",
+                    "worker-a failed",
+                    AgentFailureClass::ProviderTransient,
+                    true,
+                )
+            }),
             latency_ms: 10,
             usage: [("total_tokens".to_string(), "20".to_string())]
                 .into_iter()
@@ -5922,7 +6075,10 @@ fn prompt_evolution_penalizes_a_profile_when_anchor_was_delivered() {
 fn prompt_evolution_treats_user_cancellation_as_a_mild_negative_signal() {
     let seed = ConductorPromptGenome::seed_for_effort("pro");
     let context = [
-        ("collaboration_id".to_string(), "collab-cancelled".to_string()),
+        (
+            "collaboration_id".to_string(),
+            "collab-cancelled".to_string(),
+        ),
         ("agent_run_id".to_string(), "run-cancelled".to_string()),
         ("prompt_profile".to_string(), seed.id.clone()),
         ("prompt_effort".to_string(), "pro".to_string()),
@@ -5952,9 +6108,12 @@ fn prompt_evolution_treats_user_cancellation_as_a_mild_negative_signal() {
             kind: EventKind::TaskStatusChanged,
             summary: "Collaboration workflow failed".to_string(),
             metadata: metadata_with_context(
-                [("anytime_native_effort_success".to_string(), "false".to_string())]
-                    .into_iter()
-                    .collect(),
+                [(
+                    "anytime_native_effort_success".to_string(),
+                    "false".to_string(),
+                )]
+                .into_iter()
+                .collect(),
                 &context,
             ),
         },
@@ -7250,8 +7409,8 @@ fn recovery_envelope_round_trips_the_kernel_task_checkpoint() {
     )
     .expect("envelope should build");
     let encoded = serde_json::to_string(&envelope).expect("envelope encodes");
-    let decoded = serde_json::from_str::<AgentRecoveryEnvelope>(&encoded)
-        .expect("envelope decodes");
+    let decoded =
+        serde_json::from_str::<AgentRecoveryEnvelope>(&encoded).expect("envelope decodes");
     let restored = decoded
         .task_state
         .expect("task checkpoint persists")

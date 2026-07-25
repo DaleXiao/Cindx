@@ -7,6 +7,7 @@ pub const CONTEXT_SOURCE_SCHEMA: &str = "cindx.context-source.v1";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ContextSourceKind {
     ImageGenerationPolicy,
+    WorkflowExecutionContract,
     RestorePack,
     ArtifactManifest,
     WorkspaceKnowledge,
@@ -24,6 +25,7 @@ impl ContextSourceKind {
         }
         Some(match message.metadata.get("kind").map(String::as_str) {
             Some("image_generation_policy") => Self::ImageGenerationPolicy,
+            Some("workflow_execution_contract") => Self::WorkflowExecutionContract,
             Some("context_restore_pack") => Self::RestorePack,
             Some("artifact_manifest") => Self::ArtifactManifest,
             Some("knowledge_context") => Self::WorkspaceKnowledge,
@@ -38,6 +40,7 @@ impl ContextSourceKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ImageGenerationPolicy => "image_generation_policy",
+            Self::WorkflowExecutionContract => "workflow_execution_contract",
             Self::RestorePack => "context_restore_pack",
             Self::ArtifactManifest => "artifact_manifest",
             Self::WorkspaceKnowledge => "knowledge_context",
@@ -52,6 +55,7 @@ impl ContextSourceKind {
     pub(crate) const fn priority(self) -> u8 {
         match self {
             Self::ImageGenerationPolicy => 100,
+            Self::WorkflowExecutionContract => 99,
             Self::RestorePack => 95,
             Self::ArtifactManifest => 90,
             Self::WorkspaceKnowledge => 85,
@@ -66,7 +70,10 @@ impl ContextSourceKind {
     pub(crate) const fn is_protected(self) -> bool {
         matches!(
             self,
-            Self::ImageGenerationPolicy | Self::RestorePack | Self::ArtifactManifest
+            Self::ImageGenerationPolicy
+                | Self::WorkflowExecutionContract
+                | Self::RestorePack
+                | Self::ArtifactManifest
         )
     }
 }
@@ -333,5 +340,19 @@ mod tests {
 
         assert!(engine.checkpoint_is_reusable(32, &history, plan, 32_000));
         assert!(!engine.checkpoint_is_reusable(0, &history, plan, 32_000));
+    }
+
+    #[test]
+    fn workflow_execution_contract_is_high_priority_and_protected() {
+        let mut contract = message(MessageRole::System, "machine contract");
+        contract.metadata.insert(
+            "kind".to_string(),
+            "workflow_execution_contract".to_string(),
+        );
+
+        let source = ContextSourceKind::from_message(&contract).unwrap();
+        assert_eq!(source, ContextSourceKind::WorkflowExecutionContract);
+        assert_eq!(source.priority(), 99);
+        assert!(source.is_protected());
     }
 }

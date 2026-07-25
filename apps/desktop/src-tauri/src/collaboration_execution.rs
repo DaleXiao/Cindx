@@ -4,7 +4,7 @@ pub(crate) fn collaboration_run_should_interrupt(control: &Arc<AgentRunControl>)
     agent_run_should_stop(control) || control.has_pending_steer()
 }
 
-fn collaboration_stage_should_interrupt(
+pub(crate) fn collaboration_stage_should_interrupt(
     control: &Arc<AgentRunControl>,
     stage_class: RunStageClass,
 ) -> bool {
@@ -318,9 +318,9 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
     };
     if let Some(control) = cancellation.as_ref() {
         if let Err(reason) = control.begin_stage_model_call(&stage, stage_class) {
-            return CollaborationCompletion::failed(format!(
-                "Run stopped before model call: {}",
-                reason.code()
+            return CollaborationCompletion::failed_with(AgentFailure::from_stop_reason(
+                reason,
+                format!("Run stopped before model call: {}", reason.code()),
             ));
         }
     }
@@ -404,13 +404,20 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
             }
             let content = match no_tool_collaboration_content(response, &role_name) {
                 Ok(content) => content,
-                Err(error) => {
+                Err(failure) => {
                     if let Some(control) = cancellation.as_ref() {
-                        control.record_observation("model_protocol_error", &role_name, &error);
+                        control.record_observation(
+                            "model_protocol_error",
+                            &role_name,
+                            &failure.message,
+                        );
                     }
                     return CollaborationCompletion {
                         content: None,
-                        error: Some(error),
+                        partial_content: (!partial_output.trim().is_empty())
+                            .then_some(partial_output),
+                        error: Some(failure.message.clone()),
+                        failure: Some(failure),
                         latency_ms,
                         usage,
                         evidence: Vec::new(),
@@ -437,13 +444,16 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
             }
             CollaborationCompletion {
                 content: Some(content),
+                partial_content: None,
                 error: None,
+                failure: None,
                 latency_ms,
                 usage,
                 evidence: Vec::new(),
             }
         }
         Err(error) => {
+            let failure = AgentFailure::from_model_error(&error);
             if let Some(control) = cancellation.as_ref() {
                 control.record_observation("provider_failure", error.class.label(), &error.message);
             }
@@ -461,7 +471,9 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
             }
             CollaborationCompletion {
                 content: None,
-                error: Some(error.to_string()),
+                partial_content: (!partial_output.trim().is_empty()).then_some(partial_output),
+                error: Some(failure.message.clone()),
+                failure: Some(failure),
                 latency_ms,
                 usage,
                 evidence: Vec::new(),
@@ -473,734 +485,40 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
 fn no_tool_collaboration_content(
     response: model_provider::ModelResponse,
     role_name: &str,
-) -> Result<String, String> {
+) -> Result<String, AgentFailure> {
     match response.assessment().disposition {
         model_provider::ModelResponseDisposition::ToolCalls => {
-            return Err(format!(
-                "collaboration {role_name} attempted {} tool call(s) in a no-tool stage",
-                response.tool_calls.len()
+            return Err(AgentFailure::model_output(
+                "unexpected_tool_calls",
+                format!(
+                    "collaboration {role_name} attempted {} tool call(s) in a no-tool stage",
+                    response.tool_calls.len()
+                ),
             ));
         }
         model_provider::ModelResponseDisposition::IncompleteOutput => {
-            return Err(format!(
-                "collaboration {role_name} response reached its output limit before completion"
+            return Err(AgentFailure::model_output(
+                "incomplete_output",
+                format!(
+                    "collaboration {role_name} response reached its output limit before completion"
+                ),
             ));
         }
         model_provider::ModelResponseDisposition::Filtered => {
-            return Err(format!(
-                "collaboration {role_name} response was blocked by the provider filter"
+            return Err(AgentFailure::model_output(
+                "filtered_output",
+                format!("collaboration {role_name} response was blocked by the provider filter"),
             ));
         }
         model_provider::ModelResponseDisposition::Empty => {
-            return Err(format!(
-                "collaboration {role_name} returned an empty response"
+            return Err(AgentFailure::model_output(
+                "empty_output",
+                format!("collaboration {role_name} returned an empty response"),
             ));
         }
         model_provider::ModelResponseDisposition::Usable => {}
     }
     Ok(response.message.content)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn complete_collaboration_worker_with_tools(
-    app: tauri::AppHandle,
-    config: ProviderConfig,
-    task_id: TaskId,
-    workspace_root: PathBuf,
-    run_context: Metadata,
-    collaboration_id: String,
-    stage: String,
-    role: ModelRole,
-    model: String,
-    prompt: String,
-    allow_tools: bool,
-    max_model_turns: usize,
-    max_tool_calls: usize,
-    cancellation: Option<Arc<AgentRunControl>>,
-    branch_cancellation: Option<Arc<AtomicBool>>,
-) -> CollaborationCompletion {
-    let started_at_ms = current_time_millis();
-    let state = app.state::<AppState>();
-    let registry = if allow_tools {
-        match tool_registry_for_state(&state, &workspace_root) {
-            Ok(registry) => Some(registry),
-            Err(error) => return CollaborationCompletion::failed(error),
-        }
-    } else {
-        None
-    };
-    let tools = if let Some(registry) = registry.as_ref() {
-        evidence_worker_tools(
-            &registry
-                .exposure_plan(&prompt, config.context_window_tokens)
-                .inline,
-        )
-    } else {
-        Vec::new()
-    };
-    let has_tools = !tools.is_empty();
-    let evidence_turn_limit = max_model_turns.max(1);
-    let mut runtime = start_agent_loop(
-        task_id,
-        prompt.clone(),
-        AgentRuntimeConfig {
-            max_turns: collaboration_worker_runtime_turn_limit(evidence_turn_limit, has_tools),
-        },
-    );
-    let mut trusted_context = agent_runtime_context_for_run(&run_context).unwrap_or_default();
-    if !trusted_context.is_empty() {
-        trusted_context.push('\n');
-    }
-    trusted_context.push_str(&format!(
-        "Collaboration: {collaboration_id}\nWorker stage: {stage}\nWorker role: {}\n{} Evidence budget: {evidence_turn_limit} tool-capable model rounds and {max_tool_calls} total tool calls. Batch independent reads, prefer decisive file reads or searches over repeated directory listings, and stop gathering evidence as soon as the assigned question is answerable. Return concise conclusions for downstream workers; do not claim workspace changes.",
-        role_label(&role),
-        if allow_tools {
-            "This worker has an isolated transcript and may use only exposed read-only evidence tools."
-        } else {
-            "This is a bounded worker with no tools. Reason only from the supplied request and recent context, then finish in one response."
-        }
-    ));
-    let mut worker_context = run_context.clone();
-    let evidence_source = stage.clone();
-    worker_context.insert("collaboration_id".to_string(), collaboration_id);
-    worker_context.insert("stage".to_string(), stage.clone());
-    worker_context.insert("role".to_string(), role_label(&role).to_string());
-    worker_context.insert(
-        "worker_runtime".to_string(),
-        "isolated_evidence_v1".to_string(),
-    );
-    let mut usage = Metadata::new();
-    let mut evidence = Vec::new();
-    let mut tool_call_count = 0usize;
-    let mut first_delta_at_ms = None;
-    let stage_class = RunStageClass::Worker;
-
-    loop {
-        if branch_cancellation
-            .as_ref()
-            .is_some_and(|cancelled| cancelled.load(Ordering::SeqCst))
-        {
-            return CollaborationCompletion {
-                content: None,
-                error: Some("collaboration branch cancelled after quorum".to_string()),
-                latency_ms: current_time_millis().saturating_sub(started_at_ms),
-                usage,
-                evidence,
-            };
-        }
-        if cancellation
-            .as_ref()
-            .is_some_and(collaboration_run_should_interrupt)
-        {
-            return CollaborationCompletion {
-                content: None,
-                error: Some(
-                    if cancellation
-                        .as_ref()
-                        .is_some_and(|control| control.has_pending_steer())
-                    {
-                        COLLABORATION_STEER_INTERRUPTED
-                    } else {
-                        MODEL_REQUEST_CANCELLED
-                    }
-                    .to_string(),
-                ),
-                latency_ms: current_time_millis().saturating_sub(started_at_ms),
-                usage,
-                evidence,
-            };
-        }
-
-        if let Some(control) = cancellation.as_ref() {
-            if let Err(reason) = control.begin_stage_model_call(&stage, stage_class) {
-                return CollaborationCompletion {
-                    content: None,
-                    error: Some(format!(
-                        "Run stopped before worker model call: {}",
-                        reason.code()
-                    )),
-                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
-                    usage,
-                    evidence,
-                };
-            }
-        }
-
-        let timeout_seconds = cancellation
-            .as_ref()
-            .map(|control| control.stage_model_call_timeout_seconds(stage_class))
-            .unwrap_or(180);
-        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
-            base_url: config.base_url.clone(),
-            api_key: config.api_key.clone(),
-            model: model.clone(),
-            embedding_model: config.model_for_role(&ModelRole::Embedder),
-            timeout_seconds,
-        });
-
-        let finalizing =
-            prepare_collaboration_worker_turn(&mut runtime, has_tools, evidence_turn_limit);
-        let request_tools: &[ToolSpec] = if finalizing { &[] } else { &tools };
-
-        let max_output_tokens = bounded_max_output_tokens(
-            config.context_window_tokens,
-            COLLABORATION_MAX_OUTPUT_TOKENS,
-        );
-        let prepared_turn = AgentKernel::new(&mut runtime, request_tools).prepare_model_turn(
-            Some(&config.agent_system_prompt),
-            Some(&trusted_context),
-            config.context_window_tokens,
-            max_output_tokens,
-        );
-        let mut request = prepared_turn.request;
-        let governor = prepared_turn.context;
-        request.role = role.clone();
-        request
-            .metadata
-            .insert("collaboration_worker".to_string(), "true".to_string());
-        request.metadata.insert(
-            "max_output_tokens".to_string(),
-            max_output_tokens.to_string(),
-        );
-        usage.insert(
-            "context_governor_applied".to_string(),
-            governor.applied.to_string(),
-        );
-        usage.insert(
-            "context_projected_tokens".to_string(),
-            governor.estimated_projected_tokens.to_string(),
-        );
-        let mut partial_output = String::new();
-        let mut stream_progress = ModelStreamProgress::new();
-        let response = provider.complete_streaming_cancellable(
-            request,
-            |delta| {
-                if !delta.is_empty() {
-                    first_delta_at_ms.get_or_insert_with(current_time_millis);
-                    partial_output.push_str(delta);
-                }
-                if let Some(control) = cancellation.as_ref() {
-                    stream_progress.observe(control, "model_stream", &stage, &partial_output);
-                }
-            },
-            || {
-                cancellation.as_ref().is_some_and(|control| {
-                    collaboration_stage_should_interrupt(control, stage_class)
-                }) || branch_cancellation
-                    .as_ref()
-                    .is_some_and(|cancelled| cancelled.load(Ordering::SeqCst))
-            },
-        );
-        if let Some(control) = cancellation.as_ref() {
-            control.finish_model_call();
-        }
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => {
-                if let Some(control) = cancellation.as_ref() {
-                    control.record_observation(
-                        "provider_failure",
-                        error.class.label(),
-                        &error.message,
-                    );
-                }
-                usage.insert(
-                    "provider_failure_class".to_string(),
-                    error.class.label().to_string(),
-                );
-                usage.insert(
-                    "provider_failure_retryable".to_string(),
-                    error.retryable.to_string(),
-                );
-                if let Some(status_code) = error.status_code {
-                    usage.insert("provider_status_code".to_string(), status_code.to_string());
-                }
-                return CollaborationCompletion {
-                    content: None,
-                    error: Some(error.to_string()),
-                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
-                    usage,
-                    evidence,
-                };
-            }
-        };
-        if let Some(control) = cancellation.as_ref() {
-            if let Err(reason) = control.record_agent_turn(&stage) {
-                return CollaborationCompletion {
-                    content: None,
-                    error: Some(format!(
-                        "Run stopped after worker model turn: {}",
-                        reason.code()
-                    )),
-                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
-                    usage,
-                    evidence,
-                };
-            }
-        }
-        for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
-            let previous = usage
-                .get(key)
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or_default();
-            let additional = response
-                .metadata
-                .get(key)
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or_default();
-            usage.insert(
-                key.to_string(),
-                previous.saturating_add(additional).to_string(),
-            );
-        }
-        let previous_source = usage.get("usage_source").map(String::as_str);
-        let additional_source = response.metadata.get("usage_source").map(String::as_str);
-        let combined_source = if [previous_source, additional_source]
-            .into_iter()
-            .flatten()
-            .any(|source| source == "estimated")
-        {
-            "estimated"
-        } else if [previous_source, additional_source]
-            .into_iter()
-            .flatten()
-            .any(|source| source == "provider_partial")
-        {
-            "provider_partial"
-        } else {
-            "provider"
-        };
-        usage.insert("usage_source".to_string(), combined_source.to_string());
-        usage.insert(
-            "usage_estimated".to_string(),
-            (combined_source != "provider").to_string(),
-        );
-        let finalization_content = finalizing
-            .then(|| response.message.content.trim().to_string())
-            .filter(|content| !content.is_empty());
-        if let Some(control) = cancellation.as_ref() {
-            if let Some(evidence) = model_response_checkpoint_evidence(&response) {
-                control.record_observation("model_result", &stage, &evidence);
-            }
-        }
-
-        match AgentKernel::new(&mut runtime, request_tools).advance_model_response(response) {
-            AgentAdvance::Completed { answer } => {
-                if let Some(control) = cancellation.as_ref() {
-                    control.record_partial_output(&answer);
-                    control.record_best_known_result(
-                        &stage,
-                        &answer,
-                        if evidence.is_empty() {
-                            ResultQuality::Substantive
-                        } else {
-                            ResultQuality::Grounded
-                        },
-                        evidence.len(),
-                        false,
-                        false,
-                    );
-                }
-                usage.insert("worker_turns".to_string(), runtime.turn.to_string());
-                usage.insert("worker_tool_calls".to_string(), tool_call_count.to_string());
-                usage.insert("worker_tool_count".to_string(), tools.len().to_string());
-                if let Some(first_delta_at_ms) = first_delta_at_ms {
-                    usage.insert(
-                        "first_token_latency_ms".to_string(),
-                        first_delta_at_ms.saturating_sub(started_at_ms).to_string(),
-                    );
-                }
-                usage.insert(
-                    "worker_runtime".to_string(),
-                    "isolated_evidence_v1".to_string(),
-                );
-                return CollaborationCompletion {
-                    content: Some(answer),
-                    error: None,
-                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
-                    usage,
-                    evidence,
-                };
-            }
-            AgentAdvance::TurnBudgetExhausted {
-                completed_turns,
-                max_turns,
-                ..
-            } => {
-                return CollaborationCompletion {
-                    content: None,
-                    error: Some(format!(
-                        "worker_turn_budget_exhausted: completed {completed_turns} turns with a {max_turns}-turn budget"
-                    )),
-                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
-                    usage,
-                    evidence,
-                }
-            }
-            AgentAdvance::Failed { message } => {
-                return CollaborationCompletion {
-                    content: None,
-                    error: Some(message),
-                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
-                    usage,
-                    evidence,
-                }
-            }
-            AgentAdvance::Retry { instruction } => {
-                AgentKernel::new(&mut runtime, request_tools)
-                    .apply_model_response_retry(instruction);
-                continue;
-            }
-            AgentAdvance::ToolCalls { calls } => {
-                if finalizing {
-                    if let Some(answer) = finalization_content {
-                        if let Some(control) = cancellation.as_ref() {
-                            control.record_best_known_result(
-                                &stage,
-                                &answer,
-                                if evidence.is_empty() {
-                                    ResultQuality::Substantive
-                                } else {
-                                    ResultQuality::Grounded
-                                },
-                                evidence.len(),
-                                false,
-                                false,
-                            );
-                        }
-                        usage.insert("worker_turns".to_string(), runtime.turn.to_string());
-                        usage.insert(
-                            "worker_tool_calls".to_string(),
-                            tool_call_count.to_string(),
-                        );
-                        usage.insert("worker_tool_count".to_string(), tools.len().to_string());
-                        usage.insert(
-                            "worker_runtime".to_string(),
-                            "isolated_evidence_v1".to_string(),
-                        );
-                        return CollaborationCompletion {
-                            content: Some(answer),
-                            error: None,
-                            latency_ms: current_time_millis().saturating_sub(started_at_ms),
-                            usage,
-                            evidence,
-                        };
-                    }
-                    return CollaborationCompletion {
-                        content: None,
-                        error: Some(
-                            "collaboration worker requested another tool after its evidence phase; final answer was empty"
-                                .to_string(),
-                        ),
-                        latency_ms: current_time_millis().saturating_sub(started_at_ms),
-                        usage,
-                        evidence,
-                    };
-                }
-                for call in calls {
-                    tool_call_count += 1;
-                    let tool_call_id = call.call_id.0.clone();
-                    let mut invocation =
-                        AgentKernel::new(&mut runtime, request_tools).tool_invocation(&call);
-                    invocation.proposed_by_model = "collaboration-worker".to_string();
-                    invocation
-                        .metadata
-                        .insert("collaboration_worker".to_string(), "true".to_string());
-                    {
-                        let mut store = match state.store.lock() {
-                            Ok(store) => store,
-                            Err(error) => {
-                                return CollaborationCompletion::failed(format!(
-                                    "store lock poisoned: {error}"
-                                ))
-                            }
-                        };
-                        if let Err(error) =
-                            append_tool_proposed_event(&mut store, &invocation, Some(&worker_context))
-                        {
-                            return CollaborationCompletion::failed(error.to_string());
-                        }
-                    }
-
-                    let budget_exhausted = tool_call_count > max_tool_calls;
-                    let rejection = if budget_exhausted {
-                        Some("This collaboration worker exhausted its evidence-tool budget. Stop searching and return the best concise brief from existing evidence.")
-                    } else if AgentKernel::new(&mut runtime, request_tools)
-                        .repeated_tool_failure_count(&call)
-                        >= MAX_IDENTICAL_TOOL_FAILURES
-                    {
-                        Some("Cindx blocked this identical worker tool call after repeated failures. Change the arguments or use a different approach.")
-                    } else if !tools.iter().any(|tool| tool.name == call.tool_name) {
-                        Some("This tool is not exposed to the collaboration worker. Return the proposed action to the main executor instead.")
-                    } else {
-                        None
-                    };
-                    let (status, observation) = if let Some(reason) = rejection {
-                        let observation =
-                            observation_from_tool_result(&call.tool_name, "failed", reason);
-                        evidence.push(CollaborationEvidence {
-                            source_step: evidence_source.clone(),
-                            tool_call_id: tool_call_id.clone(),
-                            tool_name: call.tool_name.clone(),
-                            request: call.input.clone(),
-                            status: "failed".to_string(),
-                            output: truncate_for_collaboration(reason, 2_000),
-                        });
-                        let mut store = match state.store.lock() {
-                            Ok(store) => store,
-                            Err(error) => {
-                                return CollaborationCompletion::failed(format!(
-                                    "store lock poisoned: {error}"
-                                ))
-                            }
-                        };
-                        let failure_code = if budget_exhausted {
-                            "worker_tool_budget_exhausted"
-                        } else {
-                            "worker_tool_not_allowed"
-                        };
-                        if let Err(error) = append_tool_finished_event(
-                            &mut store,
-                            &runtime.task_id,
-                            &call.call_id.0,
-                            &call.tool_name,
-                            "failed",
-                            &observation,
-                            [("failure_code".to_string(), failure_code.to_string())]
-                                .into_iter()
-                                .collect(),
-                            Some(&worker_context),
-                        ) {
-                            return CollaborationCompletion::failed(error.to_string());
-                        }
-                        (ToolOutcomeStatus::Failed, observation)
-                    } else {
-                        let result = registry.as_ref().ok_or_else(|| {
-                            "collaboration worker tool registry is unavailable".to_string()
-                        });
-                        match result.and_then(|registry| {
-                            execute_agent_tool_invocation(
-                                &state,
-                                registry,
-                                invocation,
-                                &workspace_root,
-                                &worker_context,
-                            )
-                        }) {
-                            Ok(result) => {
-                                let status = result.status.clone();
-                                evidence.push(CollaborationEvidence {
-                                    source_step: evidence_source.clone(),
-                                    tool_call_id: tool_call_id.clone(),
-                                    tool_name: call.tool_name.clone(),
-                                    request: call.input.clone(),
-                                    status: tool_outcome_label(&result.status).to_string(),
-                                    output: truncate_for_collaboration(&result.output, 2_000),
-                                });
-                                (
-                                    status,
-                                    observation_from_agent_tool_result(&call.tool_name, &result),
-                                )
-                            }
-                            Err(error) => {
-                                evidence.push(CollaborationEvidence {
-                                    source_step: evidence_source.clone(),
-                                    tool_call_id: tool_call_id.clone(),
-                                    tool_name: call.tool_name.clone(),
-                                    request: call.input.clone(),
-                                    status: "failed".to_string(),
-                                    output: truncate_for_collaboration(&error, 2_000),
-                                });
-                                (
-                                    ToolOutcomeStatus::Failed,
-                                    observation_from_tool_result(
-                                        &call.tool_name,
-                                        "failed",
-                                        &error,
-                                    ),
-                                )
-                            }
-                        }
-                    };
-                    AgentKernel::new(&mut runtime, request_tools).apply_tool_observation(
-                        &call,
-                        &status,
-                        None,
-                        &observation,
-                    );
-                }
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn record_collaboration_stage_finished(
-    state: &tauri::State<'_, AppState>,
-    task_id: &TaskId,
-    run_context: &Metadata,
-    collaboration_id: &str,
-    stage: &str,
-    role: &ModelRole,
-    model: &str,
-    request_id: &str,
-    completion: &CollaborationCompletion,
-    stage_metadata: &Metadata,
-) -> Result<(), String> {
-    let mut metadata = [
-        ("collaboration_id".to_string(), collaboration_id.to_string()),
-        ("request_id".to_string(), request_id.to_string()),
-        ("stage".to_string(), stage.to_string()),
-        ("role".to_string(), role_label(role).to_string()),
-        ("model".to_string(), model.to_string()),
-        ("latency_ms".to_string(), completion.latency_ms.to_string()),
-    ]
-    .into_iter()
-    .collect::<Metadata>();
-    metadata.insert(
-        "evidence_count".to_string(),
-        completion.evidence.len().to_string(),
-    );
-    metadata.insert(
-        "evidence_tools".to_string(),
-        completion
-            .evidence
-            .iter()
-            .map(|entry| entry.tool_name.as_str())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>()
-            .join(","),
-    );
-    for (key, value) in stage_metadata {
-        metadata.insert(key.clone(), value.clone());
-    }
-    let summary = if let Some(content) = completion.content.as_ref() {
-        metadata.insert("output".to_string(), content.clone());
-        metadata.insert("status".to_string(), "completed".to_string());
-        for (key, value) in &completion.usage {
-            metadata.insert(key.clone(), value.clone());
-        }
-        format!("Collaboration {stage} finished")
-    } else {
-        metadata.insert("status".to_string(), "degraded".to_string());
-        metadata.insert(
-            "error".to_string(),
-            completion
-                .error
-                .clone()
-                .unwrap_or_else(|| "unknown collaboration failure".to_string()),
-        );
-        format!("Collaboration {stage} unavailable")
-    };
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    append_event(
-        &mut store,
-        task_id,
-        EventKind::ModelRequestFinished,
-        summary,
-        metadata_with_context(metadata, run_context),
-    )
-    .map_err(|error| error.to_string())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_collaboration_stage(
-    state: &tauri::State<'_, AppState>,
-    config: &ProviderConfig,
-    task_id: &TaskId,
-    run_context: &Metadata,
-    collaboration_id: &str,
-    stage: &str,
-    role: ModelRole,
-    model: &str,
-    prompt: String,
-) -> Result<String, String> {
-    run_collaboration_stage_with_delta(
-        state,
-        config,
-        task_id,
-        run_context,
-        collaboration_id,
-        stage,
-        role,
-        model,
-        prompt,
-        |_| {},
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_collaboration_stage_with_delta(
-    state: &tauri::State<'_, AppState>,
-    config: &ProviderConfig,
-    task_id: &TaskId,
-    run_context: &Metadata,
-    collaboration_id: &str,
-    stage: &str,
-    role: ModelRole,
-    model: &str,
-    prompt: String,
-    on_delta: impl FnMut(&str),
-) -> Result<String, String> {
-    let cancellation =
-        active_agent_run_control(state, run_context.get("session_id").map(String::as_str))?;
-    if let Some(control) = cancellation.as_ref() {
-        if control.has_pending_steer() {
-            return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
-        }
-        if agent_run_should_stop(control) {
-            return Err(MODEL_REQUEST_CANCELLED.to_string());
-        }
-    }
-    let request_id = unique_id("collaboration-model");
-    record_collaboration_stage_started(
-        state,
-        task_id,
-        run_context,
-        collaboration_id,
-        stage,
-        &role,
-        model,
-        &request_id,
-        &Metadata::new(),
-    )?;
-    let completion = complete_collaboration_model_for_stage_with_control(
-        config.clone(),
-        stage.to_string(),
-        role.clone(),
-        model.to_string(),
-        collaboration_system_prompt_for_run(&config.agent_system_prompt, run_context),
-        prompt,
-        cancellation.clone(),
-        on_delta,
-    );
-    record_collaboration_stage_finished(
-        state,
-        task_id,
-        run_context,
-        collaboration_id,
-        stage,
-        &role,
-        model,
-        &request_id,
-        &completion,
-        &Metadata::new(),
-    )?;
-    if cancellation
-        .as_ref()
-        .is_some_and(|control| control.has_pending_steer())
-    {
-        return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
-    }
-    completion.content.ok_or_else(|| {
-        completion
-            .error
-            .unwrap_or_else(|| "collaboration model returned no content".to_string())
-    })
 }
 
 #[cfg(test)]
@@ -1229,8 +547,10 @@ mod protocol_tests {
         let error = no_tool_collaboration_content(response_with_tool_call(), "synthesizer")
             .expect_err("tool calls must not be accepted as final content");
 
+        assert_eq!(error.class, agent_runtime::AgentFailureClass::ModelOutput);
+        assert_eq!(error.code, "unexpected_tool_calls");
         assert_eq!(
-            error,
+            error.message,
             "collaboration synthesizer attempted 1 tool call(s) in a no-tool stage"
         );
     }

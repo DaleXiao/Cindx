@@ -6,15 +6,20 @@ const root = process.cwd();
 const read = (relativePath) =>
   fs.readFileSync(path.join(root, relativePath), "utf8");
 
-const readRustCrateSource = (crateName) => {
-  const sourceDirectory = path.join(root, "crates", crateName, "src");
-  return fs
-    .readdirSync(sourceDirectory)
-    .filter((entry) => entry.endsWith(".rs"))
-    .sort()
-    .map((entry) => fs.readFileSync(path.join(sourceDirectory, entry), "utf8"))
+const readRustSourceTree = (sourceDirectory) =>
+  fs
+    .readdirSync(sourceDirectory, { withFileTypes: true })
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .flatMap((entry) => {
+      const entryPath = path.join(sourceDirectory, entry.name);
+      if (entry.isDirectory()) return [readRustSourceTree(entryPath)];
+      if (!entry.name.endsWith(".rs")) return [];
+      return [`// ${entryPath}\n${fs.readFileSync(entryPath, "utf8")}`];
+    })
     .join("\n");
-};
+
+const readRustCrateSource = (crateName) =>
+  readRustSourceTree(path.join(root, "crates", crateName, "src"));
 
 const parseJson = (relativePath) => JSON.parse(read(relativePath));
 
@@ -76,11 +81,15 @@ const desktopRustModules = fs
     source: fs.readFileSync(path.join(desktopRustSourceDirectory, entry), "utf8"),
   }));
 const rustCompositionRoot = read("apps/desktop/src-tauri/src/lib.rs");
-const rustLib = desktopRustModules
-  .map(({ entry, source }) => `// ${entry}\n${source}`)
-  .join("\n");
+const rustLib = readRustSourceTree(desktopRustSourceDirectory);
 const collaborationServiceSource = read(
   "apps/desktop/src-tauri/src/collaboration_service.rs"
+);
+const collaborationWorkerRuntimeSource = read(
+  "apps/desktop/src-tauri/src/collaboration_worker_runtime.rs"
+);
+const adaptiveCollaborationFinalizationSource = read(
+  "apps/desktop/src-tauri/src/adaptive_collaboration_finalization.rs"
 );
 const agentLoopServiceSource = read(
   "apps/desktop/src-tauri/src/agent_loop_service.rs"
@@ -131,12 +140,12 @@ const modelProviderCargo = read("crates/model-provider/Cargo.toml");
 const ragSource = read("crates/agent-rag/src/lib.rs");
 const graphSource = read("crates/agent-graph/src/lib.rs");
 const agentMemorySource = read("crates/agent-memory/src/lib.rs");
-const agentRuntimeSource = read("crates/agent-runtime/src/lib.rs");
+const agentRuntimeSource = readRustCrateSource("agent-runtime");
 const agentToolRuntimeSource = read("crates/agent-runtime/src/tool_runtime.rs");
 const runControlSource = read("crates/agent-runtime/src/control.rs");
 const coreAgentPrompt = read("crates/agent-runtime/src/core_prompt.txt");
 const orchestratorSource = readRustCrateSource("orchestrator");
-const promptEvolutionSource = read("crates/orchestrator/src/prompt_evolution.rs");
+const promptEvolutionSource = readRustCrateSource("orchestrator");
 const benchmarkSource = read("crates/orchestrator/src/benchmark.rs");
 const benchmarkSuite = JSON.parse(read("benchmarks/agent/core-v1.json"));
 const benchmarkBaseline = JSON.parse(read("benchmarks/agent/core-v1-baseline.json"));
@@ -182,7 +191,10 @@ assert(
 );
 for (const requiredModule of [
   "agent_loop_runtime.rs",
-  "adaptive_collaboration_runtime.rs",
+  "adaptive_collaboration_setup.rs",
+  "adaptive_collaboration_execution.rs",
+  "adaptive_collaboration_finalization.rs",
+  "desktop_prelude.rs",
   "prompt_evaluation_runtime.rs",
   "prompt_evolution_runtime.rs",
   "routing_learning_runtime.rs",
@@ -472,9 +484,9 @@ assert(
 );
 assert(
   runControlSource.includes("from_snapshot_for_continuation") &&
-    runControlSource.includes("user_cancelled_snapshot_cannot_continue") &&
-    runControlSource.includes("permission_resume_preserves_consumed_budget") &&
-    runControlSource.includes(
+    agentRuntimeSource.includes("user_cancelled_snapshot_cannot_continue") &&
+    agentRuntimeSource.includes("permission_resume_preserves_consumed_budget") &&
+    agentRuntimeSource.includes(
       "continuation_starts_a_fresh_bounded_segment_after_budget_exhaustion"
     ) &&
     rustLib.includes("begin_agent_run_control_for_continuation") &&
@@ -2041,8 +2053,10 @@ assert(
     rustLib.includes("PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS") &&
     rustLib.includes("PROMPT_EVOLUTION_BACKGROUND_BATCH_LIMIT") &&
     rustLib.includes("prompt_direct_profile_evidence_counts") &&
-    rustLib.includes("prompt_direct_promotion_evidence") &&
-    rustLib.includes("direct_stable_evidence_pending") &&
+    rustLib.includes("prompt_rollout_counterpart") &&
+    rustLib.includes("opponent_profile_id.as_deref()") &&
+    rustLib.includes("let current_counts = prompt_direct_profile_evidence_counts") &&
+    rustLib.includes("let challenger_counts = prompt_direct_profile_evidence_counts") &&
     rustLib.includes("PROMPT_EVOLUTION_OFFLINE_MIN_CASES") &&
     rustLib.includes("prompt_offline_dataset") &&
     rustLib.includes("select_prompt_offline_case") &&
@@ -2371,8 +2385,12 @@ assert(
   appSource.includes("onStreamDone={handleAgentStreamDone}") &&
     sessionThreadSource.includes("onStreamDone: (sessionId: string) => void") &&
     sessionThreadSource.includes("if (targetSessionId) onStreamDone(targetSessionId)") &&
-    rustLib.includes("let completed_state = agent_state_for_session") &&
-    rustLib.includes("return Ok(completed_state)"),
+    /let completed_state\s*=\s*agent_state_for_session/.test(rustLib) &&
+    rustLib.includes(
+      'emit_agent_stream_delta(app, request_id, session_id, "", true, false, None);'
+    ) &&
+    rustLib.includes("Ok(AgentCompletionOutcome::Completed(completed_state))") &&
+    rustLib.includes("AgentCompletionOutcome::Completed(agent_state) => return Ok(agent_state)"),
   "A committed terminal stream event must refresh the active session without waiting for polling"
 );
 assert(
@@ -2419,8 +2437,8 @@ assert(
     collaborationServiceSource.includes("struct AdaptiveCollaborationSpec") &&
     collaborationServiceSource.includes("struct CollaborationCompletion") &&
     collaborationServiceSource.includes("fn effective_workflow_model_turn_budget(") &&
-    collaborationServiceSource.includes("fn prepare_collaboration_worker_turn(") &&
-    collaborationServiceSource.includes("collaboration_worker_finalization") &&
+    collaborationWorkerRuntimeSource.includes("IsolatedWorkerRuntime::new(") &&
+    adaptiveCollaborationFinalizationSource.includes("fn finalize_adaptive_collaboration(") &&
     orchestratorSource.includes("pub struct ConductorHarness") &&
     orchestratorSource.includes("pub fn planning_prompt(&self)") &&
     orchestratorSource.includes("pub fn repair_prompt(") &&
@@ -2432,8 +2450,9 @@ assert(
     agentRuntimeSource.includes("evidence_worker_tools") &&
     agentRuntimeSource.includes("DEFAULT_COLLABORATION_WORKER_TURNS") &&
     parallelExecutionSource.includes("MAX_GLOBAL_MODEL_WORKERS: usize = 12") &&
-    parallelExecutionSource.includes("fn run_model_jobs_ordered") &&
-    rustLib.includes("run_model_jobs_ordered") &&
+    parallelExecutionSource.includes("BoundedParallelExecutor") &&
+    parallelExecutionSource.includes("run_model_jobs_until_anytime_quorum_interruptible") &&
+    agentRuntimeSource.includes("pub fn run_ordered<T: Send + 'static>") &&
     rustLib.includes('"conductor_plan"') &&
     rustLib.includes('format!("worker_{}", step_index + 1)') &&
     collaborationServiceSource.includes(
