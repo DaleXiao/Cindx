@@ -648,12 +648,16 @@ impl AgentRunControl {
             return true;
         }
         let stage_budget = self.budget.stage_budget(class);
-        self.state
-            .lock()
-            .expect("run control state poisoned")
-            .stage_usage
-            .get(&class)
-            .is_some_and(|usage| usage.started_at.elapsed() >= stage_budget.max_duration)
+        let state = self.state.lock().expect("run control state poisoned");
+        let remaining = self
+            .budget
+            .max_duration
+            .saturating_sub(state.started_at.elapsed());
+        (!stage_budget.terminal && remaining <= self.budget.terminal_time_reserve)
+            || state
+                .stage_usage
+                .get(&class)
+                .is_some_and(|usage| usage.started_at.elapsed() >= stage_budget.max_duration)
     }
 
     pub fn record_agent_turn(&self, stage: &str) -> Result<usize, RunStopReason> {

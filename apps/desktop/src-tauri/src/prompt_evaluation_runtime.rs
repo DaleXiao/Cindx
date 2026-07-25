@@ -129,11 +129,15 @@ pub(crate) fn prompt_evaluation_role(role: &str) -> ModelRole {
 pub(crate) fn prompt_evaluation_stage_class(
     step: &orchestrator::WorkflowPlanStep,
 ) -> RunStageClass {
-    match step.role.as_str() {
-        "verifier" | "reviewer" => RunStageClass::Reviewer,
-        "synthesizer" => RunStageClass::Synthesizer,
-        _ if step.access.is_empty() => RunStageClass::Candidate,
-        _ => RunStageClass::Worker,
+    match step.contract.output_kind {
+        orchestrator::WorkflowOutputKind::Synthesis => RunStageClass::Synthesizer,
+        orchestrator::WorkflowOutputKind::Verification => RunStageClass::Reviewer,
+        _ => match step.role.as_str() {
+            "verifier" | "reviewer" => RunStageClass::Reviewer,
+            "synthesizer" => RunStageClass::Synthesizer,
+            _ if step.access.is_empty() => RunStageClass::Candidate,
+            _ => RunStageClass::Worker,
+        },
     }
 }
 

@@ -80,6 +80,28 @@ fn partial(content: &str, failure: AgentFailure) -> CollaborationCompletion {
 }
 
 #[test]
+fn output_contract_makes_a_mislabeled_final_step_terminal() {
+    let step = orchestrator::WorkflowPlanStep {
+        id: "final".to_string(),
+        role: "worker".to_string(),
+        model: "model".to_string(),
+        subtask: "deliver the final answer".to_string(),
+        access: vec!["candidate".to_string()],
+        tool_policy: WorkflowToolPolicy::None,
+        contract: orchestrator::WorkflowStepContract {
+            input_steps: vec!["candidate".to_string()],
+            output_kind: orchestrator::WorkflowOutputKind::Synthesis,
+            completion: orchestrator::WorkflowCompletionCriteria::default(),
+        },
+    };
+
+    assert_eq!(
+        prompt_evaluation_stage_class(&step),
+        RunStageClass::Synthesizer
+    );
+}
+
+#[test]
 fn execution_arena_preserves_a_valid_branch_when_a_sibling_fails() {
     let mut genome = ConductorPromptGenome::seed_for_effort("pro");
     genome.max_step_attempts = 1;
@@ -140,6 +162,47 @@ fn execution_arena_preserves_a_valid_branch_when_a_sibling_fails() {
         .expect("final step should remain visible in the trajectory");
     assert_eq!(degraded_final.status, WorkflowStepStatus::Degraded);
     assert_eq!(degraded_final.attempts, 1);
+}
+
+#[test]
+fn execution_stops_after_the_delivery_target_instead_of_running_orphan_speculation() {
+    let mut genome = ConductorPromptGenome::seed_for_effort("pro");
+    genome.max_step_attempts = 1;
+    let candidate = workflow_candidate(
+        genome,
+        vec![
+            workflow_step("candidate", "worker", "worker-a", &[]),
+            workflow_step("final", "synthesizer", "worker-b", &["candidate"]),
+            workflow_step("orphan", "worker", "worker-c", &[]),
+        ],
+    );
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let captured = Arc::clone(&calls);
+    let runner: PromptEvaluationRunner = Arc::new(move |request, _| {
+        captured
+            .lock()
+            .expect("call capture lock")
+            .push(request.model.clone());
+        completed(if request.model == "worker-b" {
+            "The final answer is (A)."
+        } else {
+            "Candidate answer (A)."
+        })
+    });
+
+    let result = execute_prompt_workflow_candidate_with_runner(
+        "Solve the assigned problem",
+        candidate,
+        runner,
+    );
+
+    assert!(result.execution.succeeded);
+    assert_eq!(result.execution.final_output, "The final answer is (A).");
+    assert_eq!(result.execution.steps.len(), 2);
+    assert_eq!(
+        calls.lock().expect("call capture lock").as_slice(),
+        ["worker-a", "worker-b"]
+    );
 }
 
 #[test]

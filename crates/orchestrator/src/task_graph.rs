@@ -1,4 +1,7 @@
-use crate::{WorkflowExecutionCheckpoint, WorkflowOutputKind, WorkflowStepStatus};
+use crate::{
+    WorkflowExecutionCheckpoint, WorkflowOutputKind, WorkflowPlanStep, WorkflowStepStatus,
+};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowStepDisposition {
@@ -16,6 +19,15 @@ pub struct WorkflowExecutionFrontier {
     pub resolved_steps: Vec<String>,
     pub exhausted_steps: Vec<String>,
     pub blocked_steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WorkflowDeliveryFrontier {
+    pub target_step_id: Option<String>,
+    pub required_steps: Vec<String>,
+    pub remaining_steps: Vec<String>,
+    pub runnable_steps: Vec<String>,
+    pub remaining_layers: usize,
 }
 
 impl WorkflowExecutionFrontier {
@@ -58,6 +70,71 @@ impl WorkflowExecutionCheckpoint {
         attempt_limit: usize,
     ) -> Result<WorkflowExecutionFrontier, String> {
         self.execution_frontier_with_recovery(attempt_limit, true)
+    }
+
+    pub fn delivery_frontier(
+        &self,
+        attempt_limit: usize,
+    ) -> Result<WorkflowDeliveryFrontier, String> {
+        self.delivery_frontier_with_recovery(attempt_limit, false)
+    }
+
+    pub fn delivery_frontier_with_partial_recovery(
+        &self,
+        attempt_limit: usize,
+    ) -> Result<WorkflowDeliveryFrontier, String> {
+        self.delivery_frontier_with_recovery(attempt_limit, true)
+    }
+
+    fn delivery_frontier_with_recovery(
+        &self,
+        attempt_limit: usize,
+        allow_partial_recovery: bool,
+    ) -> Result<WorkflowDeliveryFrontier, String> {
+        let Some(target) = delivery_target(&self.plan.steps) else {
+            return Ok(WorkflowDeliveryFrontier::default());
+        };
+        let by_id = self
+            .plan
+            .steps
+            .iter()
+            .map(|step| (step.id.as_str(), step))
+            .collect::<BTreeMap<_, _>>();
+        let mut required = BTreeSet::new();
+        collect_delivery_requirements(&target.id, &by_id, &mut required)?;
+        let execution =
+            self.execution_frontier_with_recovery(attempt_limit, allow_partial_recovery)?;
+        let runnable = execution
+            .runnable_steps()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let resolved = execution
+            .resolved_steps
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let mut depth_cache = BTreeMap::new();
+        let remaining_layers = unresolved_delivery_depth(
+            &target.id,
+            &by_id,
+            &resolved,
+            &mut depth_cache,
+            &mut BTreeSet::new(),
+        )?;
+        Ok(WorkflowDeliveryFrontier {
+            target_step_id: Some(target.id.clone()),
+            required_steps: required.iter().cloned().collect(),
+            remaining_steps: required
+                .iter()
+                .filter(|step_id| !resolved.contains(*step_id))
+                .cloned()
+                .collect(),
+            runnable_steps: required
+                .iter()
+                .filter(|step_id| runnable.contains(*step_id))
+                .cloned()
+                .collect(),
+            remaining_layers,
+        })
     }
 
     fn execution_frontier_with_recovery(
@@ -249,6 +326,79 @@ impl WorkflowExecutionCheckpoint {
     }
 }
 
+fn delivery_target(steps: &[WorkflowPlanStep]) -> Option<&WorkflowPlanStep> {
+    steps
+        .iter()
+        .rev()
+        .find(|step| step.contract.output_kind == WorkflowOutputKind::Synthesis)
+        .or_else(|| {
+            steps
+                .iter()
+                .rev()
+                .find(|step| step.contract.output_kind == WorkflowOutputKind::Verification)
+        })
+        .or_else(|| steps.last())
+}
+
+fn step_inputs(step: &WorkflowPlanStep) -> BTreeSet<&str> {
+    step.access
+        .iter()
+        .chain(step.contract.input_steps.iter())
+        .map(String::as_str)
+        .collect()
+}
+
+fn collect_delivery_requirements(
+    step_id: &str,
+    by_id: &BTreeMap<&str, &WorkflowPlanStep>,
+    required: &mut BTreeSet<String>,
+) -> Result<(), String> {
+    if !required.insert(step_id.to_string()) {
+        return Ok(());
+    }
+    let step = by_id
+        .get(step_id)
+        .ok_or_else(|| format!("workflow delivery target references unknown step: {step_id}"))?;
+    for dependency in step_inputs(step) {
+        collect_delivery_requirements(dependency, by_id, required)?;
+    }
+    Ok(())
+}
+
+fn unresolved_delivery_depth(
+    step_id: &str,
+    by_id: &BTreeMap<&str, &WorkflowPlanStep>,
+    resolved: &BTreeSet<String>,
+    cache: &mut BTreeMap<String, usize>,
+    visiting: &mut BTreeSet<String>,
+) -> Result<usize, String> {
+    if resolved.contains(step_id) {
+        return Ok(0);
+    }
+    if let Some(depth) = cache.get(step_id) {
+        return Ok(*depth);
+    }
+    if !visiting.insert(step_id.to_string()) {
+        return Err(format!(
+            "workflow delivery path contains a cycle at {step_id}"
+        ));
+    }
+    let step = by_id
+        .get(step_id)
+        .ok_or_else(|| format!("workflow delivery path references unknown step: {step_id}"))?;
+    let dependency_depth = step_inputs(step)
+        .into_iter()
+        .map(|dependency| unresolved_delivery_depth(dependency, by_id, resolved, cache, visiting))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .max()
+        .unwrap_or_default();
+    visiting.remove(step_id);
+    let depth = dependency_depth.saturating_add(1);
+    cache.insert(step_id.to_string(), depth);
+    Ok(depth)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +528,46 @@ mod tests {
         let next = checkpoint.execution_frontier(2).unwrap();
         assert_eq!(next.resolved_steps, vec!["inspect"]);
         assert_eq!(next.ready_steps, vec!["synthesize"]);
+    }
+
+    #[test]
+    fn delivery_frontier_excludes_speculation_and_tracks_remaining_layers() {
+        let base = checkpoint();
+        let mut plan = base.plan;
+        plan.steps.insert(
+            1,
+            WorkflowPlanStep {
+                id: "speculative-note".to_string(),
+                role: "worker".to_string(),
+                model: "worker".to_string(),
+                subtask: "optional note".to_string(),
+                access: Vec::new(),
+                tool_policy: WorkflowToolPolicy::None,
+                contract: WorkflowStepContract::inferred("worker", &[], &WorkflowToolPolicy::None),
+            },
+        );
+        plan.budget.max_steps = 3;
+        let mut checkpoint = WorkflowExecutionCheckpoint::new("delivery", plan, 1);
+
+        let initial = checkpoint.delivery_frontier(1).unwrap();
+        assert_eq!(initial.target_step_id.as_deref(), Some("synthesize"));
+        assert_eq!(initial.required_steps, vec!["inspect", "synthesize"]);
+        assert_eq!(initial.runnable_steps, vec!["inspect"]);
+        assert_eq!(initial.remaining_layers, 2);
+
+        checkpoint
+            .complete_step(
+                "inspect",
+                "worker",
+                "evidence".to_string(),
+                "[]".to_string(),
+                2,
+            )
+            .unwrap();
+        let terminal = checkpoint.delivery_frontier(1).unwrap();
+        assert_eq!(terminal.remaining_steps, vec!["synthesize"]);
+        assert_eq!(terminal.runnable_steps, vec!["synthesize"]);
+        assert_eq!(terminal.remaining_layers, 1);
     }
 
     #[test]

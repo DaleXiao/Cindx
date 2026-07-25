@@ -493,6 +493,19 @@ fn worker_stage_can_use_the_nonterminal_window_without_an_arbitrary_half_time_ca
 }
 
 #[test]
+fn nonterminal_stage_yields_when_the_terminal_reserve_begins() {
+    let mut budget = test_budget();
+    budget.max_duration = Duration::from_millis(40);
+    budget.terminal_time_reserve = Duration::from_millis(30);
+    let mut snapshot = AgentRunControl::with_budget(budget).snapshot();
+    snapshot.elapsed_active = Duration::from_millis(12);
+    let control = AgentRunControl::from_snapshot(snapshot);
+
+    assert!(control.stage_should_stop(RunStageClass::Worker));
+    assert!(!control.stage_should_stop(RunStageClass::Synthesizer));
+}
+
+#[test]
 fn best_known_result_is_ranked_and_survives_resume() {
     let control = AgentRunControl::with_budget(test_budget());
     assert!(control.record_best_known_result(

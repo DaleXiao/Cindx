@@ -1,0 +1,130 @@
+/* Workspace */
+
+.workspace {
+  position: relative;
+  z-index: 10;
+  display: grid;
+  grid-column: 2;
+  grid-row: 2;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr) auto;
+  background: var(--bg);
+}
+
+.workspace[data-view="timeline"] {
+  grid-row: 1 / -1;
+}
+
+.workspace[data-view="timeline"] .session-thread {
+  padding-top: calc(var(--titlebar-height) + 22px);
+  scroll-padding-top: calc(var(--titlebar-height) + 18px);
+}
+
+.workspace[data-view="timeline"] .thread-find {
+  top: calc(var(--titlebar-height) + 10px);
+}
+
+.workspace[data-view="timeline"] .thread-minimap {
+  top: calc(var(--titlebar-height) + 16px);
+}
+
+.topbar-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.topbar-title > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.window-workspace-header h1 {
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.window-workspace-header p {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.context-usage {
+  display: grid;
+  width: 132px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 3px 8px;
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.context-usage strong {
+  color: #444444;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.context-usage progress {
+  width: 124px;
+  height: 2px;
+  grid-column: 1 / -1;
+  overflow: hidden;
+  justify-self: start;
+  appearance: none;
+  background: #e5e5e5;
+  border: 0;
+  border-radius: var(--radius-pill);
+}
+
+.context-usage progress::-webkit-progress-bar {
+  background: #e5e5e5;
+  border-radius: var(--radius-pill);
+}
+
+.context-usage progress::-webkit-progress-value {
+  background: #9fe3b0;
+  border-radius: var(--radius-pill);
+}
+
+.runtime-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 2px;
+  color: #454545;
+  background: transparent;
+  border: 0;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.runtime-pill svg {
+  width: 13px;
+  height: 13px;
+}
+
+.runtime-pill.ready svg {
+  color: #2f9e64;
+}
+
+
