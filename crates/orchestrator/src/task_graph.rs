@@ -9,7 +9,119 @@ pub enum WorkflowStepDisposition {
     Blocked,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WorkflowExecutionFrontier {
+    pub ready_steps: Vec<String>,
+    pub resumable_steps: Vec<String>,
+    pub resolved_steps: Vec<String>,
+    pub exhausted_steps: Vec<String>,
+    pub blocked_steps: Vec<String>,
+}
+
+impl WorkflowExecutionFrontier {
+    pub fn runnable_steps(&self) -> Vec<String> {
+        self.resumable_steps
+            .iter()
+            .chain(self.ready_steps.iter())
+            .cloned()
+            .collect()
+    }
+
+    pub fn is_complete(&self, total_steps: usize) -> bool {
+        self.resolved_steps.len() == total_steps
+    }
+
+    pub fn is_stalled(&self, total_steps: usize) -> bool {
+        !self.is_complete(total_steps)
+            && self.ready_steps.is_empty()
+            && self.resumable_steps.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowStepClaim {
+    pub step_id: String,
+    pub model: String,
+    pub resumed: bool,
+}
+
 impl WorkflowExecutionCheckpoint {
+    pub fn execution_frontier(
+        &self,
+        attempt_limit: usize,
+    ) -> Result<WorkflowExecutionFrontier, String> {
+        let mut frontier = WorkflowExecutionFrontier::default();
+        for step in &self.plan.steps {
+            match self.step_disposition(&step.id, attempt_limit)? {
+                WorkflowStepDisposition::Resolved => {
+                    frontier.resolved_steps.push(step.id.clone())
+                }
+                WorkflowStepDisposition::ResumeRunning => {
+                    frontier.resumable_steps.push(step.id.clone())
+                }
+                WorkflowStepDisposition::StartAttempt => {
+                    frontier.ready_steps.push(step.id.clone())
+                }
+                WorkflowStepDisposition::Exhausted => {
+                    frontier.exhausted_steps.push(step.id.clone())
+                }
+                WorkflowStepDisposition::Blocked => {
+                    frontier.blocked_steps.push(step.id.clone())
+                }
+            }
+        }
+        Ok(frontier)
+    }
+
+    pub fn claim_steps(
+        &mut self,
+        step_ids: &[String],
+        attempt_limit: usize,
+        now_ms: u64,
+    ) -> Result<Vec<WorkflowStepClaim>, String> {
+        let frontier = self.execution_frontier(attempt_limit)?;
+        let runnable = frontier
+            .runnable_steps()
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let requested = step_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if requested.len() != step_ids.len() {
+            return Err("workflow step claim contains duplicate ids".to_string());
+        }
+        if let Some(step_id) = requested.iter().find(|step_id| !runnable.contains(*step_id)) {
+            return Err(format!(
+                "workflow step {step_id} is not runnable in the current frontier"
+            ));
+        }
+
+        let mut claims = Vec::with_capacity(step_ids.len());
+        for step_id in step_ids {
+            let resumed = frontier.resumable_steps.iter().any(|id| id == step_id);
+            let model = self
+                .steps
+                .get(step_id)
+                .map(|step| step.model.clone())
+                .ok_or_else(|| format!("unknown workflow checkpoint step: {step_id}"))?;
+            if !resumed {
+                self.begin_step_with_attempt_limit(
+                    step_id,
+                    &model,
+                    attempt_limit,
+                    now_ms,
+                )?;
+            }
+            claims.push(WorkflowStepClaim {
+                step_id: step_id.clone(),
+                model,
+                resumed,
+            });
+        }
+        Ok(claims)
+    }
+
     pub fn step_disposition(
         &self,
         step_id: &str,
@@ -167,6 +279,57 @@ mod tests {
             checkpoint.step_disposition("inspect", 2).unwrap(),
             WorkflowStepDisposition::Exhausted
         );
+    }
+
+    #[test]
+    fn frontier_and_claims_follow_dependencies_without_restarting_running_work() {
+        let mut checkpoint = checkpoint();
+        let frontier = checkpoint.execution_frontier(2).unwrap();
+        assert_eq!(frontier.ready_steps, vec!["inspect"]);
+        assert_eq!(frontier.blocked_steps, vec!["synthesize"]);
+        assert!(!frontier.is_stalled(2));
+
+        let claims = checkpoint
+            .claim_steps(&["inspect".to_string()], 2, 10)
+            .unwrap();
+        assert_eq!(claims.len(), 1);
+        assert!(!claims[0].resumed);
+        assert_eq!(checkpoint.steps["inspect"].attempts, 1);
+
+        let resumed = checkpoint.execution_frontier(2).unwrap();
+        assert_eq!(resumed.resumable_steps, vec!["inspect"]);
+        let claims = checkpoint
+            .claim_steps(&["inspect".to_string()], 2, 11)
+            .unwrap();
+        assert!(claims[0].resumed);
+        assert_eq!(checkpoint.steps["inspect"].attempts, 1);
+
+        checkpoint
+            .complete_step(
+                "inspect",
+                "worker",
+                "evidence".to_string(),
+                "[]".to_string(),
+                12,
+            )
+            .unwrap();
+        let next = checkpoint.execution_frontier(2).unwrap();
+        assert_eq!(next.resolved_steps, vec!["inspect"]);
+        assert_eq!(next.ready_steps, vec!["synthesize"]);
+    }
+
+    #[test]
+    fn stalled_frontier_exposes_exhausted_roots_and_blocked_dependents() {
+        let mut checkpoint = checkpoint();
+        checkpoint
+            .prepare_step_attempt("inspect", "worker", 1, 1)
+            .unwrap();
+        checkpoint.fail_step("inspect", "failed", 2).unwrap();
+
+        let frontier = checkpoint.execution_frontier(1).unwrap();
+        assert_eq!(frontier.exhausted_steps, vec!["inspect"]);
+        assert_eq!(frontier.blocked_steps, vec!["synthesize"]);
+        assert!(frontier.is_stalled(2));
     }
 
     #[test]

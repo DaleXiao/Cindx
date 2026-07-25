@@ -188,7 +188,9 @@ impl ConductorPromptGenome {
             "pro" => {
                 self.graph_depth = PromptGraphDepth::Deep;
                 self.verification = PromptVerification::Adversarial;
-                self.commit_strategy = PromptCommitStrategy::Exhaustive;
+                if self.commit_strategy == PromptCommitStrategy::Adaptive {
+                    self.commit_strategy = PromptCommitStrategy::Quorum;
+                }
                 self.topology_strategy = PromptTopologyStrategy::ParallelDeliberation;
                 self.role_strategy = PromptRoleStrategy::DiverseSpecialists;
                 self.max_parallel_branches = self.max_parallel_branches.max(2);
@@ -1826,7 +1828,7 @@ mod tests {
         assert_eq!(effective_pro.verification, PromptVerification::Adversarial);
         assert_eq!(
             effective_pro.commit_strategy,
-            PromptCommitStrategy::Exhaustive
+            PromptCommitStrategy::Quorum
         );
         assert_eq!(
             effective_pro.topology_strategy,

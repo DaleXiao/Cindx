@@ -52,6 +52,7 @@ struct PilotRun {
     prompt_profile: String,
     gepa_frozen: bool,
     succeeded: bool,
+    quality_gate_met: Option<bool>,
     latency_ms: u64,
     planning_latency_ms: u64,
     prompt_tokens: u64,
@@ -99,6 +100,7 @@ struct DetailedTreatment {
     models: Vec<String>,
     prompt_profile: String,
     succeeded: bool,
+    quality_gate_met: Option<bool>,
     latency_ms: u64,
     planning_latency_ms: u64,
     usage: Metadata,
@@ -230,6 +232,7 @@ fn direct_completion(config: &ProviderConfig, prompt: &str, model: String) -> De
         models: vec![model],
         prompt_profile: "frozen-direct-baseline-v1".to_string(),
         succeeded,
+        quality_gate_met: None,
         latency_ms: completion.latency_ms,
         planning_latency_ms: 0,
         usage: completion.usage,
@@ -299,17 +302,13 @@ fn deterministic_plan(
         WorkflowBudget {
             max_steps: workflow.steps.len(),
             max_models: 3,
-            max_model_turns_per_step: if tool_policy == WorkflowToolPolicy::None {
-                1
-            } else {
-                2
-            },
+            max_model_turns_per_step: profile.effective_max_model_turns_per_step(),
             max_tool_calls_per_step: if tool_policy == WorkflowToolPolicy::None {
                 0
             } else {
                 4
             },
-            max_output_tokens_per_step: COLLABORATION_MAX_OUTPUT_TOKENS as usize,
+            max_output_tokens_per_step: 2_048,
         },
     );
     for step in &mut plan.steps {
@@ -350,11 +349,7 @@ fn conductor_plan(
         control,
     );
     if let Some(plan) = candidate.plan.as_mut() {
-        plan.budget.max_model_turns_per_step = if tool_policy == WorkflowToolPolicy::None {
-            1
-        } else {
-            2
-        };
+        plan.budget.max_output_tokens_per_step = 2_048;
         plan.budget.max_tool_calls_per_step = if tool_policy == WorkflowToolPolicy::None {
             0
         } else {
@@ -461,6 +456,7 @@ fn workflow_treatment_detailed(
         models,
         prompt_profile,
         succeeded: executed.execution.succeeded,
+        quality_gate_met: Some(executed.execution.quality_gate_met),
         latency_ms: planning_latency_ms.saturating_add(executed.execution.latency_ms),
         planning_latency_ms,
         usage,
@@ -503,6 +499,7 @@ fn gpqa_run(case: &GpqaCase, treatment: &str, result: DetailedTreatment) -> Pilo
         prompt_profile: result.prompt_profile,
         gepa_frozen: true,
         succeeded: result.succeeded,
+        quality_gate_met: result.quality_gate_met,
         latency_ms: result.latency_ms,
         planning_latency_ms: result.planning_latency_ms,
         prompt_tokens: usage_value(&result.usage, "prompt_tokens"),
@@ -549,6 +546,7 @@ fn workspace_run(case: &WorkspaceCase, treatment: &str, result: DetailedTreatmen
         prompt_profile: result.prompt_profile,
         gepa_frozen: true,
         succeeded: result.succeeded,
+        quality_gate_met: result.quality_gate_met,
         latency_ms: result.latency_ms,
         planning_latency_ms: result.planning_latency_ms,
         prompt_tokens: usage_value(&result.usage, "prompt_tokens"),
@@ -596,6 +594,7 @@ fn mrcr_run(
         prompt_profile: "raw-transcript-v1".to_string(),
         gepa_frozen: true,
         succeeded: result.error.is_none() && !output.trim().is_empty(),
+        quality_gate_met: None,
         latency_ms: result.latency_ms,
         planning_latency_ms: 0,
         prompt_tokens: usage_value(&result.usage, "prompt_tokens"),
@@ -715,25 +714,66 @@ fn pilot_v2_workspace_cases_have_stable_unique_ids() {
 }
 
 #[test]
+fn pilot_v2_preserves_effort_worker_turn_budgets() {
+    let config = ProviderConfig::default();
+    for (effort, expected_turns) in [("fast", 1), ("auto", 2), ("pro", 3)] {
+        let candidate = deterministic_plan(
+            &config,
+            "Solve the benchmark case",
+            effort,
+            &OrchestrationPolicy::Single,
+            "worker",
+            WorkflowToolPolicy::None,
+        );
+        let budget = candidate.plan.expect("deterministic pilot plan").budget;
+        assert_eq!(budget.max_model_turns_per_step, expected_turns);
+        assert_eq!(budget.max_output_tokens_per_step, 2_048);
+    }
+
+    let fast_with_tools = deterministic_plan(
+        &config,
+        "Inspect the workspace before answering",
+        "fast",
+        &OrchestrationPolicy::Single,
+        "worker",
+        WorkflowToolPolicy::ReadOnlyExploration,
+    )
+    .plan
+    .expect("tool-enabled fast plan");
+    assert_eq!(fast_with_tools.budget.max_model_turns_per_step, 1);
+    assert_eq!(
+        fast_with_tools.steps[0]
+            .tool_policy
+            .effective_model_turn_budget(fast_with_tools.budget.max_model_turns_per_step),
+        3
+    );
+    assert_eq!(
+        fast_with_tools.steps[0]
+            .tool_policy
+            .effective_tool_call_budget(fast_with_tools.budget.max_tool_calls_per_step),
+        6
+    );
+}
+
+#[test]
 #[ignore = "requires configured cloud models, network access, and official benchmark files"]
 fn provider_backed_pilot_v2() {
     let config = load_provider_config();
     assert!(config.is_ready(), "provider configuration is required");
-    let gpqa_path = PathBuf::from(
-        std::env::var("CINDX_PILOT_V2_GPQA_CSV")
-            .expect("CINDX_PILOT_V2_GPQA_CSV must point to gpqa_diamond.csv"),
-    );
-    let mrcr_paths = std::env::var("CINDX_PILOT_V2_MRCR_JSONS")
-        .expect("CINDX_PILOT_V2_MRCR_JSONS must contain two page JSON files")
-        .split(',')
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| PathBuf::from(value.trim()))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        mrcr_paths.len(),
-        2,
-        "Pilot v2 requires exactly two MRCR rows"
-    );
+    let pair_filter = pilot_pair_filter();
+    let needs_gpqa = pair_filter.as_ref().is_none_or(|pairs| {
+        pairs
+            .iter()
+            .any(|(case_id, _)| !case_id.starts_with("workspace-") && !case_id.starts_with("row-"))
+    });
+    let needs_workspace = pair_filter.as_ref().is_none_or(|pairs| {
+        pairs
+            .iter()
+            .any(|(case_id, _)| case_id.starts_with("workspace-"))
+    });
+    let needs_mrcr = pair_filter
+        .as_ref()
+        .is_none_or(|pairs| pairs.iter().any(|(case_id, _)| case_id.starts_with("row-")));
     let output_path = PathBuf::from(
         std::env::var("CINDX_PILOT_V2_OUTPUT")
             .expect("CINDX_PILOT_V2_OUTPUT must point to a private raw result path"),
@@ -746,56 +786,81 @@ fn provider_backed_pilot_v2() {
         git_commit
     );
 
-    let gpqa_cases = load_gpqa_cases(&gpqa_path, 1).expect("GPQA cases should load");
-    assert_eq!(gpqa_cases.len(), 3);
-    let mut sources = vec![PilotSource {
-        benchmark: "gpqa_diamond".to_string(),
-        source_url: GPQA_SOURCE_URL.to_string(),
-        revision: GPQA_SOURCE_REVISION.to_string(),
-        file_sha256: file_sha256(&gpqa_path).expect("GPQA file should hash"),
-        sample_count: gpqa_cases.len(),
-        protocol: "Official zero-shot multiple choice with deterministic option shuffle. The direct baseline is protocol evidence; Cindx treatments are product-mechanism evidence."
-            .to_string(),
-    }];
-    let workspace_cases = workspace_cases();
-    sources.push(PilotSource {
-        benchmark: "cindx_read_only_workspace".to_string(),
-        source_url: "local-generated-fixture".to_string(),
-        revision: "pilot-v2-fixture-v1".to_string(),
-        file_sha256: sha256_hex(
-            workspace_cases
-                .iter()
-                .flat_map(|case| case.files.iter())
-                .flat_map(|(path, content)| [path.as_bytes(), content.as_bytes()])
-                .flatten()
-                .copied()
-                .collect::<Vec<_>>()
-                .as_slice(),
-        ),
-        sample_count: workspace_cases.len(),
-        protocol: "Deterministic temporary fixtures. Baseline receives the same evidence inline; Cindx modes receive only bounded read-only workspace tools."
-            .to_string(),
-    });
-    let mut mrcr_rows = Vec::new();
-    for path in &mrcr_paths {
-        let bytes = fs::read(path).expect("MRCR page should read");
-        let page = serde_json::from_slice::<MrcrPage>(&bytes).expect("MRCR page should parse");
-        let page_row = page
-            .rows
-            .into_iter()
-            .next()
-            .expect("MRCR page should have one row");
-        assert_eq!(page_row.row.n_needles, 8);
+    let mut sources = Vec::new();
+    let gpqa_cases = if needs_gpqa {
+        let gpqa_path = PathBuf::from(
+            std::env::var("CINDX_PILOT_V2_GPQA_CSV")
+                .expect("CINDX_PILOT_V2_GPQA_CSV must point to gpqa_diamond.csv"),
+        );
+        let cases = load_gpqa_cases(&gpqa_path, 1).expect("GPQA cases should load");
+        assert_eq!(cases.len(), 3);
         sources.push(PilotSource {
-            benchmark: "mrcr_v2_8_needle".to_string(),
-            source_url: MRCR_SOURCE_URL.to_string(),
-            revision: MRCR_DATASET_REVISION.to_string(),
-            file_sha256: sha256_hex(&bytes),
-            sample_count: 1,
-            protocol: "Official multi-message transcript preserved. All four treatments are single-call protocol-preserving worker routes; this segment does not test multi-model synthesis."
+            benchmark: "gpqa_diamond".to_string(),
+            source_url: GPQA_SOURCE_URL.to_string(),
+            revision: GPQA_SOURCE_REVISION.to_string(),
+            file_sha256: file_sha256(&gpqa_path).expect("GPQA file should hash"),
+            sample_count: cases.len(),
+            protocol: "Official zero-shot multiple choice with deterministic option shuffle. The direct baseline is protocol evidence; Cindx treatments are product-mechanism evidence."
                 .to_string(),
         });
-        mrcr_rows.push(page_row);
+        cases
+    } else {
+        Vec::new()
+    };
+    let workspace_cases = workspace_cases();
+    if needs_workspace {
+        sources.push(PilotSource {
+            benchmark: "cindx_read_only_workspace".to_string(),
+            source_url: "local-generated-fixture".to_string(),
+            revision: "pilot-v2-fixture-v1".to_string(),
+            file_sha256: sha256_hex(
+                workspace_cases
+                    .iter()
+                    .flat_map(|case| case.files.iter())
+                    .flat_map(|(path, content)| [path.as_bytes(), content.as_bytes()])
+                    .flatten()
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            ),
+            sample_count: workspace_cases.len(),
+            protocol: "Deterministic temporary fixtures. Baseline receives the same evidence inline; Cindx modes receive only bounded read-only workspace tools."
+                .to_string(),
+        });
+    }
+    let mut mrcr_rows = Vec::new();
+    if needs_mrcr {
+        let mrcr_paths = std::env::var("CINDX_PILOT_V2_MRCR_JSONS")
+            .expect("CINDX_PILOT_V2_MRCR_JSONS must contain two page JSON files")
+            .split(',')
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| PathBuf::from(value.trim()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            mrcr_paths.len(),
+            2,
+            "Pilot v2 requires exactly two MRCR rows"
+        );
+        for path in &mrcr_paths {
+            let bytes = fs::read(path).expect("MRCR page should read");
+            let page = serde_json::from_slice::<MrcrPage>(&bytes).expect("MRCR page should parse");
+            let page_row = page
+                .rows
+                .into_iter()
+                .next()
+                .expect("MRCR page should have one row");
+            assert_eq!(page_row.row.n_needles, 8);
+            sources.push(PilotSource {
+                benchmark: "mrcr_v2_8_needle".to_string(),
+                source_url: MRCR_SOURCE_URL.to_string(),
+                revision: MRCR_DATASET_REVISION.to_string(),
+                file_sha256: sha256_hex(&bytes),
+                sample_count: 1,
+                protocol: "Official multi-message transcript preserved. All four treatments are single-call protocol-preserving worker routes; this segment does not test multi-model synthesis."
+                    .to_string(),
+            });
+            mrcr_rows.push(page_row);
+        }
     }
 
     let treatments = [
@@ -804,7 +869,6 @@ fn provider_backed_pilot_v2() {
         "cindx_auto",
         "cindx_pro",
     ];
-    let pair_filter = pilot_pair_filter();
     let expected_runs = pair_filter.as_ref().map_or(32, BTreeSet::len);
     let mut runs = Vec::new();
 
@@ -838,45 +902,47 @@ fn provider_backed_pilot_v2() {
         }
     }
 
-    let fixture_root = std::env::temp_dir().join(unique_id("cindx-pilot-v2-workspace"));
-    fs::create_dir_all(&fixture_root).expect("Pilot fixture root should exist");
-    for case in &workspace_cases {
-        let case_root = fixture_root.join(&case.case_id);
-        fs::create_dir_all(&case_root).expect("Pilot case root should exist");
-        materialize_workspace_case(&case_root, case);
-        for treatment in treatments {
-            if !selected_pair(pair_filter.as_ref(), &case.case_id, treatment) {
-                continue;
+    if needs_workspace {
+        let fixture_root = std::env::temp_dir().join(unique_id("cindx-pilot-v2-workspace"));
+        fs::create_dir_all(&fixture_root).expect("Pilot fixture root should exist");
+        for case in &workspace_cases {
+            let case_root = fixture_root.join(&case.case_id);
+            fs::create_dir_all(&case_root).expect("Pilot case root should exist");
+            materialize_workspace_case(&case_root, case);
+            for treatment in treatments {
+                if !selected_pair(pair_filter.as_ref(), &case.case_id, treatment) {
+                    continue;
+                }
+                eprintln!(
+                    "[pilot-v2] run {}/{} WORKSPACE {} {}",
+                    runs.len() + 1,
+                    expected_runs,
+                    case.case_id,
+                    treatment
+                );
+                let result = if treatment == "single_model_baseline" {
+                    direct_completion(
+                        &config,
+                        &baseline_workspace_prompt(case),
+                        config.model.clone(),
+                    )
+                } else {
+                    workflow_treatment_detailed(
+                        &config,
+                        &case_root,
+                        &case.objective,
+                        treatment,
+                        WorkflowToolPolicy::ReadOnlyExploration,
+                    )
+                };
+                let run = workspace_run(case, treatment, result);
+                assert_eq!(run.safety_violations, 0, "Pilot safety boundary failed");
+                runs.push(run);
+                write_pilot_checkpoint(&output_path, &config, &sources, &runs);
             }
-            eprintln!(
-                "[pilot-v2] run {}/{} WORKSPACE {} {}",
-                runs.len() + 1,
-                expected_runs,
-                case.case_id,
-                treatment
-            );
-            let result = if treatment == "single_model_baseline" {
-                direct_completion(
-                    &config,
-                    &baseline_workspace_prompt(case),
-                    config.model.clone(),
-                )
-            } else {
-                workflow_treatment_detailed(
-                    &config,
-                    &case_root,
-                    &case.objective,
-                    treatment,
-                    WorkflowToolPolicy::ReadOnlyEvidence,
-                )
-            };
-            let run = workspace_run(case, treatment, result);
-            assert_eq!(run.safety_violations, 0, "Pilot safety boundary failed");
-            runs.push(run);
-            write_pilot_checkpoint(&output_path, &config, &sources, &runs);
         }
+        fs::remove_dir_all(&fixture_root).expect("Pilot fixture root should clean up");
     }
-    fs::remove_dir_all(&fixture_root).expect("Pilot fixture root should clean up");
 
     for page_row in &mrcr_rows {
         let messages = parse_mrcr_messages(&page_row.row.prompt).expect("MRCR prompt should parse");

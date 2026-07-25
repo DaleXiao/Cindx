@@ -16,8 +16,9 @@ use agent_memory::{
 };
 use agent_rag::{
     apply_embeddings_to_index_cancellable, build_grounded_answer_prompt,
-    export_lancedb_records_jsonl, fuse_retrieval_channels as fuse_rag_retrieval_channels,
-    index_workspace, index_workspace_cancellable, lancedb_index_exists, local_query_embedding,
+    export_lancedb_records_jsonl,
+    fuse_retrieval_channels_for_query as fuse_rag_retrieval_channels_for_query, index_workspace,
+    index_workspace_cancellable, lancedb_index_exists, local_query_embedding,
     merge_retrieval_channel, replace_lancedb_index, retrieval_ranges_overlap,
     search_chunks_literal, search_lancedb_index, workspace_index_is_fresh, EmbeddingBatch,
     FileRagAdapter, IndexOptions, RagAdapter, RagChunk, RagEmbedder, RagError, RagIndex,
@@ -25,15 +26,16 @@ use agent_rag::{
 };
 #[cfg(test)]
 use agent_runtime::{
-    advance_with_model_response, append_tool_observation, model_request_for_turn_with_context_budget,
+    advance_with_model_response, append_tool_observation,
+    model_request_for_turn_with_context_budget,
 };
 use agent_runtime::{
-    bounded_max_output_tokens, compose_agent_system_prompt, evidence_worker_tools,
-    observation_from_tool_result, resume_agent_loop_from_messages, sanitize_assistant_content,
-    start_agent_loop, start_agent_loop_with_history, AgentAdvance, AgentKernel, AgentRunControl,
-    AgentRuntimeConfig, AgentTaskStateSnapshot, ResultQuality, RunBudget, RunControlSnapshot,
-    RunStageClass, RunStopReason,
-    DEFAULT_COLLABORATION_WORKER_TURNS, MAX_COLLABORATION_WORKER_TOOL_CALLS,
+    bounded_max_output_tokens, compose_agent_system_prompt, ensure_terminal_commit_instruction,
+    evidence_worker_tools, observation_from_tool_result, resume_agent_loop_from_messages,
+    sanitize_assistant_content, start_agent_loop, start_agent_loop_with_history, AgentAdvance,
+    AgentKernel, AgentLoopState, AgentRunControl, AgentRuntimeConfig, AgentTaskStateSnapshot,
+    ResultQuality, RunBudget, RunContinuationDirective, RunControlSnapshot, RunStageClass,
+    RunStopReason, DEFAULT_COLLABORATION_WORKER_TURNS, MAX_COLLABORATION_WORKER_TOOL_CALLS,
     MAX_IDENTICAL_TOOL_FAILURES,
 };
 use agent_skills::{
@@ -73,9 +75,8 @@ use orchestrator::{
     RuleBasedRouter, TaskClass, WorkflowBudget, WorkflowExecutionCheckpoint,
     WorkflowExecutionTelemetry, WorkflowPlanIr, WorkflowSearchTeacher, WorkflowStepStatus,
     WorkflowToolPolicy, WorkflowTopologyPrior, WorkflowVerificationState,
-    AGENT_EVALUATION_TRACE_SCHEMA,
-    CONDUCTOR_MAX_ATTEMPTS, MAX_ADAPTIVE_WORKFLOW_AGENTS, WORKFLOW_CHECKPOINT_SCHEMA,
-    WORKFLOW_IR_SCHEMA,
+    AGENT_EVALUATION_TRACE_SCHEMA, CONDUCTOR_MAX_ATTEMPTS, MAX_ADAPTIVE_WORKFLOW_AGENTS,
+    WORKFLOW_CHECKPOINT_SCHEMA, WORKFLOW_IR_SCHEMA,
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -123,6 +124,7 @@ mod permission_service;
 mod persistence_runtime;
 mod platform_runtime;
 mod project_commands;
+mod prompt_evaluation_feedback;
 mod prompt_evaluation_runtime;
 mod prompt_evidence_runtime;
 mod prompt_evolution_models;
@@ -172,6 +174,7 @@ use orchestration_commands::*;
 use persistence_runtime::*;
 use platform_runtime::*;
 use project_commands::*;
+use prompt_evaluation_feedback::*;
 use prompt_evaluation_runtime::*;
 use prompt_evidence_runtime::*;
 use prompt_evolution_models::*;
@@ -189,11 +192,6 @@ use tool_execution::*;
 use view_models::*;
 use workflow_checkpoint_runtime::*;
 use workflow_routing_runtime::*;
-
-use tool_runtime_service::{
-    completed_tool_result, failed_tool_result, finalize_tool_result, tool_input_fingerprint,
-    tool_invocation_context, tool_invocation_event_metadata,
-};
 
 use agent_application::{
     artifact_manifest_message, project_agent_artifacts as agent_output_artifacts_from_events,
@@ -217,8 +215,8 @@ use collaboration_service::{
     COLLABORATION_STEER_INTERRUPTED, WORKFLOW_RESUMABLE_ERROR_PREFIX, WORKFLOW_SAFETY_ERROR_PREFIX,
 };
 use parallel_execution::{
-    model_job_supervisor, run_model_jobs_ordered, run_model_jobs_until_quorum_interruptible,
-    CancellableParallelJob, ParallelJob, ParallelJobCompletion, ParallelJobSupervisor,
+    model_job_supervisor, run_model_jobs_until_quorum_interruptible, CancellableParallelJob,
+    ParallelJobCompletion, ParallelJobSupervisor,
 };
 use permission_service::{
     agent_session_permission_granted, pending_agent_permissions_for_run, permission_decision_label,
@@ -240,6 +238,10 @@ use session_projection::{
     load_agent_session_read_model, load_agent_session_read_model_snapshot,
 };
 use session_title_service::*;
+use tool_runtime_service::{
+    completed_tool_result, failed_tool_result, finalize_tool_result, tool_input_fingerprint,
+    tool_invocation_context, tool_invocation_event_metadata,
+};
 
 #[cfg(test)]
 mod external_effect_eval_tests;

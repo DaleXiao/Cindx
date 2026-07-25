@@ -38,6 +38,7 @@ pub(super) fn direct_anchor_spec(
         max_attempts: 1,
         max_model_turns: 1,
         max_tool_calls: 0,
+        max_output_tokens: 2_048,
     }
 }
 
@@ -64,6 +65,7 @@ pub(super) fn direct_anchor_verifier_spec(
         max_attempts: 1,
         max_model_turns: 1,
         max_tool_calls: 0,
+        max_output_tokens: 1_024,
     }
 }
 
@@ -524,6 +526,7 @@ pub(super) fn start_direct_anchor_verifier(
     let prompt = spec.prompt.clone();
     let max_model_turns = spec.max_model_turns;
     let max_tool_calls = spec.max_tool_calls;
+    let max_output_tokens = spec.max_output_tokens;
     supervisor
         .submit(
             DIRECT_ANCHOR_VERIFIER_JOB_ID,
@@ -543,6 +546,7 @@ pub(super) fn start_direct_anchor_verifier(
                     false,
                     max_model_turns,
                     max_tool_calls,
+                    max_output_tokens,
                     cancellation,
                     Some(branch_cancellation),
                 )
@@ -1042,6 +1046,7 @@ pub(crate) fn recover_adaptive_worker(
         spec.tool_policy != WorkflowToolPolicy::None,
         spec.max_model_turns,
         spec.max_tool_calls,
+        spec.max_output_tokens,
         cancellation,
         None,
     );

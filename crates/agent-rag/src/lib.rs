@@ -9,8 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod retrieval_fusion;
 
 pub use retrieval_fusion::{
-    fuse_retrieval_channels, merge_retrieval_channel, retrieval_ranges_overlap, FusedRagSource,
-    RetrievalChannelOutcome, RetrievalFusionResult,
+    fuse_retrieval_channels, fuse_retrieval_channels_for_query, merge_retrieval_channel,
+    retrieval_ranges_overlap, FusedRagSource, RetrievalChannelOutcome, RetrievalFusionResult,
 };
 
 #[cfg(feature = "lancedb-store")]

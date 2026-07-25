@@ -65,11 +65,15 @@ Responsibilities:
 
 ## crates/agent-memory
 
-Context checkpoint and restore-pack boundary.
+Durable memory production, recall, and restore-pack boundary.
 
 Responsibilities:
 
 - Build deterministic session checkpoints from event logs.
+- Preserve requirements from incomplete runs without promoting unfinished work
+  to completed outcomes.
+- Rank lexical and semantic recall under trust, source-diversity, deduplication,
+  and observed-use constraints.
 - Extract current goal, completed work, pending actions, decisions, tool
   results, retrievals, artifacts, and errors.
 - Generate markdown restore packs for context recovery.
@@ -86,6 +90,8 @@ Responsibilities:
 - Normalize provider tool calls into local tool invocations.
 - Preserve canonical assistant/tool transcript messages for resume.
 - Own run budgets, cancellation, no-progress and repeated-action guards.
+- Own stage budgets, terminal reserves, partial-output retention, and the
+  objective-aware context governor.
 - Track loop states such as completed, tool requested, recoverable turn-budget
   exhaustion, and failed.
 - Keep desktop storage, permission UI, and actual tool execution outside the
@@ -121,6 +127,10 @@ Responsibilities:
 - Compare router decisions against baseline policies.
 - Run the Fugu bounded multi-model workflow engine with dependency isolation,
   role-aware workers, verification, recovery, and resumable checkpoints.
+- Own the durable workflow task graph, including runnable, resumable, degraded,
+  exhausted, and dependency-blocked frontier semantics.
+- Apply capability-aware evidence budgets so text-only Fast stays direct while
+  unknown-workspace exploration can complete a bounded discovery/read chain.
 - Evaluate and promote GEPA prompt genomes from completed or replayed evidence;
   never mutate an active runtime loop.
 
@@ -139,8 +149,11 @@ model and incremental projection. `run_lifecycle.rs` is the shared UI-facing
 lifecycle vocabulary. `permission_service.rs` owns indexed session permission
 lookup and permission labels. `collaboration_service.rs` owns the desktop-facing
 Fugu worker contracts, continuation budgets, evidence envelopes, and reserved
-final-answer turn policy. These modules keep Tauri command handlers thin while
-leaving provider calls, tool side effects, and persistence in the desktop adapter.
+final-answer turn policy. `prompt_evaluation_runtime.rs` executes the isolated
+evaluation DAG; `prompt_evaluation_feedback.rs` converts completed traces into
+redacted actionable GEPA feedback without owning execution. These modules keep
+Tauri command handlers thin while leaving provider calls, tool side effects, and
+persistence in the desktop adapter.
 
 ## crates/tools
 

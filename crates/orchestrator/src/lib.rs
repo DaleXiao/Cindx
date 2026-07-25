@@ -81,6 +81,23 @@ impl WorkflowToolPolicy {
             Self::ReadOnlyExploration => "read_only_exploration",
         }
     }
+
+    pub fn effective_model_turn_budget(&self, declared_turns: usize) -> usize {
+        let minimum = match self {
+            Self::None => 1,
+            Self::ReadOnlyEvidence => 2,
+            Self::ReadOnlyExploration => 3,
+        };
+        declared_turns.max(minimum)
+    }
+
+    pub fn effective_tool_call_budget(&self, declared_calls: usize) -> usize {
+        match self {
+            Self::None => 0,
+            Self::ReadOnlyEvidence => declared_calls.max(4),
+            Self::ReadOnlyExploration => declared_calls.max(6),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,11 +343,8 @@ impl WorkflowPlanIr {
     fn reconcile_step_contracts(&mut self) {
         for step in &mut self.steps {
             if step.contract == WorkflowStepContract::default() {
-                step.contract = WorkflowStepContract::inferred(
-                    &step.role,
-                    &step.access,
-                    &step.tool_policy,
-                );
+                step.contract =
+                    WorkflowStepContract::inferred(&step.role, &step.access, &step.tool_policy);
             } else if step.contract.input_steps.is_empty() && !step.access.is_empty() {
                 step.contract.input_steps = step.access.clone();
             }
@@ -895,9 +909,10 @@ impl WorkflowExecutionCheckpoint {
                     step.semantic.input_digests = recovered_input_digests;
                 }
                 step.semantic.evidence_count = step.evidence_count;
-                step.semantic.completion_satisfied =
-                    step.status == WorkflowStepStatus::Completed;
-                step.semantic.completed_at_ms.get_or_insert(step.updated_at_ms);
+                step.semantic.completion_satisfied = step.status == WorkflowStepStatus::Completed;
+                step.semantic
+                    .completed_at_ms
+                    .get_or_insert(step.updated_at_ms);
                 if plan_step.role == "verifier"
                     && step.status == WorkflowStepStatus::Completed
                     && step.semantic.verification == WorkflowVerificationState::NotRequired
@@ -1969,6 +1984,32 @@ mod tests {
     }
 
     #[test]
+    fn tool_steps_keep_a_discovery_and_evidence_round_without_slowing_text_only_fast() {
+        assert_eq!(WorkflowToolPolicy::None.effective_model_turn_budget(1), 1);
+        assert_eq!(
+            WorkflowToolPolicy::ReadOnlyEvidence.effective_model_turn_budget(1),
+            2
+        );
+        assert_eq!(
+            WorkflowToolPolicy::ReadOnlyExploration.effective_model_turn_budget(1),
+            3
+        );
+        assert_eq!(
+            WorkflowToolPolicy::ReadOnlyExploration.effective_model_turn_budget(3),
+            3
+        );
+        assert_eq!(WorkflowToolPolicy::None.effective_tool_call_budget(6), 0);
+        assert_eq!(
+            WorkflowToolPolicy::ReadOnlyEvidence.effective_tool_call_budget(0),
+            4
+        );
+        assert_eq!(
+            WorkflowToolPolicy::ReadOnlyExploration.effective_tool_call_budget(4),
+            6
+        );
+    }
+
+    #[test]
     fn workflow_ir_round_trips_and_enforces_declared_budgets() {
         let allowed_models = vec!["planner".to_string(), "reviewer".to_string()];
         let plan = workflow_plan("workflow-1", false);
@@ -2189,6 +2230,7 @@ mod tests {
         let telemetry = vec![
             WorkflowExecutionTelemetry {
                 task_class: TaskClass::Research,
+                routing_signature: String::new(),
                 plan: fast_plan.clone(),
                 succeeded: true,
                 quality_score: Some(0.92),
@@ -2199,6 +2241,7 @@ mod tests {
             },
             WorkflowExecutionTelemetry {
                 task_class: TaskClass::Research,
+                routing_signature: String::new(),
                 plan: fast_plan.clone(),
                 succeeded: true,
                 quality_score: Some(0.88),
@@ -2209,6 +2252,7 @@ mod tests {
             },
             WorkflowExecutionTelemetry {
                 task_class: TaskClass::Research,
+                routing_signature: String::new(),
                 plan: fast_plan.clone(),
                 succeeded: true,
                 quality_score: Some(0.90),
@@ -2219,6 +2263,7 @@ mod tests {
             },
             WorkflowExecutionTelemetry {
                 task_class: TaskClass::Research,
+                routing_signature: String::new(),
                 plan: fast_plan,
                 succeeded: true,
                 quality_score: Some(0.91),
@@ -2229,6 +2274,7 @@ mod tests {
             },
             WorkflowExecutionTelemetry {
                 task_class: TaskClass::Research,
+                routing_signature: String::new(),
                 plan: slow_plan.clone(),
                 succeeded: false,
                 quality_score: Some(0.30),
@@ -2239,6 +2285,7 @@ mod tests {
             },
             WorkflowExecutionTelemetry {
                 task_class: TaskClass::Research,
+                routing_signature: String::new(),
                 plan: slow_plan,
                 succeeded: true,
                 quality_score: Some(0.45),
@@ -2267,6 +2314,7 @@ mod tests {
         let telemetry = (0..3)
             .map(|_| WorkflowExecutionTelemetry {
                 task_class: TaskClass::Research,
+                routing_signature: String::new(),
                 plan: plan.clone(),
                 succeeded: true,
                 quality_score: Some(0.95),
@@ -2281,6 +2329,64 @@ mod tests {
         assert!(teacher
             .best_prior(&TaskClass::Research, "pro", &allowed_models, 2)
             .is_none());
+    }
+
+    #[test]
+    fn search_teacher_uses_capability_signature_before_class_level_fallback() {
+        let allowed_models = vec!["planner".to_string(), "reviewer".to_string()];
+        let direct_plan = workflow_plan("direct", false);
+        let retrieval_plan = workflow_plan("retrieval", true);
+        let direct_signature = "research:tools=0:retrieval=0:vision=0:high_stakes=0:complexity=1:steps=2:parallel=1:verify=0:latency=0";
+        let retrieval_signature = "research:tools=1:retrieval=1:vision=0:high_stakes=1:complexity=3:steps=5:parallel=1:verify=1:latency=0";
+        let mut telemetry = Vec::new();
+        for _ in 0..4 {
+            telemetry.push(WorkflowExecutionTelemetry {
+                task_class: TaskClass::Research,
+                routing_signature: direct_signature.to_string(),
+                plan: direct_plan.clone(),
+                succeeded: true,
+                quality_score: Some(0.88),
+                latency_ms: 3_000,
+                total_tokens: 3_000,
+                tool_calls: 0,
+                fallback_used: false,
+            });
+            telemetry.push(WorkflowExecutionTelemetry {
+                task_class: TaskClass::Research,
+                routing_signature: retrieval_signature.to_string(),
+                plan: retrieval_plan.clone(),
+                succeeded: true,
+                quality_score: Some(0.94),
+                latency_ms: 6_000,
+                total_tokens: 30_000,
+                tool_calls: 8,
+                fallback_used: false,
+            });
+        }
+
+        let teacher = WorkflowSearchTeacher::train(&telemetry);
+        let direct = teacher
+            .best_prior_for_signature(
+                &TaskClass::Research,
+                "pro",
+                &allowed_models,
+                2,
+                direct_signature,
+            )
+            .expect("direct signature prior");
+        let retrieval = teacher
+            .best_prior_for_signature(
+                &TaskClass::Research,
+                "pro",
+                &allowed_models,
+                2,
+                retrieval_signature,
+            )
+            .expect("retrieval signature prior");
+
+        assert_eq!(direct.steps.len(), 3);
+        assert_eq!(retrieval.steps.len(), 4);
+        assert_eq!(retrieval.routing_signature, retrieval_signature);
     }
 
     #[test]

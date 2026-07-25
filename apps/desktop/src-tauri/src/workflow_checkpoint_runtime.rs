@@ -185,16 +185,6 @@ pub(crate) fn checkpoint_evidence_by_step(
         .collect()
 }
 
-pub(crate) fn ensure_adaptive_step_attempt_started(
-    checkpoint: &mut WorkflowExecutionCheckpoint,
-    step_id: &str,
-    model: &str,
-    attempt_limit: usize,
-    now_ms: u64,
-) -> Result<bool, String> {
-    checkpoint.prepare_step_attempt(step_id, model, attempt_limit, now_ms)
-}
-
 pub(crate) fn adaptive_layer_failure_error(failures: &[String]) -> Option<String> {
     if failures.is_empty() {
         None

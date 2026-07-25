@@ -1,9 +1,9 @@
-use agent_runtime::{BoundedParallelExecutor, ParallelTaskError};
+use agent_runtime::BoundedParallelExecutor;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 pub(crate) use agent_runtime::{
-    CancellableParallelJob, InterruptibleQuorumExecution, ParallelJob, ParallelJobCompletion,
+    CancellableParallelJob, InterruptibleQuorumExecution, ParallelJobCompletion,
     ParallelJobSupervisor,
 };
 
@@ -16,13 +16,6 @@ fn model_executor() -> &'static BoundedParallelExecutor {
 
 pub(crate) fn model_job_supervisor<T: Send + 'static>() -> ParallelJobSupervisor<T> {
     model_executor().supervisor()
-}
-
-pub(crate) fn run_model_jobs_ordered<T: Send + 'static>(
-    thread_label: &str,
-    jobs: Vec<ParallelJob<T>>,
-) -> Vec<Result<T, ParallelTaskError>> {
-    model_executor().run_ordered(thread_label, jobs)
 }
 
 pub(crate) fn run_model_jobs_until_quorum_interruptible<T, F, I>(
