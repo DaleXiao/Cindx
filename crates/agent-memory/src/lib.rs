@@ -130,23 +130,6 @@ pub fn extract_durable_memories(
     let completed = events
         .iter()
         .any(|event| event.summary == "Agent task completed");
-    if !completed {
-        return Vec::new();
-    }
-
-    let outcome_evidence = events
-        .iter()
-        .filter(|event| {
-            matches!(event.kind, EventKind::ToolCallFinished)
-                && event.metadata.get("status").map(String::as_str) == Some("succeeded")
-                && durable_tool_memory(event).is_some()
-        })
-        .collect::<Vec<_>>();
-    let evidence_ids = outcome_evidence
-        .iter()
-        .map(|event| event.id.0.clone())
-        .take(8)
-        .collect::<Vec<_>>();
     let mut records = Vec::new();
 
     for event in events {
@@ -172,7 +155,27 @@ pub fn extract_durable_memories(
                 ));
             }
         }
+    }
 
+    if !completed {
+        return records;
+    }
+
+    let outcome_evidence = events
+        .iter()
+        .filter(|event| {
+            matches!(event.kind, EventKind::ToolCallFinished)
+                && event.metadata.get("status").map(String::as_str) == Some("succeeded")
+                && durable_tool_memory(event).is_some()
+        })
+        .collect::<Vec<_>>();
+    let evidence_ids = outcome_evidence
+        .iter()
+        .map(|event| event.id.0.clone())
+        .take(8)
+        .collect::<Vec<_>>();
+
+    for event in events {
         if let Some(content) = durable_tool_memory(event) {
             records.push(memory_record(
                 MemoryKind::Evidence,
@@ -340,6 +343,7 @@ pub fn recall_memories_at(
             let score = (overlap_score * 0.68 + if exact { 0.32 } else { 0.0 })
                 * record.kind.recall_weight()
                 * record.trust.recall_weight()
+                * memory_usefulness_weight(record)
                 * (0.8 + recency * 0.2)
                 * (0.85 + f64::from(record.importance) / 100.0 * 0.15)
                 * if cross_session { 1.08 } else { 0.92 };
@@ -426,6 +430,7 @@ pub fn fuse_memory_recalls_at(
         let semantic_score = semantic_score
             * record.kind.recall_weight()
             * record.trust.recall_weight()
+            * memory_usefulness_weight(record)
             * (0.8 + recency * 0.2)
             * (0.85 + f64::from(record.importance) / 100.0 * 0.15)
             * if cross_session { 1.08 } else { 0.92 };
@@ -588,17 +593,50 @@ pub fn record_memory_observed_uses(
         let record_terms = memory_terms(&record.content);
         let overlap = record_terms.intersection(&output_terms).count();
         let coverage = overlap as f64 / record_terms.len().max(1) as f64;
+        let identifier_overlap = record_terms
+            .intersection(&output_terms)
+            .filter(|term| is_memory_identifier(term))
+            .count();
         let normalized_record = normalize_memory_text(&record.content);
         let exact = normalized_record.chars().count() <= 160
             && !normalized_record.is_empty()
             && normalized_output.contains(&normalized_record);
-        if exact || (overlap >= 2 && coverage >= 0.2) || overlap >= 4 {
+        let observed = match record.kind {
+            MemoryKind::Requirement => {
+                exact
+                    || identifier_overlap > 0
+                    || (overlap >= 2 && coverage >= 0.2)
+                    || overlap >= 4
+            }
+            MemoryKind::Evidence => exact || identifier_overlap > 0 || overlap >= 4,
+            MemoryKind::Outcome => exact || (overlap >= 4 && coverage >= 0.35),
+        };
+        if observed {
             record.observed_use_count = record.observed_use_count.saturating_add(1);
             record.last_observed_use_at_ms = Some(observed_at_ms);
             used.push(record.id.clone());
         }
     }
     used
+}
+
+fn memory_usefulness_weight(record: &MemoryRecord) -> f64 {
+    if record.recall_count < 2 {
+        return 1.0;
+    }
+    let utilization = record.observed_use_count as f64 / record.recall_count.max(1) as f64;
+    let calibrated = (0.84 + utilization.min(1.0) * 0.24).clamp(0.84, 1.08);
+    if matches!(record.kind, MemoryKind::Requirement)
+        && matches!(record.trust, MemoryTrust::UserStated)
+    {
+        calibrated.max(0.94)
+    } else {
+        calibrated
+    }
+}
+
+fn is_memory_identifier(term: &str) -> bool {
+    term.contains('_') || term.chars().any(char::is_numeric)
 }
 
 pub fn memory_recalls_to_markdown(recalls: &[MemoryRecall]) -> String {
@@ -1633,7 +1671,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_memory_requires_a_completed_run_and_preserves_provenance() {
+    fn user_requirements_survive_incomplete_runs_but_outcomes_require_completion() {
         let mut events = vec![
             event(
                 1,
@@ -1665,7 +1703,10 @@ mod tests {
             ),
         ];
 
-        assert!(extract_durable_memories(&events, "project-a", "session-a").is_empty());
+        let incomplete = extract_durable_memories(&events, "project-a", "session-a");
+        assert_eq!(incomplete.len(), 1);
+        assert_eq!(incomplete[0].kind, MemoryKind::Requirement);
+        assert_eq!(incomplete[0].trust, MemoryTrust::UserStated);
         events.push(event(
             4,
             EventKind::TaskStatusChanged,
@@ -1782,6 +1823,50 @@ mod tests {
         );
         assert!(unrelated.is_empty());
         assert_eq!(ledger.records[0].observed_use_count, 1);
+    }
+
+    #[test]
+    fn repeatedly_recalled_but_unused_memory_is_deprioritized() {
+        let events = vec![
+            event(
+                1,
+                EventKind::MessageAdded,
+                "User message",
+                [
+                    ("role", "user"),
+                    ("content", "Always preserve the session effort setting"),
+                ],
+            ),
+            event(2, EventKind::TaskStatusChanged, "Agent task completed", []),
+        ];
+        let mut useful = extract_durable_memories(&events, "project-a", "session-a")
+            .into_iter()
+            .next()
+            .expect("requirement memory");
+        useful.id = "useful".to_string();
+        useful.fingerprint = "useful".to_string();
+        useful.recall_count = 10;
+        useful.observed_use_count = 8;
+        let mut noisy = useful.clone();
+        noisy.id = "noisy".to_string();
+        noisy.fingerprint = "noisy".to_string();
+        noisy.recall_count = 10;
+        noisy.observed_use_count = 0;
+        let ledger = MemoryLedger {
+            records: vec![noisy, useful],
+            ..MemoryLedger::new("project-a")
+        };
+
+        let recalls = recall_memories_at(
+            &ledger,
+            "preserve session effort setting",
+            Some("session-b"),
+            4,
+            10,
+        );
+
+        assert_eq!(recalls[0].record.id, "useful");
+        assert!(recalls[0].score > recalls[1].score);
     }
 
     #[test]

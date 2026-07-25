@@ -612,6 +612,9 @@ pub(crate) fn finish_agent_run_for_control_stop_with_task_state(
         recovery_metadata,
     )
     .map_err(|error| error.to_string())?;
+    if let Err(error) = refresh_project_memory_after_run(&mut store, run_context) {
+        eprintln!("project memory checkpoint unavailable: {error}");
+    }
     drop(store);
     emit_agent_stream_delta(
         app,
