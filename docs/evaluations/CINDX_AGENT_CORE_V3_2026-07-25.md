@@ -2,7 +2,7 @@
 
 Date: 2026-07-25
 
-Release candidate: `0.1.42`
+Locally packaged release: `0.1.43`
 
 This report separates verified behavior from research claims. A passing local
 contract is not evidence of model-quality parity, and a small provider-backed
