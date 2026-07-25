@@ -189,6 +189,10 @@ export function DiagramFullscreen({ diagram, onClose, onError }: DiagramFullscre
       role="dialog"
       aria-modal="true"
       aria-label={diagram.kind === "mindmap" ? "Mind map fullscreen" : "Mermaid fullscreen"}
+      onClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") event.stopPropagation();
+      }}
     >
       <div className="thread-diagram-fullscreen-actions">
         <button

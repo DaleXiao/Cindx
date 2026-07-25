@@ -450,6 +450,8 @@ assert(
     diagramFullscreenSource.includes("downloadDiagramPng") &&
     diagramFullscreenSource.includes("replaceForeignObjectsWithSvgText") &&
     diagramFullscreenSource.includes("createPortal") &&
+    diagramFullscreenSource.includes('onClick={(event) => event.stopPropagation()}') &&
+    diagramFullscreenSource.includes('event.key === "Enter" || event.key === " "') &&
     diagramFullscreenSource.includes("<ZoomOut") &&
     diagramFullscreenSource.includes("<ZoomIn") &&
     diagramFullscreenSource.includes("<Download") &&
@@ -460,6 +462,10 @@ assert(
     styles.includes(".thread-code-block-header") &&
     styles.includes(".thread-diagram-fullscreen") &&
     styles.includes(".thread-diagram-zoom-controls") &&
+    styles.includes('.thread-mermaid-diagram[data-theme="dark"] svg text') &&
+    styles.includes('.thread-mermaid-diagram[data-theme="dark"] svg foreignObject *') &&
+    mermaidDiagramSource.includes("applyDarkDiagramLabelContrast") &&
+    mermaidDiagramSource.includes('luminance > 0.179 ? "#171717" : "#f3f3f3"') &&
     styles.includes(".clipboard-toast") &&
     styles.includes(".thread-markdown table"),
   "Assistant messages must render safe Markdown, lazy Mermaid and Markmap mind maps, copyable code, and clipboard feedback"

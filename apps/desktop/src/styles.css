@@ -7453,6 +7453,15 @@ details[open] > summary .settings-disclosure-chevron > svg {
   background: var(--surface);
 }
 
+.thread-mermaid-diagram[data-theme="dark"] svg text {
+  fill: #f3f3f3 !important;
+}
+
+.thread-mermaid-diagram[data-theme="dark"] svg foreignObject,
+.thread-mermaid-diagram[data-theme="dark"] svg foreignObject * {
+  color: #f3f3f3 !important;
+}
+
 :root[data-theme="dark"] .thread-markmap-diagram > svg.markmap {
   --markmap-text-color: #f4f4f4;
   --markmap-code-bg: #292929;
