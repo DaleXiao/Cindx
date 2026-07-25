@@ -8012,7 +8012,7 @@ fn partial_budget_completion_exposes_a_continuation() {
 }
 
 #[test]
-fn session_permission_grant_covers_non_destructive_requests_in_the_same_session() {
+fn session_permission_grant_only_covers_the_same_capability() {
     let mut store = SqliteStore::in_memory().expect("store should open");
     let granted = PermissionRequest {
         id: PermissionRequestId("session-grant".to_string()),
@@ -8056,9 +8056,18 @@ fn session_permission_grant_covers_non_destructive_requests_in_the_same_session(
     next.action = "file.write".to_string();
     next.scope = "crates/tools".to_string();
     next.risk = PermissionRisk::Write;
+    assert!(!agent_session_permission_granted(
+        &store,
+        &phase16_task_id(),
+        &next,
+        Some("session-a"),
+    )
+    .expect("execute grant must not cover a write request"));
+    next.action = "shell.run".to_string();
+    next.risk = PermissionRisk::Execute;
     assert!(
         agent_session_permission_granted(&store, &phase16_task_id(), &next, Some("session-a"),)
-            .expect("session grant should cover another non-destructive request")
+            .expect("same capability should reuse the session grant")
     );
     next.risk = PermissionRisk::Destructive;
     assert!(!agent_session_permission_granted(
