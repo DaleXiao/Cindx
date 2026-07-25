@@ -91,6 +91,7 @@ pub(super) fn start_adaptive_anchor(
             false,
             anchor_spec.max_model_turns,
             anchor_spec.max_tool_calls,
+            anchor_spec.max_output_tokens,
             cancellation.clone(),
             None,
         );
@@ -166,6 +167,7 @@ fn spawn_direct_anchor(
     let prompt = anchor_spec.prompt.clone();
     let max_model_turns = anchor_spec.max_model_turns;
     let max_tool_calls = anchor_spec.max_tool_calls;
+    let max_output_tokens = anchor_spec.max_output_tokens;
     supervisor
         .submit(
             DIRECT_ANCHOR_JOB_ID,
@@ -185,6 +187,7 @@ fn spawn_direct_anchor(
                     false,
                     max_model_turns,
                     max_tool_calls,
+                    max_output_tokens,
                     cancellation,
                     Some(branch_cancellation),
                 )

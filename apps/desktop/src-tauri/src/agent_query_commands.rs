@@ -458,13 +458,7 @@ pub(crate) fn finish_agent_run_for_control_stop(
     run_context: &Metadata,
     control: &Arc<AgentRunControl>,
 ) -> Result<AgentState, String> {
-    finish_agent_run_for_control_stop_with_task_state(
-        app,
-        state,
-        run_context,
-        control,
-        None,
-    )
+    finish_agent_run_for_control_stop_with_task_state(app, state, run_context, control, None)
 }
 
 pub(crate) fn finish_agent_run_for_control_stop_with_task_state(

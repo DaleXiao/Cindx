@@ -21,8 +21,9 @@ pub(crate) use agent_memory::{
 };
 pub(crate) use agent_rag::{
     apply_embeddings_to_index_cancellable, build_grounded_answer_prompt,
-    export_lancedb_records_jsonl, fuse_retrieval_channels as fuse_rag_retrieval_channels,
-    index_workspace, index_workspace_cancellable, lancedb_index_exists, local_query_embedding,
+    export_lancedb_records_jsonl,
+    fuse_retrieval_channels_for_query as fuse_rag_retrieval_channels_for_query, index_workspace,
+    index_workspace_cancellable, lancedb_index_exists, local_query_embedding,
     merge_retrieval_channel, replace_lancedb_index, retrieval_ranges_overlap,
     search_chunks_literal, search_lancedb_index, workspace_index_is_fresh, EmbeddingBatch,
     FileRagAdapter, IndexOptions, RagAdapter, RagChunk, RagEmbedder, RagError, RagIndex,
@@ -31,18 +32,17 @@ pub(crate) use agent_rag::{
 #[cfg(test)]
 pub(crate) use agent_runtime::{
     advance_with_model_response, model_request_for_turn_with_context_budget,
-    record_tool_outcome_with_risk, AgentFailureClass, AgentRuntimeConfig, WorkerTurnPhase,
-    WorkerTurnPolicy,
+    record_tool_outcome_with_risk, AgentRuntimeConfig, WorkerTurnPhase, WorkerTurnPolicy,
 };
 pub(crate) use agent_runtime::{
-    bounded_max_output_tokens, compose_agent_system_prompt, evidence_worker_tools,
-    observation_from_tool_result, resume_agent_loop_from_messages, sanitize_assistant_content,
-    start_agent_loop, start_agent_loop_with_history, AgentAdvance, AgentFailure, AgentKernel,
-    AgentRecoveryAction, AgentRunControl, AgentTaskStateSnapshot, AgentToolRequest,
-    ContextGovernorReport, IsolatedWorkerRuntime, ResultQuality, RunBudget, RunControlSnapshot,
-    RunStageClass, RunStopReason, WorkerAdvance, WorkerToolAdmission,
-    DEFAULT_COLLABORATION_WORKER_TURNS, MAX_COLLABORATION_WORKER_TOOL_CALLS,
-    MAX_IDENTICAL_TOOL_FAILURES,
+    bounded_max_output_tokens, compose_agent_system_prompt, ensure_terminal_commit_instruction,
+    evidence_worker_tools, observation_from_tool_result, resume_agent_loop_from_messages,
+    sanitize_assistant_content, start_agent_loop, start_agent_loop_with_history, AgentAdvance,
+    AgentFailure, AgentFailureClass, AgentKernel, AgentRecoveryAction, AgentRunControl,
+    AgentTaskStateSnapshot, AgentToolRequest, ContextGovernorReport, IsolatedWorkerRuntime,
+    ResultQuality, RunBudget, RunContinuationDirective, RunControlSnapshot, RunStageClass,
+    RunStopReason, WorkerAdvance, WorkerToolAdmission, DEFAULT_COLLABORATION_WORKER_TURNS,
+    MAX_COLLABORATION_WORKER_TOOL_CALLS, MAX_IDENTICAL_TOOL_FAILURES,
 };
 pub(crate) use agent_skills::{
     install_skill_archive as install_skill_archive_package, SkillCatalog, SkillPreference,
@@ -57,7 +57,7 @@ pub(crate) use model_provider::ModelError;
 pub(crate) use model_provider::{
     EmbeddingRequest, ModelCallMode, ModelRequest, ModelResponse, OpenAiCompatibleConfig,
     OpenAiCompatibleImageConfig, OpenAiCompatibleImageProvider, OpenAiCompatibleProvider,
-    MODEL_REQUEST_CANCELLED,
+    StreamingModelProvider, MODEL_REQUEST_CANCELLED,
 };
 #[cfg(target_os = "macos")]
 pub(crate) use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindow, NSWindowButton};

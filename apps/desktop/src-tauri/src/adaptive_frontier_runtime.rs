@@ -99,10 +99,16 @@ pub(super) fn run_adaptive_frontier(
             )?;
             return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
         }
+        let graph_frontier = workflow_checkpoint.execution_frontier(max_step_attempts)?;
+        let graph_runnable = graph_frontier
+            .runnable_steps()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
         let ready_ids = anytime_controller
             .ready_candidates()
             .into_iter()
             .filter(|candidate| candidate.id != DIRECT_ANCHOR_CANDIDATE_ID)
+            .filter(|candidate| graph_runnable.contains(&candidate.id))
             .map(|candidate| candidate.id.clone())
             .collect::<Vec<_>>();
         let layer = ready_ids
@@ -126,13 +132,7 @@ pub(super) fn run_adaptive_frontier(
             })
             .collect::<Vec<_>>();
         if layer.is_empty() {
-            let all_workflow_steps_resolved = workflow_checkpoint.steps.values().all(|step| {
-                matches!(
-                    step.status,
-                    WorkflowStepStatus::Completed | WorkflowStepStatus::Degraded
-                )
-            });
-            if all_workflow_steps_resolved {
+            if graph_frontier.is_complete(workflow_plan.steps.len()) {
                 break;
             }
             while (direct_anchor_output.is_none()
@@ -203,9 +203,11 @@ pub(super) fn run_adaptive_frontier(
                 }
                 return commit_adaptive_frontier(output, &workflow_checkpoint);
             }
-            return Err(
-                "anytime workflow frontier is blocked without runnable candidates".to_string(),
-            );
+            return Err(format!(
+                "anytime workflow frontier is blocked without runnable candidates; exhausted=[{}] blocked=[{}]",
+                graph_frontier.exhausted_steps.join(","),
+                graph_frontier.blocked_steps.join(",")
+            ));
         }
         let layer_index = frontier_round;
         frontier_round = frontier_round.saturating_add(1);

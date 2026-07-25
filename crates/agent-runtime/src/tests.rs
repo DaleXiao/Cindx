@@ -381,7 +381,7 @@ fn dangling_reasoning_tag_with_tool_calls_keeps_the_tool_turn() {
 }
 
 #[test]
-fn turn_budget_exhaustion_is_recoverable_control_flow() {
+fn completed_answer_survives_a_soft_turn_budget_overrun() {
     let mut state = start_agent_loop(
         TaskId("budget".to_string()),
         "continue the task",
@@ -403,10 +403,99 @@ fn turn_budget_exhaustion_is_recoverable_control_flow() {
 
     assert_eq!(
         advance,
+        AgentAdvance::Completed {
+            answer: "verified partial result".to_string(),
+        }
+    );
+}
+
+#[test]
+fn terminal_commit_instruction_is_durable_and_idempotent() {
+    let mut state = start_agent_loop(
+        TaskId("terminal-commit".to_string()),
+        "finish the task",
+        AgentRuntimeConfig::default(),
+    );
+
+    assert!(ensure_terminal_commit_instruction(&mut state));
+    assert!(!ensure_terminal_commit_instruction(&mut state));
+    let terminal_messages = state
+        .messages
+        .iter()
+        .filter(|message| {
+            message.metadata.get("kind").map(String::as_str) == Some("terminal_commit_policy")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_messages.len(), 1);
+    assert_eq!(terminal_messages[0].role, MessageRole::System);
+    assert_eq!(
+        terminal_messages[0]
+            .metadata
+            .get("internal")
+            .map(String::as_str),
+        Some("true")
+    );
+}
+
+#[test]
+fn retry_is_stopped_at_the_turn_budget_boundary() {
+    let mut state = start_agent_loop(
+        TaskId("retry-budget".to_string()),
+        "continue the task",
+        AgentRuntimeConfig { max_turns: 1 },
+    );
+    let response = ModelResponse {
+        message: Message {
+            role: MessageRole::Assistant,
+            content: "verified partial result".to_string(),
+            metadata: Metadata::new(),
+        },
+        raw_tool_calls_json: None,
+        tool_calls: Vec::new(),
+        metadata: [("finish_reason".to_string(), "length".to_string())]
+            .into_iter()
+            .collect(),
+    };
+
+    assert_eq!(
+        advance_with_model_response(&mut state, response, &[]),
         AgentAdvance::TurnBudgetExhausted(AgentTurnBudgetExhausted {
             completed_turns: 1,
             max_turns: 1,
             partial_answer: Some("verified partial result".to_string()),
+        })
+    );
+}
+
+#[test]
+fn tool_calls_are_stopped_when_no_finalization_turn_remains() {
+    let tools = vec![tool("file.read", "path=<workspace-relative-path>")];
+    let mut state = start_agent_loop(
+        TaskId("tool-budget".to_string()),
+        "read README",
+        AgentRuntimeConfig { max_turns: 1 },
+    );
+    let response = ModelResponse {
+        message: Message {
+            role: MessageRole::Assistant,
+            content: "I need one more read.".to_string(),
+            metadata: Metadata::new(),
+        },
+        raw_tool_calls_json: Some("[]".to_string()),
+        tool_calls: vec![ModelToolCall {
+            id: "call-1".to_string(),
+            name: "file_read".to_string(),
+            arguments_json: r#"{"input":"path=README.md"}"#.to_string(),
+        }],
+        metadata: Metadata::new(),
+    };
+
+    assert_eq!(
+        advance_with_model_response(&mut state, response, &tools),
+        AgentAdvance::TurnBudgetExhausted(AgentTurnBudgetExhausted {
+            completed_turns: 1,
+            max_turns: 1,
+            partial_answer: Some("I need one more read.".to_string()),
         })
     );
 }

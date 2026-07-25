@@ -233,23 +233,22 @@ fn running_workflow_attempt_resumes_without_consuming_another_attempt() {
     let plan = single_step_workflow_plan(3);
     let mut checkpoint = WorkflowExecutionCheckpoint::new("resume-running", plan, 10);
 
-    assert!(
-        ensure_adaptive_step_attempt_started(&mut checkpoint, "inspect", "worker", 3, 20,)
-            .expect("first attempt should start")
-    );
-    assert!(
-        !ensure_adaptive_step_attempt_started(&mut checkpoint, "inspect", "worker", 3, 30,)
-            .expect("running attempt should resume")
-    );
+    let claimed = checkpoint
+        .claim_steps(&["inspect".to_string()], 3, 20)
+        .expect("first attempt should start");
+    assert!(!claimed[0].resumed);
+    let resumed = checkpoint
+        .claim_steps(&["inspect".to_string()], 3, 30)
+        .expect("running attempt should resume");
+    assert!(resumed[0].resumed);
     assert_eq!(checkpoint.steps["inspect"].attempts, 1);
 
     checkpoint
         .fail_step("inspect", "transport failed", 40)
         .expect("attempt should fail");
-    assert!(
-        ensure_adaptive_step_attempt_started(&mut checkpoint, "inspect", "worker-alt", 3, 50,)
-            .expect("failed attempt should restart")
-    );
+    checkpoint
+        .begin_step_with_attempt_limit("inspect", "worker-alt", 3, 50)
+        .expect("failed attempt should restart");
     assert_eq!(checkpoint.steps["inspect"].attempts, 2);
     assert_eq!(checkpoint.steps["inspect"].model, "worker-alt");
 }
@@ -2694,6 +2693,22 @@ fn pro_role_budget_does_not_collapse_when_roles_share_one_model() {
 }
 
 #[test]
+fn collaboration_terminal_workers_keep_terminal_stage_reserves() {
+    assert_eq!(
+        collaboration_worker_stage_class("worker_4", &ModelRole::Summarizer),
+        RunStageClass::Synthesizer
+    );
+    assert_eq!(
+        collaboration_worker_stage_class("worker_3", &ModelRole::Reviewer),
+        RunStageClass::Reviewer
+    );
+    assert_eq!(
+        collaboration_worker_stage_class("worker_1", &ModelRole::Executor),
+        RunStageClass::Worker
+    );
+}
+
+#[test]
 fn effort_and_router_select_the_primary_model_without_collapsing_to_executor() {
     let config = ProviderConfig {
         model: "default-a".to_string(),
@@ -4846,6 +4861,7 @@ fn pairwise_observation_keeps_relative_and_per_step_credit() {
         plan: candidate_plan,
         execution: PromptWorkflowExecution {
             succeeded: true,
+            quality_gate_met: true,
             final_output: "verified".to_string(),
             steps: vec![PromptExecutionStep {
                 id: "verify".to_string(),
@@ -4869,6 +4885,7 @@ fn pairwise_observation_keeps_relative_and_per_step_credit() {
         plan: opponent_plan,
         execution: PromptWorkflowExecution {
             succeeded: true,
+            quality_gate_met: true,
             final_output: "reviewed".to_string(),
             steps: vec![PromptExecutionStep {
                 id: "verify".to_string(),
@@ -4888,7 +4905,7 @@ fn pairwise_observation_keeps_relative_and_per_step_credit() {
             total_tokens: 70,
         },
     };
-    let observation = prompt_pairwise_observation(
+    let observation = prompt_evaluation_feedback::prompt_pairwise_observation(
         &candidate,
         &opponent,
         "Fix the project and run tests",
@@ -4924,7 +4941,7 @@ fn pairwise_observation_keeps_relative_and_per_step_credit() {
         response: format!("verified with {secret}\n{bearer}"),
         error: None,
     }];
-    let traced = prompt_pairwise_observation(
+    let traced = prompt_evaluation_feedback::prompt_pairwise_observation(
         &traced_candidate,
         &opponent,
         &format!("Fix the project using {secret}"),
@@ -6639,7 +6656,7 @@ fn retrieval_fusion_deduplicates_and_preserves_channel_reasons() {
         },
     ];
 
-    let (results, sources) = fuse_retrieval_channels(&channels, 8);
+    let (results, sources) = fuse_retrieval_channels(&channels, "", 8);
 
     assert_eq!(results.len(), 2);
     assert_eq!(sources.len(), 2);
@@ -6694,7 +6711,7 @@ fn retrieval_fusion_prefers_independent_consensus_over_one_channel_outlier() {
         },
     ];
 
-    let (results, sources) = fuse_retrieval_channels(&channels, 4);
+    let (results, sources) = fuse_retrieval_channels(&channels, "", 4);
 
     assert_eq!(results[0].chunk.path, "b.md");
     assert!(sources[0].reason.contains("consensus:2"));
@@ -6750,7 +6767,7 @@ fn retrieval_fusion_does_not_double_count_correlated_graph_routes() {
         },
     ];
 
-    let (results, sources) = fuse_retrieval_channels(&channels, 4);
+    let (results, sources) = fuse_retrieval_channels(&channels, "", 4);
 
     assert_eq!(results[0].chunk.path, "b.md");
     let graph_source = sources

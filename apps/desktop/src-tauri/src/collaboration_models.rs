@@ -161,6 +161,7 @@ impl PromptDependencyOutput {
 #[derive(Debug, Clone)]
 pub(crate) struct PromptWorkflowExecution {
     pub(crate) succeeded: bool,
+    pub(crate) quality_gate_met: bool,
     pub(crate) final_output: String,
     pub(crate) steps: Vec<PromptExecutionStep>,
     pub(crate) latency_ms: u64,
@@ -175,13 +176,15 @@ pub(crate) struct PromptExecutionCandidate {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PromptEvaluationWorkerRequest {
+    pub(crate) stage: String,
+    pub(crate) stage_class: RunStageClass,
     pub(crate) role: ModelRole,
     pub(crate) model: String,
     pub(crate) prompt: String,
     pub(crate) tool_policy: WorkflowToolPolicy,
     pub(crate) max_model_turns: usize,
     pub(crate) max_tool_calls: usize,
-    pub(crate) max_output_tokens: usize,
+    pub(crate) max_output_tokens: u64,
 }
 
 pub(crate) type PromptEvaluationRunner = Arc<

@@ -452,7 +452,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         let forward_id = format!("{evaluation_id}-forward");
         let reverse_id = format!("{evaluation_id}-reverse");
         let forward = scope.spawn(move || {
-            evaluate_prompt_candidate_pair(
+            prompt_evaluation_feedback::evaluate_prompt_candidate_pair(
                 config,
                 objective_ref,
                 candidate_a,
@@ -462,7 +462,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
             )
         });
         let reverse = scope.spawn(move || {
-            evaluate_prompt_candidate_pair(
+            prompt_evaluation_feedback::evaluate_prompt_candidate_pair(
                 config,
                 objective_ref,
                 candidate_b,
@@ -507,7 +507,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         | PromptEvaluationMode::PairedExecution
         | PromptEvaluationMode::Live => PromptEvaluationSplit::Train,
     };
-    let observation_a = prompt_pairwise_observation(
+    let observation_a = prompt_evaluation_feedback::prompt_pairwise_observation(
         candidate_a,
         candidate_b,
         &objective,
@@ -522,7 +522,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         judge.feedback_a,
         std::slice::from_ref(&config.api_key),
     );
-    let observation_b = prompt_pairwise_observation(
+    let observation_b = prompt_evaluation_feedback::prompt_pairwise_observation(
         candidate_b,
         candidate_a,
         &objective,

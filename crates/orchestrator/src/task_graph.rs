@@ -1,4 +1,4 @@
-use crate::{WorkflowExecutionCheckpoint, WorkflowStepStatus};
+use crate::{WorkflowExecutionCheckpoint, WorkflowOutputKind, WorkflowStepStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowStepDisposition {
@@ -50,24 +50,37 @@ impl WorkflowExecutionCheckpoint {
         &self,
         attempt_limit: usize,
     ) -> Result<WorkflowExecutionFrontier, String> {
+        self.execution_frontier_with_recovery(attempt_limit, false)
+    }
+
+    pub fn execution_frontier_with_partial_recovery(
+        &self,
+        attempt_limit: usize,
+    ) -> Result<WorkflowExecutionFrontier, String> {
+        self.execution_frontier_with_recovery(attempt_limit, true)
+    }
+
+    fn execution_frontier_with_recovery(
+        &self,
+        attempt_limit: usize,
+        allow_partial_recovery: bool,
+    ) -> Result<WorkflowExecutionFrontier, String> {
         let mut frontier = WorkflowExecutionFrontier::default();
         for step in &self.plan.steps {
-            match self.step_disposition(&step.id, attempt_limit)? {
-                WorkflowStepDisposition::Resolved => {
-                    frontier.resolved_steps.push(step.id.clone())
-                }
+            match self.step_disposition_with_recovery(
+                &step.id,
+                attempt_limit,
+                allow_partial_recovery,
+            )? {
+                WorkflowStepDisposition::Resolved => frontier.resolved_steps.push(step.id.clone()),
                 WorkflowStepDisposition::ResumeRunning => {
                     frontier.resumable_steps.push(step.id.clone())
                 }
-                WorkflowStepDisposition::StartAttempt => {
-                    frontier.ready_steps.push(step.id.clone())
-                }
+                WorkflowStepDisposition::StartAttempt => frontier.ready_steps.push(step.id.clone()),
                 WorkflowStepDisposition::Exhausted => {
                     frontier.exhausted_steps.push(step.id.clone())
                 }
-                WorkflowStepDisposition::Blocked => {
-                    frontier.blocked_steps.push(step.id.clone())
-                }
+                WorkflowStepDisposition::Blocked => frontier.blocked_steps.push(step.id.clone()),
             }
         }
         Ok(frontier)
@@ -79,7 +92,27 @@ impl WorkflowExecutionCheckpoint {
         attempt_limit: usize,
         now_ms: u64,
     ) -> Result<Vec<WorkflowStepClaim>, String> {
-        let frontier = self.execution_frontier(attempt_limit)?;
+        self.claim_steps_with_recovery(step_ids, attempt_limit, now_ms, false)
+    }
+
+    pub fn claim_steps_with_partial_recovery(
+        &mut self,
+        step_ids: &[String],
+        attempt_limit: usize,
+        now_ms: u64,
+    ) -> Result<Vec<WorkflowStepClaim>, String> {
+        self.claim_steps_with_recovery(step_ids, attempt_limit, now_ms, true)
+    }
+
+    fn claim_steps_with_recovery(
+        &mut self,
+        step_ids: &[String],
+        attempt_limit: usize,
+        now_ms: u64,
+        allow_partial_recovery: bool,
+    ) -> Result<Vec<WorkflowStepClaim>, String> {
+        let frontier =
+            self.execution_frontier_with_recovery(attempt_limit, allow_partial_recovery)?;
         let runnable = frontier
             .runnable_steps()
             .into_iter()
@@ -91,7 +124,10 @@ impl WorkflowExecutionCheckpoint {
         if requested.len() != step_ids.len() {
             return Err("workflow step claim contains duplicate ids".to_string());
         }
-        if let Some(step_id) = requested.iter().find(|step_id| !runnable.contains(*step_id)) {
+        if let Some(step_id) = requested
+            .iter()
+            .find(|step_id| !runnable.contains(*step_id))
+        {
             return Err(format!(
                 "workflow step {step_id} is not runnable in the current frontier"
             ));
@@ -106,12 +142,7 @@ impl WorkflowExecutionCheckpoint {
                 .map(|step| step.model.clone())
                 .ok_or_else(|| format!("unknown workflow checkpoint step: {step_id}"))?;
             if !resumed {
-                self.begin_step_with_attempt_limit(
-                    step_id,
-                    &model,
-                    attempt_limit,
-                    now_ms,
-                )?;
+                self.begin_step_with_attempt_limit(step_id, &model, attempt_limit, now_ms)?;
             }
             claims.push(WorkflowStepClaim {
                 step_id: step_id.clone(),
@@ -126,6 +157,15 @@ impl WorkflowExecutionCheckpoint {
         &self,
         step_id: &str,
         attempt_limit: usize,
+    ) -> Result<WorkflowStepDisposition, String> {
+        self.step_disposition_with_recovery(step_id, attempt_limit, false)
+    }
+
+    fn step_disposition_with_recovery(
+        &self,
+        step_id: &str,
+        attempt_limit: usize,
+        allow_partial_recovery: bool,
     ) -> Result<WorkflowStepDisposition, String> {
         let checkpoint = self
             .steps
@@ -144,15 +184,37 @@ impl WorkflowExecutionCheckpoint {
             .iter()
             .find(|step| step.id == step_id)
             .ok_or_else(|| format!("workflow plan is missing step: {step_id}"))?;
-        if plan_step.access.iter().any(|dependency| {
-            self.steps.get(dependency).is_none_or(|step| {
-                !matches!(
-                    step.status,
-                    WorkflowStepStatus::Completed | WorkflowStepStatus::Degraded
-                )
+        let unresolved = plan_step
+            .access
+            .iter()
+            .filter(|dependency| {
+                self.steps.get(*dependency).is_none_or(|step| {
+                    !matches!(
+                        step.status,
+                        WorkflowStepStatus::Completed | WorkflowStepStatus::Degraded
+                    )
+                })
             })
-        }) {
-            return Ok(WorkflowStepDisposition::Blocked);
+            .collect::<Vec<_>>();
+        if !unresolved.is_empty() {
+            let resolved_count = plan_step.access.len().saturating_sub(unresolved.len());
+            let recoverable_output = matches!(
+                plan_step.contract.output_kind,
+                WorkflowOutputKind::Verification | WorkflowOutputKind::Synthesis
+            );
+            let unavailable_dependencies = unresolved.iter().all(|dependency| {
+                self.steps.get(*dependency).is_some_and(|step| {
+                    step.status == WorkflowStepStatus::Failed
+                        && step.attempts >= attempt_limit.max(1)
+                })
+            });
+            if !allow_partial_recovery
+                || !recoverable_output
+                || resolved_count == 0
+                || !unavailable_dependencies
+            {
+                return Ok(WorkflowStepDisposition::Blocked);
+            }
         }
         if checkpoint.status == WorkflowStepStatus::Running {
             return Ok(WorkflowStepDisposition::ResumeRunning);
@@ -191,8 +253,8 @@ impl WorkflowExecutionCheckpoint {
 mod tests {
     use super::*;
     use crate::{
-        WorkflowBudget, WorkflowPlanIr, WorkflowPlanStep, WorkflowStepContract,
-        WorkflowToolPolicy, WORKFLOW_IR_SCHEMA,
+        WorkflowBudget, WorkflowPlanIr, WorkflowPlanStep, WorkflowStepContract, WorkflowToolPolicy,
+        WORKFLOW_IR_SCHEMA,
     };
 
     fn checkpoint() -> WorkflowExecutionCheckpoint {
@@ -330,6 +392,63 @@ mod tests {
         assert_eq!(frontier.exhausted_steps, vec!["inspect"]);
         assert_eq!(frontier.blocked_steps, vec!["synthesize"]);
         assert!(frontier.is_stalled(2));
+    }
+
+    #[test]
+    fn partial_recovery_only_unlocks_terminal_synthesis_dependencies() {
+        let base = checkpoint();
+        let mut plan = base.plan;
+        let second_root = WorkflowPlanStep {
+            id: "inspect-backup".to_string(),
+            role: "worker".to_string(),
+            model: "worker".to_string(),
+            subtask: "inspect backup".to_string(),
+            access: Vec::new(),
+            tool_policy: WorkflowToolPolicy::ReadOnlyEvidence,
+            contract: WorkflowStepContract::inferred(
+                "worker",
+                &[],
+                &WorkflowToolPolicy::ReadOnlyEvidence,
+            ),
+        };
+        plan.steps.insert(1, second_root);
+        let synthesis = plan.steps.last_mut().unwrap();
+        synthesis.access = vec!["inspect".to_string(), "inspect-backup".to_string()];
+        synthesis.contract = WorkflowStepContract::inferred(
+            "synthesizer",
+            &synthesis.access,
+            &WorkflowToolPolicy::None,
+        );
+        plan.budget.max_steps = 3;
+        let mut checkpoint = WorkflowExecutionCheckpoint::new("partial", plan, 1);
+
+        checkpoint
+            .complete_step(
+                "inspect",
+                "worker",
+                "grounded result".to_string(),
+                "[]".to_string(),
+                2,
+            )
+            .unwrap();
+        checkpoint
+            .prepare_step_attempt("inspect-backup", "worker", 1, 3)
+            .unwrap();
+        checkpoint
+            .fail_step("inspect-backup", "provider failure", 4)
+            .unwrap();
+
+        let strict = checkpoint.execution_frontier(1).unwrap();
+        assert_eq!(strict.blocked_steps, vec!["synthesize"]);
+        let recoverable = checkpoint
+            .execution_frontier_with_partial_recovery(1)
+            .unwrap();
+        assert_eq!(recoverable.ready_steps, vec!["synthesize"]);
+        let claims = checkpoint
+            .claim_steps_with_partial_recovery(&["synthesize".to_string()], 1, 5)
+            .unwrap();
+        assert_eq!(claims[0].step_id, "synthesize");
+        assert!(!claims[0].resumed);
     }
 
     #[test]

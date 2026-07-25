@@ -441,6 +441,28 @@ fn stage_exhaustion_is_local_and_preserves_terminal_reserve() {
 }
 
 #[test]
+fn main_loop_enters_terminal_commit_before_exhausting_its_last_call() {
+    let mut budget = test_budget();
+    budget.initial_model_calls = 4;
+    budget.max_model_calls = 4;
+    budget.terminal_model_call_reserve = 1;
+    let control = AgentRunControl::with_budget(budget);
+
+    assert_eq!(
+        control.continuation_directive(),
+        RunContinuationDirective::Continue
+    );
+    for _ in 0..3 {
+        control.begin_model_call("executor").expect("model call");
+        control.finish_model_call();
+    }
+    assert_eq!(
+        control.continuation_directive(),
+        RunContinuationDirective::CommitTerminalResult
+    );
+}
+
+#[test]
 fn nonterminal_model_timeout_cannot_consume_terminal_time_reserve() {
     let mut budget = test_budget();
     budget.max_duration = Duration::from_secs(100);

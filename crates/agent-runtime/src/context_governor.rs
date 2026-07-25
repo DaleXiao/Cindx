@@ -630,8 +630,7 @@ fn context_relevance_score(message: &Message, objective_terms: &BTreeSet<String>
 
 fn context_relevance_terms(text: &str) -> BTreeSet<String> {
     text.split(|character: char| {
-        !(character.is_alphanumeric()
-            || matches!(character, '_' | '-' | '.' | '/' | ':' | '@'))
+        !(character.is_alphanumeric() || matches!(character, '_' | '-' | '.' | '/' | ':' | '@'))
     })
     .map(|term| {
         term.trim_matches(|character: char| matches!(character, '.' | '/' | ':' | '-' | '@'))
@@ -642,10 +641,31 @@ fn context_relevance_terms(text: &str) -> BTreeSet<String> {
             && (term.chars().count() > 1 || term.chars().any(char::is_numeric))
             && !matches!(
                 term.as_str(),
-                "a" | "an" | "and" | "are" | "as" | "at" | "be" | "by" | "for"
-                    | "from" | "in" | "is" | "it" | "of" | "on" | "or" | "that"
-                    | "the" | "this" | "to" | "was" | "what" | "when" | "where"
-                    | "which" | "with"
+                "a" | "an"
+                    | "and"
+                    | "are"
+                    | "as"
+                    | "at"
+                    | "be"
+                    | "by"
+                    | "for"
+                    | "from"
+                    | "in"
+                    | "is"
+                    | "it"
+                    | "of"
+                    | "on"
+                    | "or"
+                    | "that"
+                    | "the"
+                    | "this"
+                    | "to"
+                    | "was"
+                    | "what"
+                    | "when"
+                    | "where"
+                    | "which"
+                    | "with"
             )
     })
     .collect()

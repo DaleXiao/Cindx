@@ -34,9 +34,9 @@ pub use context_governor::{
     bounded_max_output_tokens, ContextBudgetAllocation, ContextGovernorReport,
 };
 pub use control::{
-    AgentRunControl, BestKnownResult, ResultQuality, RunBudget, RunControlSnapshot,
-    RunProgressSnapshot, RunStageBudget, RunStageClass, RunStageUsageSnapshot, RunSteer,
-    RunStopReason,
+    AgentRunControl, BestKnownResult, ResultQuality, RunBudget, RunContinuationDirective,
+    RunControlSnapshot, RunProgressSnapshot, RunStageBudget, RunStageClass, RunStageUsageSnapshot,
+    RunSteer, RunStopReason,
 };
 pub use failure::{AgentFailure, AgentFailureClass, AgentRecoveryAction};
 pub use kernel::{
@@ -440,12 +440,7 @@ pub fn advance_with_model_response(
     let assessment = response.assessment();
     let content = sanitize_assistant_content(&response.message.content);
     let tool_call_count = response.tool_calls.len();
-    if turn_budget::begin_model_response(state).is_err() {
-        return AgentAdvance::TurnBudgetExhausted(turn_budget::turn_budget_exhaustion(
-            state,
-            (!content.is_empty()).then_some(content),
-        ));
-    }
+    turn_budget::record_model_response(state);
 
     if !content.is_empty() || tool_call_count > 0 {
         let mut metadata = response.message.metadata.clone();
@@ -523,6 +518,12 @@ pub fn advance_with_model_response(
     state.consecutive_empty_responses = 0;
 
     if !response.tool_calls.is_empty() {
+        if state.turn >= state.max_turns {
+            return AgentAdvance::TurnBudgetExhausted(turn_budget::turn_budget_exhaustion(
+                state,
+                (!content.is_empty()).then_some(content),
+            ));
+        }
         let calls = response
             .tool_calls
             .into_iter()
@@ -562,6 +563,20 @@ pub fn append_internal_instruction(state: &mut AgentLoopState, kind: &str, instr
         .into_iter()
         .collect(),
     });
+}
+
+pub fn ensure_terminal_commit_instruction(state: &mut AgentLoopState) -> bool {
+    if state.messages.iter().any(|message| {
+        message.metadata.get("kind").map(String::as_str) == Some("terminal_commit_policy")
+    }) {
+        return false;
+    }
+    append_internal_instruction(
+        state,
+        "terminal_commit_policy",
+        "The run has entered its terminal reserve. Stop exploratory work. Complete or verify only an action that is already in progress and essential to the user's outcome; otherwise return the best grounded result now. Preserve every user constraint, state any unresolved limitation explicitly, and do not start a new branch of work.",
+    );
+    true
 }
 
 pub fn append_steering_instruction(

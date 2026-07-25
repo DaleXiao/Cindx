@@ -218,7 +218,7 @@ pub(crate) fn finalize_agent_completion(
     {
         eprintln!("project memory utilization unavailable: {error}");
     }
-    let memory_ledger = match refresh_project_memory_after_completion(&mut store, run_context) {
+    let memory_ledger = match refresh_project_memory_after_run(&mut store, run_context) {
         Ok(ledger) => ledger,
         Err(error) => {
             eprintln!("project memory checkpoint unavailable: {error}");

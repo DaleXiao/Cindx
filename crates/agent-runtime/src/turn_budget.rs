@@ -18,12 +18,8 @@ pub(crate) fn ensure_model_turn_available(
     }
 }
 
-pub(crate) fn begin_model_response(
-    state: &mut AgentLoopState,
-) -> Result<(), AgentTurnBudgetExhausted> {
-    ensure_model_turn_available(state)?;
+pub(crate) fn record_model_response(state: &mut AgentLoopState) {
     state.turn = state.turn.saturating_add(1);
-    Ok(())
 }
 
 pub(crate) fn turn_budget_exhaustion(
@@ -62,7 +58,7 @@ mod tests {
             "finish once",
             AgentRuntimeConfig { max_turns: 1 },
         );
-        begin_model_response(&mut state).expect("first turn is available");
+        record_model_response(&mut state);
 
         let exhausted = ensure_model_turn_available(&state).expect_err("second call is blocked");
         assert_eq!(exhausted.completed_turns, 1);

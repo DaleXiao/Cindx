@@ -26,11 +26,12 @@ pub(crate) fn execute_agent_model_turn(
     run_context: &Metadata,
     collaboration: Option<&AgentCollaboration>,
     cancellation: &Arc<AgentRunControl>,
-    provider: &OpenAiCompatibleProvider,
+    provider: &dyn StreamingModelProvider,
     agent_model: &str,
     tools: &[ToolSpec],
     request: ModelRequest,
     context_governor: &ContextGovernorReport,
+    terminal_commit: bool,
 ) -> Result<AgentModelTurnOutcome, String> {
     let session_id = run_context.get("session_id").map(String::as_str);
     if cancellation.begin_model_call("executor").is_err() {
@@ -86,6 +87,7 @@ pub(crate) fn execute_agent_model_turn(
                 "context_omitted_messages".to_string(),
                 context_governor.omitted_messages.to_string(),
             ),
+            ("terminal_commit".to_string(), terminal_commit.to_string()),
         ]
         .into_iter()
         .collect::<Metadata>();
@@ -115,33 +117,23 @@ pub(crate) fn execute_agent_model_turn(
         transport_attempt += 1;
         partial_stream.clear();
         stream_progress.reset();
+        let mut on_delta = |delta: &str| {
+            if !delta.is_empty() {
+                first_delta_at_ms.get_or_insert_with(current_time_millis);
+                partial_stream.push_str(delta);
+                stream_progress.observe(cancellation, "model_stream", "executor", &partial_stream);
+            }
+            if visible_stream && !delta.is_empty() {
+                streamed_output = true;
+                emit_agent_stream_delta(app, &request_id, session_id, delta, false, false, None);
+            }
+        };
+        let mut should_cancel =
+            || agent_run_should_stop(cancellation) || cancellation.has_pending_steer();
         let result = provider.complete_streaming_cancellable(
             request.clone(),
-            |delta| {
-                if !delta.is_empty() {
-                    first_delta_at_ms.get_or_insert_with(current_time_millis);
-                    partial_stream.push_str(delta);
-                    stream_progress.observe(
-                        cancellation,
-                        "model_stream",
-                        "executor",
-                        &partial_stream,
-                    );
-                }
-                if visible_stream && !delta.is_empty() {
-                    streamed_output = true;
-                    emit_agent_stream_delta(
-                        app,
-                        &request_id,
-                        session_id,
-                        delta,
-                        false,
-                        false,
-                        None,
-                    );
-                }
-            },
-            || agent_run_should_stop(cancellation) || cancellation.has_pending_steer(),
+            &mut on_delta,
+            &mut should_cancel,
         );
         match result {
             Ok(response) => break response,

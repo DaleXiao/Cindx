@@ -118,6 +118,7 @@ fn execution_arena_preserves_a_valid_branch_when_a_sibling_fails() {
     );
 
     assert!(result.execution.succeeded);
+    assert!(!result.execution.quality_gate_met);
     assert_eq!(
         result.execution.final_output,
         "The surviving evidence supports answer (A)."
@@ -139,6 +140,39 @@ fn execution_arena_preserves_a_valid_branch_when_a_sibling_fails() {
         .expect("final step should remain visible in the trajectory");
     assert_eq!(degraded_final.status, WorkflowStepStatus::Degraded);
     assert_eq!(degraded_final.attempts, 1);
+}
+
+#[test]
+fn execution_arena_requires_the_declared_pro_quorum_before_promotion() {
+    let mut genome = ConductorPromptGenome::seed_for_effort("pro");
+    genome.max_step_attempts = 1;
+    let candidate = workflow_candidate(
+        genome,
+        vec![
+            workflow_step("left", "worker", "worker-a", &[]),
+            workflow_step("right", "worker", "worker-b", &[]),
+            workflow_step("final", "synthesizer", "worker-c", &["left", "right"]),
+        ],
+    );
+    let runner: PromptEvaluationRunner = Arc::new(|request, _| {
+        assert!(!request.stage.is_empty());
+        assert!(request.max_model_turns >= 1);
+        assert!(request.max_output_tokens >= 1);
+        completed(match request.model.as_str() {
+            "worker-a" => "Independent result A",
+            "worker-b" => "Independent result B",
+            _ => "Synthesis of A and B",
+        })
+    });
+
+    let result = execute_prompt_workflow_candidate_with_runner(
+        "Solve the assigned problem",
+        candidate,
+        runner,
+    );
+
+    assert!(result.execution.succeeded);
+    assert!(result.execution.quality_gate_met);
 }
 
 #[test]

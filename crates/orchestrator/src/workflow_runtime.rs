@@ -42,6 +42,23 @@ impl WorkflowToolPolicy {
             Self::ReadOnlyExploration => "read_only_exploration",
         }
     }
+
+    pub fn effective_model_turn_budget(&self, declared_turns: usize) -> usize {
+        let minimum = match self {
+            Self::None => 1,
+            Self::ReadOnlyEvidence => 2,
+            Self::ReadOnlyExploration => 3,
+        };
+        declared_turns.max(minimum)
+    }
+
+    pub fn effective_tool_call_budget(&self, declared_calls: usize) -> usize {
+        match self {
+            Self::None => 0,
+            Self::ReadOnlyEvidence => declared_calls.max(4),
+            Self::ReadOnlyExploration => declared_calls.max(6),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

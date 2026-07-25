@@ -159,14 +159,12 @@ pub(crate) fn continue_agent_loop(
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,
     workspace_root: &Path,
-    mut runtime: agent_runtime::AgentLoopState,
-    mut prompt: String,
-    mut run_context: Metadata,
+    runtime: agent_runtime::AgentLoopState,
+    prompt: String,
+    run_context: Metadata,
     collaboration: Option<&AgentCollaboration>,
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<AgentState, String> {
-    let session_id_owned = run_context.get("session_id").cloned();
-    let session_id = session_id_owned.as_deref();
     let agent_model = agent_model_for_run(config, &run_context);
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
         base_url: config.base_url.clone(),
@@ -175,6 +173,37 @@ pub(crate) fn continue_agent_loop(
         embedding_model: config.model_for_role(&ModelRole::Embedder),
         timeout_seconds: cancellation.model_call_timeout_seconds(),
     });
+    continue_agent_loop_with_provider(
+        app,
+        state,
+        config,
+        workspace_root,
+        runtime,
+        prompt,
+        run_context,
+        collaboration,
+        cancellation,
+        &provider,
+        &agent_model,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn continue_agent_loop_with_provider(
+    app: &tauri::AppHandle,
+    state: &tauri::State<'_, AppState>,
+    config: &ProviderConfig,
+    workspace_root: &Path,
+    mut runtime: agent_runtime::AgentLoopState,
+    mut prompt: String,
+    mut run_context: Metadata,
+    collaboration: Option<&AgentCollaboration>,
+    cancellation: &Arc<AgentRunControl>,
+    provider: &dyn StreamingModelProvider,
+    agent_model: &str,
+) -> Result<AgentState, String> {
+    let session_id_owned = run_context.get("session_id").cloned();
+    let session_id = session_id_owned.as_deref();
     let registry = tool_registry_for_state(state, workspace_root)?;
     let mut tools = registry
         .exposure_plan(&prompt, config.context_window_tokens)
@@ -209,6 +238,13 @@ pub(crate) fn continue_agent_loop(
         }
         let max_output_tokens =
             bounded_max_output_tokens(config.context_window_tokens, AGENT_MAX_OUTPUT_TOKENS);
+        let terminal_commit = matches!(
+            cancellation.continuation_directive(),
+            RunContinuationDirective::CommitTerminalResult
+        );
+        if terminal_commit {
+            ensure_terminal_commit_instruction(&mut runtime);
+        }
         let verification_required = run_context
             .get("verification_required")
             .is_some_and(|value| value == "true");
@@ -253,11 +289,12 @@ pub(crate) fn continue_agent_loop(
             &run_context,
             active_collaboration,
             cancellation,
-            &provider,
-            &agent_model,
+            provider,
+            agent_model,
             &tools,
             request,
             &context_governor,
+            terminal_commit,
         )?;
         let AgentModelTurnResponse {
             response,
