@@ -19,8 +19,60 @@ pub(crate) fn agent_session_permission_granted(
         .any(|audit| {
             audit.resolution.as_ref().is_some_and(|resolution| {
                 resolution.decision == PermissionDecision::AllowForSession
+                    && permission_capability_matches(&audit.request, request)
             })
         }))
+}
+
+fn permission_capability_matches(
+    granted: &PermissionRequest,
+    requested: &PermissionRequest,
+) -> bool {
+    granted.task_id == requested.task_id
+        && granted.risk == requested.risk
+        && granted.action == requested.action
+        && requested.risk != PermissionRisk::Destructive
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::PermissionRequestId;
+
+    fn request(action: &str, risk: PermissionRisk, scope: &str) -> PermissionRequest {
+        PermissionRequest {
+            id: PermissionRequestId(format!("{action}:{scope}")),
+            task_id: TaskId("task".to_string()),
+            risk,
+            action: action.to_string(),
+            reason: "test".to_string(),
+            scope: scope.to_string(),
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn session_capability_requires_the_same_action_and_risk() {
+        let read = request("file.read", PermissionRisk::Read, "README.md");
+        let another_read = request("file.read", PermissionRisk::Read, "src/lib.rs");
+        let write = request("file.write", PermissionRisk::Write, "README.md");
+        let shell = request("shell.run", PermissionRisk::Execute, ".");
+
+        assert!(permission_capability_matches(&read, &another_read));
+        assert!(!permission_capability_matches(&read, &write));
+        assert!(!permission_capability_matches(&read, &shell));
+    }
+
+    #[test]
+    fn destructive_capabilities_are_never_reused() {
+        let destructive = request(
+            "computer.key",
+            PermissionRisk::Destructive,
+            "shortcut:cmd+delete",
+        );
+
+        assert!(!permission_capability_matches(&destructive, &destructive));
+    }
 }
 
 pub(crate) fn pending_agent_permissions_for_run(

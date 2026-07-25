@@ -100,6 +100,9 @@ const adaptiveCollaborationFinalizationSource = read(
 const agentLoopServiceSource = read(
   "apps/desktop/src-tauri/src/agent_loop_service.rs"
 );
+const agentLoopRuntimeSource = read(
+  "apps/desktop/src-tauri/src/agent_loop_runtime.rs"
+);
 const agentRecoveryServiceSource = read(
   "apps/desktop/src-tauri/src/agent_recovery_service.rs"
 );
@@ -1949,15 +1952,19 @@ assert(
 );
 assert(
   rustLib.includes(
-    "session_permission_grant_covers_non_destructive_requests_in_the_same_session"
+    "session_permission_grant_only_covers_the_same_capability"
   ) &&
     permissionServiceSource.includes("list_permission_audits_for_session") &&
+    permissionServiceSource.includes("permission_capability_matches") &&
+    permissionServiceSource.includes("granted.risk == requested.risk") &&
+    permissionServiceSource.includes("granted.action == requested.action") &&
+    agentLoopRuntimeSource.includes("agent_session_permission_granted(") &&
     permissionServiceSource.includes("request.risk == PermissionRisk::Destructive") &&
     rustLib.includes(
       ".filter(|pending| !matches!(&pending.risk, PermissionRisk::Destructive))"
     ) &&
     rustLib.includes("destructive permissions can only be allowed once"),
-  "Allow session must cover future non-destructive requests without covering destructive tools"
+  "Allow session must reuse only the same capability and never cover destructive tools"
 );
 assert(
   rustLib.includes("execute_agent_tool_invocation") &&
