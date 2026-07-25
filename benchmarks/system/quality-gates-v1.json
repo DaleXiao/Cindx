@@ -176,7 +176,8 @@
         { "path": "top_1_correct", "equals_path": "cases" },
         { "path": "recall_at_3_correct", "equals_path": "cases" },
         { "path": "trust_violations", "equals": 0 },
-        { "path": "dedup_failures", "equals": 0 }
+        { "path": "dedup_failures", "equals": 0 },
+        { "path": "supersession_failures", "equals": 0 }
       ]
     },
     {

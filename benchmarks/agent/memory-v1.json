@@ -1,7 +1,7 @@
 {
   "schema": "cindx.memory-evaluation.v1",
   "id": "core-memory",
-  "version": 1,
+  "version": 2,
   "cases": [
     {
       "id": "session-effort-scope",
@@ -50,6 +50,22 @@
       "requirement": "左侧边栏需要白色高不透明度的磨砂玻璃效果",
       "query": "继续优化左侧边栏的磨砂效果",
       "expected": "白色高不透明度的磨砂玻璃"
+    },
+    {
+      "id": "newer-name-supersedes-old-name",
+      "requirement": "From now on call me Dale",
+      "replacement": "From now on call me Alex",
+      "query": "What name should you call me?",
+      "expected": "call me Alex",
+      "expected_not": "call me Dale"
+    },
+    {
+      "id": "newer-theme-supersedes-old-theme",
+      "requirement": "Always use light mode",
+      "replacement": "Always use dark mode",
+      "query": "Keep dark mode enabled",
+      "expected": "dark mode",
+      "expected_not": "light mode"
     }
   ]
 }

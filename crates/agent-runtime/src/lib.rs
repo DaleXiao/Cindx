@@ -13,6 +13,7 @@ const DSML_TOOL_CALLS_CLOSE: &str = "</｜DSML｜tool_calls>";
 mod anytime_parallel;
 mod context_engine;
 mod context_governor;
+mod context_projection;
 mod control;
 mod failure;
 mod kernel;

@@ -22,17 +22,23 @@ struct MemoryEvaluationSuite {
 struct MemoryEvaluationCase {
     id: String,
     requirement: String,
+    #[serde(default)]
+    replacement: Option<String>,
     query: String,
     expected: String,
+    #[serde(default)]
+    expected_not: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct MemoryEvaluationCaseReport {
     id: String,
     requirement_records: usize,
+    active_requirement_records: usize,
     recalled_records: usize,
     top_1_correct: bool,
     recall_at_3_correct: bool,
+    supersession_correct: bool,
     recall_micros: u128,
 }
 
@@ -46,6 +52,7 @@ struct MemoryEvaluationReport {
     recall_at_3_correct: usize,
     trust_violations: usize,
     dedup_failures: usize,
+    supersession_failures: usize,
     average_recall_micros: u128,
     max_recall_micros: u128,
     case_results: Vec<MemoryEvaluationCaseReport>,
@@ -88,6 +95,7 @@ fn run() -> Result<(), String> {
         recall_at_3_correct: 0,
         trust_violations: 0,
         dedup_failures: 0,
+        supersession_failures: 0,
         average_recall_micros: 0,
         max_recall_micros: 0,
         case_results: Vec::with_capacity(suite.cases.len()),
@@ -107,12 +115,32 @@ fn run() -> Result<(), String> {
                 64,
             );
         }
+        if let Some(replacement) = &case.replacement {
+            let session_id = format!("source-{index}-replacement");
+            merge_memory_records(
+                &mut ledger,
+                extract_durable_memories(
+                    &completed_events(replacement, &session_id, 10_000 + index as u64),
+                    "memory-evaluation-project",
+                    &session_id,
+                ),
+                64,
+            );
+        }
         let requirement_count = ledger
             .records
             .iter()
             .filter(|record| record.kind == MemoryKind::Requirement)
             .count();
-        if requirement_count != 1 {
+        let active_requirement_count = ledger
+            .records
+            .iter()
+            .filter(|record| {
+                record.kind == MemoryKind::Requirement && record.superseded_by.is_none()
+            })
+            .count();
+        let expected_requirement_count = if case.replacement.is_some() { 2 } else { 1 };
+        if requirement_count != expected_requirement_count || active_requirement_count != 1 {
             report.dedup_failures += 1;
         }
 
@@ -133,6 +161,18 @@ fn run() -> Result<(), String> {
         if recall_at_3_correct {
             report.recall_at_3_correct += 1;
         }
+        let supersession_correct = case.expected_not.as_ref().is_none_or(|stale| {
+            ledger
+                .records
+                .iter()
+                .any(|record| record.content.contains(stale) && record.superseded_by.is_some())
+                && recalls
+                    .iter()
+                    .all(|recall| !recall.record.content.contains(stale))
+        });
+        if !supersession_correct {
+            report.supersession_failures += 1;
+        }
         report.trust_violations += recalls
             .iter()
             .filter(|recall| recall.record.trust != MemoryTrust::UserStated)
@@ -140,9 +180,11 @@ fn run() -> Result<(), String> {
         report.case_results.push(MemoryEvaluationCaseReport {
             id: case.id.clone(),
             requirement_records: requirement_count,
+            active_requirement_records: active_requirement_count,
             recalled_records: recalls.len(),
             top_1_correct,
             recall_at_3_correct,
+            supersession_correct,
             recall_micros: elapsed,
         });
     }
@@ -156,7 +198,7 @@ fn run() -> Result<(), String> {
         println!("Report: {}", path.display());
     }
     println!(
-        "Cindx memory benchmark {}-v{}: top1 {}/{} recall@3 {}/{} trust_violations={} dedup_failures={} avg={}us max={}us",
+        "Cindx memory benchmark {}-v{}: top1 {}/{} recall@3 {}/{} trust_violations={} dedup_failures={} supersession_failures={} avg={}us max={}us",
         report.suite_id,
         report.suite_version,
         report.top_1_correct,
@@ -165,25 +207,32 @@ fn run() -> Result<(), String> {
         report.cases,
         report.trust_violations,
         report.dedup_failures,
+        report.supersession_failures,
         report.average_recall_micros,
         report.max_recall_micros,
     );
     for case in report.case_results.iter().filter(|case| {
-        case.requirement_records != 1 || !case.top_1_correct || !case.recall_at_3_correct
+        case.active_requirement_records != 1
+            || !case.top_1_correct
+            || !case.recall_at_3_correct
+            || !case.supersession_correct
     }) {
         println!(
-            "  failed {}: requirements={} recalls={} top1={} recall@3={}",
+            "  failed {}: requirements={} active={} recalls={} top1={} recall@3={} supersession={}",
             case.id,
             case.requirement_records,
+            case.active_requirement_records,
             case.recalled_records,
             case.top_1_correct,
             case.recall_at_3_correct,
+            case.supersession_correct,
         );
     }
     if report.top_1_correct != report.cases
         || report.recall_at_3_correct != report.cases
         || report.trust_violations != 0
         || report.dedup_failures != 0
+        || report.supersession_failures != 0
     {
         return Err("memory evaluation gate did not pass".to_string());
     }
