@@ -151,7 +151,7 @@ const modelProviderSource = readRustCrateSource("model-provider");
 const modelProviderCargo = read("crates/model-provider/Cargo.toml");
 const ragSource = read("crates/agent-rag/src/lib.rs");
 const graphSource = read("crates/agent-graph/src/lib.rs");
-const agentMemorySource = read("crates/agent-memory/src/lib.rs");
+const agentMemorySource = readRustCrateSource("agent-memory");
 const agentRuntimeSource = readRustCrateSource("agent-runtime");
 const agentToolRuntimeSource = read("crates/agent-runtime/src/tool_runtime.rs");
 const runControlSource = read("crates/agent-runtime/src/control.rs");
@@ -2022,7 +2022,11 @@ assert(
   "Long agent runs must recover durably without replaying unknown tool outcomes"
 );
 assert(
-  agentMemorySource.includes('MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v3"') &&
+  agentMemorySource.includes('MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v4"') &&
+    agentMemorySource.includes("mod extraction;") &&
+    agentMemorySource.includes("mod ledger;") &&
+    agentMemorySource.includes("mod recall;") &&
+    agentMemorySource.includes("superseded_by") &&
     agentMemorySource.includes("extract_durable_memories") &&
     agentMemorySource.includes("merge_memory_records") &&
     agentMemorySource.includes("recall_memories_at") &&
@@ -2576,6 +2580,7 @@ assert(
     memoryEvaluationLabSource.includes("recall_at_3_correct") &&
     memoryEvaluationLabSource.includes("trust_violations") &&
     memoryEvaluationLabSource.includes("dedup_failures") &&
+    memoryEvaluationLabSource.includes("supersession_failures") &&
     qualityGateManifest.profiles["ci-contract"].includes("memory-contract") &&
     agentEvaluationDoc.includes("Project Memory Gate"),
   "Project memory must have a versioned deterministic recall and trust-boundary gate"
