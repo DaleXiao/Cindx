@@ -1,4 +1,4 @@
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useResolvedTheme, type ResolvedTheme } from "./useResolvedTheme";
 
 type MermaidDiagramProps = {
@@ -67,9 +67,45 @@ function renderErrorMessage(error: unknown) {
   return message.split("\n", 1)[0] || "Invalid diagram source";
 }
 
+function contrastingTextColor(fill: string) {
+  const channels = fill.match(/[\d.]+/g)?.map(Number);
+  if (!channels || channels.length < 3 || channels.some(Number.isNaN)) return null;
+  const [red, green, blue, alpha = 1] = channels;
+  if (alpha === 0) return null;
+  const linearize = (channel: number) => {
+    const normalized = channel / 255;
+    return normalized <= 0.04045
+      ? normalized / 12.92
+      : ((normalized + 0.055) / 1.055) ** 2.4;
+  };
+  const luminance =
+    0.2126 * linearize(red) +
+    0.7152 * linearize(green) +
+    0.0722 * linearize(blue);
+  return luminance > 0.179 ? "#171717" : "#f3f3f3";
+}
+
+function applyDarkDiagramLabelContrast(container: HTMLDivElement) {
+  container.querySelectorAll<SVGGElement>("svg g.node").forEach((node) => {
+    const shape = node.querySelector<SVGGraphicsElement>(
+      ":scope > rect, :scope > circle, :scope > ellipse, :scope > polygon, :scope > path"
+    );
+    if (!shape) return;
+    const labelColor = contrastingTextColor(getComputedStyle(shape).fill);
+    if (!labelColor) return;
+    node.querySelectorAll<SVGElement>("text, tspan").forEach((label) => {
+      label.style.setProperty("fill", labelColor, "important");
+    });
+    node.querySelectorAll<HTMLElement>("foreignObject *").forEach((label) => {
+      label.style.setProperty("color", labelColor, "important");
+    });
+  });
+}
+
 export const MermaidDiagram = memo(function MermaidDiagram({
   source
 }: MermaidDiagramProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
   const [renderState, setRenderState] = useState<RenderState>({ status: "loading" });
   const theme = useResolvedTheme();
 
@@ -91,6 +127,11 @@ export const MermaidDiagram = memo(function MermaidDiagram({
     };
   }, [source, theme]);
 
+  useLayoutEffect(() => {
+    if (theme !== "dark" || renderState.status !== "ready" || !containerRef.current) return;
+    applyDarkDiagramLabelContrast(containerRef.current);
+  }, [renderState, theme]);
+
   if (renderState.status === "loading") {
     return (
       <div className="thread-diagram-loading" role="status">
@@ -110,6 +151,7 @@ export const MermaidDiagram = memo(function MermaidDiagram({
   }
   return (
     <div
+      ref={containerRef}
       className="thread-mermaid-diagram"
       data-theme={theme}
       role="img"
