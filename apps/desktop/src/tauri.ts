@@ -4,784 +4,80 @@ import desktopPackage from "../package.json";
 
 export const DESKTOP_VERSION = desktopPackage.version;
 
-export type AgentEffort = "fast" | "auto" | "pro";
-
-export type RuntimeStatus = {
-  appVersion: string;
-  kernelStatus: string;
-  workspaceRoot: string;
-  orchestrationModes: string[];
-  registeredTools: string[];
-};
-
-export type PersonalizationConfig = {
-  preferredName: string;
-  responseTone: "natural" | "warm" | "professional" | "direct";
-  responseLength: "concise" | "balanced" | "detailed";
-};
-
-export type SidecarEndpointState = {
-  path: string;
-  exists: boolean;
-  executable: boolean;
-  healthy: boolean;
-  healthOutput: string;
-  envKey: string;
-};
-
-export type SidecarState = {
-  browser: SidecarEndpointState;
-  computer: SidecarEndpointState;
-  autoConfigure: boolean;
-  lastError: string | null;
-};
-
-export type SidecarConfigInput = {
-  browserPath: string;
-  computerPath: string;
-  autoConfigure: boolean;
-};
-
-export type WebSearchConfigState = {
-  endpoint: string;
-  apiKeySet: boolean;
-  configured: boolean;
-};
-
-export type WebSearchConfigInput = {
-  endpoint: string;
-  apiKey: string;
-};
-
-export type McpTransportConfig =
-  | {
-      type: "stdio";
-      command: string;
-      args: string[];
-      env: Record<string, string>;
-    }
-  | {
-      type: "streamable_http";
-      url: string;
-      headers: Record<string, string>;
-    };
-
-export type McpServerConfig = {
-  id: string;
-  name: string;
-  enabled: boolean;
-  requireApproval: boolean;
-  timeoutMs: number;
-  transport: McpTransportConfig;
-};
-
-export type McpServerView = {
-  id: string;
-  name: string;
-  enabled: boolean;
-  requireApproval: boolean;
-  timeoutMs: number;
-  transportType: "stdio" | "streamable_http";
-  command: string | null;
-  args: string[];
-  url: string | null;
-  secretKeys: string[];
-  toolCount: number;
-  refreshedAtMs: number | null;
-  lastError: string | null;
-};
-
-export type McpState = {
-  servers: McpServerView[];
-  lastError: string | null;
-};
-
-export type SkillRecord = {
-  id: string;
-  name: string;
-  description: string;
-  folderName: string;
-  root: string;
-  scope: "global" | "project" | "compatibility";
-  enabled: boolean;
-  trusted: boolean;
-  requiredTools: string[];
-};
-
-export type SkillState = {
-  skills: SkillRecord[];
-  lastError: string | null;
-};
-
-export type ProjectView = {
-  id: string;
-  name: string;
-  root: string;
-  detail: string;
-  status: string;
-  active: boolean;
-  createdAtMs: number;
-  updatedAtMs: number;
-};
-
-export type SessionView = {
-  id: string;
-  projectId: string;
-  name: string;
-  detail: string;
-  effort: AgentEffort;
-  status: string;
-  titleState: "pending" | "automatic" | "manual";
-  activity: "idle" | "working" | "complete" | "attention";
-  attentionReason: string | null;
-  unseenResult: boolean;
-  latestSequence: number;
-  active: boolean;
-  archived: boolean;
-  archivedAtMs: number | null;
-  createdAtMs: number;
-  updatedAtMs: number;
-};
-
-export type ProjectSessionState = {
-  projects: ProjectView[];
-  sessions: SessionView[];
-  activeProjectId: string;
-  activeSessionId: string;
-  lastError: string | null;
-};
-
-export type ScheduleCadence = "once" | "daily" | "weekdays" | "weekly";
-
-export type ScheduleRun = {
-  id: string;
-  queueId: string | null;
-  source: "scheduled" | "manual";
-  scheduledForMs: number;
-  queuedAtMs: number | null;
-  dispatchAttempts: number;
-  lastDispatchAtMs: number | null;
-  startedAtMs: number | null;
-  finishedAtMs: number | null;
-  status:
-    | "preparing"
-    | "queued"
-    | "running"
-    | "waiting_for_permission"
-    | "paused"
-    | "completed"
-    | "failed"
-    | "cancelled"
-    | "skipped";
-  error: string | null;
-};
-
-export type ScheduleView = {
-  id: string;
-  name: string;
-  projectId: string | null;
-  projectName: string;
-  sessionId: string | null;
-  sessionName: string;
-  prompt: string;
-  effort: AgentEffort;
-  timezone: string;
-  cadence: ScheduleCadence;
-  anchorAtMs: number;
-  weeklyDays: number[];
-  endsAtMs: number | null;
-  catchUp: boolean;
-  enabled: boolean;
-  nextRunAtMs: number | null;
-  createdAtMs: number;
-  updatedAtMs: number;
-  runs: ScheduleRun[];
-};
-
-export type ScheduleState = {
-  schedules: ScheduleView[];
-  lastError: string | null;
-};
-
-export type UpsertScheduleInput = {
-  id?: string | null;
-  name: string;
-  projectId: string | null;
-  sessionId: string | null;
-  prompt: string;
-  effort: AgentEffort;
-  timezone: string;
-  cadence: ScheduleCadence;
-  anchorLocal: string;
-  weeklyDays: number[];
-  endsLocal: string | null;
-  catchUp: boolean;
-  enabled: boolean;
-};
-
-export type AgentAttachment = {
-  id: string;
-  name: string;
-  path: string;
-  mimeType: string;
-  sizeBytes: number;
-};
-
-export type QueuedAgentMessage = {
-  id: string;
-  sessionId: string;
-  prompt: string;
-  attachments: AgentAttachment[];
-  effort: AgentEffort;
-  mode: "queue" | "steer";
-  createdAtMs: number;
-  updatedAtMs: number;
-};
-
-export type QueuedAgentMessageReceipt = {
-  message: QueuedAgentMessage;
-  eventCount: number;
-  latestSequence: number;
-  latestTimestampMs: number;
-};
-
-export type QueuedAgentMessageActionReceipt = {
-  queueId: string;
-  message: QueuedAgentMessage | null;
-  eventCount: number;
-  latestSequence: number;
-  latestTimestampMs: number;
-  cancelledActiveRun: boolean;
-};
-
-export type AttachmentUpload = {
-  name: string;
-  mimeType: string;
-  dataBase64: string;
-};
-
-export type ArtifactPreview = {
-  kind: "image" | "html" | "markdown" | "text" | "file";
-  mimeType: string;
-  content: string | null;
-  dataUrl: string | null;
-  sizeBytes: number;
-};
-
-export type TimelineEntry = {
-  sequence?: number;
-  label: string;
-  detail: string;
-  kind: "message" | "tool" | "permission" | "model";
-  state: "done" | "pending" | "idle";
-  timestampMs: number;
-  workflowProgress?: {
-    completedSteps: number;
-    totalSteps: number;
-    currentStepId: string | null;
-    stepStatus: string | null;
-    continuations: number;
-    recoverable: boolean;
-  };
-};
-
-export type PermissionAudit = {
-  id: string;
-  risk: string;
-  action: string;
-  reason: string;
-  scope: string;
-  status: "pending" | "resolved";
-  decision: "allow_once" | "allow_for_session" | "deny" | null;
-  requestedAtMs: number;
-  resolvedAtMs: number | null;
-};
-
-export type Phase3State = {
-  timeline: TimelineEntry[];
-  permissions: PermissionAudit[];
-};
-
-export type PermissionReviewItem = {
-  requestId: string;
-  action: string;
-  risk: string;
-  reason: string;
-  scope: string;
-  source: "agent" | "tool" | "browser" | "test";
-  projectId: string | null;
-  projectName: string | null;
-  sessionId: string | null;
-  sessionName: string | null;
-  input: string;
-  requestedAtMs: number;
-  canAllowSession: boolean;
-};
-
-export type PermissionReviewState = {
-  pending: PermissionReviewItem[];
-};
-
-export type ProviderConfigState = {
-  baseUrl: string;
-  model: string;
-  conductorModel: string;
-  plannerModel: string;
-  executorModel: string;
-  reviewerModel: string;
-  summarizerModel: string;
-  embeddingModel: string;
-  imageModel: string;
-  imageEndpoint: string;
-  collaborationPolicy: string;
-  promptEvolutionEnabled: boolean;
-  contextWindowTokens: number;
-  agentSystemPrompt: string;
-  apiKeySet: boolean;
-};
-
-export type ProviderConfigInput = {
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-  conductorModel: string;
-  plannerModel: string;
-  executorModel: string;
-  reviewerModel: string;
-  summarizerModel: string;
-  embeddingModel: string;
-  imageModel: string;
-  imageEndpoint: string;
-  collaborationPolicy: string;
-  promptEvolutionEnabled: boolean;
-  contextWindowTokens: number;
-  agentSystemPrompt: string;
-};
-
-export type ProviderModelsState = {
-  models: string[];
-  fetchedAtMs: number;
-  lastError: string | null;
-};
-
-export type ImageEndpointValidationState = {
-  endpoint: string;
-  valid: boolean;
-  lastError: string | null;
-};
-
-export type ChatMessageView = {
-  sequence?: number;
-  role: "user" | "assistant" | "system" | "tool" | "reviewer";
-  content: string;
-  timestampMs: number;
-  runId?: string | null;
-  queueId?: string | null;
-  attachments?: AgentAttachment[];
-};
-
-export type Phase4State = {
-  provider: ProviderConfigState;
-  promptEvolution: PromptEvolutionState;
-  timeline: TimelineEntry[];
-  messages: ChatMessageView[];
-  lastError: string | null;
-};
-
-export type PromptEvolutionProfileState = {
-  id: string;
-  effort: string;
-  generation: number;
-  runs: number;
-  trainRuns: number;
-  holdoutRuns: number;
-  reflectionRuns: number;
-  successRate: number;
-  averageReward: number | null;
-  averageRelativeReward: number | null;
-  averageStepCredit: number | null;
-  averageQuality: number | null;
-  averageLatencyMs: number;
-  averageTokens: number;
-  frontier: boolean;
-  champion: boolean;
-  learned: boolean;
-  next: boolean;
-};
-
-export type PromptEvolutionEffortState = {
-  effort: string;
-  applicable: boolean;
-  status: string;
-  championId: string | null;
-  championScore: number | null;
-  stagnantGenerations: number;
-  evaluatedGenerations: number;
-  freezeReason: string | null;
-  shadowRatePercent: number;
-  nextMode: string;
-  pairedRuns: number;
-  replayRuns: number;
-  reflectionPackets: number;
-  learnedProfiles: number;
-  readyProfiles: number;
-  evaluationInflight: boolean;
-  stableProfileId: string;
-  canaryProfileId: string | null;
-  canaryPercent: number;
-  promotionConfidence: number | null;
-  rollbackCount: number;
-  rolloutStatus: string;
-  readiness: string;
-  campaignStage: string;
-  campaignNextAction: string;
-  campaignResumeToken: string;
-  datasetCases: number;
-  datasetTrainCases: number;
-  datasetHoldoutCases: number;
-  requiredPairedRuns: number;
-  requiredReplayRuns: number;
-};
-
-export type PromptEvolutionState = {
-  enabled: boolean;
-  observedRuns: number;
-  generation: number;
-  populationSize: number;
-  frontierProfiles: number;
-  pairedRuns: number;
-  replayRuns: number;
-  reflectionPackets: number;
-  learnedProfiles: number;
-  evaluationInflight: boolean;
-  efforts: PromptEvolutionEffortState[];
-  profiles: PromptEvolutionProfileState[];
-};
-
-export type ToolSpecView = {
-  name: string;
-  description: string;
-  risk: string;
-  inputSchema: string;
-};
-
-export type ToolRunView = {
-  invocationId: string;
-  toolName: string;
-  status: string;
-  output: string;
-  timestampMs: number;
-};
-
-export type ToolApprovalView = {
-  requestId: string;
-  invocationId: string;
-  toolName: string;
-  risk: string;
-  reason: string;
-  scope: string;
-  input: string;
-  requestedAtMs: number;
-};
-
-export type Phase5State = {
-  timeline: TimelineEntry[];
-  tools: ToolSpecView[];
-  pendingApprovals: ToolApprovalView[];
-  results: ToolRunView[];
-  lastError: string | null;
-};
-
-export type OrchestrationStepView = {
-  orchestrationId: string;
-  policy: string;
-  stepIndex: number;
-  role: string;
-  model: string;
-  output: string;
-  latencyMs: number | null;
-  timestampMs: number;
-};
-
-export type Phase6State = {
-  timeline: TimelineEntry[];
-  steps: OrchestrationStepView[];
-  lastError: string | null;
-};
-
-export type RagStatsView = {
-  filesIndexed: number;
-  chunksIndexed: number;
-  indexedAtMs: number;
-};
-
-export type MemoryStatsView = {
-  records: number;
-  requirements: number;
-  outcomes: number;
-  evidence: number;
-  recalls: number;
-  observedUses: number;
-  updatedAtMs: number;
-};
-
-export type RagSourceView = {
-  path: string;
-  startLine: number;
-  endLine: number;
-  fileHash: string;
-  score: number;
-  reason: string;
-  text: string;
-};
-
-export type RetrievalChannelView = {
-  name: string;
-  resultCount: number;
-  durationMs: number;
-  topSources: string[];
-  error: string | null;
-};
-
-export type RetrievalTraceView = {
-  query: string;
-  mode: string;
-  channels: RetrievalChannelView[];
-  selectedCount: number;
-  durationMs: number;
-  indexCacheHit: boolean;
-  indexDurationMs: number;
-};
-
-export type GraphNodeView = {
-  id: string;
-  kind: string;
-  label: string;
-  sourcePath: string;
-  focused: boolean;
-};
-
-export type GraphEdgeView = {
-  id: string;
-  from: string;
-  to: string;
-  kind: string;
-};
-
-export type GraphStateView = {
-  totalNodes: number;
-  totalEdges: number;
-  nodes: GraphNodeView[];
-  edges: GraphEdgeView[];
-};
-
-export type Phase7State = {
-  timeline: TimelineEntry[];
-  stats: RagStatsView;
-  memory: MemoryStatsView;
-  sources: RagSourceView[];
-  retrievalTrace: RetrievalTraceView | null;
-  graph: GraphStateView;
-  answer: string | null;
-  lastError: string | null;
-};
-
-export type BrowserObservationView = {
-  invocationId: string;
-  toolName: string;
-  status: string;
-  url: string | null;
-  output: string;
-  artifactPath: string | null;
-  textPath: string | null;
-  captureKind: string | null;
-  timestampMs: number;
-};
-
-export type Phase8State = {
-  timeline: TimelineEntry[];
-  pendingApprovals: ToolApprovalView[];
-  observations: BrowserObservationView[];
-  lastError: string | null;
-};
-
-export type ContextCheckpointView = {
-  id: string;
-  generatedAtMs: number;
-  eventCount: number;
-  taskCount: number;
-  latestEventMs: number;
-  currentGoal: string | null;
-  completedSteps: string[];
-  pendingSteps: string[];
-  decisions: string[];
-  fileChanges: string[];
-  commandsRun: string[];
-  toolResults: string[];
-  retrievals: string[];
-  artifacts: string[];
-  errors: string[];
-  nextActions: string[];
-  path: string | null;
-  restorePack: string;
-};
-
-export type ContextState = {
-  timeline: TimelineEntry[];
-  checkpoint: ContextCheckpointView | null;
-  lastError: string | null;
-};
-
-export type AgentState = {
-  taskId: string;
-  projectId: string | null;
-  projectName: string | null;
-  sessionId: string | null;
-  sessionName: string | null;
-  status:
-    | "idle"
-    | "running"
-    | "waiting_for_permission"
-    | "paused"
-    | "completed"
-    | "failed"
-    | "cancelled";
-  turnCount: number;
-  maxTurns: number;
-  transcriptMessages: number;
-  contextTokensUsed: number;
-  contextWindowTokens: number;
-  contextRemainingPercent: number;
-  contextUsageEstimated: boolean;
-  runStartedAtMs: number;
-  runBudgetMs: number;
-  runModelCallBudget: number;
-  runToolCallBudget: number;
-  canCancel: boolean;
-  canRetry: boolean;
-  canContinue: boolean;
-  eventCount: number;
-  latestSequence: number;
-  oldestSequence: number;
-  hasOlderHistory: boolean;
-  timeline: TimelineEntry[];
-  messages: ChatMessageView[];
-  pendingApprovals: ToolApprovalView[];
-  queuedMessages: QueuedAgentMessage[];
-  latestAnswer: string | null;
-  lastError: string | null;
-};
-
-export type AgentStateRevision = {
-  sessionId: string;
-  eventCount: number;
-  latestSequence: number;
-  latestTimestampMs: number;
-};
-
-export type AgentStateDelta = {
-  reset: boolean;
-  latestSequence: number;
-  state: AgentState;
-};
-
-export type AgentHistoryPage = {
-  sessionId: string;
-  oldestSequence: number;
-  hasOlderHistory: boolean;
-  timeline: TimelineEntry[];
-  messages: ChatMessageView[];
-};
-
-export type AgentTraceStepView = {
-  id: string;
-  parentId: string | null;
-  turnIndex: number;
-  sequence: number;
-  kind: "status" | "message" | "model" | "tool" | "permission" | "retrieval" | "error";
-  label: string;
-  status: string;
-  startedAtMs: number;
-  finishedAtMs: number | null;
-  latencyMs: number | null;
-  model: string | null;
-  toolName: string | null;
-  requestId: string | null;
-  toolCallId: string | null;
-  permissionId: string | null;
-  inputPreview: string | null;
-  outputPreview: string | null;
-  artifactPath: string | null;
-  detail: string;
-  metadata: Record<string, string>;
-};
-
-export type AgentTraceTurnView = {
-  index: number;
-  label: string;
-  status: string;
-  startedAtMs: number;
-  finishedAtMs: number | null;
-  durationMs: number | null;
-  steps: AgentTraceStepView[];
-};
-
-export type AgentTraceRoleSummary = {
-  role: string;
-  models: string[];
-  calls: number;
-  completed: number;
-  degraded: number;
-  latencyMs: number;
-  firstTokenLatencyMs: number | null;
-  totalTokens: number;
-  evidenceCount: number;
-};
-
-export type AgentTraceState = {
-  taskId: string;
-  traceId: string;
-  runId: string;
-  projectId: string | null;
-  projectName: string | null;
-  sessionId: string | null;
-  sessionName: string | null;
-  status: string;
-  startedAtMs: number;
-  finishedAtMs: number | null;
-  durationMs: number | null;
-  turnCount: number;
-  stepCount: number;
-  toolCallCount: number;
-  permissionWaitCount: number;
-  errorCount: number;
-  roleSummaries: AgentTraceRoleSummary[];
-  exportPath: string | null;
-  turns: AgentTraceTurnView[];
-  lastError: string | null;
-};
-
-export type AgentOutputArtifactView = {
-  id: string;
-  path: string;
-  sourcePath: string | null;
-  toolName: string;
-  status: string;
-  timestampMs: number;
-  runId: string | null;
-  version: number;
-  kind: "image" | "file" | "directory";
-};
-
-export type ModelStreamDelta = {
-  taskId: string;
-  requestId: string;
-  sessionId: string | null;
-  delta: string;
-  done: boolean;
-  reset: boolean;
-  error: string | null;
-};
+export type * from "./tauriTypes";
+import type {
+  AgentEffort,
+  RuntimeStatus,
+  PersonalizationConfig,
+  SidecarEndpointState,
+  SidecarState,
+  SidecarConfigInput,
+  WebSearchConfigState,
+  WebSearchConfigInput,
+  McpTransportConfig,
+  McpServerConfig,
+  McpServerView,
+  McpState,
+  SkillRecord,
+  SkillState,
+  ProjectView,
+  SessionView,
+  ProjectSessionState,
+  ScheduleCadence,
+  ScheduleRun,
+  ScheduleView,
+  ScheduleState,
+  UpsertScheduleInput,
+  AgentAttachment,
+  QueuedAgentMessage,
+  QueuedAgentMessageReceipt,
+  QueuedAgentMessageActionReceipt,
+  AttachmentUpload,
+  ArtifactPreview,
+  TimelineEntry,
+  PermissionAudit,
+  Phase3State,
+  PermissionReviewItem,
+  PermissionReviewState,
+  ProviderConfigState,
+  ProviderConfigInput,
+  ProviderModelsState,
+  ImageEndpointValidationState,
+  ChatMessageView,
+  Phase4State,
+  PromptEvolutionProfileState,
+  PromptEvolutionEffortState,
+  PromptEvolutionState,
+  ToolSpecView,
+  ToolRunView,
+  ToolApprovalView,
+  Phase5State,
+  OrchestrationStepView,
+  Phase6State,
+  RagStatsView,
+  MemoryStatsView,
+  RagSourceView,
+  RetrievalChannelView,
+  RetrievalTraceView,
+  GraphNodeView,
+  GraphEdgeView,
+  GraphStateView,
+  Phase7State,
+  BrowserObservationView,
+  Phase8State,
+  ContextCheckpointView,
+  ContextState,
+  AgentState,
+  AgentStateRevision,
+  AgentStateDelta,
+  AgentHistoryPage,
+  AgentTraceStepView,
+  AgentTraceTurnView,
+  AgentTraceRoleSummary,
+  AgentTraceState,
+  AgentOutputArtifactView,
+  ModelStreamDelta
+} from "./tauriTypes";
 
 let browserPhase3State: Phase3State = {
   timeline: [],
@@ -1191,6 +487,10 @@ function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+function requireBrowserPreviewFallback(error: unknown) {
+  if (isTauriRuntime()) throw error;
+}
+
 export async function revealMainWindow(): Promise<void> {
   if (!isTauriRuntime()) return;
   await invoke<void>("reveal_main_window");
@@ -1204,7 +504,8 @@ export async function setSidebarMaterialWidth(width: number): Promise<void> {
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {
   try {
     return await invoke<RuntimeStatus>("get_runtime_status");
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     return {
       appVersion: DESKTOP_VERSION,
       kernelStatus: "browser preview",
@@ -1311,7 +612,8 @@ export async function pickWorkspaceFolder(
 export async function getSidecarState(): Promise<SidecarState> {
   try {
     return await invoke<SidecarState>("get_sidecar_state");
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     return browserSidecarState;
   }
 }
@@ -1345,6 +647,7 @@ export async function getMcpState(): Promise<McpState> {
   try {
     return await invoke<McpState>("get_mcp_state");
   } catch (error) {
+    requireBrowserPreviewFallback(error);
     return { servers: [], lastError: String(error) };
   }
 }
@@ -1379,6 +682,7 @@ export async function getSkillState(): Promise<SkillState> {
   try {
     return await invoke<SkillState>("get_skill_state");
   } catch (error) {
+    requireBrowserPreviewFallback(error);
     return { skills: [], lastError: String(error) };
   }
 }
@@ -1408,7 +712,8 @@ export async function installSkillUrl(url: string): Promise<SkillState> {
 export async function saveSidecarConfig(input: SidecarConfigInput): Promise<SidecarState> {
   try {
     return await invoke<SidecarState>("save_sidecar_config", { input });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     browserSidecarState = {
       browser: {
         ...browserSidecarState.browser,
@@ -1471,7 +776,8 @@ function withProjectSessionSelection(
 export async function getProjectSessionState(): Promise<ProjectSessionState> {
   try {
     return await invoke<ProjectSessionState>("get_project_session_state");
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     return browserProjectSessionState;
   }
 }
@@ -1483,7 +789,8 @@ export async function acknowledgeSessionActivity(
     return await invoke<ProjectSessionState>("acknowledge_session_activity", {
       input: { sessionId }
     });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     browserProjectSessionState = {
       ...browserProjectSessionState,
       sessions: browserProjectSessionState.sessions.map((session) =>
@@ -1687,7 +994,8 @@ export async function cancelScheduleRun(scheduleId: string): Promise<ScheduleSta
 export async function createProject(name: string, root: string): Promise<ProjectSessionState> {
   try {
     return await invoke<ProjectSessionState>("create_project", { input: { name, root } });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const now = Date.now();
     const suffix = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "project";
     const projectId = `project-${suffix}-${now}`;
@@ -1745,7 +1053,8 @@ export async function createSession(
     return await invoke<ProjectSessionState>("create_session", {
       input: { name, projectId: projectId ?? null }
     });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const now = Date.now();
     const activeProjectId = projectId ?? browserProjectSessionState.activeProjectId;
     const sessionId = newBrowserSessionId();
@@ -1789,7 +1098,8 @@ export async function renameProject(
     return await invoke<ProjectSessionState>("rename_project", {
       input: { projectId, name }
     });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const normalizedName = name.trim().replace(/[\n\r]/g, "");
     if (!normalizedName) return browserProjectSessionState;
     const now = Date.now();
@@ -1808,7 +1118,8 @@ export async function renameProject(
 export async function deleteProject(projectId: string): Promise<ProjectSessionState> {
   try {
     return await invoke<ProjectSessionState>("delete_project", { input: { projectId } });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const projectIndex = browserProjectSessionState.projects.findIndex(
       (project) => project.id === projectId
     );
@@ -1839,7 +1150,8 @@ export async function deleteProject(projectId: string): Promise<ProjectSessionSt
 export async function forkSession(sessionId: string): Promise<ProjectSessionState> {
   try {
     return await invoke<ProjectSessionState>("fork_session", { input: { sessionId } });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const source = browserProjectSessionState.sessions.find((session) => session.id === sessionId);
     if (!source) return browserProjectSessionState;
     const now = Date.now();
@@ -1881,7 +1193,8 @@ export async function renameSession(
     return await invoke<ProjectSessionState>("rename_session", {
       input: { sessionId, name }
     });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const normalizedName = name.trim().replace(/[\n\r]/g, "");
     const source = browserProjectSessionState.sessions.find(
       (session) => session.id === sessionId
@@ -1908,7 +1221,8 @@ export async function setSessionEffort(
     return await invoke<ProjectSessionState>("set_session_effort", {
       input: { sessionId, effort }
     });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     browserProjectSessionState = {
       ...browserProjectSessionState,
       sessions: browserProjectSessionState.sessions.map((session) =>
@@ -1928,7 +1242,8 @@ export async function generateSessionTitle(
     return await invoke<ProjectSessionState>("generate_session_title", {
       input: { sessionId, prompt, answer }
     });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     return await getProjectSessionState();
   }
 }
@@ -1949,7 +1264,8 @@ export async function removeAgentAttachment(sessionId: string, path: string): Pr
 export async function archiveSession(sessionId: string): Promise<ProjectSessionState> {
   try {
     return await invoke<ProjectSessionState>("archive_session", { input: { sessionId } });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const source = browserProjectSessionState.sessions.find((session) => session.id === sessionId);
     if (!source) return browserProjectSessionState;
     const now = Date.now();
@@ -1981,7 +1297,8 @@ export async function archiveSession(sessionId: string): Promise<ProjectSessionS
 export async function restoreSession(sessionId: string): Promise<ProjectSessionState> {
   try {
     return await invoke<ProjectSessionState>("restore_session", { input: { sessionId } });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     browserProjectSessionState = {
       ...browserProjectSessionState,
       sessions: browserProjectSessionState.sessions.map((session) =>
@@ -2005,7 +1322,8 @@ export async function restoreSession(sessionId: string): Promise<ProjectSessionS
 export async function deleteSession(sessionId: string): Promise<ProjectSessionState> {
   try {
     return await invoke<ProjectSessionState>("delete_session", { input: { sessionId } });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const source = browserProjectSessionState.sessions.find((session) => session.id === sessionId);
     if (!source) return browserProjectSessionState;
     let next = {
@@ -2057,7 +1375,8 @@ function ensureBrowserOpenSession(
 export async function selectProject(projectId: string): Promise<ProjectSessionState> {
   try {
     return await invoke<ProjectSessionState>("select_project", { input: { projectId } });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const nextSession =
       browserProjectSessionState.sessions.find(
         (session) => session.projectId === projectId && !session.archived
@@ -2075,7 +1394,8 @@ export async function selectProject(projectId: string): Promise<ProjectSessionSt
 export async function selectSession(sessionId: string): Promise<ProjectSessionState> {
   try {
     return await invoke<ProjectSessionState>("select_session", { input: { sessionId } });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const session = browserProjectSessionState.sessions.find((item) => item.id === sessionId);
     browserProjectSessionState = withProjectSessionSelection(
       browserProjectSessionState,
@@ -2089,7 +1409,8 @@ export async function selectSession(sessionId: string): Promise<ProjectSessionSt
 export async function getPhase3State(): Promise<Phase3State> {
   try {
     return await invoke<Phase3State>("get_phase3_state");
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     return browserPhase3State;
   }
 }
@@ -2097,7 +1418,8 @@ export async function getPhase3State(): Promise<Phase3State> {
 export async function getPermissionReviewState(): Promise<PermissionReviewState> {
   try {
     return await invoke<PermissionReviewState>("get_permission_review_state");
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const activeSession = browserProjectSessionState.sessions.find((session) => session.active);
     const activeProject = browserProjectSessionState.projects.find((project) => project.active);
     const context = {
@@ -2170,7 +1492,8 @@ export async function getPermissionReviewState(): Promise<PermissionReviewState>
 export async function requestMockPermission(): Promise<Phase3State> {
   try {
     return await invoke<Phase3State>("request_mock_permission");
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const now = Date.now();
     const id = `perm-browser-${now}`;
     browserPhase3State = {
@@ -2216,7 +1539,8 @@ export async function resolvePermission(
 ): Promise<Phase3State> {
   try {
     return await invoke<Phase3State>("resolve_permission", { requestId, decision });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const now = Date.now();
     browserPhase3State = {
       timeline: [
@@ -2249,7 +1573,8 @@ export async function resolvePermission(
 export async function getPhase4State(): Promise<Phase4State> {
   try {
     return await invoke<Phase4State>("get_phase4_state");
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     return browserPhase4State;
   }
 }
@@ -2257,7 +1582,8 @@ export async function getPhase4State(): Promise<Phase4State> {
 export async function saveProviderConfig(input: ProviderConfigInput): Promise<Phase4State> {
   try {
     return await invoke<Phase4State>("save_provider_config", { input });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     browserPhase4State = {
       ...browserPhase4State,
       provider: {
@@ -2296,7 +1622,8 @@ export async function saveProviderConfig(input: ProviderConfigInput): Promise<Ph
 export async function setPromptEvolutionEnabled(enabled: boolean): Promise<Phase4State> {
   try {
     return await invoke<Phase4State>("set_prompt_evolution_enabled", { enabled });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     browserPhase4State = {
       ...browserPhase4State,
       provider: {
@@ -2318,6 +1645,7 @@ export async function listProviderModels(
   try {
     return await invoke<ProviderModelsState>("list_provider_models", { input });
   } catch (error) {
+    requireBrowserPreviewFallback(error);
     return {
       models: [],
       fetchedAtMs: 0,
@@ -2335,6 +1663,7 @@ export async function validateImageEndpoint(
   try {
     return await invoke<ImageEndpointValidationState>("validate_image_endpoint", { input });
   } catch (error) {
+    requireBrowserPreviewFallback(error);
     const endpoint = input.imageEndpoint.trim() || input.baseUrl.trim();
     let valid = false;
     try {
@@ -2354,7 +1683,8 @@ export async function validateImageEndpoint(
 export async function sendModelPrompt(prompt: string): Promise<Phase4State> {
   try {
     return await invoke<Phase4State>("send_model_prompt", { prompt });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const now = Date.now();
     const answer = "Browser preview cannot call the local Rust provider. Open the Tauri app to send this prompt.";
     browserPhase4State = {
@@ -2817,7 +2147,8 @@ export async function resolveAgentPermission(
 export async function getPhase5State(): Promise<Phase5State> {
   try {
     return await invoke<Phase5State>("get_phase5_state");
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     return browserPhase5State;
   }
 }
@@ -2825,7 +2156,8 @@ export async function getPhase5State(): Promise<Phase5State> {
 export async function runTool(toolName: string, input: string): Promise<Phase5State> {
   try {
     return await invoke<Phase5State>("run_tool", { input: { toolName, input } });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const now = Date.now();
     if (toolName === "file.write" || toolName === "shell.run") {
       const requestId = `perm-browser-${now}`;
@@ -2883,7 +2215,8 @@ export async function resolveToolPermission(
 ): Promise<Phase5State> {
   try {
     return await invoke<Phase5State>("resolve_tool_permission", { requestId, decision });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const now = Date.now();
     const approval = browserPhase5State.pendingApprovals.find(
       (candidate) => candidate.requestId === requestId
@@ -2927,7 +2260,8 @@ export async function resolveToolPermission(
 export async function getPhase6State(): Promise<Phase6State> {
   try {
     return await invoke<Phase6State>("get_phase6_state");
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     return browserPhase6State;
   }
 }
@@ -2935,7 +2269,8 @@ export async function getPhase6State(): Promise<Phase6State> {
 export async function runOrchestration(policy: string, prompt: string): Promise<Phase6State> {
   try {
     return await invoke<Phase6State>("run_orchestration", { input: { policy, prompt } });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const now = Date.now();
     browserPhase6State = {
       ...browserPhase6State,
@@ -2958,7 +2293,8 @@ export async function runOrchestration(policy: string, prompt: string): Promise<
 export async function getPhase7State(): Promise<Phase7State> {
   try {
     return await invoke<Phase7State>("get_phase7_state");
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     return browserPhase7State;
   }
 }
@@ -3056,7 +2392,8 @@ export async function answerWithRag(query: string, limit = 6): Promise<Phase7Sta
 export async function getPhase8State(): Promise<Phase8State> {
   try {
     return await invoke<Phase8State>("get_phase8_state");
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     return browserPhase8State;
   }
 }
@@ -3066,7 +2403,8 @@ export async function getContextState(sessionId?: string): Promise<ContextState>
     return await invoke<ContextState>("get_context_state", {
       sessionId: sessionId ?? null
     });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     return browserContextState;
   }
 }
@@ -3074,7 +2412,8 @@ export async function getContextState(sessionId?: string): Promise<ContextState>
 export async function compactContext(): Promise<ContextState> {
   try {
     return await invoke<ContextState>("compact_context");
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const now = Date.now();
     browserContextState = {
       timeline: [
@@ -3097,7 +2436,8 @@ export async function compactContext(): Promise<ContextState> {
 export async function runBrowserTool(toolName: string, input: string): Promise<Phase8State> {
   try {
     return await invoke<Phase8State>("run_browser_tool", { input: { toolName, input } });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const now = Date.now();
     const requestId = `perm-browser-${now}`;
     browserPhase8State = {
@@ -3137,7 +2477,8 @@ export async function resolveBrowserPermission(
 ): Promise<Phase8State> {
   try {
     return await invoke<Phase8State>("resolve_browser_permission", { requestId, decision });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     const now = Date.now();
     const approval = browserPhase8State.pendingApprovals.find(
       (candidate) => candidate.requestId === requestId
@@ -3189,7 +2530,8 @@ export async function subscribeToModelStream(
     return await listen<ModelStreamDelta>("model-stream-delta", (event) => {
       onDelta(event.payload);
     });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     return () => {};
   }
 }
@@ -3201,7 +2543,8 @@ export async function subscribeToSessionTitleUpdates(
     return await listen<string>("session-title-updated", (event) => {
       onUpdate(event.payload);
     });
-  } catch {
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
     return () => {};
   }
 }

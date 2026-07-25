@@ -46,7 +46,10 @@ const tauriConfig = parseJson("apps/desktop/src-tauri/tauri.conf.json");
 const capability = parseJson("apps/desktop/src-tauri/capabilities/default.json");
 const appSource = read("apps/desktop/src/App.tsx");
 const settingsPageSource = read("apps/desktop/src/components/SettingsPage.tsx");
-const settingsUiSource = `${appSource}\n${settingsPageSource}`;
+const preferencesControllerSource = read(
+  "apps/desktop/src/controllers/usePreferencesController.ts"
+);
+const settingsUiSource = `${appSource}\n${settingsPageSource}\n${preferencesControllerSource}`;
 const sessionRuntimeModelSource = read(
   "apps/desktop/src/sessionRuntimeModel.ts"
 );
@@ -102,7 +105,23 @@ const styles = [
     fs.readFileSync(path.join(styleModuleDirectory, entry), "utf8")
   ),
 ].join("\n");
-const tauriBridge = read("apps/desktop/src/tauri.ts");
+const tauriBridgeImplementation = read("apps/desktop/src/tauri.ts");
+const tauriTypesSource = read("apps/desktop/src/tauriTypes.ts");
+const tauriBridge = `${tauriBridgeImplementation}\n${tauriTypesSource}`;
+const desktopControllerEntries = [
+  "usePreferencesController.ts",
+  "useProviderSettingsController.ts",
+  "useIntegrationSettingsController.ts",
+  "useKnowledgeToolingController.ts",
+];
+const desktopControllers = desktopControllerEntries.map((entry) => ({
+  entry,
+  source: read(`apps/desktop/src/controllers/${entry}`),
+}));
+const desktopControllerSource = desktopControllers
+  .map(({ source }) => source)
+  .join("\n");
+const desktopUiSource = `${appSource}\n${settingsPageSource}\n${desktopControllerSource}`;
 const localBuildScript = read("scripts/build-local-app.mjs");
 const browserSidecarSource = read("scripts/sidecars/browser-sidecar.js");
 const browserIntegrationTest = read("scripts/test-browser-sidecar.mjs");
@@ -174,6 +193,7 @@ const unsignedReleaseStart = releaseWorkflow.indexOf(
 const unsignedReleaseBlock =
   unsignedReleaseStart >= 0 ? releaseWorkflow.slice(unsignedReleaseStart) : "";
 const ciWorkflow = read(".github/workflows/ci.yml");
+const frontendCheckScript = read("scripts/check-frontend.sh");
 const releaseVersionCheck = read("scripts/check-release-version.mjs");
 const toolsSource = readRustCrateSource("tools");
 const agentStorageSource = read("crates/agent-storage/src/lib.rs");
@@ -217,7 +237,23 @@ const sessionRefreshBlock = appSource.slice(sessionRefreshStart, sessionRefreshE
 
 const rustCompositionRootLineCount = rustCompositionRoot.split("\n").length;
 const appLineCount = appSource.split("\n").length;
+const appUseStateCount = (appSource.match(/useState\(/g) ?? []).length;
 const settingsPageLineCount = settingsPageSource.split("\n").length;
+const oversizedDesktopControllers = desktopControllers
+  .map(({ entry, source }) => ({ entry, lines: source.split("\n").length }))
+  .filter(({ lines }) => lines > 500);
+const tauriBridgeImplementationLineCount = tauriBridgeImplementation.split("\n").length;
+const tauriTypesLineCount = tauriTypesSource.split("\n").length;
+const unguardedTauriFallbacks = tauriBridgeImplementation
+  .split("\n")
+  .flatMap((line, index, lines) => {
+    if (!/^  } catch \(error\) \{$/.test(line)) return [];
+    const guard = lines[index + 1]?.trim() ?? "";
+    return guard === "requireBrowserPreviewFallback(error);" ||
+      guard === "if (isTauriRuntime()) throw error;"
+      ? []
+      : [index + 1];
+  });
 const oversizedStyleModules = styleModuleEntries
   .map((entry) => ({
     entry,
@@ -230,6 +266,29 @@ const oversizedProductionRustModules = desktopRustModules
   .filter(({ entry }) => entry !== "tests.rs")
   .map(({ entry, source }) => ({ entry, lines: source.split("\n").length }))
   .filter(({ lines }) => lines > 2_200);
+const criticalDesktopAgentModuleBudgets = new Map([
+  ["agent_loop_runtime.rs", 550],
+  ["agent_collaboration_runtime.rs", 800],
+  ["agent_recovery_service.rs", 550],
+  ["permission_service.rs", 220],
+  ["prompt_workflow_execution.rs", 800],
+  ["session_context_service.rs", 550],
+  ["knowledge_runtime.rs", 1_000],
+  ["memory_runtime.rs", 950],
+]);
+const criticalDesktopAgentModules = desktopRustModules.filter(({ entry }) =>
+  criticalDesktopAgentModuleBudgets.has(entry)
+);
+const implicitCriticalDesktopAgentModules = criticalDesktopAgentModules.filter(
+  ({ source }) => /^use super::\*;/m.test(source)
+);
+const oversizedCriticalDesktopAgentModules = criticalDesktopAgentModules
+  .map(({ entry, source }) => ({
+    entry,
+    lines: source.split("\n").length,
+    budget: criticalDesktopAgentModuleBudgets.get(entry),
+  }))
+  .filter(({ lines, budget }) => lines > budget);
 const oversizedAgentCoreModules = ["agent-runtime", "agent-memory", "orchestrator"]
   .flatMap((crateName) =>
     listRustSourceFiles(path.join(root, "crates", crateName, "src"))
@@ -261,6 +320,27 @@ assert(
     .join(", ")}`
 );
 assert(
+  criticalDesktopAgentModules.length === criticalDesktopAgentModuleBudgets.size &&
+    implicitCriticalDesktopAgentModules.length === 0 &&
+    oversizedCriticalDesktopAgentModules.length === 0 &&
+    criticalDesktopAgentModules.every(
+      ({ entry, source }) =>
+        entry === "permission_service.rs" || source.includes("use crate::")
+    ) &&
+    rustCompositionRoot.includes("mod memory_runtime;") &&
+    !read("apps/desktop/src-tauri/src/knowledge_runtime.rs").includes(
+      "memory_runtime"
+    ) &&
+    read("apps/desktop/src-tauri/src/memory_runtime.rs").includes(
+      "knowledge_runtime::"
+    ),
+  `Critical desktop agent modules must use explicit crate boundaries and bounded ownership: implicit=${implicitCriticalDesktopAgentModules
+    .map(({ entry }) => entry)
+    .join(",")}, oversized=${oversizedCriticalDesktopAgentModules
+    .map(({ entry, lines, budget }) => `${entry} (${lines}/${budget})`)
+    .join(",")}`
+);
+assert(
   oversizedAgentCoreModules.length === 0,
   `Agent-core production modules exceeded the 1,450-line cohesion budget: ${oversizedAgentCoreModules
     .map(({ file, lines }) => `${file} (${lines})`)
@@ -278,13 +358,24 @@ assert(
   "Offline topology learning must remain isolated from the online router with explicit dependencies"
 );
 assert(
-  appLineCount <= 3_800 &&
+  appLineCount <= 2_850 &&
+    appUseStateCount <= 30 &&
     settingsPageLineCount <= 2_400 &&
+    tauriBridgeImplementationLineCount <= 2_700 &&
+    tauriTypesLineCount <= 900 &&
+    oversizedDesktopControllers.length === 0 &&
+    desktopControllerEntries.every((entry) =>
+      appSource.includes(`./controllers/${entry.replace(/\.ts$/, "")}`)
+    ) &&
+    tauriBridgeImplementation.includes('export type * from "./tauriTypes";') &&
+    unguardedTauriFallbacks.length === 0 &&
     appSource.includes('import("./components/SettingsPage")') &&
     appSource.includes("<SettingsPage") &&
     appSource.includes("<Suspense") &&
     !appSource.includes('className="settings-sidebar"'),
-  `App composition must keep Settings isolated and lazy-loaded (App=${appLineCount}, Settings=${settingsPageLineCount})`
+  `Desktop boundaries regressed (App=${appLineCount}, useState=${appUseStateCount}, Settings=${settingsPageLineCount}, Tauri=${tauriBridgeImplementationLineCount}, Types=${tauriTypesLineCount}, controllers=${oversizedDesktopControllers
+    .map(({ entry, lines }) => `${entry}:${lines}`)
+    .join(",")}, unguarded catches=${unguardedTauriFallbacks.join(",")})`
 );
 assert(
   styleModuleEntries.every((entry) =>
@@ -316,6 +407,15 @@ for (const requiredModule of [
 
 assert(packageJson.name === "cindx-desktop", "desktop package name changed");
 assert(packageJson.scripts.dev.includes("vite"), "desktop dev script must run Vite");
+assert(
+  packageJson.scripts.test === "node --test tests/*.test.ts" &&
+    frontendCheckScript.includes("npm test && npm run build") &&
+    ciWorkflow.includes("- name: Test frontend behavior") &&
+    ciWorkflow.includes("run: npm test") &&
+    qualityGateManifest.profiles["ci-contract"].includes("frontend-test") &&
+    qualityGateManifest.profiles.full.includes("frontend-test"),
+  "Frontend behavior tests must run locally and in CI"
+);
 assert(packageJson.scripts.build.includes("vite build"), "desktop build script must build Vite");
 assert(
   packageJson.scripts.tauri.includes("run-tauri.mjs") &&
@@ -1567,8 +1667,8 @@ assert(
   "Personalization must persist and affect agent prompts before About"
 );
 assert(
-  appSource.includes("personalizationSaveQueueRef") &&
-    appSource.includes("updatePersonalizationDraft") &&
+  settingsUiSource.includes("personalizationSaveQueueRef") &&
+    settingsUiSource.includes("updatePersonalizationDraft") &&
     settingsPageSource.includes("flushPersonalization(false)") &&
     rustLib.includes("The user's preferred name is") &&
     rustLib.includes("If the user asks what their name is"),
@@ -1621,8 +1721,9 @@ assert(
 );
 assert(
   appSource.includes('className="settings-saved-toast"') &&
-    settingsUiSource.includes("showSettingsSaved();") &&
-    (settingsUiSource.match(/showSettingsSaved\(\);/g)?.length ?? 0) === 5 &&
+    appSource.includes("showSettingsSaved();") &&
+    desktopControllerSource.includes('showSettingsSaved("Personalization saved")') &&
+    (desktopControllerSource.match(/showSaved\(\);/g)?.length ?? 0) === 3 &&
     appSource.includes("<CheckCircle2 aria-hidden=\"true\" />") &&
     styles.includes(".settings-saved-toast") &&
     styles.includes("color: #2f9e64;"),
@@ -1775,7 +1876,7 @@ assert(
 );
 assert(!tauriBridge.includes("apiKeyPreview"), "Provider state must not expose API key suffixes");
 assert(settingsPageSource.includes("<ModelSelect"), "Provider models must use select controls");
-assert(appSource.includes("listProviderModels"), "Provider settings must load the remote model catalog");
+assert(desktopUiSource.includes("listProviderModels"), "Provider settings must load the remote model catalog");
 assert(
   settingsPageSource.includes('label="Conductor"') &&
     settingsPageSource.includes("providerDraft.conductorModel") &&
@@ -1843,7 +1944,7 @@ assert(
 assert(
   !settingsPageSource.includes("Local folder") &&
     settingsPageSource.includes(".skill package") &&
-    appSource.includes("installSkillUrl") &&
+    desktopUiSource.includes("installSkillUrl") &&
     !rustLib.includes("install_skill_directory") &&
     rustLib.includes("install_skill_package") &&
     rustLib.includes("install_skill_url") &&
@@ -1860,9 +1961,10 @@ assert(
   "Cindx branding and the send action must retain their bundled type and blue accent"
 );
 assert(
-  settingsPageSource.includes("Knowledge sources") &&
+    settingsPageSource.includes("Knowledge sources") &&
     settingsPageSource.includes("knowledge-results") &&
-    appSource.includes("phase7.stats.chunksIndexed === 0") &&
+    desktopControllerSource.includes("ensureKnowledgeIndex") &&
+    desktopControllerSource.includes("phase7.stats.chunksIndexed > 0") &&
     !settingsPageSource.includes("Test retrieval") &&
     tauriBridge.includes("if (isTauriRuntime()) throw error"),
   "Knowledge search must auto-index, expose results inline, and surface real Tauri errors"
@@ -1883,7 +1985,7 @@ assert(
   settingsPageSource.includes('label="Image generation"') &&
     settingsPageSource.includes("Image API endpoint") &&
     settingsPageSource.includes("provider-endpoint-check") &&
-    appSource.includes("validateImageEndpoint") &&
+    desktopUiSource.includes("validateImageEndpoint") &&
     settingsPageSource.includes('emptyLabel="Not configured"') &&
     styles.includes("grid-template-columns: minmax(0, 1fr) 18px") &&
     styles.includes(".provider-endpoint-check") &&
@@ -2305,9 +2407,9 @@ assert(
 assert(settingsPageSource.includes("Save provider"), "App must render provider save action");
 assert(settingsPageSource.includes("Run tool"), "App must render the Phase 5 tool runner");
 assert(settingsPageSource.includes("Index workspace"), "App must render the Phase 7 RAG index action");
-assert(appSource.includes("answerWithRag"), "App must render the Phase 7 RAG answer flow");
+assert(desktopUiSource.includes("answerWithRag"), "App must render the Phase 7 RAG answer flow");
 assert(settingsPageSource.includes("Search web"), "App must render the Phase 8 web search action");
-assert(appSource.includes("runBrowserTool"), "App must render the Phase 8 browser flow");
+assert(desktopUiSource.includes("runBrowserTool"), "App must render the Phase 8 browser flow");
 assert(
   settingsPageSource.includes('handleRunBrowserTool("browser.tabs")') &&
     settingsPageSource.includes('handleRunBrowserTool("browser.select_tab")'),
