@@ -8682,6 +8682,27 @@ fn concise_user_topic_can_already_be_a_valid_title() {
 }
 
 #[test]
+fn session_title_fallback_recovers_a_pending_conversation_without_copying_a_request() {
+    let title_like_turns = vec![SessionTitleTurn {
+        prompt: "用 mindmap 描述下 transformer 架构".to_string(),
+        answer: "下面用思维导图展示 Transformer 的结构。".to_string(),
+    }];
+    assert_eq!(
+        fallback_session_title(&title_like_turns),
+        Some("用 mindmap 描述下 transformer 架构".to_string())
+    );
+
+    let request_turns = vec![SessionTitleTurn {
+        prompt: "请帮我修复 session 自动命名".to_string(),
+        answer: "我会检查标题生成与持久化链路。".to_string(),
+    }];
+    assert_eq!(
+        fallback_session_title(&request_turns),
+        Some("修复 session 自动命名".to_string())
+    );
+}
+
+#[test]
 fn session_title_state_retries_pending_and_repairs_legacy_prompt_copies() {
     let turns = vec![SessionTitleTurn {
         prompt: "这是高达，不是马克罗士，你重新画".to_string(),
