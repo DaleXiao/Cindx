@@ -663,6 +663,20 @@ fn file_sha256(path: &Path) -> Result<String, String> {
         .map_err(|error| format!("failed to hash {}: {error}", path.display()))
 }
 
+fn validated_eval_git_commit(value: &str) -> Result<String, String> {
+    let commit = value.trim();
+    if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("CINDX_EVAL_GIT_COMMIT must be a full 40-character Git SHA".to_string());
+    }
+    Ok(commit.to_ascii_lowercase())
+}
+
+fn evaluation_git_commit() -> Result<String, String> {
+    let value = std::env::var("CINDX_EVAL_GIT_COMMIT")
+        .map_err(|_| "CINDX_EVAL_GIT_COMMIT is required for provider-backed evaluation".to_string())?;
+    validated_eval_git_commit(&value)
+}
+
 fn write_external_effect_checkpoint(
     output_path: &Path,
     config: &ProviderConfig,
@@ -672,8 +686,8 @@ fn write_external_effect_checkpoint(
     let report = ExternalEffectReport {
         schema: EXTERNAL_EFFECT_SCHEMA,
         generated_at_ms: current_time_millis(),
-        git_commit: std::env::var("CINDX_EVAL_GIT_COMMIT")
-            .unwrap_or_else(|_| "unknown".to_string()),
+        git_commit: evaluation_git_commit()
+            .expect("provider-backed evaluation must have valid source provenance"),
         app_version: env!("CARGO_PKG_VERSION"),
         provider_endpoint: &config.base_url,
         configured_models: configured_models(config),
@@ -733,6 +747,17 @@ fn gpqa_option_order_is_deterministic() {
 }
 
 #[test]
+fn provider_evaluation_requires_a_full_git_commit() {
+    let commit = "E9BEB4AF1DE9435822F017A45F86917CE32DF2DC";
+    assert_eq!(
+        validated_eval_git_commit(commit).expect("full SHA should validate"),
+        commit.to_ascii_lowercase()
+    );
+    assert!(validated_eval_git_commit("unknown").is_err());
+    assert!(validated_eval_git_commit("e9beb4a").is_err());
+}
+
+#[test]
 fn mrcr_prompt_preserves_message_order_and_roles() {
     let messages = parse_mrcr_messages(
         r#"[{"role":"user","content":"one"},{"role":"assistant","content":"two"},{"role":"user","content":"three"}]"#,
@@ -763,6 +788,7 @@ fn external_effect_treatments_use_the_declared_deadline() {
 #[test]
 #[ignore = "requires configured cloud models, network access, and official benchmark files"]
 fn provider_backed_fugu_external_effect_pilot() {
+    evaluation_git_commit().expect("evaluation source commit must be declared before model calls");
     let config = load_provider_config();
     assert!(config.is_ready(), "provider configuration is required");
     let gpqa_path = PathBuf::from(
