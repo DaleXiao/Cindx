@@ -17,12 +17,22 @@ pub(crate) fn run_collaboration_candidates(
 ) -> Result<String, String> {
     let recent_context = collaboration_recent_context(history);
     let conductor_directive = prompt_profile.map(ConductorPromptGenome::conductor_directive);
-    let max_model_turns = prompt_profile
+    let declared_model_turns = prompt_profile
         .map(ConductorPromptGenome::effective_max_model_turns_per_step)
         .unwrap_or(DEFAULT_COLLABORATION_WORKER_TURNS);
-    let max_tool_calls = prompt_profile
+    let max_model_turns = if allow_tools {
+        WorkflowToolPolicy::ReadOnlyEvidence.effective_model_turn_budget(declared_model_turns)
+    } else {
+        declared_model_turns.max(1)
+    };
+    let declared_tool_calls = prompt_profile
         .map(ConductorPromptGenome::effective_max_tool_calls_per_step)
         .unwrap_or(MAX_COLLABORATION_WORKER_TOOL_CALLS);
+    let max_tool_calls = if allow_tools {
+        WorkflowToolPolicy::ReadOnlyEvidence.effective_tool_call_budget(declared_tool_calls)
+    } else {
+        0
+    };
     let specs = models
         .iter()
         .enumerate()
@@ -82,6 +92,7 @@ pub(crate) fn run_collaboration_candidates(
                     allow_tools,
                     max_model_turns,
                     max_tool_calls,
+                    COLLABORATION_MAX_OUTPUT_TOKENS,
                     cancellation,
                     Some(branch_cancellation),
                 )

@@ -256,6 +256,7 @@ pub(crate) fn govern_model_messages(
         state_messages,
         &state_message_tokens,
         system_context_budget,
+        current_user_index.map(|index| state_messages[index].content.as_str()),
         &mut selected,
         &mut replacements,
         &mut truncated_messages,
@@ -602,6 +603,60 @@ fn system_context_priority(message: &Message) -> u8 {
         .unwrap_or_default()
 }
 
+fn system_context_is_protected(message: &Message) -> bool {
+    ContextSourceKind::from_message(message).is_some_and(ContextSourceKind::is_protected)
+}
+
+fn context_relevance_score(message: &Message, objective_terms: &BTreeSet<String>) -> u16 {
+    if objective_terms.is_empty() {
+        return 0;
+    }
+    let message_terms = context_relevance_terms(&message.content);
+    let overlap = objective_terms.intersection(&message_terms).count();
+    if overlap == 0 {
+        return 0;
+    }
+    let identifier_overlap = objective_terms
+        .intersection(&message_terms)
+        .filter(|term| is_context_identifier(term))
+        .count();
+    let coverage = overlap.saturating_mul(30) / objective_terms.len().max(1);
+    overlap
+        .saturating_mul(12)
+        .saturating_add(coverage)
+        .saturating_add(identifier_overlap.saturating_mul(50))
+        .min(u16::MAX as usize) as u16
+}
+
+fn context_relevance_terms(text: &str) -> BTreeSet<String> {
+    text.split(|character: char| {
+        !(character.is_alphanumeric()
+            || matches!(character, '_' | '-' | '.' | '/' | ':' | '@'))
+    })
+    .map(|term| {
+        term.trim_matches(|character: char| matches!(character, '.' | '/' | ':' | '-' | '@'))
+            .to_lowercase()
+    })
+    .filter(|term| {
+        !term.is_empty()
+            && (term.chars().count() > 1 || term.chars().any(char::is_numeric))
+            && !matches!(
+                term.as_str(),
+                "a" | "an" | "and" | "are" | "as" | "at" | "be" | "by" | "for"
+                    | "from" | "in" | "is" | "it" | "of" | "on" | "or" | "that"
+                    | "the" | "this" | "to" | "was" | "what" | "when" | "where"
+                    | "which" | "with"
+            )
+    })
+    .collect()
+}
+
+fn is_context_identifier(term: &str) -> bool {
+    term.chars()
+        .any(|character| matches!(character, '_' | '-' | '.' | '/' | ':' | '@'))
+        || term.chars().any(char::is_numeric)
+}
+
 fn system_context_key(message: &Message, index: usize) -> String {
     message
         .metadata
@@ -615,10 +670,14 @@ fn select_system_contexts(
     messages: &[Message],
     message_tokens: &[u64],
     budget: u64,
+    current_objective: Option<&str>,
     selected: &mut BTreeSet<usize>,
     replacements: &mut BTreeMap<usize, Message>,
     truncated_messages: &mut usize,
 ) {
+    let objective_terms = current_objective
+        .map(context_relevance_terms)
+        .unwrap_or_default();
     let mut seen = BTreeSet::new();
     let mut candidates = messages
         .iter()
@@ -626,12 +685,26 @@ fn select_system_contexts(
         .rev()
         .filter(|(_, message)| matches!(message.role, MessageRole::System))
         .filter(|(index, message)| seen.insert(system_context_key(message, *index)))
-        .map(|(index, message)| (index, system_context_priority(message)))
+        .map(|(index, message)| {
+            (
+                index,
+                system_context_is_protected(message),
+                context_relevance_score(message, &objective_terms),
+                system_context_priority(message),
+            )
+        })
         .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| right.1.cmp(&left.1).then(right.0.cmp(&left.0)));
+    candidates.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then(right.2.cmp(&left.2))
+            .then(right.3.cmp(&left.3))
+            .then(right.0.cmp(&left.0))
+    });
 
     let mut remaining = budget;
-    for (index, _) in candidates {
+    for (index, _, _, _) in candidates {
         if remaining < 64 {
             break;
         }
@@ -1143,6 +1216,45 @@ mod tests {
             history, original,
             "canonical runtime history must remain lossless"
         );
+    }
+
+    #[test]
+    fn supplemental_context_selection_prefers_current_objective_coverage() {
+        let mut generic = message(
+            MessageRole::System,
+            "workspace architecture overview with unrelated deployment notes ".repeat(200),
+        );
+        generic
+            .metadata
+            .insert("kind".to_string(), "knowledge_context".to_string());
+        let mut relevant = message(
+            MessageRole::System,
+            "max_turns terminal reserve preserves the completed final answer ".repeat(200),
+        );
+        relevant
+            .metadata
+            .insert("kind".to_string(), "project_memory".to_string());
+        let messages = vec![generic, relevant];
+        let tokens = messages
+            .iter()
+            .map(estimate_model_message_tokens)
+            .collect::<Vec<_>>();
+        let mut selected = BTreeSet::new();
+        let mut replacements = BTreeMap::new();
+        let mut truncated = 0;
+
+        select_system_contexts(
+            &messages,
+            &tokens,
+            128,
+            Some("Why did max_turns discard the final answer?"),
+            &mut selected,
+            &mut replacements,
+            &mut truncated,
+        );
+
+        assert!(selected.contains(&1));
+        assert!(!selected.contains(&0));
     }
 
     #[test]

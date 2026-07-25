@@ -40,6 +40,7 @@ pub(crate) struct AdaptiveCollaborationSpec {
     pub(crate) max_attempts: usize,
     pub(crate) max_model_turns: usize,
     pub(crate) max_tool_calls: usize,
+    pub(crate) max_output_tokens: u64,
 }
 
 #[derive(Debug)]

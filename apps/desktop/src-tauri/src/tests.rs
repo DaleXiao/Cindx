@@ -222,23 +222,22 @@ fn running_workflow_attempt_resumes_without_consuming_another_attempt() {
     let plan = single_step_workflow_plan(3);
     let mut checkpoint = WorkflowExecutionCheckpoint::new("resume-running", plan, 10);
 
-    assert!(
-        ensure_adaptive_step_attempt_started(&mut checkpoint, "inspect", "worker", 3, 20,)
-            .expect("first attempt should start")
-    );
-    assert!(
-        !ensure_adaptive_step_attempt_started(&mut checkpoint, "inspect", "worker", 3, 30,)
-            .expect("running attempt should resume")
-    );
+    let claimed = checkpoint
+        .claim_steps(&["inspect".to_string()], 3, 20)
+        .expect("first attempt should start");
+    assert!(!claimed[0].resumed);
+    let resumed = checkpoint
+        .claim_steps(&["inspect".to_string()], 3, 30)
+        .expect("running attempt should resume");
+    assert!(resumed[0].resumed);
     assert_eq!(checkpoint.steps["inspect"].attempts, 1);
 
     checkpoint
         .fail_step("inspect", "transport failed", 40)
         .expect("attempt should fail");
-    assert!(
-        ensure_adaptive_step_attempt_started(&mut checkpoint, "inspect", "worker-alt", 3, 50,)
-            .expect("failed attempt should restart")
-    );
+    checkpoint
+        .begin_step_with_attempt_limit("inspect", "worker-alt", 3, 50)
+        .expect("failed attempt should restart");
     assert_eq!(checkpoint.steps["inspect"].attempts, 2);
     assert_eq!(checkpoint.steps["inspect"].model, "worker-alt");
 }
@@ -1234,6 +1233,70 @@ fn project_memory_read_model_persists_deduplicated_cross_session_requirements() 
             .map(|record| record.observed_use_count),
         Some(1)
     );
+}
+
+#[test]
+fn project_memory_checkpoints_cancelled_requirements_without_unfinished_outcomes() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let context = [
+        (
+            "project_id".to_string(),
+            "project-memory-cancelled".to_string(),
+        ),
+        (
+            "session_id".to_string(),
+            "session-memory-cancelled".to_string(),
+        ),
+        (
+            "agent_run_id".to_string(),
+            "run-memory-cancelled".to_string(),
+        ),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task started",
+        context.clone(),
+    )
+    .expect("run should start");
+    append_message_event_with_metadata(
+        &mut store,
+        &phase16_task_id(),
+        MessageRole::User,
+        "Keep effort selection scoped to each session",
+        context.clone(),
+    )
+    .expect("user requirement should append");
+    append_message_event_with_metadata(
+        &mut store,
+        &phase16_task_id(),
+        MessageRole::Assistant,
+        "The unfinished migration has been completed.",
+        context.clone(),
+    )
+    .expect("unfinished assistant output should append");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task cancelled",
+        context,
+    )
+    .expect("run should be cancelled");
+
+    let ledger = load_project_memory_ledger(&mut store, "project-memory-cancelled")
+        .expect("cancelled run should checkpoint memory");
+    assert!(ledger
+        .records
+        .iter()
+        .any(|record| record.kind == agent_memory::MemoryKind::Requirement));
+    assert!(!ledger
+        .records
+        .iter()
+        .any(|record| record.kind == agent_memory::MemoryKind::Outcome));
 }
 
 #[test]
@@ -2583,6 +2646,22 @@ fn pro_role_budget_does_not_collapse_when_roles_share_one_model() {
         .iter()
         .all(|model| model == "shared-frontier-model"));
     assert_eq!(adaptive_workflow_step_budget(budget), 5);
+}
+
+#[test]
+fn collaboration_terminal_workers_keep_terminal_stage_reserves() {
+    assert_eq!(
+        collaboration_worker_stage_class("worker_4", &ModelRole::Summarizer),
+        RunStageClass::Synthesizer
+    );
+    assert_eq!(
+        collaboration_worker_stage_class("worker_3", &ModelRole::Reviewer),
+        RunStageClass::Reviewer
+    );
+    assert_eq!(
+        collaboration_worker_stage_class("worker_1", &ModelRole::Executor),
+        RunStageClass::Worker
+    );
 }
 
 #[test]
@@ -4715,6 +4794,7 @@ fn pairwise_observation_keeps_relative_and_per_step_credit() {
         plan: candidate_plan,
         execution: PromptWorkflowExecution {
             succeeded: true,
+            quality_gate_met: true,
             final_output: "verified".to_string(),
             steps: vec![PromptExecutionStep {
                 id: "verify".to_string(),
@@ -4738,6 +4818,7 @@ fn pairwise_observation_keeps_relative_and_per_step_credit() {
         plan: opponent_plan,
         execution: PromptWorkflowExecution {
             succeeded: true,
+            quality_gate_met: true,
             final_output: "reviewed".to_string(),
             steps: vec![PromptExecutionStep {
                 id: "verify".to_string(),
@@ -4819,6 +4900,72 @@ fn pairwise_observation_keeps_relative_and_per_step_credit() {
     assert!(!encoded.contains("runtime-reflection-token"));
     assert!(encoded.contains("[REDACTED]"));
     assert_eq!(packet.steps[0].tool_calls.len(), 1);
+
+    let mut failed_candidate = candidate.clone();
+    failed_candidate.execution.succeeded = false;
+    failed_candidate.execution.final_output.clear();
+    failed_candidate.execution.steps[0].succeeded = false;
+    failed_candidate.execution.steps[0].attempts = 2;
+    failed_candidate.execution.steps[0].errors = vec!["provider timeout".to_string()];
+    let failed = prompt_pairwise_observation(
+        &failed_candidate,
+        &opponent,
+        "Fix the project and run tests",
+        "pair-3",
+        "coding",
+        PromptEvaluationSplit::Train,
+        PromptEvaluationMode::PairedExecution,
+        0.2,
+        0.7,
+        0,
+        &BTreeMap::new(),
+        ActionableSideInformation::default(),
+        &[],
+    )
+    .reflection_packet
+    .expect("failed execution should retain actionable reflection evidence");
+    assert!(failed
+        .actionable_feedback
+        .failed_constraints
+        .iter()
+        .any(|entry| entry.contains("verify") && entry.contains("2 attempt")));
+    assert!(failed
+        .actionable_feedback
+        .suggested_changes
+        .iter()
+        .any(|entry| entry.contains("alternate strategy")));
+    assert!(failed
+        .actionable_feedback
+        .errors
+        .iter()
+        .any(|entry| entry.contains("provider timeout")));
+
+    let mut fail_soft_candidate = candidate.clone();
+    fail_soft_candidate.execution.steps[0].succeeded = false;
+    fail_soft_candidate.execution.steps[0].errors = vec!["cancelled after quorum".to_string()];
+    let fail_soft = prompt_pairwise_observation(
+        &fail_soft_candidate,
+        &opponent,
+        "Fix the project and run tests",
+        "pair-4",
+        "coding",
+        PromptEvaluationSplit::Train,
+        PromptEvaluationMode::PairedExecution,
+        0.9,
+        0.7,
+        0,
+        &BTreeMap::new(),
+        ActionableSideInformation::default(),
+        &[],
+    )
+    .reflection_packet
+    .expect("fail-soft execution should retain reflection evidence");
+    assert!(fail_soft
+        .actionable_feedback
+        .passed_constraints
+        .iter()
+        .any(|entry| entry.contains("safely cancelled")));
+    assert!(fail_soft.actionable_feedback.failed_constraints.is_empty());
 }
 
 #[test]
@@ -5092,7 +5239,7 @@ fn execution_arena_runs_dependencies_before_final_synthesis() {
     );
     let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
     let captured = Arc::clone(&prompts);
-    let runner: PromptEvaluationRunner = Arc::new(move |request| {
+    let runner: PromptEvaluationRunner = Arc::new(move |request, _branch_cancellation| {
         captured
             .lock()
             .expect("prompt capture lock")
@@ -5131,6 +5278,412 @@ fn execution_arena_runs_dependencies_before_final_synthesis() {
     let prompts = prompts.lock().expect("prompt capture lock");
     assert_eq!(prompts.len(), 2);
     assert!(prompts[1].contains("[investigate]\nbranch-output"));
+}
+
+#[test]
+fn execution_arena_cancels_stragglers_after_a_fail_soft_quorum() {
+    let profile = ConductorPromptGenome::seed_for_effort("fast");
+    let plan = WorkflowPlanIr::from_adaptive_with_profile(
+        "arena-quorum",
+        "Compare independent branches and synthesize",
+        "fast",
+        "best_of_n",
+        "worker-a",
+        profile.id.clone(),
+        &AdaptiveWorkflow {
+            steps: vec![
+                AdaptiveWorkflowStep {
+                    id: "fast-branch".to_string(),
+                    role: "worker".to_string(),
+                    model: "worker-a".to_string(),
+                    subtask: "produce the decisive branch".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "slow-branch-a".to_string(),
+                    role: "worker".to_string(),
+                    model: "worker-b".to_string(),
+                    subtask: "explore an alternative".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "slow-branch-b".to_string(),
+                    role: "worker".to_string(),
+                    model: "worker-c".to_string(),
+                    subtask: "explore another alternative".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "final".to_string(),
+                    role: "synthesizer".to_string(),
+                    model: "worker-a".to_string(),
+                    subtask: "synthesize available work".to_string(),
+                    access: vec![
+                        "fast-branch".to_string(),
+                        "slow-branch-a".to_string(),
+                        "slow-branch-b".to_string(),
+                    ],
+                },
+            ],
+        },
+        WorkflowBudget {
+            max_steps: 4,
+            max_models: 3,
+            max_model_turns_per_step: 1,
+            max_tool_calls_per_step: 0,
+            max_output_tokens_per_step: 2_048,
+        },
+    );
+    let cancelled = Arc::new(AtomicU64::new(0));
+    let observed = Arc::clone(&cancelled);
+    let runner: PromptEvaluationRunner = Arc::new(move |request, branch_cancellation| {
+        if request.role == ModelRole::Summarizer {
+            return CollaborationCompletion {
+                content: Some("final from available evidence".to_string()),
+                error: None,
+                latency_ms: 1,
+                usage: Metadata::new(),
+                evidence: Vec::new(),
+            };
+        }
+        if request.model == "worker-a" {
+            return CollaborationCompletion {
+                content: Some("decisive branch".to_string()),
+                error: None,
+                latency_ms: 1,
+                usage: Metadata::new(),
+                evidence: Vec::new(),
+            };
+        }
+        while !branch_cancellation.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        observed.fetch_add(1, Ordering::AcqRel);
+        CollaborationCompletion::failed("branch cancelled after quorum")
+    });
+
+    let candidate = execute_prompt_workflow_candidate_with_runner(
+        "Compare independent branches and synthesize",
+        PromptPlanCandidate {
+            genome: profile,
+            plan: Some(plan),
+            raw_output: String::new(),
+            latency_ms: 0,
+            total_tokens: 0,
+        },
+        runner,
+    );
+
+    assert!(candidate.execution.succeeded);
+    assert_eq!(
+        candidate.execution.final_output,
+        "final from available evidence"
+    );
+    let cancellation_deadline = Instant::now() + Duration::from_secs(1);
+    while cancelled.load(Ordering::Acquire) < 2 && Instant::now() < cancellation_deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(cancelled.load(Ordering::Acquire), 2);
+    assert_eq!(
+        candidate
+            .execution
+            .steps
+            .iter()
+            .filter(|step| !step.succeeded)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn execution_arena_does_not_retry_a_quorum_cancelled_branch() {
+    let profile = ConductorPromptGenome::seed_for_effort("pro");
+    let plan = WorkflowPlanIr::from_adaptive_with_profile(
+        "arena-cancelled-retry",
+        "Compare independent branches and synthesize",
+        "pro",
+        "best_of_n",
+        "worker-a",
+        profile.id.clone(),
+        &AdaptiveWorkflow {
+            steps: vec![
+                AdaptiveWorkflowStep {
+                    id: "branch-a".to_string(),
+                    role: "worker".to_string(),
+                    model: "worker-a".to_string(),
+                    subtask: "solve independently".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "branch-b".to_string(),
+                    role: "worker".to_string(),
+                    model: "worker-b".to_string(),
+                    subtask: "solve independently".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "slow-branch".to_string(),
+                    role: "worker".to_string(),
+                    model: "worker-c".to_string(),
+                    subtask: "solve independently".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "final".to_string(),
+                    role: "synthesizer".to_string(),
+                    model: "worker-a".to_string(),
+                    subtask: "synthesize available work".to_string(),
+                    access: vec![
+                        "branch-a".to_string(),
+                        "branch-b".to_string(),
+                        "slow-branch".to_string(),
+                    ],
+                },
+            ],
+        },
+        WorkflowBudget {
+            max_steps: 4,
+            max_models: 3,
+            max_model_turns_per_step: 3,
+            max_tool_calls_per_step: 0,
+            max_output_tokens_per_step: 2_048,
+        },
+    );
+    let slow_attempts = Arc::new(AtomicU64::new(0));
+    let observed_attempts = Arc::clone(&slow_attempts);
+    let runner: PromptEvaluationRunner = Arc::new(move |request, branch_cancellation| {
+        if request.role == ModelRole::Summarizer {
+            return CollaborationCompletion {
+                content: Some("final answer".to_string()),
+                error: None,
+                latency_ms: 1,
+                usage: Metadata::new(),
+                evidence: Vec::new(),
+            };
+        }
+        if request.model != "worker-c" {
+            return CollaborationCompletion {
+                content: Some(format!("answer from {}", request.model)),
+                error: None,
+                latency_ms: 1,
+                usage: Metadata::new(),
+                evidence: Vec::new(),
+            };
+        }
+        observed_attempts.fetch_add(1, Ordering::AcqRel);
+        while !branch_cancellation.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        CollaborationCompletion::failed(MODEL_REQUEST_CANCELLED)
+    });
+
+    let candidate = execute_prompt_workflow_candidate_with_runner(
+        "Compare independent branches and synthesize",
+        PromptPlanCandidate {
+            genome: profile,
+            plan: Some(plan),
+            raw_output: String::new(),
+            latency_ms: 0,
+            total_tokens: 0,
+        },
+        runner,
+    );
+
+    assert!(candidate.execution.succeeded);
+    assert_eq!(candidate.execution.final_output, "final answer");
+    let completion_deadline = Instant::now() + Duration::from_secs(1);
+    while slow_attempts.load(Ordering::Acquire) == 0 && Instant::now() < completion_deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    std::thread::sleep(Duration::from_millis(20));
+    assert_eq!(slow_attempts.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn execution_arena_delivers_degraded_synthesis_after_a_branch_failure() {
+    let mut profile = ConductorPromptGenome::seed_for_effort("pro");
+    profile.retry_policy = PromptRetryPolicy::SameModel;
+    let plan = WorkflowPlanIr::from_adaptive_with_profile(
+        "arena-degraded",
+        "Solve a difficult question with independent checks",
+        "pro",
+        "best_of_n",
+        "planner",
+        profile.id.clone(),
+        &AdaptiveWorkflow {
+            steps: vec![
+                AdaptiveWorkflowStep {
+                    id: "analysis".to_string(),
+                    role: "thinker".to_string(),
+                    model: "worker-a".to_string(),
+                    subtask: "derive the answer".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "independent-check".to_string(),
+                    role: "worker".to_string(),
+                    model: "worker-b".to_string(),
+                    subtask: "check the derivation".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "final".to_string(),
+                    role: "synthesizer".to_string(),
+                    model: "worker-a".to_string(),
+                    subtask: "synthesize the best available result".to_string(),
+                    access: vec!["analysis".to_string(), "independent-check".to_string()],
+                },
+            ],
+        },
+        WorkflowBudget {
+            max_steps: 3,
+            max_models: 2,
+            max_model_turns_per_step: 1,
+            max_tool_calls_per_step: 0,
+            max_output_tokens_per_step: 2_048,
+        },
+    );
+    let runner: PromptEvaluationRunner = Arc::new(move |request, _branch_cancellation| {
+        if request.role == ModelRole::Summarizer {
+            return CollaborationCompletion {
+                content: Some("best grounded answer".to_string()),
+                error: None,
+                latency_ms: 1,
+                usage: Metadata::new(),
+                evidence: Vec::new(),
+            };
+        }
+        if request.model == "worker-a" {
+            return CollaborationCompletion {
+                content: Some("grounded analysis".to_string()),
+                error: None,
+                latency_ms: 1,
+                usage: Metadata::new(),
+                evidence: Vec::new(),
+            };
+        }
+        CollaborationCompletion::failed("provider timeout")
+    });
+
+    let candidate = execute_prompt_workflow_candidate_with_runner(
+        "Solve a difficult question with independent checks",
+        PromptPlanCandidate {
+            genome: profile,
+            plan: Some(plan),
+            raw_output: String::new(),
+            latency_ms: 0,
+            total_tokens: 0,
+        },
+        runner,
+    );
+
+    assert!(candidate.execution.succeeded);
+    assert!(!candidate.execution.quality_gate_met);
+    assert_eq!(candidate.execution.final_output, "best grounded answer");
+    assert!(candidate
+        .execution
+        .steps
+        .iter()
+        .any(|step| step.id == "independent-check" && !step.succeeded));
+    assert!(candidate
+        .execution
+        .steps
+        .iter()
+        .any(|step| step.id == "final" && step.succeeded));
+}
+
+#[test]
+fn execution_arena_synthesizes_from_incomplete_branch_work() {
+    let mut profile = ConductorPromptGenome::seed_for_effort("pro");
+    profile.retry_policy = PromptRetryPolicy::FailFast;
+    let plan = WorkflowPlanIr::from_adaptive_with_profile(
+        "arena-incomplete-work",
+        "Solve a difficult question",
+        "pro",
+        "best_of_n",
+        "planner",
+        profile.id.clone(),
+        &AdaptiveWorkflow {
+            steps: vec![
+                AdaptiveWorkflowStep {
+                    id: "analysis-a".to_string(),
+                    role: "thinker".to_string(),
+                    model: "worker-a".to_string(),
+                    subtask: "derive the answer".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "analysis-b".to_string(),
+                    role: "worker".to_string(),
+                    model: "worker-b".to_string(),
+                    subtask: "check independently".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "final".to_string(),
+                    role: "synthesizer".to_string(),
+                    model: "worker-c".to_string(),
+                    subtask: "synthesize the best available result".to_string(),
+                    access: vec!["analysis-a".to_string(), "analysis-b".to_string()],
+                },
+            ],
+        },
+        WorkflowBudget {
+            max_steps: 3,
+            max_models: 3,
+            max_model_turns_per_step: 3,
+            max_tool_calls_per_step: 0,
+            max_output_tokens_per_step: 2_048,
+        },
+    );
+    let runner: PromptEvaluationRunner = Arc::new(move |request, _branch_cancellation| {
+        if request.role == ModelRole::Summarizer {
+            assert!(request.prompt.contains("partial analysis from worker-a"));
+            assert!(request.prompt.contains("partial analysis from worker-b"));
+            return CollaborationCompletion {
+                content: Some("The correct answer is (A)".to_string()),
+                error: None,
+                latency_ms: 1,
+                usage: Metadata::new(),
+                evidence: Vec::new(),
+            };
+        }
+        CollaborationCompletion {
+            content: Some(format!("partial analysis from {}", request.model)),
+            error: Some(
+                "evaluation_turn_budget_exhausted: completed 3 turns with a 3-turn budget"
+                    .to_string(),
+            ),
+            latency_ms: 1,
+            usage: Metadata::new(),
+            evidence: Vec::new(),
+        }
+    });
+
+    let candidate = execute_prompt_workflow_candidate_with_runner(
+        "Solve a difficult question",
+        PromptPlanCandidate {
+            genome: profile,
+            plan: Some(plan),
+            raw_output: String::new(),
+            latency_ms: 0,
+            total_tokens: 0,
+        },
+        runner,
+    );
+
+    assert!(candidate.execution.succeeded);
+    assert!(!candidate.execution.quality_gate_met);
+    assert_eq!(candidate.execution.final_output, "The correct answer is (A)");
+    assert_eq!(
+        candidate
+            .execution
+            .steps
+            .iter()
+            .filter(|step| !step.succeeded)
+            .count(),
+        2
+    );
 }
 
 #[test]
@@ -5753,7 +6306,7 @@ fn evaluation_arena_applies_retry_and_alternate_model_genes() {
     plan.steps[0].tool_policy = WorkflowToolPolicy::ReadOnlyEvidence;
     let requests = Arc::new(Mutex::new(Vec::<PromptEvaluationWorkerRequest>::new()));
     let captured = Arc::clone(&requests);
-    let runner: PromptEvaluationRunner = Arc::new(move |request| {
+    let runner: PromptEvaluationRunner = Arc::new(move |request, _branch_cancellation| {
         let should_fail = request.model == "worker-a";
         captured.lock().expect("request capture lock").push(request);
         CollaborationCompletion {
@@ -6480,7 +7033,7 @@ fn retrieval_fusion_deduplicates_and_preserves_channel_reasons() {
         },
     ];
 
-    let (results, sources) = fuse_retrieval_channels(&channels, 8);
+    let (results, sources) = fuse_retrieval_channels(&channels, "", 8);
 
     assert_eq!(results.len(), 2);
     assert_eq!(sources.len(), 2);
@@ -6535,7 +7088,7 @@ fn retrieval_fusion_prefers_independent_consensus_over_one_channel_outlier() {
         },
     ];
 
-    let (results, sources) = fuse_retrieval_channels(&channels, 4);
+    let (results, sources) = fuse_retrieval_channels(&channels, "", 4);
 
     assert_eq!(results[0].chunk.path, "b.md");
     assert!(sources[0].reason.contains("consensus:2"));
@@ -6591,7 +7144,7 @@ fn retrieval_fusion_does_not_double_count_correlated_graph_routes() {
         },
     ];
 
-    let (results, sources) = fuse_retrieval_channels(&channels, 4);
+    let (results, sources) = fuse_retrieval_channels(&channels, "", 4);
 
     assert_eq!(results[0].chunk.path, "b.md");
     let graph_source = sources

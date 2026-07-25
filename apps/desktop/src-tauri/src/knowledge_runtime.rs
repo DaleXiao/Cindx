@@ -441,7 +441,7 @@ pub(crate) fn run_parallel_retrieval(
             }
         }
     }
-    let (results, sources) = fuse_retrieval_channels(&channels, limit);
+    let (results, sources) = fuse_retrieval_channels(&channels, query, limit);
     let channel_views = retrieval_channel_views(&channels);
     Ok(ParallelRetrievalResult {
         trace: RetrievalTraceView {
@@ -616,9 +616,10 @@ pub(crate) fn query_embedding_for_chunks(
 
 pub(crate) fn fuse_retrieval_channels(
     channels: &[RetrievalChannelOutcome],
+    query: &str,
     limit: usize,
 ) -> (Vec<RagSearchResult>, Vec<RagSourceView>) {
-    let fused = fuse_rag_retrieval_channels(channels, limit);
+    let fused = fuse_rag_retrieval_channels_for_query(channels, query, limit);
     let sources = fused
         .sources
         .into_iter()
@@ -945,7 +946,7 @@ fn load_project_memory_ledger_inner(
         delta = store.list_by_task_and_metadata_after(&task_id, "project_id", project_id, 0)?;
     }
 
-    let completed_runs = if rebuilding {
+    let checkpointed_runs = if rebuilding {
         let mut runs = BTreeMap::<String, Vec<Event>>::new();
         for event in &delta {
             if event.metadata.get("project_id").map(String::as_str) != Some(project_id) {
@@ -956,17 +957,13 @@ fn load_project_memory_ledger_inner(
             }
         }
         runs.into_iter()
-            .filter(|(_, events)| {
-                events
-                    .iter()
-                    .any(|event| event.summary == "Agent task completed")
-            })
+            .filter(|(_, events)| events.iter().any(is_memory_checkpoint_event))
             .map(|(run_id, events)| (run_id, Some(events)))
             .collect::<Vec<_>>()
     } else {
         delta
             .iter()
-            .filter(|event| event.summary == "Agent task completed")
+            .filter(|event| is_memory_checkpoint_event(event))
             .filter(|event| {
                 event.metadata.get("project_id").map(String::as_str) == Some(project_id)
             })
@@ -979,7 +976,7 @@ fn load_project_memory_ledger_inner(
             })
             .collect::<Vec<_>>()
     };
-    for (run_id, cached_events) in completed_runs {
+    for (run_id, cached_events) in checkpointed_runs {
         let events = match cached_events {
             Some(events) => events,
             None => store.list_by_task_and_metadata(&task_id, "agent_run_id", &run_id)?,
@@ -1002,6 +999,13 @@ fn load_project_memory_ledger_inner(
         save_project_memory_ledger(store, &ledger)?;
     }
     Ok(ledger)
+}
+
+fn is_memory_checkpoint_event(event: &Event) -> bool {
+    matches!(
+        event.summary.as_str(),
+        "Agent task completed" | "Agent task paused" | "Agent task failed" | "Agent task cancelled"
+    )
 }
 
 pub(crate) fn save_project_memory_ledger(
@@ -1682,7 +1686,7 @@ pub(crate) fn recall_project_memory_for_prompt(
     }))
 }
 
-pub(crate) fn refresh_project_memory_after_completion(
+pub(crate) fn refresh_project_memory_after_run(
     store: &mut SqliteStore,
     run_context: &Metadata,
 ) -> Result<Option<MemoryLedger>, StorageError> {

@@ -2464,8 +2464,9 @@ assert(
     agentRuntimeSource.includes("evidence_worker_tools") &&
     agentRuntimeSource.includes("DEFAULT_COLLABORATION_WORKER_TURNS") &&
     parallelExecutionSource.includes("MAX_GLOBAL_MODEL_WORKERS: usize = 12") &&
-    parallelExecutionSource.includes("fn run_model_jobs_ordered") &&
-    rustLib.includes("run_model_jobs_ordered") &&
+    parallelExecutionSource.includes("fn model_job_supervisor") &&
+    parallelExecutionSource.includes("fn run_model_jobs_until_quorum_interruptible") &&
+    rustLib.includes("run_model_jobs_until_quorum_interruptible(") &&
     rustLib.includes('"conductor_plan"') &&
     rustLib.includes('format!("worker_{}", step_index + 1)') &&
     collaborationServiceSource.includes(

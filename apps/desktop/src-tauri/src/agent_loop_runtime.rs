@@ -206,6 +206,13 @@ pub(crate) fn continue_agent_loop(
         }
         let max_output_tokens =
             bounded_max_output_tokens(config.context_window_tokens, AGENT_MAX_OUTPUT_TOKENS);
+        let terminal_commit = matches!(
+            cancellation.continuation_directive(),
+            RunContinuationDirective::CommitTerminalResult
+        );
+        if terminal_commit {
+            ensure_terminal_commit_instruction(&mut runtime);
+        }
         let prepared_turn = AgentKernel::new(&mut runtime, &tools).prepare_model_turn(
             Some(&config.agent_system_prompt),
             runtime_context.as_deref(),
@@ -255,6 +262,7 @@ pub(crate) fn continue_agent_loop(
                     "context_omitted_messages".to_string(),
                     context_governor.omitted_messages.to_string(),
                 ),
+                ("terminal_commit".to_string(), terminal_commit.to_string()),
             ]
             .into_iter()
             .collect::<Metadata>();
@@ -833,7 +841,7 @@ pub(crate) fn continue_agent_loop(
                     eprintln!("project memory utilization unavailable: {error}");
                 }
                 let memory_ledger =
-                    match refresh_project_memory_after_completion(&mut store, &run_context) {
+                    match refresh_project_memory_after_run(&mut store, &run_context) {
                         Ok(ledger) => ledger,
                         Err(error) => {
                             eprintln!("project memory checkpoint unavailable: {error}");

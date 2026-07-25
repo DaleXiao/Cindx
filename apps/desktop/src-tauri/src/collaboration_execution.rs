@@ -516,6 +516,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
     allow_tools: bool,
     max_model_turns: usize,
     max_tool_calls: usize,
+    max_output_tokens: u64,
     cancellation: Option<Arc<AgentRunControl>>,
     branch_cancellation: Option<Arc<AtomicBool>>,
 ) -> CollaborationCompletion {
@@ -573,7 +574,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
     let mut evidence = Vec::new();
     let mut tool_call_count = 0usize;
     let mut first_delta_at_ms = None;
-    let stage_class = RunStageClass::Worker;
+    let stage_class = collaboration_worker_stage_class(&stage, &role);
 
     loop {
         if branch_cancellation
@@ -644,7 +645,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
 
         let max_output_tokens = bounded_max_output_tokens(
             config.context_window_tokens,
-            COLLABORATION_MAX_OUTPUT_TOKENS,
+            max_output_tokens.clamp(256, COLLABORATION_MAX_OUTPUT_TOKENS),
         );
         let prepared_turn = AgentKernel::new(&mut runtime, request_tools).prepare_model_turn(
             Some(&config.agent_system_prompt),
@@ -1031,6 +1032,21 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                 }
             }
         }
+    }
+}
+
+pub(crate) fn collaboration_worker_stage_class(
+    stage: &str,
+    role: &ModelRole,
+) -> RunStageClass {
+    let role_stage_class = RunStageClass::from_label(role_label(role));
+    let inferred_stage_class = RunStageClass::from_label(stage);
+    if role_stage_class.is_terminal() {
+        role_stage_class
+    } else if inferred_stage_class != RunStageClass::Other {
+        inferred_stage_class
+    } else {
+        RunStageClass::Worker
     }
 }
 
