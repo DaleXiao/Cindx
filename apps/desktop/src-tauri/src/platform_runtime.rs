@@ -126,6 +126,9 @@ pub(crate) fn repair_macos_traffic_light_position(
             for (index, button) in [close, miniaturize, zoom].into_iter().enumerate() {
                 let mut origin = NSView::frame(&button).origin;
                 origin.x = MACOS_TRAFFIC_LIGHT_X + index as f64 * spacing;
+                // AppKit can retain the pre-reveal vertical origin after it lays out the
+                // initially hidden titlebar. Wry only reapplies x, so make the inset complete.
+                origin.y = 0.0;
                 button.setFrameOrigin(origin);
             }
         })
