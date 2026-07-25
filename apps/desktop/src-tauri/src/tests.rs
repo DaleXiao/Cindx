@@ -8476,6 +8476,14 @@ fn automatic_session_names_use_the_first_prompt() {
         automatic_session_title("请帮我分析 MBTI，重点区分 N/S？"),
         "分析 MBTI 重点区分 N/S"
     );
+    assert_eq!(
+        automatic_session_title("用脑图表示一下 transformer 的原理"),
+        "Transformer 原理思维导图"
+    );
+    assert_eq!(
+        automatic_session_title("用 mindmap 描述下 transformer 架构"),
+        "Transformer 架构思维导图"
+    );
 }
 
 #[test]
@@ -8506,19 +8514,23 @@ fn semantic_session_titles_reject_raw_conversation_sentences() {
 }
 
 #[test]
-fn concise_user_topic_can_already_be_a_valid_title() {
+fn generated_session_titles_never_copy_even_concise_user_topics() {
     let turns = vec![SessionTitleTurn {
         prompt: "Rust agent loop review".to_string(),
         answer: "I found two lifecycle races.".to_string(),
     }];
 
-    assert!(!generated_session_title_copies_conversation(
+    assert!(generated_session_title_copies_conversation(
         "Rust agent loop review",
         &turns
     ));
     assert_eq!(
         validated_generated_session_title("Rust agent loop review", &turns),
-        Some("Rust agent loop review".to_string())
+        None
+    );
+    assert_eq!(
+        fallback_session_title(&turns),
+        Some("Rust agent loop review Overview".to_string())
     );
 }
 
@@ -8530,7 +8542,7 @@ fn session_title_fallback_recovers_a_pending_conversation_without_copying_a_requ
     }];
     assert_eq!(
         fallback_session_title(&title_like_turns),
-        Some("用 mindmap 描述下 transformer 架构".to_string())
+        Some("Transformer 架构思维导图".to_string())
     );
 
     let request_turns = vec![SessionTitleTurn {
@@ -8559,6 +8571,15 @@ fn session_title_state_retries_pending_and_repairs_legacy_prompt_copies() {
         SessionTitleState::Automatic,
         "这是高达 不是马克罗士 你重新画",
         &turns
+    ));
+    let copied_diagram_turns = vec![SessionTitleTurn {
+        prompt: "用脑图表示一下 transformer 的原理".to_string(),
+        answer: "下面用思维导图介绍 Transformer 原理。".to_string(),
+    }];
+    assert!(session_title_refinement_needed(
+        SessionTitleState::Automatic,
+        "用脑图表示一下 transformer 的原理",
+        &copied_diagram_turns
     ));
     assert!(!session_title_refinement_needed(
         SessionTitleState::Automatic,
