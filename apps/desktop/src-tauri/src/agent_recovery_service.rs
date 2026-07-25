@@ -1,4 +1,15 @@
-use super::*;
+use crate::desktop_prelude::*;
+use crate::{
+    agent_read_model::{
+        active_agent_events_for_session, agent_events_for_session, is_agent_run_start_event,
+        latest_agent_prompt_from_active_events,
+    },
+    app_state::AgentRecoveryEnvelope,
+    persistence_runtime::{current_time_millis, metadata_with_context, phase16_task_id},
+    runtime_constants::AGENT_RECOVERY_SCHEMA,
+    tool_execution::{append_event, message_from_event},
+    workflow_checkpoint_runtime::latest_external_user_turn_event,
+};
 
 pub(super) fn agent_task_is_cancelled(
     store: &mut SqliteStore,

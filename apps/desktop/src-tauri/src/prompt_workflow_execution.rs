@@ -1,4 +1,18 @@
-use super::*;
+use crate::desktop_prelude::*;
+use crate::{
+    collaboration_models::{
+        PromptDependencyOutput, PromptEvaluationRunner, PromptEvaluationWorkerRequest,
+        PromptExecutionCandidate, PromptExecutionStep, PromptPlanCandidate,
+        PromptWorkflowExecution,
+    },
+    configuration_models::ProviderConfig,
+    persistence_runtime::current_time_millis,
+    prompt_evaluation_runtime::{
+        complete_prompt_evaluation_worker, prompt_evaluation_retry_allowed, prompt_evaluation_role,
+        prompt_evaluation_stage_class, prompt_evaluation_step_prompt,
+        prompt_evaluation_tool_traces,
+    },
+};
 
 pub(super) fn execute_prompt_workflow_candidate_impl(
     config: &ProviderConfig,
@@ -190,6 +204,10 @@ pub(super) fn execute_prompt_workflow_candidate_with_runner_impl(
                 }) as CancellableParallelJob<PromptExecutionStep>
             })
             .collect::<Vec<_>>();
+        let scheduled_stage_classes = scheduled
+            .iter()
+            .map(|scheduled| prompt_evaluation_stage_class(&scheduled.step))
+            .collect::<Vec<_>>();
 
         let layer_execution = run_model_jobs_until_anytime_quorum_interruptible(
             "prompt-evaluation",
@@ -198,7 +216,10 @@ pub(super) fn execute_prompt_workflow_candidate_with_runner_impl(
             PromptExecutionStep::usable,
             || {
                 control.as_ref().is_some_and(|control| {
-                    control.should_stop() || control.stage_should_stop(RunStageClass::Worker)
+                    prompt_evaluation_layer_should_stop(
+                        control,
+                        scheduled_stage_classes.iter().copied(),
+                    )
                 })
             },
         );
@@ -245,6 +266,16 @@ pub(super) fn execute_prompt_workflow_candidate_with_runner_impl(
             latency_ms: elapsed_millis(started_at),
         },
     }
+}
+
+pub(super) fn prompt_evaluation_layer_should_stop(
+    control: &AgentRunControl,
+    stage_classes: impl IntoIterator<Item = RunStageClass>,
+) -> bool {
+    control.should_stop()
+        || stage_classes
+            .into_iter()
+            .all(|stage_class| control.stage_should_stop(stage_class))
 }
 
 #[derive(Clone)]

@@ -536,7 +536,7 @@ fn deterministic_auto_fallback_compares_two_independent_branches() {
     let mut request = conductor_request();
     request.effort = "auto".to_string();
     request.prompt_genome =
-        ConductorPromptGenome::seed_for_effort("auto").with_effort_capability_floor("auto");
+        ConductorPromptGenome::seed_for_effort("auto").with_effort_delivery_contract("auto");
     request.execution_contract = ConductorExecutionContract::from_routing(
         &routing,
         "auto",
@@ -1125,6 +1125,23 @@ fn coding_capability_question_stays_direct_without_retrieval() {
 }
 
 #[test]
+fn long_self_contained_multiple_choice_question_stays_direct() {
+    let prompt = format!(
+        "What is the correct answer to this question?\n{}\n\n(A) one\n(B) two\n(C) three\n(D) four\n\nFormat your response as follows: The correct answer is (insert answer here)",
+        "A self-contained scientific premise with all facts supplied in the question. ".repeat(12)
+    );
+    let context = RoutingContext::from_prompt(&prompt, candidates());
+    let decision = RuleBasedRouter.route(&context);
+
+    assert!(context.prompt_length > 600);
+    assert_eq!(context.task_class, TaskClass::General);
+    assert!(!context.needs_tools);
+    assert!(!context.needs_retrieval);
+    assert!(!context.verification_required);
+    assert_eq!(decision.policy, OrchestrationPolicy::Single);
+}
+
+#[test]
 fn short_coding_explanation_does_not_require_workspace_context() {
     let context = RoutingContext::from_prompt("解释一下 Rust 所有权代码", candidates());
     let decision = RuleBasedRouter.route(&context);
@@ -1196,7 +1213,7 @@ fn learned_router_uses_successful_trace_table() {
 
 #[test]
 fn learned_router_can_downshift_a_matching_context_without_tools() {
-    let prompt = "Discuss this topic clearly and summarize the important distinctions. ".repeat(10);
+    let prompt = "Compare two product strategies and explain the tradeoffs.";
     let context = RoutingContext::from_prompt(&prompt, candidates());
     assert_eq!(
         RuleBasedRouter.route(&context).policy,

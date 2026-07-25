@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(test)]
 pub(crate) fn load_routing_telemetry_read_model(
     store: &mut SqliteStore,
 ) -> Result<Vec<RoutingTelemetry>, StorageError> {

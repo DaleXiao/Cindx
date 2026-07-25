@@ -1,4 +1,9 @@
-use super::*;
+use crate::desktop_prelude::*;
+use crate::{
+    collaboration_service::AgentCollaboration,
+    configuration_models::{ProjectSessionConfig, ProviderConfig, SidecarConfig, WorkspaceConfig},
+    schedule::ScheduleConfig,
+};
 
 pub(crate) struct AppState {
     pub(crate) store: Mutex<SqliteStore>,

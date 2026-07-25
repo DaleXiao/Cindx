@@ -1,4 +1,29 @@
-use super::*;
+use crate::desktop_prelude::*;
+use crate::{
+    agent_commands::{
+        add_attachment_metadata, prompt_with_attachments, validate_agent_attachments,
+    },
+    agent_completion_runtime::{finalize_agent_completion, AgentCompletionOutcome},
+    agent_model_turn_runtime::{
+        execute_agent_model_turn, AgentModelTurnOutcome, AgentModelTurnResponse,
+    },
+    agent_query_commands::{
+        append_agent_progress_event, append_agent_queue_event, emit_agent_stream_delta,
+        finish_agent_run_for_control_stop_with_task_state,
+    },
+    agent_read_model::agent_state_with_error_in_context,
+    agent_tool_runtime::{execute_agent_tool_batch, AgentToolBatchOutcome},
+    app_state::{AppState, SuspendedAgentRun},
+    configuration_models::{agent_model_for_run, ProviderConfig},
+    persistence_runtime::{
+        add_image_generation_run_context, agent_runtime_context_for_run, open_app_read_store,
+        tool_registry_for_state,
+    },
+    runtime_constants::AGENT_MAX_OUTPUT_TOKENS,
+    suspended_run_runtime::{clear_suspended_agent_run_for_context, remember_suspended_agent_run},
+    tool_execution::persist_new_runtime_messages,
+    view_models::AgentState,
+};
 
 pub(crate) fn append_single_model_policy_guidance(
     history: &mut Vec<Message>,

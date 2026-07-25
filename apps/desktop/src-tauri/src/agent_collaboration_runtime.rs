@@ -1,4 +1,21 @@
-use super::*;
+use crate::desktop_prelude::*;
+use crate::{
+    adaptive_collaboration_execution::run_adaptive_collaboration,
+    agent_query_commands::{active_agent_run_control, agent_run_should_stop},
+    app_state::AppState,
+    collaboration_execution::{
+        collaboration_candidate_models, collaboration_run_should_interrupt,
+        record_collaboration_stage_started, CollaborationCandidateSpec,
+    },
+    collaboration_stage_runtime::{record_collaboration_stage_finished, run_collaboration_stage},
+    collaboration_worker_runtime::complete_collaboration_worker_with_tools,
+    configuration_models::ProviderConfig,
+    persistence_runtime::{metadata_with_context, unique_id},
+    prompt_evolution_runtime::prompt_evolution_evaluation_for_run,
+    prompt_pairwise_runtime::schedule_prompt_pairwise_evaluation,
+    runtime_constants::COLLABORATION_MAX_OUTPUT_TOKENS,
+    tool_execution::append_event,
+};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_collaboration_candidates(
@@ -355,7 +372,7 @@ pub(crate) fn prepare_agent_collaboration(
         evaluation
             .next_profile
             .clone()
-            .with_effort_capability_floor(&effort)
+            .with_effort_delivery_contract(&effort)
     });
     if let (Some(evaluation), Some(profile)) =
         (bounded_evolution.as_ref(), bounded_profile.as_ref())

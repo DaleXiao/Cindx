@@ -475,8 +475,22 @@ fn nonterminal_model_timeout_cannot_consume_terminal_time_reserve() {
     assert!(nonterminal > Duration::from_secs(39));
 
     let terminal = control.stage_model_call_timeout(RunStageClass::Synthesizer);
-    assert!(terminal < Duration::from_secs(34));
-    assert!(terminal > Duration::from_secs(33));
+    assert!(terminal <= Duration::from_secs(50));
+    assert!(terminal > Duration::from_secs(49));
+}
+
+#[test]
+fn terminal_delivery_stages_receive_a_delivery_sized_time_budget() {
+    let mut budget = RunBudget::for_effort("pro");
+    budget.max_duration = Duration::from_secs(300);
+
+    let reviewer = budget.stage_budget(RunStageClass::Reviewer);
+    let synthesizer = budget.stage_budget(RunStageClass::Synthesizer);
+
+    assert!(reviewer.terminal);
+    assert!(synthesizer.terminal);
+    assert_eq!(reviewer.max_duration, Duration::from_secs(100));
+    assert_eq!(synthesizer.max_duration, Duration::from_secs(150));
 }
 
 #[test]

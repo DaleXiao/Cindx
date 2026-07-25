@@ -261,11 +261,11 @@ impl WorkflowExecutionCheckpoint {
             .iter()
             .find(|step| step.id == step_id)
             .ok_or_else(|| format!("workflow plan is missing step: {step_id}"))?;
-        let unresolved = plan_step
-            .access
+        let inputs = step_inputs(plan_step);
+        let unresolved = inputs
             .iter()
             .filter(|dependency| {
-                self.steps.get(*dependency).is_none_or(|step| {
+                self.steps.get(**dependency).is_none_or(|step| {
                     !matches!(
                         step.status,
                         WorkflowStepStatus::Completed | WorkflowStepStatus::Degraded
@@ -274,20 +274,23 @@ impl WorkflowExecutionCheckpoint {
             })
             .collect::<Vec<_>>();
         if !unresolved.is_empty() {
-            let resolved_count = plan_step.access.len().saturating_sub(unresolved.len());
+            let resolved_count = inputs.len().saturating_sub(unresolved.len());
             let recoverable_output = matches!(
                 plan_step.contract.output_kind,
                 WorkflowOutputKind::Verification | WorkflowOutputKind::Synthesis
             );
+            let direct_delivery_fallback =
+                plan_step.contract.output_kind == WorkflowOutputKind::Synthesis;
             let unavailable_dependencies = unresolved.iter().all(|dependency| {
-                self.steps.get(*dependency).is_some_and(|step| {
-                    step.status == WorkflowStepStatus::Failed
-                        && step.attempts >= attempt_limit.max(1)
-                })
+                self.dependency_permanently_unavailable(
+                    dependency,
+                    attempt_limit,
+                    &mut BTreeSet::new(),
+                )
             });
             if !allow_partial_recovery
                 || !recoverable_output
-                || resolved_count == 0
+                || (resolved_count == 0 && !direct_delivery_fallback)
                 || !unavailable_dependencies
             {
                 return Ok(WorkflowStepDisposition::Blocked);
@@ -300,6 +303,42 @@ impl WorkflowExecutionCheckpoint {
             return Ok(WorkflowStepDisposition::Exhausted);
         }
         Ok(WorkflowStepDisposition::StartAttempt)
+    }
+
+    fn dependency_permanently_unavailable(
+        &self,
+        step_id: &str,
+        attempt_limit: usize,
+        visiting: &mut BTreeSet<String>,
+    ) -> bool {
+        if !visiting.insert(step_id.to_string()) {
+            return false;
+        }
+        let unavailable = self.steps.get(step_id).is_some_and(|checkpoint| {
+            if matches!(
+                checkpoint.status,
+                WorkflowStepStatus::Completed
+                    | WorkflowStepStatus::Degraded
+                    | WorkflowStepStatus::Running
+            ) {
+                return false;
+            }
+            if checkpoint.status == WorkflowStepStatus::Failed
+                && checkpoint.attempts >= attempt_limit.max(1)
+            {
+                return true;
+            }
+            let Some(plan_step) = self.plan.steps.iter().find(|step| step.id == step_id) else {
+                return false;
+            };
+            let dependencies = step_inputs(plan_step);
+            !dependencies.is_empty()
+                && dependencies.into_iter().all(|dependency| {
+                    self.dependency_permanently_unavailable(dependency, attempt_limit, visiting)
+                })
+        });
+        visiting.remove(step_id);
+        unavailable
     }
 
     pub fn prepare_step_attempt(
@@ -639,6 +678,56 @@ mod tests {
             .unwrap();
         assert_eq!(claims[0].step_id, "synthesize");
         assert!(!claims[0].resumed);
+    }
+
+    #[test]
+    fn exhausted_analysis_chain_unlocks_only_the_final_delivery_fallback() {
+        let base = checkpoint();
+        let mut plan = base.plan;
+        plan.steps.insert(
+            1,
+            WorkflowPlanStep {
+                id: "verify".to_string(),
+                role: "verifier".to_string(),
+                model: "reviewer".to_string(),
+                subtask: "verify".to_string(),
+                access: vec!["inspect".to_string()],
+                tool_policy: WorkflowToolPolicy::None,
+                contract: WorkflowStepContract::inferred(
+                    "verifier",
+                    &["inspect".to_string()],
+                    &WorkflowToolPolicy::None,
+                ),
+            },
+        );
+        let synthesis = plan.steps.last_mut().unwrap();
+        synthesis.access = vec!["inspect".to_string(), "verify".to_string()];
+        synthesis.contract = WorkflowStepContract::inferred(
+            "synthesizer",
+            &synthesis.access,
+            &WorkflowToolPolicy::None,
+        );
+        plan.budget.max_steps = 3;
+        let mut checkpoint = WorkflowExecutionCheckpoint::new("direct-fallback", plan, 1);
+        checkpoint
+            .prepare_step_attempt("inspect", "worker", 1, 2)
+            .unwrap();
+        checkpoint
+            .fail_step("inspect", "provider failure", 3)
+            .unwrap();
+
+        let frontier = checkpoint
+            .execution_frontier_with_partial_recovery(1)
+            .unwrap();
+        assert_eq!(frontier.ready_steps, vec!["synthesize"]);
+        assert_eq!(frontier.blocked_steps, vec!["verify"]);
+        let delivery = checkpoint
+            .delivery_frontier_with_partial_recovery(1)
+            .unwrap();
+        assert_eq!(delivery.runnable_steps, vec!["synthesize"]);
+        checkpoint
+            .claim_steps_with_partial_recovery(&["synthesize".to_string()], 1, 4)
+            .expect("the final node should own one degraded direct-delivery attempt");
     }
 
     #[test]

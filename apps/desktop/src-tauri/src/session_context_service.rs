@@ -1,4 +1,18 @@
-use super::*;
+use crate::desktop_prelude::*;
+use crate::{
+    app_state::AppState,
+    event_projection::{collect_context_events, write_context_checkpoint},
+    persistence_runtime::{
+        context_checkpoint_manifest_path_for_session, context_checkpoint_path_for_session,
+        current_time_millis, message_role_label, metadata_with_context, phase15_task_id,
+        phase16_task_id,
+    },
+    runtime_constants::{
+        CONTEXT_CHECKPOINT_MANIFEST_SCHEMA, CONTEXT_COMPACTION_VERSION, CONTEXT_MEMORY_MAX_ITEMS,
+        CONTEXT_RESTORE_MAX_CHARS,
+    },
+    tool_execution::{append_event, message_from_event},
+};
 
 pub(super) use agent_runtime::{estimate_context_tokens, estimate_message_tokens};
 #[cfg(test)]

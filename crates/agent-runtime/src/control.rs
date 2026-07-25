@@ -220,8 +220,8 @@ impl RunBudget {
             RunStageClass::Conductor => (self.max_repair_attempts.saturating_add(1), 5),
             RunStageClass::Candidate => (self.max_model_calls.saturating_div(3).max(2), 2),
             RunStageClass::Worker => (self.max_model_calls.saturating_div(2).max(2), 1),
-            RunStageClass::Reviewer => (self.max_repair_attempts.saturating_add(2), 4),
-            RunStageClass::Synthesizer => (self.max_repair_attempts.saturating_add(2), 3),
+            RunStageClass::Reviewer => (self.max_repair_attempts.saturating_add(2), 3),
+            RunStageClass::Synthesizer => (self.max_repair_attempts.saturating_add(2), 2),
             RunStageClass::Repair => (self.max_repair_attempts, 4),
             RunStageClass::Other => (self.max_model_calls, 1),
         };
