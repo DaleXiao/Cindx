@@ -179,7 +179,6 @@ pub(super) fn is_automatic_session_name(name: &str) -> bool {
     )
 }
 
-#[cfg(test)]
 pub(super) fn automatic_session_title(prompt: &str) -> String {
     let first_line = prompt
         .lines()
@@ -256,6 +255,26 @@ fn normalized_session_title_signal(value: &str) -> String {
         .collect()
 }
 
+fn session_title_character_limit(value: &str) -> usize {
+    let contains_cjk = value.chars().any(|character| {
+        matches!(
+            character as u32,
+            0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF
+        )
+    });
+    if contains_cjk
+        && value
+            .chars()
+            .any(|character| character.is_ascii_alphabetic())
+    {
+        32
+    } else if contains_cjk {
+        20
+    } else {
+        48
+    }
+}
+
 fn source_is_already_title_like(value: &str) -> bool {
     let value = value.trim();
     if value.is_empty()
@@ -309,7 +328,7 @@ fn source_is_already_title_like(value: &str) -> bool {
         )
     });
     if contains_cjk {
-        value.chars().count() <= 20
+        value.chars().count() <= session_title_character_limit(value)
     } else {
         value.split_whitespace().count() <= 8
     }
@@ -411,13 +430,7 @@ fn is_uninformative_generated_session_title(title: &str) -> bool {
 }
 
 fn bounded_session_title(value: &str) -> String {
-    let contains_cjk = value.chars().any(|character| {
-        matches!(
-            character as u32,
-            0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF
-        )
-    });
-    let max_characters = if contains_cjk { 20 } else { 48 };
+    let max_characters = session_title_character_limit(value);
     let mut title = value.chars().take(max_characters).collect::<String>();
     if value.chars().count() > max_characters && title.contains(' ') {
         if let Some(last_space) = title.rfind(' ') {
@@ -499,6 +512,11 @@ pub(super) fn validated_generated_session_title(
     (!generated_session_title_copies_conversation(&title, turns)).then_some(title)
 }
 
+pub(super) fn fallback_session_title(turns: &[SessionTitleTurn]) -> Option<String> {
+    let prompt = turns.first()?.prompt.as_str();
+    validated_generated_session_title(&automatic_session_title(prompt), turns)
+}
+
 pub(super) fn semantic_session_title(
     config: &ProviderConfig,
     turns: &[SessionTitleTurn],
@@ -507,22 +525,27 @@ pub(super) fn semantic_session_title(
         return Err("session title requires a completed conversation turn".to_string());
     }
     let primary_model = config.model_for_role(&ModelRole::Summarizer);
-    match semantic_session_title_with_model(config, turns, primary_model.clone()) {
+    let semantic_result = match semantic_session_title_with_model(
+        config,
+        turns,
+        primary_model.clone(),
+    ) {
         Ok(title) => Ok(title),
         Err(primary_error) => {
             let fallback_model = config.model.trim();
             if fallback_model.is_empty() || fallback_model == primary_model {
-                return Err(primary_error);
+                Err(primary_error)
+            } else {
+                semantic_session_title_with_model(config, turns, fallback_model.to_string())
+                    .map_err(|fallback_error| {
+                        format!(
+                            "summarizer model failed ({primary_error}); default model failed ({fallback_error})"
+                        )
+                    })
             }
-            semantic_session_title_with_model(config, turns, fallback_model.to_string()).map_err(
-                |fallback_error| {
-                    format!(
-                        "summarizer model failed ({primary_error}); default model failed ({fallback_error})"
-                    )
-                },
-            )
         }
-    }
+    };
+    semantic_result.or_else(|error| fallback_session_title(turns).ok_or(error))
 }
 
 fn semantic_session_title_with_model(
@@ -567,7 +590,7 @@ fn semantic_session_title_with_model(
         ],
         tools: Vec::new(),
         mode: ModelCallMode::NonStreaming,
-        metadata: [("max_output_tokens".to_string(), "48".to_string())]
+        metadata: [("max_output_tokens".to_string(), "128".to_string())]
             .into_iter()
             .collect(),
     };
