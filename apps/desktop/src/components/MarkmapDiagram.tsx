@@ -3,6 +3,7 @@ import { useResolvedTheme } from "./useResolvedTheme";
 
 type MarkmapDiagramProps = {
   source: string;
+  scale?: number;
 };
 
 type RenderState =
@@ -34,11 +35,24 @@ function renderErrorMessage(error: unknown) {
 }
 
 export const MarkmapDiagram = memo(function MarkmapDiagram({
-  source
+  source,
+  scale = 1
 }: MarkmapDiagramProps) {
   const svgRef = useRef<SVGSVGElement>(null);
+  const markmapRef = useRef<InstanceType<MarkmapRuntime["Markmap"]> | null>(null);
+  const appliedScaleRef = useRef(1);
+  const requestedScaleRef = useRef(scale);
   const [renderState, setRenderState] = useState<RenderState>({ status: "loading" });
   const theme = useResolvedTheme();
+  requestedScaleRef.current = scale;
+
+  useEffect(() => {
+    const markmap = markmapRef.current;
+    if (!markmap || appliedScaleRef.current === scale) return;
+    const ratio = scale / appliedScaleRef.current;
+    appliedScaleRef.current = scale;
+    void markmap.rescale(ratio);
+  }, [scale]);
 
   useEffect(() => {
     const svg = svgRef.current;
@@ -78,9 +92,16 @@ export const MarkmapDiagram = memo(function MarkmapDiagram({
           toggleRecursively: false,
           zoom: true
         });
+        markmapRef.current = markmap;
+        appliedScaleRef.current = 1;
         await markmap.setData(root);
         if (!active) return;
         await markmap.fit();
+        const requestedScale = requestedScaleRef.current;
+        if (requestedScale !== 1) {
+          await markmap.rescale(requestedScale);
+          appliedScaleRef.current = requestedScale;
+        }
         if (active) setRenderState({ status: "ready" });
       } catch (error) {
         if (!active) return;
@@ -95,6 +116,7 @@ export const MarkmapDiagram = memo(function MarkmapDiagram({
 
     return () => {
       active = false;
+      if (markmapRef.current === markmap) markmapRef.current = null;
       markmap?.destroy();
       svg.replaceChildren();
     };

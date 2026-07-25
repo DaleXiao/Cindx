@@ -214,10 +214,14 @@ export function DiagramFullscreen({ diagram, onClose, onError }: DiagramFullscre
         <div
           className="thread-diagram-fullscreen-surface"
           ref={surfaceRef}
-          style={{ width: `${zoom * 100}%`, height: `${zoom * 100}%` }}
+          style={
+            diagram.kind === "mindmap"
+              ? { width: "100%", height: "100%" }
+              : { width: `${zoom * 100}%`, height: `${zoom * 100}%` }
+          }
         >
           {diagram.kind === "mindmap" ? (
-            <MarkmapDiagram source={diagram.source} />
+            <MarkmapDiagram source={diagram.source} scale={zoom} />
           ) : (
             <MermaidDiagram source={diagram.source} />
           )}
