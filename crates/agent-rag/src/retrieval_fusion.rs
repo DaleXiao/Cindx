@@ -1,5 +1,5 @@
 use crate::{RagChunk, RagSearchResult};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RetrievalChannelOutcome {
@@ -88,6 +88,14 @@ pub fn fuse_retrieval_channels(
     channels: &[RetrievalChannelOutcome],
     limit: usize,
 ) -> RetrievalFusionResult {
+    fuse_retrieval_channels_for_query(channels, "", limit)
+}
+
+pub fn fuse_retrieval_channels_for_query(
+    channels: &[RetrievalChannelOutcome],
+    query: &str,
+    limit: usize,
+) -> RetrievalFusionResult {
     let mut fused = Vec::<FusedRetrievalCandidate>::new();
     for channel in channels {
         let weight = retrieval_channel_weight(&channel.name);
@@ -138,54 +146,216 @@ pub fn fuse_retrieval_channels(
                     .cmp(&right.result.chunk.start_line)
             })
     });
-    let mut path_counts = BTreeMap::<String, usize>::new();
-    let mut selected = Vec::new();
-    for candidate in fused {
-        let count = path_counts
-            .entry(candidate.result.chunk.path.clone())
-            .or_default();
-        if *count >= 2 {
-            continue;
-        }
-        *count += 1;
-        selected.push(candidate);
-        if selected.len() >= limit.max(1) {
-            break;
-        }
-    }
+    let query_signals = RetrievalQuerySignals::from_query(query);
+    let selected = select_fused_candidates(fused, &query_signals, limit);
     let max_score = selected
-        .first()
-        .map(FusedRetrievalCandidate::score)
+        .iter()
+        .map(|candidate| candidate.ranking_score)
+        .max_by(|left, right| {
+            left.partial_cmp(right)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .unwrap_or(1.0)
         .max(f32::EPSILON);
     let results = selected
         .iter()
         .map(|candidate| RagSearchResult {
-            chunk: candidate.result.chunk.clone(),
-            score: candidate.score() / max_score,
+            chunk: candidate.candidate.result.chunk.clone(),
+            score: candidate.ranking_score / max_score,
         })
         .collect::<Vec<_>>();
     let sources = selected
         .into_iter()
-        .map(|candidate| {
-            let score = candidate.score() / max_score;
-            let family_count = candidate.family_scores.len();
-            let mut reasons = candidate.channels;
+        .map(|selected| {
+            let score = selected.ranking_score / max_score;
+            let family_count = selected.candidate.family_scores.len();
+            let mut reasons = selected.candidate.channels;
             if family_count > 1 {
                 reasons.push(format!("consensus:{family_count}"));
             }
+            if !query_signals.terms.is_empty() && !selected.matched_terms.is_empty() {
+                reasons.push(format!(
+                    "query_coverage:{}/{}",
+                    selected.matched_terms.len(),
+                    query_signals.terms.len()
+                ));
+            }
+            if !query_signals.identifiers.is_empty() && !selected.matched_identifiers.is_empty() {
+                reasons.push(format!(
+                    "identifier_match:{}/{}",
+                    selected.matched_identifiers.len(),
+                    query_signals.identifiers.len()
+                ));
+            }
             FusedRagSource {
-                path: candidate.result.chunk.path,
-                start_line: candidate.result.chunk.start_line,
-                end_line: candidate.result.chunk.end_line,
-                file_hash: candidate.result.chunk.file_hash,
+                path: selected.candidate.result.chunk.path,
+                start_line: selected.candidate.result.chunk.start_line,
+                end_line: selected.candidate.result.chunk.end_line,
+                file_hash: selected.candidate.result.chunk.file_hash,
                 score,
                 reason: reasons.join(" + "),
-                text: candidate.result.chunk.text,
+                text: selected.candidate.result.chunk.text,
             }
         })
         .collect();
     RetrievalFusionResult { results, sources }
+}
+
+#[derive(Debug, Default)]
+struct RetrievalQuerySignals {
+    terms: BTreeSet<String>,
+    identifiers: BTreeSet<String>,
+}
+
+impl RetrievalQuerySignals {
+    fn from_query(query: &str) -> Self {
+        let mut signals = Self::default();
+        for raw in retrieval_terms(query) {
+            if is_query_stop_word(&raw) {
+                continue;
+            }
+            if is_likely_identifier(&raw) {
+                signals.identifiers.insert(raw.clone());
+            }
+            signals.terms.insert(raw);
+        }
+        signals
+    }
+}
+
+#[derive(Debug)]
+struct SelectedRetrievalCandidate {
+    candidate: FusedRetrievalCandidate,
+    ranking_score: f32,
+    matched_terms: BTreeSet<String>,
+    matched_identifiers: BTreeSet<String>,
+}
+
+fn select_fused_candidates(
+    mut candidates: Vec<FusedRetrievalCandidate>,
+    query: &RetrievalQuerySignals,
+    limit: usize,
+) -> Vec<SelectedRetrievalCandidate> {
+    if query.terms.is_empty() {
+        let mut path_counts = BTreeMap::<String, usize>::new();
+        return candidates
+            .into_iter()
+            .filter(|candidate| {
+                let count = path_counts
+                    .entry(candidate.result.chunk.path.clone())
+                    .or_default();
+                if *count >= 2 {
+                    return false;
+                }
+                *count += 1;
+                true
+            })
+            .take(limit.max(1))
+            .map(|candidate| SelectedRetrievalCandidate {
+                ranking_score: candidate.score(),
+                candidate,
+                matched_terms: BTreeSet::new(),
+                matched_identifiers: BTreeSet::new(),
+            })
+            .collect();
+    }
+
+    let mut selected = Vec::new();
+    let mut covered_terms = BTreeSet::new();
+    let mut path_counts = BTreeMap::<String, usize>::new();
+    while !candidates.is_empty() && selected.len() < limit.max(1) {
+        let mut best: Option<(usize, f32, BTreeSet<String>, BTreeSet<String>)> = None;
+        for (index, candidate) in candidates.iter().enumerate() {
+            if path_counts
+                .get(&candidate.result.chunk.path)
+                .copied()
+                .unwrap_or_default()
+                >= 2
+            {
+                continue;
+            }
+            let candidate_terms = retrieval_terms(&format!(
+                "{} {}",
+                candidate.result.chunk.path, candidate.result.chunk.text
+            ));
+            let matched_terms = query
+                .terms
+                .intersection(&candidate_terms)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let matched_identifiers = query
+                .identifiers
+                .intersection(&candidate_terms)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let new_terms = matched_terms.difference(&covered_terms).count();
+            let coverage = matched_terms.len() as f32 / query.terms.len().max(1) as f32;
+            let marginal = new_terms as f32 / query.terms.len().max(1) as f32;
+            let identifier_coverage = matched_identifiers.len() as f32
+                / query.identifiers.len().max(1) as f32;
+            let ranking_score = candidate.score()
+                + coverage * 0.2
+                + marginal * 0.2
+                + identifier_coverage * 0.55;
+            let replace = best.as_ref().is_none_or(|(best_index, best_score, _, _)| {
+                ranking_score > *best_score
+                    || (ranking_score == *best_score
+                        && candidate.result.chunk.path
+                            < candidates[*best_index].result.chunk.path)
+            });
+            if replace {
+                best = Some((
+                    index,
+                    ranking_score,
+                    matched_terms,
+                    matched_identifiers,
+                ));
+            }
+        }
+        let Some((index, ranking_score, matched_terms, matched_identifiers)) = best else {
+            break;
+        };
+        let candidate = candidates.remove(index);
+        *path_counts
+            .entry(candidate.result.chunk.path.clone())
+            .or_default() += 1;
+        covered_terms.extend(matched_terms.iter().cloned());
+        selected.push(SelectedRetrievalCandidate {
+            candidate,
+            ranking_score,
+            matched_terms,
+            matched_identifiers,
+        });
+    }
+    selected
+}
+
+fn retrieval_terms(text: &str) -> BTreeSet<String> {
+    text.split(|character: char| {
+        !(character.is_alphanumeric()
+            || matches!(character, '_' | '-' | '.' | '/' | ':' | '@'))
+    })
+    .map(|term| {
+        term.trim_matches(|character: char| matches!(character, '.' | '/' | ':' | '-' | '@'))
+            .to_lowercase()
+    })
+    .filter(|term| !term.is_empty() && (term.chars().count() > 1 || term.chars().any(char::is_numeric)))
+    .collect()
+}
+
+fn is_likely_identifier(term: &str) -> bool {
+    term.chars()
+        .any(|character| matches!(character, '_' | '-' | '.' | '/' | ':' | '@'))
+        || term.chars().any(char::is_numeric)
+}
+
+fn is_query_stop_word(term: &str) -> bool {
+    matches!(
+        term,
+        "a" | "an" | "and" | "are" | "as" | "at" | "be" | "by" | "for" | "from"
+            | "in" | "is" | "it" | "of" | "on" | "or" | "that" | "the" | "this"
+            | "to" | "was" | "what" | "when" | "where" | "which" | "with"
+    )
 }
 
 pub fn retrieval_ranges_overlap(left: &RagChunk, right: &RagChunk) -> bool {
@@ -319,5 +489,24 @@ mod tests {
         assert_eq!(original.results.len(), 1);
         assert_eq!(original.duration_ms, 3);
         assert!(original.error.is_none());
+    }
+
+    #[test]
+    fn query_identifier_coverage_beats_a_broad_high_score_outlier() {
+        let broad = result("broad", "src/runtime.rs", 1, 1.0);
+        let mut exact = result("exact", "src/session_loop.rs", 1, 0.42);
+        exact.chunk.text = "The max_turns terminal reserve accepts a completed answer".to_string();
+        let fusion = fuse_retrieval_channels_for_query(
+            &[
+                channel("semantic_rag", vec![broad]),
+                channel("file_search", vec![exact]),
+            ],
+            "Why does max_turns discard the final answer?",
+            1,
+        );
+
+        assert_eq!(fusion.results[0].chunk.id, "exact");
+        assert!(fusion.sources[0].reason.contains("identifier_match:1/1"));
+        assert!(fusion.sources[0].reason.contains("query_coverage:"));
     }
 }

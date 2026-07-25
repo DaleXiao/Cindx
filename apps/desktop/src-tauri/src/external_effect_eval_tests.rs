@@ -362,9 +362,9 @@ fn deterministic_auto_plan(
         WorkflowBudget {
             max_steps: workflow.steps.len(),
             max_models: 3,
-            max_model_turns_per_step: 1,
+            max_model_turns_per_step: profile.effective_max_model_turns_per_step(),
             max_tool_calls_per_step: 0,
-            max_output_tokens_per_step: COLLABORATION_MAX_OUTPUT_TOKENS as usize,
+            max_output_tokens_per_step: 2_048,
         },
     );
     for step in &mut plan.steps {
@@ -475,8 +475,8 @@ fn conductor_gpqa_treatment(
         &control,
     );
     if let Some(plan) = candidate.plan.as_mut() {
-        plan.budget.max_model_turns_per_step = 1;
         plan.budget.max_tool_calls_per_step = 0;
+        plan.budget.max_output_tokens_per_step = 2_048;
         for step in &mut plan.steps {
             step.tool_policy = WorkflowToolPolicy::None;
         }

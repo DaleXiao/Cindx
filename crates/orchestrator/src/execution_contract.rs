@@ -85,7 +85,7 @@ impl ConductorExecutionContract {
         let max_parallelism = requested_parallelism.clamp(1, 3);
         let stop_policy = match effort.as_str() {
             "fast" => ConductorStopPolicy::FirstVerified,
-            "pro" => ConductorStopPolicy::Exhaustive,
+            "pro" => ConductorStopPolicy::Quorum,
             _ => ConductorStopPolicy::Quorum,
         };
         let min_successful_branches = match stop_policy {
@@ -139,7 +139,8 @@ impl ConductorExecutionContract {
     pub fn with_prompt_commit_strategy(mut self, strategy: PromptCommitStrategy) -> Self {
         self.stop_policy = match (self.effort.as_str(), strategy) {
             ("fast", _) => ConductorStopPolicy::FirstVerified,
-            ("pro", _) => ConductorStopPolicy::Exhaustive,
+            ("pro", PromptCommitStrategy::Exhaustive) => ConductorStopPolicy::Exhaustive,
+            ("pro", _) => ConductorStopPolicy::Quorum,
             (_, PromptCommitStrategy::Adaptive) => self.stop_policy,
             (_, PromptCommitStrategy::Quorum) => ConductorStopPolicy::Quorum,
             (_, PromptCommitStrategy::Exhaustive) => ConductorStopPolicy::Exhaustive,
@@ -285,19 +286,19 @@ mod tests {
     }
 
     #[test]
-    fn pro_launches_every_branch_but_commits_on_a_supermajority() {
+    fn pro_commits_only_after_its_quality_gated_quorum() {
         let contract = ConductorExecutionContract::from_routing(
             &context("Investigate three independent hypotheses and verify the strongest answer"),
             "pro",
             OrchestrationPolicy::BestOfN { candidates: 3 },
         );
 
-        assert_eq!(contract.stop_policy, ConductorStopPolicy::Exhaustive);
+        assert_eq!(contract.stop_policy, ConductorStopPolicy::Quorum);
         assert_eq!(contract.max_parallelism, 3);
         assert_eq!(contract.min_successful_branches, 2);
         assert_eq!(contract.required_successes_for_layer(2), 2);
         assert_eq!(contract.required_successes_for_layer(3), 2);
-        assert_eq!(contract.quorum_grace_ms(), 20_000);
+        assert_eq!(contract.quorum_grace_ms(), 1_000);
         assert_eq!(contract.min_team_uplift_bps, PRO_MIN_TEAM_UPLIFT_BPS);
         assert_eq!(contract.min_distinct_contributions, 2);
         assert!(contract.requires_synthesis);
@@ -321,8 +322,16 @@ mod tests {
             OrchestrationPolicy::BestOfN { candidates: 3 },
         )
         .with_prompt_commit_strategy(PromptCommitStrategy::Quorum);
-        assert_eq!(pro.stop_policy, ConductorStopPolicy::Exhaustive);
-        assert_eq!(pro.quorum_grace_ms(), 20_000);
+        assert_eq!(pro.stop_policy, ConductorStopPolicy::Quorum);
+        assert_eq!(pro.quorum_grace_ms(), 1_000);
+
+        let exhaustive_pro = ConductorExecutionContract::from_routing(
+            &routing,
+            "pro",
+            OrchestrationPolicy::BestOfN { candidates: 3 },
+        )
+        .with_prompt_commit_strategy(PromptCommitStrategy::Exhaustive);
+        assert_eq!(exhaustive_pro.stop_policy, ConductorStopPolicy::Exhaustive);
 
         let fast = ConductorExecutionContract::from_routing(
             &routing,

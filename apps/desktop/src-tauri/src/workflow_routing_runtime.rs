@@ -21,8 +21,18 @@ pub(crate) fn workflow_prior_for_run(
         .get("agent_effort")
         .map(String::as_str)
         .unwrap_or("auto");
+    let routing_signature = run_context
+        .get("routing_signature")
+        .map(String::as_str)
+        .unwrap_or_default();
     Ok(teacher
-        .best_prior(&task_class, effort, allowed_models, max_models)
+        .best_prior_for_signature(
+            &task_class,
+            effort,
+            allowed_models,
+            max_models,
+            routing_signature,
+        )
         .cloned())
 }
 

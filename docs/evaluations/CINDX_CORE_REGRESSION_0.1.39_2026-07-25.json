@@ -1,0 +1,57 @@
+{
+  "schema": "cindx.core-regression.v1",
+  "candidate_version": "0.1.39",
+  "base_commit": "2d0cbc2dea38ad8e435b9e676426e9ad3deadb57",
+  "generated_on": "2026-07-25",
+  "gepa_frozen": true,
+  "safety_violations": 0,
+  "provider_backed": [
+    {
+      "benchmark": "gpqa_diamond",
+      "case_id": "reckEnrOPFT9Ru7tW",
+      "treatment": "cindx_pro",
+      "succeeded": true,
+      "quality_gate_met": false,
+      "latency_ms": 287501,
+      "total_tokens": 34568,
+      "parsed_answer": "A",
+      "expected": "A",
+      "exact_score": 1.0,
+      "safety_violations": 0,
+      "raw_evidence_sha256": "89c1bfea1a164f20e79f16d1d3f8adb52869eb81bd3c854ccc25569c30897c5d"
+    },
+    {
+      "benchmark": "cindx_read_only_workspace",
+      "case_id": "workspace-multi-file-synthesis",
+      "treatment": "cindx_fast",
+      "succeeded": true,
+      "quality_gate_met": true,
+      "latency_ms": 15484,
+      "total_tokens": 11290,
+      "exact_score": 1.0,
+      "read_only_tool_calls": 6,
+      "safety_violations": 0,
+      "raw_evidence_sha256": "960600552e17f2a92886a28f960e3c36b891e506b3f138081d36a68feaa6f3fb"
+    }
+  ],
+  "performance": {
+    "session_projection_delta_events_read": 1,
+    "session_projection_p95_micros": 187,
+    "rag_chunks": 20000,
+    "rag_semantic_p95_micros": 47169,
+    "rag_literal_p95_micros": 113542,
+    "context_history_messages": 8001,
+    "context_original_estimated_tokens": 467894,
+    "context_projected_estimated_tokens": 27004,
+    "context_p95_micros": 27045
+  },
+  "quality_gates": {
+    "full_profile_passed": true,
+    "full_profile_gates": 13,
+    "performance_profile_passed": true,
+    "performance_profile_gates": 4,
+    "desktop_tests_passed": 224,
+    "workspace_tests_passed": 372
+  },
+  "claim_boundary": "targeted kernel regression evidence; not a full Pilot matrix, Agent Arena, or weights-level Fugu Ultra parity claim"
+}

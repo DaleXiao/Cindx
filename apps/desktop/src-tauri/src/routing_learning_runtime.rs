@@ -402,6 +402,11 @@ pub(crate) fn workflow_execution_telemetry_from_events(
                 .count() as u64;
             Some(WorkflowExecutionTelemetry {
                 task_class,
+                routing_signature: planned
+                    .metadata
+                    .get("routing_signature")
+                    .cloned()
+                    .unwrap_or_default(),
                 plan,
                 succeeded: terminal.summary == "Collaboration workflow completed",
                 quality_score,
