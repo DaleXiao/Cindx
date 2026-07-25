@@ -27,7 +27,7 @@ pub(crate) fn evaluate_prompt_candidate_pair(
                     step.role,
                     step.model,
                     step.attempts,
-                    step.succeeded,
+                    step.succeeded(),
                     step.latency_ms,
                     step.total_tokens,
                     step.tool_calls.len(),
@@ -167,7 +167,7 @@ pub(crate) fn prompt_pairwise_observation(
                         .steps
                         .iter()
                         .find(|executed| executed.id == step.id)
-                        .is_some_and(|executed| executed.succeeded),
+                        .is_some_and(PromptExecutionStep::succeeded),
                     attempts: candidate
                         .execution
                         .steps
@@ -207,7 +207,7 @@ pub(crate) fn prompt_pairwise_observation(
     );
     for step in &candidate.execution.steps {
         let fail_soft_cancellation = candidate.execution.succeeded
-            && !step.succeeded
+            && !step.succeeded()
             && step.errors.iter().any(|error| {
                 let error = error.to_ascii_lowercase();
                 error.contains("cancel") || error.contains("quorum")
@@ -222,7 +222,7 @@ pub(crate) fn prompt_pairwise_observation(
             );
             continue;
         }
-        if !step.succeeded {
+        if !step.succeeded() {
             merge_unique_feedback_entries(
                 &mut actionable_feedback.failed_constraints,
                 vec![format!(

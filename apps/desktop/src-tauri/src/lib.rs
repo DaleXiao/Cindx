@@ -43,6 +43,7 @@ mod permission_service;
 mod persistence_runtime;
 mod platform_runtime;
 mod project_commands;
+mod prompt_evaluation_feedback;
 mod prompt_evaluation_runtime;
 mod prompt_evidence_runtime;
 mod prompt_evolution_models;

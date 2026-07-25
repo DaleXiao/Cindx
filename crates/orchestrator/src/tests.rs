@@ -114,6 +114,32 @@ fn conductor_request() -> ConductorRequest {
 }
 
 #[test]
+fn tool_steps_keep_a_discovery_and_evidence_round_without_slowing_text_only_fast() {
+    assert_eq!(WorkflowToolPolicy::None.effective_model_turn_budget(1), 1);
+    assert_eq!(
+        WorkflowToolPolicy::ReadOnlyEvidence.effective_model_turn_budget(1),
+        2
+    );
+    assert_eq!(
+        WorkflowToolPolicy::ReadOnlyExploration.effective_model_turn_budget(1),
+        3
+    );
+    assert_eq!(
+        WorkflowToolPolicy::ReadOnlyExploration.effective_model_turn_budget(3),
+        3
+    );
+    assert_eq!(WorkflowToolPolicy::None.effective_tool_call_budget(6), 0);
+    assert_eq!(
+        WorkflowToolPolicy::ReadOnlyEvidence.effective_tool_call_budget(0),
+        4
+    );
+    assert_eq!(
+        WorkflowToolPolicy::ReadOnlyExploration.effective_tool_call_budget(4),
+        6
+    );
+}
+
+#[test]
 fn workflow_ir_round_trips_and_enforces_declared_budgets() {
     let allowed_models = vec!["planner".to_string(), "reviewer".to_string()];
     let plan = workflow_plan("workflow-1", false);
@@ -334,6 +360,7 @@ fn search_teacher_prefers_reliable_efficient_topology() {
     let telemetry = vec![
         WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
+            routing_signature: String::new(),
             plan: fast_plan.clone(),
             succeeded: true,
             quality_score: Some(0.92),
@@ -344,6 +371,7 @@ fn search_teacher_prefers_reliable_efficient_topology() {
         },
         WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
+            routing_signature: String::new(),
             plan: fast_plan.clone(),
             succeeded: true,
             quality_score: Some(0.88),
@@ -354,6 +382,7 @@ fn search_teacher_prefers_reliable_efficient_topology() {
         },
         WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
+            routing_signature: String::new(),
             plan: fast_plan.clone(),
             succeeded: true,
             quality_score: Some(0.90),
@@ -364,6 +393,7 @@ fn search_teacher_prefers_reliable_efficient_topology() {
         },
         WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
+            routing_signature: String::new(),
             plan: fast_plan,
             succeeded: true,
             quality_score: Some(0.91),
@@ -374,6 +404,7 @@ fn search_teacher_prefers_reliable_efficient_topology() {
         },
         WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
+            routing_signature: String::new(),
             plan: slow_plan.clone(),
             succeeded: false,
             quality_score: Some(0.30),
@@ -384,6 +415,7 @@ fn search_teacher_prefers_reliable_efficient_topology() {
         },
         WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
+            routing_signature: String::new(),
             plan: slow_plan,
             succeeded: true,
             quality_score: Some(0.45),
@@ -412,6 +444,7 @@ fn search_teacher_withholds_under_evidenced_topology() {
     let telemetry = (0..3)
         .map(|_| WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
+            routing_signature: String::new(),
             plan: plan.clone(),
             succeeded: true,
             quality_score: Some(0.95),

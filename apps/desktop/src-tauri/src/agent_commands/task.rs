@@ -359,6 +359,9 @@ pub(crate) fn cancel_agent_task(
         ),
     )
     .map_err(|error| error.to_string())?;
+    if let Err(error) = refresh_project_memory_after_run(&mut store, &run_context) {
+        eprintln!("project memory checkpoint unavailable: {error}");
+    }
 
     emit_agent_stream_delta(
         &app,

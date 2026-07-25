@@ -103,6 +103,9 @@ const agentLoopServiceSource = read(
 const agentLoopRuntimeSource = read(
   "apps/desktop/src-tauri/src/agent_loop_runtime.rs"
 );
+const desktopAgentToolRuntimeSource = read(
+  "apps/desktop/src-tauri/src/agent_tool_runtime.rs"
+);
 const agentRecoveryServiceSource = read(
   "apps/desktop/src-tauri/src/agent_recovery_service.rs"
 );
@@ -1958,7 +1961,7 @@ assert(
     permissionServiceSource.includes("permission_capability_matches") &&
     permissionServiceSource.includes("granted.risk == requested.risk") &&
     permissionServiceSource.includes("granted.action == requested.action") &&
-    agentLoopRuntimeSource.includes("agent_session_permission_granted(") &&
+    desktopAgentToolRuntimeSource.includes("agent_session_permission_granted(") &&
     permissionServiceSource.includes("request.risk == PermissionRisk::Destructive") &&
     rustLib.includes(
       ".filter(|pending| !matches!(&pending.risk, PermissionRisk::Destructive))"

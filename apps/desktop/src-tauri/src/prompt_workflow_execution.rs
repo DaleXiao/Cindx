@@ -39,14 +39,20 @@ pub(super) fn execute_prompt_workflow_candidate_with_runner_impl(
     let Some(plan) = candidate.plan.clone() else {
         return failed_execution(candidate);
     };
-    let Ok(layers) = adaptive_workflow_layers(&plan.adaptive_workflow()) else {
-        return failed_execution(candidate);
-    };
-
+    let routing = RoutingContext::from_prompt(objective, Vec::new());
+    let policy = parse_policy(&plan.policy).unwrap_or(OrchestrationPolicy::Single);
+    let execution_contract =
+        ConductorExecutionContract::from_routing(&routing, &plan.effort, policy)
+            .with_prompt_commit_strategy(candidate.genome.commit_strategy);
     let mut outputs = BTreeMap::<String, PromptDependencyOutput>::new();
     let mut execution_steps = Vec::new();
     let retry_policy = candidate.genome.retry_policy;
     let max_attempts = candidate.genome.max_step_attempts.max(1);
+    let mut checkpoint = WorkflowExecutionCheckpoint::new(
+        format!("prompt-evaluation-{}", candidate.genome.id),
+        plan.clone(),
+        current_time_millis(),
+    );
     let alternate_models = plan
         .steps
         .iter()
@@ -55,30 +61,47 @@ pub(super) fn execute_prompt_workflow_candidate_with_runner_impl(
         .into_iter()
         .collect::<Vec<_>>();
 
-    for layer in layers {
-        let mut completed = Vec::<(usize, PromptExecutionStep)>::new();
-        let scheduled = layer
+    loop {
+        let Ok(frontier) = checkpoint.execution_frontier_with_partial_recovery(max_attempts) else {
+            return failed_execution(candidate);
+        };
+        if frontier.is_complete(plan.steps.len()) {
+            break;
+        }
+        let runnable = frontier
+            .runnable_steps()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        if runnable.is_empty() {
+            for step in &plan.steps {
+                if execution_steps
+                    .iter()
+                    .any(|executed: &PromptExecutionStep| executed.id == step.id)
+                {
+                    continue;
+                }
+                let unresolved = required_step_inputs(step)
+                    .into_iter()
+                    .filter(|dependency| !outputs.contains_key(dependency))
+                    .collect::<Vec<_>>();
+                execution_steps.push(unresolved_step(step.clone(), &unresolved));
+            }
+            break;
+        }
+
+        let scheduled = plan
+            .steps
             .iter()
-            .filter_map(|index| plan.steps.get(*index).cloned().map(|step| (*index, step)))
-            .filter_map(|(index, step)| {
+            .cloned()
+            .enumerate()
+            .filter(|(_, step)| runnable.contains(&step.id))
+            .map(|(index, step)| {
                 let required_inputs = required_step_inputs(&step);
                 let unresolved = required_inputs
                     .iter()
                     .filter(|dependency| !outputs.contains_key(*dependency))
                     .cloned()
                     .collect::<Vec<_>>();
-                let usable_input_count = required_inputs
-                    .iter()
-                    .filter(|dependency| outputs.contains_key(*dependency))
-                    .count();
-                if step.contract.completion.require_resolved_inputs
-                    && !unresolved.is_empty()
-                    && !allows_partial_dependency_recovery(&step, usable_input_count)
-                {
-                    completed.push((index, unresolved_step(step, &unresolved)));
-                    return None;
-                }
-
                 let completed_input_count = required_inputs
                     .iter()
                     .filter(|dependency| {
@@ -95,15 +118,26 @@ pub(super) fn execute_prompt_workflow_candidate_with_runner_impl(
                     });
                 let initial_prompt =
                     prompt_evaluation_step_prompt(objective, &step, &outputs, &unresolved);
-                Some(ScheduledPromptStep {
+                ScheduledPromptStep {
                     index,
                     step,
                     initial_prompt,
                     completed_input_count,
                     input_degraded,
-                })
+                }
             })
             .collect::<Vec<_>>();
+
+        let claim_ids = scheduled
+            .iter()
+            .map(|scheduled| scheduled.step.id.clone())
+            .collect::<Vec<_>>();
+        if checkpoint
+            .claim_steps_with_partial_recovery(&claim_ids, max_attempts, current_time_millis())
+            .is_err()
+        {
+            return failed_execution(candidate);
+        }
 
         let jobs = scheduled
             .iter()
@@ -112,9 +146,15 @@ pub(super) fn execute_prompt_workflow_candidate_with_runner_impl(
                 let runner = Arc::clone(&runner);
                 let alternate_models = alternate_models.clone();
                 let control = control.clone();
-                let max_model_turns = plan.budget.max_model_turns_per_step;
-                let max_tool_calls = plan.budget.max_tool_calls_per_step;
-                let max_output_tokens = plan.budget.max_output_tokens_per_step;
+                let max_model_turns = scheduled_step
+                    .step
+                    .tool_policy
+                    .effective_model_turn_budget(plan.budget.max_model_turns_per_step);
+                let max_tool_calls = scheduled_step
+                    .step
+                    .tool_policy
+                    .effective_tool_call_budget(plan.budget.max_tool_calls_per_step);
+                let max_output_tokens = plan.budget.max_output_tokens_per_step as u64;
                 Box::new(move |branch_cancellation| {
                     execute_step(ExecuteStepRequest {
                         step: scheduled_step.step,
@@ -138,7 +178,7 @@ pub(super) fn execute_prompt_workflow_candidate_with_runner_impl(
         let layer_execution = run_model_jobs_until_anytime_quorum_interruptible(
             "prompt-evaluation",
             jobs,
-            prompt_layer_quorum_policy(&plan.effort, scheduled.len()),
+            prompt_frontier_quorum_policy(&execution_contract, scheduled.len()),
             PromptExecutionStep::usable,
             || {
                 control.as_ref().is_some_and(|control| {
@@ -146,17 +186,22 @@ pub(super) fn execute_prompt_workflow_candidate_with_runner_impl(
                 })
             },
         );
-        completed.extend(scheduled.into_iter().zip(layer_execution.results).map(
-            |(scheduled_step, result)| {
+        let mut completed = scheduled
+            .into_iter()
+            .zip(layer_execution.results)
+            .map(|(scheduled_step, result)| {
                 let index = scheduled_step.index;
                 (
                     index,
                     result.unwrap_or_else(|error| parallel_error_step(scheduled_step.step, error)),
                 )
-            },
-        ));
+            })
+            .collect::<Vec<_>>();
         completed.sort_by_key(|(index, _)| *index);
         for (_, step) in completed {
+            if record_prompt_step_in_checkpoint(&mut checkpoint, &step, max_attempts).is_err() {
+                return failed_execution(candidate);
+            }
             if step.usable() {
                 outputs.insert(
                     step.id.clone(),
@@ -171,10 +216,13 @@ pub(super) fn execute_prompt_workflow_candidate_with_runner_impl(
     }
 
     let final_output = select_final_output(&plan, &execution_steps, &outputs);
+    let quality_gate_met =
+        prompt_execution_quality_gate(&plan, &execution_steps, &execution_contract);
     PromptExecutionCandidate {
         plan: candidate,
         execution: PromptWorkflowExecution {
             succeeded: !final_output.trim().is_empty(),
+            quality_gate_met,
             final_output,
             total_tokens: execution_steps.iter().map(|step| step.total_tokens).sum(),
             steps: execution_steps,
@@ -203,7 +251,7 @@ struct ExecuteStepRequest {
     max_attempts: usize,
     max_model_turns: usize,
     max_tool_calls: usize,
-    max_output_tokens: usize,
+    max_output_tokens: u64,
     completed_input_count: usize,
     input_degraded: bool,
 }
@@ -225,6 +273,8 @@ fn execute_step(request: ExecuteStepRequest) -> PromptExecutionStep {
         input_degraded,
     } = request;
     let role = prompt_evaluation_role(&step.role);
+    let stage = format!("prompt_evaluation_{}", step.id);
+    let stage_class = prompt_evaluation_stage_class(&step);
     let mut model = step.model.clone();
     let mut prompt = initial_prompt.clone();
     let mut prompts = Vec::new();
@@ -253,6 +303,8 @@ fn execute_step(request: ExecuteStepRequest) -> PromptExecutionStep {
         prompts.push(format!("attempt {attempts} model={model}\n{prompt}"));
         let completion = runner(
             PromptEvaluationWorkerRequest {
+                stage: stage.clone(),
+                stage_class,
                 role: role.clone(),
                 model: model.clone(),
                 prompt: prompt.clone(),
@@ -305,7 +357,13 @@ fn execute_step(request: ExecuteStepRequest) -> PromptExecutionStep {
             )
         });
         errors.push(failure.message.clone());
-        if attempts >= max_attempts || retry_policy == PromptRetryPolicy::FailFast {
+        if attempts >= max_attempts
+            || retry_policy == PromptRetryPolicy::FailFast
+            || !prompt_evaluation_retry_allowed(
+                &failure,
+                branch_cancellation.load(Ordering::SeqCst),
+            )
+        {
             break;
         }
 
@@ -409,31 +467,105 @@ fn required_step_inputs(step: &orchestrator::WorkflowPlanStep) -> Vec<String> {
         .collect()
 }
 
-fn allows_partial_dependency_recovery(
-    step: &orchestrator::WorkflowPlanStep,
-    usable_input_count: usize,
-) -> bool {
-    usable_input_count > 0
-        && matches!(
-            step.contract.output_kind,
-            orchestrator::WorkflowOutputKind::Verification
-                | orchestrator::WorkflowOutputKind::Synthesis
-        )
-}
-
-fn prompt_layer_quorum_policy(effort: &str, total: usize) -> AnytimeQuorumPolicy {
-    let preferred_successes = if total > 1 { total.min(2) } else { 1 };
-    let improvement_window = match effort.trim().to_ascii_lowercase().as_str() {
-        "pro" => Duration::from_secs(30),
-        "auto" => Duration::from_secs(12),
-        _ => Duration::ZERO,
+fn prompt_frontier_quorum_policy(
+    contract: &ConductorExecutionContract,
+    total: usize,
+) -> AnytimeQuorumPolicy {
+    let required_successes = match contract.stop_policy {
+        ConductorStopPolicy::Exhaustive => total.max(1),
+        _ => contract.required_successes_for_layer(total),
+    };
+    let preferred_successes = match contract.stop_policy {
+        ConductorStopPolicy::FirstVerified => 1,
+        _ => total.max(1),
     };
     AnytimeQuorumPolicy::new(
-        1,
+        required_successes,
         preferred_successes,
-        improvement_window,
+        Duration::from_millis(contract.quorum_grace_ms()),
         Duration::from_millis(25),
     )
+}
+
+fn record_prompt_step_in_checkpoint(
+    checkpoint: &mut WorkflowExecutionCheckpoint,
+    step: &PromptExecutionStep,
+    max_attempts: usize,
+) -> Result<(), String> {
+    let now_ms = current_time_millis();
+    if let Some(checkpoint_step) = checkpoint.steps.get_mut(&step.id) {
+        checkpoint_step.attempts =
+            if step.status == WorkflowStepStatus::Failed || step.attempts == 0 {
+                max_attempts
+            } else {
+                checkpoint_step.attempts.max(step.attempts)
+            };
+    }
+    match step.status {
+        WorkflowStepStatus::Completed => {
+            let evidence = vec![serde_json::Value::Null; step.evidence_count];
+            checkpoint.complete_step(
+                &step.id,
+                &step.model,
+                step.output.clone(),
+                serde_json::to_string(&evidence).map_err(|error| error.to_string())?,
+                now_ms,
+            )?;
+        }
+        WorkflowStepStatus::Degraded => {
+            checkpoint.degrade_step(
+                &step.id,
+                step.output.clone(),
+                step.errors.join("; "),
+                now_ms,
+            )?;
+        }
+        WorkflowStepStatus::Failed => {
+            checkpoint.fail_step(&step.id, step.errors.join("; "), now_ms)?;
+        }
+        WorkflowStepStatus::Pending | WorkflowStepStatus::Running => {
+            return Err(format!(
+                "prompt evaluation step {} returned a non-terminal status",
+                step.id
+            ));
+        }
+    }
+    checkpoint.record_step_metrics(&step.id, step.latency_ms, step.total_tokens)
+}
+
+fn prompt_execution_quality_gate(
+    plan: &WorkflowPlanIr,
+    steps: &[PromptExecutionStep],
+    contract: &ConductorExecutionContract,
+) -> bool {
+    let Some(final_step) = plan.steps.last() else {
+        return false;
+    };
+    let final_step_completed = steps
+        .iter()
+        .find(|step| step.id == final_step.id)
+        .is_some_and(PromptExecutionStep::succeeded);
+    let root_steps = plan
+        .steps
+        .iter()
+        .filter(|step| step.access.is_empty())
+        .collect::<Vec<_>>();
+    let successful_roots = root_steps
+        .iter()
+        .filter(|planned| {
+            steps
+                .iter()
+                .find(|executed| executed.id == planned.id)
+                .is_some_and(PromptExecutionStep::succeeded)
+        })
+        .count();
+    let root_gate_met = root_steps.is_empty()
+        || successful_roots >= contract.required_successes_for_layer(root_steps.len());
+    let verification_gate_met = !contract.verification_required
+        || steps.iter().any(|step| {
+            step.succeeded() && matches!(step.role.as_str(), "verifier" | "synthesizer")
+        });
+    final_step_completed && root_gate_met && verification_gate_met
 }
 
 fn unresolved_step(
@@ -528,6 +660,7 @@ fn failed_execution(candidate: PromptPlanCandidate) -> PromptExecutionCandidate 
         plan: candidate,
         execution: PromptWorkflowExecution {
             succeeded: false,
+            quality_gate_met: false,
             final_output: String::new(),
             steps: Vec::new(),
             latency_ms: 0,

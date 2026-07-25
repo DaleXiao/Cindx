@@ -21,6 +21,13 @@ pub enum RunStopReason {
     RepairBudgetExhausted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunContinuationDirective {
+    Continue,
+    CommitTerminalResult,
+    Stop(RunStopReason),
+}
+
 impl RunStopReason {
     pub fn code(self) -> &'static str {
         match self {
@@ -539,6 +546,26 @@ impl AgentRunControl {
 
     pub fn should_stop(&self) -> bool {
         self.stop_reason().is_some()
+    }
+
+    pub fn continuation_directive(&self) -> RunContinuationDirective {
+        if let Some(reason) = self.stop_reason() {
+            return RunContinuationDirective::Stop(reason);
+        }
+        let state = self.state.lock().expect("run control state poisoned");
+        let model_calls = self.model_calls.load(Ordering::SeqCst);
+        let remaining_calls = state.model_call_limit.saturating_sub(model_calls);
+        let remaining_time = self
+            .budget
+            .max_duration
+            .saturating_sub(state.started_at.elapsed());
+        if remaining_calls <= self.budget.terminal_model_call_reserve
+            || remaining_time <= self.budget.terminal_time_reserve
+        {
+            RunContinuationDirective::CommitTerminalResult
+        } else {
+            RunContinuationDirective::Continue
+        }
     }
 
     pub fn begin_model_call(&self, stage: &str) -> Result<usize, RunStopReason> {

@@ -204,6 +204,7 @@ pub(crate) fn recover_adaptive_worker(
         spec.tool_policy != WorkflowToolPolicy::None,
         spec.max_model_turns,
         spec.max_tool_calls,
+        spec.max_output_tokens,
         cancellation,
         None,
     );

@@ -124,31 +124,42 @@ pub(super) fn prepare_adaptive_wave(
                 access: step.access.clone(),
                 tool_policy: workflow_plan.steps[step_index].tool_policy.clone(),
                 max_attempts: max_step_attempts,
-                max_model_turns: max_model_turns_per_step,
-                max_tool_calls: workflow_plan.budget.max_tool_calls_per_step,
+                max_model_turns: workflow_plan.steps[step_index]
+                    .tool_policy
+                    .effective_model_turn_budget(max_model_turns_per_step),
+                max_tool_calls: workflow_plan.steps[step_index]
+                    .tool_policy
+                    .effective_tool_call_budget(workflow_plan.budget.max_tool_calls_per_step),
+                max_output_tokens: workflow_plan.budget.max_output_tokens_per_step as u64,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
 
+    let claimed_steps = workflow_checkpoint.claim_steps(
+        &specs
+            .iter()
+            .map(|spec| spec.step_id.clone())
+            .collect::<Vec<_>>(),
+        max_step_attempts,
+        current_time_millis(),
+    )?;
+    let resumed_steps = claimed_steps
+        .into_iter()
+        .map(|claim| (claim.step_id, claim.resumed))
+        .collect::<BTreeMap<_, _>>();
     for spec in &specs {
         controller_mark_running_if_pending(anytime_controller, &spec.step_id)?;
         persist_anytime_controller(workflow_checkpoint, anytime_controller)?;
-        let started_new_attempt = ensure_adaptive_step_attempt_started(
-            workflow_checkpoint,
-            &spec.step_id,
-            &spec.model,
-            spec.max_attempts,
-            current_time_millis(),
-        )?;
+        let resumed = resumed_steps.get(&spec.step_id).copied().unwrap_or(false);
         append_workflow_checkpoint_event(
             state,
             task_id,
             run_context,
             collaboration_id,
-            if started_new_attempt {
-                "Collaboration workflow step started"
-            } else {
+            if resumed {
                 "Collaboration workflow step resumed"
+            } else {
+                "Collaboration workflow step started"
             },
             "running",
             Some(&spec.step_id),
@@ -247,6 +258,7 @@ pub(super) fn execute_adaptive_wave(
             let allow_tools = spec.tool_policy != WorkflowToolPolicy::None;
             let max_model_turns = spec.max_model_turns;
             let max_tool_calls = spec.max_tool_calls;
+            let max_output_tokens = spec.max_output_tokens;
             let cancellation = cancellation.clone();
             Box::new(move |branch_cancellation| {
                 complete_collaboration_worker_with_tools(
@@ -263,6 +275,7 @@ pub(super) fn execute_adaptive_wave(
                     allow_tools,
                     max_model_turns,
                     max_tool_calls,
+                    max_output_tokens,
                     cancellation,
                     Some(branch_cancellation),
                 )

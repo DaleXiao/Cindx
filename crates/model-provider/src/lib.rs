@@ -88,8 +88,10 @@ impl ModelResponse {
             .get("finish_reason")
             .map(|value| value.trim().to_ascii_lowercase());
         let termination = if !self.tool_calls.is_empty()
-            || matches!(finish_reason.as_deref(), Some("tool_calls" | "function_call"))
-        {
+            || matches!(
+                finish_reason.as_deref(),
+                Some("tool_calls" | "function_call")
+            ) {
             ModelResponseTermination::ToolCalls
         } else {
             match finish_reason.as_deref() {
@@ -233,6 +235,15 @@ pub trait ModelProvider {
     fn capabilities(&self) -> ProviderCapabilities;
 
     fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError>;
+}
+
+pub trait StreamingModelProvider: Send + Sync {
+    fn complete_streaming_cancellable(
+        &self,
+        request: ModelRequest,
+        on_delta: &mut dyn FnMut(&str),
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<ModelResponse, ModelError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -533,8 +544,7 @@ impl DsmlStreamDeltaFilter {
         loop {
             if self.inside_protocol {
                 if let Some(end) = self.pending.find(DSML_TOOL_CALLS_CLOSE) {
-                    self.pending
-                        .drain(..end + DSML_TOOL_CALLS_CLOSE.len());
+                    self.pending.drain(..end + DSML_TOOL_CALLS_CLOSE.len());
                     self.inside_protocol = false;
                     continue;
                 }
@@ -548,8 +558,7 @@ impl DsmlStreamDeltaFilter {
                 if start > 0 {
                     on_delta(&self.pending[..start]);
                 }
-                self.pending
-                    .drain(..start + DSML_TOOL_CALLS_OPEN.len());
+                self.pending.drain(..start + DSML_TOOL_CALLS_OPEN.len());
                 self.inside_protocol = true;
                 continue;
             }
@@ -620,13 +629,7 @@ fn apply_complete_stream_lines(
             continue;
         }
         let line = String::from_utf8_lossy(&pending[consumed..=index]);
-        apply_stream_line(
-            &line,
-            answer,
-            streamed_tool_calls,
-            finish_reason,
-            on_delta,
-        )?;
+        apply_stream_line(&line, answer, streamed_tool_calls, finish_reason, on_delta)?;
         consumed = index + 1;
     }
     if consumed > 0 {
@@ -820,11 +823,14 @@ async fn consume_streaming_response(
         .await?;
         let text = String::from_utf8_lossy(&body).into_owned();
         let provider_error = parse_provider_error(&text).unwrap_or_default();
-        return Err(ModelError::with_status(status.as_u16(), if provider_error.trim().is_empty() {
-            format!("model request failed with status {status}")
-        } else {
-            provider_error
-        }));
+        return Err(ModelError::with_status(
+            status.as_u16(),
+            if provider_error.trim().is_empty() {
+                format!("model request failed with status {status}")
+            } else {
+                provider_error
+            },
+        ));
     }
 
     consume_streaming_body(
@@ -863,11 +869,14 @@ impl OpenAiCompatibleProvider {
         let stdout = String::from_utf8_lossy(&output.body).to_string();
         if !output.status.is_success() {
             let provider_error = parse_provider_error(&stdout).unwrap_or_default();
-            return Err(ModelError::with_status(output.status.as_u16(), if provider_error.is_empty() {
-                format!("model list request failed with status {}", output.status)
-            } else {
-                provider_error
-            }));
+            return Err(ModelError::with_status(
+                output.status.as_u16(),
+                if provider_error.is_empty() {
+                    format!("model list request failed with status {}", output.status)
+                } else {
+                    provider_error
+                },
+            ));
         }
 
         parse_model_list_response(&stdout)
@@ -969,11 +978,14 @@ impl OpenAiCompatibleProvider {
         let stdout = String::from_utf8_lossy(&output.body).to_string();
         if !output.status.is_success() {
             let provider_error = parse_provider_error(&stdout).unwrap_or_default();
-            return Err(ModelError::with_status(output.status.as_u16(), if provider_error.is_empty() {
-                format!("model request failed with status {}", output.status)
-            } else {
-                provider_error
-            }));
+            return Err(ModelError::with_status(
+                output.status.as_u16(),
+                if provider_error.is_empty() {
+                    format!("model request failed with status {}", output.status)
+                } else {
+                    provider_error
+                },
+            ));
         }
 
         let mut response = parse_model_response(&stdout)?;
@@ -1014,11 +1026,14 @@ impl OpenAiCompatibleProvider {
         let stdout = String::from_utf8_lossy(&output.body).to_string();
         if !output.status.is_success() {
             let provider_error = parse_provider_error(&stdout).unwrap_or_default();
-            return Err(ModelError::with_status(output.status.as_u16(), if provider_error.is_empty() {
-                format!("embedding request failed with status {}", output.status)
-            } else {
-                provider_error
-            }));
+            return Err(ModelError::with_status(
+                output.status.as_u16(),
+                if provider_error.is_empty() {
+                    format!("embedding request failed with status {}", output.status)
+                } else {
+                    provider_error
+                },
+            ));
         }
 
         let mut response = parse_embedding_response(&stdout)?;
@@ -1070,10 +1085,10 @@ impl OpenAiCompatibleImageProvider {
         if image_endpoint_probe_succeeded(output.status) {
             Ok(endpoint)
         } else {
-            Err(ModelError::with_status(output.status.as_u16(), format!(
-                "image endpoint probe returned status {}",
-                output.status
-            )))
+            Err(ModelError::with_status(
+                output.status.as_u16(),
+                format!("image endpoint probe returned status {}", output.status),
+            ))
         }
     }
 
@@ -1124,14 +1139,17 @@ impl OpenAiCompatibleImageProvider {
         let stdout = String::from_utf8_lossy(&output.body).to_string();
         if !output.status.is_success() {
             let provider_error = parse_provider_error(&stdout).unwrap_or_default();
-            return Err(ModelError::with_status(output.status.as_u16(), if provider_error.is_empty() {
-                format!(
-                    "image generation request failed with status {}",
-                    output.status
-                )
-            } else {
-                provider_error
-            }));
+            return Err(ModelError::with_status(
+                output.status.as_u16(),
+                if provider_error.is_empty() {
+                    format!(
+                        "image generation request failed with status {}",
+                        output.status
+                    )
+                } else {
+                    provider_error
+                },
+            ));
         }
         if output.body.len() > MAX_IMAGE_RESPONSE_BYTES {
             return Err(ModelError::new("image generation response exceeded 48 MB"));
@@ -1161,10 +1179,13 @@ impl OpenAiCompatibleImageProvider {
                         &mut should_cancel,
                     )?;
                     if !output.status.is_success() {
-                        return Err(ModelError::with_status(output.status.as_u16(), format!(
-                            "generated image download failed with status {}",
-                            output.status
-                        )));
+                        return Err(ModelError::with_status(
+                            output.status.as_u16(),
+                            format!(
+                                "generated image download failed with status {}",
+                                output.status
+                            ),
+                        ));
                     }
                     output.body
                 }
@@ -1227,6 +1248,22 @@ pub fn parse_model_list_response(text: &str) -> Result<Vec<String>, ModelError> 
         return Err(ModelError::new("provider returned an empty model list"));
     }
     Ok(models)
+}
+
+impl StreamingModelProvider for OpenAiCompatibleProvider {
+    fn complete_streaming_cancellable(
+        &self,
+        request: ModelRequest,
+        on_delta: &mut dyn FnMut(&str),
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<ModelResponse, ModelError> {
+        OpenAiCompatibleProvider::complete_streaming_cancellable(
+            self,
+            request,
+            |delta| on_delta(delta),
+            || should_cancel(),
+        )
+    }
 }
 
 impl ModelProvider for OpenAiCompatibleProvider {
@@ -2504,6 +2541,60 @@ mod tests {
     use futures_util::stream;
     use std::time::Instant;
 
+    struct ScriptedStreamingProvider;
+
+    impl StreamingModelProvider for ScriptedStreamingProvider {
+        fn complete_streaming_cancellable(
+            &self,
+            request: ModelRequest,
+            on_delta: &mut dyn FnMut(&str),
+            should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<ModelResponse, ModelError> {
+            if should_cancel() {
+                return Err(ModelError::new(MODEL_REQUEST_CANCELLED));
+            }
+            on_delta("scripted ");
+            on_delta("answer");
+            Ok(ModelResponse {
+                message: Message {
+                    role: MessageRole::Assistant,
+                    content: "scripted answer".to_string(),
+                    metadata: Metadata::new(),
+                },
+                raw_tool_calls_json: None,
+                tool_calls: Vec::new(),
+                metadata: request.metadata,
+            })
+        }
+    }
+
+    #[test]
+    fn streaming_provider_contract_is_object_safe_and_preserves_callbacks() {
+        let provider: &dyn StreamingModelProvider = &ScriptedStreamingProvider;
+        let mut output = String::new();
+        let mut on_delta = |delta: &str| output.push_str(delta);
+        let mut should_cancel = || false;
+        let response = provider
+            .complete_streaming_cancellable(
+                ModelRequest {
+                    role: ModelRole::Executor,
+                    messages: Vec::new(),
+                    tools: Vec::new(),
+                    mode: ModelCallMode::Streaming,
+                    metadata: [("request_id".to_string(), "scripted".to_string())]
+                        .into_iter()
+                        .collect(),
+                },
+                &mut on_delta,
+                &mut should_cancel,
+            )
+            .unwrap();
+
+        assert_eq!(output, "scripted answer");
+        assert_eq!(response.message.content, "scripted answer");
+        assert_eq!(response.metadata["request_id"], "scripted");
+    }
+
     fn delayed_stream(
         chunks: Vec<(Duration, &'static str)>,
     ) -> impl Stream<Item = Result<Vec<u8>, ModelError>> {
@@ -3203,11 +3294,10 @@ mod tests {
 
     #[test]
     fn streaming_events_preserve_finish_reason() {
-        let event = parse_stream_event(
-            r#"data: {"choices":[{"delta":{},"finish_reason":"length"}]}"#,
-        )
-        .expect("stream event should parse")
-        .expect("stream event should exist");
+        let event =
+            parse_stream_event(r#"data: {"choices":[{"delta":{},"finish_reason":"length"}]}"#)
+                .expect("stream event should parse")
+                .expect("stream event should exist");
 
         assert_eq!(event.finish_reason.as_deref(), Some("length"));
     }

@@ -144,10 +144,7 @@ mod tests {
         let effective_pro = weak_pro.with_effort_capability_floor("pro");
         assert_eq!(effective_pro.graph_depth, PromptGraphDepth::Deep);
         assert_eq!(effective_pro.verification, PromptVerification::Adversarial);
-        assert_eq!(
-            effective_pro.commit_strategy,
-            PromptCommitStrategy::Exhaustive
-        );
+        assert_eq!(effective_pro.commit_strategy, PromptCommitStrategy::Quorum);
         assert_eq!(
             effective_pro.topology_strategy,
             PromptTopologyStrategy::ParallelDeliberation

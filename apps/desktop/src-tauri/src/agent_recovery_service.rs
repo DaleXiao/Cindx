@@ -71,14 +71,7 @@ pub(super) fn build_agent_recovery_envelope(
     reason: &str,
     now_ms: u64,
 ) -> Option<AgentRecoveryEnvelope> {
-    build_agent_recovery_envelope_with_task_state(
-        events,
-        run_context,
-        state,
-        reason,
-        now_ms,
-        None,
-    )
+    build_agent_recovery_envelope_with_task_state(events, run_context, state, reason, now_ms, None)
 }
 
 pub(super) fn build_agent_recovery_envelope_with_task_state(
@@ -152,9 +145,11 @@ pub(super) fn build_agent_recovery_envelope_with_task_state(
         budget_extensions: latest_counter(&["budget_extensions", "run_budget_extensions"])
             .or_else(|| prior.as_ref().map(|envelope| envelope.budget_extensions))
             .unwrap_or_default(),
-        task_state: task_state
-            .cloned()
-            .or_else(|| prior.as_ref().and_then(|envelope| envelope.task_state.clone())),
+        task_state: task_state.cloned().or_else(|| {
+            prior
+                .as_ref()
+                .and_then(|envelope| envelope.task_state.clone())
+        }),
         created_at_ms: prior
             .as_ref()
             .map(|envelope| envelope.created_at_ms)
@@ -170,14 +165,7 @@ pub(super) fn agent_recovery_metadata(
     reason: &str,
     metadata: Metadata,
 ) -> Result<Metadata, String> {
-    agent_recovery_metadata_with_task_state(
-        events,
-        run_context,
-        state,
-        reason,
-        metadata,
-        None,
-    )
+    agent_recovery_metadata_with_task_state(events, run_context, state, reason, metadata, None)
 }
 
 pub(super) fn agent_recovery_metadata_with_task_state(
@@ -196,9 +184,7 @@ pub(super) fn agent_recovery_metadata_with_task_state(
         current_time_millis(),
         task_state,
     )
-    .ok_or_else(|| {
-        "agent recovery checkpoint is missing a durable session prompt".to_string()
-    })?;
+    .ok_or_else(|| "agent recovery checkpoint is missing a durable session prompt".to_string())?;
     metadata.insert(
         "recovery_schema".to_string(),
         AGENT_RECOVERY_SCHEMA.to_string(),
