@@ -2393,7 +2393,7 @@ pre {
   height: 24px;
   flex: 0 0 auto;
   padding: 0;
-  color: #777777;
+  color: var(--control-fg);
   background: transparent;
   border: 0;
   border-radius: var(--radius-md);
@@ -2401,8 +2401,8 @@ pre {
 }
 
 .thread-code-block-header button:hover {
-  color: #222222;
-  background: #e5e5e5;
+  color: var(--control-fg-hover);
+  background: var(--surface-active);
 }
 
 .thread-code-block-header button svg {
