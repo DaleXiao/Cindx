@@ -1,6 +1,14 @@
 import fs from "node:fs";
 
-const css = fs.readFileSync("apps/desktop/src/styles.css", "utf8");
+const styleRoot = "apps/desktop/src/styles";
+const css = [
+  fs.readFileSync("apps/desktop/src/styles.css", "utf8"),
+  ...fs
+    .readdirSync(styleRoot)
+    .filter((entry) => entry.endsWith(".css"))
+    .sort()
+    .map((entry) => fs.readFileSync(`${styleRoot}/${entry}`, "utf8"))
+].join("\n");
 const appSource = fs.readFileSync("apps/desktop/src/App.tsx", "utf8");
 const config = JSON.parse(
   fs.readFileSync("apps/desktop/src-tauri/tauri.conf.json", "utf8")

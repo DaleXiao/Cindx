@@ -46,7 +46,6 @@ import {
   Suspense,
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -57,10 +56,12 @@ import { Inspector, type InspectorTab } from "./components/Inspector";
 import { Composer } from "./components/Composer";
 import { QueuedMessages } from "./components/QueuedMessages";
 import { Sidebar, type WorkspaceView } from "./components/Sidebar";
-import type {
-  AppearanceMode,
-  SettingsCategory
-} from "./components/SettingsPage";
+import type { SettingsCategory } from "./components/SettingsPage";
+import { usePreferencesController } from "./controllers/usePreferencesController";
+import { useProviderSettingsController } from "./controllers/useProviderSettingsController";
+import { useIntegrationSettingsController } from "./controllers/useIntegrationSettingsController";
+import { useKnowledgeToolingController } from "./controllers/useKnowledgeToolingController";
+import { fileDataBase64 } from "./utils/fileDataBase64";
 import {
   LiveSessionThread,
   type SessionThreadSelection
@@ -71,12 +72,9 @@ import {
   AgentEffort,
   AgentTraceState,
   ChatMessageView,
-  answerWithRag,
   acknowledgeSessionActivity,
   archiveSession,
   cancelAgentTask,
-  compactContext,
-  ContextState,
   createProject,
   createSession,
   deleteQueuedAgentMessage,
@@ -91,35 +89,12 @@ import {
   getAgentTraceState,
   getContextState,
   getPermissionReviewState,
-  getPhase4State,
-  getPhase5State,
-  getPhase7State,
-  getPhase8State,
   getProjectSessionState,
   getRuntimeStatus,
-  getSidecarState,
-  getWebSearchConfig,
   editQueuedAgentMessage,
-  getMcpState,
-  getPersonalizationConfig,
-  getSkillState,
-  installSkillPackage,
-  installSkillUrl,
-  indexWorkspaceRag,
   forkSession,
-  listProviderModels,
-  validateImageEndpoint,
-  Phase4State,
-  Phase5State,
-  Phase7State,
-  Phase8State,
-  McpServerConfig,
-  McpState,
-  ProviderConfigInput,
-  ProviderConfigState,
   PermissionReviewItem,
   PermissionReviewState,
-  PersonalizationConfig,
   ProjectSessionState,
   QueuedAgentMessage,
   QueuedAgentMessageActionReceipt,
@@ -127,9 +102,7 @@ import {
   revealArtifact,
   revealMainWindow,
   setSidebarMaterialWidth,
-  resolveBrowserPermission,
   resolveAgentPermission,
-  resolveToolPermission,
   resolvePermission,
   RuntimeStatus,
   retryAgentTask,
@@ -139,30 +112,13 @@ import {
   restoreSession,
   runAgentTask,
   runNextQueuedAgentMessage,
-  runBrowserTool,
-  runTool,
   pickWorkspaceFolder,
-  saveProviderConfig,
-  savePersonalizationConfig,
-  setPromptEvolutionEnabled,
-  saveSidecarConfig,
-  saveWebSearchConfig,
-  refreshMcpServer,
-  refreshSkills,
-  removeMcpServer,
-  saveSkillPreference,
-  SkillState,
-  updateMcpServerPolicy,
-  upsertMcpServer,
   saveWorkspaceRoot,
-  searchRag,
   selectProject,
   selectSession,
   setSessionEffort,
   steerQueuedAgentMessage,
   subscribeToSessionTitleUpdates,
-  SidecarState,
-  WebSearchConfigState,
   stageAgentAttachments,
   queueAgentMessage
 } from "./tauri";
@@ -182,7 +138,6 @@ import {
 
 const DEBUG_ALWAYS_VISIBLE_STORAGE_KEY = "cindx.debug.always-visible";
 const IGNORED_PERMISSION_REVIEWS_STORAGE_KEY = "cindx.permissions.ignored";
-const APPEARANCE_STORAGE_KEY = "cindx.appearance";
 const FOREGROUND_AGENT_POLL_INTERVAL_MS = 1_000;
 const BACKGROUND_AGENT_POLL_INTERVAL_MS = 5_000;
 
@@ -207,12 +162,6 @@ const SettingsPage = lazy(() =>
   }))
 );
 
-const DEFAULT_PERSONALIZATION: PersonalizationConfig = {
-  preferredName: "",
-  responseTone: "natural",
-  responseLength: "balanced"
-};
-
 function loadDebugAlwaysVisible() {
   if (typeof window === "undefined") return false;
   try {
@@ -234,17 +183,6 @@ function loadIgnoredPermissionReviewIds() {
   }
 }
 
-function loadAppearanceMode(): AppearanceMode {
-  if (typeof window === "undefined") return "system";
-  try {
-    const stored = window.localStorage.getItem(APPEARANCE_STORAGE_KEY);
-    if (stored === "light" || stored === "dark") return stored;
-  } catch {
-    // Fall back to the system appearance when storage is unavailable.
-  }
-  return "system";
-}
-
 function normalizedSessionEffort(effort: string | undefined): AgentEffort {
   if (effort === "fast" || effort === "pro") return effort;
   return "auto";
@@ -256,44 +194,10 @@ function runBudgetForEffort(effort: AgentEffort) {
   return { durationMs: 8 * 60_000, modelCalls: 18, toolCalls: 36 };
 }
 
-function normalizedEffortPolicy(policy: string) {
-  if (policy === "single" || policy === "best_of_n") return policy;
-  return "auto_router";
-}
-
-function providerDraftFromState(provider: ProviderConfigState): ProviderConfigInput {
-  return {
-    baseUrl: provider.baseUrl,
-    apiKey: "",
-    model: provider.model,
-    conductorModel: provider.conductorModel,
-    plannerModel: provider.plannerModel,
-    executorModel: provider.executorModel,
-    reviewerModel: provider.reviewerModel,
-    summarizerModel: provider.summarizerModel,
-    embeddingModel: provider.embeddingModel,
-    imageModel: provider.imageModel,
-    imageEndpoint: provider.imageEndpoint,
-    collaborationPolicy: normalizedEffortPolicy(provider.collaborationPolicy),
-    promptEvolutionEnabled: provider.promptEvolutionEnabled,
-    contextWindowTokens: provider.contextWindowTokens,
-    agentSystemPrompt: provider.agentSystemPrompt
-  };
-}
-
 function formatTokenCount(tokens: number) {
   if (tokens < 1000) return String(tokens);
   if (tokens < 1_000_000) return `${(tokens / 1000).toFixed(tokens < 10_000 ? 1 : 0)}k`;
   return `${(tokens / 1_000_000).toFixed(1)}M`;
-}
-
-function fileDataBase64(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result ?? ""));
-    reader.onerror = () => reject(reader.error ?? new Error(`Failed to read ${file.name}`));
-    reader.readAsDataURL(file);
-  });
 }
 
 function clampSidebarWidth(width: number) {
@@ -310,11 +214,19 @@ export function App() {
   const [sidebarWidth, setSidebarWidth] = useState(236);
   const [sidebarResizing, setSidebarResizing] = useState(false);
   const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>("runtime");
-  const [personalizationDraft, setPersonalizationDraft] =
-    useState<PersonalizationConfig>(DEFAULT_PERSONALIZATION);
-  const [personalizationBusy, setPersonalizationBusy] = useState(false);
-  const [personalizationError, setPersonalizationError] = useState<string | null>(null);
-  const [appearanceMode, setAppearanceMode] = useState<AppearanceMode>(loadAppearanceMode);
+  const {
+    appearanceMode,
+    flushPersonalization,
+    handleAppearanceModeChange,
+    handleSavePersonalization,
+    loadPersonalization,
+    personalizationBusy,
+    personalizationDraft,
+    personalizationError,
+    settingsToast,
+    showSettingsSaved,
+    updatePersonalizationDraft
+  } = usePreferencesController();
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("details");
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorOutputRequest, setInspectorOutputRequest] = useState<{
@@ -332,29 +244,13 @@ export function App() {
   const [ignoredPermissionReviewIds, setIgnoredPermissionReviewIds] = useState(
     loadIgnoredPermissionReviewIds
   );
-  const [phase4, setPhase4] = useState<Phase4State | null>(null);
-  const [phase5, setPhase5] = useState<Phase5State | null>(null);
-  const [phase7, setPhase7] = useState<Phase7State | null>(null);
-  const [phase8, setPhase8] = useState<Phase8State | null>(null);
-  const [contextState, setContextState] = useState<ContextState | null>(null);
   const [agentState, setAgentState] = useState<AgentState | null>(null);
   const [sessionLoadingId, setSessionLoadingId] = useState<string | null>(null);
   const [agentTraceState, setAgentTraceState] = useState<AgentTraceState | null>(null);
   const [selectedThreadItem, setSelectedThreadItem] =
     useState<SessionThreadSelection | null>(null);
   const [selectedTraceStepId, setSelectedTraceStepId] = useState<string | null>(null);
-  const [sidecarState, setSidecarState] = useState<SidecarState | null>(null);
-  const [webSearchConfig, setWebSearchConfig] = useState<WebSearchConfigState | null>(null);
-  const [mcpState, setMcpState] = useState<McpState | null>(null);
-  const [skillState, setSkillState] = useState<SkillState | null>(null);
   const [projectSessionState, setProjectSessionState] = useState<ProjectSessionState | null>(null);
-  const [sidecarDraft, setSidecarDraft] = useState({
-    browserPath: "",
-    computerPath: "",
-    autoConfigure: true
-  });
-  const [webSearchDraft, setWebSearchDraft] = useState({ endpoint: "", apiKey: "" });
-  const [providerDraft, setProviderDraft] = useState<ProviderConfigInput | null>(null);
   const [workspaceDraft, setWorkspaceDraft] = useState("");
   const [newProjectName, setNewProjectName] = useState("");
   const [projectCreateOpen, setProjectCreateOpen] = useState(false);
@@ -367,44 +263,10 @@ export function App() {
   );
   const [composerFocusRequest, setComposerFocusRequest] = useState(0);
   const [streamResetVersion, setStreamResetVersion] = useState(0);
-  const [providerModels, setProviderModels] = useState<string[]>([]);
-  const [providerModelsBusy, setProviderModelsBusy] = useState(false);
-  const [providerModelsRefreshTurn, setProviderModelsRefreshTurn] = useState(0);
-  const [providerModelsError, setProviderModelsError] = useState<string | null>(null);
-  const [imageEndpointValidation, setImageEndpointValidation] = useState<
-    "idle" | "checking" | "valid" | "invalid"
-  >("idle");
-  const imageEndpointValidationRequestRef = useRef(0);
-  const [selectedTool, setSelectedTool] = useState("file.list");
-  const [toolInput, setToolInput] = useState("path=.");
-  const [ragQuery, setRagQuery] = useState("What is the Cindx MVP scope?");
-  const [knowledgeGraphOpen, setKnowledgeGraphOpen] = useState(false);
-  const [browserUrl, setBrowserUrl] = useState("https://example.com");
-  const [browserTarget, setBrowserTarget] = useState("body");
-  const [browserText, setBrowserText] = useState("hello");
   const [permissionBusy, setPermissionBusy] = useState(false);
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
   const [workspacePickerBusy, setWorkspacePickerBusy] = useState(false);
-  const [providerBusy, setProviderBusy] = useState(false);
-  const [toolBusy, setToolBusy] = useState(false);
-  const [ragBusy, setRagBusy] = useState(false);
-  const [browserBusy, setBrowserBusy] = useState(false);
-  const [contextBusy, setContextBusy] = useState(false);
   const [traceBusy, setTraceBusy] = useState(false);
-  const [sidecarBusy, setSidecarBusy] = useState(false);
-  const [webSearchBusy, setWebSearchBusy] = useState(false);
-  const [mcpBusy, setMcpBusy] = useState(false);
-  const [skillBusy, setSkillBusy] = useState(false);
-  const [skillRefreshTurn, setSkillRefreshTurn] = useState(0);
-  const [skillUrl, setSkillUrl] = useState("");
-  const [skillInstallError, setSkillInstallError] = useState<string | null>(null);
-  const [mcpDraft, setMcpDraft] = useState({
-    name: "",
-    command: "",
-    args: "",
-    envKey: "",
-    envValue: ""
-  });
   const [projectSessionBusy, setProjectSessionBusy] = useState(false);
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(() => new Set());
   const [queuedMessageBusyId, setQueuedMessageBusyId] = useState<string | null>(null);
@@ -437,16 +299,117 @@ export function App() {
   const queueDrainingSessionIdsRef = useRef<Set<string>>(new Set());
   const suppressQueueDrainSessionIdsRef = useRef<Set<string>>(new Set());
   const startupWindowRevealRequestedRef = useRef(false);
-  const skillPackageInputRef = useRef<HTMLInputElement>(null);
-  const settingsToastTimerRef = useRef<number | null>(null);
-  const personalizationSaveTimerRef = useRef<number | null>(null);
-  const personalizationSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const personalizationRevisionRef = useRef(0);
-  const personalizationDraftRef = useRef<PersonalizationConfig>(DEFAULT_PERSONALIZATION);
   const [composerError, setComposerError] = useState<string | null>(null);
-  const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
-  const [webSearchError, setWebSearchError] = useState<string | null>(null);
-  const [settingsToast, setSettingsToast] = useState<{ id: number; message: string } | null>(null);
+  const reportComposerError = useCallback(
+    (message: string | null) => setComposerError(message),
+    []
+  );
+  const showInspector = useCallback((tab: InspectorTab) => {
+    setInspectorTab(tab);
+    setInspectorOpen(true);
+  }, []);
+  const {
+    collaborationModelCount,
+    handleLoadProviderModels,
+    handlePromptEvolutionToggle,
+    handleSaveProviderConfig,
+    imageEndpointValidation,
+    loadProviderState,
+    phase4,
+    providerBusy,
+    providerDraft,
+    providerModelOptions,
+    providerModels,
+    providerModelsBusy,
+    providerModelsError,
+    providerModelsRefreshTurn,
+    setProviderDraft
+  } = useProviderSettingsController({
+    reportError: reportComposerError,
+    showSaved: showSettingsSaved
+  });
+  const {
+    handleAddMcpServer,
+    handleInstallSkillPackage,
+    handleInstallSkillUrl,
+    handleMcpPolicy,
+    handleRefreshMcpServer,
+    handleRefreshSkills,
+    handleRemoveMcpServer,
+    handleSaveSidecars,
+    handleSaveWebSearch,
+    handleSkillPreference,
+    loadIntegrationState,
+    mcpBusy,
+    mcpDraft,
+    mcpState,
+    setMcpDraft,
+    setSidecarDraft,
+    setSkillUrl,
+    setWebSearchDraft,
+    sidecarBusy,
+    sidecarDraft,
+    sidecarState,
+    skillBusy,
+    skillInstallError,
+    skillPackageInputRef,
+    skillRefreshTurn,
+    skillState,
+    skillUrl,
+    webSearchBusy,
+    webSearchConfig,
+    webSearchDraft,
+    webSearchError
+  } = useIntegrationSettingsController({
+    reportError: reportComposerError,
+    showSaved: showSettingsSaved
+  });
+  const {
+    browserApprovals,
+    browserBusy,
+    browserObservations,
+    browserTarget,
+    browserText,
+    browserUrl,
+    contextBusy,
+    contextCheckpoint,
+    contextState,
+    handleAnswerWithRag,
+    handleCompactContext,
+    handleIndexRag,
+    handleResolveBrowserPermission,
+    handleResolveToolPermission,
+    handleRunBrowserTool,
+    handleRunTool,
+    handleSearchRag,
+    knowledgeError,
+    knowledgeGraphOpen,
+    loadKnowledgeState,
+    phase5,
+    phase7,
+    ragBusy,
+    ragQuery,
+    ragSources,
+    ragStats,
+    refreshWorkspaceKnowledge,
+    selectedTool,
+    selectedToolSpec,
+    setBrowserTarget,
+    setBrowserText,
+    setBrowserUrl,
+    setContextState,
+    setKnowledgeGraphOpen,
+    setRagQuery,
+    setSelectedTool,
+    setToolInput,
+    toolApprovals,
+    toolBusy,
+    toolInput,
+    toolResults
+  } = useKnowledgeToolingController({
+    reportError: reportComposerError,
+    showInspector
+  });
 
   function requestSessionAgentState(sessionId: string) {
     return sessionRuntimeCache.requestAgent(sessionId, () =>
@@ -563,37 +526,6 @@ export function App() {
     return () => window.cancelAnimationFrame(frame);
   }, [activeView, sidebarOpen, sidebarWidth]);
 
-  useLayoutEffect(() => {
-    const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
-    const applyAppearance = () => {
-      const resolved =
-        appearanceMode === "system"
-          ? systemTheme.matches
-            ? "dark"
-            : "light"
-          : appearanceMode;
-      document.documentElement.dataset.appearance = appearanceMode;
-      document.documentElement.dataset.theme = resolved;
-      document.documentElement.style.colorScheme = resolved;
-    };
-    applyAppearance();
-    if (appearanceMode !== "system") return;
-    systemTheme.addEventListener("change", applyAppearance);
-    return () => systemTheme.removeEventListener("change", applyAppearance);
-  }, [appearanceMode]);
-
-  useEffect(
-    () => () => {
-      if (settingsToastTimerRef.current !== null) {
-        window.clearTimeout(settingsToastTimerRef.current);
-      }
-      if (personalizationSaveTimerRef.current !== null) {
-        window.clearTimeout(personalizationSaveTimerRef.current);
-      }
-    },
-    []
-  );
-
   useEffect(() => {
     let disposed = false;
     let deferredLoadTimer: number | null = null;
@@ -629,53 +561,15 @@ export function App() {
         }
         setComposerError((current) => current ?? state.lastError);
       }),
-      getPersonalizationConfig().then((state) => {
-        personalizationDraftRef.current = state;
-        setPersonalizationDraft(state);
-      })
+      loadPersonalization()
     ];
 
     const loadDeferredState = () => {
       if (disposed) return;
-      getSidecarState().then((state) => {
-        setSidecarState(state);
-        setSidecarDraft({
-          browserPath: state.browser.path,
-          computerPath: state.computer.path,
-          autoConfigure: state.autoConfigure
-        });
-        setComposerError((current) => current ?? state.lastError);
-      });
-      getWebSearchConfig().then((state) => {
-        setWebSearchConfig(state);
-        setWebSearchDraft({ endpoint: state.endpoint, apiKey: "" });
-      });
-      getMcpState().then((state) => {
-        setMcpState(state);
-        setComposerError((current) => current ?? state.lastError);
-      });
-      getSkillState().then((state) => {
-        setSkillState(state);
-        setComposerError((current) => current ?? state.lastError);
-      });
+      loadIntegrationState();
       getPermissionReviewState().then(setPermissionReviewState);
-      getPhase4State().then((state) => {
-        setPhase4(state);
-        setProviderDraft(providerDraftFromState(state.provider));
-        setComposerError(state.lastError);
-      });
-      getPhase5State().then((state) => {
-        setPhase5(state);
-        setComposerError((current) => current ?? state.lastError);
-      });
-      getPhase7State().then((state) => {
-        setPhase7(state);
-        setComposerError((current) => current ?? state.lastError);
-      });
-      getPhase8State().then((state) => {
-        setPhase8(state);
-        setComposerError((current) => current ?? state.lastError);
-      });
+      void loadProviderState();
+      loadKnowledgeState();
     };
 
     void Promise.allSettled(coreRequests).then(() => {
@@ -720,41 +614,6 @@ export function App() {
       if (fontWaitTimer !== null) window.clearTimeout(fontWaitTimer);
     };
   }, [projectSessionState, runtime]);
-
-  useEffect(() => {
-    const requestId = imageEndpointValidationRequestRef.current + 1;
-    imageEndpointValidationRequestRef.current = requestId;
-    const imageEndpoint = providerDraft?.imageEndpoint.trim() ?? "";
-    const imageModel = providerDraft?.imageModel.trim() ?? "";
-    if (!providerDraft || !imageEndpoint || !imageModel) {
-      setImageEndpointValidation("idle");
-      return;
-    }
-    try {
-      const parsed = new URL(imageEndpoint);
-      if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("unsupported URL");
-    } catch {
-      setImageEndpointValidation("invalid");
-      return;
-    }
-
-    setImageEndpointValidation("checking");
-    const timer = window.setTimeout(() => {
-      void validateImageEndpoint({
-        baseUrl: providerDraft.baseUrl,
-        imageModel: providerDraft.imageModel,
-        imageEndpoint: providerDraft.imageEndpoint
-      }).then((result) => {
-        if (imageEndpointValidationRequestRef.current !== requestId) return;
-        setImageEndpointValidation(result.valid ? "valid" : "invalid");
-      });
-    }, 600);
-    return () => window.clearTimeout(timer);
-  }, [
-    providerDraft?.baseUrl,
-    providerDraft?.imageEndpoint,
-    providerDraft?.imageModel
-  ]);
 
   useEffect(() => {
     if (activeView !== "settings" || settingsCategory !== "permissions") return;
@@ -1189,8 +1048,6 @@ export function App() {
     [normalizedSidebarQuery, projectSessionState?.projects, projectSessionState?.sessions]
   );
 
-  const toolApprovals = phase5?.pendingApprovals ?? [];
-  const browserApprovals = phase8?.pendingApprovals ?? [];
   const agentApprovals = activeAgentState?.pendingApprovals ?? [];
   const permissionReviews = permissionReviewState?.pending ?? [];
   const activePermissionReviews = permissionReviews.filter(
@@ -1199,11 +1056,6 @@ export function App() {
   const ignoredPermissionReviews = permissionReviews.filter((review) =>
     ignoredPermissionReviewIds.has(review.requestId)
   );
-  const toolResults = phase5?.results ?? [];
-  const ragStats = phase7?.stats ?? { filesIndexed: 0, chunksIndexed: 0, indexedAtMs: 0 };
-  const ragSources = phase7?.sources ?? [];
-  const browserObservations = phase8?.observations ?? [];
-  const contextCheckpoint = contextState?.checkpoint ?? null;
   const agentCanCancel = Boolean(activeAgentState?.canCancel || activeSessionBusy);
   const agentCanRetry = Boolean(activeAgentState?.canRetry);
   const agentCanContinue = Boolean(activeAgentState?.canContinue);
@@ -1242,32 +1094,6 @@ export function App() {
     () => traceSteps.find((step) => step.id === selectedTraceStepId) ?? null,
     [selectedTraceStepId, traceSteps]
   );
-  const providerModelOptions = useMemo(() => {
-    const configured = providerDraft
-      ? [
-          providerDraft.model,
-          providerDraft.conductorModel,
-          providerDraft.plannerModel,
-          providerDraft.executorModel,
-          providerDraft.reviewerModel,
-          providerDraft.summarizerModel,
-          providerDraft.embeddingModel,
-          providerDraft.imageModel
-        ]
-      : [];
-    return [...new Set([...providerModels, ...configured].filter(Boolean))].sort();
-  }, [providerDraft, providerModels]);
-  const collaborationModelCount = providerDraft
-    ? new Set([
-        providerDraft.plannerModel,
-        providerDraft.executorModel,
-        providerDraft.reviewerModel,
-        providerDraft.summarizerModel
-      ]).size
-    : 0;
-
-  const selectedToolSpec = phase5?.tools.find((tool) => tool.name === selectedTool);
-
   function markSessionBusy(sessionId: string, busy: boolean) {
     setBusySessionIds((current) => {
       const next = new Set(current);
@@ -1419,134 +1245,6 @@ export function App() {
     }
   }
 
-  function showSettingsSaved(message = "Saved") {
-    if (settingsToastTimerRef.current !== null) {
-      window.clearTimeout(settingsToastTimerRef.current);
-    }
-    setSettingsToast({ id: Date.now(), message });
-    settingsToastTimerRef.current = window.setTimeout(() => {
-      setSettingsToast(null);
-      settingsToastTimerRef.current = null;
-    }, 1800);
-  }
-
-  function handleAppearanceModeChange(mode: AppearanceMode) {
-    setAppearanceMode(mode);
-    try {
-      window.localStorage.setItem(APPEARANCE_STORAGE_KEY, mode);
-    } catch {
-      // Keep the preference for this app session when storage is unavailable.
-    }
-    showSettingsSaved("Appearance updated");
-  }
-
-  function persistPersonalization(
-    next: PersonalizationConfig,
-    revision: number,
-    notify: boolean
-  ) {
-    setPersonalizationBusy(true);
-    setPersonalizationError(null);
-    const save = personalizationSaveQueueRef.current
-      .catch(() => undefined)
-      .then(async () => {
-        const saved = await savePersonalizationConfig(next);
-        if (revision !== personalizationRevisionRef.current) return;
-        personalizationDraftRef.current = saved;
-        setPersonalizationDraft(saved);
-        if (notify) showSettingsSaved("Personalization saved");
-      })
-      .catch((error) => {
-        if (revision !== personalizationRevisionRef.current) return;
-        setPersonalizationError(error instanceof Error ? error.message : String(error));
-      })
-      .finally(() => {
-        if (revision === personalizationRevisionRef.current) {
-          setPersonalizationBusy(false);
-        }
-      });
-    personalizationSaveQueueRef.current = save;
-    return save;
-  }
-
-  function updatePersonalizationDraft(next: PersonalizationConfig) {
-    personalizationDraftRef.current = next;
-    setPersonalizationDraft(next);
-    setPersonalizationError(null);
-    const revision = personalizationRevisionRef.current + 1;
-    personalizationRevisionRef.current = revision;
-    if (personalizationSaveTimerRef.current !== null) {
-      window.clearTimeout(personalizationSaveTimerRef.current);
-    }
-    personalizationSaveTimerRef.current = window.setTimeout(() => {
-      personalizationSaveTimerRef.current = null;
-      void persistPersonalization(next, revision, false);
-    }, 220);
-  }
-
-  function flushPersonalization(notify: boolean) {
-    if (personalizationSaveTimerRef.current !== null) {
-      window.clearTimeout(personalizationSaveTimerRef.current);
-      personalizationSaveTimerRef.current = null;
-    }
-    const revision = personalizationRevisionRef.current + 1;
-    personalizationRevisionRef.current = revision;
-    return persistPersonalization(personalizationDraftRef.current, revision, notify);
-  }
-
-  async function handleSavePersonalization() {
-    await flushPersonalization(true);
-  }
-
-  async function handleSaveProviderConfig() {
-    if (!providerDraft) return;
-    setProviderBusy(true);
-    setComposerError(null);
-    try {
-      const next = await saveProviderConfig(providerDraft);
-      setPhase4(next);
-      setProviderDraft(providerDraftFromState(next.provider));
-      showSettingsSaved();
-    } finally {
-      setProviderBusy(false);
-    }
-  }
-
-  async function handlePromptEvolutionToggle(enabled: boolean) {
-    if (!providerDraft || providerBusy) return;
-    const previous = providerDraft.promptEvolutionEnabled;
-    setProviderDraft({ ...providerDraft, promptEvolutionEnabled: enabled });
-    setProviderBusy(true);
-    try {
-      const next = await setPromptEvolutionEnabled(enabled);
-      setPhase4(next);
-      setProviderDraft(providerDraftFromState(next.provider));
-      showSettingsSaved(enabled ? "Prompt evolution enabled" : "Prompt evolution disabled");
-    } catch (error) {
-      setProviderDraft({ ...providerDraft, promptEvolutionEnabled: previous });
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setProviderBusy(false);
-    }
-  }
-
-  async function handleLoadProviderModels() {
-    if (!providerDraft || providerModelsBusy) return;
-    setProviderModelsRefreshTurn((current) => current + 1);
-    setProviderModelsBusy(true);
-    setProviderModelsError(null);
-    try {
-      const next = await listProviderModels({
-        baseUrl: providerDraft.baseUrl,
-        apiKey: providerDraft.apiKey
-      });
-      setProviderModels(next.models);
-      setProviderModelsError(next.lastError);
-    } finally {
-      setProviderModelsBusy(false);
-    }
-  }
-
   async function handleSaveWorkspace() {
     const nextPath = workspaceDraft.trim();
     if (!nextPath) return;
@@ -1557,10 +1255,7 @@ export function App() {
       setRuntime(next);
       setWorkspaceDraft(next.workspaceRoot);
       setProjectSessionState(await getProjectSessionState());
-      setPhase5(await getPhase5State());
-      setPhase7(await getPhase7State());
-      setPhase8(await getPhase8State());
-      setContextState(await getContextState());
+      await refreshWorkspaceKnowledge();
       showSettingsSaved();
     } catch (error) {
       setComposerError(error instanceof Error ? error.message : String(error));
@@ -1612,21 +1307,7 @@ export function App() {
           setWorkspaceDraft(nextRuntime.workspaceRoot);
         })
         .catch(reportBackgroundError);
-      void getPhase5State()
-        .then((next) => {
-          if (isCurrentRequest()) setPhase5(next);
-        })
-        .catch(reportBackgroundError);
-      void getPhase7State()
-        .then((next) => {
-          if (isCurrentRequest()) setPhase7(next);
-        })
-        .catch(reportBackgroundError);
-      void getPhase8State()
-        .then((next) => {
-          if (isCurrentRequest()) setPhase8(next);
-        })
-        .catch(reportBackgroundError);
+      void refreshWorkspaceKnowledge(isCurrentRequest).catch(reportBackgroundError);
     };
 
     activeSessionIdRef.current = sessionId;
@@ -2110,167 +1791,6 @@ export function App() {
     }
   }
 
-  async function handleSaveSidecars() {
-    setSidecarBusy(true);
-    setComposerError(null);
-    try {
-      const next = await saveSidecarConfig(sidecarDraft);
-      setSidecarState(next);
-      setSidecarDraft({
-        browserPath: next.browser.path,
-        computerPath: next.computer.path,
-        autoConfigure: next.autoConfigure
-      });
-      setComposerError(next.lastError);
-      showSettingsSaved();
-    } finally {
-      setSidecarBusy(false);
-    }
-  }
-
-  async function handleSaveWebSearch() {
-    setWebSearchBusy(true);
-    setWebSearchError(null);
-    setComposerError(null);
-    try {
-      const next = await saveWebSearchConfig(webSearchDraft);
-      setWebSearchConfig(next);
-      setWebSearchDraft({ endpoint: next.endpoint, apiKey: "" });
-      showSettingsSaved();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setWebSearchError(message);
-      setComposerError(message);
-    } finally {
-      setWebSearchBusy(false);
-    }
-  }
-
-  async function handleAddMcpServer() {
-    const name = mcpDraft.name.trim();
-    const command = mcpDraft.command.trim();
-    if (!name || !command) return;
-    const id = `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "mcp"}-${Date.now()}`;
-    const env =
-      mcpDraft.envKey.trim() && mcpDraft.envValue
-        ? { [mcpDraft.envKey.trim()]: mcpDraft.envValue }
-        : {};
-    const server: McpServerConfig = {
-      id,
-      name,
-      enabled: true,
-      requireApproval: true,
-      timeoutMs: 30000,
-      transport: {
-        type: "stdio",
-        command,
-        args: mcpDraft.args.split(/\s+/).filter(Boolean),
-        env
-      }
-    };
-    setMcpBusy(true);
-    setComposerError(null);
-    try {
-      setMcpState(await upsertMcpServer(server));
-      setMcpDraft({ name: "", command: "", args: "", envKey: "", envValue: "" });
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setMcpBusy(false);
-    }
-  }
-
-  async function handleRefreshMcpServer(serverId: string) {
-    setMcpBusy(true);
-    setComposerError(null);
-    try {
-      const next = await refreshMcpServer(serverId);
-      setMcpState(next);
-      setComposerError(next.lastError);
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setMcpBusy(false);
-    }
-  }
-
-  async function handleMcpPolicy(
-    serverId: string,
-    enabled: boolean,
-    requireApproval: boolean
-  ) {
-    setMcpBusy(true);
-    try {
-      setMcpState(await updateMcpServerPolicy(serverId, enabled, requireApproval));
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setMcpBusy(false);
-    }
-  }
-
-  async function handleRemoveMcpServer(serverId: string) {
-    setMcpBusy(true);
-    try {
-      setMcpState(await removeMcpServer(serverId));
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setMcpBusy(false);
-    }
-  }
-
-  async function handleRefreshSkills() {
-    setSkillRefreshTurn((current) => current + 1);
-    setSkillBusy(true);
-    try {
-      setSkillState(await refreshSkills());
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setSkillBusy(false);
-    }
-  }
-
-  async function handleSkillPreference(skillId: string, enabled: boolean, trusted: boolean) {
-    setSkillBusy(true);
-    try {
-      setSkillState(await saveSkillPreference(skillId, enabled, trusted));
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setSkillBusy(false);
-    }
-  }
-
-  async function runSkillInstall(request: () => Promise<SkillState>) {
-    setSkillBusy(true);
-    setSkillInstallError(null);
-    try {
-      setSkillState(await request());
-      showSettingsSaved("Skill installed");
-      return true;
-    } catch (error) {
-      setSkillInstallError(error instanceof Error ? error.message : String(error));
-      return false;
-    } finally {
-      setSkillBusy(false);
-    }
-  }
-
-  async function handleInstallSkillPackage(file: File) {
-    if (!/\.skill$/i.test(file.name)) {
-      setSkillInstallError("Choose a .skill package.");
-      return;
-    }
-    await runSkillInstall(async () => installSkillPackage(await fileDataBase64(file)));
-  }
-
-  async function handleInstallSkillUrl() {
-    const url = skillUrl.trim();
-    if (!url) return;
-    if (await runSkillInstall(() => installSkillUrl(url))) setSkillUrl("");
-  }
 
   function applyAgentStateForSession(sessionId: string, next: AgentState) {
     const effectiveNext = preserveOptimisticQueuedMessages(sessionId, next);
@@ -2771,170 +2291,6 @@ export function App() {
       ) {
         void drainQueuedMessages(sessionId);
       }
-    }
-  }
-
-  async function handleRunTool() {
-    if (!selectedTool) return;
-    setToolBusy(true);
-    setComposerError(null);
-    try {
-      const next = await runTool(selectedTool, toolInput);
-      setPhase5(next);
-      setInspectorTab("artifacts");
-      setInspectorOpen(true);
-      setComposerError(next.lastError);
-    } finally {
-      setToolBusy(false);
-    }
-  }
-
-  async function handleResolveToolPermission(
-    requestId: string,
-    decision: "allow_once" | "allow_for_session" | "deny"
-  ) {
-    setToolBusy(true);
-    setComposerError(null);
-    try {
-      const next = await resolveToolPermission(requestId, decision);
-      setPhase5(next);
-      setComposerError(next.lastError);
-    } finally {
-      setToolBusy(false);
-    }
-  }
-
-  async function handleIndexRag() {
-    setRagBusy(true);
-    setKnowledgeError(null);
-    setComposerError(null);
-    try {
-      const next = await indexWorkspaceRag();
-      setPhase7(next);
-      setInspectorTab("artifacts");
-      setInspectorOpen(true);
-      setComposerError(next.lastError);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setKnowledgeError(message);
-      setComposerError(message);
-    } finally {
-      setRagBusy(false);
-    }
-  }
-
-  async function handleSearchRag() {
-    if (!ragQuery.trim()) return;
-    setRagBusy(true);
-    setKnowledgeError(null);
-    setComposerError(null);
-    try {
-      if (!phase7 || phase7.stats.chunksIndexed === 0) {
-        const indexed = await indexWorkspaceRag();
-        setPhase7(indexed);
-        if (indexed.lastError) {
-          setComposerError(indexed.lastError);
-          return;
-        }
-      }
-      const next = await searchRag(ragQuery, 6);
-      setPhase7(next);
-      setInspectorTab("artifacts");
-      setInspectorOpen(true);
-      setComposerError(next.lastError);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setKnowledgeError(message);
-      setComposerError(message);
-    } finally {
-      setRagBusy(false);
-    }
-  }
-
-  async function handleAnswerWithRag() {
-    if (!ragQuery.trim()) return;
-    setRagBusy(true);
-    setKnowledgeError(null);
-    setComposerError(null);
-    try {
-      if (!phase7 || phase7.stats.chunksIndexed === 0) {
-        const indexed = await indexWorkspaceRag();
-        setPhase7(indexed);
-        if (indexed.lastError) {
-          setComposerError(indexed.lastError);
-          return;
-        }
-      }
-      const next = await answerWithRag(ragQuery, 6);
-      setPhase7(next);
-      setInspectorTab("artifacts");
-      setInspectorOpen(true);
-      setComposerError(next.lastError);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setKnowledgeError(message);
-      setComposerError(message);
-    } finally {
-      setRagBusy(false);
-    }
-  }
-
-  async function handleCompactContext() {
-    setContextBusy(true);
-    setComposerError(null);
-    try {
-      const next = await compactContext();
-      setContextState(next);
-      setInspectorTab("context");
-      setInspectorOpen(true);
-      setComposerError(next.lastError);
-    } finally {
-      setContextBusy(false);
-    }
-  }
-
-  async function handleRunBrowserTool(toolName: string) {
-    const value = browserUrl.trim();
-    if (!value && toolName !== "browser.tabs" && toolName !== "browser.select_tab") return;
-    let input = `url=${value}\noutput_dir=.cindx/browser-captures`;
-    if (toolName === "web.search") {
-      input = `query=${value}`;
-    } else if (toolName === "browser.tabs") {
-      input = "";
-    } else if (toolName === "browser.select_tab") {
-      input = `tab_id=${browserTarget.trim()}`;
-    } else if (toolName === "browser.click") {
-      input = `url=${value}\nselector=${browserTarget.trim() || "body"}\noutput_dir=.cindx/browser-actions`;
-    } else if (toolName === "browser.type") {
-      input = `url=${value}\nselector=${browserTarget.trim() || "body"}\ntext=${browserText}\noutput_dir=.cindx/browser-actions`;
-    } else if (toolName === "browser.scroll") {
-      input = `url=${value}\ndelta_y=600\noutput_dir=.cindx/browser-actions`;
-    }
-    setBrowserBusy(true);
-    setComposerError(null);
-    try {
-      const next = await runBrowserTool(toolName, input);
-      setPhase8(next);
-      setInspectorTab("artifacts");
-      setInspectorOpen(true);
-      setComposerError(next.lastError);
-    } finally {
-      setBrowserBusy(false);
-    }
-  }
-
-  async function handleResolveBrowserPermission(
-    requestId: string,
-    decision: "allow_once" | "allow_for_session" | "deny"
-  ) {
-    setBrowserBusy(true);
-    setComposerError(null);
-    try {
-      const next = await resolveBrowserPermission(requestId, decision);
-      setPhase8(next);
-      setComposerError(next.lastError);
-    } finally {
-      setBrowserBusy(false);
     }
   }
 

@@ -27,7 +27,8 @@
       "routing-contract",
       "evaluation-foundation",
       "agent-arena-contract",
-      "memory-contract"
+      "memory-contract",
+      "frontend-test"
     ],
     "control-plane": [
       "routing-contract",
@@ -56,6 +57,7 @@
       "memory-contract",
       "workspace-tests",
       "desktop-tests",
+      "frontend-test",
       "frontend-build"
     ]
   },
@@ -195,6 +197,12 @@
         "apps/desktop/src-tauri/Cargo.toml",
         "--locked"
       ]
+    },
+    {
+      "id": "frontend-test",
+      "category": "ux_and_state",
+      "cwd": "apps/desktop",
+      "command": ["npm", "test"]
     },
     {
       "id": "frontend-build",

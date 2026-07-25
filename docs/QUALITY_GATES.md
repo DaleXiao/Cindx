@@ -8,7 +8,7 @@ does not claim Fugu Ultra equivalence.
 
 - `quick`: version, desktop layout, and structural UX contracts.
 - `ci-contract`: quick checks plus routing, Evaluation v2 foundation, the
-  120-case arena contract, and memory.
+  120-case arena contract, memory, and frontend state behavior.
 - `control-plane`: deterministic agent contracts plus Rust workspace and desktop tests.
 - `performance`: long-session incremental projection, bounded context governance,
   and 20k-chunk RAG diagnostics.
