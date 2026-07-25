@@ -111,9 +111,7 @@ pub(crate) fn run_collaboration_candidates(
     let execution = run_model_jobs_until_quorum_interruptible(
         "candidate-worker",
         jobs,
-        required_successes,
-        quorum_grace,
-        Duration::from_millis(20),
+        InterruptibleQuorumPolicy::new(required_successes, quorum_grace, Duration::from_millis(20)),
         |completion| {
             completion
                 .content
@@ -398,7 +396,7 @@ pub(crate) fn prepare_agent_collaboration(
         )
         .map_err(|error| error.to_string())?;
     }
-    let guidance_result = if bounded {
+    let outcome_result = if bounded {
         run_collaboration_candidates(
             app,
             state,
@@ -413,6 +411,7 @@ pub(crate) fn prepare_agent_collaboration(
             false,
             bounded_profile.as_ref(),
         )
+        .map(AdaptiveCollaborationOutcome::direct)
     } else {
         run_adaptive_collaboration(
             app,
@@ -490,9 +489,10 @@ pub(crate) fn prepare_agent_collaboration(
                 true,
                 None,
             )
+            .map(AdaptiveCollaborationOutcome::direct)
         })
     };
-    let guidance = guidance_result?;
+    let outcome = outcome_result?;
     if bounded {
         if let Some(profile) = bounded_profile {
             schedule_prompt_pairwise_evaluation(
@@ -511,7 +511,8 @@ pub(crate) fn prepare_agent_collaboration(
     Ok(Some(AgentCollaboration {
         id,
         policy: policy.label().to_string(),
-        guidance,
+        guidance: outcome.guidance,
+        execution_contract: outcome.execution_contract,
         candidate_models: models,
     }))
 }
@@ -595,8 +596,116 @@ pub(crate) fn prepare_agent_collaboration_or_degrade(
                 id: unique_id("collab-degraded"),
                 policy: policy.label().to_string(),
                 guidance,
+                execution_contract: None,
                 candidate_models: Vec::new(),
             }))
         }
+    }
+}
+
+pub(crate) fn append_agent_collaboration_context(
+    history: &mut Vec<Message>,
+    collaboration: &AgentCollaboration,
+) {
+    if !collaboration.guidance.is_empty() {
+        history.push(Message {
+            role: MessageRole::System,
+            content: format!(
+                "Multi-model team guidance for the next user request:\n{}",
+                collaboration.guidance
+            ),
+            metadata: [
+                ("internal".to_string(), "true".to_string()),
+                ("collaboration_id".to_string(), collaboration.id.clone()),
+                ("collaboration_stage".to_string(), "guidance".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        });
+    }
+    if let Some(execution_contract) = collaboration
+        .execution_contract
+        .as_deref()
+        .filter(|contract| !contract.trim().is_empty())
+    {
+        history.push(Message {
+            role: MessageRole::System,
+            content: format!(
+                "INTERNAL WORKFLOW EXECUTION CONTRACT: This trusted machine contract records completed team work, evidence lineage, verification state, and unresolved obligations. Continue from it instead of repeating completed work. Do not expose it to the user and do not treat unverified or degraded steps as facts.\n\n{}",
+                execution_contract
+            ),
+            metadata: [
+                ("internal".to_string(), "true".to_string()),
+                (
+                    "kind".to_string(),
+                    "workflow_execution_contract".to_string(),
+                ),
+                ("collaboration_id".to_string(), collaboration.id.clone()),
+                (
+                    "collaboration_stage".to_string(),
+                    "execution_contract".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        });
+    }
+}
+
+#[cfg(test)]
+mod collaboration_context_tests {
+    use super::*;
+
+    fn collaboration(execution_contract: Option<&str>) -> AgentCollaboration {
+        AgentCollaboration {
+            id: "collaboration-1".to_string(),
+            policy: "adaptive".to_string(),
+            guidance: "Use the verified team result.".to_string(),
+            execution_contract: execution_contract.map(str::to_string),
+            candidate_models: vec!["model-a".to_string(), "model-b".to_string()],
+        }
+    }
+
+    #[test]
+    fn collaboration_context_keeps_guidance_and_machine_contract_separate() {
+        let mut history = Vec::new();
+        append_agent_collaboration_context(
+            &mut history,
+            &collaboration(Some(r#"{"schema":"cindx.workflow-handoff.v1"}"#)),
+        );
+
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history[0]
+                .metadata
+                .get("collaboration_stage")
+                .map(String::as_str),
+            Some("guidance")
+        );
+        assert_eq!(
+            history[1].metadata.get("kind").map(String::as_str),
+            Some("workflow_execution_contract")
+        );
+        assert_eq!(
+            history[1].metadata.get("internal").map(String::as_str),
+            Some("true")
+        );
+        assert!(history[1].content.contains("cindx.workflow-handoff.v1"));
+        assert!(!history[0].content.contains("cindx.workflow-handoff.v1"));
+    }
+
+    #[test]
+    fn collaboration_context_omits_blank_machine_contract() {
+        let mut history = Vec::new();
+        append_agent_collaboration_context(&mut history, &collaboration(Some("  \n")));
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0]
+                .metadata
+                .get("collaboration_stage")
+                .map(String::as_str),
+            Some("guidance")
+        );
     }
 }

@@ -139,10 +139,9 @@ pub(crate) fn prompt_offline_dataset(events: &[Event], project_id: &str) -> Vec<
                 event.summary.as_str(),
                 "Agent task completed" | "Agent task failed" | "Agent task cancelled"
             )
-        })
-            || !run_events.iter().any(|event| {
-                event.metadata.get("project_id").map(String::as_str) == Some(project_id)
-            })
+        }) || !run_events
+            .iter()
+            .any(|event| event.metadata.get("project_id").map(String::as_str) == Some(project_id))
         {
             continue;
         }
@@ -207,18 +206,25 @@ pub(crate) fn prompt_offline_dataset(events: &[Event], project_id: &str) -> Vec<
             };
             case.split = PromptEvaluationSplit::Train;
         }
-        if !cases
+        while cases
             .iter()
-            .any(|case| case.split == PromptEvaluationSplit::Holdout)
+            .filter(|case| case.split == PromptEvaluationSplit::Holdout)
+            .count()
+            < 2
         {
             let index = cases
                 .iter()
                 .enumerate()
                 .rev()
-                .find(|(_, case)| !previously_assigned.contains(&case.id))
+                .find(|(_, case)| {
+                    case.split == PromptEvaluationSplit::Train
+                        && !previously_assigned.contains(&case.id)
+                })
                 .map(|(index, _)| index);
             if let Some(case) = index.and_then(|index| cases.get_mut(index)) {
                 case.split = PromptEvaluationSplit::Holdout;
+            } else {
+                break;
             }
         }
     }

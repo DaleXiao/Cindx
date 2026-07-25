@@ -75,6 +75,35 @@ pub(crate) fn aggregate_prompt_pairwise_payloads(
     }
 }
 
+pub(crate) fn validate_prompt_pairwise_agreement(
+    first: &PromptPairwiseEvaluationPayload,
+    second_aligned: &PromptPairwiseEvaluationPayload,
+) -> Result<(), String> {
+    let scores = [
+        first.score_a,
+        first.score_b,
+        second_aligned.score_a,
+        second_aligned.score_b,
+    ];
+    if scores
+        .iter()
+        .any(|score| !score.is_finite() || !(0.0..=1.0).contains(score))
+    {
+        return Err("pairwise reviewer returned an invalid score".to_string());
+    }
+    let first_margin = first.score_a - first.score_b;
+    let second_margin = second_aligned.score_a - second_aligned.score_b;
+    let meaningful_conflict = first_margin.abs() >= 0.10
+        && second_margin.abs() >= 0.10
+        && first_margin.signum() != second_margin.signum();
+    if meaningful_conflict || (first_margin - second_margin).abs() > 0.50 {
+        return Err(format!(
+            "pairwise reviewer disagreement: margins={first_margin:.3},{second_margin:.3}"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PromptPlanCandidate {
     pub(crate) genome: ConductorPromptGenome,
@@ -91,13 +120,42 @@ pub(crate) struct PromptExecutionStep {
     pub(crate) model: String,
     pub(crate) prompt: String,
     pub(crate) attempts: usize,
-    pub(crate) succeeded: bool,
+    pub(crate) status: WorkflowStepStatus,
     pub(crate) output: String,
     pub(crate) tool_calls: Vec<AgentEvaluationToolTrace>,
     pub(crate) errors: Vec<String>,
     pub(crate) latency_ms: u64,
     pub(crate) total_tokens: u64,
     pub(crate) evidence_count: usize,
+}
+
+impl PromptExecutionStep {
+    pub(crate) fn succeeded(&self) -> bool {
+        self.status == WorkflowStepStatus::Completed
+    }
+
+    pub(crate) fn usable(&self) -> bool {
+        matches!(
+            self.status,
+            WorkflowStepStatus::Completed | WorkflowStepStatus::Degraded
+        ) && !self.output.trim().is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PromptDependencyOutput {
+    pub(crate) status: WorkflowStepStatus,
+    pub(crate) content: String,
+}
+
+impl PromptDependencyOutput {
+    pub(crate) fn completed(&self) -> bool {
+        self.status == WorkflowStepStatus::Completed
+    }
+
+    pub(crate) fn degraded(&self) -> bool {
+        self.status == WorkflowStepStatus::Degraded
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -123,10 +181,12 @@ pub(crate) struct PromptEvaluationWorkerRequest {
     pub(crate) tool_policy: WorkflowToolPolicy,
     pub(crate) max_model_turns: usize,
     pub(crate) max_tool_calls: usize,
+    pub(crate) max_output_tokens: usize,
 }
 
-pub(crate) type PromptEvaluationRunner =
-    Arc<dyn Fn(PromptEvaluationWorkerRequest) -> CollaborationCompletion + Send + Sync>;
+pub(crate) type PromptEvaluationRunner = Arc<
+    dyn Fn(PromptEvaluationWorkerRequest, Arc<AtomicBool>) -> CollaborationCompletion + Send + Sync,
+>;
 
 #[cfg(test)]
 #[derive(Debug, Clone)]

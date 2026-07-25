@@ -138,7 +138,7 @@ fn deterministic_rank(seed: &str, value: &str) -> String {
 }
 
 fn gpqa_case_from_row(row: GpqaRow, seed: &str) -> GpqaCase {
-    let mut options = vec![
+    let mut options = [
         (row.correct_answer.trim().to_string(), true),
         (row.incorrect_answer_1.trim().to_string(), false),
         (row.incorrect_answer_2.trim().to_string(), false),
@@ -538,7 +538,9 @@ fn raw_protocol_completion(
             };
             CollaborationCompletion {
                 content: Some(content),
+                partial_content: None,
                 error: None,
+                failure: None,
                 latency_ms,
                 usage,
                 evidence: Vec::new(),

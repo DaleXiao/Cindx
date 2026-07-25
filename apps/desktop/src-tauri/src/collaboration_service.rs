@@ -1,5 +1,5 @@
 use agent_core::{Message, MessageRole, Metadata, ModelRole};
-use agent_runtime::AgentLoopState;
+use agent_runtime::AgentFailure;
 use orchestrator::{
     AdaptiveWorkflow, ConductorPromptGenome, ConductorRoleHints, PromptContextPolicy,
     WorkflowExecutionCheckpoint, WorkflowPlanIr, WorkflowToolPolicy, WORKFLOW_IR_SCHEMA,
@@ -7,7 +7,6 @@ use orchestrator::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-const COLLABORATION_WORKER_FINALIZATION_TURNS: usize = 1;
 const COLLABORATION_SHARED_EVIDENCE_MAX_ENTRIES: usize = 32;
 const COLLABORATION_EVIDENCE_REQUEST_MAX_CHARS: usize = 2_000;
 const COLLABORATION_EVIDENCE_OUTPUT_MAX_CHARS: usize = 2_000;
@@ -22,7 +21,33 @@ pub(crate) struct AgentCollaboration {
     pub(crate) id: String,
     pub(crate) policy: String,
     pub(crate) guidance: String,
+    pub(crate) execution_contract: Option<String>,
     pub(crate) candidate_models: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AdaptiveCollaborationOutcome {
+    pub(crate) guidance: String,
+    pub(crate) execution_contract: Option<String>,
+}
+
+impl AdaptiveCollaborationOutcome {
+    pub(crate) fn direct(guidance: String) -> Self {
+        Self {
+            guidance,
+            execution_contract: None,
+        }
+    }
+
+    pub(crate) fn from_checkpoint(
+        guidance: String,
+        checkpoint: &WorkflowExecutionCheckpoint,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            guidance,
+            execution_contract: Some(checkpoint.execution_handoff_json()?),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -45,7 +70,9 @@ pub(crate) struct AdaptiveCollaborationSpec {
 #[derive(Debug)]
 pub(crate) struct CollaborationCompletion {
     pub(crate) content: Option<String>,
+    pub(crate) partial_content: Option<String>,
     pub(crate) error: Option<String>,
+    pub(crate) failure: Option<AgentFailure>,
     pub(crate) latency_ms: u64,
     pub(crate) usage: Metadata,
     pub(crate) evidence: Vec<CollaborationEvidence>,
@@ -63,14 +90,77 @@ pub(crate) struct CollaborationEvidence {
 }
 
 impl CollaborationCompletion {
-    pub(crate) fn failed(error: impl Into<String>) -> Self {
+    pub(crate) fn completed_worker(
+        content: String,
+        latency_ms: u64,
+        usage: Metadata,
+        evidence: Vec<CollaborationEvidence>,
+    ) -> Self {
+        Self {
+            content: Some(content),
+            partial_content: None,
+            error: None,
+            failure: None,
+            latency_ms,
+            usage,
+            evidence,
+        }
+    }
+
+    pub(crate) fn failed_worker(
+        failure: AgentFailure,
+        partial_content: Option<String>,
+        latency_ms: u64,
+        usage: Metadata,
+        evidence: Vec<CollaborationEvidence>,
+    ) -> Self {
         Self {
             content: None,
-            error: Some(error.into()),
+            partial_content,
+            error: Some(failure.message.clone()),
+            failure: Some(failure),
+            latency_ms,
+            usage,
+            evidence,
+        }
+    }
+
+    pub(crate) fn failed(error: impl Into<String>) -> Self {
+        Self::failed_with(AgentFailure::internal("collaboration_internal", error))
+    }
+
+    pub(crate) fn failed_with(failure: AgentFailure) -> Self {
+        Self {
+            content: None,
+            partial_content: None,
+            error: Some(failure.message.clone()),
+            failure: Some(failure),
             latency_ms: 0,
             usage: Metadata::new(),
             evidence: Vec::new(),
         }
+    }
+
+    pub(crate) fn failure_or_empty_output(&self) -> AgentFailure {
+        self.failure.clone().unwrap_or_else(|| {
+            AgentFailure::model_output(
+                "collaboration_empty_output",
+                self.error
+                    .clone()
+                    .unwrap_or_else(|| "collaboration worker returned empty content".to_string()),
+            )
+        })
+    }
+
+    pub(crate) fn best_available_content(&self) -> Option<&str> {
+        self.content
+            .as_deref()
+            .filter(|content| !content.trim().is_empty())
+            .or_else(|| {
+                self.partial_content
+                    .as_deref()
+                    .filter(|content| !content.trim().is_empty())
+            })
     }
 }
 
@@ -92,50 +182,6 @@ pub(crate) fn effective_workflow_step_attempt_budget(
         .max_step_attempts
         .max(1)
         .saturating_mul(checkpoint.continuations.saturating_add(1))
-}
-
-pub(crate) fn collaboration_worker_runtime_turn_limit(
-    max_model_turns: usize,
-    has_tools: bool,
-) -> usize {
-    max_model_turns.max(1).saturating_add(if has_tools {
-        COLLABORATION_WORKER_FINALIZATION_TURNS
-    } else {
-        0
-    })
-}
-
-pub(crate) fn prepare_collaboration_worker_turn(
-    runtime: &mut AgentLoopState,
-    has_tools: bool,
-    evidence_turn_limit: usize,
-) -> bool {
-    let finalizing = has_tools && runtime.turn >= evidence_turn_limit.max(1);
-    if finalizing
-        && runtime
-            .messages
-            .last()
-            .and_then(|message| message.metadata.get("kind"))
-            .map(String::as_str)
-            != Some("collaboration_worker_finalization")
-    {
-        runtime.messages.push(Message {
-            role: MessageRole::User,
-            content: concat!(
-                "The read-only evidence phase is complete and tools are now unavailable. ",
-                "Do not request more tools. Return the assigned concise work product now, ",
-                "grounded only in the evidence and context already collected."
-            )
-            .to_string(),
-            metadata: [(
-                "kind".to_string(),
-                "collaboration_worker_finalization".to_string(),
-            )]
-            .into_iter()
-            .collect(),
-        });
-    }
-    finalizing
 }
 
 pub(crate) fn truncate_for_collaboration(value: &str, max_chars: usize) -> String {

@@ -143,6 +143,35 @@ pub(super) fn finalize_adaptive_collaboration(
             false,
         );
     }
+    let uplift_repair = repair_adaptive_uplift(AdaptiveUpliftRepairContext {
+        state,
+        config,
+        task_id,
+        run_context,
+        collaboration_id,
+        prompt,
+        verification: prompt_genome.verification,
+        evidence_count,
+        team_candidate_id: &final_step_id,
+        team_output: &final_output,
+        anchor_output: direct_anchor_output,
+        cancellation,
+        anytime_controller,
+        workflow_checkpoint,
+    })?;
+    if collaboration_steer_pending(cancellation) {
+        pause_anytime_for_steer(
+            state,
+            task_id,
+            run_context,
+            collaboration_id,
+            workflow_checkpoint,
+            anytime_controller,
+            anchor_supervisor,
+            direct_anchor_verifier,
+        )?;
+        return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
+    }
     let (remaining_ms, terminal_reserve_ms) = cancellation.map_or((u64::MAX, 0), |control| {
         let progress = control.progress();
         let budget = control.budget();
@@ -151,13 +180,37 @@ pub(super) fn finalize_adaptive_collaboration(
             u64::try_from(budget.terminal_time_reserve.as_millis()).unwrap_or(u64::MAX),
         )
     });
-    let selected_candidate = match anytime_controller.decision(remaining_ms, terminal_reserve_ms) {
+    let frontier_candidate = match anytime_controller.decision(remaining_ms, terminal_reserve_ms) {
         AnytimeDecision::Commit { candidate_id } => Some(candidate_id),
         AnytimeDecision::Continue | AnytimeDecision::Wait | AnytimeDecision::Exhausted => {
             anytime_controller
                 .best()
                 .map(|best| best.candidate_id.clone())
         }
+    };
+    let team_frontier_candidate_id = uplift_repair
+        .as_ref()
+        .map_or(final_step_id.as_str(), |repair| {
+            repair.candidate_id.as_str()
+        });
+    let selected_candidate = match adaptive_uplift_selection_decision(
+        anytime_controller,
+        team_frontier_candidate_id,
+        direct_anchor_output,
+    ) {
+        Some(UpliftGateDecision::AcceptTeam) => Some(team_frontier_candidate_id.to_string()),
+        Some(UpliftGateDecision::SelectAnchor { .. })
+            if workflow_checkpoint
+                .anytime_outputs
+                .get(DIRECT_ANCHOR_CANDIDATE_ID)
+                .is_some_and(|output| !output.trim().is_empty()) =>
+        {
+            Some(DIRECT_ANCHOR_CANDIDATE_ID.to_string())
+        }
+        Some(UpliftGateDecision::RepairTeam { .. })
+        | Some(UpliftGateDecision::ReturnBestKnown { .. })
+        | Some(UpliftGateDecision::SelectAnchor { .. })
+        | None => frontier_candidate,
     };
     let mut selected_candidate_id = final_step_id.clone();
     if let Some(candidate_id) = selected_candidate.as_deref() {
@@ -171,6 +224,31 @@ pub(super) fn finalize_adaptive_collaboration(
         }
     }
     let selected_verdict = anytime_controller.verdict(&selected_candidate_id).cloned();
+    let (selected_quality_gate, selected_pairwise_comparison) = if let Some(repair) = uplift_repair
+        .as_ref()
+        .filter(|repair| repair.candidate_id == selected_candidate_id)
+    {
+        (
+            repair.quality_gate.clone(),
+            repair.pairwise_comparison.clone(),
+        )
+    } else if selected_candidate_id == final_step_id {
+        (quality_gate.clone(), pairwise_comparison.clone())
+    } else {
+        (
+            selected_verdict.as_ref().map_or_else(
+                || quality_gate.clone(),
+                |verdict| AdaptiveQualityGateResult {
+                    output: String::new(),
+                    score: f64::from(verdict.quality_bps) / 10_000.0,
+                    safety_violations: verdict.safety_violations,
+                    passed: verdict.verified && verdict.safety_violations == 0,
+                    issues: Vec::new(),
+                },
+            ),
+            None,
+        )
+    };
     let selected_candidate_kind = anytime_controller
         .candidate(&selected_candidate_id)
         .map(|candidate| match candidate.kind {
@@ -198,8 +276,8 @@ pub(super) fn finalize_adaptive_collaboration(
     let prompt_learning_eligible = selected_candidate_id == final_step_id
         && selected_verified
         && native_effort_success
-        && quality_gate.passed
-        && quality_gate.safety_violations == 0;
+        && selected_quality_gate.passed
+        && selected_quality_gate.safety_violations == 0;
     if collaboration_steer_pending(cancellation) {
         pause_anytime_for_steer(
             state,
@@ -236,7 +314,7 @@ pub(super) fn finalize_adaptive_collaboration(
         .values()
         .filter(|step| step.attempts > 1)
         .count();
-    let step_credits = workflow_checkpoint.assign_step_credits(quality_gate.score);
+    let step_credits = workflow_checkpoint.assign_step_credits(selected_quality_gate.score);
     workflow_checkpoint.finalize(final_output.clone(), current_time_millis())?;
     append_workflow_checkpoint_event(
         state,
@@ -294,18 +372,24 @@ pub(super) fn finalize_adaptive_collaboration(
                         "step_credits".to_string(),
                         serde_json::to_string(&step_credits).unwrap_or_else(|_| "[]".to_string()),
                     ),
-                    ("quality_pass".to_string(), quality_gate.passed.to_string()),
+                    (
+                        "quality_pass".to_string(),
+                        selected_quality_gate.passed.to_string(),
+                    ),
                     (
                         "quality_score".to_string(),
-                        format!("{:.3}", quality_gate.score.clamp(0.0, 1.0)),
+                        format!("{:.3}", selected_quality_gate.score.clamp(0.0, 1.0)),
                     ),
                     (
                         "quality_issues".to_string(),
-                        truncate_for_collaboration(&quality_gate.issues.join(" | "), 4_000),
+                        truncate_for_collaboration(
+                            &selected_quality_gate.issues.join(" | "),
+                            4_000,
+                        ),
                     ),
                     (
                         "safety_violations".to_string(),
-                        quality_gate.safety_violations.to_string(),
+                        selected_quality_gate.safety_violations.to_string(),
                     ),
                     (
                         "anytime_selected_candidate".to_string(),
@@ -336,21 +420,21 @@ pub(super) fn finalize_adaptive_collaboration(
                     ),
                     (
                         "anytime_team_uplift_bps".to_string(),
-                        pairwise_comparison
+                        selected_pairwise_comparison
                             .as_ref()
                             .map(|comparison| comparison.team_uplift_bps.to_string())
                             .unwrap_or_default(),
                     ),
                     (
                         "anytime_team_score_bps".to_string(),
-                        pairwise_comparison
+                        selected_pairwise_comparison
                             .as_ref()
                             .map(|comparison| comparison.team_score_bps.to_string())
                             .unwrap_or_default(),
                     ),
                     (
                         "anytime_anchor_score_bps".to_string(),
-                        pairwise_comparison
+                        selected_pairwise_comparison
                             .as_ref()
                             .map(|comparison| comparison.anchor_score_bps.to_string())
                             .unwrap_or_default(),

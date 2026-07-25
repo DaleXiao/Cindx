@@ -1,4 +1,6 @@
-use crate::{AgentLoopState, InteractionSurface, PendingInteractionVerification};
+use crate::{
+    AgentLoopState, AgentTaskContract, InteractionSurface, PendingInteractionVerification,
+};
 use agent_core::{Message, MessageRole, TaskId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -56,6 +58,8 @@ pub struct AgentTaskStateSnapshot {
     pub pending_interaction_verifications: Vec<PersistedInteractionVerification>,
     pub verified_interactions: usize,
     pub interaction_verification_gate_requests: usize,
+    #[serde(default)]
+    pub task_contract: AgentTaskContract,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +109,7 @@ impl AgentTaskStateSnapshot {
                 .collect(),
             verified_interactions: state.verified_interactions,
             interaction_verification_gate_requests: state.interaction_verification_gate_requests,
+            task_contract: state.task_contract.clone(),
         }
     }
 
@@ -153,6 +158,21 @@ impl AgentTaskStateSnapshot {
             }
         }
 
+        let task_contract = if self.task_contract == AgentTaskContract::default()
+            && (self.successful_mutations > 0 || !pending_interaction_verifications.is_empty())
+        {
+            AgentTaskContract::restore_legacy(
+                self.successful_mutations,
+                self.verified_after_last_mutation,
+                pending_interaction_verifications
+                    .iter()
+                    .map(|(surface, pending)| (*surface, pending.action_tool.clone()))
+                    .collect(),
+            )
+        } else {
+            self.task_contract.clone()
+        };
+
         Ok(AgentLoopState {
             task_id: TaskId(self.task_id.clone()),
             user_prompt,
@@ -167,6 +187,7 @@ impl AgentTaskStateSnapshot {
             pending_interaction_verifications,
             verified_interactions: self.verified_interactions,
             interaction_verification_gate_requests: self.interaction_verification_gate_requests,
+            task_contract,
         })
     }
 
@@ -252,8 +273,8 @@ fn message_role_label(role: &MessageRole) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{start_agent_loop, AgentRuntimeConfig};
-    use agent_core::{Metadata, TaskId};
+    use crate::{record_tool_outcome_with_risk, start_agent_loop, AgentRuntimeConfig};
+    use agent_core::{Metadata, TaskId, ToolOutcomeStatus, ToolRisk};
 
     #[test]
     fn round_trips_control_state_against_the_durable_transcript() {
@@ -266,7 +287,15 @@ mod tests {
         state
             .failed_tool_signatures
             .insert("shell.run:abc".to_string(), 2);
-        state.successful_mutations = 3;
+        for path in ["src/one.rs", "src/two.rs", "src/three.rs"] {
+            record_tool_outcome_with_risk(
+                &mut state,
+                "file.write",
+                &format!(r#"{{"path":"{path}"}}"#),
+                &ToolOutcomeStatus::Succeeded,
+                Some(&ToolRisk::WritesWorkspace),
+            );
+        }
         state.pending_interaction_verifications.insert(
             InteractionSurface::Browser,
             PendingInteractionVerification {

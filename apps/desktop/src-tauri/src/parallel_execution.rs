@@ -1,9 +1,9 @@
-use agent_runtime::{BoundedParallelExecutor, ParallelTaskError};
+use agent_runtime::BoundedParallelExecutor;
 use std::sync::OnceLock;
-use std::time::Duration;
 
 pub(crate) use agent_runtime::{
-    CancellableParallelJob, InterruptibleQuorumExecution, ParallelJob, ParallelJobCompletion,
+    AnytimeQuorumExecution, AnytimeQuorumPolicy, CancellableParallelJob,
+    InterruptibleQuorumExecution, InterruptibleQuorumPolicy, ParallelJobCompletion,
     ParallelJobSupervisor,
 };
 
@@ -18,19 +18,10 @@ pub(crate) fn model_job_supervisor<T: Send + 'static>() -> ParallelJobSupervisor
     model_executor().supervisor()
 }
 
-pub(crate) fn run_model_jobs_ordered<T: Send + 'static>(
-    thread_label: &str,
-    jobs: Vec<ParallelJob<T>>,
-) -> Vec<Result<T, ParallelTaskError>> {
-    model_executor().run_ordered(thread_label, jobs)
-}
-
 pub(crate) fn run_model_jobs_until_quorum_interruptible<T, F, I>(
     thread_label: &str,
     jobs: Vec<CancellableParallelJob<T>>,
-    required_successes: usize,
-    grace_period: Duration,
-    poll_interval: Duration,
+    policy: InterruptibleQuorumPolicy,
     is_success: F,
     should_interrupt: I,
 ) -> InterruptibleQuorumExecution<T>
@@ -42,9 +33,28 @@ where
     model_executor().run_until_quorum_interruptible(
         thread_label,
         jobs,
-        required_successes,
-        grace_period,
-        poll_interval,
+        policy,
+        is_success,
+        should_interrupt,
+    )
+}
+
+pub(crate) fn run_model_jobs_until_anytime_quorum_interruptible<T, F, I>(
+    thread_label: &str,
+    jobs: Vec<CancellableParallelJob<T>>,
+    policy: AnytimeQuorumPolicy,
+    is_success: F,
+    should_interrupt: I,
+) -> AnytimeQuorumExecution<T>
+where
+    T: Send + 'static,
+    F: Fn(&T) -> bool,
+    I: FnMut() -> bool,
+{
+    model_executor().run_until_anytime_quorum_interruptible(
+        thread_label,
+        jobs,
+        policy,
         is_success,
         should_interrupt,
     )

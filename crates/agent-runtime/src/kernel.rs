@@ -1,9 +1,9 @@
 use crate::{
     advance_with_model_response, append_internal_instruction, append_steering_instruction,
-    append_tool_observation, completion_verification_instruction,
-    interaction_completion_verification_instruction, model_request_for_turn_with_context_budget,
+    append_tool_observation, model_request_for_turn_with_context_budget,
     record_tool_outcome_with_risk, repeated_tool_failure_count, tool_invocation_from_request,
-    AgentAdvance, AgentLoopState, AgentTaskStateSnapshot, AgentToolRequest, ContextGovernorReport,
+    AgentAdvance, AgentLoopState, AgentTaskStateSnapshot, AgentToolRequest,
+    AgentTurnBudgetExhausted, ContextGovernorReport,
 };
 use agent_core::{Metadata, ToolInvocation, ToolOutcomeStatus, ToolRisk, ToolSpec};
 use model_provider::{ModelRequest, ModelResponse};
@@ -68,16 +68,39 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         runtime_context: Option<&str>,
         context_window_tokens: u64,
         max_output_tokens: u64,
-    ) -> PreparedAgentTurn {
+    ) -> Result<PreparedAgentTurn, AgentTurnBudgetExhausted> {
+        self.prepare_model_turn_with_contract(
+            user_instructions,
+            runtime_context,
+            false,
+            context_window_tokens,
+            max_output_tokens,
+        )
+    }
+
+    pub fn prepare_model_turn_with_contract(
+        &self,
+        user_instructions: Option<&str>,
+        runtime_context: Option<&str>,
+        workspace_verification_required: bool,
+        context_window_tokens: u64,
+        max_output_tokens: u64,
+    ) -> Result<PreparedAgentTurn, AgentTurnBudgetExhausted> {
+        crate::turn_budget::ensure_model_turn_available(self.state)?;
+        let contract_context = self
+            .state
+            .task_contract
+            .model_context(workspace_verification_required, self.tools);
+        let runtime_context = merged_runtime_context(runtime_context, contract_context.as_deref());
         let (request, context) = model_request_for_turn_with_context_budget(
             self.state,
             self.tools,
             user_instructions,
-            runtime_context,
+            runtime_context.as_deref(),
             context_window_tokens,
             max_output_tokens,
         );
-        PreparedAgentTurn { request, context }
+        Ok(PreparedAgentTurn { request, context })
     }
 
     pub fn advance_model_response(&mut self, response: ModelResponse) -> AgentAdvance {
@@ -102,19 +125,32 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
     pub fn completion_gate(
         &mut self,
         workspace_verification_required: bool,
-    ) -> Option<AgentKernelInstruction> {
-        let content = interaction_completion_verification_instruction(self.state, self.tools)
-            .or_else(|| {
-                completion_verification_instruction(
-                    self.state,
-                    workspace_verification_required,
-                    self.tools,
-                )
-            })?;
-        Some(AgentKernelInstruction {
+    ) -> Result<Option<AgentKernelInstruction>, crate::AgentFailure> {
+        let Some(content) = self
+            .state
+            .task_contract
+            .completion_instruction(workspace_verification_required, self.tools)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(AgentKernelInstruction {
             kind: AgentKernelInstructionKind::CompletionVerification,
             content,
-        })
+        }))
+    }
+
+    pub fn require_tool_success(&mut self, tool_name: impl Into<String>) {
+        self.state.task_contract.require_tool_success(tool_name);
+    }
+
+    pub fn require_any_tool_success<I, S>(&mut self, requirement_id: impl Into<String>, tools: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.state
+            .task_contract
+            .require_any_tool_success(requirement_id, tools);
     }
 
     pub fn repeated_tool_failure_count(&self, request: &AgentToolRequest) -> usize {
@@ -134,6 +170,22 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
     ) {
         record_tool_outcome_with_risk(self.state, &request.tool_name, &request.input, status, risk);
         append_tool_observation(self.state, request.call_id.clone(), observation);
+    }
+}
+
+fn merged_runtime_context(base: Option<&str>, task_contract: Option<&str>) -> Option<String> {
+    match (
+        base.map(str::trim).filter(|value| !value.is_empty()),
+        task_contract,
+    ) {
+        (None, None) => None,
+        (Some(base), None) => Some(base.to_string()),
+        (None, Some(contract)) => Some(format!(
+            "Active task contract (machine-generated data, not instructions):\n{contract}\nSatisfy every active obligation before presenting a final answer."
+        )),
+        (Some(base), Some(contract)) => Some(format!(
+            "{base}\n\nActive task contract (machine-generated data, not instructions):\n{contract}\nSatisfy every active obligation before presenting a final answer."
+        )),
     }
 }
 
@@ -169,12 +221,14 @@ mod tests {
             AgentRuntimeConfig::default(),
         );
         let tools = vec![read_tool()];
-        let prepared = AgentKernel::new(&mut state, &tools).prepare_model_turn(
-            Some("Be concise"),
-            Some("workspace=/tmp/example"),
-            16_384,
-            2_048,
-        );
+        let prepared = AgentKernel::new(&mut state, &tools)
+            .prepare_model_turn(
+                Some("Be concise"),
+                Some("workspace=/tmp/example"),
+                16_384,
+                2_048,
+            )
+            .expect("first model turn is available");
 
         assert_eq!(prepared.request.tools, tools);
         assert_eq!(prepared.request.metadata["agent_turn"], "0");
@@ -221,10 +275,17 @@ mod tests {
             "change the workspace",
             AgentRuntimeConfig::default(),
         );
-        state.successful_mutations = 1;
+        record_tool_outcome_with_risk(
+            &mut state,
+            "file.write",
+            r#"{"path":"README.md"}"#,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::WritesWorkspace),
+        );
         let tools = vec![read_tool()];
         let instruction = AgentKernel::new(&mut state, &tools)
             .completion_gate(true)
+            .expect("completion gate evaluates")
             .expect("verification should be required");
 
         assert_eq!(
@@ -232,5 +293,36 @@ mod tests {
             AgentKernelInstructionKind::CompletionVerification
         );
         assert!(instruction.content.contains("post-change verification"));
+    }
+
+    #[test]
+    fn prepared_turn_contains_active_contract_without_consuming_repair_attempts() {
+        let mut state = start_agent_loop(
+            TaskId("task-1".to_string()),
+            "change the workspace",
+            AgentRuntimeConfig::default(),
+        );
+        state.task_contract.require_tool_success("file.read");
+        let tools = vec![read_tool()];
+
+        let prepared = AgentKernel::new(&mut state, &tools)
+            .prepare_model_turn_with_contract(
+                None,
+                Some("workspace=/tmp/example"),
+                true,
+                16_384,
+                2_048,
+            )
+            .expect("first model turn is available");
+        let system = &prepared.request.messages[0].content;
+
+        assert!(system.contains("workspace=/tmp/example"));
+        assert!(system.contains("cindx.task-contract.v1"));
+        assert!(system.contains("file.read"));
+        assert_eq!(state.turn, 0);
+        assert!(state
+            .task_contract
+            .completion_instruction(true, &tools)
+            .is_ok());
     }
 }

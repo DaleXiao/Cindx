@@ -480,18 +480,22 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
                 .unwrap_or_else(|_| Err("reverse pairwise reviewer panicked".to_string())),
         )
     });
-    let judge = match (forward, reverse) {
-        (Ok(forward), Ok(reverse)) => {
-            aggregate_prompt_pairwise_payloads(forward, reverse_prompt_pairwise_payload(reverse))
-        }
-        (Ok(forward), Err(_)) => forward,
-        (Err(_), Ok(reverse)) => reverse_prompt_pairwise_payload(reverse),
+    let (forward, reverse) = match (forward, reverse) {
+        (Ok(forward), Ok(reverse)) => (forward, reverse_prompt_pairwise_payload(reverse)),
         (Err(forward), Err(reverse)) => {
             return Err(format!(
                 "both pairwise reviewers failed: forward={forward}; reverse={reverse}"
-            ))
+            ));
+        }
+        (Err(error), Ok(_)) => {
+            return Err(format!("forward pairwise reviewer failed: {error}"));
+        }
+        (Ok(_), Err(error)) => {
+            return Err(format!("reverse pairwise reviewer failed: {error}"));
         }
     };
+    validate_prompt_pairwise_agreement(&forward, &reverse)?;
+    let judge = aggregate_prompt_pairwise_payloads(forward, reverse);
     if control.should_stop() {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }

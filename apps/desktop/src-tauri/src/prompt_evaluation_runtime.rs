@@ -126,27 +126,51 @@ pub(crate) fn prompt_evaluation_role(role: &str) -> ModelRole {
     }
 }
 
+fn prompt_evaluation_stage_class(role: &ModelRole) -> RunStageClass {
+    match role {
+        ModelRole::Reviewer => RunStageClass::Reviewer,
+        ModelRole::Summarizer => RunStageClass::Synthesizer,
+        _ => RunStageClass::Worker,
+    }
+}
+
+fn prompt_evaluation_elapsed_ms(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 pub(crate) fn prompt_evaluation_step_prompt(
     objective: &str,
     step: &orchestrator::WorkflowPlanStep,
-    outputs: &BTreeMap<String, String>,
+    outputs: &BTreeMap<String, PromptDependencyOutput>,
+    missing_dependencies: &[String],
 ) -> String {
-    let dependencies = if step.access.is_empty() {
+    let required_dependencies = step
+        .access
+        .iter()
+        .chain(step.contract.input_steps.iter())
+        .collect::<BTreeSet<_>>();
+    let dependencies = if required_dependencies.is_empty() {
         "(none; solve this branch independently)".to_string()
     } else {
-        step.access
+        required_dependencies
             .iter()
-            .map(|dependency| {
-                format!(
-                    "[{dependency}]\n{}",
-                    outputs
-                        .get(dependency)
-                        .map(String::as_str)
-                        .unwrap_or("[dependency unavailable]")
-                )
+            .filter_map(|dependency| {
+                outputs.get(*dependency).map(|output| {
+                    let status = if output.completed() {
+                        "completed"
+                    } else {
+                        "degraded_partial"
+                    };
+                    format!("[{dependency} status={status}]\n{}", output.content)
+                })
             })
             .collect::<Vec<_>>()
             .join("\n\n")
+    };
+    let missing = if missing_dependencies.is_empty() {
+        "(none)".to_string()
+    } else {
+        missing_dependencies.join(", ")
     };
     let tool_contract = match step.tool_policy {
         WorkflowToolPolicy::None => {
@@ -160,7 +184,7 @@ pub(crate) fn prompt_evaluation_step_prompt(
         }
     };
     format!(
-        "You are executing one node in an isolated Cindx Conductor evaluation. The workspace boundary is read-only and no external side effects are allowed. {tool_contract} Never claim an action that is absent from your tool results. Produce the strongest work product possible from the objective, authorized dependency outputs, and verified read-only evidence. State uncertainty rather than inventing evidence.\n\nObjective:\n{objective}\n\nYour role: {}\nYour subtask:\n{}\n\nAuthorized dependency outputs:\n{dependencies}",
+        "You are executing one node in an isolated Cindx Conductor evaluation. The workspace boundary is read-only and no external side effects are allowed. {tool_contract} Never claim an action that is absent from your tool results. Produce the strongest work product possible from the objective, authorized dependency outputs, and verified read-only evidence. Inputs marked degraded_partial are real but incomplete; preserve useful claims while explicitly correcting or qualifying them. Missing dependency ids contain no usable content and must never be treated as evidence. State uncertainty rather than inventing evidence.\n\nObjective:\n{objective}\n\nYour role: {}\nYour subtask:\n{}\n\nAuthorized dependency outputs:\n{dependencies}\n\nMissing dependency ids:\n{missing}",
         step.role, step.subtask
     )
 }
@@ -196,8 +220,10 @@ pub(crate) fn complete_prompt_evaluation_worker(
     workspace_root: &Path,
     request: PromptEvaluationWorkerRequest,
     control: &Arc<AgentRunControl>,
+    branch_cancellation: &Arc<AtomicBool>,
 ) -> CollaborationCompletion {
-    let started_at_ms = current_time_millis();
+    let started_at = Instant::now();
+    let stage_class = prompt_evaluation_stage_class(&request.role);
     let registry = ToolRegistry::with_workspace_tools(workspace_root.to_path_buf());
     let tools = prompt_evaluation_tool_specs(
         &registry,
@@ -205,78 +231,114 @@ pub(crate) fn complete_prompt_evaluation_worker(
         config.context_window_tokens,
         &request.tool_policy,
     );
-    let has_tools = !tools.is_empty();
     let evidence_turn_limit = request.max_model_turns.max(1);
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
         base_url: config.base_url.clone(),
         api_key: config.api_key.clone(),
         model: request.model.clone(),
         embedding_model: config.model_for_role(&ModelRole::Embedder),
-        timeout_seconds: control.model_call_timeout_seconds(),
+        timeout_seconds: control.stage_model_call_timeout_seconds(stage_class),
     });
-    let mut runtime = start_agent_loop(
+    let mut worker = IsolatedWorkerRuntime::new(
         TaskId(unique_id("prompt-evaluation-worker")),
         request.prompt.clone(),
-        AgentRuntimeConfig {
-            max_turns: collaboration_worker_runtime_turn_limit(evidence_turn_limit, has_tools),
-        },
+        tools,
+        evidence_turn_limit,
+        request.max_tool_calls,
     );
+    if request.tool_policy == WorkflowToolPolicy::ReadOnlyEvidence {
+        worker.require_substantive_evidence();
+    }
     let trusted_context = format!(
         "This is a GEPA evaluation sandbox backed by the active workspace through read-only tools. Never request or imply writes, process execution, browser control, computer control, or network access. Treat tool outputs as the only external evidence. You have {evidence_turn_limit} tool-capable model rounds and {} total tool calls; batch decisive reads, avoid repeated directory listings, and stop gathering evidence once the assigned node is answerable. Return only the assigned node work product.",
         request.max_tool_calls,
     );
-    let mut usage = Metadata::new();
     let mut evidence = Vec::new();
-    let mut tool_call_count = 0usize;
     loop {
-        if control.should_stop() {
-            return CollaborationCompletion {
-                content: None,
-                error: Some(MODEL_REQUEST_CANCELLED.to_string()),
-                latency_ms: current_time_millis().saturating_sub(started_at_ms),
-                usage,
+        if branch_cancellation.load(Ordering::SeqCst) {
+            return CollaborationCompletion::failed_worker(
+                AgentFailure::cancelled(
+                    "parallel_quorum_cancelled",
+                    "evaluation branch cancelled after the layer reached an anytime quorum",
+                ),
+                None,
+                prompt_evaluation_elapsed_ms(started_at),
+                worker.completion_usage("read_only_evaluation_v3"),
                 evidence,
-            };
+            );
         }
-        if let Err(reason) = control.begin_model_call("prompt_evaluation_worker") {
-            return CollaborationCompletion {
-                content: None,
-                error: Some(format!(
-                    "evaluation worker stopped before model call: {}",
-                    reason.code()
-                )),
-                latency_ms: current_time_millis().saturating_sub(started_at_ms),
-                usage,
+        if let Some(reason) = control.stop_reason() {
+            let failure = AgentFailure::from_stop_reason(
+                reason,
+                format!("evaluation worker stopped: {}", reason.code()),
+            );
+            return CollaborationCompletion::failed_worker(
+                failure,
+                None,
+                prompt_evaluation_elapsed_ms(started_at),
+                worker.completion_usage("read_only_evaluation_v3"),
                 evidence,
-            };
+            );
         }
-        let finalizing =
-            prepare_collaboration_worker_turn(&mut runtime, has_tools, evidence_turn_limit);
-        let request_tools: &[ToolSpec] = if finalizing { &[] } else { &tools };
+        if control.stage_should_stop(stage_class) {
+            let failure = AgentFailure::from_stop_reason(
+                RunStopReason::StageBudgetExhausted,
+                "evaluation worker exhausted its stage time budget",
+            );
+            return CollaborationCompletion::failed_worker(
+                failure,
+                None,
+                prompt_evaluation_elapsed_ms(started_at),
+                worker.completion_usage("read_only_evaluation_v3"),
+                evidence,
+            );
+        }
         let max_output_tokens = bounded_max_output_tokens(
             config.context_window_tokens,
-            COLLABORATION_MAX_OUTPUT_TOKENS,
+            u64::try_from(request.max_output_tokens.max(1)).unwrap_or(u64::MAX),
         );
-        let prepared_turn = AgentKernel::new(&mut runtime, request_tools).prepare_model_turn(
+        let prepared_turn = match worker.prepare_model_turn(
             Some(&config.agent_system_prompt),
             Some(&trusted_context),
             config.context_window_tokens,
             max_output_tokens,
-        );
-        let mut model_request = prepared_turn.request;
-        let governor = prepared_turn.context;
+        ) {
+            Ok(prepared_turn) => prepared_turn,
+            Err(failed) => {
+                if let Some(partial_answer) = failed.partial_content.as_ref() {
+                    control.record_partial_output(partial_answer);
+                }
+                return CollaborationCompletion::failed_worker(
+                    failed.failure,
+                    failed.partial_content,
+                    prompt_evaluation_elapsed_ms(started_at),
+                    worker.completion_usage("read_only_evaluation_v3"),
+                    evidence,
+                );
+            }
+        };
+        if let Err(reason) = control.begin_stage_model_call("prompt_evaluation_worker", stage_class)
+        {
+            let failure = AgentFailure::from_stop_reason(
+                reason,
+                format!(
+                    "evaluation worker stopped before model call: {}",
+                    reason.code()
+                ),
+            );
+            return CollaborationCompletion::failed_worker(
+                failure,
+                None,
+                prompt_evaluation_elapsed_ms(started_at),
+                worker.completion_usage("read_only_evaluation_v3"),
+                evidence,
+            );
+        }
+        let mut model_request = prepared_turn.turn.request;
         model_request.role = request.role.clone();
         model_request.metadata.insert(
             "max_output_tokens".to_string(),
             max_output_tokens.to_string(),
-        );
-        usage.insert(
-            "context_governor_applied".to_string(),
-            governor.applied.to_string(),
-        );
-        usage.insert(
-            "context_projected_tokens".to_string(),
-            governor.estimated_projected_tokens.to_string(),
         );
         model_request
             .metadata
@@ -284,147 +346,89 @@ pub(crate) fn complete_prompt_evaluation_worker(
         let response = provider.complete_streaming_cancellable(
             model_request,
             |_| {},
-            || control.should_stop(),
+            || {
+                branch_cancellation.load(Ordering::SeqCst)
+                    || control.should_stop()
+                    || control.stage_should_stop(stage_class)
+            },
         );
         control.finish_model_call();
         let response = match response {
             Ok(response) => response,
             Err(error) => {
-                return CollaborationCompletion {
-                    content: None,
-                    error: Some(error.to_string()),
-                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
-                    usage,
+                let failure = if branch_cancellation.load(Ordering::SeqCst) {
+                    AgentFailure::cancelled(
+                        "parallel_quorum_cancelled",
+                        "evaluation branch cancelled after the layer reached an anytime quorum",
+                    )
+                } else if let Some(reason) = control.stop_reason() {
+                    AgentFailure::from_stop_reason(
+                        reason,
+                        format!("evaluation worker stopped: {}", reason.code()),
+                    )
+                } else if control.stage_should_stop(stage_class) {
+                    AgentFailure::from_stop_reason(
+                        RunStopReason::StageBudgetExhausted,
+                        "evaluation worker exhausted its stage time budget",
+                    )
+                } else {
+                    AgentFailure::from_model_error(&error)
+                };
+                return CollaborationCompletion::failed_worker(
+                    failure,
+                    None,
+                    prompt_evaluation_elapsed_ms(started_at),
+                    worker.completion_usage("read_only_evaluation_v3"),
                     evidence,
-                }
+                );
             }
         };
-        for key in [
-            "prompt_tokens",
-            "completion_tokens",
-            "total_tokens",
-            "usage_source",
-            "usage_estimated",
-        ] {
-            let previous = usage
-                .get(key)
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or_default();
-            let additional = response
-                .metadata
-                .get(key)
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or_default();
-            usage.insert(
-                key.to_string(),
-                previous.saturating_add(additional).to_string(),
-            );
-        }
-        let finalization_content = finalizing
-            .then(|| response.message.content.trim().to_string())
-            .filter(|content| !content.is_empty());
         if let Some(evidence) = model_response_checkpoint_evidence(&response) {
             control.record_checkpoint("model_result", "prompt_evaluation_worker", &evidence);
         }
-        match AgentKernel::new(&mut runtime, request_tools).advance_model_response(response) {
-            AgentAdvance::Completed { answer } => {
-                usage.insert("worker_turns".to_string(), runtime.turn.to_string());
-                usage.insert("worker_tool_calls".to_string(), tool_call_count.to_string());
-                usage.insert(
-                    "worker_runtime".to_string(),
-                    "read_only_evaluation_v2".to_string(),
+        match worker.advance_model_response(response) {
+            WorkerAdvance::Completed { answer } => {
+                return CollaborationCompletion::completed_worker(
+                    answer,
+                    prompt_evaluation_elapsed_ms(started_at),
+                    worker.completion_usage("read_only_evaluation_v3"),
+                    evidence,
                 );
-                return CollaborationCompletion {
-                    content: Some(answer),
-                    error: None,
-                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
-                    usage,
-                    evidence,
-                };
             }
-            AgentAdvance::TurnBudgetExhausted {
-                completed_turns,
-                max_turns,
-                ..
-            } => {
-                return CollaborationCompletion {
-                    content: None,
-                    error: Some(format!(
-                        "evaluation_turn_budget_exhausted: completed {completed_turns} turns with a {max_turns}-turn budget"
-                    )),
-                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
-                    usage,
-                    evidence,
+            WorkerAdvance::Failed(failed) => {
+                if let Some(partial_answer) = failed.partial_content.as_ref() {
+                    control.record_partial_output(partial_answer);
                 }
-            }
-            AgentAdvance::Failed { message } => {
-                return CollaborationCompletion {
-                    content: None,
-                    error: Some(message),
-                    latency_ms: current_time_millis().saturating_sub(started_at_ms),
-                    usage,
+                return CollaborationCompletion::failed_worker(
+                    failed.failure,
+                    failed.partial_content,
+                    prompt_evaluation_elapsed_ms(started_at),
+                    worker.completion_usage("read_only_evaluation_v3"),
                     evidence,
-                }
+                );
             }
-            AgentAdvance::Retry { instruction } => {
-                AgentKernel::new(&mut runtime, request_tools)
-                    .apply_model_response_retry(instruction);
-                continue;
-            }
-            AgentAdvance::ToolCalls { calls } => {
-                if finalizing {
-                    if let Some(answer) = finalization_content {
-                        usage.insert("worker_turns".to_string(), runtime.turn.to_string());
-                        usage.insert(
-                            "worker_tool_calls".to_string(),
-                            tool_call_count.to_string(),
-                        );
-                        usage.insert(
-                            "worker_runtime".to_string(),
-                            "read_only_evaluation_v2".to_string(),
-                        );
-                        return CollaborationCompletion {
-                            content: Some(answer),
-                            error: None,
-                            latency_ms: current_time_millis().saturating_sub(started_at_ms),
-                            usage,
-                            evidence,
-                        };
-                    }
-                    return CollaborationCompletion {
-                        content: None,
-                        error: Some(
-                            "evaluation worker requested another tool after its evidence phase; final answer was empty"
-                                .to_string(),
-                        ),
-                        latency_ms: current_time_millis().saturating_sub(started_at_ms),
-                        usage,
-                        evidence,
-                    };
-                }
+            WorkerAdvance::Retry => continue,
+            WorkerAdvance::ToolCalls { calls } => {
                 for call in calls {
-                    tool_call_count += 1;
-                    let allowed = tool_call_count <= request.max_tool_calls
-                        && tools.iter().any(|tool| {
-                            tool.name == call.tool_name && tool.risk == ToolRisk::ReadOnly
-                        });
-                    let (status, output) = if !allowed {
-                        (
-                            ToolOutcomeStatus::Denied,
-                            "Evaluation sandbox denied this tool: only exposed read-only tools within the per-step budget are allowed."
-                                .to_string(),
-                        )
+                    let admission = worker.admit_tool_call(&call);
+                    let (status, output) = if let WorkerToolAdmission::Denied { reason, .. } =
+                        admission
+                    {
+                        (ToolOutcomeStatus::Denied, reason.to_string())
                     } else {
-                        let mut invocation =
-                            AgentKernel::new(&mut runtime, request_tools).tool_invocation(&call);
+                        let mut invocation = worker.tool_invocation(&call);
                         invocation.proposed_by_model = "prompt-evaluation-worker".to_string();
-                        invocation.metadata.insert(
-                            "evaluation_sandbox".to_string(),
-                            "read_only_v2".to_string(),
-                        );
+                        invocation
+                            .metadata
+                            .insert("evaluation_sandbox".to_string(), "read_only_v2".to_string());
                         let tool_control = ToolExecutionControl::new({
                             let control = Arc::clone(control);
-                            move || control.should_stop()
+                            let branch_cancellation = Arc::clone(branch_cancellation);
+                            move || {
+                                branch_cancellation.load(Ordering::SeqCst)
+                                    || control.should_stop()
+                                    || control.stage_should_stop(stage_class)
+                            }
                         });
                         match registry.get(&call.tool_name) {
                             Some(tool) if tool.spec().risk == ToolRisk::ReadOnly => {
@@ -452,12 +456,7 @@ pub(crate) fn complete_prompt_evaluation_worker(
                         tool_outcome_label(&status),
                         &output,
                     );
-                    AgentKernel::new(&mut runtime, request_tools).apply_tool_observation(
-                        &call,
-                        &status,
-                        None,
-                        &observation,
-                    );
+                    worker.apply_tool_observation(&call, &status, &observation);
                 }
             }
         }
@@ -471,212 +470,24 @@ pub(crate) fn execute_prompt_workflow_candidate(
     candidate: PromptPlanCandidate,
     control: &Arc<AgentRunControl>,
 ) -> PromptExecutionCandidate {
-    let config = config.clone();
-    let workspace_root = workspace_root.to_path_buf();
-    let control = control.clone();
-    execute_prompt_workflow_candidate_with_runner(
+    prompt_workflow_execution::execute_prompt_workflow_candidate_impl(
+        config,
+        workspace_root,
         objective,
         candidate,
-        Arc::new(move |request| {
-            complete_prompt_evaluation_worker(&config, &workspace_root, request, &control)
-        }),
+        control,
     )
 }
 
+#[cfg(test)]
 pub(crate) fn execute_prompt_workflow_candidate_with_runner(
     objective: &str,
     candidate: PromptPlanCandidate,
     runner: PromptEvaluationRunner,
 ) -> PromptExecutionCandidate {
-    let started_at_ms = current_time_millis();
-    let Some(plan) = candidate.plan.as_ref() else {
-        return PromptExecutionCandidate {
-            plan: candidate,
-            execution: PromptWorkflowExecution {
-                succeeded: false,
-                final_output: String::new(),
-                steps: Vec::new(),
-                latency_ms: 0,
-                total_tokens: 0,
-            },
-        };
-    };
-    let Ok(layers) = adaptive_workflow_layers(&plan.adaptive_workflow()) else {
-        return PromptExecutionCandidate {
-            plan: candidate,
-            execution: PromptWorkflowExecution {
-                succeeded: false,
-                final_output: String::new(),
-                steps: Vec::new(),
-                latency_ms: 0,
-                total_tokens: 0,
-            },
-        };
-    };
-
-    let mut outputs = BTreeMap::<String, String>::new();
-    let mut execution_steps = Vec::new();
-    let retry_policy = candidate.genome.retry_policy;
-    let max_attempts = candidate.genome.max_step_attempts.max(1);
-    let alternate_models = plan
-        .steps
-        .iter()
-        .map(|step| step.model.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    for layer in layers {
-        let jobs = layer
-            .iter()
-            .filter_map(|index| plan.steps.get(*index).cloned().map(|step| (*index, step)))
-            .map(|(index, step)| {
-                let initial_prompt = prompt_evaluation_step_prompt(objective, &step, &outputs);
-                let runner = Arc::clone(&runner);
-                let alternate_models = alternate_models.clone();
-                let max_model_turns = plan.budget.max_model_turns_per_step;
-                let max_tool_calls = plan.budget.max_tool_calls_per_step;
-                Box::new(move || {
-                    let role = prompt_evaluation_role(&step.role);
-                    let mut model = step.model.clone();
-                    let mut prompt = initial_prompt.clone();
-                    let mut prompts = Vec::new();
-                    let mut errors = Vec::new();
-                    let mut evidence = Vec::new();
-                    let mut latency_ms = 0u64;
-                    let mut total_tokens = 0u64;
-                    let mut attempts = 0usize;
-                    let mut final_output = None;
-                    while attempts < max_attempts {
-                        attempts += 1;
-                        prompts.push(format!("attempt {attempts} model={model}\n{prompt}"));
-                        let completion = runner(PromptEvaluationWorkerRequest {
-                            role: role.clone(),
-                            model: model.clone(),
-                            prompt: prompt.clone(),
-                            tool_policy: step.tool_policy.clone(),
-                            max_model_turns,
-                            max_tool_calls,
-                        });
-                        latency_ms = latency_ms.saturating_add(completion.latency_ms);
-                        total_tokens = total_tokens.saturating_add(
-                            completion
-                                .usage
-                                .get("total_tokens")
-                                .and_then(|value| value.parse::<u64>().ok())
-                                .unwrap_or_default(),
-                        );
-                        evidence.extend(completion.evidence);
-                        if let Some(content) = completion
-                            .content
-                            .filter(|content| !content.trim().is_empty())
-                        {
-                            final_output = Some(content);
-                            break;
-                        }
-                        let error = completion
-                            .error
-                            .unwrap_or_else(|| "empty worker output".to_string());
-                        errors.push(error.clone());
-                        if attempts >= max_attempts
-                            || retry_policy == PromptRetryPolicy::FailFast
-                        {
-                            break;
-                        }
-                        if retry_policy == PromptRetryPolicy::AlternateModel {
-                            if let Some(alternate) = alternate_models
-                                .iter()
-                                .filter(|candidate| **candidate != model)
-                                .nth((attempts - 1) % alternate_models.len().max(1))
-                            {
-                                model.clone_from(alternate);
-                            }
-                        }
-                        prompt = format!(
-                            "Retry the same authorized evaluation node after a failed attempt. Correct the failure without widening scope or claiming unavailable actions.\n\nFailure:\n{}\n\nOriginal node contract:\n{}",
-                            truncate_for_collaboration(&error, 2_000),
-                            initial_prompt
-                        );
-                    }
-                    let succeeded = final_output.is_some();
-                    let output = final_output.unwrap_or_else(|| {
-                        format!(
-                            "[execution failed: {}]",
-                            errors
-                                .last()
-                                .map(String::as_str)
-                                .unwrap_or("empty worker output")
-                        )
-                    });
-                    let tool_calls = prompt_evaluation_tool_traces(&evidence);
-                    (
-                        index,
-                        PromptExecutionStep {
-                            id: step.id,
-                            role: step.role,
-                            model,
-                            prompt: prompts.join("\n\n---\n\n"),
-                            attempts,
-                            succeeded,
-                            output,
-                            tool_calls,
-                            errors,
-                            latency_ms,
-                            total_tokens,
-                            evidence_count: step.access.len() + evidence.len(),
-                        },
-                    )
-                }) as ParallelJob<(usize, PromptExecutionStep)>
-            })
-            .collect::<Vec<_>>();
-        let mut completed = run_model_jobs_ordered("prompt-evaluation", jobs)
-            .into_iter()
-            .map(|result| {
-                result.unwrap_or_else(|error| {
-                    (
-                        usize::MAX,
-                        PromptExecutionStep {
-                            id: "worker-panic".to_string(),
-                            role: "worker".to_string(),
-                            model: String::new(),
-                            prompt: String::new(),
-                            attempts: 1,
-                            succeeded: false,
-                            output: format!("[execution failed: {error}]"),
-                            tool_calls: Vec::new(),
-                            errors: vec![error.to_string()],
-                            latency_ms: 0,
-                            total_tokens: 0,
-                            evidence_count: 0,
-                        },
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        completed.sort_by_key(|(index, _)| *index);
-        for (_, step) in completed {
-            outputs.insert(step.id.clone(), step.output.clone());
-            execution_steps.push(step);
-        }
-    }
-    let final_output = plan
-        .steps
-        .last()
-        .and_then(|step| outputs.get(&step.id))
-        .cloned()
-        .unwrap_or_default();
-    let succeeded = !final_output.trim().is_empty()
-        && execution_steps.len() == plan.steps.len()
-        && execution_steps.iter().all(|step| step.succeeded);
-    PromptExecutionCandidate {
-        plan: candidate,
-        execution: PromptWorkflowExecution {
-            succeeded,
-            final_output,
-            total_tokens: execution_steps.iter().map(|step| step.total_tokens).sum(),
-            steps: execution_steps,
-            latency_ms: current_time_millis().saturating_sub(started_at_ms),
-        },
-    }
+    prompt_workflow_execution::execute_prompt_workflow_candidate_with_runner_impl(
+        objective, candidate, runner, None,
+    )
 }
 
 pub(crate) fn evaluate_prompt_candidate_pair(
@@ -701,12 +512,12 @@ pub(crate) fn evaluate_prompt_candidate_pair(
             .iter()
             .map(|step| {
                 format!(
-                    "step={} role={} model={} attempts={} succeeded={} latency_ms={} tokens={} tool_calls={} output:\n{}",
+                    "step={} role={} model={} attempts={} status={:?} latency_ms={} tokens={} tool_calls={} output:\n{}",
                     step.id,
                     step.role,
                     step.model,
                     step.attempts,
-                    step.succeeded,
+                    step.status,
                     step.latency_ms,
                     step.total_tokens,
                     step.tool_calls.len(),
@@ -842,7 +653,7 @@ pub(crate) fn prompt_pairwise_observation(
                         .steps
                         .iter()
                         .find(|executed| executed.id == step.id)
-                        .is_some_and(|executed| executed.succeeded),
+                        .is_some_and(PromptExecutionStep::succeeded),
                     attempts: candidate
                         .execution
                         .steps
