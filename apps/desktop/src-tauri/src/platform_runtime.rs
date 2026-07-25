@@ -89,6 +89,11 @@ pub(crate) fn set_sidebar_material_width(app: tauri::AppHandle, width: f64) -> R
 }
 
 #[cfg(target_os = "macos")]
+fn centered_macos_traffic_light_origin_y(button_height: f64) -> f64 {
+    ((MACOS_TITLEBAR_HEIGHT - button_height) / 2.0).max(0.0)
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn repair_macos_traffic_light_position(
     window: &tauri::WebviewWindow,
 ) -> Result<(), String> {
@@ -116,7 +121,7 @@ pub(crate) fn repair_macos_traffic_light_position(
             };
 
             let close_frame = NSView::frame(&close);
-            let title_bar_height = close_frame.size.height + MACOS_TRAFFIC_LIGHT_Y;
+            let title_bar_height = MACOS_TITLEBAR_HEIGHT.max(close_frame.size.height);
             let mut title_bar_frame = NSView::frame(&title_bar_view);
             title_bar_frame.size.height = title_bar_height;
             title_bar_frame.origin.y = window.frame().size.height - title_bar_height;
@@ -124,11 +129,10 @@ pub(crate) fn repair_macos_traffic_light_position(
 
             let spacing = NSView::frame(&miniaturize).origin.x - close_frame.origin.x;
             for (index, button) in [close, miniaturize, zoom].into_iter().enumerate() {
-                let mut origin = NSView::frame(&button).origin;
+                let button_frame = NSView::frame(&button);
+                let mut origin = button_frame.origin;
                 origin.x = MACOS_TRAFFIC_LIGHT_X + index as f64 * spacing;
-                // AppKit can retain the pre-reveal vertical origin after it lays out the
-                // initially hidden titlebar. Wry only reapplies x, so make the inset complete.
-                origin.y = 0.0;
+                origin.y = centered_macos_traffic_light_origin_y(button_frame.size.height);
                 button.setFrameOrigin(origin);
             }
         })
@@ -203,4 +207,15 @@ pub(crate) fn schedule_main_window_reveal_fallback(app: tauri::AppHandle) {
         let _ = repair_macos_traffic_light_position(&window);
         schedule_macos_traffic_light_position_repair(&app, window.label());
     });
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::centered_macos_traffic_light_origin_y;
+
+    #[test]
+    fn traffic_lights_are_centered_in_the_app_titlebar() {
+        assert_eq!(centered_macos_traffic_light_origin_y(14.0), 16.0);
+        assert_eq!(centered_macos_traffic_light_origin_y(46.0), 0.0);
+    }
 }

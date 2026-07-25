@@ -328,7 +328,8 @@ assert(
     rustLib.includes("fn schedule_macos_traffic_light_position_repair(") &&
     rustLib.includes("MACOS_TRAFFIC_LIGHT_REPAIR_GENERATION") &&
     rustLib.includes("MACOS_TRAFFIC_LIGHT_REPAIR_DELAY_MS: u64 = 48") &&
-    rustLib.includes("origin.y = 0.0;") &&
+    rustLib.includes("MACOS_TITLEBAR_HEIGHT: f64 = 46.0") &&
+    rustLib.includes("centered_macos_traffic_light_origin_y(button_frame.size.height)") &&
     rustLib.includes("repair_macos_traffic_light_position(&window)?;") &&
     rustLib.includes("let _ = repair_macos_traffic_light_position(&window);") &&
     rustLib.includes("tauri::WindowEvent::Resized(_)") &&
