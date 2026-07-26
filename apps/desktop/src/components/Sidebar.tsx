@@ -298,7 +298,7 @@ export function Sidebar({
 
   return (
     <aside className="sidebar" aria-label="Projects and tasks">
-      <div className="brand-row" title={activeProject?.root}>
+      <div className="brand-row">
         <div className="brand-identity">
           <span className="brand-mark-shell">
             <img className="brand-mark" src={appIconUrl} alt="" />
