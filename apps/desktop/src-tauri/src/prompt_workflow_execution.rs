@@ -12,6 +12,10 @@ use crate::{
         prompt_evaluation_stage_class, prompt_evaluation_step_prompt,
         prompt_evaluation_tool_traces,
     },
+    prompt_workflow_selection::{
+        compare_prompt_team_with_anchor, finish_prompt_direct_anchor,
+        prompt_execution_quality_gate, select_final_output, start_prompt_direct_anchor,
+    },
 };
 
 pub(super) fn execute_prompt_workflow_candidate_impl(
@@ -40,6 +44,7 @@ pub(super) fn execute_prompt_workflow_candidate_impl(
             }
         }),
         Some(control),
+        true,
     )
 }
 
@@ -48,6 +53,7 @@ pub(super) fn execute_prompt_workflow_candidate_with_runner_impl(
     candidate: PromptPlanCandidate,
     runner: PromptEvaluationRunner,
     control: Option<Arc<AgentRunControl>>,
+    enable_direct_anchor: bool,
 ) -> PromptExecutionCandidate {
     let started_at = Instant::now();
     let Some(plan) = candidate.plan.clone() else {
@@ -67,6 +73,11 @@ pub(super) fn execute_prompt_workflow_candidate_with_runner_impl(
         plan.clone(),
         current_time_millis(),
     );
+    let mut direct_anchor = if enable_direct_anchor {
+        start_prompt_direct_anchor(objective, &plan, Arc::clone(&runner)).unwrap_or(None)
+    } else {
+        None
+    };
     let alternate_models = plan
         .steps
         .iter()
@@ -252,18 +263,127 @@ pub(super) fn execute_prompt_workflow_candidate_with_runner_impl(
         }
     }
 
-    let final_output = select_final_output(&plan, &execution_steps, &outputs);
-    let quality_gate_met =
-        prompt_execution_quality_gate(&plan, &execution_steps, &execution_contract);
+    let team_output = select_final_output(&plan, &execution_steps, &outputs);
+    if !team_output.trim().is_empty()
+        && plan.steps.last().is_some_and(|step| {
+            checkpoint
+                .steps
+                .get(&step.id)
+                .is_some_and(|step| step.status == WorkflowStepStatus::Completed)
+        })
+    {
+        let _ = checkpoint.finalize(team_output.clone(), current_time_millis());
+    }
+    let anchor_result = finish_prompt_direct_anchor(&mut direct_anchor, control.as_ref());
+    let anchor_tokens = anchor_result
+        .as_ref()
+        .map_or(0, |result| result.total_tokens);
+    let anchor_latency_ms = anchor_result.as_ref().map_or(0, |result| result.latency_ms);
+    let pairwise_result = anchor_result.as_ref().and_then(|anchor| {
+        if team_output.trim().is_empty() {
+            None
+        } else {
+            compare_prompt_team_with_anchor(
+                objective,
+                &team_output,
+                &anchor.output,
+                &plan,
+                Arc::clone(&runner),
+                control.as_ref(),
+            )
+            .ok()
+            .flatten()
+        }
+    });
+    let pairwise_tokens = pairwise_result
+        .as_ref()
+        .map_or(0, |result| result.total_tokens);
+    let (mut checkpoint, mut anytime) =
+        match AgentEngineSession::restore(&execution_contract, checkpoint) {
+            Ok(session) => session.into_parts(),
+            Err(_) => return failed_execution(candidate),
+        };
+    if let Some(anchor) = anchor_result.as_ref() {
+        let anchor_pending = anytime
+            .candidate(DIRECT_ANCHOR_CANDIDATE_ID)
+            .is_some_and(|candidate| candidate.state == AnytimeCandidateState::Pending);
+        if anchor_pending
+            && (anytime.mark_running(DIRECT_ANCHOR_CANDIDATE_ID).is_err()
+                || anytime
+                    .observe(
+                        DIRECT_ANCHOR_CANDIDATE_ID,
+                        direct_anchor_response_verdict(true, false),
+                    )
+                    .is_err())
+        {
+            return failed_execution(candidate);
+        }
+        checkpoint.anytime_outputs.insert(
+            DIRECT_ANCHOR_CANDIDATE_ID.to_string(),
+            anchor.output.clone(),
+        );
+    }
+    if let (Some(final_step), Some(pairwise)) = (plan.steps.last(), pairwise_result.as_ref()) {
+        if let Some(mut verdict) = anytime.verdict(&final_step.id).cloned() {
+            verdict.quality_bps = pairwise.comparison.team_score_bps;
+            verdict.confidence_bps = verdict
+                .confidence_bps
+                .min(pairwise.comparison.team_score_bps);
+            verdict.safety_violations = verdict
+                .safety_violations
+                .saturating_add(pairwise.comparison.team_safety_violations);
+            verdict.anchor_uplift_bps = Some(pairwise.comparison.team_uplift_bps);
+            if anytime.revise(&final_step.id, verdict).is_err() {
+                return failed_execution(candidate);
+            }
+        }
+        if let Some(mut verdict) = anytime.verdict(DIRECT_ANCHOR_CANDIDATE_ID).cloned() {
+            verdict.quality_bps = pairwise.comparison.anchor_score_bps;
+            verdict.confidence_bps = verdict
+                .confidence_bps
+                .min(pairwise.comparison.anchor_score_bps);
+            verdict.safety_violations = verdict
+                .safety_violations
+                .saturating_add(pairwise.comparison.anchor_safety_violations);
+            if anytime.revise(DIRECT_ANCHOR_CANDIDATE_ID, verdict).is_err() {
+                return failed_execution(candidate);
+            }
+        }
+    }
+    if orchestrator::persist_anytime_controller(&mut checkpoint, &anytime).is_err() {
+        return failed_execution(candidate);
+    }
+    let anchor_selected = (anchor_result.is_some()
+        && !team_output.trim().is_empty()
+        && pairwise_result.is_none()
+        && execution_contract.min_team_uplift_bps > 0)
+        || anytime
+            .best()
+            .is_some_and(|best| best.candidate_id == DIRECT_ANCHOR_CANDIDATE_ID);
+    let final_output = if anchor_selected {
+        anchor_result
+            .as_ref()
+            .map(|result| result.output.clone())
+            .unwrap_or_default()
+    } else {
+        team_output
+    };
+    let quality_gate_met = !anchor_selected
+        && prompt_execution_quality_gate(&plan, &execution_steps, &execution_contract);
     PromptExecutionCandidate {
         plan: candidate,
         execution: PromptWorkflowExecution {
             succeeded: !final_output.trim().is_empty(),
             quality_gate_met,
             final_output,
-            total_tokens: execution_steps.iter().map(|step| step.total_tokens).sum(),
+            total_tokens: execution_steps
+                .iter()
+                .map(|step| step.total_tokens)
+                .sum::<u64>()
+                .saturating_add(anchor_tokens)
+                .saturating_add(pairwise_tokens),
             steps: execution_steps,
-            latency_ms: elapsed_millis(started_at),
+            latency_ms: elapsed_millis(started_at).max(anchor_latency_ms),
         },
     }
 }
@@ -586,41 +706,6 @@ pub(crate) fn record_prompt_step_in_checkpoint(
     checkpoint.record_step_metrics(&step.id, step.latency_ms, step.total_tokens)
 }
 
-fn prompt_execution_quality_gate(
-    plan: &WorkflowPlanIr,
-    steps: &[PromptExecutionStep],
-    contract: &ConductorExecutionContract,
-) -> bool {
-    let Some(final_step) = plan.steps.last() else {
-        return false;
-    };
-    let final_step_completed = steps
-        .iter()
-        .find(|step| step.id == final_step.id)
-        .is_some_and(PromptExecutionStep::succeeded);
-    let root_steps = plan
-        .steps
-        .iter()
-        .filter(|step| step.access.is_empty())
-        .collect::<Vec<_>>();
-    let successful_roots = root_steps
-        .iter()
-        .filter(|planned| {
-            steps
-                .iter()
-                .find(|executed| executed.id == planned.id)
-                .is_some_and(PromptExecutionStep::succeeded)
-        })
-        .count();
-    let root_gate_met = root_steps.is_empty()
-        || successful_roots >= contract.required_successes_for_layer(root_steps.len());
-    let verification_gate_met = !contract.verification_required
-        || steps.iter().any(|step| {
-            step.succeeded() && matches!(step.role.as_str(), "verifier" | "synthesizer")
-        });
-    final_step_completed && root_gate_met && verification_gate_met
-}
-
 fn unresolved_step(
     step: orchestrator::WorkflowPlanStep,
     unresolved: &[String],
@@ -663,52 +748,6 @@ pub(crate) fn parallel_error_step(
         latency_ms: 0,
         total_tokens: 0,
         evidence_count: 0,
-    }
-}
-
-fn select_final_output(
-    plan: &WorkflowPlanIr,
-    steps: &[PromptExecutionStep],
-    outputs: &BTreeMap<String, PromptDependencyOutput>,
-) -> String {
-    if let Some(output) = plan
-        .steps
-        .last()
-        .and_then(|step| outputs.get(&step.id))
-        .filter(|output| !output.content.trim().is_empty())
-    {
-        return output.content.clone();
-    }
-
-    steps
-        .iter()
-        .enumerate()
-        .filter(|(_, step)| step.usable())
-        .max_by_key(|(execution_index, step)| {
-            let output_rank = plan
-                .steps
-                .iter()
-                .find(|planned| planned.id == step.id)
-                .map(|planned| output_kind_rank(&planned.contract.output_kind))
-                .unwrap_or_default();
-            let completion_rank = usize::from(step.succeeded());
-            (
-                output_rank,
-                completion_rank,
-                step.evidence_count,
-                *execution_index,
-            )
-        })
-        .map(|(_, step)| step.output.clone())
-        .unwrap_or_default()
-}
-
-fn output_kind_rank(kind: &orchestrator::WorkflowOutputKind) -> usize {
-    match kind {
-        orchestrator::WorkflowOutputKind::Analysis => 0,
-        orchestrator::WorkflowOutputKind::Evidence => 1,
-        orchestrator::WorkflowOutputKind::Verification => 2,
-        orchestrator::WorkflowOutputKind::Synthesis => 3,
     }
 }
 

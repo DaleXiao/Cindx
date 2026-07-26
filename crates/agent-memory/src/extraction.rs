@@ -236,44 +236,13 @@ fn is_durable_requirement_content(content: &str) -> bool {
 }
 
 fn is_durable_outcome_content(content: &str, has_tool_evidence: bool) -> bool {
-    if contains_instruction_override(content) {
+    // Assistant prose is not durable project truth by itself. Persist an
+    // outcome only when the same user turn produced concrete tool evidence;
+    // user-stated requirements are handled separately above.
+    if !has_tool_evidence || contains_instruction_override(content) {
         return false;
     }
-    if has_tool_evidence {
-        return true;
-    }
-    let normalized = normalize_memory_text(content);
-    if normalized.chars().count() < 16 {
-        return false;
-    }
-    let lower = content.to_lowercase();
-    [
-        "implemented",
-        "fixed",
-        "updated",
-        "created",
-        "completed",
-        "configured",
-        "stored",
-        "added",
-        "removed",
-        "generated",
-        "tests pass",
-        "test passed",
-        "已实现",
-        "已修复",
-        "已完成",
-        "已更新",
-        "已创建",
-        "已配置",
-        "已保存",
-        "已新增",
-        "已删除",
-        "已生成",
-        "测试通过",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
+    !normalize_memory_text(content).is_empty()
 }
 
 fn contains_instruction_override(content: &str) -> bool {

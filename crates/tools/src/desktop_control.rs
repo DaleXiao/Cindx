@@ -1,4 +1,5 @@
 use super::*;
+use crate::process_control::terminate_process_group;
 
 pub(crate) const BROWSER_CONTROL_REQUEST_SCHEMA: &str = "cindx.browser-control.v2";
 pub(crate) const BROWSER_CONTROL_RESPONSE_SCHEMA: &str = "cindx.browser-control-result.v2";

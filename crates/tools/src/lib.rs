@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
@@ -18,6 +18,8 @@ use model_provider::{
 };
 mod desktop_control;
 mod file_batch;
+mod process_control;
+mod shell;
 
 #[cfg(test)]
 use desktop_control::{
@@ -26,6 +28,14 @@ use desktop_control::{
 };
 pub use desktop_control::{BrowserTool, ComputerTool};
 pub use file_batch::ReadFilesTool;
+pub use shell::ShellRunTool;
+
+const DEFAULT_FILE_READ_BYTES: usize = 128 * 1024;
+const MAX_FILE_READ_BYTES: usize = 256 * 1024;
+const WEB_RESPONSE_MAX_BYTES: usize = 8 * 1024 * 1024;
+const WEB_STDERR_MAX_BYTES: usize = 256 * 1024;
+const SEARCH_FILE_SCAN_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const SEARCH_MATCH_PREVIEW_CHARS: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolError {
@@ -931,429 +941,6 @@ impl Tool for WriteFileTool {
     }
 }
 
-pub struct ShellRunTool {
-    workspace_root: PathBuf,
-}
-
-const DEFAULT_SHELL_TIMEOUT_SECONDS: u64 = 120;
-const MAX_SHELL_TIMEOUT_SECONDS: u64 = 600;
-const SHELL_POLL_INTERVAL: Duration = Duration::from_millis(40);
-const DEFAULT_FILE_READ_BYTES: usize = 128 * 1024;
-const MAX_FILE_READ_BYTES: usize = 256 * 1024;
-const SHELL_STREAM_PREVIEW_BYTES: usize = 64 * 1024;
-const SHELL_STREAM_ARTIFACT_MAX_BYTES: u64 = 32 * 1024 * 1024;
-const WEB_RESPONSE_MAX_BYTES: usize = 8 * 1024 * 1024;
-const WEB_STDERR_MAX_BYTES: usize = 256 * 1024;
-const SEARCH_FILE_SCAN_MAX_BYTES: u64 = 8 * 1024 * 1024;
-const SEARCH_MATCH_PREVIEW_CHARS: usize = 512;
-
-struct ShellCommandOutput {
-    status: ExitStatus,
-    stdout: BoundedStreamCapture,
-    stderr: BoundedStreamCapture,
-    timed_out: bool,
-    cancelled: bool,
-}
-
-#[derive(Default)]
-struct BoundedStreamCapture {
-    preview: Vec<u8>,
-    total_bytes: u64,
-    artifact_bytes: u64,
-    preview_truncated: bool,
-    artifact_truncated: bool,
-    artifact_path: Option<PathBuf>,
-    artifact_error: Option<String>,
-}
-
-#[cfg(unix)]
-unsafe extern "C" {
-    fn kill(pid: i32, signal: i32) -> i32;
-}
-
-#[cfg(unix)]
-fn terminate_process_group(process_id: u32, signal: i32) {
-    unsafe {
-        let _ = kill(-(process_id as i32), signal);
-    }
-}
-
-#[cfg(not(unix))]
-fn terminate_process_group(_process_id: u32, _signal: i32) {}
-
-fn capture_process_stream(mut stream: impl Read, artifact_path: PathBuf) -> BoundedStreamCapture {
-    let mut artifact = fs::File::create(&artifact_path).ok();
-    let mut artifact_error = artifact
-        .is_none()
-        .then(|| format!("failed to create {}", artifact_path.display()));
-    let head_limit = SHELL_STREAM_PREVIEW_BYTES / 2;
-    let tail_limit = SHELL_STREAM_PREVIEW_BYTES.saturating_sub(head_limit);
-    let mut head = Vec::with_capacity(head_limit);
-    let mut tail = Vec::with_capacity(tail_limit);
-    let mut buffer = [0u8; 16 * 1024];
-    let mut total_bytes = 0u64;
-    let mut artifact_bytes = 0u64;
-
-    loop {
-        let count = match stream.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(count) => count,
-            Err(error) => {
-                artifact_error
-                    .get_or_insert_with(|| format!("failed to read process stream: {error}"));
-                break;
-            }
-        };
-        let chunk = &buffer[..count];
-        total_bytes = total_bytes.saturating_add(count as u64);
-
-        let mut retained_in_head = 0usize;
-        if head.len() < head_limit {
-            let retained = (head_limit - head.len()).min(chunk.len());
-            head.extend_from_slice(&chunk[..retained]);
-            retained_in_head = retained;
-        }
-        tail.extend_from_slice(&chunk[retained_in_head..]);
-        if tail.len() > tail_limit {
-            let excess = tail.len() - tail_limit;
-            tail.drain(..excess);
-        }
-
-        if let Some(file) = artifact.as_mut() {
-            let remaining = SHELL_STREAM_ARTIFACT_MAX_BYTES.saturating_sub(artifact_bytes);
-            let writable = (remaining as usize).min(chunk.len());
-            if writable > 0 {
-                if let Err(error) = file.write_all(&chunk[..writable]) {
-                    artifact_error = Some(format!("failed to write process artifact: {error}"));
-                    artifact = None;
-                } else {
-                    artifact_bytes = artifact_bytes.saturating_add(writable as u64);
-                }
-            }
-        }
-    }
-
-    if let Some(file) = artifact.as_mut() {
-        if let Err(error) = file.flush() {
-            artifact_error = Some(format!("failed to flush process artifact: {error}"));
-        }
-    }
-    let preview_truncated = total_bytes > (head.len() + tail.len()) as u64;
-    let mut preview = head;
-    if preview_truncated {
-        preview.extend_from_slice(b"\n...[middle output omitted from preview]...\n");
-    }
-    preview.extend_from_slice(&tail);
-    let artifact_truncated = total_bytes > artifact_bytes;
-    let keep_artifact = preview_truncated && artifact_error.is_none() && artifact_bytes > 0;
-    if !keep_artifact {
-        let _ = fs::remove_file(&artifact_path);
-    }
-
-    BoundedStreamCapture {
-        preview,
-        total_bytes,
-        artifact_bytes,
-        preview_truncated,
-        artifact_truncated,
-        artifact_path: keep_artifact.then_some(artifact_path),
-        artifact_error,
-    }
-}
-
-fn run_shell_command(
-    command: &str,
-    cwd: &Path,
-    timeout_seconds: u64,
-    control: &ToolExecutionControl,
-    artifact_dir: &Path,
-) -> Result<ShellCommandOutput, ToolError> {
-    fs::create_dir_all(artifact_dir).map_err(|error| {
-        ToolError::new(format!("failed to create shell output directory: {error}"))
-    })?;
-    let mut process = Command::new("/bin/zsh");
-    process
-        .arg("-lc")
-        .arg(command)
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        process.process_group(0);
-    }
-
-    let mut child = process
-        .spawn()
-        .map_err(|error| ToolError::new(format!("failed to run shell command: {error}")))?;
-    let process_id = child.id();
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| ToolError::new("failed to capture shell stdout"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| ToolError::new("failed to capture shell stderr"))?;
-    let stdout_path = artifact_dir.join("stdout.log");
-    let stderr_path = artifact_dir.join("stderr.log");
-    let stdout_reader = thread::spawn(move || capture_process_stream(stdout, stdout_path));
-    let stderr_reader = thread::spawn(move || capture_process_stream(stderr, stderr_path));
-    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
-    let mut timed_out = false;
-    let mut cancelled = false;
-
-    let status = loop {
-        if control.should_cancel() {
-            cancelled = true;
-            terminate_process_group(process_id, 15);
-            thread::sleep(Duration::from_millis(120));
-            terminate_process_group(process_id, 9);
-            let _ = child.kill();
-            break child.wait().map_err(|error| {
-                ToolError::new(format!("failed to stop cancelled shell command: {error}"))
-            })?;
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => thread::sleep(SHELL_POLL_INTERVAL),
-            Ok(None) => {
-                timed_out = true;
-                terminate_process_group(process_id, 15);
-                thread::sleep(Duration::from_millis(120));
-                terminate_process_group(process_id, 9);
-                let _ = child.kill();
-                break child.wait().map_err(|error| {
-                    ToolError::new(format!("failed to stop timed out shell command: {error}"))
-                })?;
-            }
-            Err(error) => {
-                terminate_process_group(process_id, 9);
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(ToolError::new(format!(
-                    "failed to inspect shell command: {error}"
-                )));
-            }
-        }
-    };
-
-    // A completed shell may leave background descendants holding the output pipes open.
-    terminate_process_group(process_id, 15);
-    thread::sleep(Duration::from_millis(40));
-    terminate_process_group(process_id, 9);
-
-    Ok(ShellCommandOutput {
-        status,
-        stdout: stdout_reader.join().unwrap_or_default(),
-        stderr: stderr_reader.join().unwrap_or_default(),
-        timed_out,
-        cancelled,
-    })
-}
-
-impl ShellRunTool {
-    pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
-        Self {
-            workspace_root: workspace_root.into(),
-        }
-    }
-}
-
-impl Tool for ShellRunTool {
-    fn spec(&self) -> ToolSpec {
-        builtin_tool_spec(
-            "shell.run",
-            "Run a bounded foreground shell command in the workspace. Background processes are terminated when the command finishes.",
-            ToolRisk::ExecutesProcess,
-            "command=<shell command>\ncwd=<optional workspace-relative path>\ntimeout_seconds=<optional 1-600, default 120>",
-        )
-    }
-
-    fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
-        let input = parse_input(&invocation.input_json);
-        let command = input
-            .get("command")
-            .cloned()
-            .unwrap_or_else(|| "<missing command>".to_string());
-        let cwd = input.get("cwd").cloned().unwrap_or_else(|| ".".to_string());
-        Some(permission_request(
-            &invocation.task_id,
-            PermissionRisk::Execute,
-            "shell.run",
-            "Run a local process in the selected workspace.",
-            &cwd,
-            [
-                ("tool_call_id".to_string(), invocation.id.0.clone()),
-                ("tool_name".to_string(), invocation.tool_name.clone()),
-                ("command".to_string(), command),
-            ]
-            .into_iter()
-            .collect(),
-        ))
-    }
-
-    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
-        self.execute_with_control(invocation, &ToolExecutionControl::never_cancelled())
-    }
-
-    fn execute_with_control(
-        &self,
-        invocation: ToolInvocation,
-        control: &ToolExecutionControl,
-    ) -> Result<ToolResult, ToolError> {
-        if control.should_cancel() {
-            return Ok(ToolResult::text(
-                invocation.id,
-                ToolOutcomeStatus::Cancelled,
-                "Shell command cancelled before it started.",
-                Metadata::new(),
-            ));
-        }
-        let input = parse_input(&invocation.input_json);
-        let command = required_input(&input, "command")?;
-        let cwd = input.get("cwd").cloned().unwrap_or_else(|| ".".to_string());
-        let timeout_seconds = match input.get("timeout_seconds") {
-            Some(value) => value.parse::<u64>().map_err(|_| {
-                ToolError::new("timeout_seconds must be an integer between 1 and 600")
-            })?,
-            None => DEFAULT_SHELL_TIMEOUT_SECONDS,
-        };
-        if !(1..=MAX_SHELL_TIMEOUT_SECONDS).contains(&timeout_seconds) {
-            return Err(ToolError::new(
-                "timeout_seconds must be an integer between 1 and 600",
-            ));
-        }
-        let resolved_cwd = resolve_workspace_path(&self.workspace_root, &cwd)?;
-        let resolved_cwd = resolve_workspace_read_path(&self.workspace_root, &resolved_cwd)?;
-        let artifact_dir = self
-            .workspace_root
-            .join(".cindx")
-            .join("tool-output")
-            .join(format!("{:016x}", stable_hash(&invocation.id.0)));
-        let output = run_shell_command(
-            &command,
-            &resolved_cwd,
-            timeout_seconds,
-            control,
-            &artifact_dir,
-        )?;
-
-        let mut combined = String::new();
-        combined.push_str(&String::from_utf8_lossy(&output.stdout.preview));
-        if !output.stderr.preview.is_empty() {
-            if !combined.is_empty() {
-                combined.push('\n');
-            }
-            combined.push_str(&String::from_utf8_lossy(&output.stderr.preview));
-        }
-        append_stream_capture_note(&mut combined, "stdout", &output.stdout);
-        append_stream_capture_note(&mut combined, "stderr", &output.stderr);
-        if output.timed_out {
-            if !combined.is_empty() && !combined.ends_with('\n') {
-                combined.push('\n');
-            }
-            combined.push_str(&format!(
-                "Command timed out after {timeout_seconds} seconds. Background processes were stopped."
-            ));
-        } else if output.cancelled {
-            if !combined.is_empty() && !combined.ends_with('\n') {
-                combined.push('\n');
-            }
-            combined.push_str("Command cancelled. The process group was stopped.");
-        }
-
-        let mut metadata = Metadata::new();
-        metadata.insert("command".to_string(), command);
-        metadata.insert("cwd".to_string(), cwd);
-        metadata.insert("timeout_seconds".to_string(), timeout_seconds.to_string());
-        metadata.insert("timed_out".to_string(), output.timed_out.to_string());
-        metadata.insert("cancelled".to_string(), output.cancelled.to_string());
-        metadata.insert(
-            "stdout_bytes".to_string(),
-            output.stdout.total_bytes.to_string(),
-        );
-        metadata.insert(
-            "stderr_bytes".to_string(),
-            output.stderr.total_bytes.to_string(),
-        );
-        metadata.insert(
-            "output_truncated".to_string(),
-            (output.stdout.preview_truncated || output.stderr.preview_truncated).to_string(),
-        );
-        metadata.insert(
-            "exit_code".to_string(),
-            output
-                .status
-                .code()
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "signal".to_string()),
-        );
-
-        let mut result = tool_result(
-            invocation.id,
-            if output.cancelled {
-                ToolOutcomeStatus::Cancelled
-            } else if output.status.success() && !output.timed_out {
-                ToolOutcomeStatus::Succeeded
-            } else {
-                ToolOutcomeStatus::Failed
-            },
-            combined,
-            metadata,
-        );
-        for (label, capture) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
-            if let Some(path) = &capture.artifact_path {
-                result.artifacts.push(ToolArtifact {
-                    path: path.display().to_string(),
-                    mime_type: Some("text/plain".to_string()),
-                    title: Some(format!("Shell {label}")),
-                });
-                result
-                    .metadata
-                    .insert(format!("{label}_artifact_path"), path.display().to_string());
-                result.metadata.insert(
-                    format!("{label}_artifact_bytes"),
-                    capture.artifact_bytes.to_string(),
-                );
-                result.metadata.insert(
-                    format!("{label}_artifact_truncated"),
-                    capture.artifact_truncated.to_string(),
-                );
-            }
-        }
-        Ok(result)
-    }
-}
-
-fn append_stream_capture_note(output: &mut String, label: &str, capture: &BoundedStreamCapture) {
-    if !capture.preview_truncated && capture.artifact_error.is_none() {
-        return;
-    }
-    if !output.is_empty() && !output.ends_with('\n') {
-        output.push('\n');
-    }
-    if let Some(path) = &capture.artifact_path {
-        output.push_str(&format!(
-            "\n[{label} preview bounded; {} bytes produced. Captured {} bytes at {}{}]",
-            capture.total_bytes,
-            capture.artifact_bytes,
-            path.display(),
-            if capture.artifact_truncated {
-                "; artifact reached the 32 MB safety limit, rerun a narrower command for omitted data"
-            } else {
-                ""
-            }
-        ));
-    } else if let Some(error) = &capture.artifact_error {
-        output.push_str(&format!(
-            "\n[{label} preview bounded; {} bytes produced; artifact unavailable: {error}]",
-            capture.total_bytes
-        ));
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct WebSearchTool {
     config: WebSearchConfig,
@@ -1663,7 +1250,7 @@ fn image_output_path(
     Ok((resolved, relative_path))
 }
 
-fn builtin_tool_spec(
+pub(crate) fn builtin_tool_spec(
     name: &str,
     description: &str,
     risk: ToolRisk,
@@ -1763,7 +1350,10 @@ pub fn encode_input(entries: &[(&str, &str)]) -> String {
         .join("\n")
 }
 
-fn required_input(input: &BTreeMap<String, String>, key: &str) -> Result<String, ToolError> {
+pub(crate) fn required_input(
+    input: &BTreeMap<String, String>,
+    key: &str,
+) -> Result<String, ToolError> {
     input
         .get(key)
         .filter(|value| !value.trim().is_empty())
@@ -1792,7 +1382,7 @@ fn parse_bounded_usize_input(
     Ok(value)
 }
 
-fn permission_request(
+pub(crate) fn permission_request(
     task_id: &TaskId,
     risk: PermissionRisk,
     action: &str,
@@ -1814,7 +1404,7 @@ fn permission_request(
     }
 }
 
-fn tool_result(
+pub(crate) fn tool_result(
     invocation_id: ToolCallId,
     status: ToolOutcomeStatus,
     output: String,
@@ -1823,7 +1413,10 @@ fn tool_result(
     ToolResult::text(invocation_id, status, output, metadata)
 }
 
-fn resolve_workspace_path(workspace_root: &Path, path: &str) -> Result<PathBuf, ToolError> {
+pub(crate) fn resolve_workspace_path(
+    workspace_root: &Path,
+    path: &str,
+) -> Result<PathBuf, ToolError> {
     let candidate = Path::new(path);
     if candidate.is_absolute() {
         return Err(ToolError::new("absolute paths are not allowed"));
@@ -1870,7 +1463,10 @@ fn resolve_workspace_path(workspace_root: &Path, path: &str) -> Result<PathBuf, 
     Ok(resolved)
 }
 
-fn resolve_workspace_read_path(workspace_root: &Path, path: &Path) -> Result<PathBuf, ToolError> {
+pub(crate) fn resolve_workspace_read_path(
+    workspace_root: &Path,
+    path: &Path,
+) -> Result<PathBuf, ToolError> {
     let canonical_root = fs::canonicalize(workspace_root)
         .map_err(|error| ToolError::new(format!("failed to resolve workspace: {error}")))?;
     let canonical_path = fs::canonicalize(path)
@@ -2362,7 +1958,7 @@ fn current_time_millis() -> u64 {
         .as_millis() as u64
 }
 
-fn stable_hash(value: &str) -> u64 {
+pub(crate) fn stable_hash(value: &str) -> u64 {
     let mut hash = 14_695_981_039_346_656_037_u64;
     for byte in value.as_bytes() {
         hash ^= *byte as u64;

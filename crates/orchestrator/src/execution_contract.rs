@@ -88,26 +88,40 @@ impl ConductorExecutionContract {
             "pro" => ConductorStopPolicy::Quorum,
             _ => ConductorStopPolicy::Quorum,
         };
-        let min_successful_branches = match stop_policy {
-            ConductorStopPolicy::FirstVerified => 1,
-            ConductorStopPolicy::Quorum => max_parallelism.saturating_sub(1).max(1),
-            ConductorStopPolicy::Exhaustive => {
-                max_parallelism.saturating_mul(2).saturating_add(2) / 3
-            }
-        };
         let terminal_model_call_reserve = match effort.as_str() {
             "fast" => 1,
             "pro" => 3,
             _ => 2,
         };
         let collaboration_path = !matches!(policy, OrchestrationPolicy::Single);
-        let (min_team_uplift_bps, min_distinct_contributions, requires_synthesis) =
-            match effort.as_str() {
-                "fast" => (0, 0, false),
-                "pro" => (PRO_MIN_TEAM_UPLIFT_BPS, 2, true),
-                _ if collaboration_path => (0, 1, true),
-                _ => (0, 0, false),
-            };
+        let min_distinct_contributions = if collaboration_path
+            && max_parallelism >= 2
+            && (context.needs_multi_model || context.parallelizable)
+        {
+            2
+        } else if collaboration_path
+            && (context.high_stakes
+                || context.verification_required
+                || context.needs_tools
+                || context.needs_retrieval
+                || context.complexity_score >= 3)
+        {
+            1
+        } else {
+            0
+        };
+        let min_successful_branches = match stop_policy {
+            ConductorStopPolicy::FirstVerified => 1,
+            ConductorStopPolicy::Quorum | ConductorStopPolicy::Exhaustive => {
+                min_distinct_contributions.max(1)
+            }
+        };
+        let min_team_uplift_bps = if effort == "pro" {
+            PRO_MIN_TEAM_UPLIFT_BPS
+        } else {
+            0
+        };
+        let requires_synthesis = min_distinct_contributions >= 2;
 
         Self {
             task_class: context.task_class.clone(),
@@ -137,6 +151,7 @@ impl ConductorExecutionContract {
     }
 
     pub fn with_prompt_commit_strategy(mut self, strategy: PromptCommitStrategy) -> Self {
+        let task_quorum = self.min_successful_branches.max(1);
         self.stop_policy = match (self.effort.as_str(), strategy) {
             ("fast", _) => ConductorStopPolicy::FirstVerified,
             ("pro", PromptCommitStrategy::Exhaustive) => ConductorStopPolicy::Exhaustive,
@@ -147,9 +162,9 @@ impl ConductorExecutionContract {
         };
         self.min_successful_branches = match self.stop_policy {
             ConductorStopPolicy::FirstVerified => 1,
-            ConductorStopPolicy::Quorum => self.max_parallelism.saturating_sub(1).max(1),
+            ConductorStopPolicy::Quorum => task_quorum,
             ConductorStopPolicy::Exhaustive => {
-                self.max_parallelism.saturating_mul(2).saturating_add(2) / 3
+                task_quorum.max(self.max_parallelism.saturating_mul(2).saturating_add(2) / 3)
             }
         };
         self
@@ -199,6 +214,22 @@ impl ConductorExecutionContract {
         {
             return Err("workflow execution contract requires a verification path".to_string());
         }
+        let distinct_contributors = plan
+            .steps
+            .iter()
+            .take(plan.steps.len().saturating_sub(1))
+            .filter(|step| {
+                step.role != "verifier"
+                    && step.access.is_empty()
+                    && matches!(step.role.as_str(), "thinker" | "worker")
+            })
+            .count();
+        if distinct_contributors < self.min_distinct_contributions {
+            return Err(format!(
+                "collaboration workflow has {distinct_contributors} independent contribution(s), but {} are required by the task",
+                self.min_distinct_contributions
+            ));
+        }
         if self.requires_synthesis {
             let Some(final_step) = plan.steps.last() else {
                 return Err("collaboration workflow requires a synthesis step".to_string());
@@ -207,20 +238,6 @@ impl ConductorExecutionContract {
                 return Err(
                     "collaboration workflow must end with an explicit synthesizer".to_string(),
                 );
-            }
-            let distinct_contributors = plan
-                .steps
-                .iter()
-                .take(plan.steps.len().saturating_sub(1))
-                .filter(|step| step.role != "verifier")
-                .map(|step| step.model.as_str())
-                .collect::<std::collections::BTreeSet<_>>()
-                .len();
-            if distinct_contributors < self.min_distinct_contributions {
-                return Err(format!(
-                    "collaboration workflow has {distinct_contributors} distinct contributor model(s), but {} are required",
-                    self.min_distinct_contributions
-                ));
             }
         }
         Ok(())
@@ -302,6 +319,21 @@ mod tests {
         assert_eq!(contract.min_team_uplift_bps, PRO_MIN_TEAM_UPLIFT_BPS);
         assert_eq!(contract.min_distinct_contributions, 2);
         assert!(contract.requires_synthesis);
+    }
+
+    #[test]
+    fn simple_pro_uses_quality_comparison_without_forcing_decorative_branches() {
+        let contract = ConductorExecutionContract::from_routing(
+            &context("What is a Rust enum?"),
+            "pro",
+            OrchestrationPolicy::BestOfN { candidates: 3 },
+        );
+
+        assert_eq!(contract.max_parallelism, 3);
+        assert_eq!(contract.min_successful_branches, 1);
+        assert_eq!(contract.min_distinct_contributions, 0);
+        assert!(!contract.requires_synthesis);
+        assert_eq!(contract.min_team_uplift_bps, PRO_MIN_TEAM_UPLIFT_BPS);
     }
 
     #[test]

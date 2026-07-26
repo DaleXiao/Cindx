@@ -2123,7 +2123,12 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
             evaluation_id: format!("direct-stable-{index}"),
             case_id: format!("direct-case-{index}"),
             opponent_profile_id: Some(stable.id.clone()),
-            task_class: "coding".to_string(),
+            task_class: if index.is_multiple_of(2) {
+                "coding"
+            } else {
+                "research"
+            }
+            .to_string(),
             split,
             mode: match split {
                 PromptEvaluationSplit::Train => PromptEvaluationMode::PairedExecution,
@@ -2236,6 +2241,127 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
     assert!(rolled_back.canary_profile_id.is_none());
     assert_eq!(rolled_back.rollback_count, 1);
     assert_eq!(rolled_back.stable_profile_id, stable.id);
+}
+
+#[test]
+fn completed_gepa_canary_persists_a_verified_frozen_profile() {
+    let stable = ConductorPromptGenome::seed_for_effort("auto");
+    let candidate = stable
+        .mutations()
+        .into_iter()
+        .next()
+        .expect("seed should have an evolved candidate");
+    let mut rollout = default_prompt_rollout("auto");
+    rollout.canary_profile_id = Some(candidate.id.clone());
+    rollout.canary_percent = 100;
+    rollout.status = "canary".to_string();
+    let mut model = PromptEvolutionReadModel {
+        schema: PROMPT_EVOLUTION_READ_MODEL_NAMESPACE.to_string(),
+        revision: 0,
+        event_count: 0,
+        genomes: vec![PromptGenomeRecord {
+            effort: "auto".to_string(),
+            genome: candidate.clone(),
+            evolution_method: Some(PromptEvolutionMethod::GepaReflectivePaired),
+        }],
+        observations: Vec::new(),
+        rollouts: BTreeMap::from([("auto".to_string(), rollout)]),
+        datasets: BTreeMap::new(),
+    };
+    for index in 0..7 {
+        let split = if index < 3 {
+            PromptEvaluationSplit::Train
+        } else {
+            PromptEvaluationSplit::Holdout
+        };
+        let mode = match split {
+            PromptEvaluationSplit::Train => PromptEvaluationMode::PairedExecution,
+            PromptEvaluationSplit::Holdout => PromptEvaluationMode::ReplayExecution,
+        };
+        let task_class = if index % 2 == 0 { "coding" } else { "research" };
+        let candidate_observation = PromptEvolutionObservation {
+            profile_id: candidate.id.clone(),
+            evaluation_id: format!("promotion-{index}"),
+            case_id: format!("case-{index}"),
+            opponent_profile_id: Some(stable.id.clone()),
+            task_class: task_class.to_string(),
+            split,
+            mode,
+            format_valid: true,
+            succeeded: true,
+            quality_score: 0.95,
+            latency_ms: 100,
+            total_tokens: 100,
+            estimated_cost_microusd: 0,
+            safety_violations: 0,
+            relative_reward: Some(0.5),
+            step_credits: Vec::new(),
+            reflection_packet: None,
+        };
+        let mut stable_observation = candidate_observation.clone();
+        stable_observation.profile_id = stable.id.clone();
+        stable_observation.opponent_profile_id = Some(candidate.id.clone());
+        stable_observation.quality_score = 0.45;
+        stable_observation.relative_reward = Some(-0.5);
+        model
+            .observations
+            .push(("auto".to_string(), candidate_observation));
+        model
+            .observations
+            .push(("auto".to_string(), stable_observation));
+    }
+    model.observations.push((
+        "auto".to_string(),
+        PromptEvolutionObservation {
+            profile_id: candidate.id.clone(),
+            evaluation_id: "promotion-live".to_string(),
+            case_id: "promotion-live".to_string(),
+            opponent_profile_id: None,
+            task_class: "coding".to_string(),
+            split: PromptEvaluationSplit::Train,
+            mode: PromptEvaluationMode::Live,
+            format_valid: true,
+            succeeded: true,
+            quality_score: 0.9,
+            latency_ms: 100,
+            total_tokens: 100,
+            estimated_cost_microusd: 0,
+            safety_violations: 0,
+            relative_reward: None,
+            step_credits: Vec::new(),
+            reflection_packet: None,
+        },
+    ));
+    let evaluation = PromptEvolutionEvaluation {
+        population: vec![stable.clone(), candidate.clone()],
+        observations: Vec::new(),
+        frontier_ids: [candidate.id.clone()].into_iter().collect(),
+        champion_id: Some(candidate.id.clone()),
+        champion_score: Some(0.9),
+        champion_confidence: None,
+        status: "exploring".to_string(),
+        freeze_reason: None,
+        stagnant_generations: 0,
+        evaluated_generations: 1,
+        next_mode: "explore".to_string(),
+        next_profile: candidate.clone(),
+        mutation_parent: None,
+        mutation_trajectories: Vec::new(),
+    };
+
+    let promoted = reconcile_prompt_rollout(&mut model, "auto", &evaluation);
+
+    assert_eq!(promoted.status, "promoted");
+    assert_eq!(promoted.stable_profile_id, candidate.id);
+    let snapshot = promoted
+        .frozen_profile
+        .expect("GEPA promotion should freeze its evidence-bound profile");
+    snapshot.validate().expect("snapshot should remain valid");
+    assert_eq!(snapshot.stable_profile_id, stable.id);
+    assert_eq!(
+        snapshot.evolution_method,
+        PromptEvolutionMethod::GepaReflectivePaired
+    );
 }
 
 #[test]
@@ -4721,6 +4847,119 @@ fn offline_prompt_dataset_is_project_scoped_deterministic_and_split_stable() {
             "existing offline split must not drift as the dataset grows"
         );
     }
+}
+
+#[test]
+fn offline_prompt_dataset_stratifies_task_classes_without_split_drift() {
+    let mut events = Vec::new();
+    for (index, (run_id, task_class)) in [
+        ("coding-a", "coding"),
+        ("coding-b", "coding"),
+        ("research-a", "research"),
+        ("research-b", "research"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let sequence = index as u64 * 2 + 1;
+        let metadata = [
+            ("agent_run_id".to_string(), run_id.to_string()),
+            ("project_id".to_string(), "project-a".to_string()),
+            ("session_id".to_string(), format!("session-{run_id}")),
+            ("task_class".to_string(), task_class.to_string()),
+            ("prompt".to_string(), format!("Evaluate {run_id}")),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        events.push(Event {
+            id: EventId(format!("start-{run_id}")),
+            task_id: phase16_task_id(),
+            sequence,
+            timestamp_ms: sequence * 10,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Agent task started".to_string(),
+            metadata: metadata.clone(),
+        });
+        events.push(Event {
+            id: EventId(format!("finish-{run_id}")),
+            task_id: phase16_task_id(),
+            sequence: sequence + 1,
+            timestamp_ms: (sequence + 1) * 10,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Agent task completed".to_string(),
+            metadata,
+        });
+    }
+
+    let dataset = prompt_offline_dataset(&events, "project-a");
+
+    for task_class in ["coding", "research"] {
+        let splits = dataset
+            .iter()
+            .filter(|case| case.task_class == task_class)
+            .map(|case| case.split)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            splits,
+            BTreeSet::from([PromptEvaluationSplit::Train, PromptEvaluationSplit::Holdout,])
+        );
+    }
+}
+
+#[test]
+fn offline_prompt_scheduler_prioritizes_underrepresented_task_class() {
+    let dataset = [
+        ("coding-a", "coding"),
+        ("coding-b", "coding"),
+        ("research-a", "research"),
+    ]
+    .into_iter()
+    .map(|(id, task_class)| PromptOfflineCase {
+        id: id.to_string(),
+        objective: format!("Evaluate {id}"),
+        task_class: task_class.to_string(),
+        project_id: "project-a".to_string(),
+        source_run_id: format!("run-{id}"),
+        split: PromptEvaluationSplit::Train,
+    })
+    .collect::<Vec<_>>();
+    let observations = ["coding-a", "coding-b"]
+        .into_iter()
+        .flat_map(|case_id| {
+            [("stable", "candidate"), ("candidate", "stable")].map(
+                move |(profile_id, opponent_id)| PromptEvolutionObservation {
+                    profile_id: profile_id.to_string(),
+                    evaluation_id: format!("eval-{profile_id}-{case_id}"),
+                    case_id: case_id.to_string(),
+                    opponent_profile_id: Some(opponent_id.to_string()),
+                    task_class: "coding".to_string(),
+                    split: PromptEvaluationSplit::Train,
+                    mode: PromptEvaluationMode::PairedExecution,
+                    format_valid: true,
+                    succeeded: true,
+                    quality_score: 0.8,
+                    latency_ms: 100,
+                    total_tokens: 100,
+                    estimated_cost_microusd: 0,
+                    safety_violations: 0,
+                    relative_reward: Some(0.1),
+                    step_credits: Vec::new(),
+                    reflection_packet: None,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let selected = select_prompt_offline_case(
+        &dataset,
+        &observations,
+        "stable",
+        "candidate",
+        PromptEvaluationSplit::Train,
+    )
+    .expect("an offline case should be scheduled");
+
+    assert_eq!(selected.id, "research-a");
 }
 
 #[test]
@@ -8120,9 +8359,17 @@ fn session_permission_grant_only_covers_the_same_capability() {
     .expect("execute grant must not cover a write request"));
     next.action = "shell.run".to_string();
     next.risk = PermissionRisk::Execute;
+    assert!(!agent_session_permission_granted(
+        &store,
+        &phase16_task_id(),
+        &next,
+        Some("session-a"),
+    )
+    .expect("shell grants must remain bound to their working directory"));
+    next.scope = ".".to_string();
     assert!(
         agent_session_permission_granted(&store, &phase16_task_id(), &next, Some("session-a"),)
-            .expect("same capability should reuse the session grant")
+            .expect("the exact shell capability should reuse the session grant")
     );
     next.risk = PermissionRisk::Destructive;
     assert!(!agent_session_permission_granted(

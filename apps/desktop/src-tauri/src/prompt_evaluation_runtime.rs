@@ -516,7 +516,18 @@ pub(crate) fn execute_prompt_workflow_candidate_with_runner(
     runner: PromptEvaluationRunner,
 ) -> PromptExecutionCandidate {
     prompt_workflow_execution::execute_prompt_workflow_candidate_with_runner_impl(
-        objective, candidate, runner, None,
+        objective, candidate, runner, None, false,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn execute_prompt_workflow_candidate_with_direct_anchor_runner(
+    objective: &str,
+    candidate: PromptPlanCandidate,
+    runner: PromptEvaluationRunner,
+) -> PromptExecutionCandidate {
+    prompt_workflow_execution::execute_prompt_workflow_candidate_with_runner_impl(
+        objective, candidate, runner, None, true,
     )
 }
 

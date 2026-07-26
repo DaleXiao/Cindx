@@ -157,7 +157,7 @@ impl ConductorPromptGenome {
                 3,
                 PromptToolPolicy::ReadOnlyExploration,
                 PromptRetryPolicy::AlternateModel,
-                PromptTopologyStrategy::ParallelDeliberation,
+                PromptTopologyStrategy::AdaptiveDag,
                 PromptRoleStrategy::DiverseSpecialists,
                 3,
                 3,

@@ -10,6 +10,8 @@ pub struct PromptPromotionGateConfig {
     pub minimum_holdout_runs: usize,
     pub minimum_unique_train_cases: usize,
     pub minimum_unique_holdout_cases: usize,
+    pub minimum_train_task_classes: usize,
+    pub minimum_holdout_task_classes: usize,
     pub minimum_wilson_lower_bound: f64,
     pub maximum_generalization_gap: f64,
     pub maximum_holdout_task_class_regression: f64,
@@ -25,6 +27,8 @@ pub enum PromptPromotionBlocker {
     InsufficientHoldoutRuns,
     InsufficientTrainCaseDiversity,
     InsufficientHoldoutCaseDiversity,
+    InsufficientTrainTaskClassDiversity,
+    InsufficientHoldoutTaskClassDiversity,
     WeakConfidence,
     GeneralizationGap,
     HoldoutTaskClassRegression,
@@ -41,6 +45,10 @@ impl PromptPromotionBlocker {
             Self::InsufficientHoldoutRuns => "insufficient_holdout_runs",
             Self::InsufficientTrainCaseDiversity => "insufficient_train_case_diversity",
             Self::InsufficientHoldoutCaseDiversity => "insufficient_holdout_case_diversity",
+            Self::InsufficientTrainTaskClassDiversity => "insufficient_train_task_class_diversity",
+            Self::InsufficientHoldoutTaskClassDiversity => {
+                "insufficient_holdout_task_class_diversity"
+            }
             Self::WeakConfidence => "weak_confidence",
             Self::GeneralizationGap => "generalization_gap",
             Self::HoldoutTaskClassRegression => "holdout_task_class_regression",
@@ -55,6 +63,8 @@ pub struct PromptPromotionGateResult {
     pub holdout_runs: usize,
     pub unique_train_cases: usize,
     pub unique_holdout_cases: usize,
+    pub train_task_classes: usize,
+    pub holdout_task_classes: usize,
     pub train_average_reward: f64,
     pub holdout_average_reward: f64,
     pub confidence: PromptPromotionConfidence,
@@ -174,6 +184,16 @@ pub fn evaluate_prompt_promotion_gate(
         .map(|observation| observation.case_id.as_str())
         .collect::<BTreeSet<_>>()
         .len();
+    let train_task_classes = train
+        .iter()
+        .map(|observation| observation.task_class.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let holdout_task_classes = holdout
+        .iter()
+        .map(|observation| observation.task_class.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
 
     if train.len() < config.minimum_train_runs {
         blockers.insert(PromptPromotionBlocker::InsufficientTrainRuns);
@@ -186,6 +206,12 @@ pub fn evaluate_prompt_promotion_gate(
     }
     if unique_holdout_cases < config.minimum_unique_holdout_cases {
         blockers.insert(PromptPromotionBlocker::InsufficientHoldoutCaseDiversity);
+    }
+    if train_task_classes < config.minimum_train_task_classes {
+        blockers.insert(PromptPromotionBlocker::InsufficientTrainTaskClassDiversity);
+    }
+    if holdout_task_classes < config.minimum_holdout_task_classes {
+        blockers.insert(PromptPromotionBlocker::InsufficientHoldoutTaskClassDiversity);
     }
 
     let average_reward = |entries: &[&PromptEvolutionObservation]| {
@@ -225,6 +251,8 @@ pub fn evaluate_prompt_promotion_gate(
         holdout_runs: holdout.len(),
         unique_train_cases,
         unique_holdout_cases,
+        train_task_classes,
+        holdout_task_classes,
         train_average_reward,
         holdout_average_reward,
         confidence,
@@ -304,6 +332,8 @@ mod tests {
             minimum_holdout_runs: 2,
             minimum_unique_train_cases: 2,
             minimum_unique_holdout_cases: 2,
+            minimum_train_task_classes: 2,
+            minimum_holdout_task_classes: 2,
             minimum_wilson_lower_bound: 0.0,
             maximum_generalization_gap: 0.15,
             maximum_holdout_task_class_regression: 0.05,
@@ -353,6 +383,8 @@ mod tests {
         assert!(result.eligible, "{:?}", result.blockers);
         assert_eq!(result.unique_train_cases, 2);
         assert_eq!(result.unique_holdout_cases, 2);
+        assert_eq!(result.train_task_classes, 2);
+        assert_eq!(result.holdout_task_classes, 2);
     }
 
     #[test]
@@ -380,6 +412,24 @@ mod tests {
         assert!(result
             .blockers
             .contains(&PromptPromotionBlocker::IncompletePairedEvidence));
+    }
+
+    #[test]
+    fn repeated_task_class_cannot_satisfy_generalization_coverage() {
+        let mut evidence = complete_evidence();
+        for observation in &mut evidence {
+            observation.task_class = "coding".to_string();
+        }
+
+        let result = evaluate_prompt_promotion_gate(&evidence, "candidate", "stable", config());
+
+        assert!(!result.eligible);
+        assert!(result
+            .blockers
+            .contains(&PromptPromotionBlocker::InsufficientTrainTaskClassDiversity));
+        assert!(result
+            .blockers
+            .contains(&PromptPromotionBlocker::InsufficientHoldoutTaskClassDiversity));
     }
 
     #[test]

@@ -1,10 +1,12 @@
 mod genome;
 mod observation;
 mod pareto;
+mod snapshot;
 
 pub use genome::*;
 pub use observation::*;
 pub use pareto::*;
+pub use snapshot::*;
 
 #[cfg(test)]
 mod tests {

@@ -94,7 +94,8 @@ impl ConductorHarness {
                 "- Use no more than {max_models} distinct worker models.\n",
                 "- role must be exactly thinker, worker, verifier, or synthesizer.\n",
                 "- Preserve listed order: access may reference only earlier step ids.\n",
-                "- Obey the evolved profile's branch and verification policy; do not add decorative agents.\n",
+                "- The task contract requires {required_contributions} independent contribution(s). This is the only minimum branch count. The evolved profile controls preferences and upper bounds; it must not force decorative agents when the task requires zero or one branch.\n",
+                "- Require a verifier only when contract verification_required=true; otherwise add one only when it resolves a concrete uncertainty.\n",
                 "- Keep workers isolated and expose an earlier result only through access.\n",
                 "{branch_role_constraint}\n",
                 "- A verifier must directly access every independent root branch it audits.\n",
@@ -107,15 +108,7 @@ impl ConductorHarness {
                 "Evolved orchestration directive:\n{evolved_directive}\n\n",
                 "User request:\n{objective}\n\nRecent session memory:\n{recent_context}"
             ),
-            schema_example = conductor_schema_example(
-                request.budget.max_steps,
-                request.budget.max_models,
-                request.prompt_genome.max_parallel_branches,
-                request.prompt_genome.graph_depth,
-                request.prompt_genome.verification,
-                request.prompt_genome.topology_strategy,
-                &request.role_hints,
-            ),
+            schema_example = conductor_schema_example(request),
             max_steps = request.budget.max_steps,
             max_models = request.budget.max_models,
             task_class = request.execution_contract.task_class.label(),
@@ -124,6 +117,7 @@ impl ConductorHarness {
             contract_parallelism = request.execution_contract.max_parallelism,
             contract_quorum = request.execution_contract.min_successful_branches,
             contract_verification = request.execution_contract.verification_required,
+            required_contributions = request.execution_contract.min_distinct_contributions,
             terminal_reserve = request.execution_contract.terminal_model_call_reserve,
             stop_policy = request.execution_contract.stop_policy,
             fallback_policy = request.execution_contract.fallback_policy,
@@ -217,9 +211,11 @@ impl ConductorHarness {
             return Err("deterministic conductor fallback has no worker model".to_string());
         }
 
-        let needs_verifier = self.request.prompt_genome.verification
-            == PromptVerification::Adversarial
-            && self.request.budget.max_steps >= 4;
+        let required_branches = self.request.execution_contract.min_distinct_contributions;
+        let needs_verifier = required_branches > 0
+            && self.request.execution_contract.verification_required
+            && self.request.prompt_genome.verification == PromptVerification::Adversarial
+            && self.request.budget.max_steps >= required_branches.saturating_add(2);
         let reserved_steps = 1 + usize::from(needs_verifier);
         let branch_capacity = self
             .request
@@ -228,12 +224,18 @@ impl ConductorHarness {
             .saturating_sub(reserved_steps)
             .min(self.request.budget.max_models)
             .min(self.request.execution_contract.max_parallelism)
-            .min(self.request.prompt_genome.max_parallel_branches);
-        let branch_count = match self.request.prompt_genome.topology_strategy {
-            PromptTopologyStrategy::Serial => branch_capacity.min(1),
-            PromptTopologyStrategy::AdaptiveDag => branch_capacity.min(2),
-            PromptTopologyStrategy::ParallelDeliberation => branch_capacity,
-        };
+            .min(
+                self.request
+                    .prompt_genome
+                    .max_parallel_branches
+                    .max(required_branches),
+            );
+        if branch_capacity < required_branches {
+            return Err(format!(
+                "deterministic conductor fallback can schedule {branch_capacity} independent branch(es), but the task requires {required_branches}"
+            ));
+        }
+        let branch_count = required_branches;
 
         let hinted_models = [
             &self.request.role_hints.planner,
@@ -411,30 +413,8 @@ impl ConductorHarness {
             .min(self.request.budget.max_models)
             .min(self.request.execution_contract.max_parallelism)
             .min(root_step_capacity);
-        let required_branches = if branch_limit == 0 {
-            0
-        } else {
-            match self.request.prompt_genome.topology_strategy {
-                PromptTopologyStrategy::Serial => usize::from(
-                    workflow.steps.len() > 1
-                        || self.request.prompt_genome.graph_depth != PromptGraphDepth::Lean,
-                ),
-                PromptTopologyStrategy::AdaptiveDag => {
-                    if workflow.steps.len() == 1
-                        && self.request.prompt_genome.graph_depth == PromptGraphDepth::Lean
-                    {
-                        0
-                    } else {
-                        match self.request.prompt_genome.graph_depth {
-                            PromptGraphDepth::Lean => 1,
-                            PromptGraphDepth::Balanced | PromptGraphDepth::Deep => 2,
-                        }
-                    }
-                }
-                PromptTopologyStrategy::ParallelDeliberation => 2,
-            }
-            .min(branch_limit)
-        };
+        let required_branches = self.request.execution_contract.min_distinct_contributions;
+        let branch_limit = branch_limit.max(required_branches).min(root_step_capacity);
         if independent_branches.len() < required_branches {
             return Err(
                 format!(
@@ -505,8 +485,9 @@ impl ConductorHarness {
         {
             return Err("conductor workflow must end with a synthesizer".to_string());
         }
-        if self.request.prompt_genome.verification == PromptVerification::Adversarial
-            && self.request.budget.max_steps >= 4
+        if self.request.execution_contract.verification_required
+            && self.request.prompt_genome.verification == PromptVerification::Adversarial
+            && self.request.budget.max_steps >= required_branches.saturating_add(2)
         {
             let independent_ids = independent_branches
                 .iter()
@@ -536,15 +517,16 @@ impl ConductorHarness {
     }
 }
 
-fn conductor_schema_example(
-    max_steps: usize,
-    max_models: usize,
-    max_parallel_branches: usize,
-    graph_depth: PromptGraphDepth,
-    verification: PromptVerification,
-    topology_strategy: PromptTopologyStrategy,
-    role_hints: &ConductorRoleHints,
-) -> String {
+fn conductor_schema_example(request: &ConductorRequest) -> String {
+    let max_steps = request.budget.max_steps;
+    let max_models = request.budget.max_models;
+    let max_parallel_branches = request.prompt_genome.max_parallel_branches;
+    let graph_depth = request.prompt_genome.graph_depth;
+    let verification = request.prompt_genome.verification;
+    let topology_strategy = request.prompt_genome.topology_strategy;
+    let required_branches = request.execution_contract.min_distinct_contributions;
+    let verification_required = request.execution_contract.verification_required;
+    let role_hints = &request.role_hints;
     let branch_executor = if role_hints.executor != role_hints.planner {
         &role_hints.executor
     } else if role_hints.reviewer != role_hints.planner {
@@ -553,14 +535,15 @@ fn conductor_schema_example(
         &role_hints.executor
     };
     let root_capacity = max_steps.saturating_sub(1).min(max_models);
-    let branch_capacity = match topology_strategy {
+    let branch_limit = match topology_strategy {
         PromptTopologyStrategy::Serial => root_capacity.min(1),
         PromptTopologyStrategy::AdaptiveDag | PromptTopologyStrategy::ParallelDeliberation => {
             root_capacity.min(max_parallel_branches)
         }
-    };
-    if topology_strategy == PromptTopologyStrategy::Serial && graph_depth == PromptGraphDepth::Lean
-    {
+    }
+    .max(required_branches.min(root_capacity));
+    let branch_capacity = required_branches.min(branch_limit);
+    if branch_capacity == 0 {
         return serde_json::json!({
             "steps": [{
                 "id": "synthesize",
@@ -625,7 +608,9 @@ fn conductor_schema_example(
                 },
             ]
         }),
-        _ if verification == PromptVerification::Adversarial && max_steps >= 4 => serde_json::json!({
+        _ if verification_required
+            && verification == PromptVerification::Adversarial
+            && max_steps >= 4 => serde_json::json!({
             "steps": [
                 {
                     "id": "approach_a",

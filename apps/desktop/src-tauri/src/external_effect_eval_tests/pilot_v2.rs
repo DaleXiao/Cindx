@@ -1,6 +1,6 @@
 use super::*;
 
-const PILOT_SCHEMA: &str = "cindx.pilot_v2.raw.v1";
+const PILOT_SCHEMA: &str = "cindx.pilot_v2.raw.v2";
 const PILOT_ID: &str = "pilot-v2-8x4";
 
 #[derive(Debug, Clone)]
@@ -50,6 +50,9 @@ struct PilotRun {
     effective_policy: String,
     models: Vec<String>,
     prompt_profile: String,
+    prompt_profile_origin: String,
+    prompt_profile_sha256: String,
+    prompt_profile_artifact_sha256: Option<String>,
     gepa_frozen: bool,
     succeeded: bool,
     latency_ms: u64,
@@ -98,6 +101,10 @@ struct DetailedTreatment {
     policy: String,
     models: Vec<String>,
     prompt_profile: String,
+    prompt_profile_origin: String,
+    prompt_profile_sha256: String,
+    prompt_profile_artifact_sha256: Option<String>,
+    gepa_frozen: bool,
     succeeded: bool,
     latency_ms: u64,
     planning_latency_ms: u64,
@@ -229,6 +236,10 @@ fn direct_completion(config: &ProviderConfig, prompt: &str, model: String) -> De
         policy: "single_raw_baseline".to_string(),
         models: vec![model],
         prompt_profile: "frozen-direct-baseline-v1".to_string(),
+        prompt_profile_origin: "fixed_protocol".to_string(),
+        prompt_profile_sha256: fixed_protocol_sha256("frozen-direct-baseline-v1"),
+        prompt_profile_artifact_sha256: None,
+        gepa_frozen: false,
         succeeded,
         latency_ms: completion.latency_ms,
         planning_latency_ms: 0,
@@ -246,8 +257,8 @@ fn deterministic_plan(
     policy: &OrchestrationPolicy,
     selected_model: &str,
     tool_policy: WorkflowToolPolicy,
+    profile: &EvaluationPromptProfile,
 ) -> PromptPlanCandidate {
-    let profile = ConductorPromptGenome::seed_for_effort(effort);
     let steps = match policy {
         OrchestrationPolicy::Single | OrchestrationPolicy::AutoRouter => vec![
             AdaptiveWorkflowStep {
@@ -294,7 +305,7 @@ fn deterministic_plan(
         effort,
         policy.label(),
         config.model_for_conductor(),
-        profile.id.clone(),
+        profile.genome.id.clone(),
         &workflow,
         WorkflowBudget {
             max_steps: workflow.steps.len(),
@@ -316,7 +327,7 @@ fn deterministic_plan(
         step.tool_policy = tool_policy.clone();
     }
     PromptPlanCandidate {
-        genome: profile,
+        genome: profile.genome.clone(),
         plan: Some(plan),
         raw_output: String::new(),
         latency_ms: 0,
@@ -331,13 +342,13 @@ fn conductor_plan(
     policy: &OrchestrationPolicy,
     tool_policy: WorkflowToolPolicy,
     control: &Arc<AgentRunControl>,
+    profile: &EvaluationPromptProfile,
 ) -> PromptPlanCandidate {
     let agent_budget = match policy {
         OrchestrationPolicy::BestOfN { candidates } => (*candidates).clamp(1, 3),
         _ => 3,
     };
     let worker_models = collaboration_candidate_models(config, agent_budget);
-    let profile = ConductorPromptGenome::seed_for_effort(effort);
     let mut candidate = evaluate_conductor_prompt_profile(
         config,
         objective,
@@ -345,7 +356,7 @@ fn conductor_plan(
         policy.label(),
         &worker_models,
         agent_budget,
-        &profile,
+        &profile.genome,
         &unique_id("pilot-v2-conductor"),
         control,
     );
@@ -373,6 +384,7 @@ fn workflow_treatment_detailed(
     objective: &str,
     treatment: &str,
     tool_policy: WorkflowToolPolicy,
+    profile: &EvaluationPromptProfile,
 ) -> DetailedTreatment {
     let (effort, policy, selected_model) = match treatment {
         "cindx_fast" => ("fast", OrchestrationPolicy::Single, config.model.clone()),
@@ -392,7 +404,15 @@ fn workflow_treatment_detailed(
     };
     let control = evaluation_run_control(effort);
     let candidate = if matches!(policy, OrchestrationPolicy::BestOfN { .. }) {
-        conductor_plan(config, objective, effort, &policy, tool_policy, &control)
+        conductor_plan(
+            config,
+            objective,
+            effort,
+            &policy,
+            tool_policy,
+            &control,
+            profile,
+        )
     } else {
         deterministic_plan(
             config,
@@ -401,6 +421,7 @@ fn workflow_treatment_detailed(
             &policy,
             &selected_model,
             tool_policy,
+            profile,
         )
     };
     let planning_latency_ms = candidate.latency_ms;
@@ -460,6 +481,10 @@ fn workflow_treatment_detailed(
         policy: policy.label().to_string(),
         models,
         prompt_profile,
+        prompt_profile_origin: profile.origin.to_string(),
+        prompt_profile_sha256: profile.genome_sha256.clone(),
+        prompt_profile_artifact_sha256: profile.artifact_sha256.clone(),
+        gepa_frozen: profile.gepa_frozen,
         succeeded: executed.execution.succeeded,
         latency_ms: planning_latency_ms.saturating_add(executed.execution.latency_ms),
         planning_latency_ms,
@@ -501,7 +526,10 @@ fn gpqa_run(case: &GpqaCase, treatment: &str, result: DetailedTreatment) -> Pilo
         effective_policy: result.policy,
         models: result.models,
         prompt_profile: result.prompt_profile,
-        gepa_frozen: true,
+        prompt_profile_origin: result.prompt_profile_origin,
+        prompt_profile_sha256: result.prompt_profile_sha256,
+        prompt_profile_artifact_sha256: result.prompt_profile_artifact_sha256,
+        gepa_frozen: result.gepa_frozen,
         succeeded: result.succeeded,
         latency_ms: result.latency_ms,
         planning_latency_ms: result.planning_latency_ms,
@@ -547,7 +575,10 @@ fn workspace_run(case: &WorkspaceCase, treatment: &str, result: DetailedTreatmen
         effective_policy: result.policy,
         models: result.models,
         prompt_profile: result.prompt_profile,
-        gepa_frozen: true,
+        prompt_profile_origin: result.prompt_profile_origin,
+        prompt_profile_sha256: result.prompt_profile_sha256,
+        prompt_profile_artifact_sha256: result.prompt_profile_artifact_sha256,
+        gepa_frozen: result.gepa_frozen,
         succeeded: result.succeeded,
         latency_ms: result.latency_ms,
         planning_latency_ms: result.planning_latency_ms,
@@ -594,7 +625,10 @@ fn mrcr_run(
         effective_policy: policy.to_string(),
         models,
         prompt_profile: "raw-transcript-v1".to_string(),
-        gepa_frozen: true,
+        prompt_profile_origin: "fixed_protocol".to_string(),
+        prompt_profile_sha256: fixed_protocol_sha256("raw-transcript-v1"),
+        prompt_profile_artifact_sha256: None,
+        gepa_frozen: false,
         succeeded: result.error.is_none() && !output.trim().is_empty(),
         latency_ms: result.latency_ms,
         planning_latency_ms: 0,
@@ -651,6 +685,11 @@ fn write_pilot_checkpoint(
     sources: &[PilotSource],
     runs: &[PilotRun],
 ) {
+    let gepa_runs = runs
+        .iter()
+        .filter(|run| matches!(run.treatment.as_str(), "cindx_auto" | "cindx_pro"))
+        .collect::<Vec<_>>();
+    let gepa_frozen = !gepa_runs.is_empty() && gepa_runs.iter().all(|run| run.gepa_frozen);
     let report = PilotReport {
         schema: PILOT_SCHEMA,
         pilot_id: PILOT_ID,
@@ -667,7 +706,7 @@ fn write_pilot_checkpoint(
             "cindx_auto",
             "cindx_pro",
         ],
-        gepa_frozen: true,
+        gepa_frozen,
         execution_boundary: "Temporary read-only workspaces only; no generated code execution, writes, shell, browser, computer-use, or benchmark network tools.",
         evaluation_limits: [
             (
@@ -746,6 +785,13 @@ fn pilot_v2_safety_boundary_accepts_batch_reads_but_rejects_writes() {
 fn provider_backed_pilot_v2() {
     let config = load_provider_config();
     assert!(config.is_ready(), "provider configuration is required");
+    let prompt_profiles = ["fast", "auto", "pro"]
+        .into_iter()
+        .map(|effort| {
+            evaluation_prompt_profile(effort).map(|profile| (effort.to_string(), profile))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()
+        .expect("evaluation prompt profiles should be frozen before provider calls");
     let pair_filter = pilot_pair_filter();
     let workspace_cases = workspace_cases();
     let workspace_case_ids = workspace_cases
@@ -772,9 +818,11 @@ fn provider_backed_pilot_v2() {
     let git_commit =
         std::env::var("CINDX_EVAL_GIT_COMMIT").unwrap_or_else(|_| "unknown".to_string());
     eprintln!(
-        "[pilot-v2] frozen baseline app={} commit={} GEPA=off",
+        "[pilot-v2] frozen baseline app={} commit={} auto_gepa={} pro_gepa={}",
         env!("CARGO_PKG_VERSION"),
-        git_commit
+        git_commit,
+        prompt_profiles["auto"].gepa_frozen,
+        prompt_profiles["pro"].gepa_frozen,
     );
 
     let mut sources = Vec::new();
@@ -876,12 +924,16 @@ fn provider_backed_pilot_v2() {
             let result = if treatment == "single_model_baseline" {
                 direct_completion(&config, &case.prompt, config.model.clone())
             } else {
+                let effort = treatment
+                    .strip_prefix("cindx_")
+                    .expect("Cindx treatment should declare effort");
                 workflow_treatment_detailed(
                     &config,
                     Path::new(env!("CARGO_MANIFEST_DIR")),
                     &case.prompt,
                     treatment,
                     WorkflowToolPolicy::None,
+                    &prompt_profiles[effort],
                 )
             };
             let run = gpqa_run(case, treatment, result);
@@ -915,12 +967,16 @@ fn provider_backed_pilot_v2() {
                     config.model.clone(),
                 )
             } else {
+                let effort = treatment
+                    .strip_prefix("cindx_")
+                    .expect("Cindx treatment should declare effort");
                 workflow_treatment_detailed(
                     &config,
                     &case_root,
                     &case.objective,
                     treatment,
                     WorkflowToolPolicy::ReadOnlyEvidence,
+                    &prompt_profiles[effort],
                 )
             };
             let run = workspace_run(case, treatment, result);

@@ -3,9 +3,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod agent_engine;
 mod anytime;
 mod arena;
 mod benchmark;
+mod candidate_selection;
 mod conductor_runtime;
 mod evaluation;
 mod evolution_campaign;
@@ -21,9 +23,11 @@ mod workflow_handoff;
 mod workflow_runtime;
 mod workflow_validation;
 
+pub use agent_engine::*;
 pub use anytime::*;
 pub use arena::*;
 pub use benchmark::*;
+pub use candidate_selection::*;
 pub use conductor_runtime::*;
 pub use evaluation::*;
 pub use evolution_campaign::*;

@@ -227,6 +227,39 @@ pub(crate) fn prompt_offline_dataset(events: &[Event], project_id: &str) -> Vec<
                 break;
             }
         }
+
+        // Keep every task class with enough evidence represented on both
+        // sides of the immutable split. Existing assignments never move;
+        // only newly discovered cases can repair missing class coverage.
+        let task_classes = cases
+            .iter()
+            .map(|case| case.task_class.clone())
+            .collect::<BTreeSet<_>>();
+        for task_class in task_classes {
+            let class_size = cases
+                .iter()
+                .filter(|case| case.task_class == task_class)
+                .count();
+            if class_size < 2 {
+                continue;
+            }
+            for required_split in [PromptEvaluationSplit::Train, PromptEvaluationSplit::Holdout] {
+                if cases
+                    .iter()
+                    .any(|case| case.task_class == task_class && case.split == required_split)
+                {
+                    continue;
+                }
+                let Some(index) = cases.iter().position(|case| {
+                    case.task_class == task_class
+                        && !previously_assigned.contains(&case.id)
+                        && case.split != required_split
+                }) else {
+                    continue;
+                };
+                cases[index].split = required_split;
+            }
+        }
     }
     cases
 }
@@ -242,6 +275,24 @@ pub(crate) fn select_prompt_offline_case(
         .iter()
         .filter(|case| case.split == split)
         .min_by_key(|case| {
+            let evidence_for = |profile_id: &str, opponent_id: &str, case_id: Option<&str>| {
+                observations
+                    .iter()
+                    .filter(|observation| {
+                        observation.profile_id == profile_id
+                            && observation.opponent_profile_id.as_deref() == Some(opponent_id)
+                            && observation.split == split
+                            && observation.task_class == case.task_class
+                            && case_id.is_none_or(|case_id| observation.case_id == case_id)
+                    })
+                    .map(PromptEvolutionObservation::evidence_identity)
+                    .collect::<BTreeSet<_>>()
+                    .len()
+            };
+            let current_class_repeats =
+                evidence_for(current_profile_id, challenger_profile_id, None);
+            let challenger_class_repeats =
+                evidence_for(challenger_profile_id, current_profile_id, None);
             let current_repeats =
                 prompt_unique_evidence_counts(observations.iter().filter(|observation| {
                     observation.case_id == case.id
@@ -257,6 +308,8 @@ pub(crate) fn select_prompt_offline_case(
             let current_repeats = current_repeats.0.saturating_add(current_repeats.1);
             let challenger_repeats = challenger_repeats.0.saturating_add(challenger_repeats.1);
             (
+                current_class_repeats.saturating_add(challenger_class_repeats),
+                current_class_repeats.max(challenger_class_repeats),
                 current_repeats.saturating_add(challenger_repeats),
                 current_repeats.max(challenger_repeats),
                 case.id.as_str(),

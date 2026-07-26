@@ -724,8 +724,10 @@ pub fn search_chunks_literal(
             } else if exact_matches > 0 {
                 1.0 + (exact_matches.min(8) as f32 * 0.05)
             } else {
-                let text_score = lexical_overlap_in_text(&query_tokens, &normalized_text);
-                let path_score = lexical_overlap_in_text(&query_tokens, &normalized_path);
+                let text_score =
+                    lexical_overlap_in_normalized_text(&query_tokens, &normalized_text);
+                let path_score =
+                    lexical_overlap_in_normalized_text(&query_tokens, &normalized_path);
                 (text_score * 0.75) + (path_score * 0.45)
             };
             (score > 0.0).then_some((index, score))
@@ -1573,6 +1575,23 @@ fn lexical_overlap(query: &BTreeMap<String, usize>, chunk: &BTreeMap<String, usi
 }
 
 fn lexical_overlap_in_text(query: &BTreeMap<String, usize>, text: &str) -> f32 {
+    lexical_overlap_in_chars(
+        query,
+        text.chars().flat_map(|character| character.to_lowercase()),
+    )
+}
+
+fn lexical_overlap_in_normalized_text(
+    query: &BTreeMap<String, usize>,
+    normalized_text: &str,
+) -> f32 {
+    lexical_overlap_in_chars(query, normalized_text.chars())
+}
+
+fn lexical_overlap_in_chars(
+    query: &BTreeMap<String, usize>,
+    characters: impl IntoIterator<Item = char>,
+) -> f32 {
     if query.is_empty() {
         return 0.0;
     }
@@ -1588,11 +1607,9 @@ fn lexical_overlap_in_text(query: &BTreeMap<String, usize>, text: &str) -> f32 {
             }
         }
     };
-    for character in text.chars() {
+    for character in characters {
         if character.is_alphanumeric() || character == '_' {
-            for lower in character.to_lowercase() {
-                current.push(lower);
-            }
+            current.push(character);
         } else {
             record_token(&mut current, &mut matched);
             if matched.len() == query.len() {

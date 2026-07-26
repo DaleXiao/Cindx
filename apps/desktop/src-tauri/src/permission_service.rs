@@ -13,17 +13,15 @@ pub(crate) fn agent_session_permission_granted(
     let Some(session_id) = session_id else {
         return Ok(false);
     };
-    Ok(store
-        .list_permission_audits_for_session(task_id, session_id, None, 0)?
-        .into_iter()
-        .any(|audit| {
-            audit.resolution.as_ref().is_some_and(|resolution| {
-                resolution.decision == PermissionDecision::AllowForSession
-                    && permission_capability_matches(&audit.request, request)
-            })
-        }))
+    store.has_session_permission_capability(
+        task_id,
+        session_id,
+        request,
+        permission_requires_exact_scope(request),
+    )
 }
 
+#[cfg(test)]
 fn permission_capability_matches(
     granted: &PermissionRequest,
     requested: &PermissionRequest,
@@ -31,7 +29,12 @@ fn permission_capability_matches(
     granted.task_id == requested.task_id
         && granted.risk == requested.risk
         && granted.action == requested.action
+        && (!permission_requires_exact_scope(requested) || granted.scope == requested.scope)
         && requested.risk != PermissionRisk::Destructive
+}
+
+fn permission_requires_exact_scope(request: &PermissionRequest) -> bool {
+    request.action == "shell.run"
 }
 
 pub(crate) fn pending_agent_permissions_for_run(
@@ -113,11 +116,24 @@ mod tests {
         let read = request("file.read", PermissionRisk::Read, "README.md");
         let another_read = request("file.read", PermissionRisk::Read, "src/lib.rs");
         let write = request("file.write", PermissionRisk::Write, "README.md");
-        let shell = request("shell.run", PermissionRisk::Execute, ".");
+        let shell = request("shell.run", PermissionRisk::Execute, "/workspace");
 
         assert!(permission_capability_matches(&read, &another_read));
         assert!(!permission_capability_matches(&read, &write));
         assert!(!permission_capability_matches(&read, &shell));
+    }
+
+    #[test]
+    fn shell_session_capability_is_bound_to_its_working_directory() {
+        let workspace = request("shell.run", PermissionRisk::Execute, "/workspace");
+        let same_workspace = request("shell.run", PermissionRisk::Execute, "/workspace");
+        let another_workspace = request("shell.run", PermissionRisk::Execute, "/other");
+
+        assert!(permission_capability_matches(&workspace, &same_workspace));
+        assert!(!permission_capability_matches(
+            &workspace,
+            &another_workspace
+        ));
     }
 
     #[test]

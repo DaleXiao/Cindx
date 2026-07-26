@@ -1,6 +1,5 @@
 use super::*;
 
-pub(crate) const DIRECT_ANCHOR_CANDIDATE_ID: &str = "__direct_anchor";
 pub(crate) const PARTIAL_HANDOFF_CANDIDATE_ID: &str = "__partial_handoff";
 pub(super) const DIRECT_ANCHOR_JOB_ID: usize = 0;
 const DIRECT_ANCHOR_VERIFIER_JOB_ID: usize = 0;
@@ -26,12 +25,8 @@ pub(super) fn direct_anchor_spec(
         role: "direct_anchor".to_string(),
         stage: "direct_anchor".to_string(),
         model: role_hints.executor.clone(),
-        subtask: "Produce the smallest immediately usable execution brief.".to_string(),
-        prompt: format!(
-            "You are Cindx's independent direct-anchor branch. Produce a concise internal execution brief for a separate tool-using executor. Preserve the exact user objective and constraints, identify decisive unknowns and the smallest evidence or tool checks needed, give concrete next actions and completion criteria, and flag uncertainty. Do not claim that files, tools, or external effects already completed. Do not answer the user directly. Return only the brief, with no preamble.\n\nUser request:\n{}\n\nRelevant prior context:\n{}",
-            truncate_for_collaboration(prompt, 12_000),
-            bounded_memory,
-        ),
+        subtask: "Produce an independent, immediately usable direct answer.".to_string(),
+        prompt: direct_anchor_response_prompt(prompt, &bounded_memory),
         request_id: unique_id("collaboration-anchor"),
         access: Vec::new(),
         tool_policy: WorkflowToolPolicy::None,
@@ -55,7 +50,7 @@ pub(super) fn direct_anchor_verifier_spec(
         model: config.model_for_role(&ModelRole::Reviewer),
         subtask: "Independently verify the direct execution anchor.".to_string(),
         prompt: format!(
-            "You are Cindx's independent direct-anchor verifier. Decide whether the internal execution brief is safe and sufficient for a separate tool-using executor to make immediate, correct progress. Reject it when it drops user constraints, substitutes a different objective, lacks decisive evidence or tool checks for a non-trivial task, invents completed effects, or makes unsupported completion claims. For complex work, require a concrete decomposition and verification criteria; do not reward brevity alone. Return exactly one JSON object and no prose: {{\"pass\":true,\"score\":0.0,\"issues\":[\"...\"],\"safety_violations\":0}}. score must be between 0 and 1.\n\nUser request:\n{}\n\nDirect execution brief:\n{}",
+            "You are Cindx's independent direct-answer verifier. Judge whether the candidate is a correct, useful, safe user-facing answer to the exact request. Reject it when it drops constraints, substitutes a different objective, exposes internal orchestration, invents completed effects, makes unsupported claims, or omits decisive qualifications. For a task requiring tools, accept only a truthful partial result that clearly identifies what remains unverified. Return exactly one JSON object and no prose: {{\"pass\":true,\"score\":0.0,\"issues\":[\"...\"],\"safety_violations\":0}}. score must be between 0 and 1.\n\nUser request:\n{}\n\nDirect candidate answer:\n{}",
             truncate_for_collaboration(user_prompt, 12_000),
             truncate_for_collaboration(anchor_output, 14_000),
         ),
@@ -92,148 +87,26 @@ pub(super) fn direct_anchor_verifier_metadata(spec: &AdaptiveCollaborationSpec) 
 }
 
 pub(super) fn direct_anchor_verdict(
-    verification: PromptVerification,
+    _verification: PromptVerification,
     content: Option<&str>,
 ) -> AnytimeVerdict {
     let deliverable = content.is_some_and(|value| !value.trim().is_empty());
-    AnytimeVerdict {
-        quality_bps: if deliverable { 6_000 } else { 0 },
-        confidence_bps: if deliverable { 5_500 } else { 0 },
-        constraint_coverage_bps: if deliverable { 6_000 } else { 0 },
-        evidence_count: 0,
-        safety_violations: 0,
-        deliverable,
-        verified: deliverable && verification == PromptVerification::Minimal,
-        anchor_uplift_bps: None,
-    }
-}
-
-fn anytime_step_kind(role: &str, index: usize, final_step_index: usize) -> AnytimeCandidateKind {
-    if index == final_step_index {
-        AnytimeCandidateKind::Synthesis
-    } else if role == "verifier" {
-        AnytimeCandidateKind::Verification
-    } else if role == "repair" {
-        AnytimeCandidateKind::Repair
-    } else {
-        AnytimeCandidateKind::Workflow
-    }
+    direct_anchor_response_verdict(deliverable, false)
 }
 
 pub(super) fn initialize_anytime_controller(
     contract: &ConductorExecutionContract,
-    workflow: &orchestrator::AdaptiveWorkflow,
+    _workflow: &orchestrator::AdaptiveWorkflow,
     checkpoint: &WorkflowExecutionCheckpoint,
 ) -> Result<AnytimeController, String> {
-    if !checkpoint.anytime_controller_json.trim().is_empty() {
-        let mut snapshot =
-            serde_json::from_str::<AnytimeControllerSnapshot>(&checkpoint.anytime_controller_json)
-                .map_err(|error| format!("anytime controller checkpoint is invalid: {error}"))?;
-        // Older checkpoints reserved exactly enough slots for the workflow and
-        // anchor. Keep one non-executing slot for a synthesized partial handoff.
-        snapshot.config.max_candidates = snapshot
-            .config
-            .max_candidates
-            .max(snapshot.candidates.len().saturating_add(1));
-        snapshot.config.min_team_uplift_bps = contract.min_team_uplift_bps;
-        snapshot.config.min_distinct_contributions = contract.min_distinct_contributions;
-        snapshot.config.requires_synthesis = contract.requires_synthesis;
-        snapshot.config.verification_required = contract.verification_required;
-        let mut controller = AnytimeController::from_snapshot(snapshot)?;
-        let final_step_index = workflow.steps.len().saturating_sub(1);
-        for (index, step) in workflow.steps.iter().enumerate() {
-            if controller.candidate(&step.id).is_none() {
-                continue;
-            }
-            controller.annotate_candidate(
-                &step.id,
-                anytime_step_kind(&step.role, index, final_step_index),
-                Some(step.model.clone()),
-                index == final_step_index,
-            )?;
-        }
-        return Ok(controller);
-    }
-
-    let mut config = AnytimeControllerConfig::from_contract(contract);
-    config.max_candidates = config
-        .max_candidates
-        .max(workflow.steps.len().saturating_add(2));
-    let mut controller = AnytimeController::new(config);
-    controller.register(AnytimeCandidate::direct_anchor(DIRECT_ANCHOR_CANDIDATE_ID))?;
-    let final_step_index = workflow.steps.len().saturating_sub(1);
-    for (index, step) in workflow.steps.iter().enumerate() {
-        let uplift = contract
-            .expected_uplift_bps
-            .saturating_add(u16::try_from(index.saturating_mul(250)).unwrap_or(u16::MAX))
-            .min(10_000);
-        let mut candidate = AnytimeCandidate::workflow(&step.id, step.access.clone(), uplift)
-            .with_kind(anytime_step_kind(&step.role, index, final_step_index))
-            .with_contribution_signature(step.model.clone());
-        if index != final_step_index {
-            candidate = candidate.as_intermediate();
-        }
-        controller.register(candidate)?;
-
-        let Some(step_checkpoint) = checkpoint.steps.get(&step.id) else {
-            continue;
-        };
-        if index == final_step_index && !checkpoint.finalized {
-            continue;
-        }
-        match step_checkpoint.status {
-            WorkflowStepStatus::Completed | WorkflowStepStatus::Degraded => {
-                controller.mark_running(&step.id)?;
-                let semantic = &step_checkpoint.semantic;
-                let lineage_complete = semantic.completion_satisfied
-                    && !semantic.output_digest.trim().is_empty()
-                    && semantic.input_digests.len() == step.access.len();
-                let verified = semantic.verification == WorkflowVerificationState::Passed;
-                let evidence_count = step_checkpoint.evidence_count.max(semantic.evidence_count);
-                controller.observe(
-                    &step.id,
-                    AnytimeVerdict {
-                        quality_bps: match (step_checkpoint.status.clone(), verified) {
-                            (WorkflowStepStatus::Completed, true) => 7_250,
-                            (WorkflowStepStatus::Completed, false) => 6_250,
-                            (WorkflowStepStatus::Degraded, _) => 4_500,
-                            _ => 0,
-                        },
-                        confidence_bps: if verified { 7_000 } else { 5_250 },
-                        constraint_coverage_bps: if lineage_complete { 6_500 } else { 0 },
-                        evidence_count,
-                        safety_violations: 0,
-                        deliverable: lineage_complete
-                            && step_checkpoint
-                                .output
-                                .as_ref()
-                                .is_some_and(|output| !output.trim().is_empty()),
-                        verified,
-                        anchor_uplift_bps: None,
-                    },
-                )?;
-            }
-            WorkflowStepStatus::Failed => {
-                controller.mark_running(&step.id)?;
-                controller.fail(&step.id)?;
-            }
-            WorkflowStepStatus::Cancelled => {
-                controller.mark_running(&step.id)?;
-                controller.cancel(&step.id)?;
-            }
-            WorkflowStepStatus::Pending | WorkflowStepStatus::Running => {}
-        }
-    }
-    Ok(controller)
+    AgentEngineSession::restore(contract, checkpoint.clone()).map(|session| session.into_parts().1)
 }
 
 pub(super) fn persist_anytime_controller(
     checkpoint: &mut WorkflowExecutionCheckpoint,
     controller: &AnytimeController,
 ) -> Result<(), String> {
-    checkpoint.anytime_controller_json = serde_json::to_string(&controller.snapshot())
-        .map_err(|error| format!("failed to serialize anytime controller: {error}"))?;
-    Ok(())
+    orchestrator::persist_anytime_controller(checkpoint, controller)
 }
 
 pub(super) fn collaboration_steer_pending(cancellation: Option<&Arc<AgentRunControl>>) -> bool {
@@ -370,7 +243,7 @@ pub(super) fn record_direct_anchor_completion(
     collaboration_id: &str,
     spec: &AdaptiveCollaborationSpec,
     completion: &CollaborationCompletion,
-    verification: PromptVerification,
+    _verification: PromptVerification,
     cancellation: Option<&Arc<AgentRunControl>>,
 ) -> Result<Option<String>, String> {
     let role = adaptive_model_role(&spec.role);
@@ -397,7 +270,7 @@ pub(super) fn record_direct_anchor_completion(
             content,
             ResultQuality::Substantive,
             0,
-            verification == PromptVerification::Minimal,
+            false,
             false,
         );
     }
@@ -871,4 +744,17 @@ pub(super) fn await_direct_anchor_fallback(
         cancellation,
     )?;
     Ok(current_output.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minimal_policy_does_not_masquerade_as_completed_verification() {
+        let verdict = direct_anchor_verdict(PromptVerification::Minimal, Some("usable answer"));
+
+        assert!(verdict.deliverable);
+        assert!(!verdict.verified);
+    }
 }
