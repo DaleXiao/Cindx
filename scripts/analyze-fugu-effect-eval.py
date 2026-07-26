@@ -236,7 +236,7 @@ def render_markdown(
         f"- Source commit: `{report['git_commit']}`",
         f"- App crate version: `{report['app_version']}`",
         f"- Raw evidence SHA-256: `{report['raw_evidence_sha256']}`",
-        f"- Evaluation budget: {report['evaluation_limits'].get('model_call_timeout_seconds', 'n/a')}s per model call; {report['evaluation_limits'].get('treatment_deadline_seconds', 'n/a')}s per treatment.",
+        f"- Evaluation budget: {report['evaluation_limits'].get('model_call_timeout_seconds', 'n/a')}s per model call; {report['evaluation_limits'].get('treatment_deadline_seconds', 'n/a')}s per treatment; {report['evaluation_limits'].get('max_output_tokens_per_call', 'n/a')} output tokens per call.",
         "- Scope: fixed-sample external-effect pilot, not a full leaderboard submission.",
         "",
         "## Protocol",

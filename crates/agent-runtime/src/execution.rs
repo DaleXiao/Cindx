@@ -269,6 +269,7 @@ where
         },
     );
     let mut usage = Metadata::new();
+    let mut last_unusable_response = None;
 
     loop {
         let prepared = AgentKernel::new(&mut runtime, &[])
@@ -279,12 +280,10 @@ where
                 request.max_output_tokens,
             )
             .map_err(|exhausted| {
-                AgentFailure::budget(
-                    "turn_budget_exhausted",
-                    format!(
-                        "no-tool agent exhausted {} turns before producing a terminal answer",
-                        exhausted.max_turns
-                    ),
+                no_tool_turn_exhaustion(
+                    exhausted.max_turns,
+                    exhausted.max_turns,
+                    last_unusable_response,
                 )
             })?;
         let response = run_model_turn(prepared.request)?;
@@ -300,15 +299,14 @@ where
                 });
             }
             AgentAdvance::Retry { instruction } => {
+                last_unusable_response = Some(unusable_response_kind(&instruction));
                 AgentKernel::new(&mut runtime, &[]).apply_model_response_retry(instruction);
             }
             AgentAdvance::TurnBudgetExhausted(exhausted) => {
-                return Err(AgentFailure::budget(
-                    "turn_budget_exhausted",
-                    format!(
-                        "no-tool agent exhausted {}/{} turns before producing a terminal answer",
-                        exhausted.completed_turns, exhausted.max_turns
-                    ),
+                return Err(no_tool_turn_exhaustion(
+                    exhausted.completed_turns,
+                    exhausted.max_turns,
+                    last_unusable_response,
                 ));
             }
             AgentAdvance::ToolCalls { .. } => {
@@ -319,6 +317,35 @@ where
             }
             AgentAdvance::Failed { failure } => return Err(failure),
         }
+    }
+}
+
+fn unusable_response_kind(instruction: &str) -> &'static str {
+    if instruction.contains("output limit") {
+        "incomplete"
+    } else if instruction.contains("safety filter") {
+        "filtered"
+    } else if instruction.contains("response was empty") {
+        "empty"
+    } else {
+        "unusable"
+    }
+}
+
+fn no_tool_turn_exhaustion(
+    completed_turns: usize,
+    max_turns: usize,
+    last_unusable_response: Option<&str>,
+) -> AgentFailure {
+    let message = format!(
+        "no-tool agent exhausted {completed_turns}/{max_turns} turns before producing a terminal answer"
+    );
+    match last_unusable_response {
+        Some(kind) => AgentFailure::model_output(
+            "model_output_recovery_exhausted",
+            format!("{message}; last response was {kind}"),
+        ),
+        None => AgentFailure::budget("turn_budget_exhausted", message),
     }
 }
 
@@ -457,6 +484,35 @@ mod tests {
         assert!(outcome.messages.iter().any(|message| {
             message.metadata.get("kind").map(String::as_str) == Some("model_response_retry")
         }));
+    }
+
+    #[test]
+    fn no_tool_driver_allows_the_kernel_recovery_horizon() {
+        let mut request = request(Vec::new());
+        request.max_turns = 3;
+        let mut calls = 0usize;
+        let outcome = run_no_tool_agent(request, |_| {
+            calls += 1;
+            Ok(if calls < 3 {
+                response("")
+            } else {
+                response("The correct answer is (B).")
+            })
+        })
+        .expect("the third bounded turn should complete");
+
+        assert_eq!(calls, 3);
+        assert_eq!(outcome.answer, "The correct answer is (B).");
+    }
+
+    #[test]
+    fn no_tool_driver_reports_the_last_unusable_response() {
+        let failure = run_no_tool_agent(request(Vec::new()), |_| Ok(response("")))
+            .expect_err("two empty responses should exhaust the bounded request");
+
+        assert_eq!(failure.code, "model_output_recovery_exhausted");
+        assert_eq!(failure.class, crate::AgentFailureClass::ModelOutput);
+        assert!(failure.message.ends_with("last response was empty"));
     }
 
     #[test]
