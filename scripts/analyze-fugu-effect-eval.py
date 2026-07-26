@@ -13,7 +13,10 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
-RAW_SCHEMA = "cindx.external_effect_eval.raw.v1"
+RAW_SCHEMAS = {
+    "cindx.external_effect_eval.raw.v1",
+    "cindx.external_effect_eval.raw.v2",
+}
 SANITIZED_SCHEMA = "cindx.external_effect_eval.sanitized.v1"
 
 
@@ -469,7 +472,7 @@ def main() -> None:
 
     raw_bytes = args.raw.read_bytes()
     raw = json.loads(raw_bytes)
-    if raw.get("schema") != RAW_SCHEMA:
+    if raw.get("schema") not in RAW_SCHEMAS:
         raise SystemExit(f"unexpected raw schema: {raw.get('schema')}")
     sanitized_runs = [sanitize_run(run) for run in raw["runs"]]
     report = {

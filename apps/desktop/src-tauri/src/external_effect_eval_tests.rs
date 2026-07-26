@@ -1,7 +1,7 @@
 use super::*;
 use orchestrator::{AdaptiveWorkflow, AdaptiveWorkflowStep};
 
-const EXTERNAL_EFFECT_SCHEMA: &str = "cindx.external_effect_eval.raw.v1";
+const EXTERNAL_EFFECT_SCHEMA: &str = "cindx.external_effect_eval.raw.v2";
 const GPQA_SOURCE_URL: &str = "https://github.com/idavidrein/gpqa";
 const GPQA_SOURCE_REVISION: &str = "56686c06f5e19865c153de0fdb11be3890014df7";
 const MRCR_SOURCE_URL: &str = "https://huggingface.co/datasets/openai/mrcr";
@@ -110,6 +110,7 @@ struct ExternalEffectRun {
     expected: String,
     output: String,
     error: Option<String>,
+    diagnostics: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -425,39 +426,76 @@ fn workflow_treatment(
             .saturating_add(execution.execution.total_tokens)
             .to_string(),
     );
-    let finalizer_models = terminal_delivery_models(config);
-    planning_models.extend(finalizer_models.iter().cloned());
-    planning_models.sort();
-    planning_models.dedup();
-    let finalizer_started = Instant::now();
-    let finalizer = finalize_prompt_workflow_for_user(
-        config,
-        prompt,
-        &execution.execution,
-        &finalizer_models,
-        control,
+    usage.insert(
+        "planning_latency_ms".to_string(),
+        planning_latency_ms.to_string(),
     );
-    let finalizer_latency_ms =
-        u64::try_from(finalizer_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let (output, succeeded, error) = match finalizer {
-        Ok(outcome) if !outcome.answer.trim().is_empty() => {
-            merge_treatment_usage(&mut usage, &outcome.usage);
+    usage.insert(
+        "workflow_latency_ms".to_string(),
+        execution.execution.latency_ms.to_string(),
+    );
+    usage.insert(
+        "workflow_succeeded".to_string(),
+        workflow_succeeded.to_string(),
+    );
+    usage.insert(
+        "workflow_quality_gate_met".to_string(),
+        execution.execution.quality_gate_met.to_string(),
+    );
+    usage.insert(
+        "workflow_steps".to_string(),
+        workflow_step_diagnostics(&execution.execution),
+    );
+    let finalizer_models = terminal_delivery_models(config);
+    let (output, succeeded, error, finalizer_latency_ms) =
+        if workflow_delivery_is_final(&execution.execution) {
             usage.insert(
                 "terminal_executor_status".to_string(),
-                "completed".to_string(),
+                "skipped_verified_workflow".to_string(),
             );
-            (outcome.answer, true, None)
-        }
-        Ok(_) => fallback_workflow_delivery(
-            workflow_output,
-            workflow_error,
-            &mut usage,
-            "terminal executor returned an empty answer".to_string(),
-        ),
-        Err(failure) => {
-            fallback_workflow_delivery(workflow_output, workflow_error, &mut usage, failure.message)
-        }
-    };
+            (workflow_output, true, None, 0)
+        } else {
+            planning_models.extend(finalizer_models.iter().cloned());
+            planning_models.sort();
+            planning_models.dedup();
+            let finalizer_started = Instant::now();
+            let finalizer = finalize_prompt_workflow_for_user(
+                config,
+                prompt,
+                &execution.execution,
+                &finalizer_models,
+                control,
+            );
+            let finalizer_latency_ms =
+                u64::try_from(finalizer_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let (output, succeeded, error) = match finalizer {
+                Ok(outcome) if !outcome.answer.trim().is_empty() => {
+                    merge_treatment_usage(&mut usage, &outcome.usage);
+                    usage.insert(
+                        "terminal_executor_status".to_string(),
+                        "completed".to_string(),
+                    );
+                    (outcome.answer, true, None)
+                }
+                Ok(_) => fallback_workflow_delivery(
+                    workflow_output,
+                    workflow_error,
+                    &mut usage,
+                    "terminal executor returned an empty answer".to_string(),
+                ),
+                Err(failure) => fallback_workflow_delivery(
+                    workflow_output,
+                    workflow_error,
+                    &mut usage,
+                    failure.message,
+                ),
+            };
+            (output, succeeded, error, finalizer_latency_ms)
+        };
+    usage.insert(
+        "terminal_executor_latency_ms".to_string(),
+        finalizer_latency_ms.to_string(),
+    );
     TreatmentOutput {
         policy,
         models: planning_models,
@@ -469,6 +507,46 @@ fn workflow_treatment(
         output,
         error,
     }
+}
+
+fn workflow_delivery_is_final(execution: &PromptWorkflowExecution) -> bool {
+    execution.succeeded
+        && execution.quality_gate_met
+        && !execution.final_output.trim().is_empty()
+}
+
+fn workflow_step_diagnostics(execution: &PromptWorkflowExecution) -> String {
+    serde_json::to_string(
+        &execution
+            .steps
+            .iter()
+            .map(|step| {
+                serde_json::json!({
+                    "id": step.id,
+                    "role": step.role,
+                    "model": step.model,
+                    "status": step.status,
+                    "attempts": step.attempts,
+                    "latency_ms": step.latency_ms,
+                    "total_tokens": step.total_tokens,
+                    "errors": step.errors,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|error| format!("diagnostic serialization failed: {error}"))
+}
+
+fn evaluation_diagnostics(usage: &Metadata) -> BTreeMap<String, String> {
+    usage
+        .iter()
+        .filter(|(key, _)| {
+            key.starts_with("planning_")
+                || key.starts_with("workflow_")
+                || key.starts_with("terminal_executor_")
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
 }
 
 fn finalize_prompt_workflow_for_user(
@@ -930,6 +1008,7 @@ fn append_gpqa_run(
         expected: case.expected.to_string(),
         output: result.output,
         error: result.error,
+        diagnostics: evaluation_diagnostics(&result.usage),
     });
 }
 
@@ -972,6 +1051,7 @@ fn append_mrcr_run(
         expected: page_row.row.answer.clone(),
         output,
         error: result.error,
+        diagnostics: BTreeMap::new(),
     });
 }
 
@@ -1115,6 +1195,25 @@ fn terminal_executor_failure_does_not_turn_an_empty_graph_into_success() {
     assert!(error
         .as_deref()
         .is_some_and(|error| error.contains("all workflow branches failed")));
+}
+
+#[test]
+fn verified_workflow_delivery_does_not_require_a_second_model_call() {
+    let execution = PromptWorkflowExecution {
+        succeeded: true,
+        quality_gate_met: true,
+        final_output: "The correct answer is (B).".to_string(),
+        steps: Vec::new(),
+        latency_ms: 25,
+        total_tokens: 50,
+    };
+    assert!(workflow_delivery_is_final(&execution));
+
+    let unverified = PromptWorkflowExecution {
+        quality_gate_met: false,
+        ..execution
+    };
+    assert!(!workflow_delivery_is_final(&unverified));
 }
 
 #[test]
