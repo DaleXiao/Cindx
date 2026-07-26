@@ -425,7 +425,7 @@ fn workflow_treatment(
             .saturating_add(execution.execution.total_tokens)
             .to_string(),
     );
-    let finalizer_models = terminal_executor_models(config);
+    let finalizer_models = terminal_delivery_models(config);
     planning_models.extend(finalizer_models.iter().cloned());
     planning_models.sort();
     planning_models.dedup();
@@ -598,12 +598,13 @@ fn finalize_prompt_workflow_for_user(
     )
 }
 
-fn terminal_executor_models(config: &ProviderConfig) -> Vec<String> {
+fn terminal_delivery_models(config: &ProviderConfig) -> Vec<String> {
     ordered_unique_models([
-        config.model_for_role(&ModelRole::Executor),
-        config.model_for_role(&ModelRole::Reviewer),
-        config.model.clone(),
+        config.model_for_role(&ModelRole::Summarizer),
         config.model_for_conductor(),
+        config.model.clone(),
+        config.model_for_role(&ModelRole::Reviewer),
+        config.model_for_role(&ModelRole::Executor),
     ])
 }
 
@@ -1151,15 +1152,34 @@ fn external_effect_treatments_use_the_declared_deadline() {
 }
 
 #[test]
-fn terminal_executor_model_pool_preserves_order_and_removes_duplicates() {
+fn terminal_delivery_model_pool_starts_with_synthesizer_and_removes_duplicates() {
+    let config = ProviderConfig {
+        model: "default".to_string(),
+        conductor_model: "conductor".to_string(),
+        executor_model: "executor".to_string(),
+        reviewer_model: "reviewer".to_string(),
+        summarizer_model: "summarizer".to_string(),
+        ..ProviderConfig::default()
+    };
     assert_eq!(
-        ordered_unique_models([
-            "executor".to_string(),
+        terminal_delivery_models(&config),
+        vec![
+            "summarizer".to_string(),
+            "conductor".to_string(),
+            "default".to_string(),
             "reviewer".to_string(),
             "executor".to_string(),
+        ]
+    );
+
+    assert_eq!(
+        ordered_unique_models([
+            "summarizer".to_string(),
+            "conductor".to_string(),
+            "summarizer".to_string(),
             String::new(),
         ]),
-        vec!["executor".to_string(), "reviewer".to_string()]
+        vec!["summarizer".to_string(), "conductor".to_string()]
     );
 }
 
