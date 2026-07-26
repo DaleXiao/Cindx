@@ -19,7 +19,7 @@ use crate::{
         add_image_generation_run_context, agent_runtime_context_for_run, open_app_read_store,
         tool_registry_for_state,
     },
-    runtime_constants::AGENT_MAX_OUTPUT_TOKENS,
+    runtime_constants::{AGENT_MAX_OUTPUT_TOKENS, AGENT_MODEL_RECOVERY_WINDOW_SECONDS},
     suspended_run_runtime::{clear_suspended_agent_run_for_context, remember_suspended_agent_run},
     tool_execution::persist_new_runtime_messages,
     view_models::AgentState,
@@ -191,12 +191,24 @@ pub(crate) fn continue_agent_loop(
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<AgentState, String> {
     let agent_model = agent_model_for_run(config, &run_context);
+    let provider_timeout = if collaboration.is_some() {
+        cancellation
+            .stage_model_call_timeout_with_recovery(
+                RunStageClass::Finalizer,
+                1,
+                Duration::from_secs(AGENT_MODEL_RECOVERY_WINDOW_SECONDS),
+            )
+            .as_secs()
+            .max(1)
+    } else {
+        cancellation.model_call_timeout_seconds()
+    };
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
         base_url: config.base_url.clone(),
         api_key: config.api_key.clone(),
         model: agent_model.clone(),
         embedding_model: config.model_for_role(&ModelRole::Embedder),
-        timeout_seconds: cancellation.model_call_timeout_seconds(),
+        timeout_seconds: provider_timeout,
     });
     continue_agent_loop_with_provider(
         app,

@@ -785,6 +785,23 @@ impl AgentRunControl {
         self.stage_model_call_timeout(class).as_secs().max(1)
     }
 
+    pub fn stage_model_call_timeout_with_recovery(
+        &self,
+        class: RunStageClass,
+        recovery_windows: usize,
+        minimum_recovery_window: Duration,
+    ) -> Duration {
+        let available = self.stage_model_call_timeout(class);
+        if recovery_windows == 0 || minimum_recovery_window.is_zero() {
+            return available;
+        }
+        let reserved = minimum_recovery_window
+            .checked_mul(u32::try_from(recovery_windows).unwrap_or(u32::MAX))
+            .unwrap_or(available)
+            .min(available.saturating_sub(Duration::from_secs(1)));
+        available.saturating_sub(reserved)
+    }
+
     pub fn progress(&self) -> RunProgressSnapshot {
         let state = self.state.lock().expect("run control state poisoned");
         let elapsed = state.started_at.elapsed().min(self.budget.max_duration);
