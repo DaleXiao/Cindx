@@ -510,9 +510,7 @@ fn workflow_treatment(
 }
 
 fn workflow_delivery_is_final(execution: &PromptWorkflowExecution) -> bool {
-    execution.succeeded
-        && execution.quality_gate_met
-        && !execution.final_output.trim().is_empty()
+    execution.succeeded && execution.quality_gate_met && !execution.final_output.trim().is_empty()
 }
 
 fn workflow_step_diagnostics(execution: &PromptWorkflowExecution) -> String {

@@ -361,9 +361,14 @@ pub(crate) fn complete_prompt_evaluation_worker(
         model_request
             .metadata
             .insert("evaluation_sandbox".to_string(), "read_only_v2".to_string());
+        let mut streamed = String::new();
         let response = provider.complete_streaming_cancellable(
             model_request,
-            |_| {},
+            |delta| {
+                if !delta.is_empty() {
+                    streamed.push_str(delta);
+                }
+            },
             || {
                 branch_cancellation.load(Ordering::SeqCst)
                     || control.should_stop()
@@ -371,7 +376,7 @@ pub(crate) fn complete_prompt_evaluation_worker(
             },
         );
         control.finish_model_call();
-        let response = match response {
+        let mut response = match response {
             Ok(response) => response,
             Err(error) => {
                 let failure = if branch_cancellation.load(Ordering::SeqCst) {
@@ -392,15 +397,22 @@ pub(crate) fn complete_prompt_evaluation_worker(
                 } else {
                     AgentFailure::from_model_error(&error)
                 };
+                let partial_content = (!streamed.trim().is_empty()).then_some(streamed);
+                if let Some(partial_answer) = partial_content.as_ref() {
+                    control.record_partial_output(partial_answer);
+                }
                 return CollaborationCompletion::failed_worker(
                     failure,
-                    None,
+                    partial_content,
                     prompt_evaluation_elapsed_ms(started_at),
                     worker.completion_usage("read_only_evaluation_v3"),
                     evidence,
                 );
             }
         };
+        if !streamed.trim().is_empty() {
+            response.message.content = streamed;
+        }
         if let Some(evidence) = model_response_checkpoint_evidence(&response) {
             control.record_checkpoint("model_result", "prompt_evaluation_worker", &evidence);
         }
