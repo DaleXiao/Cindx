@@ -98,7 +98,7 @@ impl RunBudget {
                 agent_turns_per_extension: 3,
                 max_repair_attempts: 2,
                 terminal_model_call_reserve: 2,
-                terminal_time_reserve: Duration::from_secs(30),
+                terminal_time_reserve: Duration::from_secs(3 * 60),
             },
             "pro" => Self {
                 max_duration: Duration::from_secs(4 * 60 * 60),
@@ -117,7 +117,7 @@ impl RunBudget {
                 agent_turns_per_extension: 48,
                 max_repair_attempts: 8,
                 terminal_model_call_reserve: 8,
-                terminal_time_reserve: Duration::from_secs(10 * 60),
+                terminal_time_reserve: Duration::from_secs(15 * 60),
             },
             _ => Self {
                 max_duration: Duration::from_secs(45 * 60),
@@ -136,20 +136,20 @@ impl RunBudget {
                 agent_turns_per_extension: 18,
                 max_repair_attempts: 4,
                 terminal_model_call_reserve: 4,
-                terminal_time_reserve: Duration::from_secs(2 * 60),
+                terminal_time_reserve: Duration::from_secs(5 * 60),
             },
         }
     }
 
-    /// The terminal reserve is shared by internal review/synthesis and final
-    /// user delivery. Half is protected exclusively for the finalizer so an
-    /// internally successful workflow cannot finish without time to answer.
+    /// The finalizer owns the complete terminal reserve. Internal review and
+    /// synthesis may run before that boundary, but cannot consume the only
+    /// model-call window available for the user-facing answer.
     pub fn finalizer_model_call_reserve(self) -> usize {
-        self.terminal_model_call_reserve.div_ceil(2).max(1)
+        self.terminal_model_call_reserve.max(1)
     }
 
     pub fn finalizer_time_reserve(self) -> Duration {
-        self.terminal_time_reserve / 2
+        self.terminal_time_reserve
     }
 
     pub fn protected_model_call_reserve(self, class: RunStageClass) -> usize {
@@ -212,13 +212,17 @@ mod tests {
     }
 
     #[test]
-    fn finalizer_reserve_is_nested_inside_the_terminal_reserve() {
+    fn finalizer_owns_a_complete_model_call_window() {
         for effort in ["fast", "auto", "pro"] {
             let budget = RunBudget::for_effort(effort);
             assert!(budget.finalizer_model_call_reserve() > 0);
             assert!(budget.finalizer_model_call_reserve() <= budget.terminal_model_call_reserve);
             assert!(budget.finalizer_time_reserve() > Duration::ZERO);
-            assert!(budget.finalizer_time_reserve() < budget.terminal_time_reserve);
+            assert_eq!(
+                budget.finalizer_time_reserve(),
+                budget.terminal_time_reserve
+            );
+            assert!(budget.finalizer_time_reserve() >= budget.model_call_timeout);
         }
     }
 }

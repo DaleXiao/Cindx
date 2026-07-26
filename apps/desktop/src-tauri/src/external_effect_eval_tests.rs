@@ -8,7 +8,7 @@ const MRCR_SOURCE_URL: &str = "https://huggingface.co/datasets/openai/mrcr";
 const MRCR_DATASET_REVISION: &str = "2025-12-05-bugfix";
 const EVALUATION_MODEL_CALL_TIMEOUT_SECONDS: u64 = 180;
 const EVALUATION_TREATMENT_DEADLINE_SECONDS: u64 = 300;
-const EVALUATION_TERMINAL_RESERVE_SECONDS: u64 = 90;
+const EVALUATION_TERMINAL_RESERVE_SECONDS: u64 = EVALUATION_MODEL_CALL_TIMEOUT_SECONDS;
 
 fn evaluation_run_control(effort: &str) -> Arc<AgentRunControl> {
     let mut budget = RunBudget::for_effort(effort);
@@ -1067,6 +1067,8 @@ fn external_effect_treatments_use_the_declared_deadline() {
             budget.model_call_timeout,
             Duration::from_secs(EVALUATION_MODEL_CALL_TIMEOUT_SECONDS)
         );
+        assert_eq!(budget.terminal_time_reserve, budget.model_call_timeout);
+        assert_eq!(budget.finalizer_time_reserve(), budget.model_call_timeout);
         assert!(budget.terminal_time_reserve < budget.max_duration);
     }
 }
