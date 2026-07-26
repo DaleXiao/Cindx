@@ -645,7 +645,10 @@ fn conductor_harness_requires_diverse_root_branches_and_complete_review() {
                 r#"{"steps":[{"id":"a","role":"thinker","model":"planner","subtask":"primary analysis","access":[]},{"id":"b","role":"worker","model":"reviewer","subtask":"independent implementation","access":[]},{"id":"verify","role":"verifier","model":"reviewer","subtask":"audit one branch","access":["a"]},{"id":"final","role":"synthesizer","model":"planner","subtask":"merge","access":["a","b","verify"]}]}"#,
             )
             .expect_err("adversarial review should cover every root branch");
-    assert!(incomplete_review.contains("directly audits every independent branch"));
+    assert!(
+        incomplete_review.contains("directly audits every independent contribution"),
+        "{incomplete_review}"
+    );
 }
 
 #[test]
@@ -678,7 +681,7 @@ fn conductor_harness_enforces_the_selected_prompt_genome() {
                 r#"{"steps":[{"id":"a","role":"thinker","model":"planner","subtask":"primary","access":[]},{"id":"b","role":"worker","model":"reviewer","subtask":"alternative","access":[]},{"id":"final","role":"synthesizer","model":"planner","subtask":"merge","access":["a","b"]}]}"#,
             )
             .expect_err("adversarial profile should require a verifier");
-    assert!(error.contains("requires a verifier"));
+    assert!(error.contains("requires a verification step"), "{error}");
 
     let pro_plan = adversarial
             .parse_plan(
@@ -772,7 +775,10 @@ fn conductor_harness_applies_evolved_topology_and_role_strategies() {
                 r#"{"steps":[{"id":"a","role":"worker","model":"planner","subtask":"analysis","access":[]},{"id":"b","role":"worker","model":"reviewer","subtask":"implementation","access":[]},{"id":"verify","role":"verifier","model":"reviewer","subtask":"audit","access":["a","b"]},{"id":"final","role":"synthesizer","model":"planner","subtask":"report","access":["a","b","verify"]}]}"#,
             )
             .expect_err("diverse specialists must include complementary root roles");
-    assert!(diversity_error.contains("complementary thinker and worker"));
+    assert!(
+        diversity_error.contains("at least two complementary role labels"),
+        "{diversity_error}"
+    );
 }
 
 #[test]
@@ -973,7 +979,7 @@ fn adaptive_worker_only_receives_authorized_outputs() {
     let worker = adaptive_worker_prompt(&workflow, 1, "Investigate", "", &BTreeMap::new())
         .expect("worker prompt should build");
     assert!(thinker.contains("Hypotheses; Assumptions"));
-    assert!(worker.contains("Work product; Evidence used or needed"));
+    assert!(worker.contains("Evidence; Provenance; Findings; Uncertainty; Handoff"));
     assert_ne!(thinker, worker);
 }
 

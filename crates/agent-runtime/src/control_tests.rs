@@ -129,6 +129,30 @@ fn material_checkpoints_extend_a_segment_but_new_observations_do_not() {
 }
 
 #[test]
+fn final_available_turn_is_reserved_for_terminal_commit_unless_progress_can_extend_it() {
+    let mut budget = test_budget();
+    budget.initial_agent_turns = 2;
+    budget.max_agent_turns = 4;
+    budget.terminal_model_call_reserve = 0;
+    budget.terminal_time_reserve = Duration::ZERO;
+
+    let control = AgentRunControl::with_budget(budget);
+    assert_eq!(control.record_agent_turn("executor"), Ok(1));
+    assert_eq!(
+        control.continuation_directive(),
+        RunContinuationDirective::CommitTerminalResult
+    );
+
+    let control = AgentRunControl::with_budget(budget);
+    assert_eq!(control.record_agent_turn("executor"), Ok(1));
+    assert!(control.record_checkpoint("tool_result", "evidence", "verified-result"));
+    assert_eq!(
+        control.continuation_directive(),
+        RunContinuationDirective::Continue
+    );
+}
+
+#[test]
 fn enforces_model_and_tool_call_budgets() {
     let model_control = AgentRunControl::with_budget(test_budget());
     assert_eq!(model_control.begin_model_call("one"), Ok(1));

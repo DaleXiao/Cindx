@@ -30,6 +30,7 @@ pub(super) fn direct_anchor_spec(
         request_id: unique_id("collaboration-anchor"),
         access: Vec::new(),
         tool_policy: WorkflowToolPolicy::None,
+        output_kind: WorkflowOutputKind::Synthesis,
         max_attempts: 1,
         max_model_turns: 1,
         max_tool_calls: 0,
@@ -57,6 +58,7 @@ pub(super) fn direct_anchor_verifier_spec(
         request_id: unique_id("collaboration-anchor-verifier"),
         access: Vec::new(),
         tool_policy: WorkflowToolPolicy::None,
+        output_kind: WorkflowOutputKind::Verification,
         max_attempts: 1,
         max_model_turns: 1,
         max_tool_calls: 0,
@@ -100,6 +102,53 @@ pub(super) fn initialize_anytime_controller(
     checkpoint: &WorkflowExecutionCheckpoint,
 ) -> Result<AnytimeController, String> {
     AgentEngineSession::restore(contract, checkpoint.clone()).map(|session| session.into_parts().1)
+}
+
+pub(super) fn rebuild_anytime_controller_after_replan(
+    contract: &ConductorExecutionContract,
+    checkpoint: &mut WorkflowExecutionCheckpoint,
+    previous: &AnytimeController,
+    direct_anchor_output: Option<&str>,
+    direct_anchor_running: bool,
+) -> Result<AnytimeController, String> {
+    let previous_snapshot = previous.snapshot();
+    checkpoint.anytime_controller_json.clear();
+    let workflow = checkpoint.plan.adaptive_workflow();
+    let mut rebuilt = initialize_anytime_controller(contract, &workflow, checkpoint)?;
+    let prior_anchor = previous_snapshot
+        .candidates
+        .iter()
+        .find(|candidate| candidate.id == DIRECT_ANCHOR_CANDIDATE_ID);
+    let prior_verdict = previous_snapshot.verdicts.get(DIRECT_ANCHOR_CANDIDATE_ID);
+    if let Some(output) = direct_anchor_output {
+        controller_mark_running_if_pending(&mut rebuilt, DIRECT_ANCHOR_CANDIDATE_ID)?;
+        if rebuilt
+            .candidate(DIRECT_ANCHOR_CANDIDATE_ID)
+            .is_some_and(|candidate| candidate.state == AnytimeCandidateState::Running)
+        {
+            rebuilt.observe(
+                DIRECT_ANCHOR_CANDIDATE_ID,
+                prior_verdict.cloned().unwrap_or_else(|| {
+                    direct_anchor_response_verdict(!output.trim().is_empty(), false)
+                }),
+            )?;
+        }
+    } else if direct_anchor_running
+        || prior_anchor.is_some_and(|candidate| candidate.state == AnytimeCandidateState::Running)
+    {
+        controller_mark_running_if_pending(&mut rebuilt, DIRECT_ANCHOR_CANDIDATE_ID)?;
+    } else if let Some(anchor) = prior_anchor {
+        match anchor.state {
+            AnytimeCandidateState::Failed => rebuilt.fail(DIRECT_ANCHOR_CANDIDATE_ID)?,
+            AnytimeCandidateState::Cancelled => rebuilt.cancel(DIRECT_ANCHOR_CANDIDATE_ID)?,
+            AnytimeCandidateState::Pending
+            | AnytimeCandidateState::Running
+            | AnytimeCandidateState::Usable
+            | AnytimeCandidateState::Verified => {}
+        }
+    }
+    persist_anytime_controller(checkpoint, &rebuilt)?;
+    Ok(rebuilt)
 }
 
 pub(super) fn persist_anytime_controller(
@@ -246,7 +295,7 @@ pub(super) fn record_direct_anchor_completion(
     _verification: PromptVerification,
     cancellation: Option<&Arc<AgentRunControl>>,
 ) -> Result<Option<String>, String> {
-    let role = adaptive_model_role(&spec.role);
+    let role = adaptive_model_role(&spec.role, &spec.output_kind);
     record_collaboration_stage_finished(
         state,
         task_id,
@@ -372,7 +421,7 @@ pub(super) fn start_direct_anchor_verifier(
     cancellation: Option<Arc<AgentRunControl>>,
 ) -> Result<DirectAnchorVerifier, String> {
     let spec = direct_anchor_verifier_spec(config, user_prompt, anchor_output);
-    let role = adaptive_model_role(&spec.role);
+    let role = adaptive_model_role(&spec.role, &spec.output_kind);
     record_collaboration_stage_started(
         state,
         task_id,
@@ -471,7 +520,7 @@ pub(super) fn settle_direct_anchor_verifier(
     controller: &mut AnytimeController,
     checkpoint: &mut WorkflowExecutionCheckpoint,
 ) -> Result<(), String> {
-    let role = adaptive_model_role(&verifier.spec.role);
+    let role = adaptive_model_role(&verifier.spec.role, &verifier.spec.output_kind);
     record_collaboration_stage_finished(
         state,
         task_id,

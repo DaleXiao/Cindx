@@ -138,6 +138,10 @@ pub(crate) fn append_workflow_checkpoint_event(
             "additional_model_turns_per_step".to_string(),
             checkpoint.additional_model_turns_per_step.to_string(),
         ),
+        (
+            "workflow_plan_revisions".to_string(),
+            checkpoint.plan_revisions.len().to_string(),
+        ),
     ]
     .into_iter()
     .collect::<Metadata>();

@@ -1,4 +1,5 @@
 use crate::memory_text::{first_metadata_value, normalize_memory_text, sanitize_line, truncate};
+use crate::semantic::{parse_semantic_memory_batch, validate_semantic_memory_batch};
 use crate::{MemoryKind, MemoryProvenance, MemoryRecord, MemoryTrust};
 use agent_core::{Event, EventKind};
 
@@ -7,6 +8,9 @@ pub fn extract_durable_memories(
     project_id: &str,
     session_id: &str,
 ) -> Vec<MemoryRecord> {
+    if let Some(records) = semantic_memory_records(events, project_id, session_id) {
+        return records;
+    }
     let completed = events
         .iter()
         .any(|event| event.summary == "Agent task completed");
@@ -112,8 +116,22 @@ pub fn extract_durable_memories(
     records
 }
 
+fn semantic_memory_records(
+    events: &[Event],
+    project_id: &str,
+    session_id: &str,
+) -> Option<Vec<MemoryRecord>> {
+    let event = events
+        .iter()
+        .rev()
+        .find(|event| event.summary == "Semantic memory candidates accepted")?;
+    let payload = event.metadata.get("memory_candidates_json")?;
+    let batch = parse_semantic_memory_batch(payload).ok()?;
+    Some(validate_semantic_memory_batch(batch, events, project_id, session_id).accepted)
+}
+
 #[allow(clippy::too_many_arguments)]
-fn memory_record(
+pub(crate) fn memory_record(
     kind: MemoryKind,
     trust: MemoryTrust,
     content: String,
@@ -245,7 +263,7 @@ fn is_durable_outcome_content(content: &str, has_tool_evidence: bool) -> bool {
     !normalize_memory_text(content).is_empty()
 }
 
-fn contains_instruction_override(content: &str) -> bool {
+pub(crate) fn contains_instruction_override(content: &str) -> bool {
     let lower = content.to_lowercase();
     [
         "ignore previous instruction",

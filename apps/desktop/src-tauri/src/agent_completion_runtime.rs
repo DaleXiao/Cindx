@@ -218,23 +218,15 @@ pub(crate) fn finalize_agent_completion(
     {
         eprintln!("project memory utilization unavailable: {error}");
     }
-    let memory_ledger = match refresh_project_memory_after_run(&mut store, run_context) {
-        Ok(ledger) => ledger,
-        Err(error) => {
-            eprintln!("project memory checkpoint unavailable: {error}");
-            None
-        }
-    };
     let completed_state =
         agent_state_for_session(&store, None, session_id).map_err(|error| error.to_string())?;
     drop(store);
     emit_agent_stream_delta(app, request_id, session_id, "", true, false, None);
-    if let Some(ledger) = memory_ledger {
-        schedule_project_memory_vector_refresh(
-            workspace_root.to_path_buf(),
-            config.clone(),
-            ledger,
-        );
-    }
+    crate::semantic_memory_worker::schedule_semantic_memory_refresh(
+        app.clone(),
+        workspace_root.to_path_buf(),
+        config.clone(),
+        run_context.clone(),
+    );
     Ok(AgentCompletionOutcome::Completed(completed_state))
 }

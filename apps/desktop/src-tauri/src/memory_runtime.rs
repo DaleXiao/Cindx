@@ -3,20 +3,20 @@ use crate::{
     agent_query_commands::append_agent_progress_event,
     app_state::AppState,
     configuration_models::ProviderConfig,
+    event_persistence::append_event,
     event_projection::write_private_file_atomically,
-    knowledge_runtime::{
-        prepare_agent_knowledge_context, should_run_agent_knowledge_retrieval, CloudRagEmbedder,
-    },
+    knowledge_runtime::{prepare_agent_knowledge_context, CloudRagEmbedder},
     persistence_runtime::{
-        current_time_millis, memory_lancedb_database_path_for, memory_lancedb_manifest_path_for,
-        metadata_with_context, open_app_read_store, phase16_task_id, skill_catalog_for_root,
+        memory_lancedb_database_path_for, memory_lancedb_manifest_path_for, open_app_read_store,
+        skill_catalog_for_root,
     },
+    project_session_persistence::metadata_with_context,
     runtime_constants::{
         AGENT_MEMORY_MAX_RECORDS, AGENT_MEMORY_READ_MODEL_NAMESPACE, AGENT_MEMORY_RECALL_LIMIT,
         MEMORY_VECTOR_FALLBACK_RETRY_MS, MEMORY_VECTOR_MANIFEST_SCHEMA,
         MEMORY_VECTOR_REFRESH_INFLIGHT,
     },
-    tool_execution::append_event,
+    runtime_values::{current_time_millis, phase16_task_id},
     view_models::MemoryStatsView,
 };
 
@@ -68,6 +68,7 @@ fn load_project_memory_ledger_inner(
                 })
         });
     let mut rebuilding = stored.is_none();
+    let mut changed = rebuilding;
     let mut ledger = stored.unwrap_or_else(|| MemoryLedger::new(project_id));
     let mut delta = store.list_by_task_and_metadata_after(
         &task_id,
@@ -75,8 +76,10 @@ fn load_project_memory_ledger_inner(
         project_id,
         ledger.revision,
     )?;
+    changed |= !delta.is_empty();
     if ledger.event_count.saturating_add(delta.len() as u64) != revision.event_count {
         rebuilding = true;
+        changed = true;
         ledger = MemoryLedger::new(project_id);
         delta = store.list_by_task_and_metadata_after(&task_id, "project_id", project_id, 0)?;
     }
@@ -130,7 +133,7 @@ fn load_project_memory_ledger_inner(
     }
     ledger.revision = revision.latest_sequence;
     ledger.event_count = revision.event_count;
-    if persist {
+    if persist && changed {
         save_project_memory_ledger(store, &ledger)?;
     }
     Ok(ledger)
@@ -139,7 +142,11 @@ fn load_project_memory_ledger_inner(
 fn is_memory_checkpoint_event(event: &Event) -> bool {
     matches!(
         event.summary.as_str(),
-        "Agent task completed" | "Agent task paused" | "Agent task failed" | "Agent task cancelled"
+        "Agent task completed"
+            | "Agent task paused"
+            | "Agent task failed"
+            | "Agent task cancelled"
+            | "Semantic memory candidates accepted"
     )
 }
 
@@ -223,46 +230,6 @@ pub(crate) fn project_memory_stats(
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProjectMemoryRecallMode {
-    Lexical,
-    Hybrid,
-}
-
-pub(crate) fn project_memory_recall_mode(
-    context: &RoutingContext,
-    prompt: &str,
-) -> Option<ProjectMemoryRecallMode> {
-    let normalized = prompt.to_ascii_lowercase();
-    let explicitly_memory_dependent = [
-        "remember",
-        "previous",
-        "last time",
-        "continue",
-        "my name",
-        "call me",
-        "what do you call me",
-        "之前",
-        "上次",
-        "刚才",
-        "继续",
-        "还记得",
-        "我的名字",
-        "我叫什么",
-        "叫我",
-        "称呼我",
-    ]
-    .iter()
-    .any(|needle| normalized.contains(needle));
-    if explicitly_memory_dependent || context.needs_multi_model {
-        return Some(ProjectMemoryRecallMode::Hybrid);
-    }
-    if context.needs_tools || context.needs_retrieval || context.complexity_score >= 2 {
-        return Some(ProjectMemoryRecallMode::Lexical);
-    }
-    None
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct PreparedRunKnowledgeContexts {
     pub(crate) memory: Option<Message>,
@@ -293,14 +260,11 @@ pub(crate) fn prepare_run_knowledge_contexts(
     run_context: &Metadata,
     workspace_root: &Path,
     config: &ProviderConfig,
-    prompt: &str,
-    routing_context: &RoutingContext,
-    retrieval_mode: &str,
+    decision: &AgentRunDecision,
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<PreparedRunKnowledgeContexts, String> {
-    let memory_mode = project_memory_recall_mode(routing_context, prompt);
-    let recall_memory = memory_mode.is_some();
-    let retrieve_workspace = should_run_agent_knowledge_retrieval(routing_context);
+    let recall_memory = !matches!(decision.memory.policy, MemoryRecallPolicy::None);
+    let retrieve_workspace = decision.retrieval.enabled();
     if !recall_memory && !retrieve_workspace {
         return Ok(PreparedRunKnowledgeContexts::default());
     }
@@ -321,8 +285,7 @@ pub(crate) fn prepare_run_knowledge_contexts(
                     run_context,
                     workspace_root,
                     config,
-                    prompt,
-                    memory_mode.expect("memory worker requires a recall mode"),
+                    &decision.memory.query,
                     cancellation,
                 )
             })
@@ -335,8 +298,7 @@ pub(crate) fn prepare_run_knowledge_contexts(
                     task_id,
                     run_context,
                     workspace_root,
-                    prompt,
-                    retrieval_mode,
+                    &decision.retrieval,
                     cancellation,
                 )
             })
@@ -665,7 +627,6 @@ pub(crate) fn recall_project_memory_for_prompt(
     workspace_root: &Path,
     config: &ProviderConfig,
     prompt: &str,
-    recall_mode: ProjectMemoryRecallMode,
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<Option<Message>, String> {
     let Some(project_id) = run_context.get("project_id") else {
@@ -689,26 +650,21 @@ pub(crate) fn recall_project_memory_for_prompt(
         AGENT_MEMORY_RECALL_LIMIT.saturating_mul(2),
         now_ms,
     );
-    let (semantic_scores, vector_manifest, vector_error) = match recall_mode {
-        ProjectMemoryRecallMode::Lexical => (BTreeMap::new(), None, None),
-        ProjectMemoryRecallMode::Hybrid => {
-            schedule_project_memory_vector_refresh(
-                workspace_root.to_path_buf(),
-                config.clone(),
-                ledger.clone(),
-            );
-            match project_memory_semantic_scores(
-                workspace_root,
-                project_id,
-                &ledger,
-                config,
-                prompt,
-                cancellation,
-            ) {
-                Ok((scores, manifest)) => (scores, Some(manifest), None),
-                Err(error) => (BTreeMap::new(), None, Some(error)),
-            }
-        }
+    schedule_project_memory_vector_refresh(
+        workspace_root.to_path_buf(),
+        config.clone(),
+        ledger.clone(),
+    );
+    let (semantic_scores, vector_manifest, vector_error) = match project_memory_semantic_scores(
+        workspace_root,
+        project_id,
+        &ledger,
+        config,
+        prompt,
+        cancellation,
+    ) {
+        Ok((scores, manifest)) => (scores, Some(manifest), None),
+        Err(error) => (BTreeMap::new(), None, Some(error)),
     };
     let mut recalls = fuse_memory_recalls_at(
         &ledger,
@@ -757,12 +713,10 @@ pub(crate) fn recall_project_memory_for_prompt(
         ("query".to_string(), prompt.to_string()),
         (
             "retrieval_mode".to_string(),
-            match recall_mode {
-                ProjectMemoryRecallMode::Lexical => "project_memory_lexical",
-                ProjectMemoryRecallMode::Hybrid if semantic_scores.is_empty() => {
-                    "project_memory_hybrid_fallback"
-                }
-                ProjectMemoryRecallMode::Hybrid => "project_memory_hybrid",
+            if semantic_scores.is_empty() {
+                "project_memory_hybrid_fallback"
+            } else {
+                "project_memory_hybrid"
             }
             .to_string(),
         ),

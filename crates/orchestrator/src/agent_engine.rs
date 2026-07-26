@@ -101,9 +101,7 @@ pub fn persist_anytime_controller(
 fn anytime_step_kind(step: &WorkflowPlanStep, is_delivery: bool) -> AnytimeCandidateKind {
     if is_delivery || step.contract.output_kind == WorkflowOutputKind::Synthesis {
         AnytimeCandidateKind::Synthesis
-    } else if step.role == "verifier"
-        || step.contract.output_kind == WorkflowOutputKind::Verification
-    {
+    } else if step.contract.output_kind == WorkflowOutputKind::Verification {
         AnytimeCandidateKind::Verification
     } else if step.role == "repair" {
         AnytimeCandidateKind::Repair

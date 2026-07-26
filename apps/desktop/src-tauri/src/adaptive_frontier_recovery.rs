@@ -70,7 +70,7 @@ pub(super) fn settle_adaptive_step(
         return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
     }
     let metadata = adaptive_stage_metadata(spec);
-    let role = adaptive_model_role(&spec.role);
+    let role = adaptive_model_role(&spec.role, &spec.output_kind);
     record_collaboration_stage_finished(
         state,
         task_id,

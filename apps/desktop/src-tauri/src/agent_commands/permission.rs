@@ -241,9 +241,15 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         ),
     )
     .map_err(|error| error.to_string())?;
-    let events = store
-        .list_by_task(&phase16_task_id())
-        .map_err(|error| error.to_string())?;
+    let events = match session_id {
+        Some(session_id) => store.list_by_task_and_metadata_or_unscoped(
+            &phase16_task_id(),
+            "session_id",
+            session_id,
+        ),
+        None => store.list_by_task(&phase16_task_id()),
+    }
+    .map_err(|error| error.to_string())?;
     let active_events = active_agent_events_for_session(&events, session_id);
     let prompt = latest_agent_prompt_from_active_events(&active_events)
         .unwrap_or_else(|| "Continue the agent task.".to_string());

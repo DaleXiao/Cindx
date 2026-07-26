@@ -63,7 +63,7 @@ pub(super) fn start_adaptive_anchor(
         }));
     }
 
-    let anchor_role = adaptive_model_role(&anchor_spec.role);
+    let anchor_role = adaptive_model_role(&anchor_spec.role, &anchor_spec.output_kind);
     record_collaboration_stage_started(
         state,
         task_id,

@@ -3,7 +3,6 @@ use super::*;
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn schedule_prompt_pairwise_evaluation(
     app: tauri::AppHandle,
-    config: ProviderConfig,
     task_id: TaskId,
     run_context: Metadata,
     effort: String,
@@ -12,83 +11,17 @@ pub(crate) fn schedule_prompt_pairwise_evaluation(
     agent_budget: usize,
     current_profile: ConductorPromptGenome,
 ) {
-    let lease_key = effort.clone();
-    let Ok(Some(inflight_lease)) = ExclusiveKeyLease::try_acquire(
-        prompt_evaluation_inflight(),
-        lease_key.clone(),
-        "prompt evaluation inflight",
-    ) else {
-        return;
-    };
-    let spawn_result = std::thread::Builder::new()
-        .name(format!("cindx-prompt-evaluation-{lease_key}"))
-        .spawn(move || {
-            let _inflight_lease = inflight_lease;
-            let state = app.state::<AppState>();
-            let control = Arc::new(AgentRunControl::new("pro"));
-            let Ok(_control_lease) = RegisteredRunControl::register(
-                &state.prompt_evaluation_controls,
-                lease_key.clone(),
-                Arc::clone(&control),
-                "prompt evaluation control",
-                "prompt evaluation is already active for this effort",
-            ) else {
-                return;
-            };
-            match wait_for_prompt_evaluation_idle(&state, &control) {
-                Ok(true) => {}
-                Ok(false) | Err(_) => return,
-            }
-            for _ in 0..PROMPT_EVOLUTION_BACKGROUND_BATCH_LIMIT {
-                let result = run_background_prompt_pairwise_evaluation(
-                    &state,
-                    &config,
-                    &task_id,
-                    &run_context,
-                    &effort,
-                    &policy,
-                    &worker_models,
-                    agent_budget,
-                    &current_profile,
-                    &control,
-                );
-                match result {
-                    Ok(true) => continue,
-                    Ok(false) => break,
-                    Err(error) => {
-                        if error != MODEL_REQUEST_CANCELLED {
-                            if let Ok(mut store) = state.store.lock() {
-                                let _ = append_event(
-                                    &mut store,
-                                    &task_id,
-                                    EventKind::TaskStatusChanged,
-                                    "Conductor pairwise evaluation failed",
-                                    metadata_with_context(
-                                        [
-                                            (
-                                                "background_evaluation".to_string(),
-                                                "true".to_string(),
-                                            ),
-                                            ("prompt_effort".to_string(), effort.clone()),
-                                            (
-                                                "error".to_string(),
-                                                truncate_for_collaboration(&error, 2_000),
-                                            ),
-                                        ]
-                                        .into_iter()
-                                        .collect(),
-                                        &run_context,
-                                    ),
-                                );
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-        });
-    if let Err(error) = spawn_result {
-        eprintln!("prompt evaluation worker could not start: {error}");
+    if let Err(error) = enqueue_prompt_pairwise_evaluation(
+        &app,
+        &task_id,
+        &run_context,
+        effort,
+        policy,
+        worker_models,
+        agent_budget,
+        current_profile,
+    ) {
+        eprintln!("prompt evaluation request could not be persisted: {error}");
     }
 }
 
@@ -188,7 +121,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         let model =
             load_prompt_evolution_read_model(&mut store).map_err(|error| error.to_string())?;
         let events = store
-            .list_by_task(task_id)
+            .list_by_task_and_metadata(task_id, "project_id", project_id)
             .map_err(|error| error.to_string())?;
         let rollout = model.rollouts.get(effort).cloned();
         let known_profiles = model

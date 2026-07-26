@@ -1,4 +1,7 @@
-use crate::{OrchestrationPolicy, PromptCommitStrategy, RoutingContext, TaskClass, WorkflowPlanIr};
+use crate::{
+    OrchestrationPolicy, PromptCommitStrategy, RoutingContext, TaskClass, WorkflowOutputKind,
+    WorkflowPlanIr,
+};
 use serde::{Deserialize, Serialize};
 
 pub const AUTO_COLLABORATION_MIN_UPLIFT_BPS: u16 = 3_000;
@@ -210,7 +213,7 @@ impl ConductorExecutionContract {
             && !plan
                 .steps
                 .iter()
-                .any(|step| matches!(step.role.as_str(), "verifier" | "synthesizer"))
+                .any(|step| step.contract.output_kind == WorkflowOutputKind::Verification)
         {
             return Err("workflow execution contract requires a verification path".to_string());
         }
@@ -219,9 +222,8 @@ impl ConductorExecutionContract {
             .iter()
             .take(plan.steps.len().saturating_sub(1))
             .filter(|step| {
-                step.role != "verifier"
+                step.contract.output_kind != WorkflowOutputKind::Verification
                     && step.access.is_empty()
-                    && matches!(step.role.as_str(), "thinker" | "worker")
             })
             .count();
         if distinct_contributors < self.min_distinct_contributions {
@@ -234,9 +236,10 @@ impl ConductorExecutionContract {
             let Some(final_step) = plan.steps.last() else {
                 return Err("collaboration workflow requires a synthesis step".to_string());
             };
-            if final_step.role != "synthesizer" {
+            if final_step.contract.output_kind != WorkflowOutputKind::Synthesis {
                 return Err(
-                    "collaboration workflow must end with an explicit synthesizer".to_string(),
+                    "collaboration workflow must end with an explicit synthesis contract"
+                        .to_string(),
                 );
             }
         }

@@ -10,11 +10,12 @@ use crate::{
     collaboration_stage_runtime::{record_collaboration_stage_finished, run_collaboration_stage},
     collaboration_worker_runtime::complete_collaboration_worker_with_tools,
     configuration_models::ProviderConfig,
-    persistence_runtime::{metadata_with_context, unique_id},
+    event_persistence::append_event,
+    project_session_persistence::metadata_with_context,
     prompt_evolution_runtime::prompt_evolution_evaluation_for_run,
     prompt_pairwise_runtime::schedule_prompt_pairwise_evaluation,
     runtime_constants::COLLABORATION_MAX_OUTPUT_TOKENS,
-    tool_execution::append_event,
+    runtime_values::unique_id,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -525,7 +526,6 @@ pub(crate) fn prepare_agent_collaboration(
         if let Some(profile) = bounded_profile {
             schedule_prompt_pairwise_evaluation(
                 app.clone(),
-                config.clone(),
                 task_id.clone(),
                 run_context.clone(),
                 effort,

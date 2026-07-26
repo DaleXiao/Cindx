@@ -82,17 +82,28 @@ pub(super) fn prepare_adaptive_collaboration(
     } else {
         workflow_prior_for_run(state, run_context, models, agent_budget)?
     };
-    let evolution = if !resumed_from_checkpoint && config.prompt_evolution_enabled {
-        Some(prompt_evolution_evaluation_for_run(
-            state,
-            &effort,
-            run_context,
-        )?)
-    } else {
-        None
-    };
+    let strategy_genome = (!resumed_from_checkpoint)
+        .then(|| run_context.get("prompt_genome"))
+        .flatten()
+        .and_then(|encoded| serde_json::from_str::<ConductorPromptGenome>(encoded).ok());
+    let evolution =
+        if !resumed_from_checkpoint && strategy_genome.is_none() && config.prompt_evolution_enabled
+        {
+            Some(prompt_evolution_evaluation_for_run(
+                state,
+                &effort,
+                run_context,
+            )?)
+        } else {
+            None
+        };
     let selection_mode = if resumed_from_checkpoint {
         "checkpoint_resume".to_string()
+    } else if strategy_genome.is_some() {
+        run_context
+            .get("prompt_profile_source")
+            .cloned()
+            .unwrap_or_else(|| "run_strategy".to_string())
     } else {
         evolution
             .as_ref()
@@ -104,6 +115,7 @@ pub(super) fn prepare_adaptive_collaboration(
         .and_then(|checkpoint| {
             serde_json::from_str::<ConductorPromptGenome>(&checkpoint.prompt_genome_json).ok()
         })
+        .or(strategy_genome)
         .or_else(|| {
             evolution
                 .as_ref()

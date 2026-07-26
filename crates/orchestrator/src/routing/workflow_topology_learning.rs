@@ -3,9 +3,10 @@ use super::{
     LEARNED_ROUTER_MIN_SUCCESS_CONFIDENCE,
 };
 use crate::{WorkflowPlanIr, WorkflowToolPolicy};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowExecutionTelemetry {
     pub task_class: TaskClass,
     pub routing_signature: String,

@@ -1,4 +1,6 @@
-use orchestrator::{evaluate_agent_arena, parse_agent_arena_observations, parse_agent_arena_suite};
+use orchestrator_eval::{
+    evaluate_agent_arena, parse_agent_arena_observations, parse_agent_arena_suite,
+};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};

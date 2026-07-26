@@ -44,6 +44,16 @@ struct ConductorWorkflowStepPayload {
     subtask: String,
     #[serde(default, alias = "access_list", alias = "accessList")]
     access: Vec<String>,
+    #[serde(default)]
+    output_kind: Option<WorkflowOutputKind>,
+    #[serde(default)]
+    tool_policy: Option<WorkflowToolPolicy>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ConductorStepSemantics {
+    output_kind: Option<WorkflowOutputKind>,
+    tool_policy: Option<WorkflowToolPolicy>,
 }
 
 impl ConductorHarness {
@@ -81,7 +91,7 @@ impl ConductorHarness {
                 "- Give independent root branches non-overlapping subtasks and use distinct models when the pool permits."
             }
             PromptRoleStrategy::DiverseSpecialists => {
-                "- Give independent root branches non-overlapping subtasks, distinct models when possible, and complementary thinker/worker roles."
+                "- Give independent root branches non-overlapping subtasks, distinct models when possible, and complementary domain-specific roles."
             }
         };
         format!(
@@ -90,16 +100,18 @@ impl ConductorHarness {
                 "{schema_example}\n\n",
                 "Harness constraints:\n",
                 "- Execution contract: task_class={task_class}, expected_uplift={expected_uplift_bps}bps, confidence={confidence_bps}bps, max_parallelism={contract_parallelism}, quorum={contract_quorum}, verification_required={contract_verification}, terminal_reserve={terminal_reserve}, stop={stop_policy:?}, fallback={fallback_policy:?}.\n",
-                "- Use between 1 and {max_steps} workflow steps, including the final synthesizer. Choose the smallest useful graph.\n",
+                "- Use between 1 and {max_steps} workflow steps, including the final synthesis step. Choose the smallest useful graph.\n",
                 "- Use no more than {max_models} distinct worker models.\n",
-                "- role must be exactly thinker, worker, verifier, or synthesizer.\n",
+                "- role is a short lowercase domain label such as mathematician, evidence_researcher, critic, or integrator; do not use it as an execution permission.\n",
+                "- output_kind must be exactly analysis, evidence, verification, or synthesis. The final step must use synthesis.\n",
+                "- tool_policy must be exactly none, read_only_evidence, or read_only_exploration. Never request effectful tools here.\n",
                 "- Preserve listed order: access may reference only earlier step ids.\n",
                 "- The task contract requires {required_contributions} independent contribution(s). This is the only minimum branch count. The evolved profile controls preferences and upper bounds; it must not force decorative agents when the task requires zero or one branch.\n",
                 "- Require a verifier only when contract verification_required=true; otherwise add one only when it resolves a concrete uncertainty.\n",
                 "- Keep workers isolated and expose an earlier result only through access.\n",
                 "{branch_role_constraint}\n",
-                "- A verifier must directly access every independent root branch it audits.\n",
-                "- Every branch must reach the final synthesizer; retain dissenting or failed branches.\n",
+                "- A verification step must directly access every independent root branch it audits.\n",
+                "- Every branch must reach the final synthesis step; retain dissenting or failed branches.\n",
                 "- Use exact model strings from the worker pool. The Conductor model is not implicitly a worker.\n",
                 "- Do not include markdown fences, commentary, tool calls, or a user-facing answer.\n\n",
                 "Configured worker role hints:\nPlanner: {planner}\nExecutor: {executor}\nReviewer: {reviewer}\nSynthesizer: {synthesizer}\n\n",
@@ -161,12 +173,17 @@ impl ConductorHarness {
         let payload = serde_json::from_str::<ConductorWorkflowPayload>(&response[start..=end])
             .map_err(|error| format!("conductor workflow JSON is invalid: {error}"))?;
         let step_count = payload.steps.len();
+        let mut semantics = Vec::with_capacity(step_count);
         let workflow = AdaptiveWorkflow {
             steps: payload
                 .steps
                 .into_iter()
                 .enumerate()
                 .map(|(index, step)| {
+                    semantics.push(ConductorStepSemantics {
+                        output_kind: step.output_kind.clone(),
+                        tool_policy: step.tool_policy.clone(),
+                    });
                     let access = step
                         .access
                         .into_iter()
@@ -192,7 +209,7 @@ impl ConductorHarness {
                 .collect(),
         };
         self.validate_shape(&workflow)?;
-        self.build_plan(&workflow)
+        self.build_plan(&workflow, Some(&semantics))
     }
 
     pub fn fallback_plan(&self) -> Result<WorkflowPlanIr, String> {
@@ -328,10 +345,14 @@ impl ConductorHarness {
 
         let workflow = AdaptiveWorkflow { steps };
         self.validate_shape(&workflow)?;
-        self.build_plan(&workflow)
+        self.build_plan(&workflow, None)
     }
 
-    fn build_plan(&self, workflow: &AdaptiveWorkflow) -> Result<WorkflowPlanIr, String> {
+    fn build_plan(
+        &self,
+        workflow: &AdaptiveWorkflow,
+        semantics: Option<&[ConductorStepSemantics]>,
+    ) -> Result<WorkflowPlanIr, String> {
         let mut budget = self.request.budget.clone();
         if self.request.prompt_evolution_enabled {
             budget.max_model_turns_per_step = budget
@@ -367,7 +388,43 @@ impl ConductorHarness {
                 step.tool_policy = self.request.prompt_genome.workflow_tool_policy(&step.role);
             }
         }
+        for (index, step) in plan.steps.iter_mut().enumerate() {
+            let semantics = semantics.and_then(|values| values.get(index));
+            if let Some(tool_policy) = semantics.and_then(|value| value.tool_policy.clone()) {
+                step.tool_policy = tool_policy;
+            }
+            if let Some(output_kind) = semantics.and_then(|value| value.output_kind.clone()) {
+                step.contract.output_kind = output_kind;
+            } else if index + 1 == workflow.steps.len() {
+                step.contract.output_kind = WorkflowOutputKind::Synthesis;
+            }
+            step.contract.input_steps = step.access.clone();
+        }
         plan.validate(&self.request.worker_models)?;
+        if self.request.execution_contract.verification_required {
+            let root_ids = plan
+                .steps
+                .iter()
+                .take(plan.steps.len().saturating_sub(1))
+                .filter(|step| {
+                    step.access.is_empty()
+                        && step.contract.output_kind != WorkflowOutputKind::Verification
+                })
+                .map(|step| step.id.as_str())
+                .collect::<BTreeSet<_>>();
+            let verification_covers_roots = plan.steps.iter().any(|step| {
+                step.contract.output_kind == WorkflowOutputKind::Verification
+                    && root_ids
+                        .iter()
+                        .all(|root_id| step.access.iter().any(|access| access == root_id))
+            });
+            if !verification_covers_roots {
+                return Err(
+                    "workflow requires a verification step that directly audits every independent contribution"
+                        .to_string(),
+                );
+            }
+        }
         self.request.execution_contract.validate_plan(&plan)?;
         Ok(plan)
     }
@@ -394,9 +451,7 @@ impl ConductorHarness {
             .steps
             .iter()
             .take(workflow.steps.len().saturating_sub(1))
-            .filter(|step| {
-                step.access.is_empty() && matches!(step.role.as_str(), "thinker" | "worker")
-            })
+            .filter(|step| step.access.is_empty())
             .collect::<Vec<_>>();
         let root_step_capacity = if self.request.prompt_genome.require_final_synthesis {
             self.request.budget.max_steps.saturating_sub(1)
@@ -470,38 +525,9 @@ impl ConductorHarness {
                 .iter()
                 .map(|step| step.role.as_str())
                 .collect::<BTreeSet<_>>();
-            if !branch_roles.contains("thinker") || !branch_roles.contains("worker") {
+            if branch_roles.len() < 2 {
                 return Err(
-                    "conductor diverse-specialist branches require complementary thinker and worker roles"
-                        .to_string(),
-                );
-            }
-        }
-        if self.request.prompt_genome.require_final_synthesis
-            && workflow
-                .steps
-                .last()
-                .is_some_and(|step| step.role != "synthesizer")
-        {
-            return Err("conductor workflow must end with a synthesizer".to_string());
-        }
-        if self.request.execution_contract.verification_required
-            && self.request.prompt_genome.verification == PromptVerification::Adversarial
-            && self.request.budget.max_steps >= required_branches.saturating_add(2)
-        {
-            let independent_ids = independent_branches
-                .iter()
-                .map(|step| step.id.as_str())
-                .collect::<BTreeSet<_>>();
-            let verifier_covers_branches = workflow.steps.iter().any(|step| {
-                step.role == "verifier"
-                    && independent_ids
-                        .iter()
-                        .all(|branch_id| step.access.iter().any(|access| access == branch_id))
-            });
-            if !verifier_covers_branches {
-                return Err(
-                    "adversarial prompt profile requires a verifier that directly audits every independent branch"
+                    "conductor diverse-specialist branches require at least two complementary role labels"
                         .to_string(),
                 );
             }
@@ -544,7 +570,7 @@ fn conductor_schema_example(request: &ConductorRequest) -> String {
     .max(required_branches.min(root_capacity));
     let branch_capacity = required_branches.min(branch_limit);
     if branch_capacity == 0 {
-        return serde_json::json!({
+        return conductor_example_with_contracts(serde_json::json!({
             "steps": [{
                 "id": "synthesize",
                 "role": "synthesizer",
@@ -552,10 +578,9 @@ fn conductor_schema_example(request: &ConductorRequest) -> String {
                 "subtask": "produce a checkable execution brief",
                 "access": [],
             }]
-        })
-        .to_string();
+        }));
     }
-    match branch_capacity {
+    conductor_example_with_contracts(match branch_capacity {
         0 if graph_depth == PromptGraphDepth::Lean => serde_json::json!({
             "steps": [{
                 "id": "synthesize",
@@ -583,65 +608,70 @@ fn conductor_schema_example(request: &ConductorRequest) -> String {
                 },
             ]
         }),
-        2 if verification != PromptVerification::Adversarial || max_steps < 4 => serde_json::json!({
-            "steps": [
-                {
-                    "id": "approach_a",
-                    "role": "thinker",
-                    "model": role_hints.planner,
-                    "subtask": "analyze assumptions and the strongest approach",
-                    "access": [],
-                },
-                {
-                    "id": "approach_b",
-                    "role": "worker",
-                    "model": branch_executor,
-                    "subtask": "develop a concrete independent implementation path",
-                    "access": [],
-                },
-                {
-                    "id": "synthesize",
-                    "role": "synthesizer",
-                    "model": role_hints.synthesizer,
-                    "subtask": "resolve both branches into one execution brief",
-                    "access": ["approach_a", "approach_b"],
-                },
-            ]
-        }),
+        2 if verification != PromptVerification::Adversarial || max_steps < 4 => {
+            serde_json::json!({
+                "steps": [
+                    {
+                        "id": "approach_a",
+                        "role": "thinker",
+                        "model": role_hints.planner,
+                        "subtask": "analyze assumptions and the strongest approach",
+                        "access": [],
+                    },
+                    {
+                        "id": "approach_b",
+                        "role": "worker",
+                        "model": branch_executor,
+                        "subtask": "develop a concrete independent implementation path",
+                        "access": [],
+                    },
+                    {
+                        "id": "synthesize",
+                        "role": "synthesizer",
+                        "model": role_hints.synthesizer,
+                        "subtask": "resolve both branches into one execution brief",
+                        "access": ["approach_a", "approach_b"],
+                    },
+                ]
+            })
+        }
         _ if verification_required
             && verification == PromptVerification::Adversarial
-            && max_steps >= 4 => serde_json::json!({
-            "steps": [
-                {
-                    "id": "approach_a",
-                    "role": "thinker",
-                    "model": role_hints.planner,
-                    "subtask": "analyze assumptions and the strongest approach",
-                    "access": [],
-                },
-                {
-                    "id": "approach_b",
-                    "role": "worker",
-                    "model": branch_executor,
-                    "subtask": "develop a concrete independent implementation path",
-                    "access": [],
-                },
-                {
-                    "id": "verify",
-                    "role": "verifier",
-                    "model": role_hints.reviewer,
-                    "subtask": "cross-check both reports and identify unsupported claims",
-                    "access": ["approach_a", "approach_b"],
-                },
-                {
-                    "id": "synthesize",
-                    "role": "synthesizer",
-                    "model": role_hints.synthesizer,
-                    "subtask": "resolve disagreements into one evidence-grounded execution brief",
-                    "access": ["approach_a", "approach_b", "verify"],
-                },
-            ]
-        }),
+            && max_steps >= 4 =>
+        {
+            serde_json::json!({
+                "steps": [
+                    {
+                        "id": "approach_a",
+                        "role": "thinker",
+                        "model": role_hints.planner,
+                        "subtask": "analyze assumptions and the strongest approach",
+                        "access": [],
+                    },
+                    {
+                        "id": "approach_b",
+                        "role": "worker",
+                        "model": branch_executor,
+                        "subtask": "develop a concrete independent implementation path",
+                        "access": [],
+                    },
+                    {
+                        "id": "verify",
+                        "role": "verifier",
+                        "model": role_hints.reviewer,
+                        "subtask": "cross-check both reports and identify unsupported claims",
+                        "access": ["approach_a", "approach_b"],
+                    },
+                    {
+                        "id": "synthesize",
+                        "role": "synthesizer",
+                        "model": role_hints.synthesizer,
+                        "subtask": "resolve disagreements into one evidence-grounded execution brief",
+                        "access": ["approach_a", "approach_b", "verify"],
+                    },
+                ]
+            })
+        }
         _ => serde_json::json!({
             "steps": [
                 {
@@ -667,8 +697,47 @@ fn conductor_schema_example(request: &ConductorRequest) -> String {
                 },
             ]
         }),
+    })
+}
+
+fn conductor_example_with_contracts(mut value: serde_json::Value) -> String {
+    if let Some(steps) = value
+        .get_mut("steps")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        let final_index = steps.len().saturating_sub(1);
+        for (index, step) in steps.iter_mut().enumerate() {
+            let role = step
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let output_kind = if index == final_index {
+                "synthesis"
+            } else if role == "verifier" {
+                "verification"
+            } else if role == "worker" {
+                "evidence"
+            } else {
+                "analysis"
+            };
+            let tool_policy = if matches!(output_kind, "synthesis" | "verification") {
+                "none"
+            } else {
+                "read_only_evidence"
+            };
+            if let Some(object) = step.as_object_mut() {
+                object.insert(
+                    "output_kind".to_string(),
+                    serde_json::Value::String(output_kind.to_string()),
+                );
+                object.insert(
+                    "tool_policy".to_string(),
+                    serde_json::Value::String(tool_policy.to_string()),
+                );
+            }
+        }
     }
-    .to_string()
+    value.to_string()
 }
 
 fn truncate_conductor_text(value: &str, max_chars: usize) -> String {

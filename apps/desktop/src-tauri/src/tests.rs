@@ -1,4 +1,8 @@
 use super::*;
+use crate::agent_collaboration_runtime::{
+    collaboration_candidate_handoff, collaboration_candidate_quorum,
+    collaboration_candidate_quorum_grace, collaboration_error_blocks_executor,
+};
 use orchestrator::{AdaptiveWorkflow, AdaptiveWorkflowStep};
 use tools::encode_input;
 
@@ -1581,6 +1585,13 @@ fn session_history_page_reports_a_stable_older_cursor() {
 #[test]
 fn routing_telemetry_read_model_deduplicates_completed_runs() {
     let mut store = SqliteStore::in_memory().expect("store should open");
+    let start_context = [
+        ("session_id".to_string(), "session-router".to_string()),
+        ("agent_run_id".to_string(), "run-router-1".to_string()),
+        ("requested_policy".to_string(), "auto_router".to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
     let run_context = [
         ("session_id".to_string(), "session-router".to_string()),
         ("agent_run_id".to_string(), "run-router-1".to_string()),
@@ -1600,9 +1611,17 @@ fn routing_telemetry_read_model_deduplicates_completed_runs() {
         &phase16_task_id(),
         EventKind::TaskStatusChanged,
         "Agent task started",
-        run_context.clone(),
+        start_context,
     )
     .expect("run should start");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent run decision selected",
+        run_context.clone(),
+    )
+    .expect("dynamic run decision should append");
     append_event(
         &mut store,
         &phase16_task_id(),
@@ -1629,6 +1648,12 @@ fn routing_telemetry_read_model_deduplicates_completed_runs() {
         load_routing_telemetry_read_model(&mut store).expect("routing read model should build");
     assert_eq!(initial.len(), 1);
     assert_eq!(initial[0].selected_model, "model-a");
+    assert_eq!(initial[0].task_class, TaskClass::Coding);
+    assert_eq!(
+        initial[0].selected_policy,
+        OrchestrationPolicy::PlanExecuteReview
+    );
+    assert_eq!(initial[0].context_signature, "coding:3");
     assert_eq!(initial[0].cost_proxy, 900);
 
     append_message_event_with_metadata(
@@ -2758,50 +2783,6 @@ fn ensemble_uses_distinct_role_models_in_stable_order() {
     .iter()
     .all(|model| worker_models.contains(model)));
 
-    let coverage = workflow_role_coverage(
-        &AdaptiveWorkflow {
-            steps: vec![
-                AdaptiveWorkflowStep {
-                    id: "plan".to_string(),
-                    role: "thinker".to_string(),
-                    model: hints.planner.clone(),
-                    subtask: "plan".to_string(),
-                    access: Vec::new(),
-                },
-                AdaptiveWorkflowStep {
-                    id: "execute".to_string(),
-                    role: "worker".to_string(),
-                    model: hints.executor.clone(),
-                    subtask: "execute".to_string(),
-                    access: Vec::new(),
-                },
-                AdaptiveWorkflowStep {
-                    id: "review".to_string(),
-                    role: "verifier".to_string(),
-                    model: hints.reviewer.clone(),
-                    subtask: "review".to_string(),
-                    access: vec!["plan".to_string(), "execute".to_string()],
-                },
-                AdaptiveWorkflowStep {
-                    id: "synthesize".to_string(),
-                    role: "synthesizer".to_string(),
-                    model: hints.synthesizer.clone(),
-                    subtask: "synthesize".to_string(),
-                    access: vec![
-                        "plan".to_string(),
-                        "execute".to_string(),
-                        "review".to_string(),
-                    ],
-                },
-            ],
-        },
-        &hints,
-    );
-    assert_eq!(coverage.aligned_steps, 4);
-    assert_eq!(coverage.independent_models, 2);
-    assert_eq!(coverage.verifier_steps, 1);
-    assert_eq!(coverage.synthesizer_steps, 1);
-    assert!(coverage.cross_reviewed);
 }
 
 #[test]
@@ -2835,7 +2816,7 @@ fn collaboration_terminal_workers_keep_terminal_stage_reserves() {
 }
 
 #[test]
-fn effort_and_router_select_the_primary_model_without_collapsing_to_executor() {
+fn run_context_selects_the_primary_model_without_collapsing_to_executor() {
     let config = ProviderConfig {
         model: "default-a".to_string(),
         executor_model: "executor-b".to_string(),
@@ -2858,41 +2839,10 @@ fn effort_and_router_select_the_primary_model_without_collapsing_to_executor() {
     .into_iter()
     .collect();
     assert_eq!(agent_model_for_run(&config, &run_context), "routed-c");
-
-    let policy = OrchestrationPolicy::Single;
-    let mut decision = RuleBasedRouter.route(&RoutingContext::from_prompt(
-        "hello",
-        model_candidates_for_config(&config),
-    ));
-    assert_eq!(
-        agent_model_for_effort(&config, AgentEffort::Auto, &policy, &decision),
-        "default-a"
-    );
-    decision.model = "routed-c".to_string();
-    decision
-        .metadata
-        .insert("router".to_string(), "rule_based_v2".to_string());
-    assert_eq!(
-        agent_model_for_effort(&config, AgentEffort::Auto, &policy, &decision),
-        "routed-c"
-    );
-    assert_eq!(
-        agent_model_for_effort(&config, AgentEffort::Fast, &policy, &decision),
-        "default-a"
-    );
-    assert_eq!(
-        agent_model_for_effort(
-            &config,
-            AgentEffort::Pro,
-            &OrchestrationPolicy::BestOfN { candidates: 3 },
-            &decision,
-        ),
-        "executor-b"
-    );
 }
 
 #[test]
-fn agent_effort_maps_to_bounded_policies() {
+fn agent_effort_keeps_auto_and_pro_under_dynamic_policy_selection() {
     assert_eq!(
         AgentEffort::parse("fast").requested_policy(),
         OrchestrationPolicy::Single
@@ -2903,26 +2853,9 @@ fn agent_effort_maps_to_bounded_policies() {
     );
     assert_eq!(
         AgentEffort::parse("pro").requested_policy(),
-        OrchestrationPolicy::BestOfN { candidates: 3 }
+        OrchestrationPolicy::AutoRouter
     );
     assert_eq!(AgentEffort::parse("unknown"), AgentEffort::Auto);
-}
-
-#[test]
-fn pro_uses_bounded_collaboration_for_simple_requests_only() {
-    let mut context = RoutingContext::from_prompt("重新来一次", Vec::new());
-
-    assert_eq!(collaboration_profile(AgentEffort::Pro, &context), "bounded");
-    assert_eq!(
-        collaboration_profile(AgentEffort::Auto, &context),
-        "adaptive"
-    );
-
-    context.needs_multi_model = true;
-    assert_eq!(
-        collaboration_profile(AgentEffort::Pro, &context),
-        "adaptive"
-    );
 }
 
 #[test]
@@ -4248,6 +4181,35 @@ fn workflow_telemetry_restores_versioned_plan_and_quality() {
         Some(&vec!["file.search".to_string()])
     );
     assert!(telemetry[0].succeeded);
+
+    let mut store = SqliteStore::in_memory().expect("workflow telemetry store should open");
+    for event in &events {
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            event.kind.clone(),
+            event.summary.clone(),
+            event.metadata.clone(),
+        )
+        .expect("workflow event should append");
+    }
+    let initial = load_workflow_telemetry_read_model(&mut store, &models)
+        .expect("workflow telemetry read model should build");
+    assert_eq!(initial.len(), 1);
+    append_message_event_with_metadata(
+        &mut store,
+        &phase16_task_id(),
+        MessageRole::User,
+        "unrelated follow-up",
+        [("session_id".to_string(), "session-unrelated".to_string())]
+            .into_iter()
+            .collect(),
+    )
+    .expect("unrelated event should append");
+    let updated = load_workflow_telemetry_read_model(&mut store, &models)
+        .expect("workflow telemetry read model should advance incrementally");
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].plan.workflow_id, "collab-1");
 
     events.last_mut().unwrap().metadata.insert(
         "anytime_prompt_learning_eligible".to_string(),
@@ -6553,41 +6515,6 @@ fn restored_scheduled_queue_is_retryable_instead_of_running() {
 }
 
 #[test]
-fn simple_greeting_skips_workspace_knowledge_retrieval() {
-    let greeting = RoutingContext::from_prompt("你好", Vec::new());
-    let capability_question = RoutingContext::from_prompt("你会不会写代码", Vec::new());
-    let retrieval = RoutingContext::from_prompt("搜索项目文档里的 API 定义", Vec::new());
-
-    assert!(!should_run_agent_knowledge_retrieval(&greeting));
-    assert!(!should_run_agent_knowledge_retrieval(&capability_question));
-    assert!(should_run_agent_knowledge_retrieval(&retrieval));
-    assert_eq!(project_memory_recall_mode(&greeting, "你好"), None);
-    assert_eq!(
-        project_memory_recall_mode(&capability_question, "你会不会写代码"),
-        None
-    );
-    assert_eq!(
-        project_memory_recall_mode(
-            &RoutingContext::from_prompt("继续上次的侧边栏修改", Vec::new()),
-            "继续上次的侧边栏修改"
-        ),
-        Some(ProjectMemoryRecallMode::Hybrid)
-    );
-    let tool_task = RoutingContext::from_prompt("修改 src/lib.rs 里的错误", Vec::new());
-    assert_eq!(
-        project_memory_recall_mode(&tool_task, "修改 src/lib.rs 里的错误"),
-        Some(ProjectMemoryRecallMode::Lexical)
-    );
-    assert_eq!(
-        project_memory_recall_mode(
-            &RoutingContext::from_prompt("我叫什么名字？", Vec::new()),
-            "我叫什么名字？"
-        ),
-        Some(ProjectMemoryRecallMode::Hybrid)
-    );
-}
-
-#[test]
 fn coding_retrieval_mode_skips_graph_channels() {
     let root = temp_test_root("phase7-selective-retrieval");
     fs::create_dir_all(&root).expect("temp root should exist");
@@ -6745,82 +6672,7 @@ fn graph_walk_seed_fusion_includes_semantic_and_file_evidence() {
 }
 
 #[test]
-fn graph_walk_enrichment_skips_duplicate_literal_seeds() {
-    let root = temp_test_root("phase7-graph-enrichment-duplicate");
-    fs::create_dir_all(&root).expect("temp root should exist");
-    fs::write(root.join("a.md"), "shared graph seed").expect("fixture should write");
-    let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
-    let shared = RagSearchResult {
-        chunk: index.chunks[0].clone(),
-        score: 0.9,
-    };
-    let channels = vec![
-        RetrievalChannelOutcome {
-            name: "semantic_rag".to_string(),
-            duration_ms: 1,
-            results: vec![shared.clone()],
-            error: None,
-        },
-        RetrievalChannelOutcome {
-            name: "graph_walk".to_string(),
-            duration_ms: 1,
-            results: Vec::new(),
-            error: None,
-        },
-        RetrievalChannelOutcome {
-            name: "file_search".to_string(),
-            duration_ms: 1,
-            results: vec![shared],
-            error: None,
-        },
-    ];
-    let seeds = graph_walk_seed_results(&channels, 8);
-
-    assert!(!graph_walk_has_novel_enrichment_seeds(&channels, &seeds));
-}
-
-#[test]
-fn graph_walk_enrichment_runs_for_semantic_only_seed() {
-    let root = temp_test_root("phase7-graph-enrichment-novel");
-    fs::create_dir_all(&root).expect("temp root should exist");
-    fs::write(root.join("a.md"), "literal graph seed").expect("fixture should write");
-    fs::write(root.join("b.md"), "semantic graph seed").expect("fixture should write");
-    let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
-    let literal = RagSearchResult {
-        chunk: index.chunks[0].clone(),
-        score: 0.8,
-    };
-    let semantic = RagSearchResult {
-        chunk: index.chunks[1].clone(),
-        score: 0.9,
-    };
-    let channels = vec![
-        RetrievalChannelOutcome {
-            name: "semantic_rag".to_string(),
-            duration_ms: 1,
-            results: vec![semantic],
-            error: None,
-        },
-        RetrievalChannelOutcome {
-            name: "graph_walk".to_string(),
-            duration_ms: 1,
-            results: Vec::new(),
-            error: None,
-        },
-        RetrievalChannelOutcome {
-            name: "file_search".to_string(),
-            duration_ms: 1,
-            results: vec![literal],
-            error: None,
-        },
-    ];
-    let seeds = graph_walk_seed_results(&channels, 8);
-
-    assert!(graph_walk_has_novel_enrichment_seeds(&channels, &seeds));
-}
-
-#[test]
-fn complex_retrieval_runs_all_four_independent_channels() {
+fn complex_retrieval_runs_parallel_seed_channels_before_graph_walk() {
     let root = temp_test_root("phase7-four-way-retrieval");
     fs::create_dir_all(&root).expect("temp root should exist");
     fs::write(
@@ -6849,15 +6701,19 @@ fn complex_retrieval_runs_all_four_independent_channels() {
     )
     .expect("retrieval should run");
 
+    let channel_names = retrieval
+        .trace
+        .channels
+        .iter()
+        .map(|channel| channel.name.as_str())
+        .collect::<Vec<_>>();
     assert_eq!(
-        retrieval
-            .trace
-            .channels
-            .iter()
-            .map(|channel| channel.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["semantic_rag", "graph_recall", "graph_walk", "file_search"]
+        channel_names.iter().copied().collect::<BTreeSet<_>>(),
+        ["semantic_rag", "graph_recall", "file_search", "graph_walk"]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
     );
+    assert_eq!(channel_names.last().copied(), Some("graph_walk"));
     assert!(retrieval
         .trace
         .channels

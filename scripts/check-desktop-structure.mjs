@@ -160,6 +160,12 @@ const desktopAgentToolRuntimeSource = read(
 const agentRecoveryServiceSource = read(
   "apps/desktop/src-tauri/src/agent_recovery_service.rs"
 );
+const promptEvolutionWorkerSource = read(
+  "apps/desktop/src-tauri/src/prompt_evolution_worker.rs"
+);
+const promptPairwiseRuntimeSource = read(
+  "apps/desktop/src-tauri/src/prompt_pairwise_runtime.rs"
+);
 const parallelExecutionSource = read(
   "apps/desktop/src-tauri/src/parallel_execution.rs"
 );
@@ -210,7 +216,7 @@ const runControlSource = read("crates/agent-runtime/src/control.rs");
 const coreAgentPrompt = read("crates/agent-runtime/src/core_prompt.txt");
 const orchestratorSource = readRustCrateSource("orchestrator");
 const promptEvolutionSource = readRustCrateSource("orchestrator");
-const benchmarkSource = read("crates/orchestrator/src/benchmark.rs");
+const benchmarkSource = read("crates/orchestrator-eval/src/benchmark.rs");
 const benchmarkSuite = JSON.parse(read("benchmarks/agent/core-v1.json"));
 const benchmarkBaseline = JSON.parse(read("benchmarks/agent/core-v1-baseline.json"));
 const memoryBenchmarkSuite = JSON.parse(read("benchmarks/agent/memory-v1.json"));
@@ -219,7 +225,14 @@ const qualityGateManifest = JSON.parse(
 );
 const qualityGateRunner = read("scripts/run-quality-gates.mjs");
 const qualityGateDoc = read("docs/QUALITY_GATES.md");
-const evaluationLabSource = read("crates/orchestrator/examples/evaluation_lab.rs");
+const evaluationLabSource = read(
+  "crates/orchestrator-eval/examples/evaluation_lab.rs"
+);
+const shippingOrchestratorExamples = fs.existsSync(
+  path.join(root, "crates", "orchestrator", "examples")
+)
+  ? fs.readdirSync(path.join(root, "crates", "orchestrator", "examples"))
+  : [];
 const memoryEvaluationLabSource = read("crates/agent-memory/examples/memory_lab.rs");
 const agentEvaluationDoc = read("docs/AGENT_EVALUATION.md");
 const browserControlDoc = read("docs/BROWSER_CONTROL.md");
@@ -267,12 +280,24 @@ const oversizedProductionRustModules = desktopRustModules
   .map(({ entry, source }) => ({ entry, lines: source.split("\n").length }))
   .filter(({ lines }) => lines > 2_200);
 const criticalDesktopAgentModuleBudgets = new Map([
+  ["agent_run_engine.rs", 250],
+  ["agent_strategy_runtime.rs", 420],
   ["agent_loop_runtime.rs", 550],
   ["agent_collaboration_runtime.rs", 800],
   ["agent_recovery_service.rs", 550],
+  ["background_work_runtime.rs", 80],
+  ["configuration_persistence.rs", 400],
+  ["event_persistence.rs", 180],
+  ["event_security.rs", 500],
   ["permission_service.rs", 220],
+  ["project_session_persistence.rs", 600],
+  ["prompt_evolution_worker.rs", 650],
   ["prompt_workflow_execution.rs", 800],
+  ["runtime_values.rs", 420],
   ["session_context_service.rs", 550],
+  ["sidecar_runtime.rs", 300],
+  ["semantic_memory_runtime.rs", 260],
+  ["semantic_memory_worker.rs", 240],
   ["knowledge_runtime.rs", 1_000],
   ["memory_runtime.rs", 950],
 ]);
@@ -333,6 +358,14 @@ assert(
     ) &&
     read("apps/desktop/src-tauri/src/memory_runtime.rs").includes(
       "knowledge_runtime::"
+    ) &&
+    !read("apps/desktop/src-tauri/src/runtime_values.rs").includes("std::fs") &&
+    !read("apps/desktop/src-tauri/src/runtime_values.rs").includes("SqliteStore") &&
+    read("apps/desktop/src-tauri/src/event_persistence.rs").includes(
+      "event_security::"
+    ) &&
+    !read("apps/desktop/src-tauri/src/tool_execution.rs").includes(
+      "fn append_event("
     ),
   `Critical desktop agent modules must use explicit crate boundaries and bounded ownership: implicit=${implicitCriticalDesktopAgentModules
     .map(({ entry }) => entry)
@@ -345,6 +378,37 @@ assert(
   `Agent-core production modules exceeded the 1,450-line cohesion budget: ${oversizedAgentCoreModules
     .map(({ file, lines }) => `${file} (${lines})`)
     .join(", ")}`
+);
+assert(
+  agentStorageSource.includes("idx_events_task_kind_sequence") &&
+    agentRecoveryServiceSource.includes(".list_by_task_and_kinds(") &&
+    agentRecoveryServiceSource.includes("agent_events_for_session(store, &task_id, session_id)") &&
+    promptEvolutionWorkerSource.includes(
+      '.list_by_task_and_metadata(\n            &crate::runtime_values::phase16_task_id(),\n            "background_evaluation",\n            "true",'
+    ) &&
+    promptPairwiseRuntimeSource.includes(
+      '.list_by_task_and_metadata(task_id, "project_id", project_id)'
+    ),
+  "Startup recovery and prompt evolution must keep history reads indexed and scope-bounded"
+);
+assert(
+  shippingOrchestratorExamples.length === 0 &&
+    fs.existsSync(
+      path.join(root, "crates", "orchestrator-eval", "examples", "arena_lab.rs")
+    ) &&
+    fs.existsSync(
+      path.join(
+        root,
+        "crates",
+        "orchestrator-eval",
+        "examples",
+        "evaluation_v2_lab.rs"
+      )
+    ) &&
+    !orchestratorSource.includes("mod arena;") &&
+    !orchestratorSource.includes("mod benchmark;") &&
+    !orchestratorSource.includes("mod fugu_evaluation;"),
+  "Shipping orchestrator must not compile research evaluation modules or examples"
 );
 const workflowTopologyLearningSource = read(
   "crates/orchestrator/src/routing/workflow_topology_learning.rs"
@@ -393,10 +457,16 @@ for (const requiredModule of [
   "adaptive_collaboration_setup.rs",
   "adaptive_collaboration_execution.rs",
   "adaptive_collaboration_finalization.rs",
+  "configuration_persistence.rs",
   "desktop_prelude.rs",
+  "event_persistence.rs",
+  "event_security.rs",
   "prompt_evaluation_runtime.rs",
   "prompt_evolution_runtime.rs",
+  "project_session_persistence.rs",
   "routing_learning_runtime.rs",
+  "runtime_values.rs",
+  "sidecar_runtime.rs",
   "tool_execution.rs",
 ]) {
   assert(
@@ -745,18 +815,20 @@ assert(
 );
 assert(
   rustLib.includes("fn prepare_run_knowledge_contexts(") &&
-    rustLib.includes("should_run_agent_knowledge_retrieval(routing_context)") &&
+    rustLib.includes("let plan = plan_agent_run(") &&
+    rustLib.includes("&plan.decision") &&
+    rustLib.includes("let retrieve_workspace = decision.retrieval.enabled()") &&
     rustLib.includes("let workspace_handle = retrieve_workspace.then") &&
-    orchestratorSource.includes("is_capability_question") &&
-    orchestratorSource.includes("is_lightweight_direct") &&
-    orchestratorSource.includes("learned_router_cannot_upgrade_a_lightweight_coding_question") &&
+    rustLib.includes("if effort == AgentEffort::Fast") &&
+    rustLib.includes('"dynamic_conductor_v1".to_string()') &&
+    rustLib.includes('"dynamic_conductor_fallback_direct".to_string()') &&
     rustLib.includes("index_graph_chunks_cancellable") &&
     rustLib.includes("upsert_all(extractions)") &&
     ragSource.includes("index_workspace_cancellable") &&
     ragSource.includes("RAG_INDEX_CANCELLED") &&
     modelProviderSource.includes("embed_cancellable") &&
     graphSource.includes("pub fn upsert_all"),
-  "Lightweight turns must skip retrieval and knowledge preparation must remain cancellable"
+  "Fast must remain direct while Auto/Pro retrieval is conductor-planned and cancellable"
 );
 assert(
   appSource.includes("sessionSelectionRequestRef") &&
@@ -2232,6 +2304,7 @@ assert(
     agentMemorySource.includes("mod extraction;") &&
     agentMemorySource.includes("mod ledger;") &&
     agentMemorySource.includes("mod recall;") &&
+    agentMemorySource.includes("mod semantic;") &&
     agentMemorySource.includes("superseded_by") &&
     agentMemorySource.includes("extract_durable_memories") &&
     agentMemorySource.includes("merge_memory_records") &&
@@ -2248,12 +2321,12 @@ assert(
     rustLib.includes("MemoryStatsView") &&
     rustLib.includes('"Project memory recalled"') &&
     rustLib.includes('"Project memory utilization measured"') &&
-    rustLib.includes("enum ProjectMemoryRecallMode") &&
-    rustLib.includes("project_memory_recall_mode") &&
-    rustLib.includes("ProjectMemoryRecallMode::Lexical") &&
-    rustLib.includes("ProjectMemoryRecallMode::Hybrid") &&
-    rustLib.includes("memory_mode.expect") &&
-    rustLib.includes("project_memory_recall_mode(&greeting") &&
+    rustLib.includes(
+      "let recall_memory = !matches!(decision.memory.policy, MemoryRecallPolicy::None)"
+    ) &&
+    rustLib.includes("project_memory_hybrid_fallback") &&
+    agentMemorySource.includes("validate_semantic_memory_batch") &&
+    agentMemorySource.includes("source_event_ids") &&
     agentMemorySource.includes(
       "recalled_memory_is_serialized_as_quoted_json_data"
     ) &&
@@ -2266,14 +2339,15 @@ assert(
     rustLib.includes("cached_rag_adapter_for") &&
     rustLib.includes("invalidate_workspace_knowledge_cache") &&
     rustLib.includes('timed_retrieval_channel("graph_walk"') &&
-    rustLib.includes("std::thread::scope") &&
-    rustLib.includes("let graph_store = if include_graph") &&
+    rustLib.includes("let mut channels = std::thread::scope") &&
+    rustLib.includes("let graph_store = if include_graph {") &&
     rustLib.includes("cached_graph_store.or(opened_graph_store.as_ref())") &&
-    rustLib.includes("let graph_seeds = search_chunks_literal") &&
+    rustLib.includes("let graph_seeds = graph_walk_seed_results") &&
+    rustLib.includes("channels.push(timed_retrieval_channel") &&
     rustLib.includes("search_lancedb_index(") &&
     tauriBridge.includes("indexCacheHit") &&
     settingsPageSource.includes('"index cached"'),
-  "Knowledge retrieval must reuse a bounded index cache and keep graph walk inside the parallel channel"
+  "Knowledge retrieval must reuse a bounded cache, parallelize direct channels, then graph-walk from their seeds"
 );
 assert(
   rustLib.includes("agent_trace_role_summaries") &&
@@ -2323,7 +2397,14 @@ assert(
     rustLib.includes("prompt_offline_dataset") &&
     rustLib.includes("select_prompt_offline_case") &&
     rustLib.includes('"Conductor offline dataset selected"') &&
-    rustLib.includes("PROMPT_EVALUATION_IDLE_GRACE_MS: u64 = 30_000") &&
+    rustLib.includes("BACKGROUND_WORK_IDLE_GRACE_MS: u64 = 30_000") &&
+    promptEvolutionWorkerSource.includes("wait_for_foreground_agent_idle") &&
+    read("apps/desktop/src-tauri/src/semantic_memory_worker.rs").includes(
+      "wait_for_foreground_agent_idle"
+    ) &&
+    read("apps/desktop/src-tauri/src/semantic_memory_runtime.rs").includes(
+      "foreground_agent_should_preempt"
+    ) &&
     rustLib.includes("schedule_prompt_pairwise_evaluation") &&
     rustLib.includes("bounded_evolution") &&
     rustLib.includes("prompt_objective") &&
@@ -2590,18 +2671,20 @@ assert(
   "RAG cloud embeddings must stay within the provider-safe batch limit"
 );
 assert(
-  rustLib.includes("run_parallel_retrieval(") &&
+  rustLib.includes("run_planned_retrieval(") &&
+    rustLib.includes("retrieval_plan: &WorkspaceRetrievalPlan") &&
     rustLib.includes('timed_retrieval_channel("semantic_rag"') &&
     rustLib.includes('timed_retrieval_channel("graph_recall"') &&
     rustLib.includes('timed_retrieval_channel("graph_walk"') &&
     rustLib.includes('timed_retrieval_channel("file_search"') &&
-    rustLib.includes('retrieval_mode == "four_way_parallel"') &&
-    rustLib.includes("coding_retrieval_mode_skips_graph_channels") &&
+    rustLib.includes("plan.channels") &&
+    orchestratorSource.includes("WorkspaceRetrievalPlan") &&
+    orchestratorSource.includes("WorkspaceRetrievalChannel") &&
     rustLib.includes("fuse_retrieval_channels") &&
     rustLib.includes("prepare_agent_knowledge_context") &&
     ragSource.includes("search_chunks_semantic") &&
     ragSource.includes("search_chunks_literal"),
-  "Knowledge retrieval must select two or four channels, fuse results, and feed the agent"
+  "Knowledge retrieval must execute the conductor-selected channels, fuse results, and feed the agent"
 );
 assert(
   settingsPageSource.includes("Graph Explorer") &&
@@ -2695,75 +2778,53 @@ assert(
   "Context compaction must preserve session-scoped operational and conversational memory"
 );
 assert(
-  rustLib.includes("synthesize_agent_answer(") &&
+  rustLib.includes("prepare_agent_execution(") &&
+    rustLib.includes("plan_agent_run(") &&
     rustLib.includes("run_adaptive_collaboration(") &&
     collaborationServiceSource.includes("struct AdaptiveCollaborationSpec") &&
     collaborationServiceSource.includes("struct CollaborationCompletion") &&
-    collaborationServiceSource.includes("fn effective_workflow_model_turn_budget(") &&
     collaborationWorkerRuntimeSource.includes("IsolatedWorkerRuntime::new(") &&
     adaptiveCollaborationFinalizationSource.includes("fn finalize_adaptive_collaboration(") &&
+    orchestratorSource.includes(
+      'AGENT_RUN_DECISION_SCHEMA: &str = "cindx.agent-run-decision.v1"'
+    ) &&
+    orchestratorSource.includes("pub struct AgentRunDecisionHarness") &&
     orchestratorSource.includes("pub struct ConductorHarness") &&
     orchestratorSource.includes("pub fn planning_prompt(&self)") &&
     orchestratorSource.includes("pub fn repair_prompt(") &&
     orchestratorSource.includes("pub fn parse_plan(") &&
     rustLib.includes("CONDUCTOR_MAX_ATTEMPTS") &&
-    rustLib.includes("run_collaboration_candidates(") &&
     rustLib.includes("complete_collaboration_worker_with_tools(") &&
     rustLib.includes('"isolated_evidence_v1"') &&
     agentRuntimeSource.includes("evidence_worker_tools") &&
-    agentRuntimeSource.includes("DEFAULT_COLLABORATION_WORKER_TURNS") &&
     parallelExecutionSource.includes("MAX_GLOBAL_MODEL_WORKERS: usize = 12") &&
     parallelExecutionSource.includes("BoundedParallelExecutor") &&
     parallelExecutionSource.includes("run_model_jobs_until_anytime_quorum_interruptible") &&
-    agentRuntimeSource.includes("pub fn run_ordered<T: Send + 'static>") &&
     rustLib.includes('"conductor_plan"') &&
     rustLib.includes('format!("worker_{}", step_index + 1)') &&
     collaborationServiceSource.includes(
       '("access_list".to_string(), spec.access.join(","))'
     ) &&
-    rustLib.includes('"arbiter"') &&
-    rustLib.includes('"planner"') &&
-    rustLib.includes('"reviewer"') &&
-    rustLib.includes('"synthesizer"') &&
     rustLib.includes("recover_adaptive_worker(") &&
     rustLib.includes("quality_gate_adaptive_output(") &&
     rustLib.includes("append_single_model_policy_guidance(") &&
-    rustLib.includes("let OrchestrationPolicy::BestOfN { candidates } = policy else") &&
-    rustLib.includes("route_with_local_telemetry(") &&
     orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 5") &&
     orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_AGENTS: usize = 3") &&
     orchestratorSource.includes("adaptive_workflow_step_budget") &&
-    orchestratorSource.includes("the final adaptive workflow must incorporate every branch") &&
-    orchestratorSource.includes("complexity_score") &&
-    orchestratorSource.includes("estimated_steps") &&
-    orchestratorSource.includes("parallelizable") &&
-    orchestratorSource.includes("verification_required") &&
-    orchestratorSource.includes("latency_sensitive") &&
-    orchestratorSource.includes('"rule_based_v2"') &&
-    orchestratorSource.includes('"learned_conductor_v1"') &&
-    orchestratorSource.includes('"collaboration_budget"') &&
-    orchestratorSource.includes("high_stakes") &&
-    orchestratorSource.includes('"thinker" | "worker" | "verifier" | "synthesizer"') &&
     orchestratorSource.includes("adaptive_workflow_layers") &&
-    orchestratorSource.includes("adaptive_worker_prompt") &&
-    orchestratorSource.includes("ordinary_research_uses_one_planned_execution_path") &&
-    orchestratorSource.includes("latency_sensitive_complex_request_does_not_spawn_an_ensemble") &&
-    orchestratorSource.includes("auto_router_selects_models_by_task_role") &&
-    orchestratorSource.includes("learned_router_cannot_upgrade_ordinary_research_to_ultra") &&
-    rustLib.includes("AgentEffort::Auto if !routing_decision.model.trim().is_empty()") &&
     orchestratorSource.includes("must only access earlier steps") &&
-    rustLib.includes('"conductor_version".to_string(), "agent_v2".to_string()') &&
     rustLib.includes('"workflow_ir".to_string()') &&
     orchestratorSource.includes('WORKFLOW_IR_SCHEMA: &str = "cindx.workflow.v1"') &&
-    orchestratorSource.includes("WorkflowSearchTeacher") &&
+    orchestratorSource.includes(
+      'WORKFLOW_REVISION_SCHEMA: &str = "cindx.workflow.revision.v1"'
+    ) &&
+    orchestratorSource.includes("MAX_WORKFLOW_PLAN_REVISIONS") &&
+    rustLib.includes("validate_and_apply_revision(") &&
     rustLib.includes("Collaboration workflow planned") &&
     rustLib.includes("Tool evidence ledger") &&
     rustLib.includes("collaboration_step_result(") &&
-    rustLib.includes('"evidence_count"') &&
-    rustLib.includes("adaptive_coordinator_accepts_five_steps_with_three_reused_models") &&
-    rustLib.includes("pro_role_budget_does_not_collapse_when_roles_share_one_model") &&
-    rustLib.includes("conductor_result_separates_worker_claims_from_tool_evidence"),
-  "Primary agent must reserve bounded tool-capable adaptive workflows for Ultra-routed requests"
+    rustLib.includes('"evidence_count"'),
+  "Primary agent must use a bounded, tool-capable, conductor-planned and revisable workflow"
 );
 assert(
   orchestratorSource.includes("evaluate_routing_cases") &&

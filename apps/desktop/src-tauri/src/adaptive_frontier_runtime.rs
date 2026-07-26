@@ -1,5 +1,4 @@
 use super::*;
-use orchestrator::AdaptiveWorkflow;
 
 pub(super) enum AdaptiveFrontierOutcome {
     Continue(Box<AdaptiveFrontierState>),
@@ -29,9 +28,6 @@ pub(super) struct AdaptiveFrontierContext<'a, 'state> {
     pub(super) shared_memory: &'a str,
     pub(super) prompt_genome: &'a ConductorPromptGenome,
     pub(super) execution_contract: &'a ConductorExecutionContract,
-    pub(super) workflow_plan: &'a WorkflowPlanIr,
-    pub(super) workflow: &'a AdaptiveWorkflow,
-    pub(super) layer_count: usize,
     pub(super) workflow_started_at_ms: u64,
     pub(super) cancellation: Option<Arc<AgentRunControl>>,
     pub(super) anchor_spec: &'a AdaptiveCollaborationSpec,
@@ -59,9 +55,6 @@ pub(super) fn run_adaptive_frontier(
         shared_memory,
         prompt_genome,
         execution_contract,
-        workflow_plan,
-        workflow,
-        layer_count,
         workflow_started_at_ms,
         cancellation,
         anchor_spec,
@@ -72,17 +65,10 @@ pub(super) fn run_adaptive_frontier(
         mut direct_anchor_verifier,
         mut direct_anchor_verifier_attempted,
     } = context;
-    let max_model_turns_per_step =
-        effective_workflow_model_turn_budget(workflow_plan, &workflow_checkpoint);
     let max_step_attempts =
         effective_workflow_step_attempt_budget(prompt_genome, &workflow_checkpoint);
     let mut outputs = workflow_checkpoint.completed_outputs();
     let mut evidence_by_step = checkpoint_evidence_by_step(&workflow_checkpoint);
-    let final_step_id = workflow
-        .steps
-        .last()
-        .map(|step| step.id.clone())
-        .ok_or_else(|| "adaptive workflow has no final step".to_string())?;
 
     let mut frontier_round = 0usize;
     loop {
@@ -99,6 +85,16 @@ pub(super) fn run_adaptive_frontier(
             )?;
             return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
         }
+        let current_plan = workflow_checkpoint.plan.clone();
+        let current_workflow = current_plan.adaptive_workflow();
+        let current_layer_count = adaptive_workflow_layers(&current_workflow)?.len();
+        let max_model_turns_per_step =
+            effective_workflow_model_turn_budget(&current_plan, &workflow_checkpoint);
+        let final_step_id = current_workflow
+            .steps
+            .last()
+            .map(|step| step.id.clone())
+            .ok_or_else(|| "adaptive workflow has no final step".to_string())?;
         let graph_frontier = workflow_checkpoint.execution_frontier(max_step_attempts)?;
         let graph_runnable = graph_frontier
             .runnable_steps()
@@ -114,7 +110,7 @@ pub(super) fn run_adaptive_frontier(
         let layer = ready_ids
             .iter()
             .filter_map(|candidate_id| {
-                workflow
+                current_workflow
                     .steps
                     .iter()
                     .position(|step| &step.id == candidate_id)
@@ -122,7 +118,7 @@ pub(super) fn run_adaptive_frontier(
             .filter(|step_index| {
                 workflow_checkpoint
                     .steps
-                    .get(&workflow.steps[*step_index].id)
+                    .get(&current_workflow.steps[*step_index].id)
                     .is_some_and(|step| {
                         !matches!(
                             step.status,
@@ -132,7 +128,7 @@ pub(super) fn run_adaptive_frontier(
             })
             .collect::<Vec<_>>();
         if layer.is_empty() {
-            if graph_frontier.is_complete(workflow_plan.steps.len()) {
+            if graph_frontier.is_complete(current_plan.steps.len()) {
                 break;
             }
             while (direct_anchor_output.is_none()
@@ -218,12 +214,12 @@ pub(super) fn run_adaptive_frontier(
             collaboration_id,
             prompt,
             shared_memory,
-            workflow,
-            workflow_plan,
+            workflow: &current_workflow,
+            workflow_plan: &current_plan,
             execution_contract,
             layer,
             layer_index,
-            layer_count,
+            layer_count: current_layer_count,
             max_step_attempts,
             max_model_turns_per_step,
             outputs: &outputs,
@@ -267,6 +263,7 @@ pub(super) fn run_adaptive_frontier(
             prompt,
             models,
             prompt_genome,
+            execution_contract,
             anchor_spec,
             final_step_id: &final_step_id,
             workflow_started_at_ms,

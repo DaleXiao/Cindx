@@ -100,7 +100,7 @@
         "run",
         "--locked",
         "-p",
-        "orchestrator",
+        "orchestrator-eval",
         "--example",
         "evaluation_lab",
         "--",

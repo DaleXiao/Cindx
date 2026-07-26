@@ -1,4 +1,7 @@
 use super::*;
+use std::sync::{Condvar, OnceLock};
+
+static PROMPT_EVALUATION_WAKE: OnceLock<(Mutex<u64>, Condvar)> = OnceLock::new();
 
 #[derive(Default)]
 pub(crate) struct PromptEvolutionAccumulator {
@@ -40,27 +43,26 @@ pub(crate) fn prompt_evaluation_inflight() -> &'static Mutex<BTreeSet<String>> {
     PROMPT_EVALUATIONS_INFLIGHT.get_or_init(|| Mutex::new(BTreeSet::new()))
 }
 
-pub(crate) fn wait_for_prompt_evaluation_idle(
-    state: &tauri::State<'_, AppState>,
-    control: &Arc<AgentRunControl>,
-) -> Result<bool, String> {
-    let mut idle_since = None::<Instant>;
-    loop {
-        if control.should_stop() {
-            return Ok(false);
-        }
-        let foreground_active = !state
-            .agent_run_controls
-            .lock()
-            .map_err(|error| format!("agent run control lock poisoned: {error}"))?
-            .is_empty();
-        if foreground_active {
-            idle_since = None;
-        } else if idle_since.get_or_insert_with(Instant::now).elapsed()
-            >= Duration::from_millis(PROMPT_EVALUATION_IDLE_GRACE_MS)
-        {
-            return Ok(true);
-        }
-        std::thread::sleep(Duration::from_millis(80));
-    }
+pub(crate) fn notify_prompt_evaluation_worker() {
+    let (revision, wake) = PROMPT_EVALUATION_WAKE.get_or_init(|| (Mutex::new(0), Condvar::new()));
+    let mut revision = revision
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *revision = revision.saturating_add(1);
+    wake.notify_one();
+}
+
+pub(crate) fn wait_for_prompt_evaluation_worker(observed: &mut u64, timeout: Duration) {
+    let (revision, wake) = PROMPT_EVALUATION_WAKE.get_or_init(|| (Mutex::new(0), Condvar::new()));
+    let revision = revision
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let revision = if *revision == *observed {
+        wake.wait_timeout(revision, timeout)
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .0
+    } else {
+        revision
+    };
+    *observed = *revision;
 }

@@ -1,7 +1,6 @@
 pub(crate) use agent_application::{
     artifact_manifest_message, project_agent_artifacts as agent_output_artifacts_from_events,
-    project_session_lifecycle, AgentOutputArtifact as AgentOutputArtifactView,
-    SessionLifecycleInput, SessionTitleState,
+    AgentOutputArtifact as AgentOutputArtifactView, SessionTitleState,
 };
 pub(crate) use agent_core::{
     Event, EventId, EventKind, Message, MessageRole, Metadata, ModelRole, PermissionDecision,
@@ -24,10 +23,10 @@ pub(crate) use agent_rag::{
     export_lancedb_records_jsonl,
     fuse_retrieval_channels_for_query as fuse_rag_retrieval_channels_for_query, index_workspace,
     index_workspace_cancellable, lancedb_index_exists, local_query_embedding,
-    merge_retrieval_channel, replace_lancedb_index, retrieval_ranges_overlap,
-    search_chunks_literal, search_lancedb_index, workspace_index_is_fresh, EmbeddingBatch,
-    FileRagAdapter, IndexOptions, RagAdapter, RagChunk, RagEmbedder, RagError, RagIndex,
-    RagIndexStats, RagSearchResult, RetrievalChannelOutcome, RAG_INDEX_CANCELLED,
+    replace_lancedb_index, retrieval_ranges_overlap, search_chunks_literal, search_lancedb_index,
+    workspace_index_is_fresh, EmbeddingBatch, FileRagAdapter, IndexOptions, RagAdapter, RagChunk,
+    RagEmbedder, RagError, RagIndex, RagIndexStats, RagSearchResult, RetrievalChannelOutcome,
+    RAG_INDEX_CANCELLED,
 };
 #[cfg(test)]
 pub(crate) use agent_runtime::{
@@ -35,9 +34,9 @@ pub(crate) use agent_runtime::{
     record_tool_outcome_with_risk, AgentRuntimeConfig, WorkerTurnPhase, WorkerTurnPolicy,
 };
 pub(crate) use agent_runtime::{
-    bounded_max_output_tokens, compose_agent_system_prompt, ensure_terminal_commit_instruction,
-    evidence_worker_tools, observation_from_tool_result, resume_agent_loop_from_messages,
-    sanitize_assistant_content, start_agent_loop, start_agent_loop_with_history, AgentAdvance,
+    bounded_max_output_tokens, ensure_terminal_commit_instruction, evidence_worker_tools,
+    observation_from_tool_result, resume_agent_loop_from_messages, sanitize_assistant_content,
+    start_agent_loop, start_agent_loop_with_history, AgentAdvance,
     AgentFailure, AgentFailureClass, AgentKernel, AgentRecoveryAction, AgentRunControl,
     AgentTaskStateSnapshot, AgentToolRequest, ContextGovernorReport, IsolatedWorkerRuntime,
     ResultQuality, RunBudget, RunContinuationDirective, RunControlSnapshot, RunStageClass,
@@ -64,7 +63,7 @@ pub(crate) use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindow, NSWi
 #[cfg(test)]
 pub(crate) use orchestrator::AgentEvaluationVerifier;
 pub(crate) use orchestrator::{
-    adaptive_worker_prompt, adaptive_workflow_layers, adaptive_workflow_step_budget,
+    adaptive_worker_prompt_for_plan, adaptive_workflow_layers, adaptive_workflow_step_budget,
     candidate_pair_review_prompt, compare_team_and_anchor_order_invariant, decide_uplift_gate,
     default_plan, derive_prompt_evolution_campaign, direct_anchor_response_prompt,
     direct_anchor_response_verdict, evaluate_prompt_convergence, evaluate_prompt_promotion_gate,
@@ -73,21 +72,23 @@ pub(crate) use orchestrator::{
     AgentEngineSession, AgentEvaluationCaseScore, AgentEvaluationCheck,
     AgentEvaluationEvidenceSource, AgentEvaluationReflectionPacket, AgentEvaluationSplit,
     AgentEvaluationToolTrace, AgentEvaluationTrace, AgentEvaluationTraceStep,
-    AgentEvaluationVerifierOutcome, AnytimeCandidate, AnytimeCandidateKind, AnytimeCandidateState,
-    AnytimeController, AnytimeControllerConfig, AnytimeDecision, AnytimeVerdict,
-    ConductorExecutionContract, ConductorHarness, ConductorPromptGenome, ConductorRequest,
-    ConductorRoleHints, ConductorStopPolicy, FrozenPromptProfileSnapshot, LearnedModelRouter,
-    ModelCandidate, OrchestrationPolicy, PromptEvaluationMode, PromptEvaluationSplit,
-    PromptEvolutionCampaignInput, PromptEvolutionCampaignSnapshot, PromptEvolutionMethod,
-    PromptEvolutionObservation, PromptInstanceParetoArchive, PromptParetoArchive,
-    PromptPromotionConfidence, PromptPromotionGateConfig, PromptProposalMinibatchDecision,
-    PromptRetryPolicy, PromptStepCredit, PromptVerification, RoutingContext, RoutingDecision,
-    RoutingOutcome, RoutingTelemetry, RuleBasedRouter, TaskClass, TeamAnchorComparison, UpliftGap,
+    AgentEvaluationVerifierOutcome, AgentRunDecision, AnytimeCandidate, AnytimeCandidateKind,
+    AnytimeCandidateState, AnytimeController, AnytimeControllerConfig, AnytimeDecision,
+    AnytimeVerdict, ConductorExecutionContract, ConductorHarness,
+    ConductorPromptGenome, ConductorRequest, ConductorRoleHints, ConductorStopPolicy,
+    FrozenPromptProfileSnapshot, LearnedModelRouter, MemoryRecallPolicy, ModelCandidate,
+    OrchestrationPolicy, PromptEvaluationMode, PromptEvaluationSplit, PromptEvolutionCampaignInput,
+    PromptEvolutionCampaignSnapshot, PromptEvolutionMethod, PromptEvolutionObservation,
+    PromptInstanceParetoArchive, PromptParetoArchive, PromptPromotionConfidence,
+    PromptPromotionGateConfig, PromptProposalMinibatchDecision, PromptRetryPolicy,
+    PromptStepCredit, PromptVerification, RoutingContext, RoutingDecision, RoutingOutcome,
+    RoutingTelemetry, RuleBasedRouter, TaskClass, TeamAnchorComparison, UpliftGap,
     UpliftGateDecision, UpliftGateInput, WorkflowBudget, WorkflowExecutionCheckpoint,
-    WorkflowExecutionTelemetry, WorkflowPlanIr, WorkflowSearchTeacher, WorkflowStepStatus,
-    WorkflowToolPolicy, WorkflowTopologyPrior, AGENT_EVALUATION_TRACE_SCHEMA,
-    CONDUCTOR_MAX_ATTEMPTS, DIRECT_ANCHOR_CANDIDATE_ID, MAX_ADAPTIVE_WORKFLOW_AGENTS,
-    WORKFLOW_CHECKPOINT_SCHEMA, WORKFLOW_IR_SCHEMA,
+    WorkflowExecutionTelemetry, WorkflowOutputKind, WorkflowPlanIr, WorkflowSearchTeacher,
+    WorkflowStepStatus, WorkflowToolPolicy, WorkflowTopologyPrior, WorkspaceRetrievalChannel,
+    WorkspaceRetrievalPlan, AGENT_EVALUATION_TRACE_SCHEMA, CONDUCTOR_MAX_ATTEMPTS,
+    DIRECT_ANCHOR_CANDIDATE_ID, MAX_ADAPTIVE_WORKFLOW_AGENTS, WORKFLOW_CHECKPOINT_SCHEMA,
+    WORKFLOW_IR_SCHEMA,
 };
 pub(crate) use serde::{Deserialize, Serialize};
 pub(crate) use std::cmp::Reverse;
@@ -103,8 +104,7 @@ pub(crate) use std::sync::{Arc, Mutex};
 pub(crate) use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub(crate) use tauri::{Emitter, Manager};
 pub(crate) use tools::{
-    prompt_requests_image_generation, ImageGenerationConfig, ToolExecutionControl, ToolRegistry,
-    WebSearchConfig,
+    ImageGenerationConfig, ToolExecutionControl, ToolRegistry, WebSearchConfig,
 };
 
 pub(crate) use crate::agent_loop_service::{
@@ -117,8 +117,8 @@ pub(crate) use crate::collaboration_service::{
     collaboration_context_for_genome, collaboration_fallback_models, collaboration_recent_context,
     collaboration_recovery_evidence, collaboration_step_result,
     effective_workflow_model_turn_budget, effective_workflow_step_attempt_budget,
-    merge_collaboration_evidence, truncate_for_collaboration, workflow_role_coverage,
-    AdaptiveCollaborationOutcome, AdaptiveCollaborationSpec, AgentCollaboration,
+    merge_collaboration_evidence, truncate_for_collaboration, AdaptiveCollaborationOutcome,
+    AdaptiveCollaborationSpec, AgentCollaboration,
     CollaborationCompletion, CollaborationEvidence, COLLABORATION_STEER_INTERRUPTED,
     WORKFLOW_RESUMABLE_ERROR_PREFIX, WORKFLOW_SAFETY_ERROR_PREFIX,
 };

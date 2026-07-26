@@ -16,6 +16,7 @@ pub(super) struct AdaptiveWaveReconciliationContext<'a, 'state> {
     pub(super) prompt: &'a str,
     pub(super) models: &'a [String],
     pub(super) prompt_genome: &'a ConductorPromptGenome,
+    pub(super) execution_contract: &'a ConductorExecutionContract,
     pub(super) anchor_spec: &'a AdaptiveCollaborationSpec,
     pub(super) final_step_id: &'a str,
     pub(super) workflow_started_at_ms: u64,
@@ -45,6 +46,7 @@ pub(super) fn reconcile_adaptive_wave(
         prompt,
         models,
         prompt_genome,
+        execution_contract,
         anchor_spec,
         final_step_id,
         workflow_started_at_ms,
@@ -201,6 +203,65 @@ pub(super) fn reconcile_adaptive_wave(
                 .is_some_and(|step| step.status == WorkflowStepStatus::Completed)
         })
         .count();
+    let failed_delivery = wave.specs.iter().any(|spec| {
+        spec.step_id == final_step_id
+            && workflow_checkpoint
+                .steps
+                .get(&spec.step_id)
+                .is_some_and(|step| step.status == WorkflowStepStatus::Failed)
+    });
+    let graph_requires_replan = !layer_failures.is_empty()
+        && (failed_delivery || !wave.independent || successful_steps < wave.required_successes);
+    if graph_requires_replan {
+        if let Some(revision) = attempt_adaptive_graph_replan(AdaptiveGraphReplanContext {
+            state,
+            config,
+            task_id,
+            run_context,
+            collaboration_id,
+            models,
+            wave,
+            layer_failures: &layer_failures,
+            checkpoint: workflow_checkpoint,
+            cancellation: cancellation.as_ref(),
+        })? {
+            let anchor_running = anchor_supervisor
+                .as_ref()
+                .is_some_and(|supervisor| supervisor.pending() > 0);
+            let rebuilt_anytime_controller = rebuild_anytime_controller_after_replan(
+                execution_contract,
+                workflow_checkpoint,
+                &*anytime_controller,
+                direct_anchor_output.as_deref(),
+                anchor_running,
+            )?;
+            *anytime_controller = rebuilt_anytime_controller;
+            *outputs = workflow_checkpoint.completed_outputs();
+            evidence_by_step.retain(|step_id, _| workflow_checkpoint.steps.contains_key(step_id));
+            append_workflow_checkpoint_event(
+                state,
+                task_id,
+                run_context,
+                collaboration_id,
+                "Collaboration task graph revised",
+                "replanned",
+                None,
+                workflow_checkpoint,
+            )?;
+            if let Some(control) = cancellation.as_ref() {
+                control.mark_progress(
+                    "collaboration",
+                    &format!(
+                        "Task graph revision {} replaced {} with {}",
+                        revision.revision,
+                        revision.target_step_id,
+                        revision.replacement_step_ids.join(", ")
+                    ),
+                );
+            }
+            return Ok(AdaptiveWaveReconciliationOutcome::Continue);
+        }
+    }
     if wave.independent && !layer_failures.is_empty() && successful_steps >= wave.required_successes
     {
         degrade_failed_quorum_branches(DegradedQuorumContext {
