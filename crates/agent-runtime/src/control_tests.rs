@@ -454,18 +454,12 @@ fn internal_terminal_stages_cannot_consume_final_user_delivery_calls() {
             .expect("candidate call");
         control.finish_model_call();
     }
-    for stage in ["synthesis_1", "synthesis_2"] {
-        control
-            .begin_stage_model_call(stage, RunStageClass::Synthesizer)
-            .expect("internal terminal call");
-        control.finish_model_call();
-    }
     assert_eq!(
-        control.begin_stage_model_call("synthesis_3", RunStageClass::Synthesizer),
+        control.begin_stage_model_call("synthesis", RunStageClass::Synthesizer),
         Err(RunStopReason::StageBudgetExhausted)
     );
 
-    for stage in ["delivery_1", "delivery_2"] {
+    for stage in ["delivery_1", "delivery_2", "delivery_3", "delivery_4"] {
         control
             .begin_stage_model_call(stage, RunStageClass::Finalizer)
             .expect("finalizer call");
@@ -508,13 +502,13 @@ fn nonterminal_model_timeout_cannot_consume_terminal_time_reserve() {
     assert!(nonterminal <= Duration::from_secs(40));
     assert!(nonterminal > Duration::from_secs(39));
 
-    let terminal = control.stage_model_call_timeout(RunStageClass::Synthesizer);
-    assert!(terminal <= Duration::from_secs(50));
-    assert!(terminal > Duration::from_secs(49));
+    let internal_terminal = control.stage_model_call_timeout(RunStageClass::Synthesizer);
+    assert!(internal_terminal <= Duration::from_secs(40));
+    assert!(internal_terminal > Duration::from_secs(39));
 
     let finalizer = control.stage_model_call_timeout(RunStageClass::Finalizer);
-    assert!(finalizer <= Duration::from_secs(30));
-    assert!(finalizer > Duration::from_secs(29));
+    assert!(finalizer <= Duration::from_secs(60));
+    assert!(finalizer > Duration::from_secs(59));
 }
 
 #[test]
@@ -554,7 +548,8 @@ fn nonterminal_stage_yields_when_the_terminal_reserve_begins() {
     let control = AgentRunControl::from_snapshot(snapshot);
 
     assert!(control.stage_should_stop(RunStageClass::Worker));
-    assert!(!control.stage_should_stop(RunStageClass::Synthesizer));
+    assert!(control.stage_should_stop(RunStageClass::Synthesizer));
+    assert!(!control.stage_should_stop(RunStageClass::Finalizer));
 }
 
 #[test]
