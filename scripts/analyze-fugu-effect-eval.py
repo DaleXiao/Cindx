@@ -16,6 +16,7 @@ from typing import Any
 RAW_SCHEMAS = {
     "cindx.external_effect_eval.raw.v1",
     "cindx.external_effect_eval.raw.v2",
+    "cindx.external_effect_eval.raw.v3",
 }
 SANITIZED_SCHEMA = "cindx.external_effect_eval.sanitized.v1"
 
