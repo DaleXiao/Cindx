@@ -529,15 +529,19 @@ assert(
     rustLib.includes("fn repair_macos_traffic_light_position(") &&
     rustLib.includes("fn schedule_macos_traffic_light_position_repair(") &&
     rustLib.includes("MACOS_TRAFFIC_LIGHT_REPAIR_GENERATION") &&
-    rustLib.includes("MACOS_TRAFFIC_LIGHT_REPAIR_DELAY_MS: u64 = 48") &&
-    rustLib.includes("MACOS_TITLEBAR_HEIGHT: f64 = 46.0") &&
-    rustLib.includes("centered_macos_traffic_light_origin_y(button_frame.size.height)") &&
+    rustLib.includes(
+      "MACOS_TRAFFIC_LIGHT_REPAIR_DELAYS_MS: [u64; 3] = [96, 320, 900]"
+    ) &&
+    rustLib.includes("for delay_ms in MACOS_TRAFFIC_LIGHT_REPAIR_DELAYS_MS") &&
+    rustLib.includes("tauri::WindowEvent::Focused(true)") &&
+    rustLib.includes("MACOS_TRAFFIC_LIGHT_Y: f64 = 25.0") &&
+    rustLib.includes("fn macos_traffic_light_layout(button_height: f64)") &&
+    rustLib.includes("origin.y = button_origin_y;") &&
     rustLib.includes("repair_macos_traffic_light_position(&window)?;") &&
     rustLib.includes("let _ = repair_macos_traffic_light_position(&window);") &&
     rustLib.includes("tauri::WindowEvent::Resized(_)") &&
     rustLib.includes("tauri::WindowEvent::ScaleFactorChanged { .. }") &&
     !rustLib.includes("tauri::WindowEvent::Moved(_)") &&
-    !rustLib.includes("tauri::WindowEvent::Focused(true)") &&
     !rustLib.includes("tauri::WindowEvent::ThemeChanged(_)") &&
     tauriBridge.includes('invoke<void>("reveal_main_window")') &&
     appSource.includes("startupWindowRevealRequestedRef") &&
@@ -548,7 +552,7 @@ assert(
     appSource.includes("!sessionRuntimeCache.hasAgent(state.activeSessionId)") &&
     !appSource.includes("agentState?.sessionId !== projectSessionState.activeSessionId") &&
     !appSource.includes("revealAfterStableFrame"),
-  "The native window must reveal a stable loading frame and repair native controls only after size or scale relayouts"
+  "The native window must reveal a stable loading frame and repair native controls after size, scale, or focus relayouts"
 );
 const titlebarHeight = 46;
 // This is the user-confirmed macOS alignment; do not retune it indirectly.
