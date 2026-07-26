@@ -512,6 +512,31 @@ fn nonterminal_model_timeout_cannot_consume_terminal_time_reserve() {
 }
 
 #[test]
+fn finalizer_timeout_reserves_a_bounded_recovery_window() {
+    let mut budget = test_budget();
+    budget.max_duration = Duration::from_secs(180);
+    budget.model_call_timeout = Duration::from_secs(180);
+    budget.terminal_time_reserve = Duration::from_secs(180);
+    let control = AgentRunControl::with_budget(budget);
+
+    let primary = control.stage_model_call_timeout_with_recovery(
+        RunStageClass::Finalizer,
+        1,
+        Duration::from_secs(60),
+    );
+    assert!(primary <= Duration::from_secs(120));
+    assert!(primary > Duration::from_secs(119));
+
+    let only_attempt = control.stage_model_call_timeout_with_recovery(
+        RunStageClass::Finalizer,
+        0,
+        Duration::from_secs(60),
+    );
+    assert!(only_attempt <= Duration::from_secs(180));
+    assert!(only_attempt > Duration::from_secs(179));
+}
+
+#[test]
 fn terminal_delivery_stages_receive_a_delivery_sized_time_budget() {
     let mut budget = RunBudget::for_effort("pro");
     budget.max_duration = Duration::from_secs(300);

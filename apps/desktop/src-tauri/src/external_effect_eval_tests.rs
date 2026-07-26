@@ -10,6 +10,7 @@ const EVALUATION_MODEL_CALL_TIMEOUT_SECONDS: u64 = 180;
 const EVALUATION_TREATMENT_DEADLINE_SECONDS: u64 = 300;
 const EVALUATION_TERMINAL_RESERVE_SECONDS: u64 = EVALUATION_MODEL_CALL_TIMEOUT_SECONDS;
 const EVALUATION_MAX_OUTPUT_TOKENS: u64 = COLLABORATION_MAX_OUTPUT_TOKENS;
+const EVALUATION_FINALIZER_RECOVERY_SECONDS: u64 = 60;
 
 fn evaluation_run_control(effort: &str) -> Arc<AgentRunControl> {
     let mut budget = RunBudget::for_effort(effort);
@@ -298,8 +299,9 @@ fn direct_gpqa_treatment(config: &ProviderConfig, prompt: &str) -> TreatmentOutp
     treatment_from_completion(
         "single",
         vec![model.clone()],
-        complete_collaboration_model_with_control(
+        complete_collaboration_model_for_stage_with_control(
             config.clone(),
+            "terminal_executor".to_string(),
             ModelRole::Executor,
             model,
             "Answer the multiple-choice question without tools. Follow the requested answer format exactly."
@@ -508,64 +510,90 @@ fn finalize_prompt_workflow_for_user(
             max_turns: 3,
         },
         |mut request| {
-            let model = models
-                .get(model_attempt)
-                .or_else(|| models.last())
-                .expect("terminal executor model pool must not be empty")
-                .clone();
-            model_attempt = model_attempt.saturating_add(1);
-            control
-                .begin_stage_model_call("terminal_executor", RunStageClass::Finalizer)
-                .map_err(|reason| {
-                    AgentFailure::from_stop_reason(
-                        reason,
-                        format!("terminal executor could not start: {}", reason.code()),
-                    )
-                })?;
             request.role = ModelRole::Executor;
             request.metadata.insert(
                 "max_output_tokens".to_string(),
                 EVALUATION_MAX_OUTPUT_TOKENS.to_string(),
             );
-            let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
-                base_url: config.base_url.clone(),
-                api_key: config.api_key.clone(),
-                model,
-                embedding_model: config.model_for_role(&ModelRole::Embedder),
-                timeout_seconds: control
-                    .stage_model_call_timeout_seconds(RunStageClass::Finalizer),
-            });
-            let started_at_ms = current_time_millis();
-            let mut streamed = String::new();
-            let mut first_delta_at_ms = None;
-            let result = provider.complete_streaming_cancellable(
-                request,
-                &mut |delta: &str| {
-                    if !delta.is_empty() {
-                        first_delta_at_ms.get_or_insert_with(current_time_millis);
-                        streamed.push_str(delta);
-                    }
-                },
-                &mut || control.should_stop(),
-            );
-            control.finish_model_call();
-            let mut response = result.map_err(|error| AgentFailure::from_model_error(&error))?;
-            control.record_agent_turn("terminal_executor").map_err(|reason| {
-                AgentFailure::from_stop_reason(
-                    reason,
-                    format!("terminal executor stopped: {}", reason.code()),
-                )
-            })?;
-            if !streamed.trim().is_empty() {
-                response.message.content = streamed;
-            }
-            if let Some(first_delta_at_ms) = first_delta_at_ms {
-                response.metadata.insert(
-                    "first_token_latency_ms".to_string(),
-                    first_delta_at_ms.saturating_sub(started_at_ms).to_string(),
+            loop {
+                let attempt_index = model_attempt;
+                let model = models
+                    .get(attempt_index)
+                    .or_else(|| models.last())
+                    .expect("terminal executor model pool must not be empty")
+                    .clone();
+                model_attempt = model_attempt.saturating_add(1);
+                let has_alternate = model_attempt < models.len();
+                control
+                    .begin_stage_model_call("terminal_executor", RunStageClass::Finalizer)
+                    .map_err(|reason| {
+                        AgentFailure::from_stop_reason(
+                            reason,
+                            format!("terminal executor could not start: {}", reason.code()),
+                        )
+                    })?;
+                let recovery_windows = usize::from(attempt_index == 0 && has_alternate);
+                let timeout_seconds = control
+                    .stage_model_call_timeout_with_recovery(
+                        RunStageClass::Finalizer,
+                        recovery_windows,
+                        Duration::from_secs(EVALUATION_FINALIZER_RECOVERY_SECONDS),
+                    )
+                    .as_secs()
+                    .max(1);
+                let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+                    base_url: config.base_url.clone(),
+                    api_key: config.api_key.clone(),
+                    model,
+                    embedding_model: config.model_for_role(&ModelRole::Embedder),
+                    timeout_seconds,
+                });
+                let started_at_ms = current_time_millis();
+                let mut streamed = String::new();
+                let mut first_delta_at_ms = None;
+                let result = provider.complete_streaming_cancellable(
+                    request.clone(),
+                    &mut |delta: &str| {
+                        if !delta.is_empty() {
+                            first_delta_at_ms.get_or_insert_with(current_time_millis);
+                            streamed.push_str(delta);
+                        }
+                    },
+                    &mut || control.should_stop(),
                 );
+                control.finish_model_call();
+                let mut response = match result {
+                    Ok(response) => response,
+                    Err(error) => {
+                        let failure = AgentFailure::from_model_error(&error);
+                        let recoverable = terminal_provider_failure_recoverable(
+                            &failure,
+                            has_alternate,
+                            control.should_stop(),
+                        );
+                        if recoverable {
+                            continue;
+                        }
+                        return Err(failure);
+                    }
+                };
+                control.record_agent_turn("terminal_executor").map_err(|reason| {
+                    AgentFailure::from_stop_reason(
+                        reason,
+                        format!("terminal executor stopped: {}", reason.code()),
+                    )
+                })?;
+                if !streamed.trim().is_empty() {
+                    response.message.content = streamed;
+                }
+                if let Some(first_delta_at_ms) = first_delta_at_ms {
+                    response.metadata.insert(
+                        "first_token_latency_ms".to_string(),
+                        first_delta_at_ms.saturating_sub(started_at_ms).to_string(),
+                    );
+                }
+                return Ok(response);
             }
-            Ok(response)
         },
     )
 }
@@ -587,6 +615,19 @@ fn ordered_unique_models(models: impl IntoIterator<Item = String>) -> Vec<String
         }
     }
     unique
+}
+
+fn terminal_provider_failure_recoverable(
+    failure: &AgentFailure,
+    has_alternate: bool,
+    control_stopped: bool,
+) -> bool {
+    has_alternate
+        && !control_stopped
+        && matches!(
+            failure.class,
+            AgentFailureClass::Cancelled | AgentFailureClass::ProviderTransient
+        )
 }
 
 fn prompt_execution_evidence_packet(
@@ -1120,6 +1161,30 @@ fn terminal_executor_model_pool_preserves_order_and_removes_duplicates() {
         ]),
         vec!["executor".to_string(), "reviewer".to_string()]
     );
+}
+
+#[test]
+fn terminal_provider_failover_never_overrides_a_control_stop() {
+    let cancelled = AgentFailure::cancelled("provider_cancelled", "cancelled");
+    assert!(terminal_provider_failure_recoverable(
+        &cancelled, true, false
+    ));
+    assert!(!terminal_provider_failure_recoverable(
+        &cancelled, true, true
+    ));
+    assert!(!terminal_provider_failure_recoverable(
+        &cancelled, false, false
+    ));
+
+    let invalid = AgentFailure::new(
+        "provider_invalid_request",
+        "invalid request",
+        AgentFailureClass::ProviderPermanent,
+        false,
+    );
+    assert!(!terminal_provider_failure_recoverable(
+        &invalid, true, false
+    ));
 }
 
 #[test]
