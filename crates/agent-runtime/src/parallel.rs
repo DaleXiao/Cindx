@@ -241,6 +241,17 @@ impl<T: Send + 'static> ParallelJobSupervisor<T> {
             .count()
     }
 
+    /// Requests cooperative cancellation without invalidating a result that a
+    /// running job is already returning. Callers may drain for a short bounded
+    /// grace period before dropping the supervisor, which hard-cancels any
+    /// remaining jobs.
+    pub fn request_cancel_all(&self) -> usize {
+        self.jobs
+            .values()
+            .filter(|control| request_job_cancel(control))
+            .count()
+    }
+
     /// Collects jobs that atomically completed before cancellation won.
     ///
     /// A completion can race with a quorum decision after the receiver's last
@@ -254,6 +265,22 @@ impl<T: Send + 'static> ParallelJobSupervisor<T> {
             .any(|control| control.lifecycle.load(Ordering::Acquire) == JOB_COMPLETED)
         {
             let Some(completion) = self.recv() else {
+                break;
+            };
+            completions.push(completion);
+        }
+        completions
+    }
+
+    pub(crate) fn collect_for(&mut self, timeout: Duration) -> Vec<ParallelJobCompletion<T>> {
+        let deadline = Instant::now() + timeout;
+        let mut completions = Vec::new();
+        while !self.jobs.is_empty() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let Some(completion) = self.recv_timeout(remaining) else {
                 break;
             };
             completions.push(completion);
@@ -281,6 +308,13 @@ fn cancel_job(control: &ParallelJobControl) -> bool {
     }
     control.cancellation.store(true, Ordering::Release);
     true
+}
+
+fn request_job_cancel(control: &ParallelJobControl) -> bool {
+    if control.lifecycle.load(Ordering::Acquire) != JOB_RUNNING {
+        return false;
+    }
+    !control.cancellation.swap(true, Ordering::AcqRel)
 }
 
 impl<T> Drop for ParallelJobSupervisor<T> {

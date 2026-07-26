@@ -3,6 +3,8 @@ use crate::parallel::{
 };
 use std::time::{Duration, Instant};
 
+const COOPERATIVE_CANCELLATION_GRACE: Duration = Duration::from_millis(250);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnytimeQuorumPolicy {
     pub minimum_successes: usize,
@@ -84,8 +86,8 @@ impl BoundedParallelExecutor {
         while received < spawned {
             if should_interrupt() {
                 interrupted = true;
-                cancelled_stragglers = supervisor.cancel_all();
-                collect_completed_results(
+                cancelled_stragglers = supervisor.request_cancel_all();
+                collect_cooperative_results(
                     &mut supervisor,
                     &mut slots,
                     &mut received,
@@ -200,6 +202,27 @@ fn collect_completed_results<T, F>(
     }
 }
 
+fn collect_cooperative_results<T, F>(
+    supervisor: &mut crate::parallel::ParallelJobSupervisor<T>,
+    slots: &mut [Option<Result<T, ParallelTaskError>>],
+    received: &mut usize,
+    successful: &mut usize,
+    is_success: &F,
+) where
+    T: Send + 'static,
+    F: Fn(&T) -> bool,
+{
+    for ParallelJobCompletion { job_id, result } in
+        supervisor.collect_for(COOPERATIVE_CANCELLATION_GRACE)
+    {
+        if result.as_ref().is_ok_and(is_success) {
+            *successful = successful.saturating_add(1);
+        }
+        slots[job_id] = Some(result);
+        *received = received.saturating_add(1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +291,31 @@ mod tests {
         assert_eq!(output.successful, 1);
         assert_eq!(output.cancelled_stragglers, 1);
         assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn interrupt_preserves_a_cooperative_partial_result() {
+        let executor = BoundedParallelExecutor::new(1);
+        let started = Arc::new(AtomicBool::new(false));
+        let worker_started = Arc::clone(&started);
+        let jobs = vec![Box::new(move |cancelled: Arc<AtomicBool>| {
+            worker_started.store(true, Ordering::SeqCst);
+            while !cancelled.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(1));
+            }
+            42usize
+        }) as CancellableParallelJob<usize>];
+
+        let output = executor.run_until_anytime_quorum_interruptible(
+            "anytime-interrupt-partial",
+            jobs,
+            AnytimeQuorumPolicy::new(1, 1, Duration::ZERO, Duration::from_millis(1)),
+            |value| *value > 0,
+            || started.load(Ordering::SeqCst),
+        );
+
+        assert!(output.interrupted);
+        assert_eq!(output.results, vec![Ok(42)]);
+        assert_eq!(output.successful, 1);
     }
 }
