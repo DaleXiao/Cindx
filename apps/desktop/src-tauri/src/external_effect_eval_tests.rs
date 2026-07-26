@@ -346,7 +346,7 @@ fn deterministic_auto_plan(
             },
             AdaptiveWorkflowStep {
                 id: "review".to_string(),
-                role: "reviewer".to_string(),
+                role: "synthesizer".to_string(),
                 model: config.model_for_role(&ModelRole::Reviewer),
                 subtask: "Resolve any disagreement and return only: The correct answer is (X), where X is A, B, C, or D."
                     .to_string(),

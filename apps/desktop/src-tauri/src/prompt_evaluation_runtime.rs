@@ -131,7 +131,7 @@ pub(crate) fn prompt_evaluation_stage_class(
     step: &orchestrator::WorkflowPlanStep,
 ) -> RunStageClass {
     match step.contract.output_kind {
-        orchestrator::WorkflowOutputKind::Synthesis => RunStageClass::Synthesizer,
+        orchestrator::WorkflowOutputKind::Synthesis => RunStageClass::Finalizer,
         orchestrator::WorkflowOutputKind::Verification => RunStageClass::Reviewer,
         _ => match step.role.as_str() {
             "verifier" | "reviewer" => RunStageClass::Reviewer,

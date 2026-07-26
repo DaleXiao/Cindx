@@ -279,8 +279,8 @@ impl WorkflowExecutionCheckpoint {
                 plan_step.contract.output_kind,
                 WorkflowOutputKind::Verification | WorkflowOutputKind::Synthesis
             );
-            let direct_delivery_fallback =
-                plan_step.contract.output_kind == WorkflowOutputKind::Synthesis;
+            let direct_delivery_fallback = delivery_target(&self.plan.steps)
+                .is_some_and(|target| target.id == plan_step.id);
             let unavailable_dependencies = unresolved.iter().all(|dependency| {
                 self.dependency_permanently_unavailable(
                     dependency,
@@ -795,6 +795,47 @@ mod tests {
         checkpoint
             .claim_steps_with_partial_recovery(&["synthesize".to_string()], 1, 4)
             .expect("the final node should own one degraded direct-delivery attempt");
+    }
+
+    #[test]
+    fn exhausted_analysis_chain_unlocks_a_verification_delivery_target() {
+        let base = checkpoint();
+        let mut plan = base.plan;
+        let delivery = plan.steps.last_mut().unwrap();
+        delivery.id = "review".to_string();
+        delivery.role = "verifier".to_string();
+        delivery.subtask = "review and deliver".to_string();
+        delivery.contract = WorkflowStepContract::inferred(
+            "verifier",
+            &delivery.access,
+            &WorkflowToolPolicy::None,
+        );
+        assert_eq!(
+            delivery.contract.output_kind,
+            WorkflowOutputKind::Verification
+        );
+        let mut checkpoint = WorkflowExecutionCheckpoint::new("verification-fallback", plan, 1);
+        checkpoint
+            .prepare_step_attempt("inspect", "worker", 1, 2)
+            .unwrap();
+        checkpoint
+            .fail_step("inspect", "provider failure", 3)
+            .unwrap();
+
+        assert_eq!(
+            checkpoint.execution_frontier(1).unwrap().blocked_steps,
+            vec!["review"]
+        );
+        let recoverable = checkpoint
+            .execution_frontier_with_partial_recovery(1)
+            .unwrap();
+        assert_eq!(recoverable.ready_steps, vec!["review"]);
+        assert!(recoverable.blocked_steps.is_empty());
+        let delivery = checkpoint
+            .delivery_frontier_with_partial_recovery(1)
+            .unwrap();
+        assert_eq!(delivery.target_step_id.as_deref(), Some("review"));
+        assert_eq!(delivery.runnable_steps, vec!["review"]);
     }
 
     #[test]
