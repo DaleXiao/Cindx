@@ -9,6 +9,7 @@ const MRCR_DATASET_REVISION: &str = "2025-12-05-bugfix";
 const EVALUATION_MODEL_CALL_TIMEOUT_SECONDS: u64 = 180;
 const EVALUATION_TREATMENT_DEADLINE_SECONDS: u64 = 300;
 const EVALUATION_TERMINAL_RESERVE_SECONDS: u64 = EVALUATION_MODEL_CALL_TIMEOUT_SECONDS;
+const EVALUATION_MAX_OUTPUT_TOKENS: u64 = COLLABORATION_MAX_OUTPUT_TOKENS;
 
 fn evaluation_run_control(effort: &str) -> Arc<AgentRunControl> {
     let mut budget = RunBudget::for_effort(effort);
@@ -365,7 +366,7 @@ fn deterministic_auto_plan(
             max_models: 3,
             max_model_turns_per_step: profile.effective_max_model_turns_per_step(),
             max_tool_calls_per_step: 0,
-            max_output_tokens_per_step: 2_048,
+            max_output_tokens_per_step: EVALUATION_MAX_OUTPUT_TOKENS as usize,
         },
     );
     for step in &mut plan.steps {
@@ -422,8 +423,8 @@ fn workflow_treatment(
             .saturating_add(execution.execution.total_tokens)
             .to_string(),
     );
-    let finalizer_model = config.model_for_role(&ModelRole::Executor);
-    planning_models.push(finalizer_model.clone());
+    let finalizer_models = terminal_executor_models(config);
+    planning_models.extend(finalizer_models.iter().cloned());
     planning_models.sort();
     planning_models.dedup();
     let finalizer_started = Instant::now();
@@ -431,7 +432,7 @@ fn workflow_treatment(
         config,
         prompt,
         &execution.execution,
-        &finalizer_model,
+        &finalizer_models,
         control,
     );
     let finalizer_latency_ms =
@@ -472,7 +473,7 @@ fn finalize_prompt_workflow_for_user(
     config: &ProviderConfig,
     prompt: &str,
     execution: &PromptWorkflowExecution,
-    model: &str,
+    models: &[String],
     control: &Arc<AgentRunControl>,
 ) -> Result<agent_runtime::NoToolAgentOutcome, AgentFailure> {
     let guidance = if execution.final_output.trim().is_empty() {
@@ -491,6 +492,7 @@ fn finalize_prompt_workflow_for_user(
     .with_evidence_packet(prompt_execution_evidence_packet(prompt, execution))
     .append_to_history(&mut history);
 
+    let mut model_attempt = 0usize;
     agent_runtime::run_no_tool_agent(
         agent_runtime::NoToolAgentRequest {
             task_id: TaskId(unique_id("external-effect-terminal")),
@@ -502,10 +504,16 @@ fn finalize_prompt_workflow_for_user(
                     .to_string(),
             ),
             context_window_tokens: config.context_window_tokens,
-            max_output_tokens: 2_048,
-            max_turns: 2,
+            max_output_tokens: EVALUATION_MAX_OUTPUT_TOKENS,
+            max_turns: 3,
         },
         |mut request| {
+            let model = models
+                .get(model_attempt)
+                .or_else(|| models.last())
+                .expect("terminal executor model pool must not be empty")
+                .clone();
+            model_attempt = model_attempt.saturating_add(1);
             control
                 .begin_stage_model_call("terminal_executor", RunStageClass::Finalizer)
                 .map_err(|reason| {
@@ -515,13 +523,14 @@ fn finalize_prompt_workflow_for_user(
                     )
                 })?;
             request.role = ModelRole::Executor;
-            request
-                .metadata
-                .insert("max_output_tokens".to_string(), "2048".to_string());
+            request.metadata.insert(
+                "max_output_tokens".to_string(),
+                EVALUATION_MAX_OUTPUT_TOKENS.to_string(),
+            );
             let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
                 base_url: config.base_url.clone(),
                 api_key: config.api_key.clone(),
-                model: model.to_string(),
+                model,
                 embedding_model: config.model_for_role(&ModelRole::Embedder),
                 timeout_seconds: control
                     .stage_model_call_timeout_seconds(RunStageClass::Finalizer),
@@ -559,6 +568,25 @@ fn finalize_prompt_workflow_for_user(
             Ok(response)
         },
     )
+}
+
+fn terminal_executor_models(config: &ProviderConfig) -> Vec<String> {
+    ordered_unique_models([
+        config.model_for_role(&ModelRole::Executor),
+        config.model_for_role(&ModelRole::Reviewer),
+        config.model.clone(),
+        config.model_for_conductor(),
+    ])
+}
+
+fn ordered_unique_models(models: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut unique = Vec::new();
+    for model in models {
+        if !model.trim().is_empty() && !unique.contains(&model) {
+            unique.push(model);
+        }
+    }
+    unique
 }
 
 fn prompt_execution_evidence_packet(
@@ -725,7 +753,7 @@ fn conductor_gpqa_treatment(
     );
     if let Some(plan) = candidate.plan.as_mut() {
         plan.budget.max_tool_calls_per_step = 0;
-        plan.budget.max_output_tokens_per_step = 2_048;
+        plan.budget.max_output_tokens_per_step = EVALUATION_MAX_OUTPUT_TOKENS as usize;
         for step in &mut plan.steps {
             step.tool_policy = WorkflowToolPolicy::None;
         }
@@ -949,6 +977,10 @@ fn write_external_effect_checkpoint(
                 "treatment_deadline_seconds".to_string(),
                 EVALUATION_TREATMENT_DEADLINE_SECONDS,
             ),
+            (
+                "max_output_tokens_per_call".to_string(),
+                EVALUATION_MAX_OUTPUT_TOKENS,
+            ),
         ]
         .into_iter()
         .collect(),
@@ -1071,6 +1103,23 @@ fn external_effect_treatments_use_the_declared_deadline() {
         assert_eq!(budget.finalizer_time_reserve(), budget.model_call_timeout);
         assert!(budget.terminal_time_reserve < budget.max_duration);
     }
+    assert_eq!(
+        EVALUATION_MAX_OUTPUT_TOKENS,
+        COLLABORATION_MAX_OUTPUT_TOKENS
+    );
+}
+
+#[test]
+fn terminal_executor_model_pool_preserves_order_and_removes_duplicates() {
+    assert_eq!(
+        ordered_unique_models([
+            "executor".to_string(),
+            "reviewer".to_string(),
+            "executor".to_string(),
+            String::new(),
+        ]),
+        vec!["executor".to_string(), "reviewer".to_string()]
+    );
 }
 
 #[test]
@@ -1107,6 +1156,21 @@ fn provider_backed_fugu_external_effect_pilot() {
         .canonicalize()
         .expect("repository root should resolve");
     let mut gpqa_cases = load_gpqa_cases(&gpqa_path, per_domain).expect("GPQA cases should load");
+    if let Ok(raw_case_ids) = std::env::var("CINDX_GPQA_CASE_IDS") {
+        let requested = raw_case_ids
+            .split(',')
+            .map(str::trim)
+            .filter(|case_id| !case_id.is_empty())
+            .collect::<BTreeSet<_>>();
+        if !requested.is_empty() {
+            gpqa_cases.retain(|case| requested.contains(case.case_id.as_str()));
+            assert_eq!(
+                gpqa_cases.len(),
+                requested.len(),
+                "every CINDX_GPQA_CASE_IDS entry must exist in the frozen sample"
+            );
+        }
+    }
     let gpqa_case_limit = std::env::var("CINDX_GPQA_CASE_LIMIT")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
