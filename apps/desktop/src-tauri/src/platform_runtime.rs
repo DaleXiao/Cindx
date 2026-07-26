@@ -89,8 +89,8 @@ pub(crate) fn set_sidebar_material_width(app: tauri::AppHandle, width: f64) -> R
 }
 
 #[cfg(target_os = "macos")]
-fn macos_traffic_light_layout(button_height: f64) -> (f64, f64) {
-    (button_height + MACOS_TRAFFIC_LIGHT_Y, 0.0)
+fn centered_macos_traffic_light_origin_y(button_height: f64) -> f64 {
+    ((MACOS_TITLEBAR_HEIGHT - button_height) / 2.0).max(0.0)
 }
 
 #[cfg(target_os = "macos")]
@@ -121,8 +121,7 @@ pub(crate) fn repair_macos_traffic_light_position(
             };
 
             let close_frame = NSView::frame(&close);
-            let (title_bar_height, button_origin_y) =
-                macos_traffic_light_layout(close_frame.size.height);
+            let title_bar_height = MACOS_TITLEBAR_HEIGHT.max(close_frame.size.height);
             let mut title_bar_frame = NSView::frame(&title_bar_view);
             title_bar_frame.size.height = title_bar_height;
             title_bar_frame.origin.y = window.frame().size.height - title_bar_height;
@@ -133,7 +132,7 @@ pub(crate) fn repair_macos_traffic_light_position(
                 let button_frame = NSView::frame(&button);
                 let mut origin = button_frame.origin;
                 origin.x = MACOS_TRAFFIC_LIGHT_X + index as f64 * spacing;
-                origin.y = button_origin_y;
+                origin.y = centered_macos_traffic_light_origin_y(button_frame.size.height);
                 button.setFrameOrigin(origin);
             }
         })
@@ -216,16 +215,16 @@ pub(crate) fn schedule_main_window_reveal_fallback(app: tauri::AppHandle) {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::macos_traffic_light_layout;
+    use super::{centered_macos_traffic_light_origin_y, MACOS_TITLEBAR_HEIGHT};
 
     #[test]
-    fn traffic_lights_keep_the_confirmed_top_inset() {
+    fn traffic_light_center_matches_the_app_titlebar_center() {
         let button_height = 14.0;
-        let (title_bar_height, button_origin_y) = macos_traffic_light_layout(button_height);
-        let visible_top_inset = title_bar_height - button_origin_y - button_height;
+        let button_origin_y = centered_macos_traffic_light_origin_y(button_height);
+        let button_center_y = button_origin_y + button_height / 2.0;
 
-        assert_eq!(title_bar_height, 39.0);
-        assert_eq!(button_origin_y, 0.0);
-        assert_eq!(visible_top_inset, 25.0);
+        assert_eq!(MACOS_TITLEBAR_HEIGHT, 46.0);
+        assert_eq!(button_origin_y, 16.0);
+        assert_eq!(button_center_y, MACOS_TITLEBAR_HEIGHT / 2.0);
     }
 }
