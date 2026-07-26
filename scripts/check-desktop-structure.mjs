@@ -534,9 +534,11 @@ assert(
     ) &&
     rustLib.includes("for delay_ms in MACOS_TRAFFIC_LIGHT_REPAIR_DELAYS_MS") &&
     rustLib.includes("tauri::WindowEvent::Focused(true)") &&
-    rustLib.includes("MACOS_TRAFFIC_LIGHT_Y: f64 = 25.0") &&
-    rustLib.includes("fn macos_traffic_light_layout(button_height: f64)") &&
-    rustLib.includes("origin.y = button_origin_y;") &&
+    rustLib.includes("MACOS_TITLEBAR_HEIGHT: f64 = 46.0") &&
+    rustLib.includes("fn centered_macos_traffic_light_origin_y(button_height: f64)") &&
+    rustLib.includes(
+      "origin.y = centered_macos_traffic_light_origin_y(button_frame.size.height);"
+    ) &&
     rustLib.includes("repair_macos_traffic_light_position(&window)?;") &&
     rustLib.includes("let _ = repair_macos_traffic_light_position(&window);") &&
     rustLib.includes("tauri::WindowEvent::Resized(_)") &&
@@ -569,7 +571,7 @@ assert(
       "top: calc((var(--titlebar-height) - var(--titlebar-control-size)) / 2)"
     ) &&
     !styles.includes("--titlebar-content-offset-y"),
-  "Native traffic lights must retain the user-confirmed y=25 alignment"
+  "Native traffic lights must remain centered in the 46px app titlebar"
 );
 assert(
   tauriConfig.bundle.icon.includes("icons/icon.icns"),
