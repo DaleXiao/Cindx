@@ -149,7 +149,7 @@ pub(crate) async fn confirm_delete_action(
 #[cfg(target_os = "macos")]
 pub(crate) fn show_native_delete_confirmation(kind: &str, name: &str) -> bool {
     use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSAlertStyle};
+    use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication};
     use objc2_foundation::NSString;
 
     let Some(main_thread) = MainThreadMarker::new() else {
@@ -167,6 +167,10 @@ pub(crate) fn show_native_delete_confirmation(kind: &str, name: &str) -> bool {
     };
     let alert = NSAlert::new(main_thread);
     alert.setAlertStyle(NSAlertStyle::Critical);
+    if let Some(icon) = NSApplication::sharedApplication(main_thread).applicationIconImage() {
+        // NSAlert otherwise substitutes its critical-warning artwork for the app identity.
+        unsafe { alert.setIcon(Some(&icon)) };
+    }
     alert.setMessageText(&NSString::from_str(&format!("Delete {target} ‘{name}’?")));
     alert.setInformativeText(&NSString::from_str(informative_text));
     alert.addButtonWithTitle(&NSString::from_str(&format!("Delete {target}")));

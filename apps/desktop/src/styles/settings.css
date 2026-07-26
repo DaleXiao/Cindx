@@ -1662,6 +1662,12 @@ details[open] > summary .settings-disclosure-chevron > svg {
   background: #1d4ed8;
 }
 
+.permission-review-actions button.permission-approve svg {
+  color: #ffffff !important;
+  stroke: currentColor !important;
+  stroke-width: 2.25;
+}
+
 .permission-review-actions button.permission-session {
   color: #1d4ed8;
   background: #eff6ff;
@@ -1782,5 +1788,4 @@ details[open] > summary .settings-disclosure-chevron > svg {
 .settings-view .prompt-evolution-table tbody td:last-child {
   border-radius: 0 var(--settings-element-radius) var(--settings-element-radius) 0;
 }
-
 

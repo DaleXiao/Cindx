@@ -617,7 +617,6 @@
   .knowledge-graph-node-label,
   .metadata-disclosure-icon,
   .metadata-details-body,
-  .brand-mark-shell::after,
   .brand-name-shimmer {
     transition: none;
     animation: none;
@@ -651,4 +650,3 @@
     transition: none;
   }
 }
-

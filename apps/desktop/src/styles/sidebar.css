@@ -65,24 +65,6 @@
   object-fit: contain;
 }
 
-.brand-mark-shell::after {
-  position: absolute;
-  inset: 0;
-  content: "";
-  background: linear-gradient(
-    108deg,
-    transparent 34%,
-    rgb(255 255 255 / 78%) 48%,
-    rgb(191 219 254 / 58%) 52%,
-    transparent 66%
-  );
-  background-position: 135% 0;
-  background-size: 240% 100%;
-  mix-blend-mode: screen;
-  opacity: 0;
-  pointer-events: none;
-}
-
 .brand-name {
   position: relative;
   display: inline-block;
@@ -116,29 +98,8 @@
   -webkit-text-fill-color: transparent;
 }
 
-.brand-identity:hover .brand-mark-shell::after {
-  animation: brand-mark-shimmer 560ms var(--ease-out-quart) 1 both;
-}
-
 .brand-identity:hover .brand-name-shimmer {
-  animation: brand-name-shimmer 720ms 280ms var(--ease-out-quart) 1 both;
-}
-
-@keyframes brand-mark-shimmer {
-  0% {
-    background-position: 135% 0;
-    opacity: 0;
-  }
-
-  18%,
-  82% {
-    opacity: 1;
-  }
-
-  100% {
-    background-position: -135% 0;
-    opacity: 0;
-  }
+  animation: brand-name-shimmer 720ms var(--ease-out-quart) 1 both;
 }
 
 @keyframes brand-name-shimmer {
@@ -894,5 +855,4 @@
     transform: translateY(0) scale(1);
   }
 }
-
 
