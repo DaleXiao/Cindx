@@ -194,6 +194,33 @@ impl WorkflowPlanIr {
         workflow: &AdaptiveWorkflow,
         budget: WorkflowBudget,
     ) -> Self {
+        let mut steps = workflow
+            .steps
+            .iter()
+            .map(|step| WorkflowPlanStep {
+                id: step.id.clone(),
+                role: step.role.clone(),
+                model: step.model.clone(),
+                subtask: step.subtask.clone(),
+                access: step.access.clone(),
+                tool_policy: WorkflowToolPolicy::ReadOnlyEvidence,
+                contract: WorkflowStepContract::inferred(
+                    &step.role,
+                    &step.access,
+                    &WorkflowToolPolicy::ReadOnlyEvidence,
+                ),
+            })
+            .collect::<Vec<_>>();
+        if !steps.iter().any(|step| {
+            matches!(
+                step.contract.output_kind,
+                WorkflowOutputKind::Synthesis | WorkflowOutputKind::Verification
+            )
+        }) {
+            if let Some(delivery) = steps.last_mut() {
+                delivery.contract.output_kind = WorkflowOutputKind::Synthesis;
+            }
+        }
         Self {
             schema: WORKFLOW_IR_SCHEMA.to_string(),
             workflow_id: workflow_id.into(),
@@ -202,23 +229,7 @@ impl WorkflowPlanIr {
             policy: policy.into(),
             coordinator_model: coordinator_model.into(),
             prompt_profile: prompt_profile.into(),
-            steps: workflow
-                .steps
-                .iter()
-                .map(|step| WorkflowPlanStep {
-                    id: step.id.clone(),
-                    role: step.role.clone(),
-                    model: step.model.clone(),
-                    subtask: step.subtask.clone(),
-                    access: step.access.clone(),
-                    tool_policy: WorkflowToolPolicy::ReadOnlyEvidence,
-                    contract: WorkflowStepContract::inferred(
-                        &step.role,
-                        &step.access,
-                        &WorkflowToolPolicy::ReadOnlyEvidence,
-                    ),
-                })
-                .collect(),
+            steps,
             budget,
         }
     }

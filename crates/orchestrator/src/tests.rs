@@ -79,6 +79,38 @@ fn workflow_plan(workflow_id: &str, with_verifier: bool) -> WorkflowPlanIr {
     )
 }
 
+#[test]
+fn fallback_delivery_sink_has_a_terminal_output_contract() {
+    let plan = WorkflowPlanIr::from_adaptive(
+        "single-step",
+        "Answer the question",
+        "auto",
+        "single",
+        "default",
+        &AdaptiveWorkflow {
+            steps: vec![AdaptiveWorkflowStep {
+                id: "answer".to_string(),
+                role: "worker".to_string(),
+                model: "default".to_string(),
+                subtask: "Return the final answer".to_string(),
+                access: Vec::new(),
+            }],
+        },
+        WorkflowBudget {
+            max_steps: 1,
+            max_models: 1,
+            max_model_turns_per_step: 1,
+            max_tool_calls_per_step: 0,
+            max_output_tokens_per_step: 1_024,
+        },
+    );
+
+    assert_eq!(
+        plan.steps[0].contract.output_kind,
+        WorkflowOutputKind::Synthesis
+    );
+}
+
 fn conductor_request() -> ConductorRequest {
     let routing = RoutingContext::from_prompt("Compare implementation strategies", Vec::new());
     ConductorRequest {

@@ -1,5 +1,5 @@
 use super::*;
-use orchestrator::{AdaptiveWorkflow, AdaptiveWorkflowStep};
+use orchestrator::{AdaptiveWorkflow, AdaptiveWorkflowStep, WorkflowOutputKind};
 
 const EXTERNAL_EFFECT_SCHEMA: &str = "cindx.external_effect_eval.raw.v2";
 const GPQA_SOURCE_URL: &str = "https://github.com/idavidrein/gpqa";
@@ -409,6 +409,7 @@ fn workflow_treatment(
         execute_prompt_workflow_candidate(config, workspace_root, prompt, candidate, control);
     let workflow_succeeded = execution.execution.succeeded;
     let workflow_output = execution.execution.final_output.clone();
+    let workflow_output_kind = selected_workflow_output_kind(&execution);
     let workflow_error = (!workflow_succeeded).then(|| {
         execution
             .execution
@@ -448,7 +449,7 @@ fn workflow_treatment(
     );
     let finalizer_models = terminal_delivery_models(config);
     let (output, succeeded, error, finalizer_latency_ms) =
-        if workflow_delivery_is_final(&execution.execution) {
+        if workflow_delivery_is_final(&execution.execution, workflow_output_kind.as_ref()) {
             usage.insert(
                 "terminal_executor_status".to_string(),
                 "skipped_verified_workflow".to_string(),
@@ -509,8 +510,30 @@ fn workflow_treatment(
     }
 }
 
-fn workflow_delivery_is_final(execution: &PromptWorkflowExecution) -> bool {
-    execution.succeeded && execution.quality_gate_met && !execution.final_output.trim().is_empty()
+fn selected_workflow_output_kind(
+    execution: &PromptExecutionCandidate,
+) -> Option<WorkflowOutputKind> {
+    let plan = execution.plan.plan.as_ref()?;
+    let selected = execution.execution.steps.iter().rev().find(|step| {
+        step.usable() && step.output.trim() == execution.execution.final_output.trim()
+    })?;
+    plan.steps
+        .iter()
+        .find(|step| step.id == selected.id)
+        .map(|step| step.contract.output_kind.clone())
+}
+
+fn workflow_delivery_is_final(
+    execution: &PromptWorkflowExecution,
+    output_kind: Option<&WorkflowOutputKind>,
+) -> bool {
+    execution.succeeded
+        && !execution.final_output.trim().is_empty()
+        && (execution.quality_gate_met
+            || matches!(
+                output_kind,
+                Some(WorkflowOutputKind::Synthesis | WorkflowOutputKind::Verification)
+            ))
 }
 
 fn workflow_step_diagnostics(execution: &PromptWorkflowExecution) -> String {
@@ -1196,7 +1219,7 @@ fn terminal_executor_failure_does_not_turn_an_empty_graph_into_success() {
 }
 
 #[test]
-fn verified_workflow_delivery_does_not_require_a_second_model_call() {
+fn workflow_delivery_contract_avoids_a_second_model_call() {
     let execution = PromptWorkflowExecution {
         succeeded: true,
         quality_gate_met: true,
@@ -1205,13 +1228,23 @@ fn verified_workflow_delivery_does_not_require_a_second_model_call() {
         latency_ms: 25,
         total_tokens: 50,
     };
-    assert!(workflow_delivery_is_final(&execution));
+    assert!(workflow_delivery_is_final(
+        &execution,
+        Some(&WorkflowOutputKind::Synthesis)
+    ));
 
-    let unverified = PromptWorkflowExecution {
+    let unverified_delivery = PromptWorkflowExecution {
         quality_gate_met: false,
         ..execution
     };
-    assert!(!workflow_delivery_is_final(&unverified));
+    assert!(workflow_delivery_is_final(
+        &unverified_delivery,
+        Some(&WorkflowOutputKind::Verification)
+    ));
+    assert!(!workflow_delivery_is_final(
+        &unverified_delivery,
+        Some(&WorkflowOutputKind::Analysis)
+    ));
 }
 
 #[test]
