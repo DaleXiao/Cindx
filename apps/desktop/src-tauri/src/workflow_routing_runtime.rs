@@ -1,15 +1,19 @@
 use super::*;
 
 pub(crate) fn workflow_prior_for_run(
-    _state: &tauri::State<'_, AppState>,
+    state: &tauri::State<'_, AppState>,
     run_context: &Metadata,
     allowed_models: &[String],
     max_models: usize,
 ) -> Result<Option<WorkflowTopologyPrior>, String> {
-    let events = open_app_read_store()?
-        .list_by_task(&phase16_task_id())
-        .map_err(|error| error.to_string())?;
-    let telemetry = workflow_execution_telemetry_from_events(&events, allowed_models);
+    let telemetry = {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        load_workflow_telemetry_read_model(&mut store, allowed_models)
+            .map_err(|error| error.to_string())?
+    };
     let teacher = WorkflowSearchTeacher::train(&telemetry);
     let Some(task_class) = run_context
         .get("task_class")
@@ -34,6 +38,50 @@ pub(crate) fn workflow_prior_for_run(
             routing_signature,
         )
         .cloned())
+}
+
+pub(crate) fn conductor_historical_evidence(
+    state: &tauri::State<'_, AppState>,
+    allowed_models: &[String],
+) -> Result<String, String> {
+    let telemetry = {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        load_routing_telemetry_read_model(&mut store).map_err(|error| error.to_string())?
+    };
+    let allowed = allowed_models
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let evidence = LearnedModelRouter::train(&telemetry)
+        .calibrated_evidence()
+        .into_iter()
+        .filter(|route| allowed.contains(route.model.as_str()))
+        .take(12)
+        .map(|route| {
+            format!(
+                "class={} execution={} model={} samples={} success={:.0}% lower_confidence={:.2} quality={} verification={} latency_ms={}",
+                route.task_class.label(),
+                route.policy.label(),
+                route.model,
+                route.examples,
+                route.success_rate * 100.0,
+                route.success_confidence,
+                route
+                    .average_quality_score
+                    .map(|score| format!("{score:.2}"))
+                    .unwrap_or_else(|| "unrated".to_string()),
+                route
+                    .verification_rate
+                    .map(|rate| format!("{:.0}%", rate * 100.0))
+                    .unwrap_or_else(|| "unrated".to_string()),
+                route.average_latency_ms,
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(evidence.join("\n"))
 }
 
 pub(crate) fn parse_task_class_label(value: &str) -> Option<TaskClass> {
@@ -86,43 +134,6 @@ pub(crate) fn model_candidates_for_config(config: &ProviderConfig) -> Vec<ModelC
         latency_tier,
     })
     .collect()
-}
-
-pub(crate) fn route_with_local_telemetry(
-    _state: &tauri::State<'_, AppState>,
-    context: &RoutingContext,
-) -> Result<(RoutingDecision, usize), String> {
-    let mut store = open_app_read_store()?;
-    let telemetry = load_routing_telemetry_read_model_snapshot(&mut store)
-        .map_err(|error| error.to_string())?;
-    let router = LearnedModelRouter::train(&telemetry);
-    let learned_examples = router
-        .learned_route_for_context(context)
-        .map(|route| route.examples)
-        .unwrap_or(0);
-    let learned_evidence_ready = router
-        .learned_route_for_context(context)
-        .is_some_and(|route| route.evidence_ready());
-    let learned_model_available = router
-        .learned_route_for_context(context)
-        .map(|route| {
-            context
-                .model_candidates
-                .iter()
-                .any(|candidate| candidate.name == route.model)
-        })
-        .unwrap_or(false);
-    let decision = if learned_evidence_ready && learned_model_available {
-        router.route(context)
-    } else {
-        let mut decision = RuleBasedRouter.route(context);
-        decision
-            .metadata
-            .entry("router".to_string())
-            .or_insert_with(|| "rule_based_v2".to_string());
-        decision
-    };
-    Ok((decision, learned_examples))
 }
 
 pub(crate) fn append_router_decision_event(

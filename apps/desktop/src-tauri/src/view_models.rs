@@ -809,6 +809,21 @@ pub(crate) struct RoutingTelemetryReadModel {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct WorkflowTelemetryEntry {
+    pub(crate) workflow_id: String,
+    pub(crate) telemetry: WorkflowExecutionTelemetry,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct WorkflowTelemetryReadModel {
+    pub(crate) schema: String,
+    pub(crate) revision: u64,
+    pub(crate) event_count: u64,
+    pub(crate) model_pool_signature: String,
+    pub(crate) entries: Vec<WorkflowTelemetryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PromptGenomeRecord {
     pub(crate) effort: String,
     pub(crate) genome: ConductorPromptGenome,

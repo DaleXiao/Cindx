@@ -5,9 +5,11 @@ use crate::{
         latest_agent_prompt_from_active_events,
     },
     app_state::AgentRecoveryEnvelope,
-    persistence_runtime::{current_time_millis, metadata_with_context, phase16_task_id},
+    event_persistence::append_event,
+    project_session_persistence::metadata_with_context,
     runtime_constants::AGENT_RECOVERY_SCHEMA,
-    tool_execution::{append_event, message_from_event},
+    runtime_values::{current_time_millis, phase16_task_id},
+    tool_execution::message_from_event,
     workflow_checkpoint_runtime::latest_external_user_turn_event,
 };
 
@@ -393,12 +395,13 @@ pub(super) fn recovery_safe_transcript(events: &[Event]) -> Vec<Message> {
 }
 
 pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Result<usize, String> {
-    let events = store
-        .list_by_task(&phase16_task_id())
+    let task_id = phase16_task_id();
+    let lifecycle_events = store
+        .list_by_task_and_kinds(&task_id, &[EventKind::TaskStatusChanged, EventKind::Error])
         .map_err(|error| error.to_string())?;
     let mut active_runs = BTreeMap::<String, Metadata>::new();
 
-    for event in &events {
+    for event in &lifecycle_events {
         let session_key = event
             .metadata
             .get("session_id")
@@ -430,6 +433,8 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
     let mut recovered = 0;
     for (session_key, run_context) in active_runs {
         let session_id = (session_key != "__default__").then_some(session_key.as_str());
+        let events = agent_events_for_session(store, &task_id, session_id)
+            .map_err(|error| error.to_string())?;
         let active_events = active_agent_events_for_session(&events, session_id);
         let already_recovered_wait = active_events.last().is_some_and(|event| {
             event.summary == "Agent task waiting for permission"
@@ -440,7 +445,7 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
         }
         let pending_permissions = pending_agent_permissions_for_run(
             store,
-            &phase16_task_id(),
+            &task_id,
             session_id,
             run_context.get("agent_run_id").map(String::as_str),
         )

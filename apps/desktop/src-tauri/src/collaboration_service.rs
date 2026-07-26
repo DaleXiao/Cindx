@@ -1,8 +1,8 @@
 use agent_core::{Message, MessageRole, Metadata, ModelRole};
 use agent_runtime::{AgentEvidenceCandidate, AgentEvidencePacket, AgentFailure};
 use orchestrator::{
-    AdaptiveWorkflow, ConductorPromptGenome, ConductorRoleHints, PromptContextPolicy,
-    WorkflowExecutionCheckpoint, WorkflowPlanIr, WorkflowStepStatus, WorkflowToolPolicy,
+    ConductorPromptGenome, ConductorRoleHints, PromptContextPolicy, WorkflowExecutionCheckpoint,
+    WorkflowOutputKind, WorkflowPlanIr, WorkflowStepStatus, WorkflowToolPolicy,
     WorkflowVerificationState, WORKFLOW_IR_SCHEMA,
 };
 use serde::{Deserialize, Serialize};
@@ -153,6 +153,7 @@ pub(crate) struct AdaptiveCollaborationSpec {
     pub(crate) request_id: String,
     pub(crate) access: Vec<String>,
     pub(crate) tool_policy: WorkflowToolPolicy,
+    pub(crate) output_kind: WorkflowOutputKind,
     pub(crate) max_attempts: usize,
     pub(crate) max_model_turns: usize,
     pub(crate) max_tool_calls: usize,
@@ -420,6 +421,10 @@ pub(crate) fn adaptive_stage_metadata(spec: &AdaptiveCollaborationSpec) -> Metad
             spec.tool_policy.label().to_string(),
         ),
         (
+            "output_kind".to_string(),
+            format!("{:?}", spec.output_kind).to_ascii_lowercase(),
+        ),
+        (
             "max_model_turns".to_string(),
             spec.max_model_turns.to_string(),
         ),
@@ -433,12 +438,13 @@ pub(crate) fn adaptive_stage_metadata(spec: &AdaptiveCollaborationSpec) -> Metad
     .collect()
 }
 
-pub(crate) fn adaptive_model_role(role: &str) -> ModelRole {
-    match role {
-        "thinker" => ModelRole::Planner,
-        "verifier" => ModelRole::Reviewer,
-        "synthesizer" => ModelRole::Summarizer,
-        _ => ModelRole::Executor,
+pub(crate) fn adaptive_model_role(role: &str, output_kind: &WorkflowOutputKind) -> ModelRole {
+    match output_kind {
+        WorkflowOutputKind::Verification => ModelRole::Reviewer,
+        WorkflowOutputKind::Synthesis => ModelRole::Summarizer,
+        WorkflowOutputKind::Evidence => ModelRole::Executor,
+        WorkflowOutputKind::Analysis if role == "thinker" => ModelRole::Planner,
+        WorkflowOutputKind::Analysis => ModelRole::Executor,
     }
 }
 
@@ -452,46 +458,48 @@ pub(crate) struct WorkflowRoleCoverage {
     pub(crate) cross_reviewed: bool,
 }
 
-pub(crate) fn workflow_role_coverage(
-    workflow: &AdaptiveWorkflow,
+pub(crate) fn workflow_contract_coverage(
+    plan: &WorkflowPlanIr,
     hints: &ConductorRoleHints,
 ) -> WorkflowRoleCoverage {
-    let expected_model = |role: &str| match role {
-        "thinker" => hints.planner.as_str(),
-        "worker" => hints.executor.as_str(),
-        "verifier" => hints.reviewer.as_str(),
-        "synthesizer" => hints.synthesizer.as_str(),
-        _ => "",
+    let expected_model = |kind: &WorkflowOutputKind| match kind {
+        WorkflowOutputKind::Analysis => hints.planner.as_str(),
+        WorkflowOutputKind::Evidence => hints.executor.as_str(),
+        WorkflowOutputKind::Verification => hints.reviewer.as_str(),
+        WorkflowOutputKind::Synthesis => hints.synthesizer.as_str(),
     };
-    let independent_models = workflow
+    let independent_models = plan
         .steps
         .iter()
-        .filter(|step| step.access.is_empty() && matches!(step.role.as_str(), "thinker" | "worker"))
+        .filter(|step| {
+            step.access.is_empty()
+                && step.contract.output_kind != WorkflowOutputKind::Verification
+                && step.contract.output_kind != WorkflowOutputKind::Synthesis
+        })
         .map(|step| step.model.as_str())
         .collect::<BTreeSet<_>>()
         .len();
     WorkflowRoleCoverage {
-        aligned_steps: workflow
+        aligned_steps: plan
             .steps
             .iter()
-            .filter(|step| step.model == expected_model(&step.role))
+            .filter(|step| step.model == expected_model(&step.contract.output_kind))
             .count(),
-        total_steps: workflow.steps.len(),
+        total_steps: plan.steps.len(),
         independent_models,
-        verifier_steps: workflow
+        verifier_steps: plan
             .steps
             .iter()
-            .filter(|step| step.role == "verifier")
+            .filter(|step| step.contract.output_kind == WorkflowOutputKind::Verification)
             .count(),
-        synthesizer_steps: workflow
+        synthesizer_steps: plan
             .steps
             .iter()
-            .filter(|step| step.role == "synthesizer")
+            .filter(|step| step.contract.output_kind == WorkflowOutputKind::Synthesis)
             .count(),
-        cross_reviewed: workflow
-            .steps
-            .iter()
-            .any(|step| step.role == "verifier" && step.access.len() >= 2),
+        cross_reviewed: plan.steps.iter().any(|step| {
+            step.contract.output_kind == WorkflowOutputKind::Verification && step.access.len() >= 2
+        }),
     }
 }
 

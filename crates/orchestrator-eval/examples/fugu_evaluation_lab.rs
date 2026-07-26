@@ -1,4 +1,4 @@
-use orchestrator::{
+use orchestrator_eval::{
     build_fugu_evaluation_run_plan, evaluate_fugu_evaluation, parse_fugu_evaluation_observations,
     parse_fugu_evaluation_suite, render_fugu_evaluation_card,
 };

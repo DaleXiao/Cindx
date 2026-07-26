@@ -300,6 +300,13 @@ impl WorkflowPlanIr {
                 ));
             }
         }
+        if self
+            .steps
+            .last()
+            .is_none_or(|step| step.contract.output_kind != WorkflowOutputKind::Synthesis)
+        {
+            return Err("workflow must end with a synthesis output contract".to_string());
+        }
         validate_adaptive_workflow(&self.adaptive_workflow(), allowed_models)
     }
 
@@ -424,6 +431,8 @@ pub struct WorkflowExecutionCheckpoint {
     pub continuations: usize,
     #[serde(default)]
     pub additional_model_turns_per_step: usize,
+    #[serde(default)]
+    pub plan_revisions: Vec<WorkflowPlanRevisionRecord>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
 }
@@ -468,6 +477,7 @@ impl WorkflowExecutionCheckpoint {
             finalized: false,
             continuations: 0,
             additional_model_turns_per_step: 0,
+            plan_revisions: Vec::new(),
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
         }
@@ -484,6 +494,9 @@ impl WorkflowExecutionCheckpoint {
             return Err("workflow checkpoint resume key is empty".to_string());
         }
         self.plan.validate(allowed_models)?;
+        if self.plan_revisions.len() > MAX_WORKFLOW_PLAN_REVISIONS {
+            return Err("workflow checkpoint exceeds its plan revision budget".to_string());
+        }
         let expected = self
             .plan
             .steps
@@ -630,7 +643,7 @@ impl WorkflowExecutionCheckpoint {
             output_digest: workflow_output_digest(&output),
             output_kind: plan_step.contract.output_kind.clone(),
             evidence_count,
-            verification: if plan_step.role == "verifier" {
+            verification: if plan_step.contract.output_kind == WorkflowOutputKind::Verification {
                 WorkflowVerificationState::Passed
             } else {
                 WorkflowVerificationState::NotRequired
@@ -919,7 +932,7 @@ impl WorkflowExecutionCheckpoint {
                 step.semantic
                     .completed_at_ms
                     .get_or_insert(step.updated_at_ms);
-                if plan_step.role == "verifier"
+                if plan_step.contract.output_kind == WorkflowOutputKind::Verification
                     && step.status == WorkflowStepStatus::Completed
                     && step.semantic.verification == WorkflowVerificationState::NotRequired
                 {

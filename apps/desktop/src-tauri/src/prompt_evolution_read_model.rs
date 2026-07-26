@@ -489,6 +489,7 @@ pub(crate) fn load_prompt_evolution_read_model(
                         && model.event_count <= revision.event_count
                 })
         });
+    let had_stored_model = stored.is_some();
     let mut model = stored.unwrap_or_else(|| PromptEvolutionReadModel {
         schema: PROMPT_EVOLUTION_READ_MODEL_NAMESPACE.to_string(),
         revision: 0,
@@ -499,7 +500,9 @@ pub(crate) fn load_prompt_evolution_read_model(
         datasets: BTreeMap::new(),
     });
     let mut delta = store.list_by_task_after(&task_id, model.revision)?;
+    let mut changed = !had_stored_model;
     if model.event_count.saturating_add(delta.len() as u64) != revision.event_count {
+        changed = true;
         delta = store.list_by_task_after(&task_id, 0)?;
         model = build_prompt_evolution_read_model(
             &delta,
@@ -507,12 +510,14 @@ pub(crate) fn load_prompt_evolution_read_model(
             revision.event_count,
         );
     } else if model.revision == 0 {
+        changed = true;
         model = build_prompt_evolution_read_model(
             &delta,
             revision.latest_sequence,
             revision.event_count,
         );
-    } else {
+    } else if !delta.is_empty() {
+        changed = true;
         for event in &delta {
             for record in prompt_genome_records_from_event(event) {
                 upsert_prompt_genome(&mut model.genomes, record);
@@ -561,7 +566,9 @@ pub(crate) fn load_prompt_evolution_read_model(
         model.event_count = revision.event_count;
     }
 
-    save_prompt_evolution_read_model(store, &model)?;
+    if changed {
+        save_prompt_evolution_read_model(store, &model)?;
+    }
     Ok(model)
 }
 

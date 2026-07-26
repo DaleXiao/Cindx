@@ -546,7 +546,7 @@ pub(crate) fn fork_session(
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
     let events = store
-        .list_by_task(&phase16_task_id())
+        .list_by_task_and_metadata_or_unscoped(&phase16_task_id(), "session_id", &source.id)
         .map_err(|error| error.to_string())?;
     for event in agent_session_events(&events, &source.id) {
         let mut metadata = event.metadata;

@@ -1,4 +1,7 @@
 use super::queue::*;
+use crate::agent_run_engine::{
+    prepare_agent_execution, AgentRunPreparationError, PreparedAgentExecution,
+};
 use crate::*;
 
 #[tauri::command]
@@ -93,30 +96,6 @@ pub(crate) fn run_agent_task_blocking_inner(
         normalized_current_time_context(&input.current_time),
     );
     let requested_policy = effort.requested_policy();
-    let mut routing_context =
-        RoutingContext::from_prompt(&prompt, model_candidates_for_config(&config));
-    if requested_policy != OrchestrationPolicy::AutoRouter {
-        routing_context.user_policy_override = Some(requested_policy.clone());
-    }
-    let (routing_decision, router_examples) = route_with_local_telemetry(&state, &routing_context)?;
-    let collaboration_policy = if requested_policy == OrchestrationPolicy::AutoRouter {
-        routing_decision.policy.clone()
-    } else {
-        requested_policy.clone()
-    };
-    let conductor_contract = ConductorExecutionContract::from_routing(
-        &routing_context,
-        effort.label(),
-        collaboration_policy.clone(),
-    );
-    run_context.insert(
-        "task_class".to_string(),
-        routing_context.task_class.label().to_string(),
-    );
-    run_context.insert(
-        "routing_signature".to_string(),
-        routing_context.learning_signature(),
-    );
     run_context.insert("agent_effort".to_string(), effort.label().to_string());
     add_image_generation_run_context(&mut run_context, &config, &prompt);
     add_agent_run_budget_metadata(&mut run_context, cancellation);
@@ -124,39 +103,9 @@ pub(crate) fn run_agent_task_blocking_inner(
         "requested_policy".to_string(),
         requested_policy.label().to_string(),
     );
-    run_context.insert(
-        "collaboration_policy".to_string(),
-        collaboration_policy.label().to_string(),
-    );
-    run_context.insert(
-        "collaboration_profile".to_string(),
-        collaboration_profile(effort, &routing_context).to_string(),
-    );
-    run_context.insert(
-        "conductor_contract".to_string(),
-        conductor_contract.to_json()?,
-    );
-    run_context.insert(
-        "expected_collaboration_uplift_bps".to_string(),
-        conductor_contract.expected_uplift_bps.to_string(),
-    );
-    run_context.insert(
-        "agent_model".to_string(),
-        agent_model_for_effort(&config, effort, &collaboration_policy, &routing_decision),
-    );
-    run_context.insert("router_model".to_string(), routing_decision.model.clone());
-    run_context.insert("router_examples".to_string(), router_examples.to_string());
-    run_context.insert(
-        "router_source".to_string(),
-        routing_decision
-            .metadata
-            .get("router")
-            .cloned()
-            .unwrap_or_else(|| "rule_based_v2".to_string()),
-    );
     let session_id = run_context.get("session_id").map(String::as_str);
     let task_id = phase16_task_id();
-    let (mut history, artifact_manifest) = {
+    let (history, artifact_manifest) = {
         let mut store = state
             .store
             .lock()
@@ -174,18 +123,6 @@ pub(crate) fn run_agent_task_blocking_inner(
         let mut start_metadata = run_context.clone();
         start_metadata.insert("prompt".to_string(), display_prompt.clone());
         start_metadata.insert(
-            "requested_policy".to_string(),
-            requested_policy.label().to_string(),
-        );
-        start_metadata.insert(
-            "collaboration_policy".to_string(),
-            collaboration_policy.label().to_string(),
-        );
-        start_metadata.insert(
-            "router_explanation".to_string(),
-            routing_decision.explanation.clone(),
-        );
-        start_metadata.insert(
             "context_window_tokens".to_string(),
             config.context_window_tokens.to_string(),
         );
@@ -195,15 +132,6 @@ pub(crate) fn run_agent_task_blocking_inner(
             EventKind::TaskStatusChanged,
             "Agent task started",
             start_metadata,
-        )
-        .map_err(|error| error.to_string())?;
-        append_router_decision_event(
-            &mut store,
-            &task_id,
-            &run_context,
-            &routing_context,
-            &routing_decision,
-            router_examples,
         )
         .map_err(|error| error.to_string())?;
         let mut message_metadata = run_context.clone();
@@ -219,86 +147,37 @@ pub(crate) fn run_agent_task_blocking_inner(
         (history, artifact_manifest)
     };
 
-    history = prepare_session_history_context(
-        &state,
-        &root,
-        &run_context,
-        history,
-        config.context_window_tokens,
-    )
-    .map_err(|error| format!("context preparation failed: {error}"))?;
-    let prepared_knowledge = match prepare_run_knowledge_contexts(
-        &state,
-        &task_id,
-        &run_context,
-        &root,
-        &config,
-        &prompt,
-        &routing_context,
-        &routing_decision.retrieval_mode,
-        cancellation,
-    ) {
-        Ok(prepared) => prepared,
-        Err(error) if error == MODEL_REQUEST_CANCELLED => {
-            return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
-        }
-        Err(error) => return Err(error),
-    };
-    append_prepared_memory_context(&mut run_context, &mut history, prepared_knowledge.memory);
-    if let Some(artifact_manifest) = artifact_manifest {
-        history.push(artifact_manifest);
-    }
-
-    append_skill_context_for_run(&root, &prompt, &mut history)?;
-    if let Some(workspace_context) = prepared_knowledge.workspace {
-        history.push(workspace_context);
-    }
-
-    if agent_run_should_stop(cancellation) {
-        return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
-    }
-
-    cancellation.mark_progress("orchestration", "Preparing execution strategy");
-    append_agent_progress_event(
-        &state,
-        &task_id,
-        &run_context,
-        "Preparing execution strategy",
-    )?;
-    append_single_model_policy_guidance(&mut history, &collaboration_policy);
-    let collaboration = match prepare_agent_collaboration_or_degrade(
+    let prepared = match prepare_agent_execution(
         app,
         &state,
         &config,
         &task_id,
         &root,
-        &run_context,
-        &collaboration_policy,
+        run_context,
         &prompt,
-        &history,
+        history,
+        artifact_manifest,
+        effort,
+        cancellation,
     ) {
-        Ok(collaboration) => collaboration,
-        Err(_) if agent_run_should_stop(cancellation) => {
+        Ok(prepared) => prepared,
+        Err(AgentRunPreparationError::ControlStop(run_context)) => {
             return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
         }
-        Err(error) => {
+        Err(AgentRunPreparationError::Collaboration { error, run_context }) => {
             return agent_state_with_error_in_context(
                 &state,
                 &run_context,
                 format!("Collaboration failed: {error}"),
             );
         }
+        Err(AgentRunPreparationError::Runtime(error)) => return Err(error),
     };
-    if let Some(collaboration) = collaboration.as_ref() {
-        append_agent_collaboration_context(&mut history, collaboration);
-    }
-
-    if agent_run_should_stop(cancellation) {
-        return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
-    }
-
-    cancellation.mark_progress("executor", "Starting execution");
-    append_agent_progress_event(&state, &task_id, &run_context, "Starting execution")?;
+    let PreparedAgentExecution {
+        run_context,
+        history,
+        collaboration,
+    } = prepared;
     let runtime_config = cancellation.runtime_config();
     let mut runtime = if history.is_empty() {
         start_agent_loop(task_id, prompt.clone(), runtime_config.clone())
@@ -577,66 +456,12 @@ pub(crate) fn retry_agent_task_blocking_inner(
     }
     run_context.insert("agent_run_id".to_string(), unique_id("agent-run"));
     let requested_policy = effort.requested_policy();
-    let mut routing_context =
-        RoutingContext::from_prompt(&prompt, model_candidates_for_config(&config));
-    if requested_policy != OrchestrationPolicy::AutoRouter {
-        routing_context.user_policy_override = Some(requested_policy.clone());
-    }
-    let (routing_decision, router_examples) = route_with_local_telemetry(&state, &routing_context)?;
-    let collaboration_policy = if requested_policy == OrchestrationPolicy::AutoRouter {
-        routing_decision.policy.clone()
-    } else {
-        requested_policy.clone()
-    };
-    let conductor_contract = ConductorExecutionContract::from_routing(
-        &routing_context,
-        effort.label(),
-        collaboration_policy.clone(),
-    );
-    run_context.insert(
-        "task_class".to_string(),
-        routing_context.task_class.label().to_string(),
-    );
-    run_context.insert(
-        "routing_signature".to_string(),
-        routing_context.learning_signature(),
-    );
     run_context.insert("agent_effort".to_string(), effort.label().to_string());
     add_image_generation_run_context(&mut run_context, &config, &prompt);
     add_agent_run_budget_metadata(&mut run_context, cancellation);
     run_context.insert(
         "requested_policy".to_string(),
         requested_policy.label().to_string(),
-    );
-    run_context.insert(
-        "collaboration_policy".to_string(),
-        collaboration_policy.label().to_string(),
-    );
-    run_context.insert(
-        "collaboration_profile".to_string(),
-        collaboration_profile(effort, &routing_context).to_string(),
-    );
-    run_context.insert(
-        "conductor_contract".to_string(),
-        conductor_contract.to_json()?,
-    );
-    run_context.insert(
-        "expected_collaboration_uplift_bps".to_string(),
-        conductor_contract.expected_uplift_bps.to_string(),
-    );
-    run_context.insert(
-        "agent_model".to_string(),
-        agent_model_for_effort(&config, effort, &collaboration_policy, &routing_decision),
-    );
-    run_context.insert("router_model".to_string(), routing_decision.model.clone());
-    run_context.insert("router_examples".to_string(), router_examples.to_string());
-    run_context.insert(
-        "router_source".to_string(),
-        routing_decision
-            .metadata
-            .get("router")
-            .cloned()
-            .unwrap_or_else(|| "rule_based_v2".to_string()),
     );
     {
         let mut store = state
@@ -657,15 +482,6 @@ pub(crate) fn retry_agent_task_blocking_inner(
             start_metadata,
         )
         .map_err(|error| error.to_string())?;
-        append_router_decision_event(
-            &mut store,
-            &task_id,
-            &run_context,
-            &routing_context,
-            &routing_decision,
-            router_examples,
-        )
-        .map_err(|error| error.to_string())?;
         let mut continuation_metadata = run_context.clone();
         continuation_metadata.insert("continuation_replay".to_string(), "true".to_string());
         append_message_event_with_metadata(
@@ -678,7 +494,7 @@ pub(crate) fn retry_agent_task_blocking_inner(
         .map_err(|error| error.to_string())?;
     }
 
-    let (mut history, artifact_manifest, restored_task_state) = {
+    let (history, artifact_manifest, restored_task_state) = {
         let mut store = state
             .store
             .lock()
@@ -733,77 +549,37 @@ pub(crate) fn retry_agent_task_blocking_inner(
             restored_task_state,
         )
     };
-    history = prepare_session_history_context(
-        &state,
-        &root,
-        &run_context,
-        history,
-        config.context_window_tokens,
-    )?;
-    let prepared_knowledge = match prepare_run_knowledge_contexts(
-        &state,
-        &task_id,
-        &run_context,
-        &root,
-        &config,
-        &prompt,
-        &routing_context,
-        &routing_decision.retrieval_mode,
-        cancellation,
-    ) {
-        Ok(prepared) => prepared,
-        Err(error) if error == MODEL_REQUEST_CANCELLED => {
-            return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
-        }
-        Err(error) => return Err(error),
-    };
-    append_prepared_memory_context(&mut run_context, &mut history, prepared_knowledge.memory);
-    if let Some(artifact_manifest) = artifact_manifest {
-        history.push(artifact_manifest);
-    }
-    append_skill_context_for_run(&root, &prompt, &mut history)?;
-    if let Some(workspace_context) = prepared_knowledge.workspace {
-        history.push(workspace_context);
-    }
-    cancellation.mark_progress("orchestration", "Preparing execution strategy");
-    append_agent_progress_event(
-        &state,
-        &task_id,
-        &run_context,
-        "Preparing execution strategy",
-    )?;
-    append_single_model_policy_guidance(&mut history, &collaboration_policy);
-    let collaboration = match prepare_agent_collaboration_or_degrade(
+    let prepared = match prepare_agent_execution(
         app,
         &state,
         &config,
         &task_id,
         &root,
-        &run_context,
-        &collaboration_policy,
+        run_context,
         &prompt,
-        &history,
+        history,
+        artifact_manifest,
+        effort,
+        cancellation,
     ) {
-        Ok(collaboration) => collaboration,
-        Err(_) if agent_run_should_stop(cancellation) => {
+        Ok(prepared) => prepared,
+        Err(AgentRunPreparationError::ControlStop(run_context)) => {
             return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
         }
-        Err(error) => {
+        Err(AgentRunPreparationError::Collaboration { error, run_context }) => {
             return agent_state_with_error_in_context(
                 &state,
                 &run_context,
                 format!("Collaboration failed: {error}"),
             );
         }
+        Err(AgentRunPreparationError::Runtime(error)) => return Err(error),
     };
-    if let Some(collaboration) = collaboration.as_ref() {
-        append_agent_collaboration_context(&mut history, collaboration);
-    }
-    if agent_run_should_stop(cancellation) {
-        return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
-    }
-    cancellation.mark_progress("executor", "Starting execution");
-    append_agent_progress_event(&state, &task_id, &run_context, "Starting execution")?;
+    let PreparedAgentExecution {
+        run_context,
+        history,
+        collaboration,
+    } = prepared;
     let runtime_config = cancellation.runtime_config();
     let runtime = if let Some(mut runtime) = restored_task_state {
         runtime.messages = history;

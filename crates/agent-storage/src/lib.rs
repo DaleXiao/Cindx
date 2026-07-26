@@ -329,6 +329,28 @@ impl SqliteStore {
         events_from_statement(&mut statement)
     }
 
+    pub fn list_by_task_and_kinds(
+        &self,
+        task_id: &TaskId,
+        kinds: &[EventKind],
+    ) -> Result<Vec<Event>, StorageError> {
+        if kinds.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = (0..kinds.len())
+            .map(|index| format!("?{}", index + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut statement = self.prepare(&format!(
+            "select id, task_id, sequence, timestamp_ms, kind, summary, metadata_text\n             from events\n             where task_id = ?1 and kind in ({placeholders})\n             order by sequence asc"
+        ))?;
+        statement.bind_text(1, &task_id.0)?;
+        for (index, kind) in kinds.iter().enumerate() {
+            statement.bind_text((index + 2) as c_int, event_kind_to_str(kind))?;
+        }
+        events_from_statement(&mut statement)
+    }
+
     pub fn event_revision_by_metadata(
         &self,
         task_id: &TaskId,
@@ -965,6 +987,8 @@ impl SqliteStore {
 
             create index if not exists idx_events_task_sequence
               on events(task_id, sequence);
+            create index if not exists idx_events_task_kind_sequence
+              on events(task_id, kind, sequence);
 
             create table if not exists permission_requests (
               id text primary key not null,
@@ -2217,6 +2241,46 @@ mod tests {
         assert_eq!(revision.event_count, 2);
         assert_eq!(revision.latest_sequence, 3);
         assert_eq!(revision.latest_timestamp_ms, 300);
+    }
+
+    #[test]
+    fn reads_only_requested_event_kinds_in_sequence_order() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("task-kinds".to_string());
+        for (sequence, kind) in [
+            (1, EventKind::MessageAdded),
+            (2, EventKind::TaskStatusChanged),
+            (3, EventKind::ToolCallFinished),
+            (4, EventKind::Error),
+        ] {
+            store
+                .append(Event {
+                    id: EventId(format!("event-{sequence}")),
+                    task_id: task_id.clone(),
+                    sequence,
+                    timestamp_ms: sequence * 100,
+                    kind,
+                    summary: format!("event {sequence}"),
+                    metadata: Metadata::new(),
+                })
+                .expect("event should append");
+        }
+
+        let events = store
+            .list_by_task_and_kinds(&task_id, &[EventKind::TaskStatusChanged, EventKind::Error])
+            .expect("filtered events should load");
+
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![2, 4]
+        );
+        assert!(store
+            .list_by_task_and_kinds(&task_id, &[])
+            .expect("empty filter should load")
+            .is_empty());
     }
 
     #[test]

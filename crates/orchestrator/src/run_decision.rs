@@ -1,0 +1,626 @@
+use crate::{
+    ConductorExecutionContract, ConductorFallbackPolicy, ConductorStopPolicy, ModelCandidate,
+    OrchestrationPolicy, RoutingContext, RoutingDecision, TaskClass,
+};
+use agent_core::{Metadata, ModelRole};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+
+pub const AGENT_RUN_DECISION_SCHEMA: &str = "cindx.agent-run-decision.v1";
+pub const MAX_RUN_DECISION_QUERY_CHARS: usize = 2_000;
+pub const MAX_RUN_DECISION_RATIONALE_CHARS: usize = 1_200;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentExecutionMode {
+    Direct,
+    Workflow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceRetrievalChannel {
+    Semantic,
+    FileSearch,
+    GraphDirect,
+    GraphWalk,
+}
+
+impl WorkspaceRetrievalChannel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Semantic => "semantic_rag",
+            Self::FileSearch => "file_search",
+            Self::GraphDirect => "graph_recall",
+            Self::GraphWalk => "graph_walk",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryRecallPolicy {
+    None,
+    Relevant,
+    Comprehensive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentVerificationPolicy {
+    None,
+    SelfCheck,
+    Independent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentToolRequirement {
+    None,
+    ReadOnly,
+    Effects,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRiskLevel {
+    Low,
+    Elevated,
+    High,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRetrievalPlan {
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub channels: BTreeSet<WorkspaceRetrievalChannel>,
+    #[serde(default = "default_retrieval_limit")]
+    pub max_results: usize,
+}
+
+fn default_retrieval_limit() -> usize {
+    8
+}
+
+impl WorkspaceRetrievalPlan {
+    pub fn none() -> Self {
+        Self {
+            query: String::new(),
+            channels: BTreeSet::new(),
+            max_results: default_retrieval_limit(),
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        !self.channels.is_empty()
+    }
+
+    pub fn mode_label(&self) -> String {
+        if self.channels.is_empty() {
+            return "none".to_string();
+        }
+        self.channels
+            .iter()
+            .copied()
+            .map(WorkspaceRetrievalChannel::label)
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryRecallPlan {
+    pub policy: MemoryRecallPolicy,
+    #[serde(default)]
+    pub query: String,
+}
+
+impl MemoryRecallPlan {
+    pub fn none() -> Self {
+        Self {
+            policy: MemoryRecallPolicy::None,
+            query: String::new(),
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.policy != MemoryRecallPolicy::None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRunDecision {
+    pub schema: String,
+    pub task_class: TaskClass,
+    pub execution: AgentExecutionMode,
+    pub primary_model: String,
+    pub tool_requirement: AgentToolRequirement,
+    #[serde(default)]
+    pub vision_required: bool,
+    pub risk_level: AgentRiskLevel,
+    pub retrieval: WorkspaceRetrievalPlan,
+    pub memory: MemoryRecallPlan,
+    pub verification: AgentVerificationPolicy,
+    pub max_parallelism: usize,
+    pub min_successful_branches: usize,
+    pub distinct_contributions: usize,
+    pub estimated_steps: usize,
+    pub expected_uplift_bps: u16,
+    pub confidence_bps: u16,
+    pub stop_policy: ConductorStopPolicy,
+    #[serde(default)]
+    pub rationale: String,
+}
+
+impl AgentRunDecision {
+    pub fn direct(primary_model: impl Into<String>) -> Self {
+        Self {
+            schema: AGENT_RUN_DECISION_SCHEMA.to_string(),
+            task_class: TaskClass::General,
+            execution: AgentExecutionMode::Direct,
+            primary_model: primary_model.into(),
+            tool_requirement: AgentToolRequirement::None,
+            vision_required: false,
+            risk_level: AgentRiskLevel::Low,
+            retrieval: WorkspaceRetrievalPlan::none(),
+            memory: MemoryRecallPlan::none(),
+            verification: AgentVerificationPolicy::SelfCheck,
+            max_parallelism: 1,
+            min_successful_branches: 1,
+            distinct_contributions: 0,
+            estimated_steps: 1,
+            expected_uplift_bps: 0,
+            confidence_bps: 0,
+            stop_policy: ConductorStopPolicy::FirstVerified,
+            rationale: "safe direct fallback".to_string(),
+        }
+    }
+
+    pub fn validate(
+        &self,
+        allowed_models: &[String],
+        max_parallelism: usize,
+    ) -> Result<(), String> {
+        if self.schema != AGENT_RUN_DECISION_SCHEMA {
+            return Err(format!(
+                "unsupported agent run decision schema: {}",
+                self.schema
+            ));
+        }
+        if self.primary_model.trim().is_empty()
+            || !allowed_models
+                .iter()
+                .any(|model| model.trim() == self.primary_model.trim())
+        {
+            return Err(
+                "run decision primary_model is not in the configured model pool".to_string(),
+            );
+        }
+        if self.retrieval.query.chars().count() > MAX_RUN_DECISION_QUERY_CHARS
+            || self.memory.query.chars().count() > MAX_RUN_DECISION_QUERY_CHARS
+        {
+            return Err("run decision query exceeds the harness limit".to_string());
+        }
+        if self.rationale.chars().count() > MAX_RUN_DECISION_RATIONALE_CHARS {
+            return Err("run decision rationale exceeds the harness limit".to_string());
+        }
+        if self.retrieval.enabled() && self.retrieval.query.trim().is_empty() {
+            return Err("workspace retrieval requires a focused query".to_string());
+        }
+        if !(1..=24).contains(&self.retrieval.max_results) {
+            return Err("workspace retrieval max_results must be between 1 and 24".to_string());
+        }
+        if self
+            .retrieval
+            .channels
+            .contains(&WorkspaceRetrievalChannel::GraphWalk)
+            && !self.retrieval.channels.iter().any(|channel| {
+                matches!(
+                    channel,
+                    WorkspaceRetrievalChannel::Semantic
+                        | WorkspaceRetrievalChannel::FileSearch
+                        | WorkspaceRetrievalChannel::GraphDirect
+                )
+            })
+        {
+            return Err(
+                "graph_walk requires at least one seed-producing retrieval channel".to_string(),
+            );
+        }
+        if self.memory.enabled() && self.memory.query.trim().is_empty() {
+            return Err("memory recall requires a focused query".to_string());
+        }
+        if !self.memory.enabled() && !self.memory.query.trim().is_empty() {
+            return Err("memory query must be empty when memory recall is disabled".to_string());
+        }
+        if self.expected_uplift_bps > 10_000 || self.confidence_bps > 10_000 {
+            return Err(
+                "run decision probability scores must be between 0 and 10000 bps".to_string(),
+            );
+        }
+        if !(1..=5).contains(&self.estimated_steps) {
+            return Err("run decision estimated_steps must be between 1 and 5".to_string());
+        }
+        let max_parallelism = max_parallelism.clamp(1, 3);
+        match self.execution {
+            AgentExecutionMode::Direct => {
+                if self.max_parallelism != 1
+                    || self.min_successful_branches != 1
+                    || self.distinct_contributions != 0
+                    || self.stop_policy != ConductorStopPolicy::FirstVerified
+                    || self.verification == AgentVerificationPolicy::Independent
+                {
+                    return Err("direct execution must use one branch, first_verified, and no independent verifier".to_string());
+                }
+            }
+            AgentExecutionMode::Workflow => {
+                if !(1..=max_parallelism).contains(&self.max_parallelism) {
+                    return Err(format!(
+                        "workflow parallelism must be between 1 and {max_parallelism}"
+                    ));
+                }
+                if !(1..=self.max_parallelism).contains(&self.min_successful_branches) {
+                    return Err("workflow quorum exceeds its parallel branch budget".to_string());
+                }
+                if !(1..=self.max_parallelism).contains(&self.distinct_contributions) {
+                    return Err(
+                        "workflow distinct contribution count is outside its branch budget"
+                            .to_string(),
+                    );
+                }
+                if self.stop_policy == ConductorStopPolicy::FirstVerified
+                    && self.min_successful_branches != 1
+                {
+                    return Err(
+                        "first_verified workflow must require exactly one successful branch"
+                            .to_string(),
+                    );
+                }
+                if self.verification == AgentVerificationPolicy::Independent
+                    && self.estimated_steps < 2
+                {
+                    return Err(
+                        "independent verification requires at least two workflow steps".to_string(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn policy(&self) -> OrchestrationPolicy {
+        match self.execution {
+            AgentExecutionMode::Direct => OrchestrationPolicy::Single,
+            AgentExecutionMode::Workflow => OrchestrationPolicy::BestOfN {
+                candidates: self.max_parallelism.max(1),
+            },
+        }
+    }
+
+    pub fn learning_signature(&self) -> String {
+        format!(
+            "{}:execution={:?}:tools={:?}:retrieval={}:memory={:?}:vision={}:risk={:?}:parallelism={}:verify={:?}",
+            self.task_class.label(),
+            self.execution,
+            self.tool_requirement,
+            self.retrieval.mode_label(),
+            self.memory.policy,
+            u8::from(self.vision_required),
+            self.risk_level,
+            self.max_parallelism,
+            self.verification,
+        )
+        .to_ascii_lowercase()
+    }
+
+    pub fn routing_context(
+        &self,
+        prompt: &str,
+        model_candidates: Vec<ModelCandidate>,
+    ) -> RoutingContext {
+        RoutingContext {
+            task_class: self.task_class.clone(),
+            prompt_length: prompt.chars().count(),
+            needs_tools: self.tool_requirement != AgentToolRequirement::None,
+            needs_retrieval: self.retrieval.enabled(),
+            needs_multi_model: self.execution == AgentExecutionMode::Workflow
+                && self.max_parallelism > 1,
+            needs_vision: self.vision_required,
+            high_stakes: self.risk_level == AgentRiskLevel::High,
+            complexity_score: u8::try_from(
+                self.estimated_steps
+                    .saturating_add(self.distinct_contributions)
+                    .saturating_sub(1),
+            )
+            .unwrap_or(u8::MAX)
+            .min(8),
+            estimated_steps: u8::try_from(self.estimated_steps).unwrap_or(5).min(5),
+            parallelizable: self.max_parallelism > 1,
+            verification_required: self.verification != AgentVerificationPolicy::None,
+            latency_sensitive: self.execution == AgentExecutionMode::Direct,
+            user_policy_override: None,
+            model_candidates,
+        }
+    }
+
+    pub fn routing_decision(&self) -> RoutingDecision {
+        let mut metadata = Metadata::new();
+        metadata.insert("router".to_string(), "dynamic_conductor_v1".to_string());
+        metadata.insert(
+            "task_class".to_string(),
+            self.task_class.label().to_string(),
+        );
+        metadata.insert(
+            "execution".to_string(),
+            format!("{:?}", self.execution).to_ascii_lowercase(),
+        );
+        metadata.insert("retrieval_mode".to_string(), self.retrieval.mode_label());
+        metadata.insert(
+            "memory_policy".to_string(),
+            format!("{:?}", self.memory.policy).to_ascii_lowercase(),
+        );
+        metadata.insert(
+            "max_parallelism".to_string(),
+            self.max_parallelism.to_string(),
+        );
+        metadata.insert(
+            "estimated_steps".to_string(),
+            self.estimated_steps.to_string(),
+        );
+        metadata.insert(
+            "expected_uplift_bps".to_string(),
+            self.expected_uplift_bps.to_string(),
+        );
+        metadata.insert(
+            "confidence_bps".to_string(),
+            self.confidence_bps.to_string(),
+        );
+        RoutingDecision {
+            policy: self.policy(),
+            model: self.primary_model.clone(),
+            verifier_role: (self.verification == AgentVerificationPolicy::Independent)
+                .then_some(ModelRole::Reviewer),
+            retrieval_mode: self.retrieval.mode_label(),
+            explanation: self.rationale.clone(),
+            metadata,
+        }
+    }
+
+    pub fn execution_contract(&self, effort: &str) -> ConductorExecutionContract {
+        let effort = match effort.trim().to_ascii_lowercase().as_str() {
+            "fast" => "fast",
+            "pro" => "pro",
+            _ => "auto",
+        }
+        .to_string();
+        ConductorExecutionContract {
+            task_class: self.task_class.clone(),
+            effort: effort.clone(),
+            policy: self.policy(),
+            expected_uplift_bps: self.expected_uplift_bps,
+            confidence_bps: self.confidence_bps,
+            max_parallelism: self.max_parallelism,
+            min_successful_branches: self.min_successful_branches,
+            verification_required: self.verification != AgentVerificationPolicy::None,
+            terminal_model_call_reserve: match effort.as_str() {
+                "fast" => 1,
+                "pro" => 3,
+                _ => 2,
+            },
+            stop_policy: self.stop_policy,
+            fallback_policy: if self.retrieval.enabled()
+                || self.tool_requirement != AgentToolRequirement::None
+            {
+                ConductorFallbackPolicy::BestKnownResult
+            } else {
+                ConductorFallbackPolicy::SinglePath
+            },
+            min_team_uplift_bps: 0,
+            min_distinct_contributions: self.distinct_contributions,
+            requires_synthesis: self.distinct_contributions > 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRunDecisionRequest {
+    pub objective: String,
+    pub recent_context: String,
+    pub effort: String,
+    pub conductor_model: String,
+    pub allowed_models: Vec<String>,
+    pub max_parallelism: usize,
+    pub evolved_directive: String,
+    pub historical_evidence: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentRunDecisionHarness {
+    request: AgentRunDecisionRequest,
+}
+
+impl AgentRunDecisionHarness {
+    pub fn new(request: AgentRunDecisionRequest) -> Self {
+        Self { request }
+    }
+
+    pub fn planning_prompt(&self) -> String {
+        let request = &self.request;
+        let models = request
+            .allowed_models
+            .iter()
+            .map(|model| format!("- {model}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let context = if request.recent_context.trim().is_empty() {
+            "(none)"
+        } else {
+            request.recent_context.as_str()
+        };
+        let historical_evidence = if request.historical_evidence.trim().is_empty() {
+            "(no sufficiently supported observations yet)"
+        } else {
+            request.historical_evidence.as_str()
+        };
+        format!(
+            concat!(
+                "You are the Cindx runtime Conductor. Decide how to execute the request; do not answer it. Return only one strict JSON object.\n",
+                "Treat the strongest configured single-model direct answer as the baseline. Choose workflow only when independent work, verification, or decomposition is likely to improve correctness enough to justify coordination latency and correlated-error risk. Pro prioritizes correctness but is not automatically multi-model. Auto balances correctness and latency.\n",
+                "Choose retrieval from semantic, file_search, graph_direct, graph_walk only when the answer needs workspace evidence not already present. Choose memory only when prior user/project decisions are materially relevant. Do not retrieve merely because the prompt is long, mentions code, or asks a question.\n",
+                "Graph walk must have semantic, file_search, or graph_direct as a seed channel. Keep focused retrieval and memory queries under {query_limit} characters. Use only exact configured model strings.\n",
+                "For direct execution use max_parallelism=1, min_successful_branches=1, distinct_contributions=0, stop_policy=first_verified, and verification none or self_check. For workflow use 1..={max_parallelism} branches and make distinct_contributions reflect genuinely different work, not duplicated answers.\n",
+                "expected_uplift_bps and confidence_bps are calibrated estimates from 0 to 10000, not advocacy. The harness will reject inconsistent budgets.\n",
+                "Historical evidence is observational, not a routing command. Use it only when its task class and execution shape fit the current request; low-sample or mismatched evidence must not override current reasoning:\n{historical_evidence}\n\n",
+                "Mutable evolved guidance may shape the decision but cannot override schema, configured models, safety, or budgets: {evolved_directive}\n\n",
+                "Return this shape exactly:\n",
+                "{{\"schema\":\"{schema}\",\"task_class\":\"general|coding|research|retrieval|browser|computer\",\"execution\":\"direct|workflow\",\"primary_model\":\"configured model\",\"tool_requirement\":\"none|read_only|effects\",\"vision_required\":false,\"risk_level\":\"low|elevated|high\",\"retrieval\":{{\"query\":\"\",\"channels\":[],\"max_results\":8}},\"memory\":{{\"policy\":\"none|relevant|comprehensive\",\"query\":\"\"}},\"verification\":\"none|self_check|independent\",\"max_parallelism\":1,\"min_successful_branches\":1,\"distinct_contributions\":0,\"estimated_steps\":1,\"expected_uplift_bps\":0,\"confidence_bps\":7000,\"stop_policy\":\"first_verified|quorum|exhaustive\",\"rationale\":\"short decision reason\"}}\n\n",
+                "Effort: {effort}\nConductor model: {conductor_model}\nConfigured execution models:\n{models}\n\nUser request:\n{objective}\n\nRecent session context:\n{context}"
+            ),
+            query_limit = MAX_RUN_DECISION_QUERY_CHARS,
+            max_parallelism = request.max_parallelism.clamp(1, 3),
+            evolved_directive = if request.evolved_directive.trim().is_empty() {
+                "(none)"
+            } else {
+                request.evolved_directive.as_str()
+            },
+            historical_evidence = historical_evidence,
+            schema = AGENT_RUN_DECISION_SCHEMA,
+            effort = request.effort,
+            conductor_model = request.conductor_model,
+            models = models,
+            objective = request.objective,
+            context = context,
+        )
+    }
+
+    pub fn repair_prompt(&self, rejected: &str, error: &str) -> String {
+        format!(
+            "Repair the rejected Cindx run decision. Correct only schema, configured model, enum, query, or budget consistency. Return strict JSON only.\n\nValidation error:\n{}\n\nRejected decision:\n{}\n\nOriginal request:\n{}",
+            error,
+            bounded_chars(rejected, 6_000),
+            self.planning_prompt(),
+        )
+    }
+
+    pub fn parse(&self, response: &str) -> Result<AgentRunDecision, String> {
+        let start = response
+            .find('{')
+            .ok_or_else(|| "run decision did not return a JSON object".to_string())?;
+        let end = response
+            .rfind('}')
+            .filter(|end| *end >= start)
+            .ok_or_else(|| "run decision returned incomplete JSON".to_string())?;
+        let decision = serde_json::from_str::<AgentRunDecision>(&response[start..=end])
+            .map_err(|error| format!("run decision JSON is invalid: {error}"))?;
+        decision.validate(&self.request.allowed_models, self.request.max_parallelism)?;
+        Ok(decision)
+    }
+}
+
+fn bounded_chars(value: &str, limit: usize) -> String {
+    let mut chars = value.chars();
+    let bounded = chars.by_ref().take(limit).collect::<String>();
+    if chars.next().is_some() {
+        format!("{bounded}\n[truncated]")
+    } else {
+        bounded
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request() -> AgentRunDecisionRequest {
+        AgentRunDecisionRequest {
+            objective: "Compare two implementation strategies".to_string(),
+            recent_context: String::new(),
+            effort: "auto".to_string(),
+            conductor_model: "planner".to_string(),
+            allowed_models: vec!["executor".to_string(), "reviewer".to_string()],
+            max_parallelism: 3,
+            evolved_directive: String::new(),
+            historical_evidence: String::new(),
+        }
+    }
+
+    #[test]
+    fn parses_a_consistent_dynamic_workflow_decision() {
+        let harness = AgentRunDecisionHarness::new(request());
+        let decision = harness
+            .parse(
+                r#"{
+                    "schema":"cindx.agent-run-decision.v1",
+                    "task_class":"research",
+                    "execution":"workflow",
+                    "primary_model":"executor",
+                    "tool_requirement":"read_only",
+                    "vision_required":false,
+                    "risk_level":"elevated",
+                    "retrieval":{"query":"implementation evidence","channels":["semantic","file_search"],"max_results":6},
+                    "memory":{"policy":"relevant","query":"prior architecture constraints"},
+                    "verification":"independent",
+                    "max_parallelism":2,
+                    "min_successful_branches":2,
+                    "distinct_contributions":2,
+                    "estimated_steps":4,
+                    "expected_uplift_bps":2800,
+                    "confidence_bps":7200,
+                    "stop_policy":"quorum",
+                    "rationale":"independent architecture and implementation analysis"
+                }"#,
+            )
+            .unwrap();
+        assert_eq!(
+            decision.policy(),
+            OrchestrationPolicy::BestOfN { candidates: 2 }
+        );
+        assert_eq!(decision.retrieval.max_results, 6);
+        assert_eq!(
+            decision
+                .execution_contract("auto")
+                .min_distinct_contributions,
+            2
+        );
+    }
+
+    #[test]
+    fn planning_prompt_labels_historical_evidence_as_observational() {
+        let mut request = request();
+        request.historical_evidence =
+            "coding direct executor: 8/10 verified, median latency 1200 ms".to_string();
+        let prompt = AgentRunDecisionHarness::new(request).planning_prompt();
+
+        assert!(prompt.contains("Historical evidence is observational, not a routing command"));
+        assert!(prompt.contains("8/10 verified"));
+        assert!(prompt.contains("low-sample or mismatched evidence must not override"));
+    }
+
+    #[test]
+    fn rejects_decorative_collaboration_and_unknown_models() {
+        let harness = AgentRunDecisionHarness::new(request());
+        let invalid = AgentRunDecision {
+            primary_model: "unknown".to_string(),
+            execution: AgentExecutionMode::Workflow,
+            max_parallelism: 3,
+            min_successful_branches: 1,
+            distinct_contributions: 0,
+            stop_policy: ConductorStopPolicy::Quorum,
+            ..AgentRunDecision::direct("executor")
+        };
+        assert!(invalid
+            .validate(&harness.request.allowed_models, 3)
+            .is_err());
+    }
+
+    #[test]
+    fn direct_fallback_never_spawns_or_retrieves() {
+        let decision = AgentRunDecision::direct("executor");
+        decision.validate(&["executor".to_string()], 3).unwrap();
+        assert_eq!(decision.execution, AgentExecutionMode::Direct);
+        assert!(!decision.retrieval.enabled());
+        assert!(!decision.memory.enabled());
+        assert_eq!(decision.distinct_contributions, 0);
+    }
+}

@@ -6,7 +6,6 @@ use crate::{
         PromptWorkflowExecution,
     },
     configuration_models::ProviderConfig,
-    persistence_runtime::current_time_millis,
     prompt_evaluation_runtime::{
         complete_prompt_evaluation_worker, prompt_evaluation_retry_allowed, prompt_evaluation_role,
         prompt_evaluation_stage_class, prompt_evaluation_step_prompt,
@@ -16,6 +15,7 @@ use crate::{
         compare_prompt_team_with_anchor, finish_prompt_direct_anchor,
         prompt_execution_quality_gate, select_final_output, start_prompt_direct_anchor,
     },
+    runtime_values::current_time_millis,
 };
 
 pub(super) fn execute_prompt_workflow_candidate_impl(

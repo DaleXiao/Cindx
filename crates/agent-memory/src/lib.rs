@@ -5,6 +5,7 @@ mod extraction;
 mod ledger;
 mod memory_text;
 mod recall;
+mod semantic;
 
 pub use checkpoint::{
     build_restore_context_pack, build_session_checkpoint, build_session_checkpoint_at,
@@ -16,6 +17,11 @@ pub use ledger::merge_memory_records;
 pub use recall::{
     fuse_memory_recalls_at, memory_recalls_to_markdown, recall_memories_at,
     record_memory_observed_uses, record_memory_recalls,
+};
+pub use semantic::{
+    parse_semantic_memory_batch, semantic_memory_extraction_prompt, validate_semantic_memory_batch,
+    SemanticMemoryBatch, SemanticMemoryCandidate, SemanticMemoryValidation,
+    MAX_SEMANTIC_MEMORY_CANDIDATES, SEMANTIC_MEMORY_BATCH_SCHEMA,
 };
 
 pub const MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v4";

@@ -15,37 +15,13 @@ use crate::{
     agent_tool_runtime::{execute_agent_tool_batch, AgentToolBatchOutcome},
     app_state::{AppState, SuspendedAgentRun},
     configuration_models::{agent_model_for_run, ProviderConfig},
-    persistence_runtime::{
-        add_image_generation_run_context, agent_runtime_context_for_run, open_app_read_store,
-        tool_registry_for_state,
-    },
+    event_persistence::persist_new_runtime_messages,
+    persistence_runtime::{open_app_read_store, tool_registry_for_state},
     runtime_constants::{AGENT_MAX_OUTPUT_TOKENS, AGENT_MODEL_RECOVERY_WINDOW_SECONDS},
+    runtime_values::{add_image_generation_run_context, agent_runtime_context_for_run},
     suspended_run_runtime::{clear_suspended_agent_run_for_context, remember_suspended_agent_run},
-    tool_execution::persist_new_runtime_messages,
     view_models::AgentState,
 };
-
-pub(crate) fn append_single_model_policy_guidance(
-    history: &mut Vec<Message>,
-    policy: &OrchestrationPolicy,
-) {
-    if *policy != OrchestrationPolicy::PlanExecuteReview {
-        return;
-    }
-    history.push(Message {
-        role: MessageRole::System,
-        content: "Use a single-model plan-execute-review loop for this request: form a concise plan, execute only the required tools, verify the result against evidence, then answer. Do not expose private chain-of-thought; report only decisions, actions, and verified results.".to_string(),
-        metadata: [
-            ("internal".to_string(), "true".to_string()),
-            (
-                "kind".to_string(),
-                "single_model_policy_guidance".to_string(),
-            ),
-        ]
-        .into_iter()
-        .collect(),
-    });
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pause_agent_loop_for_control_stop(

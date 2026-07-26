@@ -1,4 +1,4 @@
-use orchestrator::{
+use orchestrator_eval::{
     evaluate_agent_benchmark, parse_agent_benchmark_baseline, parse_agent_benchmark_observations,
     parse_agent_benchmark_suite,
 };

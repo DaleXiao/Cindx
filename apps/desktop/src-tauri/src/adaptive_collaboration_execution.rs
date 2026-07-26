@@ -1,4 +1,5 @@
 use super::*;
+use crate::collaboration_service::workflow_contract_coverage;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_adaptive_collaboration(
@@ -106,7 +107,7 @@ pub(crate) fn run_adaptive_collaboration(
     };
     let workflow = workflow_plan.adaptive_workflow();
     let layers = adaptive_workflow_layers(&workflow)?;
-    let role_coverage = workflow_role_coverage(&workflow, &role_hints);
+    let role_coverage = workflow_contract_coverage(&workflow_plan, &role_hints);
     let layer_count = layers.len();
     let mut workflow_checkpoint = workflow_checkpoint.take().unwrap_or_else(|| {
         WorkflowExecutionCheckpoint::new(
@@ -219,9 +220,6 @@ pub(crate) fn run_adaptive_collaboration(
         shared_memory: &shared_memory,
         prompt_genome: &prompt_genome,
         execution_contract: &execution_contract,
-        workflow_plan: &workflow_plan,
-        workflow: &workflow,
-        layer_count,
         workflow_started_at_ms,
         cancellation: cancellation.clone(),
         anchor_spec: &anchor_spec,
@@ -266,11 +264,16 @@ pub(crate) fn run_adaptive_collaboration(
             )?;
         }
     }
-    let final_step = workflow
+    let final_plan = workflow_checkpoint.plan.clone();
+    let final_workflow = final_plan.adaptive_workflow();
+    let final_step_id = final_plan
         .steps
         .last()
+        .map(|step| step.id.clone())
         .ok_or_else(|| "adaptive workflow has no final step".to_string())?;
-    let final_output = if let Some(output) = outputs.remove(&final_step.id) {
+    let final_layer_count = adaptive_workflow_layers(&final_workflow)?.len();
+    let final_role_coverage = workflow_contract_coverage(&final_plan, &role_hints);
+    let final_output = if let Some(output) = outputs.remove(&final_step_id) {
         output
     } else {
         if direct_anchor_output.is_none() {
@@ -333,13 +336,13 @@ pub(crate) fn run_adaptive_collaboration(
     let final_output = match adaptive_quality_handoff(&quality_gate) {
         Ok(output) => output,
         Err(error) => {
-            controller_mark_running_if_pending(&mut anytime_controller, &final_step.id)?;
+            controller_mark_running_if_pending(&mut anytime_controller, &final_step_id)?;
             if anytime_controller
-                .candidate(&final_step.id)
+                .candidate(&final_step_id)
                 .is_some_and(|candidate| candidate.state == AnytimeCandidateState::Running)
             {
                 anytime_controller.observe(
-                    &final_step.id,
+                    &final_step_id,
                     AnytimeVerdict {
                         quality_bps: 0,
                         confidence_bps: 0,
@@ -360,7 +363,7 @@ pub(crate) fn run_adaptive_collaboration(
                 collaboration_id,
                 "Collaboration workflow blocked by quality gate",
                 "paused",
-                Some(&final_step.id),
+                Some(&final_step_id),
                 &workflow_checkpoint,
             )?;
             if let Some((candidate_id, output, verdict)) =
@@ -419,10 +422,10 @@ pub(crate) fn run_adaptive_collaboration(
         policy,
         prompt_genome,
         workflow_started_at_ms,
-        final_step_id: final_step.id.clone(),
-        workflow_steps: workflow_plan.steps.len(),
-        layer_count,
-        role_coverage,
+        final_step_id,
+        workflow_steps: final_plan.steps.len(),
+        layer_count: final_layer_count,
+        role_coverage: final_role_coverage,
         evidence_count,
         quality_gate,
         final_output,

@@ -304,8 +304,8 @@ pub(crate) fn prompt_evolution_evaluation_for_run(
     let previous_rollout = model.rollouts.get(effort).cloned();
     let rollout = reconcile_prompt_rollout(&mut model, effort, &evaluation);
     apply_prompt_rollout_selection(&mut evaluation, &rollout, &model, run_context, effort);
-    save_prompt_evolution_read_model(&mut store, &model).map_err(|error| error.to_string())?;
     if previous_rollout.as_ref() != Some(&rollout) {
+        save_prompt_evolution_read_model(&mut store, &model).map_err(|error| error.to_string())?;
         append_event(
             &mut store,
             &phase16_task_id(),

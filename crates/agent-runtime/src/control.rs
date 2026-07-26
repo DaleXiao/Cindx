@@ -380,12 +380,17 @@ impl AgentRunControl {
         }
         let state = self.state.lock().expect("run control state poisoned");
         let model_calls = self.model_calls.load(Ordering::SeqCst);
+        let agent_turns = self.agent_turns.load(Ordering::SeqCst);
         let remaining_calls = state.model_call_limit.saturating_sub(model_calls);
+        let remaining_turns = state.agent_turn_limit.saturating_sub(agent_turns);
+        let turn_extension_available = state.agent_turn_limit < self.budget.max_agent_turns
+            && state.checkpoint_count > state.agent_turn_extension_checkpoint;
         let remaining_time = self
             .budget
             .max_duration
             .saturating_sub(state.started_at.elapsed());
         if remaining_calls <= self.budget.terminal_model_call_reserve
+            || (remaining_turns <= 1 && !turn_extension_available)
             || remaining_time <= self.budget.terminal_time_reserve
         {
             RunContinuationDirective::CommitTerminalResult

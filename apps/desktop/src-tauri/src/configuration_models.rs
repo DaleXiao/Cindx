@@ -136,26 +136,8 @@ impl AgentEffort {
     pub(crate) fn requested_policy(self) -> OrchestrationPolicy {
         match self {
             Self::Fast => OrchestrationPolicy::Single,
-            Self::Auto => OrchestrationPolicy::AutoRouter,
-            Self::Pro => OrchestrationPolicy::BestOfN { candidates: 3 },
+            Self::Auto | Self::Pro => OrchestrationPolicy::AutoRouter,
         }
-    }
-}
-
-pub(crate) fn collaboration_profile(effort: AgentEffort, context: &RoutingContext) -> &'static str {
-    if effort == AgentEffort::Pro
-        && context.complexity_score <= 1
-        && context.estimated_steps <= 2
-        && !context.needs_multi_model
-        && !context.needs_retrieval
-        && !context.needs_vision
-        && !context.high_stakes
-        && !context.parallelizable
-        && !context.verification_required
-    {
-        "bounded"
-    } else {
-        "adaptive"
     }
 }
 
@@ -260,23 +242,6 @@ pub(crate) fn agent_model_for_run(config: &ProviderConfig, run_context: &Metadat
         .as_ref()
         .map(|policy| config.model_for_agent_policy(policy))
         .unwrap_or_else(|| config.model_for_role(&ModelRole::Executor))
-}
-
-pub(crate) fn agent_model_for_effort(
-    config: &ProviderConfig,
-    effort: AgentEffort,
-    policy: &OrchestrationPolicy,
-    routing_decision: &RoutingDecision,
-) -> String {
-    match effort {
-        AgentEffort::Fast if !config.model.trim().is_empty() => config.model.clone(),
-        AgentEffort::Auto if !routing_decision.model.trim().is_empty() => {
-            routing_decision.model.clone()
-        }
-        AgentEffort::Fast | AgentEffort::Auto | AgentEffort::Pro => {
-            config.model_for_agent_policy(policy)
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

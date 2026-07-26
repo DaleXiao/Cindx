@@ -105,9 +105,14 @@ pub(super) fn prepare_adaptive_wave(
         .into_iter()
         .map(|step_index| {
             let step = &workflow.steps[step_index];
-            let worker_prompt =
-                adaptive_worker_prompt(workflow, step_index, prompt, shared_memory, outputs)
-                    .ok_or_else(|| format!("adaptive worker prompt is missing for {}", step.id))?;
+            let worker_prompt = adaptive_worker_prompt_for_plan(
+                workflow_plan,
+                step_index,
+                prompt,
+                shared_memory,
+                outputs,
+            )
+            .ok_or_else(|| format!("adaptive worker prompt is missing for {}", step.id))?;
             Ok(AdaptiveCollaborationSpec {
                 step_index,
                 step_id: step.id.clone(),
@@ -123,6 +128,7 @@ pub(super) fn prepare_adaptive_wave(
                 request_id: unique_id("collaboration-model"),
                 access: step.access.clone(),
                 tool_policy: workflow_plan.steps[step_index].tool_policy.clone(),
+                output_kind: workflow_plan.steps[step_index].contract.output_kind.clone(),
                 max_attempts: max_step_attempts,
                 max_model_turns: workflow_plan.steps[step_index]
                     .tool_policy
@@ -166,7 +172,7 @@ pub(super) fn prepare_adaptive_wave(
             workflow_checkpoint,
         )?;
         let metadata = adaptive_stage_metadata(spec);
-        let role = adaptive_model_role(&spec.role);
+        let role = adaptive_model_role(&spec.role, &spec.output_kind);
         record_collaboration_stage_started(
             state,
             task_id,
@@ -253,7 +259,7 @@ pub(super) fn execute_adaptive_wave(
             let collaboration_id = collaboration_id.to_string();
             let stage = spec.stage.clone();
             let model = spec.model.clone();
-            let role = adaptive_model_role(&spec.role);
+            let role = adaptive_model_role(&spec.role, &spec.output_kind);
             let prompt = spec.prompt.clone();
             let allow_tools = spec.tool_policy != WorkflowToolPolicy::None;
             let max_model_turns = spec.max_model_turns;

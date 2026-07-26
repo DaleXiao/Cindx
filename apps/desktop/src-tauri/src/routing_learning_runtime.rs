@@ -1,12 +1,12 @@
 use super::*;
 
-#[cfg(test)]
 pub(crate) fn load_routing_telemetry_read_model(
     store: &mut SqliteStore,
 ) -> Result<Vec<RoutingTelemetry>, StorageError> {
     load_routing_telemetry_read_model_inner(store, true)
 }
 
+#[cfg(test)]
 pub(crate) fn load_routing_telemetry_read_model_snapshot(
     store: &mut SqliteStore,
 ) -> Result<Vec<RoutingTelemetry>, StorageError> {
@@ -34,6 +34,7 @@ fn load_routing_telemetry_read_model_inner(
                         && model.event_count <= revision.event_count
                 })
         });
+    let rebuilt = stored.is_none();
     let mut model = stored.unwrap_or_else(|| RoutingTelemetryReadModel {
         schema: ROUTING_TELEMETRY_READ_MODEL_NAMESPACE.to_string(),
         revision: 0,
@@ -41,7 +42,9 @@ fn load_routing_telemetry_read_model_inner(
         entries: Vec::new(),
     });
     let mut delta = store.list_by_task_after(&task_id, model.revision)?;
+    let mut changed = rebuilt || !delta.is_empty();
     if model.event_count.saturating_add(delta.len() as u64) != revision.event_count {
+        changed = true;
         model.revision = 0;
         model.event_count = 0;
         model.entries.clear();
@@ -79,10 +82,10 @@ fn load_routing_telemetry_read_model_inner(
     }
     model.revision = revision.latest_sequence;
     model.event_count = revision.event_count;
-    let payload = serde_json::to_string(&model).map_err(|error| {
-        StorageError::new(format!("routing telemetry serialization failed: {error}"))
-    })?;
-    if persist {
+    if persist && changed {
+        let payload = serde_json::to_string(&model).map_err(|error| {
+            StorageError::new(format!("routing telemetry serialization failed: {error}"))
+        })?;
         store.save_read_model(
             ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
             ROUTING_TELEMETRY_READ_MODEL_KEY,
@@ -113,12 +116,17 @@ pub(crate) fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTele
                     "Agent task started" | "Agent task retry started"
                 )
             })?;
-            let task_class = parse_task_class_label(started.metadata.get("task_class")?)?;
-            let selected_policy = parse_policy(started.metadata.get("collaboration_policy")?)?;
-            let selected_model = started
+            let decision = run_events
+                .iter()
+                .find(|event| event.summary == "Agent run decision selected")
+                .copied()
+                .unwrap_or(started);
+            let task_class = parse_task_class_label(decision.metadata.get("task_class")?)?;
+            let selected_policy = parse_policy(decision.metadata.get("collaboration_policy")?)?;
+            let selected_model = decision
                 .metadata
                 .get("agent_model")
-                .or_else(|| started.metadata.get("router_model"))?
+                .or_else(|| decision.metadata.get("router_model"))?
                 .clone();
             let terminal = run_events.iter().rev().find(|event| {
                 matches!(
@@ -145,7 +153,7 @@ pub(crate) fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTele
                 .count() as u64;
             Some(RoutingTelemetry {
                 task_class,
-                context_signature: started
+                context_signature: decision
                     .metadata
                     .get("routing_signature")
                     .cloned()
@@ -167,6 +175,111 @@ pub(crate) fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTele
             })
         })
         .collect()
+}
+
+pub(crate) fn load_workflow_telemetry_read_model(
+    store: &mut SqliteStore,
+    allowed_models: &[String],
+) -> Result<Vec<WorkflowExecutionTelemetry>, StorageError> {
+    let task_id = phase16_task_id();
+    let revision = store.event_revision(&task_id)?;
+    let model_pool_signature = workflow_model_pool_signature(allowed_models);
+    let stored = store
+        .load_read_model(
+            WORKFLOW_TELEMETRY_READ_MODEL_NAMESPACE,
+            WORKFLOW_TELEMETRY_READ_MODEL_KEY,
+        )?
+        .and_then(|stored| {
+            serde_json::from_str::<WorkflowTelemetryReadModel>(&stored.payload)
+                .ok()
+                .filter(|model| {
+                    model.schema == WORKFLOW_TELEMETRY_READ_MODEL_NAMESPACE
+                        && model.revision == stored.revision
+                        && model.revision <= revision.latest_sequence
+                        && model.event_count <= revision.event_count
+                        && model.model_pool_signature == model_pool_signature
+                })
+        });
+    let rebuilt = stored.is_none();
+    let mut model = stored.unwrap_or_else(|| WorkflowTelemetryReadModel {
+        schema: WORKFLOW_TELEMETRY_READ_MODEL_NAMESPACE.to_string(),
+        revision: 0,
+        event_count: 0,
+        model_pool_signature: model_pool_signature.clone(),
+        entries: Vec::new(),
+    });
+    let mut delta = store.list_by_task_after(&task_id, model.revision)?;
+    let mut changed = rebuilt || !delta.is_empty();
+    if model.event_count.saturating_add(delta.len() as u64) != revision.event_count {
+        changed = true;
+        model.revision = 0;
+        model.event_count = 0;
+        model.entries.clear();
+        delta = store.list_by_task_after(&task_id, 0)?;
+    }
+    let completed_workflows = delta
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.summary.as_str(),
+                "Collaboration workflow completed" | "Collaboration workflow failed"
+            )
+        })
+        .filter_map(|event| event.metadata.get("collaboration_id"))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for workflow_id in completed_workflows {
+        let workflow_events =
+            store.list_by_task_and_metadata(&task_id, "collaboration_id", &workflow_id)?;
+        model
+            .entries
+            .retain(|entry| entry.workflow_id != workflow_id);
+        if let Some(telemetry) =
+            workflow_execution_telemetry_from_events(&workflow_events, allowed_models)
+                .into_iter()
+                .next()
+        {
+            model.entries.push(WorkflowTelemetryEntry {
+                workflow_id,
+                telemetry,
+            });
+        }
+    }
+    if model.entries.len() > WORKFLOW_TELEMETRY_MAX_RUNS {
+        model
+            .entries
+            .drain(0..model.entries.len() - WORKFLOW_TELEMETRY_MAX_RUNS);
+    }
+    model.revision = revision.latest_sequence;
+    model.event_count = revision.event_count;
+    model.model_pool_signature = model_pool_signature;
+    if changed {
+        let payload = serde_json::to_string(&model).map_err(|error| {
+            StorageError::new(format!("workflow telemetry serialization failed: {error}"))
+        })?;
+        store.save_read_model(
+            WORKFLOW_TELEMETRY_READ_MODEL_NAMESPACE,
+            WORKFLOW_TELEMETRY_READ_MODEL_KEY,
+            model.revision,
+            &payload,
+        )?;
+    }
+    Ok(model
+        .entries
+        .into_iter()
+        .map(|entry| entry.telemetry)
+        .collect())
+}
+
+fn workflow_model_pool_signature(allowed_models: &[String]) -> String {
+    let mut models = allowed_models
+        .iter()
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+        .collect::<Vec<_>>();
+    models.sort_unstable();
+    models.dedup();
+    models.join("\u{1f}")
 }
 
 fn routing_quality_signals(run_events: &[&Event], terminal: &Event) -> (Option<f32>, Option<bool>) {

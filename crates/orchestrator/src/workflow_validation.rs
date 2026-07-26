@@ -60,12 +60,9 @@ pub fn validate_adaptive_workflow(
                 step.id
             ));
         }
-        if !matches!(
-            step.role.as_str(),
-            "thinker" | "worker" | "verifier" | "synthesizer"
-        ) {
+        if !valid_workflow_role(&step.role) {
             return Err(format!(
-                "adaptive workflow step {} selected an unknown role: {}",
+                "adaptive workflow step {} selected an invalid role label: {}",
                 step.id, step.role
             ));
         }
@@ -101,14 +98,6 @@ pub fn validate_adaptive_workflow(
     {
         return Err("the final adaptive workflow step must synthesize prior work".to_string());
     }
-    if workflow
-        .steps
-        .last()
-        .is_some_and(|step| step.role != "synthesizer")
-    {
-        return Err("the final adaptive workflow step must use the synthesizer role".to_string());
-    }
-
     let indexes = workflow
         .steps
         .iter()
@@ -143,6 +132,15 @@ pub fn validate_adaptive_workflow(
 
     adaptive_workflow_layers(workflow)?;
     Ok(())
+}
+
+fn valid_workflow_role(role: &str) -> bool {
+    let role = role.trim();
+    !role.is_empty()
+        && role.len() <= 48
+        && role.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
 }
 
 pub fn adaptive_workflow_layers(workflow: &AdaptiveWorkflow) -> Result<Vec<Vec<usize>>, String> {
@@ -187,23 +185,73 @@ pub fn adaptive_worker_prompt(
     outputs: &BTreeMap<String, String>,
 ) -> Option<String> {
     let step = workflow.steps.get(step_index)?;
-    let (role_instruction, output_contract) = match step.role.as_str() {
-        "thinker" => (
-            "Explore an independent approach, decompose the problem, and expose assumptions without duplicating implementation work.",
-            "Hypotheses; Assumptions; Recommended path; Failure modes.",
+    adaptive_worker_prompt_parts(
+        step,
+        WorkflowStepContract::inferred(
+            &step.role,
+            &step.access,
+            &WorkflowToolPolicy::ReadOnlyEvidence,
         ),
-        "verifier" => (
+        user_prompt,
+        shared_memory,
+        outputs,
+    )
+}
+
+pub fn adaptive_worker_prompt_for_plan(
+    plan: &WorkflowPlanIr,
+    step_index: usize,
+    user_prompt: &str,
+    shared_memory: &str,
+    outputs: &BTreeMap<String, String>,
+) -> Option<String> {
+    let plan_step = plan.steps.get(step_index)?;
+    let step = AdaptiveWorkflowStep {
+        id: plan_step.id.clone(),
+        role: plan_step.role.clone(),
+        model: plan_step.model.clone(),
+        subtask: plan_step.subtask.clone(),
+        access: plan_step.access.clone(),
+    };
+    adaptive_worker_prompt_parts(
+        &step,
+        plan_step.contract.clone(),
+        user_prompt,
+        shared_memory,
+        outputs,
+    )
+}
+
+fn adaptive_worker_prompt_parts(
+    step: &AdaptiveWorkflowStep,
+    contract: WorkflowStepContract,
+    user_prompt: &str,
+    shared_memory: &str,
+    outputs: &BTreeMap<String, String>,
+) -> Option<String> {
+    let (role_instruction, output_contract) = match contract.output_kind {
+        WorkflowOutputKind::Verification => (
             "Audit supplied work against evidence, identify disagreements, and state exact corrections without inventing a new unsupported solution.",
             "Agreements; Disagreements; Evidence verdicts; Required corrections.",
         ),
-        "synthesizer" => (
+        WorkflowOutputKind::Synthesis => (
             "Resolve disagreements and produce one checkable execution brief grounded in the supplied work.",
             "Decision; Integrated execution brief; Evidence basis; Unresolved risks.",
+        ),
+        WorkflowOutputKind::Evidence => (
+            "Collect or derive the concrete evidence required by the assigned subtask and distinguish observations from inference.",
+            "Evidence; Provenance; Findings; Uncertainty; Handoff.",
+        ),
+        WorkflowOutputKind::Analysis => match step.role.as_str() {
+        "thinker" => (
+            "Explore an independent approach, decompose the problem, and expose assumptions without duplicating implementation work.",
+            "Hypotheses; Assumptions; Recommended path; Failure modes.",
         ),
         _ => (
             "Produce concrete work for the assigned subtask and report evidence and uncertainty rather than repeating the planning branch.",
             "Work product; Evidence used or needed; Risks; Handoff.",
         ),
+        },
     };
     let bounded_shared_memory = if shared_memory.trim().is_empty() {
         "(none)".to_string()

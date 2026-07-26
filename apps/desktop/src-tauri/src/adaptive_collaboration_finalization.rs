@@ -475,7 +475,6 @@ pub(super) fn finalize_adaptive_collaboration(
     if config.prompt_evolution_enabled && effort != "fast" {
         schedule_prompt_pairwise_evaluation(
             app.clone(),
-            config.clone(),
             task_id.clone(),
             run_context.clone(),
             effort,
