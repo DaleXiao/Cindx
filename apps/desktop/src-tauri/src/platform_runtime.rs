@@ -89,8 +89,8 @@ pub(crate) fn set_sidebar_material_width(app: tauri::AppHandle, width: f64) -> R
 }
 
 #[cfg(target_os = "macos")]
-fn centered_macos_traffic_light_origin_y(button_height: f64) -> f64 {
-    ((MACOS_TITLEBAR_HEIGHT - button_height) / 2.0).max(0.0)
+fn macos_traffic_light_layout(button_height: f64) -> (f64, f64) {
+    (button_height + MACOS_TRAFFIC_LIGHT_Y, 0.0)
 }
 
 #[cfg(target_os = "macos")]
@@ -121,7 +121,8 @@ pub(crate) fn repair_macos_traffic_light_position(
             };
 
             let close_frame = NSView::frame(&close);
-            let title_bar_height = MACOS_TITLEBAR_HEIGHT.max(close_frame.size.height);
+            let (title_bar_height, button_origin_y) =
+                macos_traffic_light_layout(close_frame.size.height);
             let mut title_bar_frame = NSView::frame(&title_bar_view);
             title_bar_frame.size.height = title_bar_height;
             title_bar_frame.origin.y = window.frame().size.height - title_bar_height;
@@ -132,7 +133,7 @@ pub(crate) fn repair_macos_traffic_light_position(
                 let button_frame = NSView::frame(&button);
                 let mut origin = button_frame.origin;
                 origin.x = MACOS_TRAFFIC_LIGHT_X + index as f64 * spacing;
-                origin.y = centered_macos_traffic_light_origin_y(button_frame.size.height);
+                origin.y = button_origin_y;
                 button.setFrameOrigin(origin);
             }
         })
@@ -158,12 +159,16 @@ pub(crate) fn schedule_macos_traffic_light_position_repair(
         .wrapping_add(1);
 
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(MACOS_TRAFFIC_LIGHT_REPAIR_DELAY_MS));
-        if MACOS_TRAFFIC_LIGHT_REPAIR_GENERATION.load(Ordering::Relaxed) != generation {
-            return;
-        }
-        if let Some(window) = app.get_webview_window(&window_label) {
-            let _ = repair_macos_traffic_light_position(&window);
+        let mut elapsed_ms = 0;
+        for delay_ms in MACOS_TRAFFIC_LIGHT_REPAIR_DELAYS_MS {
+            std::thread::sleep(Duration::from_millis(delay_ms - elapsed_ms));
+            elapsed_ms = delay_ms;
+            if MACOS_TRAFFIC_LIGHT_REPAIR_GENERATION.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            if let Some(window) = app.get_webview_window(&window_label) {
+                let _ = repair_macos_traffic_light_position(&window);
+            }
         }
     });
 }
@@ -211,11 +216,16 @@ pub(crate) fn schedule_main_window_reveal_fallback(app: tauri::AppHandle) {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::centered_macos_traffic_light_origin_y;
+    use super::macos_traffic_light_layout;
 
     #[test]
-    fn traffic_lights_are_centered_in_the_app_titlebar() {
-        assert_eq!(centered_macos_traffic_light_origin_y(14.0), 16.0);
-        assert_eq!(centered_macos_traffic_light_origin_y(46.0), 0.0);
+    fn traffic_lights_keep_the_confirmed_top_inset() {
+        let button_height = 14.0;
+        let (title_bar_height, button_origin_y) = macos_traffic_light_layout(button_height);
+        let visible_top_inset = title_bar_height - button_origin_y - button_height;
+
+        assert_eq!(title_bar_height, 39.0);
+        assert_eq!(button_origin_y, 0.0);
+        assert_eq!(visible_top_inset, 25.0);
     }
 }

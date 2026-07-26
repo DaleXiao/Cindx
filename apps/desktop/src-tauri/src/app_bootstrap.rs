@@ -115,7 +115,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             if matches!(
                 event,
-                tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. }
+                tauri::WindowEvent::Resized(_)
+                    | tauri::WindowEvent::ScaleFactorChanged { .. }
+                    | tauri::WindowEvent::Focused(true)
             ) {
                 schedule_macos_traffic_light_position_repair(window.app_handle(), window.label());
             }
