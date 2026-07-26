@@ -96,10 +96,7 @@ fn output_contract_makes_a_mislabeled_final_step_terminal() {
         },
     };
 
-    assert_eq!(
-        prompt_evaluation_stage_class(&step),
-        RunStageClass::Synthesizer
-    );
+    assert_eq!(prompt_evaluation_stage_class(&step), RunStageClass::Finalizer);
 }
 
 #[test]
@@ -118,15 +115,19 @@ fn terminal_delivery_layer_survives_the_reserved_time_boundary() {
     assert!(
         !prompt_workflow_execution::prompt_evaluation_layer_should_stop(
             &control,
-            [RunStageClass::Synthesizer],
+            [RunStageClass::Finalizer],
         )
     );
     assert!(
-        !prompt_workflow_execution::prompt_evaluation_layer_should_stop(
+        prompt_workflow_execution::prompt_evaluation_layer_should_stop(
             &control,
             [RunStageClass::Worker, RunStageClass::Reviewer],
         )
     );
+    assert!(prompt_workflow_execution::prompt_evaluation_layer_should_stop(
+        &control,
+        [RunStageClass::Synthesizer],
+    ));
 }
 
 #[test]
