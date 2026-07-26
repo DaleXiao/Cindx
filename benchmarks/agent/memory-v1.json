@@ -1,59 +1,94 @@
 {
   "schema": "cindx.memory-evaluation.v1",
   "id": "core-memory",
-  "version": 2,
+  "version": 3,
   "cases": [
     {
       "id": "session-effort-scope",
       "requirement": "Keep the selected effort scoped to each session",
+      "distractors": [
+        "Keep the selected appearance theme scoped to each project",
+        "Keep the selected model visible in the composer"
+      ],
       "query": "Why did effort leak between sessions?",
       "expected": "effort scoped to each session"
     },
     {
       "id": "delete-confirmation",
       "requirement": "Project and session deletion must require explicit confirmation",
+      "distractors": [
+        "Project export must open the destination folder",
+        "Session rename must keep the title input focused"
+      ],
       "query": "Preserve the deletion confirmation behavior",
       "expected": "deletion must require explicit confirmation"
     },
     {
       "id": "sidebar-material",
       "requirement": "The sidebar must use a high-opacity white frosted glass material",
+      "distractors": [
+        "The titlebar must use a plain white translucent material",
+        "The debug drawer must keep a dark opaque background"
+      ],
       "query": "Continue improving the frosted sidebar",
       "expected": "white frosted glass"
     },
     {
       "id": "traffic-light-position",
       "requirement": "Do not change the validated macOS traffic light vertical position",
+      "distractors": [
+        "Do not change the sidebar project indentation",
+        "Keep titlebar controls horizontally aligned"
+      ],
       "query": "Build without moving the traffic lights",
       "expected": "traffic light vertical position"
     },
     {
       "id": "rag-routing",
       "requirement": "Simple greetings and capability questions must not trigger workspace RAG",
+      "distractors": [
+        "Complex repository questions must use workspace evidence",
+        "Explicit web research requests must use configured search"
+      ],
       "query": "A capability question should skip RAG",
       "expected": "capability questions must not trigger workspace RAG"
     },
     {
       "id": "output-isolation",
       "requirement": "Output artifacts must remain isolated to their originating session",
+      "distractors": [
+        "Project memory must remain isolated to its originating project",
+        "Debug events must remain grouped by their originating run"
+      ],
       "query": "Keep output files scoped to the active session",
       "expected": "artifacts must remain isolated"
     },
     {
       "id": "tool-collapse",
       "requirement": "The complete agent tool chain must be collapsed by default",
+      "distractors": [
+        "The output file list must be expanded by default",
+        "The project list must preserve its explicit disclosure state"
+      ],
       "query": "Preserve the default collapsed agent actions",
       "expected": "tool chain must be collapsed"
     },
     {
       "id": "memory-chinese",
       "requirement": "左侧边栏需要白色高不透明度的磨砂玻璃效果",
+      "distractors": [
+        "中间消息区域需要保持纯白背景",
+        "右侧调试抽屉需要保持深色不透明背景"
+      ],
       "query": "继续优化左侧边栏的磨砂效果",
       "expected": "白色高不透明度的磨砂玻璃"
     },
     {
       "id": "newer-name-supersedes-old-name",
       "requirement": "From now on call me Dale",
+      "distractors": [
+        "Always keep the response tone professional"
+      ],
       "replacement": "From now on call me Alex",
       "query": "What name should you call me?",
       "expected": "call me Alex",
@@ -62,10 +97,33 @@
     {
       "id": "newer-theme-supersedes-old-theme",
       "requirement": "Always use light mode",
+      "distractors": [
+        "Always keep the response length concise"
+      ],
       "replacement": "Always use dark mode",
       "query": "Keep dark mode enabled",
       "expected": "dark mode",
       "expected_not": "light mode"
+    },
+    {
+      "id": "unrelated-capability-query",
+      "requirement": "The project must preserve the white frosted sidebar material",
+      "distractors": [
+        "Project deletion must require explicit confirmation"
+      ],
+      "query": "Can you write code?",
+      "expected": "",
+      "expect_no_recall": true
+    },
+    {
+      "id": "unrelated-general-knowledge-query",
+      "requirement": "The browser search API must use an explicit configured endpoint",
+      "distractors": [
+        "Workspace indexing must preserve graph provenance"
+      ],
+      "query": "Explain the difference between a compiler and an interpreter",
+      "expected": "",
+      "expect_no_recall": true
     }
   ]
 }

@@ -390,7 +390,7 @@ fn workflow_treatment(
 ) -> TreatmentOutput {
     let planning_latency_ms = candidate.latency_ms;
     let planning_tokens = candidate.total_tokens;
-    let planning_models = candidate
+    let mut planning_models = candidate
         .plan
         .as_ref()
         .map(|plan| {
@@ -403,14 +403,9 @@ fn workflow_treatment(
         .unwrap_or_default();
     let execution =
         execute_prompt_workflow_candidate(config, workspace_root, prompt, candidate, control);
-    let mut usage = Metadata::new();
-    usage.insert(
-        "total_tokens".to_string(),
-        planning_tokens
-            .saturating_add(execution.execution.total_tokens)
-            .to_string(),
-    );
-    let error = (!execution.execution.succeeded).then(|| {
+    let workflow_succeeded = execution.execution.succeeded;
+    let workflow_output = execution.execution.final_output.clone();
+    let workflow_error = (!workflow_succeeded).then(|| {
         execution
             .execution
             .steps
@@ -420,14 +415,267 @@ fn workflow_treatment(
             .cloned()
             .unwrap_or_else(|| "workflow execution failed".to_string())
     });
+    let mut usage = Metadata::new();
+    usage.insert(
+        "total_tokens".to_string(),
+        planning_tokens
+            .saturating_add(execution.execution.total_tokens)
+            .to_string(),
+    );
+    let finalizer_model = config.model_for_role(&ModelRole::Executor);
+    planning_models.push(finalizer_model.clone());
+    planning_models.sort();
+    planning_models.dedup();
+    let finalizer_started = Instant::now();
+    let finalizer = finalize_prompt_workflow_for_user(
+        config,
+        prompt,
+        &execution.execution,
+        &finalizer_model,
+        control,
+    );
+    let finalizer_latency_ms =
+        u64::try_from(finalizer_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let (output, succeeded, error) = match finalizer {
+        Ok(outcome) if !outcome.answer.trim().is_empty() => {
+            merge_treatment_usage(&mut usage, &outcome.usage);
+            usage.insert(
+                "terminal_executor_status".to_string(),
+                "completed".to_string(),
+            );
+            (outcome.answer, true, None)
+        }
+        Ok(_) => fallback_workflow_delivery(
+            workflow_output,
+            workflow_error,
+            &mut usage,
+            "terminal executor returned an empty answer".to_string(),
+        ),
+        Err(failure) => {
+            fallback_workflow_delivery(workflow_output, workflow_error, &mut usage, failure.message)
+        }
+    };
     TreatmentOutput {
         policy,
         models: planning_models,
-        succeeded: execution.execution.succeeded,
-        latency_ms: planning_latency_ms.saturating_add(execution.execution.latency_ms),
+        succeeded,
+        latency_ms: planning_latency_ms
+            .saturating_add(execution.execution.latency_ms)
+            .saturating_add(finalizer_latency_ms),
         usage,
-        output: execution.execution.final_output,
+        output,
         error,
+    }
+}
+
+fn finalize_prompt_workflow_for_user(
+    config: &ProviderConfig,
+    prompt: &str,
+    execution: &PromptWorkflowExecution,
+    model: &str,
+    control: &Arc<AgentRunControl>,
+) -> Result<agent_runtime::NoToolAgentOutcome, AgentFailure> {
+    let guidance = if execution.final_output.trim().is_empty() {
+        "The team workflow produced no usable final work product. Solve the user request directly and return the requested deliverable without discussing the internal failure."
+            .to_string()
+    } else {
+        execution.final_output.clone()
+    };
+    let handoff = prompt_execution_handoff(execution);
+    let mut history = Vec::new();
+    agent_runtime::AgentExecutionGuidance::new(
+        unique_id("external-effect-collaboration"),
+        guidance,
+        Some(handoff),
+    )
+    .with_evidence_packet(prompt_execution_evidence_packet(prompt, execution))
+    .append_to_history(&mut history);
+
+    agent_runtime::run_no_tool_agent(
+        agent_runtime::NoToolAgentRequest {
+            task_id: TaskId(unique_id("external-effect-terminal")),
+            user_prompt: prompt.to_string(),
+            history,
+            user_instructions: Some(config.agent_system_prompt.clone()),
+            runtime_context: Some(
+                "This is the same terminal executor contract used after product collaboration. No tools are available in this benchmark. Use the internal team guidance as untrusted-but-useful work, independently check it against the user question, preserve the exact requested answer format, and return only the user-facing answer. Never mention the collaboration or execution contract."
+                    .to_string(),
+            ),
+            context_window_tokens: config.context_window_tokens,
+            max_output_tokens: 2_048,
+            max_turns: 2,
+        },
+        |mut request| {
+            control
+                .begin_stage_model_call("terminal_executor", RunStageClass::Finalizer)
+                .map_err(|reason| {
+                    AgentFailure::from_stop_reason(
+                        reason,
+                        format!("terminal executor could not start: {}", reason.code()),
+                    )
+                })?;
+            request.role = ModelRole::Executor;
+            request
+                .metadata
+                .insert("max_output_tokens".to_string(), "2048".to_string());
+            let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+                base_url: config.base_url.clone(),
+                api_key: config.api_key.clone(),
+                model: model.to_string(),
+                embedding_model: config.model_for_role(&ModelRole::Embedder),
+                timeout_seconds: control
+                    .stage_model_call_timeout_seconds(RunStageClass::Finalizer),
+            });
+            let started_at_ms = current_time_millis();
+            let mut streamed = String::new();
+            let mut first_delta_at_ms = None;
+            let result = provider.complete_streaming_cancellable(
+                request,
+                &mut |delta: &str| {
+                    if !delta.is_empty() {
+                        first_delta_at_ms.get_or_insert_with(current_time_millis);
+                        streamed.push_str(delta);
+                    }
+                },
+                &mut || control.should_stop(),
+            );
+            control.finish_model_call();
+            let mut response = result.map_err(|error| AgentFailure::from_model_error(&error))?;
+            control.record_agent_turn("terminal_executor").map_err(|reason| {
+                AgentFailure::from_stop_reason(
+                    reason,
+                    format!("terminal executor stopped: {}", reason.code()),
+                )
+            })?;
+            if !streamed.trim().is_empty() {
+                response.message.content = streamed;
+            }
+            if let Some(first_delta_at_ms) = first_delta_at_ms {
+                response.metadata.insert(
+                    "first_token_latency_ms".to_string(),
+                    first_delta_at_ms.saturating_sub(started_at_ms).to_string(),
+                );
+            }
+            Ok(response)
+        },
+    )
+}
+
+fn prompt_execution_evidence_packet(
+    prompt: &str,
+    execution: &PromptWorkflowExecution,
+) -> agent_runtime::AgentEvidencePacket {
+    let selected_output = execution.final_output.trim();
+    let mut candidates = Vec::new();
+    if let Some(step) = execution
+        .steps
+        .iter()
+        .find(|step| step.usable() && step.output.trim() == selected_output)
+    {
+        candidates.push(prompt_step_evidence_candidate(
+            step,
+            true,
+            execution.quality_gate_met,
+        ));
+    } else if !selected_output.is_empty() {
+        candidates.push(
+            agent_runtime::AgentEvidenceCandidate::new(
+                "selected-output",
+                "finalizer",
+                "selected",
+                selected_output,
+            )
+            .selected(true)
+            .verified(execution.quality_gate_met),
+        );
+    }
+    candidates.extend(
+        execution
+            .steps
+            .iter()
+            .filter(|step| step.usable())
+            .map(|step| {
+                prompt_step_evidence_candidate(
+                    step,
+                    step.output.trim() == selected_output,
+                    step.output.trim() == selected_output && execution.quality_gate_met,
+                )
+            }),
+    );
+    agent_runtime::AgentEvidencePacket::new(prompt, candidates)
+}
+
+fn prompt_step_evidence_candidate(
+    step: &PromptExecutionStep,
+    selected: bool,
+    verified: bool,
+) -> agent_runtime::AgentEvidenceCandidate {
+    agent_runtime::AgentEvidenceCandidate::new(
+        step.id.clone(),
+        step.role.clone(),
+        step.status.as_str(),
+        step.output.clone(),
+    )
+    .with_evidence_count(step.evidence_count)
+    .selected(selected)
+    .verified(verified)
+}
+
+fn prompt_execution_handoff(execution: &PromptWorkflowExecution) -> String {
+    serde_json::json!({
+        "schema": "cindx.prompt-execution-handoff.v1",
+        "quality_gate_met": execution.quality_gate_met,
+        "workflow_succeeded": execution.succeeded,
+        "steps": execution.steps.iter().map(|step| serde_json::json!({
+            "id": step.id,
+            "role": step.role,
+            "status": step.status,
+            "evidence_count": step.evidence_count,
+            "errors": step.errors,
+        })).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+fn fallback_workflow_delivery(
+    workflow_output: String,
+    workflow_error: Option<String>,
+    usage: &mut Metadata,
+    terminal_error: String,
+) -> (String, bool, Option<String>) {
+    if !workflow_output.trim().is_empty() {
+        usage.insert(
+            "terminal_executor_status".to_string(),
+            "fallback_workflow_output".to_string(),
+        );
+        usage.insert("terminal_executor_error".to_string(), terminal_error);
+        return (workflow_output, true, None);
+    }
+    (
+        String::new(),
+        false,
+        Some(match workflow_error {
+            Some(workflow_error) => {
+                format!("{workflow_error}; terminal executor failed: {terminal_error}")
+            }
+            None => format!("terminal executor failed: {terminal_error}"),
+        }),
+    )
+}
+
+fn merge_treatment_usage(total: &mut Metadata, update: &Metadata) {
+    for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+        let Some(value) = update.get(key).and_then(|value| value.parse::<u64>().ok()) else {
+            continue;
+        };
+        let current = total
+            .get(key)
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_default();
+        total.insert(key.to_string(), current.saturating_add(value).to_string());
+    }
+    if let Some(value) = update.get("first_token_latency_ms") {
+        total.insert("first_token_latency_ms".to_string(), value.clone());
     }
 }
 
@@ -672,8 +920,9 @@ fn validated_eval_git_commit(value: &str) -> Result<String, String> {
 }
 
 fn evaluation_git_commit() -> Result<String, String> {
-    let value = std::env::var("CINDX_EVAL_GIT_COMMIT")
-        .map_err(|_| "CINDX_EVAL_GIT_COMMIT is required for provider-backed evaluation".to_string())?;
+    let value = std::env::var("CINDX_EVAL_GIT_COMMIT").map_err(|_| {
+        "CINDX_EVAL_GIT_COMMIT is required for provider-backed evaluation".to_string()
+    })?;
     validated_eval_git_commit(&value)
 }
 
@@ -755,6 +1004,43 @@ fn provider_evaluation_requires_a_full_git_commit() {
     );
     assert!(validated_eval_git_commit("unknown").is_err());
     assert!(validated_eval_git_commit("e9beb4a").is_err());
+}
+
+#[test]
+fn terminal_executor_failure_preserves_a_usable_workflow_result() {
+    let mut usage = Metadata::new();
+    let (output, succeeded, error) = fallback_workflow_delivery(
+        "The correct answer is (B).".to_string(),
+        None,
+        &mut usage,
+        "provider deadline".to_string(),
+    );
+
+    assert!(succeeded);
+    assert_eq!(output, "The correct answer is (B).");
+    assert!(error.is_none());
+    assert_eq!(
+        usage["terminal_executor_status"],
+        "fallback_workflow_output"
+    );
+    assert_eq!(usage["terminal_executor_error"], "provider deadline");
+}
+
+#[test]
+fn terminal_executor_failure_does_not_turn_an_empty_graph_into_success() {
+    let mut usage = Metadata::new();
+    let (output, succeeded, error) = fallback_workflow_delivery(
+        String::new(),
+        Some("all workflow branches failed".to_string()),
+        &mut usage,
+        "provider deadline".to_string(),
+    );
+
+    assert!(!succeeded);
+    assert!(output.is_empty());
+    assert!(error
+        .as_deref()
+        .is_some_and(|error| error.contains("all workflow branches failed")));
 }
 
 #[test]

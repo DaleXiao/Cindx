@@ -189,6 +189,38 @@ pub struct PromptPromotionConfidence {
     pub wilson_lower_bound: f64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum PromptProposalMinibatchDecision {
+    NotRequired,
+    Pending {
+        comparisons: usize,
+        required: usize,
+    },
+    Accepted {
+        comparisons: usize,
+        wins: usize,
+        losses: usize,
+        average_relative_reward: f64,
+    },
+    Rejected {
+        comparisons: usize,
+        wins: usize,
+        losses: usize,
+        average_relative_reward: f64,
+        reason: String,
+    },
+}
+
+impl PromptProposalMinibatchDecision {
+    pub fn is_rejected(&self) -> bool {
+        matches!(self, Self::Rejected { .. })
+    }
+
+    pub fn is_accepted(&self) -> bool {
+        matches!(self, Self::NotRequired | Self::Accepted { .. })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromptParetoCandidate {
     pub genome: ConductorPromptGenome,

@@ -85,6 +85,13 @@ impl BoundedParallelExecutor {
             if should_interrupt() {
                 interrupted = true;
                 cancelled_stragglers = supervisor.cancel_all();
+                collect_completed_results(
+                    &mut supervisor,
+                    &mut slots,
+                    &mut received,
+                    &mut successful,
+                    &is_success,
+                );
                 break;
             }
             if successful >= preferred_successes {
@@ -96,6 +103,13 @@ impl BoundedParallelExecutor {
                     &is_success,
                 );
                 cancelled_stragglers = supervisor.cancel_all();
+                collect_completed_results(
+                    &mut supervisor,
+                    &mut slots,
+                    &mut received,
+                    &mut successful,
+                    &is_success,
+                );
                 break;
             }
 
@@ -109,6 +123,13 @@ impl BoundedParallelExecutor {
                 .unwrap_or(poll_interval);
             if minimum_at.is_some() && wait.is_zero() {
                 cancelled_stragglers = supervisor.cancel_all();
+                collect_completed_results(
+                    &mut supervisor,
+                    &mut slots,
+                    &mut received,
+                    &mut successful,
+                    &is_success,
+                );
                 break;
             }
 
@@ -152,6 +173,25 @@ fn collect_ready_results<T, F>(
     F: Fn(&T) -> bool,
 {
     while let Some(ParallelJobCompletion { job_id, result }) = supervisor.try_recv() {
+        if result.as_ref().is_ok_and(is_success) {
+            *successful = successful.saturating_add(1);
+        }
+        slots[job_id] = Some(result);
+        *received = received.saturating_add(1);
+    }
+}
+
+fn collect_completed_results<T, F>(
+    supervisor: &mut crate::parallel::ParallelJobSupervisor<T>,
+    slots: &mut [Option<Result<T, ParallelTaskError>>],
+    received: &mut usize,
+    successful: &mut usize,
+    is_success: &F,
+) where
+    T: Send + 'static,
+    F: Fn(&T) -> bool,
+{
+    for ParallelJobCompletion { job_id, result } in supervisor.collect_completed() {
         if result.as_ref().is_ok_and(is_success) {
             *successful = successful.saturating_add(1);
         }

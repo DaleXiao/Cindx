@@ -432,6 +432,7 @@ fn observe_wave_results(
                 )?;
             }
             WorkflowStepStatus::Failed => anytime_controller.fail(&spec.step_id)?,
+            WorkflowStepStatus::Cancelled => anytime_controller.cancel(&spec.step_id)?,
             WorkflowStepStatus::Pending
             | WorkflowStepStatus::Running
             | WorkflowStepStatus::Completed

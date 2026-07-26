@@ -81,6 +81,44 @@ mod tests {
         }
     }
 
+    fn paired_minibatch_observations(
+        proposal: &ConductorPromptGenome,
+        parent: &ConductorPromptGenome,
+        rewards: &[f64],
+    ) -> Vec<PromptEvolutionObservation> {
+        rewards
+            .iter()
+            .enumerate()
+            .flat_map(|(index, reward)| {
+                let evaluation_id = format!("minibatch-{index}");
+                let case_id = format!("case-{index}");
+                let mut proposal_observation = observation(
+                    &proposal.id,
+                    PromptEvaluationSplit::Train,
+                    (0.7 + reward / 2.0).clamp(0.0, 1.0),
+                    100,
+                    100,
+                );
+                proposal_observation.evaluation_id = evaluation_id.clone();
+                proposal_observation.case_id = case_id.clone();
+                proposal_observation.opponent_profile_id = Some(parent.id.clone());
+                proposal_observation.relative_reward = Some(*reward);
+                let mut parent_observation = observation(
+                    &parent.id,
+                    PromptEvaluationSplit::Train,
+                    (0.7 - reward / 2.0).clamp(0.0, 1.0),
+                    100,
+                    100,
+                );
+                parent_observation.evaluation_id = evaluation_id;
+                parent_observation.case_id = case_id;
+                parent_observation.opponent_profile_id = Some(proposal.id.clone());
+                parent_observation.relative_reward = Some(-reward);
+                [proposal_observation, parent_observation]
+            })
+            .collect()
+    }
+
     #[test]
     fn prompt_genomes_mutate_and_cross_without_unbounded_fields() {
         let auto = ConductorPromptGenome::seed_for_effort("auto");
@@ -118,6 +156,50 @@ mod tests {
         assert_eq!(child.parents, vec![auto.id, pro.id]);
         assert_eq!(child.generation, 1);
         child.validate().unwrap();
+    }
+
+    #[test]
+    fn reflective_proposal_must_improve_on_a_paired_minibatch() {
+        let parent = ConductorPromptGenome::seed_for_effort("auto");
+        let mut proposal = parent.mutations().remove(0);
+        proposal.id = "learned-proposal".to_string();
+        let pending = paired_minibatch_observations(&proposal, &parent, &[0.2, 0.1]);
+        assert!(matches!(
+            prompt_proposal_minibatch_decision(&proposal, &pending, 3, 0.02).unwrap(),
+            PromptProposalMinibatchDecision::Pending {
+                comparisons: 2,
+                required: 3
+            }
+        ));
+
+        let accepted = paired_minibatch_observations(&proposal, &parent, &[0.2, 0.1, 0.15]);
+        assert!(matches!(
+            prompt_proposal_minibatch_decision(&proposal, &accepted, 3, 0.02).unwrap(),
+            PromptProposalMinibatchDecision::Accepted { wins: 3, .. }
+        ));
+
+        let rejected = paired_minibatch_observations(&proposal, &parent, &[0.1, -0.2, 0.0]);
+        assert!(matches!(
+            prompt_proposal_minibatch_decision(&proposal, &rejected, 3, 0.02).unwrap(),
+            PromptProposalMinibatchDecision::Rejected {
+                reason,
+                ..
+            } if reason == "no_measured_minibatch_improvement"
+        ));
+    }
+
+    #[test]
+    fn reflective_proposal_requires_real_paired_parent_evidence() {
+        let parent = ConductorPromptGenome::seed_for_effort("auto");
+        let mut proposal = parent.mutations().remove(0);
+        proposal.id = "learned-proposal".to_string();
+        let mut observations = paired_minibatch_observations(&proposal, &parent, &[0.2, 0.2, 0.2]);
+        observations.retain(|observation| observation.profile_id == proposal.id);
+
+        assert!(matches!(
+            prompt_proposal_minibatch_decision(&proposal, &observations, 3, 0.02).unwrap(),
+            PromptProposalMinibatchDecision::Pending { comparisons: 0, .. }
+        ));
     }
 
     #[test]

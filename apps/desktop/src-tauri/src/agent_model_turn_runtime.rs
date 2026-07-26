@@ -34,7 +34,12 @@ pub(crate) fn execute_agent_model_turn(
     terminal_commit: bool,
 ) -> Result<AgentModelTurnOutcome, String> {
     let session_id = run_context.get("session_id").map(String::as_str);
-    if cancellation.begin_model_call("executor").is_err() {
+    let model_call = if collaboration.is_some() || terminal_commit {
+        cancellation.begin_stage_model_call("executor", RunStageClass::Finalizer)
+    } else {
+        cancellation.begin_model_call("executor")
+    };
+    if model_call.is_err() {
         return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
             app,
             state,

@@ -534,19 +534,22 @@ fn prompt_frontier_quorum_policy(
     )
 }
 
-fn record_prompt_step_in_checkpoint(
+pub(crate) fn record_prompt_step_in_checkpoint(
     checkpoint: &mut WorkflowExecutionCheckpoint,
     step: &PromptExecutionStep,
     max_attempts: usize,
 ) -> Result<(), String> {
     let now_ms = current_time_millis();
     if let Some(checkpoint_step) = checkpoint.steps.get_mut(&step.id) {
-        checkpoint_step.attempts =
-            if step.status == WorkflowStepStatus::Failed || step.attempts == 0 {
-                max_attempts
-            } else {
-                checkpoint_step.attempts.max(step.attempts)
-            };
+        checkpoint_step.attempts = if matches!(
+            step.status,
+            WorkflowStepStatus::Failed | WorkflowStepStatus::Cancelled
+        ) || step.attempts == 0
+        {
+            max_attempts
+        } else {
+            checkpoint_step.attempts.max(step.attempts)
+        };
     }
     match step.status {
         WorkflowStepStatus::Completed => {
@@ -569,6 +572,9 @@ fn record_prompt_step_in_checkpoint(
         }
         WorkflowStepStatus::Failed => {
             checkpoint.fail_step(&step.id, step.errors.join("; "), now_ms)?;
+        }
+        WorkflowStepStatus::Cancelled => {
+            checkpoint.cancel_step(&step.id, step.errors.join("; "), now_ms)?;
         }
         WorkflowStepStatus::Pending | WorkflowStepStatus::Running => {
             return Err(format!(
@@ -636,7 +642,7 @@ fn unresolved_step(
     }
 }
 
-fn parallel_error_step(
+pub(crate) fn parallel_error_step(
     step: orchestrator::WorkflowPlanStep,
     error: agent_runtime::ParallelTaskError,
 ) -> PromptExecutionStep {
@@ -646,7 +652,11 @@ fn parallel_error_step(
         model: step.model,
         prompt: String::new(),
         attempts: usize::from(error != agent_runtime::ParallelTaskError::Cancelled),
-        status: WorkflowStepStatus::Failed,
+        status: if error == agent_runtime::ParallelTaskError::Cancelled {
+            WorkflowStepStatus::Cancelled
+        } else {
+            WorkflowStepStatus::Failed
+        },
         output: String::new(),
         tool_calls: Vec::new(),
         errors: vec![error.to_string()],

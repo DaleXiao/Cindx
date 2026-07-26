@@ -23,11 +23,15 @@ struct MemoryEvaluationCase {
     id: String,
     requirement: String,
     #[serde(default)]
+    distractors: Vec<String>,
+    #[serde(default)]
     replacement: Option<String>,
     query: String,
     expected: String,
     #[serde(default)]
     expected_not: Option<String>,
+    #[serde(default)]
+    expect_no_recall: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -36,9 +40,11 @@ struct MemoryEvaluationCaseReport {
     requirement_records: usize,
     active_requirement_records: usize,
     recalled_records: usize,
+    deduplication_correct: bool,
     top_1_correct: bool,
     recall_at_3_correct: bool,
     supersession_correct: bool,
+    no_recall_correct: bool,
     recall_micros: u128,
 }
 
@@ -53,6 +59,7 @@ struct MemoryEvaluationReport {
     trust_violations: usize,
     dedup_failures: usize,
     supersession_failures: usize,
+    false_positive_failures: usize,
     average_recall_micros: u128,
     max_recall_micros: u128,
     case_results: Vec<MemoryEvaluationCaseReport>,
@@ -96,6 +103,7 @@ fn run() -> Result<(), String> {
         trust_violations: 0,
         dedup_failures: 0,
         supersession_failures: 0,
+        false_positive_failures: 0,
         average_recall_micros: 0,
         max_recall_micros: 0,
         case_results: Vec::with_capacity(suite.cases.len()),
@@ -127,6 +135,22 @@ fn run() -> Result<(), String> {
                 64,
             );
         }
+        for (distractor_index, distractor) in case.distractors.iter().enumerate() {
+            let session_id = format!("source-{index}-distractor-{distractor_index}");
+            merge_memory_records(
+                &mut ledger,
+                extract_durable_memories(
+                    &completed_events(
+                        distractor,
+                        &session_id,
+                        20_000 + index as u64 * 100 + distractor_index as u64,
+                    ),
+                    "memory-evaluation-project",
+                    &session_id,
+                ),
+                64,
+            );
+        }
         let requirement_count = ledger
             .records
             .iter()
@@ -139,8 +163,12 @@ fn run() -> Result<(), String> {
                 record.kind == MemoryKind::Requirement && record.superseded_by.is_none()
             })
             .count();
-        let expected_requirement_count = if case.replacement.is_some() { 2 } else { 1 };
-        if requirement_count != expected_requirement_count || active_requirement_count != 1 {
+        let expected_requirement_count =
+            1 + usize::from(case.replacement.is_some()) + case.distractors.len();
+        let expected_active_count = 1 + case.distractors.len();
+        let deduplication_correct = requirement_count == expected_requirement_count
+            && active_requirement_count == expected_active_count;
+        if !deduplication_correct {
             report.dedup_failures += 1;
         }
 
@@ -149,15 +177,27 @@ fn run() -> Result<(), String> {
         let elapsed = started_at.elapsed().as_micros();
         total_recall_micros = total_recall_micros.saturating_add(elapsed);
         report.max_recall_micros = report.max_recall_micros.max(elapsed);
-        let top_1_correct = recalls
-            .first()
-            .is_some_and(|recall| recall.record.content.contains(&case.expected));
+        let no_recall_correct = !case.expect_no_recall || recalls.is_empty();
+        if !no_recall_correct {
+            report.false_positive_failures += 1;
+        }
+        let top_1_correct = if case.expect_no_recall {
+            recalls.is_empty()
+        } else {
+            recalls
+                .first()
+                .is_some_and(|recall| recall.record.content.contains(&case.expected))
+        };
         if top_1_correct {
             report.top_1_correct += 1;
         }
-        let recall_at_3_correct = recalls
-            .iter()
-            .any(|recall| recall.record.content.contains(&case.expected));
+        let recall_at_3_correct = if case.expect_no_recall {
+            recalls.is_empty()
+        } else {
+            recalls
+                .iter()
+                .any(|recall| recall.record.content.contains(&case.expected))
+        };
         if recall_at_3_correct {
             report.recall_at_3_correct += 1;
         }
@@ -182,9 +222,11 @@ fn run() -> Result<(), String> {
             requirement_records: requirement_count,
             active_requirement_records: active_requirement_count,
             recalled_records: recalls.len(),
+            deduplication_correct,
             top_1_correct,
             recall_at_3_correct,
             supersession_correct,
+            no_recall_correct,
             recall_micros: elapsed,
         });
     }
@@ -198,7 +240,7 @@ fn run() -> Result<(), String> {
         println!("Report: {}", path.display());
     }
     println!(
-        "Cindx memory benchmark {}-v{}: top1 {}/{} recall@3 {}/{} trust_violations={} dedup_failures={} supersession_failures={} avg={}us max={}us",
+        "Cindx memory benchmark {}-v{}: top1 {}/{} recall@3 {}/{} trust_violations={} dedup_failures={} supersession_failures={} false_positive_failures={} avg={}us max={}us",
         report.suite_id,
         report.suite_version,
         report.top_1_correct,
@@ -208,17 +250,19 @@ fn run() -> Result<(), String> {
         report.trust_violations,
         report.dedup_failures,
         report.supersession_failures,
+        report.false_positive_failures,
         report.average_recall_micros,
         report.max_recall_micros,
     );
     for case in report.case_results.iter().filter(|case| {
-        case.active_requirement_records != 1
+        !case.deduplication_correct
             || !case.top_1_correct
             || !case.recall_at_3_correct
             || !case.supersession_correct
+            || !case.no_recall_correct
     }) {
         println!(
-            "  failed {}: requirements={} active={} recalls={} top1={} recall@3={} supersession={}",
+            "  failed {}: requirements={} active={} recalls={} top1={} recall@3={} supersession={} no_recall={}",
             case.id,
             case.requirement_records,
             case.active_requirement_records,
@@ -226,6 +270,7 @@ fn run() -> Result<(), String> {
             case.top_1_correct,
             case.recall_at_3_correct,
             case.supersession_correct,
+            case.no_recall_correct,
         );
     }
     if report.top_1_correct != report.cases
@@ -233,6 +278,7 @@ fn run() -> Result<(), String> {
         || report.trust_violations != 0
         || report.dedup_failures != 0
         || report.supersession_failures != 0
+        || report.false_positive_failures != 0
     {
         return Err("memory evaluation gate did not pass".to_string());
     }

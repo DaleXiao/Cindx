@@ -303,7 +303,42 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
             })
         })
         .unwrap_or(PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS);
-    let split = if current_counts.0 < PROMPT_EVOLUTION_MIN_TRAIN_RUNS
+    let proposal_gate = if current_profile
+        .parents
+        .iter()
+        .any(|parent| parent == &challenger.id)
+    {
+        Some(prompt_proposal_minibatch_decision(
+            current_profile,
+            &evaluation.observations,
+            PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
+            PROMPT_EVOLUTION_MINIBATCH_RELATIVE_IMPROVEMENT,
+        )?)
+    } else if challenger
+        .parents
+        .iter()
+        .any(|parent| parent == &current_profile.id)
+    {
+        Some(prompt_proposal_minibatch_decision(
+            &challenger,
+            &evaluation.observations,
+            PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
+            PROMPT_EVOLUTION_MINIBATCH_RELATIVE_IMPROVEMENT,
+        )?)
+    } else {
+        None
+    };
+    if proposal_gate
+        .as_ref()
+        .is_some_and(PromptProposalMinibatchDecision::is_rejected)
+    {
+        return Ok(false);
+    }
+    let minibatch_pending = proposal_gate
+        .as_ref()
+        .is_some_and(|decision| !decision.is_accepted());
+    let split = if minibatch_pending
+        || current_counts.0 < PROMPT_EVOLUTION_MIN_TRAIN_RUNS
         || challenger_counts.0 < PROMPT_EVOLUTION_MIN_TRAIN_RUNS
     {
         PromptEvaluationSplit::Train

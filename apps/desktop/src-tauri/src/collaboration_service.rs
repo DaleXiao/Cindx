@@ -1,8 +1,9 @@
 use agent_core::{Message, MessageRole, Metadata, ModelRole};
-use agent_runtime::AgentFailure;
+use agent_runtime::{AgentEvidenceCandidate, AgentEvidencePacket, AgentFailure};
 use orchestrator::{
     AdaptiveWorkflow, ConductorPromptGenome, ConductorRoleHints, PromptContextPolicy,
-    WorkflowExecutionCheckpoint, WorkflowPlanIr, WorkflowToolPolicy, WORKFLOW_IR_SCHEMA,
+    WorkflowExecutionCheckpoint, WorkflowPlanIr, WorkflowStepStatus, WorkflowToolPolicy,
+    WorkflowVerificationState, WORKFLOW_IR_SCHEMA,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,6 +23,7 @@ pub(crate) struct AgentCollaboration {
     pub(crate) policy: String,
     pub(crate) guidance: String,
     pub(crate) execution_contract: Option<String>,
+    pub(crate) evidence_packet: Option<AgentEvidencePacket>,
     pub(crate) candidate_models: Vec<String>,
 }
 
@@ -29,6 +31,7 @@ pub(crate) struct AgentCollaboration {
 pub(crate) struct AdaptiveCollaborationOutcome {
     pub(crate) guidance: String,
     pub(crate) execution_contract: Option<String>,
+    pub(crate) evidence_packet: Option<AgentEvidencePacket>,
 }
 
 impl AdaptiveCollaborationOutcome {
@@ -36,6 +39,7 @@ impl AdaptiveCollaborationOutcome {
         Self {
             guidance,
             execution_contract: None,
+            evidence_packet: None,
         }
     }
 
@@ -44,10 +48,97 @@ impl AdaptiveCollaborationOutcome {
         checkpoint: &WorkflowExecutionCheckpoint,
     ) -> Result<Self, String> {
         Ok(Self {
+            evidence_packet: Some(checkpoint_evidence_packet(&guidance, checkpoint)),
             guidance,
             execution_contract: Some(checkpoint.execution_handoff_json()?),
         })
     }
+}
+
+fn checkpoint_evidence_packet(
+    selected_output: &str,
+    checkpoint: &WorkflowExecutionCheckpoint,
+) -> AgentEvidencePacket {
+    let mut candidates = Vec::new();
+    if let Some(candidate) = checkpoint
+        .plan
+        .steps
+        .iter()
+        .find_map(|plan_step| {
+            let step = checkpoint.steps.get(&plan_step.id)?;
+            let output = step.output.as_deref()?.trim();
+            (output == selected_output.trim()).then(|| {
+                checkpoint_step_evidence_candidate(
+                    &plan_step.id,
+                    &plan_step.role,
+                    step,
+                    output,
+                    true,
+                )
+            })
+        })
+        .or_else(|| {
+            checkpoint
+                .anytime_outputs
+                .iter()
+                .find(|(_, output)| output.trim() == selected_output.trim())
+                .map(|(id, output)| {
+                    AgentEvidenceCandidate::new(id, "frontier", "selected", output).selected(true)
+                })
+        })
+    {
+        candidates.push(candidate);
+    } else if !selected_output.trim().is_empty() {
+        candidates.push(
+            AgentEvidenceCandidate::new(
+                "selected-output",
+                "finalizer",
+                "selected",
+                selected_output,
+            )
+            .selected(true),
+        );
+    }
+
+    candidates.extend(checkpoint.plan.steps.iter().filter_map(|plan_step| {
+        let step = checkpoint.steps.get(&plan_step.id)?;
+        let output = step.output.as_deref()?.trim();
+        matches!(
+            step.status,
+            WorkflowStepStatus::Completed | WorkflowStepStatus::Degraded
+        )
+        .then(|| {
+            checkpoint_step_evidence_candidate(
+                &plan_step.id,
+                &plan_step.role,
+                step,
+                output,
+                output == selected_output.trim(),
+            )
+        })
+    }));
+    candidates.extend(checkpoint.anytime_outputs.iter().map(|(id, output)| {
+        AgentEvidenceCandidate::new(id, "frontier", "candidate", output)
+            .selected(output.trim() == selected_output.trim())
+    }));
+
+    AgentEvidencePacket::new(checkpoint.plan.objective.clone(), candidates)
+}
+
+fn checkpoint_step_evidence_candidate(
+    id: &str,
+    role: &str,
+    step: &orchestrator::WorkflowStepCheckpoint,
+    output: &str,
+    selected: bool,
+) -> AgentEvidenceCandidate {
+    let verified = step.status == WorkflowStepStatus::Completed
+        && step.semantic.completion_satisfied
+        && step.semantic.verification != WorkflowVerificationState::Degraded;
+    AgentEvidenceCandidate::new(id, role, step.status.as_str(), output)
+        .with_evidence_count(step.semantic.evidence_count.max(step.evidence_count))
+        .verified(verified)
+        .selected(selected)
 }
 
 #[derive(Debug, Clone)]

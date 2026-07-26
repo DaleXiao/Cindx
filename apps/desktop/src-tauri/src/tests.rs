@@ -4075,6 +4075,24 @@ fn workflow_telemetry_restores_versioned_plan_and_quality() {
             ),
         },
         Event {
+            id: EventId("tool".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 3,
+            timestamp_ms: 275,
+            kind: EventKind::ToolCallFinished,
+            summary: "Tool call finished: file.search".to_string(),
+            metadata: metadata_with_context(
+                [
+                    ("stage".to_string(), "worker_1".to_string()),
+                    ("tool".to_string(), "file.search".to_string()),
+                    ("status".to_string(), "succeeded".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                &context,
+            ),
+        },
+        Event {
             id: EventId("completed".to_string()),
             task_id: phase16_task_id(),
             sequence: 4,
@@ -4098,6 +4116,11 @@ fn workflow_telemetry_restores_versioned_plan_and_quality() {
     assert_eq!(telemetry[0].quality_score, Some(0.875));
     assert_eq!(telemetry[0].latency_ms, 400);
     assert_eq!(telemetry[0].total_tokens, 640);
+    assert_eq!(telemetry[0].tool_calls, 1);
+    assert_eq!(
+        telemetry[0].successful_tools_by_step.get("first"),
+        Some(&vec!["file.search".to_string()])
+    );
     assert!(telemetry[0].succeeded);
 
     events.last_mut().unwrap().metadata.insert(
@@ -6299,15 +6322,30 @@ fn simple_greeting_skips_workspace_knowledge_retrieval() {
     assert!(!should_run_agent_knowledge_retrieval(&greeting));
     assert!(!should_run_agent_knowledge_retrieval(&capability_question));
     assert!(should_run_agent_knowledge_retrieval(&retrieval));
-    assert!(!should_recall_agent_memory(&greeting, "你好"));
-    assert!(!should_recall_agent_memory(
-        &capability_question,
-        "你会不会写代码"
-    ));
-    assert!(should_recall_agent_memory(
-        &RoutingContext::from_prompt("继续上次的侧边栏修改", Vec::new()),
-        "继续上次的侧边栏修改"
-    ));
+    assert_eq!(project_memory_recall_mode(&greeting, "你好"), None);
+    assert_eq!(
+        project_memory_recall_mode(&capability_question, "你会不会写代码"),
+        None
+    );
+    assert_eq!(
+        project_memory_recall_mode(
+            &RoutingContext::from_prompt("继续上次的侧边栏修改", Vec::new()),
+            "继续上次的侧边栏修改"
+        ),
+        Some(ProjectMemoryRecallMode::Hybrid)
+    );
+    let tool_task = RoutingContext::from_prompt("修改 src/lib.rs 里的错误", Vec::new());
+    assert_eq!(
+        project_memory_recall_mode(&tool_task, "修改 src/lib.rs 里的错误"),
+        Some(ProjectMemoryRecallMode::Lexical)
+    );
+    assert_eq!(
+        project_memory_recall_mode(
+            &RoutingContext::from_prompt("我叫什么名字？", Vec::new()),
+            "我叫什么名字？"
+        ),
+        Some(ProjectMemoryRecallMode::Hybrid)
+    );
 }
 
 #[test]

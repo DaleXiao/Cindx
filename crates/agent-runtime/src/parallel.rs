@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -128,14 +128,24 @@ pub struct ParallelJobSupervisor<T> {
     gate: Arc<WorkerGate>,
     sender: mpsc::Sender<ParallelJobCompletion<T>>,
     receiver: mpsc::Receiver<ParallelJobCompletion<T>>,
-    cancellations: BTreeMap<usize, Arc<AtomicBool>>,
+    jobs: BTreeMap<usize, ParallelJobControl>,
+}
+
+const JOB_RUNNING: u8 = 0;
+const JOB_COMPLETED: u8 = 1;
+const JOB_CANCELLED: u8 = 2;
+
+#[derive(Debug)]
+struct ParallelJobControl {
+    cancellation: Arc<AtomicBool>,
+    lifecycle: Arc<AtomicU8>,
 }
 
 impl<T> fmt::Debug for ParallelJobSupervisor<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ParallelJobSupervisor")
-            .field("pending", &self.cancellations.len())
+            .field("pending", &self.jobs.len())
             .finish()
     }
 }
@@ -147,7 +157,7 @@ impl<T: Send + 'static> ParallelJobSupervisor<T> {
         thread_label: &str,
         job: CancellableParallelJob<T>,
     ) -> Result<(), ParallelTaskError> {
-        if self.cancellations.contains_key(&job_id) {
+        if self.jobs.contains_key(&job_id) {
             return Err(ParallelTaskError::Spawn(format!(
                 "duplicate parallel job id {job_id}"
             )));
@@ -156,6 +166,8 @@ impl<T: Send + 'static> ParallelJobSupervisor<T> {
         static THREAD_SEQUENCE: AtomicU64 = AtomicU64::new(1);
         let cancellation = Arc::new(AtomicBool::new(false));
         let worker_cancellation = Arc::clone(&cancellation);
+        let lifecycle = Arc::new(AtomicU8::new(JOB_RUNNING));
+        let worker_lifecycle = Arc::clone(&lifecycle);
         let sender = self.sender.clone();
         let gate = Arc::clone(&self.gate);
         let sequence = THREAD_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -164,23 +176,42 @@ impl<T: Send + 'static> ParallelJobSupervisor<T> {
             .name(name)
             .spawn(move || {
                 let permit = gate.acquire();
-                let result = if worker_cancellation.load(Ordering::SeqCst) {
+                let result = if worker_cancellation.load(Ordering::Acquire) {
                     Err(ParallelTaskError::Cancelled)
                 } else {
                     catch_unwind(AssertUnwindSafe(|| job(Arc::clone(&worker_cancellation))))
                         .map_err(|_| ParallelTaskError::Panic)
                 };
+                let result = if worker_lifecycle
+                    .compare_exchange(
+                        JOB_RUNNING,
+                        JOB_COMPLETED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    result
+                } else {
+                    Err(ParallelTaskError::Cancelled)
+                };
                 drop(permit);
                 let _ = sender.send(ParallelJobCompletion { job_id, result });
             })
             .map_err(|error| ParallelTaskError::Spawn(error.to_string()))?;
-        self.cancellations.insert(job_id, cancellation);
+        self.jobs.insert(
+            job_id,
+            ParallelJobControl {
+                cancellation,
+                lifecycle,
+            },
+        );
         Ok(())
     }
 
     pub fn recv(&mut self) -> Option<ParallelJobCompletion<T>> {
         self.receiver.recv().ok().inspect(|completion| {
-            self.cancellations.remove(&completion.job_id);
+            self.jobs.remove(&completion.job_id);
         })
     }
 
@@ -189,38 +220,73 @@ impl<T: Send + 'static> ParallelJobSupervisor<T> {
             .recv_timeout(timeout)
             .ok()
             .inspect(|completion| {
-                self.cancellations.remove(&completion.job_id);
+                self.jobs.remove(&completion.job_id);
             })
     }
 
     pub fn try_recv(&mut self) -> Option<ParallelJobCompletion<T>> {
         self.receiver.try_recv().ok().inspect(|completion| {
-            self.cancellations.remove(&completion.job_id);
+            self.jobs.remove(&completion.job_id);
         })
     }
 
     pub fn cancel(&self, job_id: usize) -> bool {
-        self.cancellations
-            .get(&job_id)
-            .is_some_and(|token| !token.swap(true, Ordering::SeqCst))
+        self.jobs.get(&job_id).is_some_and(cancel_job)
     }
 
     pub fn cancel_all(&self) -> usize {
-        self.cancellations
+        self.jobs
             .values()
-            .filter(|token| !token.swap(true, Ordering::SeqCst))
+            .filter(|control| cancel_job(control))
             .count()
     }
 
-    pub fn pending(&self) -> usize {
-        self.cancellations.len()
+    /// Collects jobs that atomically completed before cancellation won.
+    ///
+    /// A completion can race with a quorum decision after the receiver's last
+    /// poll. The lifecycle flag makes that boundary explicit: completed work is
+    /// retained, while jobs for which cancellation won return `Cancelled`.
+    pub(crate) fn collect_completed(&mut self) -> Vec<ParallelJobCompletion<T>> {
+        let mut completions = Vec::new();
+        while self
+            .jobs
+            .values()
+            .any(|control| control.lifecycle.load(Ordering::Acquire) == JOB_COMPLETED)
+        {
+            let Some(completion) = self.recv() else {
+                break;
+            };
+            completions.push(completion);
+        }
+        completions
     }
+
+    pub fn pending(&self) -> usize {
+        self.jobs.len()
+    }
+}
+
+fn cancel_job(control: &ParallelJobControl) -> bool {
+    if control
+        .lifecycle
+        .compare_exchange(
+            JOB_RUNNING,
+            JOB_CANCELLED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return false;
+    }
+    control.cancellation.store(true, Ordering::Release);
+    true
 }
 
 impl<T> Drop for ParallelJobSupervisor<T> {
     fn drop(&mut self) {
-        for token in self.cancellations.values() {
-            token.store(true, Ordering::SeqCst);
+        for control in self.jobs.values() {
+            let _ = cancel_job(control);
         }
     }
 }
@@ -238,7 +304,7 @@ impl BoundedParallelExecutor {
             gate: Arc::clone(&self.gate),
             sender,
             receiver,
-            cancellations: BTreeMap::new(),
+            jobs: BTreeMap::new(),
         }
     }
 
@@ -330,6 +396,13 @@ impl BoundedParallelExecutor {
             };
             let Some(ParallelJobCompletion { job_id, result }) = next else {
                 cancelled_stragglers = supervisor.cancel_all();
+                collect_completed_quorum_results(
+                    &mut supervisor,
+                    &mut slots,
+                    &mut received,
+                    &mut successful,
+                    &is_success,
+                );
                 break;
             };
             if result.as_ref().is_ok_and(&is_success) {
@@ -341,6 +414,13 @@ impl BoundedParallelExecutor {
                 quorum_at = Some(Instant::now());
                 if grace_period.is_zero() {
                     cancelled_stragglers = supervisor.cancel_all();
+                    collect_completed_quorum_results(
+                        &mut supervisor,
+                        &mut slots,
+                        &mut received,
+                        &mut successful,
+                        &is_success,
+                    );
                     break;
                 }
             }
@@ -407,6 +487,13 @@ impl BoundedParallelExecutor {
             if should_interrupt() {
                 interrupted = true;
                 cancelled_stragglers = supervisor.cancel_all();
+                collect_completed_quorum_results(
+                    &mut supervisor,
+                    &mut slots,
+                    &mut received,
+                    &mut successful,
+                    &is_success,
+                );
                 break;
             }
             let wait = if let Some(quorum_at) = quorum_at {
@@ -414,6 +501,13 @@ impl BoundedParallelExecutor {
                     grace_period.saturating_sub(Instant::now().duration_since(quorum_at));
                 if remaining.is_zero() {
                     cancelled_stragglers = supervisor.cancel_all();
+                    collect_completed_quorum_results(
+                        &mut supervisor,
+                        &mut slots,
+                        &mut received,
+                        &mut successful,
+                        &is_success,
+                    );
                     break;
                 }
                 remaining.min(poll_interval)
@@ -433,6 +527,13 @@ impl BoundedParallelExecutor {
                 quorum_at = Some(Instant::now());
                 if grace_period.is_zero() {
                     cancelled_stragglers = supervisor.cancel_all();
+                    collect_completed_quorum_results(
+                        &mut supervisor,
+                        &mut slots,
+                        &mut received,
+                        &mut successful,
+                        &is_success,
+                    );
                     break;
                 }
             }
@@ -452,6 +553,25 @@ impl BoundedParallelExecutor {
             },
             interrupted,
         }
+    }
+}
+
+fn collect_completed_quorum_results<T, F>(
+    supervisor: &mut ParallelJobSupervisor<T>,
+    slots: &mut [Option<Result<T, ParallelTaskError>>],
+    received: &mut usize,
+    successful: &mut usize,
+    is_success: &F,
+) where
+    T: Send + 'static,
+    F: Fn(&T) -> bool,
+{
+    for ParallelJobCompletion { job_id, result } in supervisor.collect_completed() {
+        if result.as_ref().is_ok_and(is_success) {
+            *successful = successful.saturating_add(1);
+        }
+        slots[job_id] = Some(result);
+        *received = received.saturating_add(1);
     }
 }
 

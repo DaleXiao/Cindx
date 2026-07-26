@@ -294,9 +294,11 @@ mod tests {
         );
         let event = finished_event(&invocation, &result);
 
-        assert!(completed_tool_result_from_events(&[event.clone()], &invocation).is_some());
+        assert!(
+            completed_tool_result_from_events(std::slice::from_ref(&event), &invocation).is_some()
+        );
         assert!(completed_tool_result_from_events(
-            &[event.clone()],
+            std::slice::from_ref(&event),
             &super::tests::invocation(r#"{"path":"b.txt"}"#)
         )
         .is_none());
@@ -419,8 +421,9 @@ mod tests {
             .metadata
             .insert("recovery_resume_key".to_string(), "resume-1".to_string());
 
-        let replayed = completed_recovery_effect_from_events(&[event.clone()], &recovered, &root)
-            .expect("verified deterministic effect should replay");
+        let replayed =
+            completed_recovery_effect_from_events(std::slice::from_ref(&event), &recovered, &root)
+                .expect("verified deterministic effect should replay");
         assert_eq!(
             replayed
                 .metadata
