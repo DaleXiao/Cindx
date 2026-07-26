@@ -55,6 +55,7 @@ mod prompt_mutation_runtime;
 mod prompt_pairwise_runtime;
 mod prompt_rollout_runtime;
 mod prompt_workflow_execution;
+mod prompt_workflow_selection;
 mod queue_service;
 mod routing_learning_runtime;
 mod run_lifecycle;

@@ -257,12 +257,17 @@ pub(crate) fn prompt_genome_records_from_event(event: &Event) -> Vec<PromptGenom
                 .map(|genome| vec![genome])
         })
         .unwrap_or_default();
+    let evolution_method = match event.metadata.get("mutation_strategy").map(String::as_str) {
+        Some("gepa_reflection") => Some(PromptEvolutionMethod::GepaReflectivePaired),
+        _ => None,
+    };
     genomes
         .into_iter()
         .filter(|genome| genome.validate().is_ok())
         .map(|genome| PromptGenomeRecord {
             effort: effort.clone(),
             genome,
+            evolution_method,
         })
         .collect()
 }
@@ -346,6 +351,11 @@ pub(crate) fn prompt_rollout_record_from_event(
                 .get("promotion_confidence")
                 .and_then(|value| value.parse::<f64>().ok())
                 .filter(|value| value.is_finite()),
+            frozen_profile: event
+                .metadata
+                .get("frozen_prompt_profile")
+                .and_then(|value| serde_json::from_str(value).ok())
+                .filter(|snapshot: &FrozenPromptProfileSnapshot| snapshot.validate().is_ok()),
         },
     ))
 }

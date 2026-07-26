@@ -243,7 +243,8 @@ impl SkillCatalog {
             .filter_map(|skill| {
                 let name = skill.name.to_ascii_lowercase();
                 let description = skill.description.to_ascii_lowercase();
-                let explicit = query.contains(&name) || query.contains(&skill.folder_name.to_ascii_lowercase());
+                let explicit = query.contains(&name)
+                    || query.contains(&skill.folder_name.to_ascii_lowercase());
                 let overlap = token_set(&format!("{name} {description}"))
                     .intersection(&query_tokens)
                     .count();
@@ -270,7 +271,9 @@ pub fn install_skill_archive(
     let mut archive = zip::ZipArchive::new(Cursor::new(archive_bytes))
         .map_err(|error| format!("invalid .skill package: {error}"))?;
     if archive.len() > MAX_INSTALL_FILES {
-        return Err(format!("skill package contains more than {MAX_INSTALL_FILES} entries"));
+        return Err(format!(
+            "skill package contains more than {MAX_INSTALL_FILES} entries"
+        ));
     }
 
     let mut files = Vec::new();
@@ -293,7 +296,11 @@ pub fn install_skill_archive(
             .enclosed_name()
             .ok_or_else(|| "skill package contains an unsafe path".to_string())?
             .to_path_buf();
-        if path.components().next().is_some_and(|component| component.as_os_str() == "__MACOSX") {
+        if path
+            .components()
+            .next()
+            .is_some_and(|component| component.as_os_str() == "__MACOSX")
+        {
             continue;
         }
         let declared_size = usize::try_from(entry.size())
@@ -322,7 +329,9 @@ pub fn install_skill_files(
         return Err("the selected skill is empty".to_string());
     }
     if files.len() > MAX_INSTALL_FILES {
-        return Err(format!("a skill can contain at most {MAX_INSTALL_FILES} files"));
+        return Err(format!(
+            "a skill can contain at most {MAX_INSTALL_FILES} files"
+        ));
     }
 
     let mut normalized_files = Vec::with_capacity(files.len());
@@ -480,14 +489,20 @@ impl Tool for SkillSearchTool {
         )
     }
 
-    fn permission_request(&self, _invocation: &ToolInvocation) -> Option<agent_core::PermissionRequest> {
+    fn permission_request(
+        &self,
+        _invocation: &ToolInvocation,
+    ) -> Option<agent_core::PermissionRequest> {
         None
     }
 
     fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
         let input: serde_json::Value = serde_json::from_str(&invocation.input_json)
             .map_err(|error| ToolError::new(format!("invalid skill search input: {error}")))?;
-        let query = input.get("query").and_then(serde_json::Value::as_str).unwrap_or_default();
+        let query = input
+            .get("query")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
         let rows = self
             .catalog
             .select(query, 8)
@@ -532,7 +547,10 @@ impl Tool for SkillLoadTool {
         )
     }
 
-    fn permission_request(&self, _invocation: &ToolInvocation) -> Option<agent_core::PermissionRequest> {
+    fn permission_request(
+        &self,
+        _invocation: &ToolInvocation,
+    ) -> Option<agent_core::PermissionRequest> {
         None
     }
 

@@ -6,6 +6,5 @@ pub use artifacts::{
     AgentOutputArtifact,
 };
 pub use sessions::{
-    project_session_lifecycle, SessionLifecycleInput, SessionLifecycleProjection,
-    SessionTitleState,
+    project_session_lifecycle, SessionLifecycleInput, SessionLifecycleProjection, SessionTitleState,
 };

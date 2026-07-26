@@ -227,7 +227,9 @@ fn wait_for_child_with_control(
         .join()
         .map_err(|_| McpError::new("MCP HTTP stderr reader panicked"))?;
     if let Some(error) = stdout.error {
-        return Err(McpError::new(format!("failed to read MCP HTTP stdout: {error}")));
+        return Err(McpError::new(format!(
+            "failed to read MCP HTTP stdout: {error}"
+        )));
     }
     if stdout.truncated {
         return Err(McpError::new(format!(
@@ -236,7 +238,9 @@ fn wait_for_child_with_control(
         )));
     }
     if let Some(error) = stderr.error {
-        return Err(McpError::new(format!("failed to read MCP HTTP stderr: {error}")));
+        return Err(McpError::new(format!(
+            "failed to read MCP HTTP stderr: {error}"
+        )));
     }
     Ok(Output {
         status,
@@ -263,9 +267,9 @@ impl McpStdioClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = process
-            .spawn()
-            .map_err(|error| McpError::new(format!("failed to start MCP server {command}: {error}")))?;
+        let mut child = process.spawn().map_err(|error| {
+            McpError::new(format!("failed to start MCP server {command}: {error}"))
+        })?;
         let stdin = child
             .stdin
             .take()
@@ -651,11 +655,9 @@ impl McpHttpClient {
         let raw = String::from_utf8_lossy(&output.stdout);
         let (status, headers, body) = parse_http_response(&raw)?;
         if let Some(session_id) = header_value(&headers, "mcp-session-id") {
-            *self
-                .session_id
-                .lock()
-                .map_err(|error| McpError::new(format!("MCP HTTP session lock poisoned: {error}")))? =
-                Some(session_id);
+            *self.session_id.lock().map_err(|error| {
+                McpError::new(format!("MCP HTTP session lock poisoned: {error}"))
+            })? = Some(session_id);
         }
         if !(200..300).contains(&status) {
             return Err(McpError::new(format!("MCP HTTP {status}: {body}")));
@@ -667,8 +669,9 @@ impl McpHttpClient {
         let message = if content_type.contains("text/event-stream") {
             parse_sse_response(body, request_id.unwrap())?
         } else {
-            serde_json::from_str::<Value>(body)
-                .map_err(|error| McpError::new(format!("invalid MCP HTTP JSON response: {error}")))?
+            serde_json::from_str::<Value>(body).map_err(|error| {
+                McpError::new(format!("invalid MCP HTTP JSON response: {error}"))
+            })?
         };
         if let Some(error) = message.get("error") {
             return Err(McpError::new(format!("MCP error: {error}")));
@@ -680,9 +683,7 @@ impl McpHttpClient {
 impl McpClientConnection {
     fn connect(config: &McpServerConfig) -> Result<Self, McpError> {
         match &config.transport {
-            McpTransportConfig::Stdio { .. } => {
-                McpStdioClient::connect(config).map(Self::Stdio)
-            }
+            McpTransportConfig::Stdio { .. } => McpStdioClient::connect(config).map(Self::Stdio),
             McpTransportConfig::StreamableHttp { .. } => {
                 McpHttpClient::connect(config).map(Self::Http)
             }
@@ -734,7 +735,9 @@ fn parse_sse_response(body: &str, request_id: u64) -> Result<Value, McpError> {
             return Ok(value);
         }
     }
-    Err(McpError::new("MCP SSE response did not include the request id"))
+    Err(McpError::new(
+        "MCP SSE response did not include the request id",
+    ))
 }
 
 fn parse_http_response(raw: &str) -> Result<(u16, BTreeMap<String, String>, &str), McpError> {
@@ -894,10 +897,7 @@ impl McpRuntime {
             .clients
             .lock()
             .map_err(|error| McpError::new(format!("MCP runtime lock poisoned: {error}")))?;
-        if let Some(client) = clients
-            .get(&config.id)
-            .filter(|client| client.is_alive())
-        {
+        if let Some(client) = clients.get(&config.id).filter(|client| client.is_alive()) {
             return Ok(Arc::clone(client));
         }
         clients.remove(&config.id);
@@ -955,7 +955,10 @@ impl McpCatalogService {
     pub fn save_servers(&mut self, servers: Vec<McpServerConfig>) -> Result<(), McpError> {
         validate_server_configs(&servers)?;
         for previous in &self.servers {
-            if !servers.iter().any(|server| server.id == previous.id && server == previous) {
+            if !servers
+                .iter()
+                .any(|server| server.id == previous.id && server == previous)
+            {
                 self.runtime.disconnect(&previous.id);
             }
         }
@@ -1013,7 +1016,11 @@ impl McpCatalogService {
             return Err(McpError::new("MCP server is disabled"));
         }
         let now = current_time_millis();
-        let snapshot = match self.runtime.client(&config).and_then(|client| client.list_tools()) {
+        let snapshot = match self
+            .runtime
+            .client(&config)
+            .and_then(|client| client.list_tools())
+        {
             Ok(tools) => McpCatalogSnapshot {
                 server_id: server_id.to_string(),
                 refreshed_at_ms: now,
@@ -1088,7 +1095,12 @@ impl McpRemoteTool {
                 None => client.call_tool(&self.descriptor.name, arguments),
             })
             .map_err(|error| ToolError::new(error.message))?;
-        Ok(mcp_tool_result(invocation, &self.server, &self.descriptor, result))
+        Ok(mcp_tool_result(
+            invocation,
+            &self.server,
+            &self.descriptor,
+            result,
+        ))
     }
 }
 
@@ -1109,11 +1121,7 @@ impl Tool for McpRemoteTool {
             },
             normalize_object_schema(self.descriptor.input_schema.clone()).to_string(),
         );
-        spec.output_schema_json = self
-            .descriptor
-            .output_schema
-            .as_ref()
-            .map(Value::to_string);
+        spec.output_schema_json = self.descriptor.output_schema.as_ref().map(Value::to_string);
         spec
     }
 
@@ -1162,7 +1170,10 @@ fn mcp_tool_result(
     descriptor: &McpToolDescriptor,
     result: Value,
 ) -> ToolResult {
-    let is_error = result.get("isError").and_then(Value::as_bool).unwrap_or(false);
+    let is_error = result
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let mut content = Vec::new();
     let mut output = String::new();
     let mut output_bytes = 0u64;
@@ -1176,12 +1187,8 @@ fn mcp_tool_result(
         match item.get("type").and_then(Value::as_str) {
             Some("text") => {
                 let text = item.get("text").and_then(Value::as_str).unwrap_or_default();
-                let preview = append_mcp_preview(
-                    &mut output,
-                    text,
-                    &mut output_bytes,
-                    &mut output_truncated,
-                );
+                let preview =
+                    append_mcp_preview(&mut output, text, &mut output_bytes, &mut output_truncated);
                 if !preview.is_empty() {
                     content.push(ToolContent::Text(preview));
                 }
@@ -1213,7 +1220,10 @@ fn mcp_tool_result(
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                let text = resource.get("text").and_then(Value::as_str).map(str::to_string);
+                let text = resource
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 let rendered = text.as_deref().unwrap_or(&uri);
                 let preview = append_mcp_preview(
                     &mut output,
@@ -1261,10 +1271,7 @@ fn mcp_tool_result(
     metadata.insert("mcp_server_id".to_string(), server.id.clone());
     metadata.insert("mcp_tool_name".to_string(), descriptor.name.clone());
     metadata.insert("output_bytes".to_string(), output_bytes.to_string());
-    metadata.insert(
-        "output_truncated".to_string(),
-        output_truncated.to_string(),
-    );
+    metadata.insert("output_truncated".to_string(), output_truncated.to_string());
     let structured_output_json = if output_truncated {
         Some(result.to_string())
     } else {
@@ -1321,7 +1328,10 @@ fn validate_server_configs(servers: &[McpServerConfig]) -> Result<(), McpError> 
             return Err(McpError::new("MCP server id and name are required"));
         }
         if ids.insert(server.id.clone(), ()).is_some() {
-            return Err(McpError::new(format!("duplicate MCP server id: {}", server.id)));
+            return Err(McpError::new(format!(
+                "duplicate MCP server id: {}",
+                server.id
+            )));
         }
         match &server.transport {
             McpTransportConfig::Stdio { command, .. } if command.trim().is_empty() => {
@@ -1358,8 +1368,9 @@ fn write_private_json<T: Serialize>(path: &Path, value: &T) -> Result<(), McpErr
 
 fn write_private_text(path: &Path, text: &str) -> Result<(), McpError> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| McpError::new(format!("failed to create MCP config directory: {error}")))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            McpError::new(format!("failed to create MCP config directory: {error}"))
+        })?;
     }
     let mut options = fs::OpenOptions::new();
     options.create(true).write(true).truncate(true);
@@ -1451,7 +1462,10 @@ mod tests {
 
     #[test]
     fn creates_stable_mcp_wire_names() {
-        assert_eq!(mcp_wire_name("Git Hub", "search/issues"), "mcp__Git_Hub__search_issues");
+        assert_eq!(
+            mcp_wire_name("Git Hub", "search/issues"),
+            "mcp__Git_Hub__search_issues"
+        );
     }
 
     #[test]
@@ -1524,10 +1538,14 @@ mod tests {
         let raw = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMCP-Session-Id: session-1\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}";
         let (status, headers, body) = parse_http_response(raw).unwrap();
         assert_eq!(status, 200);
-        assert_eq!(header_value(&headers, "MCP-Session-Id").as_deref(), Some("session-1"));
+        assert_eq!(
+            header_value(&headers, "MCP-Session-Id").as_deref(),
+            Some("session-1")
+        );
         assert!(body.contains("\"result\""));
 
-        let sse = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"tools\":[]}}\n\n";
+        let sse =
+            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"tools\":[]}}\n\n";
         let message = parse_sse_response(sse, 7).unwrap();
         assert_eq!(message["result"]["tools"], json!([]));
     }

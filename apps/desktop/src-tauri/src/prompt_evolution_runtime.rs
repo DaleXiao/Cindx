@@ -350,6 +350,14 @@ pub(crate) fn prompt_evolution_evaluation_for_run(
                         "rollback_count".to_string(),
                         rollout.rollback_count.to_string(),
                     ),
+                    (
+                        "frozen_prompt_profile".to_string(),
+                        rollout
+                            .frozen_profile
+                            .as_ref()
+                            .and_then(|snapshot| serde_json::to_string(snapshot).ok())
+                            .unwrap_or_default(),
+                    ),
                 ]
                 .into_iter()
                 .collect(),

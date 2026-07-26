@@ -748,6 +748,49 @@ impl SqliteStore {
         permission_audits_from_statement(&mut statement)
     }
 
+    pub fn has_session_permission_capability(
+        &self,
+        task_id: &TaskId,
+        session_id: &str,
+        request: &PermissionRequest,
+        exact_scope: bool,
+    ) -> Result<bool, StorageError> {
+        let mut statement = if exact_scope {
+            self.prepare(
+                "select 1
+                 from permission_requests pr
+                 inner join permission_resolutions rr on rr.request_id = pr.id
+                 where pr.task_id = ?1
+                   and pr.session_id = ?2
+                   and pr.risk = ?3
+                   and pr.action = ?4
+                   and pr.scope = ?5
+                   and rr.decision = 'allow_for_session'
+                 limit 1",
+            )?
+        } else {
+            self.prepare(
+                "select 1
+                 from permission_requests pr
+                 inner join permission_resolutions rr on rr.request_id = pr.id
+                 where pr.task_id = ?1
+                   and pr.session_id = ?2
+                   and pr.risk = ?3
+                   and pr.action = ?4
+                   and rr.decision = 'allow_for_session'
+                 limit 1",
+            )?
+        };
+        statement.bind_text(1, &task_id.0)?;
+        statement.bind_text(2, session_id)?;
+        statement.bind_text(3, permission_risk_to_str(&request.risk))?;
+        statement.bind_text(4, &request.action)?;
+        if exact_scope {
+            statement.bind_text(5, &request.scope)?;
+        }
+        Ok(statement.step()? == StepResult::Row)
+    }
+
     pub fn delete_records_by_metadata(
         &mut self,
         key: &str,
@@ -984,6 +1027,8 @@ impl SqliteStore {
               on permission_requests(task_id, session_id, requested_at_ms desc);
             create index if not exists idx_permission_requests_task_session_run
               on permission_requests(task_id, session_id, agent_run_id, requested_at_ms desc);
+            create index if not exists idx_permission_requests_session_capability
+              on permission_requests(task_id, session_id, risk, action, scope);
             ",
         )?;
         self.backfill_event_scope_columns()?;
@@ -2041,6 +2086,52 @@ mod tests {
         assert_eq!(active_run[0].request.id.0, "perm-a2");
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].request.id.0, "perm-a2");
+    }
+
+    #[test]
+    fn checks_session_capabilities_with_risk_action_and_optional_scope() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("task-agent".to_string());
+        let request_id = PermissionRequestId("perm-shell".to_string());
+        let request = PermissionRequest {
+            id: request_id.clone(),
+            task_id: task_id.clone(),
+            risk: PermissionRisk::Execute,
+            action: "shell.run".to_string(),
+            reason: "test".to_string(),
+            scope: "/workspace".to_string(),
+            metadata: [("session_id".to_string(), "session-a".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        store
+            .save_permission_request(request.clone(), 100)
+            .expect("permission should save");
+        store
+            .resolve_permission(PermissionResolution {
+                request_id,
+                decision: PermissionDecision::AllowForSession,
+                resolved_at_ms: 110,
+                resolved_by: "user".to_string(),
+            })
+            .expect("permission should resolve");
+
+        assert!(store
+            .has_session_permission_capability(&task_id, "session-a", &request, true)
+            .expect("capability query should succeed"));
+        let mut another_scope = request.clone();
+        another_scope.scope = "/other".to_string();
+        assert!(!store
+            .has_session_permission_capability(&task_id, "session-a", &another_scope, true)
+            .expect("scope query should succeed"));
+        assert!(store
+            .has_session_permission_capability(&task_id, "session-a", &another_scope, false)
+            .expect("unscoped query should succeed"));
+        let mut another_risk = request;
+        another_risk.risk = PermissionRisk::Write;
+        assert!(!store
+            .has_session_permission_capability(&task_id, "session-a", &another_risk, false)
+            .expect("risk query should succeed"));
     }
 
     #[test]

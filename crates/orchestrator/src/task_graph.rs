@@ -279,8 +279,8 @@ impl WorkflowExecutionCheckpoint {
                 plan_step.contract.output_kind,
                 WorkflowOutputKind::Verification | WorkflowOutputKind::Synthesis
             );
-            let direct_delivery_fallback = delivery_target(&self.plan.steps)
-                .is_some_and(|target| target.id == plan_step.id);
+            let direct_delivery_fallback =
+                delivery_target(&self.plan.steps).is_some_and(|target| target.id == plan_step.id);
             let unavailable_dependencies = unresolved.iter().all(|dependency| {
                 self.dependency_permanently_unavailable(
                     dependency,
@@ -805,11 +805,8 @@ mod tests {
         delivery.id = "review".to_string();
         delivery.role = "verifier".to_string();
         delivery.subtask = "review and deliver".to_string();
-        delivery.contract = WorkflowStepContract::inferred(
-            "verifier",
-            &delivery.access,
-            &WorkflowToolPolicy::None,
-        );
+        delivery.contract =
+            WorkflowStepContract::inferred("verifier", &delivery.access, &WorkflowToolPolicy::None);
         assert_eq!(
             delivery.contract.output_kind,
             WorkflowOutputKind::Verification

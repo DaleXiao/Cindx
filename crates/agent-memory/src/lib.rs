@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_successful_tool_does_not_verify_assistant_outcome() {
+    fn unrelated_successful_tool_from_before_the_turn_does_not_persist_assistant_outcome() {
         let events = vec![
             event(
                 1,
@@ -394,13 +394,41 @@ mod tests {
         ];
 
         let records = extract_durable_memories(&events, "project-a", "session-a");
-        let outcome = records
+        assert!(records
             .iter()
-            .find(|record| record.kind == MemoryKind::Outcome)
-            .expect("assistant outcome should remain available as a low-trust memory");
+            .all(|record| record.kind != MemoryKind::Outcome));
+    }
 
-        assert_eq!(outcome.trust, MemoryTrust::AssistantReported);
-        assert_eq!(outcome.source_event_ids, vec!["event-2".to_string()]);
+    #[test]
+    fn completed_assistant_claim_without_tool_evidence_is_not_durable_memory() {
+        let events = vec![
+            event(
+                1,
+                EventKind::MessageAdded,
+                "User message",
+                [
+                    ("role", "user"),
+                    ("content", "Explain the current architecture"),
+                ],
+            ),
+            event(
+                2,
+                EventKind::MessageAdded,
+                "Assistant message",
+                [
+                    ("role", "assistant"),
+                    (
+                        "content",
+                        "Implemented and verified the architecture changes.",
+                    ),
+                ],
+            ),
+            event(3, EventKind::TaskStatusChanged, "Agent task completed", []),
+        ];
+
+        let records = extract_durable_memories(&events, "project-a", "session-a");
+
+        assert!(records.is_empty());
     }
 
     #[test]
@@ -444,13 +472,9 @@ mod tests {
         ];
 
         let records = extract_durable_memories(&events, "project-a", "session-a");
-        let outcome = records
+        assert!(records
             .iter()
-            .find(|record| record.kind == MemoryKind::Outcome)
-            .expect("explicit completion language remains a low-trust outcome");
-
-        assert_eq!(outcome.source_event_ids, vec!["event-4".to_string()]);
-        assert_eq!(outcome.importance, 58);
+            .all(|record| record.kind != MemoryKind::Outcome));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use super::*;
 use orchestrator::{AdaptiveWorkflow, AdaptiveWorkflowStep, WorkflowOutputKind};
 
-const EXTERNAL_EFFECT_SCHEMA: &str = "cindx.external_effect_eval.raw.v2";
+const EXTERNAL_EFFECT_SCHEMA: &str = "cindx.external_effect_eval.raw.v3";
 const GPQA_SOURCE_URL: &str = "https://github.com/idavidrein/gpqa";
 const GPQA_SOURCE_REVISION: &str = "56686c06f5e19865c153de0fdb11be3890014df7";
 const MRCR_SOURCE_URL: &str = "https://huggingface.co/datasets/openai/mrcr";
@@ -92,6 +92,11 @@ struct ExternalEffectRun {
     requested_policy: String,
     effective_policy: String,
     models: Vec<String>,
+    prompt_profile: String,
+    prompt_profile_origin: String,
+    prompt_profile_sha256: String,
+    prompt_profile_artifact_sha256: Option<String>,
+    gepa_frozen: bool,
     succeeded: bool,
     latency_ms: u64,
     prompt_tokens: u64,
@@ -130,11 +135,85 @@ struct ExternalEffectReport<'a> {
 struct TreatmentOutput {
     policy: String,
     models: Vec<String>,
+    prompt_profile: String,
+    prompt_profile_origin: String,
+    prompt_profile_sha256: String,
+    prompt_profile_artifact_sha256: Option<String>,
+    gepa_frozen: bool,
     succeeded: bool,
     latency_ms: u64,
     usage: Metadata,
     output: String,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct EvaluationPromptProfile {
+    genome: ConductorPromptGenome,
+    origin: &'static str,
+    genome_sha256: String,
+    artifact_sha256: Option<String>,
+    gepa_frozen: bool,
+}
+
+impl EvaluationPromptProfile {
+    fn seed(effort: &str) -> Self {
+        let genome = ConductorPromptGenome::seed_for_effort(effort);
+        let genome_sha256 = orchestrator::prompt_genome_sha256(&genome)
+            .expect("built-in prompt genome should validate and serialize");
+        Self {
+            genome,
+            origin: "built_in_seed",
+            genome_sha256,
+            artifact_sha256: None,
+            gepa_frozen: false,
+        }
+    }
+
+    fn from_frozen_snapshot(
+        effort: &str,
+        snapshot: orchestrator::FrozenPromptProfileSnapshot,
+    ) -> Result<Self, String> {
+        if snapshot.effort != effort {
+            return Err(format!(
+                "frozen prompt profile effort {} does not match requested {effort}",
+                snapshot.effort
+            ));
+        }
+        let artifact_sha256 = snapshot.artifact_sha256()?;
+        Ok(Self {
+            genome: snapshot.genome,
+            origin: "frozen_gepa_snapshot",
+            genome_sha256: snapshot.candidate_sha256,
+            artifact_sha256: Some(artifact_sha256),
+            gepa_frozen: true,
+        })
+    }
+}
+
+fn evaluation_prompt_profile(effort: &str) -> Result<EvaluationPromptProfile, String> {
+    let env_name = match effort {
+        "auto" => Some("CINDX_EVAL_FROZEN_GEPA_AUTO_PATH"),
+        "pro" => Some("CINDX_EVAL_FROZEN_GEPA_PRO_PATH"),
+        "fast" => None,
+        other => return Err(format!("unsupported evaluation effort: {other}")),
+    };
+    let Some(env_name) = env_name else {
+        return Ok(EvaluationPromptProfile::seed(effort));
+    };
+    let Some(path) = std::env::var_os(env_name) else {
+        return Ok(EvaluationPromptProfile::seed(effort));
+    };
+    let path = PathBuf::from(path);
+    let encoded = fs::read(&path)
+        .map_err(|error| format!("failed to read {} from {env_name}: {error}", path.display()))?;
+    let snapshot = orchestrator::FrozenPromptProfileSnapshot::from_json_slice(&encoded)
+        .map_err(|error| format!("invalid frozen prompt profile {}: {error}", path.display()))?;
+    EvaluationPromptProfile::from_frozen_snapshot(effort, snapshot)
+}
+
+fn fixed_protocol_sha256(profile: &str) -> String {
+    sha256_hex(profile.as_bytes())
 }
 
 fn deterministic_rank(seed: &str, value: &str) -> String {
@@ -277,6 +356,7 @@ fn usage_value(usage: &Metadata, key: &str) -> u64 {
 fn treatment_from_completion(
     policy: impl Into<String>,
     models: Vec<String>,
+    prompt_profile: &str,
     completion: CollaborationCompletion,
 ) -> TreatmentOutput {
     let succeeded = completion.error.is_none()
@@ -287,6 +367,11 @@ fn treatment_from_completion(
     TreatmentOutput {
         policy: policy.into(),
         models,
+        prompt_profile: prompt_profile.to_string(),
+        prompt_profile_origin: "fixed_protocol".to_string(),
+        prompt_profile_sha256: fixed_protocol_sha256(prompt_profile),
+        prompt_profile_artifact_sha256: None,
+        gepa_frozen: false,
         succeeded,
         latency_ms: completion.latency_ms,
         usage: completion.usage,
@@ -300,6 +385,7 @@ fn direct_gpqa_treatment(config: &ProviderConfig, prompt: &str) -> TreatmentOutp
     treatment_from_completion(
         "single",
         vec![model.clone()],
+        "gpqa-direct-baseline-v1",
         complete_collaboration_model_for_stage_with_control(
             config.clone(),
             "terminal_executor".to_string(),
@@ -318,8 +404,8 @@ fn deterministic_auto_plan(
     config: &ProviderConfig,
     prompt: &str,
     decision: &RoutingDecision,
+    profile: &EvaluationPromptProfile,
 ) -> PromptPlanCandidate {
-    let profile = ConductorPromptGenome::seed_for_effort("auto");
     let steps = match decision.policy {
         OrchestrationPolicy::Single => vec![AdaptiveWorkflowStep {
             id: "answer".to_string(),
@@ -362,12 +448,12 @@ fn deterministic_auto_plan(
         "auto",
         decision.policy.label(),
         config.model_for_conductor(),
-        profile.id.clone(),
+        profile.genome.id.clone(),
         &workflow,
         WorkflowBudget {
             max_steps: workflow.steps.len(),
             max_models: 3,
-            max_model_turns_per_step: profile.effective_max_model_turns_per_step(),
+            max_model_turns_per_step: profile.genome.effective_max_model_turns_per_step(),
             max_tool_calls_per_step: 0,
             max_output_tokens_per_step: EVALUATION_MAX_OUTPUT_TOKENS as usize,
         },
@@ -376,7 +462,7 @@ fn deterministic_auto_plan(
         step.tool_policy = WorkflowToolPolicy::None;
     }
     PromptPlanCandidate {
-        genome: profile,
+        genome: profile.genome.clone(),
         plan: Some(plan),
         raw_output: String::new(),
         latency_ms: 0,
@@ -391,6 +477,7 @@ fn workflow_treatment(
     policy: String,
     candidate: PromptPlanCandidate,
     control: &Arc<AgentRunControl>,
+    profile: &EvaluationPromptProfile,
 ) -> TreatmentOutput {
     let planning_latency_ms = candidate.latency_ms;
     let planning_tokens = candidate.total_tokens;
@@ -500,6 +587,11 @@ fn workflow_treatment(
     TreatmentOutput {
         policy,
         models: planning_models,
+        prompt_profile: profile.genome.id.clone(),
+        prompt_profile_origin: profile.origin.to_string(),
+        prompt_profile_sha256: profile.genome_sha256.clone(),
+        prompt_profile_artifact_sha256: profile.artifact_sha256.clone(),
+        gepa_frozen: profile.gepa_frozen,
         succeeded,
         latency_ms: planning_latency_ms
             .saturating_add(execution.execution.latency_ms)
@@ -852,21 +944,29 @@ fn auto_gpqa_treatment(
     config: &ProviderConfig,
     workspace_root: &Path,
     prompt: &str,
+    profile: &EvaluationPromptProfile,
 ) -> TreatmentOutput {
     let context = RoutingContext::from_prompt(prompt, model_candidates_for_config(config));
     let decision = RuleBasedRouter.route(&context);
     let policy = decision.policy.label().to_string();
     match decision.policy {
-        OrchestrationPolicy::BestOfN { candidates } => {
-            conductor_gpqa_treatment(config, workspace_root, prompt, "auto", candidates, policy)
-        }
+        OrchestrationPolicy::BestOfN { candidates } => conductor_gpqa_treatment(
+            config,
+            workspace_root,
+            prompt,
+            "auto",
+            candidates,
+            policy,
+            profile,
+        ),
         _ => workflow_treatment(
             config,
             workspace_root,
             prompt,
             policy,
-            deterministic_auto_plan(config, prompt, &decision),
+            deterministic_auto_plan(config, prompt, &decision, profile),
             &evaluation_run_control("auto"),
+            profile,
         ),
     }
 }
@@ -878,6 +978,7 @@ fn conductor_gpqa_treatment(
     effort: &str,
     agent_budget: usize,
     policy: String,
+    profile: &EvaluationPromptProfile,
 ) -> TreatmentOutput {
     let worker_models = collaboration_candidate_models(config, agent_budget);
     let control = evaluation_run_control(effort);
@@ -888,7 +989,7 @@ fn conductor_gpqa_treatment(
         &policy,
         &worker_models,
         agent_budget,
-        &ConductorPromptGenome::seed_for_effort(effort),
+        &profile.genome,
         &unique_id("external-conductor"),
         &control,
     );
@@ -899,7 +1000,15 @@ fn conductor_gpqa_treatment(
             step.tool_policy = WorkflowToolPolicy::None;
         }
     }
-    workflow_treatment(config, workspace_root, prompt, policy, candidate, &control)
+    workflow_treatment(
+        config,
+        workspace_root,
+        prompt,
+        policy,
+        candidate,
+        &control,
+        profile,
+    )
 }
 
 fn raw_protocol_completion(
@@ -1008,6 +1117,11 @@ fn append_gpqa_run(
         requested_policy: treatment.to_string(),
         effective_policy: result.policy,
         models: result.models,
+        prompt_profile: result.prompt_profile,
+        prompt_profile_origin: result.prompt_profile_origin,
+        prompt_profile_sha256: result.prompt_profile_sha256,
+        prompt_profile_artifact_sha256: result.prompt_profile_artifact_sha256,
+        gepa_frozen: result.gepa_frozen,
         succeeded: result.succeeded,
         latency_ms: result.latency_ms,
         prompt_tokens: usage_value(&result.usage, "prompt_tokens"),
@@ -1051,6 +1165,11 @@ fn append_mrcr_run(
         requested_policy: treatment.to_string(),
         effective_policy: policy.to_string(),
         models,
+        prompt_profile: "mrcr-raw-transcript-v1".to_string(),
+        prompt_profile_origin: "fixed_protocol".to_string(),
+        prompt_profile_sha256: fixed_protocol_sha256("mrcr-raw-transcript-v1"),
+        prompt_profile_artifact_sha256: None,
+        gepa_frozen: false,
         succeeded: result.error.is_none() && !output.trim().is_empty(),
         latency_ms: result.latency_ms,
         prompt_tokens: usage_value(&result.usage, "prompt_tokens"),
@@ -1343,6 +1462,10 @@ fn provider_backed_fugu_external_effect_pilot() {
     evaluation_git_commit().expect("evaluation source commit must be declared before model calls");
     let config = load_provider_config();
     assert!(config.is_ready(), "provider configuration is required");
+    let auto_profile = evaluation_prompt_profile("auto")
+        .expect("auto evaluation prompt profile should be reproducible");
+    let pro_profile = evaluation_prompt_profile("pro")
+        .expect("pro evaluation prompt profile should be reproducible");
     let gpqa_path = PathBuf::from(
         std::env::var("CINDX_GPQA_CSV").expect("CINDX_GPQA_CSV must point to gpqa_diamond.csv"),
     );
@@ -1420,7 +1543,7 @@ fn provider_backed_fugu_external_effect_pilot() {
             &mut runs,
             case,
             "cindx_auto",
-            auto_gpqa_treatment(&config, &repository_root, &case.prompt),
+            auto_gpqa_treatment(&config, &repository_root, &case.prompt, &auto_profile),
         );
         append_gpqa_run(
             &mut runs,
@@ -1433,6 +1556,7 @@ fn provider_backed_fugu_external_effect_pilot() {
                 "pro",
                 3,
                 "best_of_n".to_string(),
+                &pro_profile,
             ),
         );
         write_external_effect_checkpoint(&output_path, &config, &sources, &runs);

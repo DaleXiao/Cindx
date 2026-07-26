@@ -183,7 +183,10 @@ impl ToolSpec {
         let value: serde_json::Value = serde_json::from_str(&self.input_schema_json)
             .map_err(|error| format!("invalid JSON schema for {}: {error}", self.name))?;
         if value.get("type").and_then(serde_json::Value::as_str) != Some("object") {
-            return Err(format!("tool {} input schema must describe an object", self.name));
+            return Err(format!(
+                "tool {} input schema must describe an object",
+                self.name
+            ));
         }
         Ok(())
     }

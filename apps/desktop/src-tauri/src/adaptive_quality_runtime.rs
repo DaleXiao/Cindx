@@ -370,68 +370,48 @@ pub(crate) fn compare_team_guidance_with_anchor(
     if team_output.trim().is_empty() || anchor_output.trim().is_empty() {
         return Err("paired comparison requires both team and anchor guidance".to_string());
     }
-    let team_is_a = sha256_hex(collaboration_id.as_bytes())
-        .as_bytes()
-        .first()
-        .is_none_or(|byte| byte % 2 == 0);
-    let (candidate_a, candidate_b) = if team_is_a {
-        (team_output, anchor_output)
-    } else {
-        (anchor_output, team_output)
-    };
     let reviewer_model = config.model_for_role(&ModelRole::Reviewer);
-    let raw = run_collaboration_stage(
-        state,
-        config,
-        task_id,
-        run_context,
-        collaboration_id,
-        "team_anchor_pairwise",
-        ModelRole::Reviewer,
-        &reviewer_model,
-        format!(
-            "Blindly compare two internal execution-guidance candidates for the same user request. Judge objective fidelity, constraint coverage, evidence discipline, concrete executable next actions, robustness, and safety. Do not reward verbosity. Candidate labels are randomized and reveal no source. Return only strict JSON: {{\"score_a\":0.0,\"score_b\":0.0,\"safety_violations_a\":0,\"safety_violations_b\":0}}. Scores must be finite numbers from 0 to 1.\n\nUser request:\n{}\n\nCandidate A:\n{}\n\nCandidate B:\n{}",
-            truncate_for_collaboration(user_prompt, 12_000),
-            truncate_for_collaboration(candidate_a, 14_000),
-            truncate_for_collaboration(candidate_b, 14_000),
-        ),
-    )?;
-    let payload = parse_prompt_pairwise_payload(&raw)?;
-    for (label, score) in [("A", payload.score_a), ("B", payload.score_b)] {
-        if !score.is_finite() || !(0.0..=1.0).contains(&score) {
-            return Err(format!(
-                "paired comparison score {label} must be finite and between 0 and 1"
-            ));
-        }
-    }
-    let score_a_bps = (payload.score_a * 10_000.0).round() as u16;
-    let score_b_bps = (payload.score_b * 10_000.0).round() as u16;
-    let (team_score_bps, anchor_score_bps, team_safety_violations, anchor_safety_violations) =
-        if team_is_a {
-            (
-                score_a_bps,
-                score_b_bps,
-                payload.safety_violations_a,
-                payload.safety_violations_b,
+    let forward_prompt = candidate_pair_review_prompt(user_prompt, team_output, anchor_output);
+    let reverse_prompt = candidate_pair_review_prompt(user_prompt, anchor_output, team_output);
+    let (forward, reverse) = std::thread::scope(|scope| {
+        let forward = scope.spawn(|| {
+            run_collaboration_stage(
+                state,
+                config,
+                task_id,
+                run_context,
+                collaboration_id,
+                "team_anchor_pairwise_forward",
+                ModelRole::Reviewer,
+                &reviewer_model,
+                forward_prompt,
             )
-        } else {
-            (
-                score_b_bps,
-                score_a_bps,
-                payload.safety_violations_b,
-                payload.safety_violations_a,
+        });
+        let reverse = scope.spawn(|| {
+            run_collaboration_stage(
+                state,
+                config,
+                task_id,
+                run_context,
+                collaboration_id,
+                "team_anchor_pairwise_reverse",
+                ModelRole::Reviewer,
+                &reviewer_model,
+                reverse_prompt,
             )
-        };
-    let team_uplift_bps = i32::from(team_score_bps)
-        .saturating_sub(i32::from(anchor_score_bps))
-        .clamp(-10_000, 10_000) as i16;
-    let comparison = AdaptivePairwiseComparison {
-        team_score_bps,
-        anchor_score_bps,
-        team_uplift_bps,
-        team_safety_violations,
-        anchor_safety_violations,
-    };
+        });
+        (
+            forward
+                .join()
+                .unwrap_or_else(|_| Err("forward team-anchor reviewer panicked".to_string())),
+            reverse
+                .join()
+                .unwrap_or_else(|_| Err("reverse team-anchor reviewer panicked".to_string())),
+        )
+    });
+    let forward = parse_candidate_pair_review(&forward?)?;
+    let reverse = parse_candidate_pair_review(&reverse?)?;
+    let comparison = compare_team_and_anchor_order_invariant(forward, reverse)?;
     if let Ok(mut store) = state.store.lock() {
         let _ = append_event(
             &mut store,
@@ -442,20 +422,26 @@ pub(crate) fn compare_team_guidance_with_anchor(
                 [
                     ("collaboration_id".to_string(), collaboration_id.to_string()),
                     ("comparison_blind".to_string(), "true".to_string()),
+                    ("comparison_order_invariant".to_string(), "true".to_string()),
                     (
-                        "comparison_team_label".to_string(),
-                        if team_is_a { "A" } else { "B" }.to_string(),
+                        "team_score_bps".to_string(),
+                        comparison.team_score_bps.to_string(),
                     ),
-                    ("team_score_bps".to_string(), team_score_bps.to_string()),
-                    ("anchor_score_bps".to_string(), anchor_score_bps.to_string()),
-                    ("team_uplift_bps".to_string(), team_uplift_bps.to_string()),
+                    (
+                        "anchor_score_bps".to_string(),
+                        comparison.anchor_score_bps.to_string(),
+                    ),
+                    (
+                        "team_uplift_bps".to_string(),
+                        comparison.team_uplift_bps.to_string(),
+                    ),
                     (
                         "team_safety_violations".to_string(),
-                        team_safety_violations.to_string(),
+                        comparison.team_safety_violations.to_string(),
                     ),
                     (
                         "anchor_safety_violations".to_string(),
-                        anchor_safety_violations.to_string(),
+                        comparison.anchor_safety_violations.to_string(),
                     ),
                 ]
                 .into_iter()
@@ -465,20 +451,6 @@ pub(crate) fn compare_team_guidance_with_anchor(
         );
     }
     Ok(comparison)
-}
-
-fn parse_prompt_pairwise_payload(
-    response: &str,
-) -> Result<PromptPairwiseEvaluationPayload, String> {
-    let start = response
-        .find('{')
-        .ok_or_else(|| "paired comparison did not return JSON".to_string())?;
-    let end = response
-        .rfind('}')
-        .filter(|end| *end >= start)
-        .ok_or_else(|| "paired comparison returned incomplete JSON".to_string())?;
-    serde_json::from_str(&response[start..=end])
-        .map_err(|error| format!("paired comparison JSON is invalid: {error}"))
 }
 
 pub(crate) fn parse_collaboration_quality(

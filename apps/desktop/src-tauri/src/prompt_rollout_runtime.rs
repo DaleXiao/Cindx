@@ -22,6 +22,7 @@ pub(crate) fn default_prompt_rollout(effort: &str) -> PromptRolloutState {
         status: "stable".to_string(),
         last_reason: None,
         promotion_confidence: None,
+        frozen_profile: None,
     }
 }
 
@@ -92,6 +93,102 @@ pub(crate) fn next_prompt_canary_stage(current: u8) -> u8 {
     }
 }
 
+fn prompt_promotion_gate_config() -> PromptPromotionGateConfig {
+    PromptPromotionGateConfig {
+        minimum_train_runs: PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
+        minimum_holdout_runs: PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS,
+        minimum_unique_train_cases: 2,
+        minimum_unique_holdout_cases: 2,
+        minimum_train_task_classes: 2,
+        minimum_holdout_task_classes: 2,
+        minimum_wilson_lower_bound: PROMPT_EVOLUTION_MIN_PROMOTION_WILSON,
+        maximum_generalization_gap: 0.15,
+        maximum_holdout_task_class_regression: 0.05,
+    }
+}
+
+fn frozen_prompt_profile_for_promotion(
+    model: &PromptEvolutionReadModel,
+    effort: &str,
+    candidate_id: &str,
+    stable_profile_id: &str,
+) -> Result<Option<FrozenPromptProfileSnapshot>, String> {
+    let Some(record) = model
+        .genomes
+        .iter()
+        .find(|record| record.effort == effort && record.genome.id == candidate_id)
+    else {
+        return Ok(None);
+    };
+    if record.evolution_method != Some(PromptEvolutionMethod::GepaReflectivePaired) {
+        return Ok(None);
+    }
+
+    let observations = model
+        .observations
+        .iter()
+        .filter(|(observed_effort, observation)| {
+            observed_effort == effort
+                && observation.mode.is_execution()
+                && ((observation.profile_id == candidate_id
+                    && observation.opponent_profile_id.as_deref() == Some(stable_profile_id))
+                    || (observation.profile_id == stable_profile_id
+                        && observation.opponent_profile_id.as_deref() == Some(candidate_id)))
+        })
+        .map(|(_, observation)| observation.clone())
+        .collect::<Vec<_>>();
+    let gate = evaluate_prompt_promotion_gate(
+        &observations,
+        candidate_id,
+        stable_profile_id,
+        prompt_promotion_gate_config(),
+    );
+    if !gate.eligible {
+        let blockers = gate
+            .blockers
+            .iter()
+            .map(|blocker| blocker.label())
+            .collect::<Vec<_>>()
+            .join(",");
+        return Err(format!(
+            "cannot freeze GEPA profile before the promotion gate passes: {blockers}"
+        ));
+    }
+
+    let split_label = |observation: &PromptEvolutionObservation| match observation.split {
+        PromptEvaluationSplit::Train => "train",
+        PromptEvaluationSplit::Holdout => "holdout",
+    };
+    let dataset_manifest = observations
+        .iter()
+        .map(|observation| {
+            format!(
+                "{}\u{1f}{}\u{1f}{}",
+                observation.case_id,
+                observation.task_class,
+                split_label(observation)
+            )
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let dataset_sha256 = sha256_hex(dataset_manifest.join("\n").as_bytes());
+    let mut evidence = observations;
+    evidence.sort_by_key(PromptEvolutionObservation::evidence_identity);
+    let paired_evidence_sha256 = sha256_hex(
+        &serde_json::to_vec(&evidence)
+            .map_err(|error| format!("promotion evidence serialization failed: {error}"))?,
+    );
+    FrozenPromptProfileSnapshot::new_gepa(
+        effort,
+        record.genome.clone(),
+        stable_profile_id,
+        dataset_sha256,
+        paired_evidence_sha256,
+    )
+    .map(Some)
+}
+
 pub(crate) fn reconcile_prompt_rollout(
     model: &mut PromptEvolutionReadModel,
     effort: &str,
@@ -130,15 +227,7 @@ pub(crate) fn reconcile_prompt_rollout(
         &effort_observations,
         candidate_id,
         &rollout.stable_profile_id,
-        PromptPromotionGateConfig {
-            minimum_train_runs: PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
-            minimum_holdout_runs: PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS,
-            minimum_unique_train_cases: 2,
-            minimum_unique_holdout_cases: 2,
-            minimum_wilson_lower_bound: PROMPT_EVOLUTION_MIN_PROMOTION_WILSON,
-            maximum_generalization_gap: 0.15,
-            maximum_holdout_task_class_regression: 0.05,
-        },
+        prompt_promotion_gate_config(),
     );
     let confidence = &promotion_gate.confidence;
     rollout.promotion_confidence = Some(confidence.wilson_lower_bound);
@@ -193,7 +282,22 @@ pub(crate) fn reconcile_prompt_rollout(
     let enough_live_traffic = live_runs.saturating_sub(rollout.live_checkpoint) >= 1;
     if enough_new_evidence && enough_live_traffic {
         if rollout.canary_percent >= 100 {
+            let frozen_profile = match frozen_prompt_profile_for_promotion(
+                model,
+                effort,
+                candidate_id,
+                &rollout.stable_profile_id,
+            ) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    rollout.status = "evaluating".to_string();
+                    rollout.last_reason = Some(format!("freeze_failed:{error}"));
+                    model.rollouts.insert(effort.to_string(), rollout.clone());
+                    return rollout;
+                }
+            };
             rollout.stable_profile_id = candidate_id.to_string();
+            rollout.frozen_profile = frozen_profile;
             rollout.canary_profile_id = None;
             rollout.canary_percent = 0;
             rollout.status = "promoted".to_string();

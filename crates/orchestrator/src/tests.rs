@@ -550,6 +550,7 @@ fn conductor_harness_produces_a_bounded_repair_request() {
 fn deterministic_pro_fallback_preserves_independent_review_and_synthesis() {
     let mut request = conductor_request();
     request.budget.max_steps = 5;
+    request.execution_contract.verification_required = true;
     let harness = ConductorHarness::new(request);
 
     let plan = harness
@@ -623,6 +624,7 @@ fn deterministic_auto_fallback_compares_two_independent_branches() {
 fn conductor_harness_requires_diverse_root_branches_and_complete_review() {
     let mut request = conductor_request();
     request.budget.max_steps = 5;
+    request.execution_contract.verification_required = true;
     let harness = ConductorHarness::new(request);
     let same_model = harness
             .parse_plan(
@@ -669,6 +671,7 @@ fn conductor_harness_enforces_the_selected_prompt_genome() {
 
     let mut adversarial_request = conductor_request();
     adversarial_request.budget.max_steps = 5;
+    adversarial_request.execution_contract.verification_required = true;
     let adversarial = ConductorHarness::new(adversarial_request);
     let error = adversarial
             .parse_plan(
@@ -692,6 +695,31 @@ fn conductor_harness_enforces_the_selected_prompt_genome() {
         pro_plan.steps.last().unwrap().tool_policy,
         WorkflowToolPolicy::None
     );
+}
+
+#[test]
+fn conductor_harness_allows_a_single_step_pro_graph_for_a_simple_task() {
+    let routing = RoutingContext::from_prompt("What is a Rust enum?", Vec::new());
+    let mut request = conductor_request();
+    request.objective = "What is a Rust enum?".to_string();
+    request.execution_contract = ConductorExecutionContract::from_routing(
+        &routing,
+        "pro",
+        OrchestrationPolicy::BestOfN { candidates: 3 },
+    );
+    request.prompt_genome = ConductorPromptGenome::seed_for_effort("pro");
+    let harness = ConductorHarness::new(request);
+
+    let plan = harness
+        .parse_plan(
+            r#"{"steps":[{"id":"final","role":"synthesizer","model":"planner","subtask":"produce the direct execution brief","access":[]}] }"#,
+        )
+        .expect("simple Pro should let the conductor choose the smallest useful graph");
+
+    assert_eq!(plan.steps.len(), 1);
+    assert!(harness
+        .planning_prompt()
+        .contains("requires 0 independent contribution(s)"));
 }
 
 #[test]

@@ -63,7 +63,10 @@ impl ContextSourceKind {
             Self::RestorePack => 95,
             Self::ArtifactManifest => 90,
             Self::WorkspaceKnowledge => 85,
-            Self::ProjectMemory => 80,
+            // This context was recalled specifically for the current request
+            // and can contain durable user requirements. Keep it ahead of
+            // bulk workspace evidence when the input budget is tight.
+            Self::ProjectMemory => 96,
             Self::Skill => 75,
             Self::SingleModelPolicy => 70,
             Self::Collaboration => 68,
@@ -79,6 +82,7 @@ impl ContextSourceKind {
                 | Self::AgentEvidence
                 | Self::RestorePack
                 | Self::ArtifactManifest
+                | Self::ProjectMemory
         )
     }
 }
@@ -373,5 +377,22 @@ mod tests {
         assert_eq!(source.as_str(), "agent_evidence_packet");
         assert!(source.priority() > ContextSourceKind::ProjectMemory.priority());
         assert!(source.is_protected());
+    }
+
+    #[test]
+    fn recalled_project_memory_is_protected_above_workspace_knowledge() {
+        let mut memory = message(MessageRole::System, "durable user requirement");
+        memory
+            .metadata
+            .insert("kind".to_string(), "project_memory".to_string());
+        let mut knowledge = message(MessageRole::System, "workspace evidence");
+        knowledge
+            .metadata
+            .insert("kind".to_string(), "knowledge_context".to_string());
+
+        let memory_source = ContextSourceKind::from_message(&memory).unwrap();
+        let knowledge_source = ContextSourceKind::from_message(&knowledge).unwrap();
+        assert!(memory_source.is_protected());
+        assert!(memory_source.priority() > knowledge_source.priority());
     }
 }

@@ -42,9 +42,7 @@ pub struct SessionLifecycleProjection {
     pub latest_sequence: u64,
 }
 
-pub fn project_session_lifecycle(
-    input: SessionLifecycleInput<'_>,
-) -> SessionLifecycleProjection {
+pub fn project_session_lifecycle(input: SessionLifecycleInput<'_>) -> SessionLifecycleProjection {
     let unseen = input.latest_sequence > input.seen_event_sequence;
     match input.status {
         "running" => SessionLifecycleProjection {
@@ -107,8 +105,14 @@ mod tests {
 
     #[test]
     fn legacy_title_records_preserve_manually_named_sessions() {
-        assert_eq!(SessionTitleState::parse(None, true), SessionTitleState::Pending);
-        assert_eq!(SessionTitleState::parse(None, false), SessionTitleState::Manual);
+        assert_eq!(
+            SessionTitleState::parse(None, true),
+            SessionTitleState::Pending
+        );
+        assert_eq!(
+            SessionTitleState::parse(None, false),
+            SessionTitleState::Manual
+        );
         assert_eq!(
             SessionTitleState::parse(Some("automatic"), false),
             SessionTitleState::Automatic
@@ -126,7 +130,10 @@ mod tests {
 
     #[test]
     fn permission_and_continuation_remain_actionable() {
-        assert_eq!(project("waiting_for_permission", 12).attention_reason, Some("permission"));
+        assert_eq!(
+            project("waiting_for_permission", 12).attention_reason,
+            Some("permission")
+        );
         assert_eq!(project("paused", 12).attention_reason, Some("continuation"));
     }
 }

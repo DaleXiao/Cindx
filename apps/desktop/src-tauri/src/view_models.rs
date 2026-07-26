@@ -812,6 +812,8 @@ pub(crate) struct RoutingTelemetryReadModel {
 pub(crate) struct PromptGenomeRecord {
     pub(crate) effort: String,
     pub(crate) genome: ConductorPromptGenome,
+    #[serde(default)]
+    pub(crate) evolution_method: Option<PromptEvolutionMethod>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -851,6 +853,8 @@ pub(crate) struct PromptRolloutState {
     pub(crate) status: String,
     pub(crate) last_reason: Option<String>,
     pub(crate) promotion_confidence: Option<f64>,
+    #[serde(default)]
+    pub(crate) frozen_profile: Option<FrozenPromptProfileSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize)]

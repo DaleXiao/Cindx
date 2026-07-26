@@ -96,7 +96,10 @@ fn output_contract_makes_a_mislabeled_final_step_terminal() {
         },
     };
 
-    assert_eq!(prompt_evaluation_stage_class(&step), RunStageClass::Finalizer);
+    assert_eq!(
+        prompt_evaluation_stage_class(&step),
+        RunStageClass::Finalizer
+    );
 }
 
 #[test]
@@ -124,10 +127,12 @@ fn terminal_delivery_layer_survives_the_reserved_time_boundary() {
             [RunStageClass::Worker, RunStageClass::Reviewer],
         )
     );
-    assert!(prompt_workflow_execution::prompt_evaluation_layer_should_stop(
-        &control,
-        [RunStageClass::Synthesizer],
-    ));
+    assert!(
+        prompt_workflow_execution::prompt_evaluation_layer_should_stop(
+            &control,
+            [RunStageClass::Synthesizer],
+        )
+    );
 }
 
 #[test]
@@ -191,6 +196,122 @@ fn execution_arena_preserves_a_valid_branch_when_a_sibling_fails() {
         .expect("final step should remain visible in the trajectory");
     assert_eq!(degraded_final.status, WorkflowStepStatus::Degraded);
     assert_eq!(degraded_final.attempts, 1);
+}
+
+#[test]
+fn product_semantics_select_the_direct_anchor_when_the_team_has_no_delivery() {
+    let mut genome = ConductorPromptGenome::seed_for_effort("auto");
+    genome.max_step_attempts = 1;
+    genome.retry_policy = PromptRetryPolicy::FailFast;
+    let candidate = workflow_candidate(
+        genome,
+        vec![workflow_step("answer", "worker", "worker-a", &[])],
+    );
+    let runner: PromptEvaluationRunner = Arc::new(|request, _| {
+        if request.stage == "prompt_evaluation_direct_anchor" {
+            completed("Use the independent derivation and preserve the requested answer format.")
+        } else {
+            failed(AgentFailure::new(
+                "provider_invalid_request",
+                "team branch failed permanently",
+                AgentFailureClass::ProviderPermanent,
+                false,
+            ))
+        }
+    });
+
+    let result = execute_prompt_workflow_candidate_with_direct_anchor_runner(
+        "Solve the assigned problem",
+        candidate,
+        runner,
+    );
+
+    assert!(result.execution.succeeded);
+    assert!(!result.execution.quality_gate_met);
+    assert_eq!(
+        result.execution.final_output,
+        "Use the independent derivation and preserve the requested answer format."
+    );
+    assert_eq!(result.execution.steps[0].status, WorkflowStepStatus::Failed);
+}
+
+#[test]
+fn product_semantics_select_the_anchor_when_bidirectional_review_prefers_it() {
+    let candidate = workflow_candidate(
+        ConductorPromptGenome::seed_for_effort("pro"),
+        vec![workflow_step("answer", "worker", "worker-a", &[])],
+    );
+    let runner: PromptEvaluationRunner = Arc::new(|request, _| match request.stage.as_str() {
+        "prompt_evaluation_direct_anchor" => completed("anchor guidance"),
+        "prompt_evaluation_team_anchor_forward" => completed(
+            r#"{"score_a":0.3,"score_b":0.9,"safety_violations_a":0,"safety_violations_b":0}"#,
+        ),
+        "prompt_evaluation_team_anchor_reverse" => completed(
+            r#"{"score_a":0.9,"score_b":0.3,"safety_violations_a":0,"safety_violations_b":0}"#,
+        ),
+        _ => completed("team guidance"),
+    });
+
+    let result = execute_prompt_workflow_candidate_with_direct_anchor_runner(
+        "Solve the assigned problem",
+        candidate,
+        runner,
+    );
+
+    assert_eq!(result.execution.final_output, "anchor guidance");
+    assert!(!result.execution.quality_gate_met);
+}
+
+#[test]
+fn product_semantics_keep_the_team_only_when_bidirectional_review_prefers_it() {
+    let candidate = workflow_candidate(
+        ConductorPromptGenome::seed_for_effort("pro"),
+        vec![workflow_step("answer", "worker", "worker-a", &[])],
+    );
+    let runner: PromptEvaluationRunner = Arc::new(|request, _| match request.stage.as_str() {
+        "prompt_evaluation_direct_anchor" => completed("anchor guidance"),
+        "prompt_evaluation_team_anchor_forward" => completed(
+            r#"{"score_a":0.9,"score_b":0.3,"safety_violations_a":0,"safety_violations_b":0}"#,
+        ),
+        "prompt_evaluation_team_anchor_reverse" => completed(
+            r#"{"score_a":0.3,"score_b":0.9,"safety_violations_a":0,"safety_violations_b":0}"#,
+        ),
+        _ => completed("team guidance"),
+    });
+
+    let result = execute_prompt_workflow_candidate_with_direct_anchor_runner(
+        "Solve the assigned problem",
+        candidate,
+        runner,
+    );
+
+    assert_eq!(result.execution.final_output, "team guidance");
+}
+
+#[test]
+fn product_semantics_fail_closed_when_pairwise_order_changes_the_winner() {
+    let candidate = workflow_candidate(
+        ConductorPromptGenome::seed_for_effort("pro"),
+        vec![workflow_step("answer", "worker", "worker-a", &[])],
+    );
+    let runner: PromptEvaluationRunner = Arc::new(|request, _| match request.stage.as_str() {
+        "prompt_evaluation_direct_anchor" => completed("anchor guidance"),
+        "prompt_evaluation_team_anchor_forward" => completed(
+            r#"{"score_a":0.9,"score_b":0.3,"safety_violations_a":0,"safety_violations_b":0}"#,
+        ),
+        "prompt_evaluation_team_anchor_reverse" => completed(
+            r#"{"score_a":0.9,"score_b":0.3,"safety_violations_a":0,"safety_violations_b":0}"#,
+        ),
+        _ => completed("team guidance"),
+    });
+
+    let result = execute_prompt_workflow_candidate_with_direct_anchor_runner(
+        "Solve the assigned problem",
+        candidate,
+        runner,
+    );
+
+    assert_eq!(result.execution.final_output, "anchor guidance");
 }
 
 #[test]
