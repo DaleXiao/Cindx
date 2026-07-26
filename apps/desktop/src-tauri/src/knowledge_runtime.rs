@@ -333,6 +333,7 @@ pub(crate) fn index_workspace_with_cloud_fallback_cancellable(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_parallel_retrieval(
     workspace_root: &Path,
     adapter: &FileRagAdapter,

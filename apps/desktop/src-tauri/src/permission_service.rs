@@ -34,47 +34,6 @@ fn permission_capability_matches(
         && requested.risk != PermissionRisk::Destructive
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use agent_core::PermissionRequestId;
-
-    fn request(action: &str, risk: PermissionRisk, scope: &str) -> PermissionRequest {
-        PermissionRequest {
-            id: PermissionRequestId(format!("{action}:{scope}")),
-            task_id: TaskId("task".to_string()),
-            risk,
-            action: action.to_string(),
-            reason: "test".to_string(),
-            scope: scope.to_string(),
-            metadata: Default::default(),
-        }
-    }
-
-    #[test]
-    fn session_capability_requires_the_same_action_and_risk() {
-        let read = request("file.read", PermissionRisk::Read, "README.md");
-        let another_read = request("file.read", PermissionRisk::Read, "src/lib.rs");
-        let write = request("file.write", PermissionRisk::Write, "README.md");
-        let shell = request("shell.run", PermissionRisk::Execute, ".");
-
-        assert!(permission_capability_matches(&read, &another_read));
-        assert!(!permission_capability_matches(&read, &write));
-        assert!(!permission_capability_matches(&read, &shell));
-    }
-
-    #[test]
-    fn destructive_capabilities_are_never_reused() {
-        let destructive = request(
-            "computer.key",
-            PermissionRisk::Destructive,
-            "shortcut:cmd+delete",
-        );
-
-        assert!(!permission_capability_matches(&destructive, &destructive));
-    }
-}
-
 pub(crate) fn pending_agent_permissions_for_run(
     store: &SqliteStore,
     task_id: &TaskId,
@@ -129,5 +88,46 @@ pub(crate) fn permission_decision_past_tense(decision: &PermissionDecision) -> &
     match decision {
         PermissionDecision::AllowOnce | PermissionDecision::AllowForSession => "approved",
         PermissionDecision::Deny => "denied",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::PermissionRequestId;
+
+    fn request(action: &str, risk: PermissionRisk, scope: &str) -> PermissionRequest {
+        PermissionRequest {
+            id: PermissionRequestId(format!("{action}:{scope}")),
+            task_id: TaskId("task".to_string()),
+            risk,
+            action: action.to_string(),
+            reason: "test".to_string(),
+            scope: scope.to_string(),
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn session_capability_requires_the_same_action_and_risk() {
+        let read = request("file.read", PermissionRisk::Read, "README.md");
+        let another_read = request("file.read", PermissionRisk::Read, "src/lib.rs");
+        let write = request("file.write", PermissionRisk::Write, "README.md");
+        let shell = request("shell.run", PermissionRisk::Execute, ".");
+
+        assert!(permission_capability_matches(&read, &another_read));
+        assert!(!permission_capability_matches(&read, &write));
+        assert!(!permission_capability_matches(&read, &shell));
+    }
+
+    #[test]
+    fn destructive_capabilities_are_never_reused() {
+        let destructive = request(
+            "computer.key",
+            PermissionRisk::Destructive,
+            "shortcut:cmd+delete",
+        );
+
+        assert!(!permission_capability_matches(&destructive, &destructive));
     }
 }

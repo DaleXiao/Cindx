@@ -467,6 +467,119 @@ pub fn prompt_promotion_confidence<'a>(
     }
 }
 
+pub fn prompt_proposal_minibatch_decision(
+    proposal: &ConductorPromptGenome,
+    observations: &[PromptEvolutionObservation],
+    minimum_comparisons: usize,
+    minimum_relative_improvement: f64,
+) -> Result<PromptProposalMinibatchDecision, String> {
+    proposal.validate()?;
+    if proposal.parents.is_empty() {
+        return Ok(PromptProposalMinibatchDecision::NotRequired);
+    }
+    if minimum_comparisons == 0 {
+        return Err("prompt proposal minibatch requires at least one comparison".to_string());
+    }
+    if !minimum_relative_improvement.is_finite()
+        || !(-1.0..=1.0).contains(&minimum_relative_improvement)
+    {
+        return Err("prompt proposal minibatch improvement must be finite and bounded".to_string());
+    }
+
+    let parent_ids = proposal
+        .parents
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut parent_pairs = BTreeSet::new();
+    for observation in observations.iter().filter(|observation| {
+        parent_ids.contains(observation.profile_id.as_str())
+            && observation.opponent_profile_id.as_deref() == Some(proposal.id.as_str())
+            && observation.split == PromptEvaluationSplit::Train
+            && observation.mode == PromptEvaluationMode::PairedExecution
+    }) {
+        parent_pairs.insert((
+            observation.evaluation_id.as_str(),
+            observation.case_id.as_str(),
+            observation.profile_id.as_str(),
+        ));
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut paired = observations
+        .iter()
+        .filter(|observation| {
+            observation.profile_id == proposal.id
+                && observation
+                    .opponent_profile_id
+                    .as_deref()
+                    .is_some_and(|opponent| parent_ids.contains(opponent))
+                && observation.split == PromptEvaluationSplit::Train
+                && observation.mode == PromptEvaluationMode::PairedExecution
+        })
+        .filter(|observation| {
+            let Some(parent_id) = observation.opponent_profile_id.as_deref() else {
+                return false;
+            };
+            parent_pairs.contains(&(
+                observation.evaluation_id.as_str(),
+                observation.case_id.as_str(),
+                parent_id,
+            ))
+        })
+        .filter(|observation| seen.insert(observation.evidence_identity()))
+        .collect::<Vec<_>>();
+    paired.sort_by(|left, right| {
+        left.evaluation_id
+            .cmp(&right.evaluation_id)
+            .then_with(|| left.case_id.cmp(&right.case_id))
+    });
+
+    if paired
+        .iter()
+        .any(|observation| !observation.format_valid || observation.safety_violations > 0)
+    {
+        return Ok(PromptProposalMinibatchDecision::Rejected {
+            comparisons: paired.len(),
+            wins: 0,
+            losses: 0,
+            average_relative_reward: -1.0,
+            reason: "format_or_safety_failure".to_string(),
+        });
+    }
+    if paired.len() < minimum_comparisons {
+        return Ok(PromptProposalMinibatchDecision::Pending {
+            comparisons: paired.len(),
+            required: minimum_comparisons,
+        });
+    }
+
+    let paired = &paired[..minimum_comparisons];
+    let rewards = paired
+        .iter()
+        .map(|observation| observation.group_relative_reward())
+        .collect::<Vec<_>>();
+    let wins = rewards.iter().filter(|reward| **reward > 0.02).count();
+    let losses = rewards.iter().filter(|reward| **reward < -0.02).count();
+    let average_relative_reward = rewards.iter().sum::<f64>() / rewards.len() as f64;
+    if average_relative_reward > minimum_relative_improvement && wins > losses {
+        Ok(PromptProposalMinibatchDecision::Accepted {
+            comparisons: rewards.len(),
+            wins,
+            losses,
+            average_relative_reward,
+        })
+    } else {
+        Ok(PromptProposalMinibatchDecision::Rejected {
+            comparisons: rewards.len(),
+            wins,
+            losses,
+            average_relative_reward,
+            reason: "no_measured_minibatch_improvement".to_string(),
+        })
+    }
+}
+
 pub fn evaluate_prompt_convergence(
     genomes: &[ConductorPromptGenome],
     observations: &[PromptEvolutionObservation],

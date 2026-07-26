@@ -2242,7 +2242,15 @@ assert(
     rustLib.includes("MemoryStatsView") &&
     rustLib.includes('"Project memory recalled"') &&
     rustLib.includes('"Project memory utilization measured"') &&
-    rustLib.includes("should_recall_agent_memory") &&
+    rustLib.includes("enum ProjectMemoryRecallMode") &&
+    rustLib.includes("project_memory_recall_mode") &&
+    rustLib.includes("ProjectMemoryRecallMode::Lexical") &&
+    rustLib.includes("ProjectMemoryRecallMode::Hybrid") &&
+    rustLib.includes("memory_mode.expect") &&
+    rustLib.includes("project_memory_recall_mode(&greeting") &&
+    agentMemorySource.includes(
+      "recalled_memory_is_serialized_as_quoted_json_data"
+    ) &&
     rustLib.includes("delete_project_memory") &&
     settingsPageSource.includes('aria-label="Project memory stats"'),
   "Project memory must be durable, deduplicated, explainable, trust-scoped, and deleted with its project"

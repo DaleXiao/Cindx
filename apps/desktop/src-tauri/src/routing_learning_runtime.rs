@@ -401,6 +401,29 @@ pub(crate) fn workflow_execution_telemetry_from_events(
                 .iter()
                 .filter(|event| event.kind == EventKind::ToolCallFinished)
                 .count() as u64;
+            let successful_tools_by_step = workflow_events
+                .iter()
+                .filter(|event| event.kind == EventKind::ToolCallFinished)
+                .filter(|event| {
+                    event
+                        .metadata
+                        .get("status")
+                        .is_some_and(|status| matches!(status.as_str(), "succeeded" | "success"))
+                })
+                .filter_map(|event| {
+                    let stage = event.metadata.get("stage")?;
+                    let index = stage.strip_prefix("worker_")?.parse::<usize>().ok()?;
+                    let step_id = plan.steps.get(index.checked_sub(1)?)?.id.clone();
+                    let tool = event.metadata.get("tool")?.clone();
+                    Some((step_id, tool))
+                })
+                .fold(
+                    BTreeMap::<String, Vec<String>>::new(),
+                    |mut tools, (step_id, tool)| {
+                        tools.entry(step_id).or_default().push(tool);
+                        tools
+                    },
+                );
             Some(WorkflowExecutionTelemetry {
                 task_class,
                 routing_signature: planned
@@ -414,6 +437,7 @@ pub(crate) fn workflow_execution_telemetry_from_events(
                 latency_ms: terminal.timestamp_ms.saturating_sub(planned.timestamp_ms),
                 total_tokens,
                 tool_calls,
+                successful_tools_by_step,
                 fallback_used: terminal
                     .metadata
                     .get("fallback_used")

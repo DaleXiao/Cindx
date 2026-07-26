@@ -246,12 +246,12 @@ fn transcript_fingerprint(messages: &[&Message]) -> String {
         for key in ["tool_call_id", "tool_call_ids", "kind", "status"] {
             if let Some(value) = message.metadata.get(key) {
                 hasher.update(key.as_bytes());
-                hasher.update([b'=']);
+                hasher.update(*b"=");
                 hasher.update(value.as_bytes());
                 hasher.update([0]);
             }
         }
-        hasher.update([b'\n']);
+        hasher.update(*b"\n");
     }
     format!("{:x}", hasher.finalize())
 }

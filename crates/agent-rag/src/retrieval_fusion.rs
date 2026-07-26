@@ -151,10 +151,7 @@ pub fn fuse_retrieval_channels_for_query(
     let max_score = selected
         .iter()
         .map(|candidate| candidate.ranking_score)
-        .max_by(|left, right| {
-            left.partial_cmp(right)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
         .unwrap_or(1.0)
         .max(f32::EPSILON);
     let results = selected
@@ -291,25 +288,17 @@ fn select_fused_candidates(
             let new_terms = matched_terms.difference(&covered_terms).count();
             let coverage = matched_terms.len() as f32 / query.terms.len().max(1) as f32;
             let marginal = new_terms as f32 / query.terms.len().max(1) as f32;
-            let identifier_coverage = matched_identifiers.len() as f32
-                / query.identifiers.len().max(1) as f32;
-            let ranking_score = candidate.score()
-                + coverage * 0.2
-                + marginal * 0.2
-                + identifier_coverage * 0.55;
+            let identifier_coverage =
+                matched_identifiers.len() as f32 / query.identifiers.len().max(1) as f32;
+            let ranking_score =
+                candidate.score() + coverage * 0.2 + marginal * 0.2 + identifier_coverage * 0.55;
             let replace = best.as_ref().is_none_or(|(best_index, best_score, _, _)| {
                 ranking_score > *best_score
                     || (ranking_score == *best_score
-                        && candidate.result.chunk.path
-                            < candidates[*best_index].result.chunk.path)
+                        && candidate.result.chunk.path < candidates[*best_index].result.chunk.path)
             });
             if replace {
-                best = Some((
-                    index,
-                    ranking_score,
-                    matched_terms,
-                    matched_identifiers,
-                ));
+                best = Some((index, ranking_score, matched_terms, matched_identifiers));
             }
         }
         let Some((index, ranking_score, matched_terms, matched_identifiers)) = best else {
@@ -332,14 +321,15 @@ fn select_fused_candidates(
 
 fn retrieval_terms(text: &str) -> BTreeSet<String> {
     text.split(|character: char| {
-        !(character.is_alphanumeric()
-            || matches!(character, '_' | '-' | '.' | '/' | ':' | '@'))
+        !(character.is_alphanumeric() || matches!(character, '_' | '-' | '.' | '/' | ':' | '@'))
     })
     .map(|term| {
         term.trim_matches(|character: char| matches!(character, '.' | '/' | ':' | '-' | '@'))
             .to_lowercase()
     })
-    .filter(|term| !term.is_empty() && (term.chars().count() > 1 || term.chars().any(char::is_numeric)))
+    .filter(|term| {
+        !term.is_empty() && (term.chars().count() > 1 || term.chars().any(char::is_numeric))
+    })
     .collect()
 }
 
@@ -352,9 +342,31 @@ fn is_likely_identifier(term: &str) -> bool {
 fn is_query_stop_word(term: &str) -> bool {
     matches!(
         term,
-        "a" | "an" | "and" | "are" | "as" | "at" | "be" | "by" | "for" | "from"
-            | "in" | "is" | "it" | "of" | "on" | "or" | "that" | "the" | "this"
-            | "to" | "was" | "what" | "when" | "where" | "which" | "with"
+        "a" | "an"
+            | "and"
+            | "are"
+            | "as"
+            | "at"
+            | "be"
+            | "by"
+            | "for"
+            | "from"
+            | "in"
+            | "is"
+            | "it"
+            | "of"
+            | "on"
+            | "or"
+            | "that"
+            | "the"
+            | "this"
+            | "to"
+            | "was"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "with"
     )
 }
 

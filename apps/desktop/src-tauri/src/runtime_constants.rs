@@ -23,6 +23,7 @@ pub(crate) const ADAPTIVE_EVIDENCE_REPAIR_ATTEMPTS: usize = 1;
 pub(crate) const ADAPTIVE_ADVERSARIAL_REPAIR_ATTEMPTS: usize = 2;
 pub(crate) const PROMPT_EVOLUTION_POPULATION_LIMIT: usize = 6;
 pub(crate) const PROMPT_EVOLUTION_MIN_TRAIN_RUNS: usize = 3;
+pub(crate) const PROMPT_EVOLUTION_MINIBATCH_RELATIVE_IMPROVEMENT: f64 = 0.02;
 pub(crate) const PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS: usize = 4;
 pub(crate) const PROMPT_EVOLUTION_MIN_PARETO_REPEATS: usize = 3;
 pub(crate) const PROMPT_EVOLUTION_STAGNATION_PATIENCE: usize = 3;

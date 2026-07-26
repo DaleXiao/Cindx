@@ -323,8 +323,10 @@ impl WorkflowExecutionCheckpoint {
             ) {
                 return false;
             }
-            if checkpoint.status == WorkflowStepStatus::Failed
-                && checkpoint.attempts >= attempt_limit.max(1)
+            if matches!(
+                checkpoint.status,
+                WorkflowStepStatus::Failed | WorkflowStepStatus::Cancelled
+            ) && checkpoint.attempts >= attempt_limit.max(1)
             {
                 return true;
             }
@@ -678,6 +680,71 @@ mod tests {
             .unwrap();
         assert_eq!(claims[0].step_id, "synthesize");
         assert!(!claims[0].resumed);
+    }
+
+    #[test]
+    fn cancelled_quorum_branch_is_auditable_and_does_not_block_partial_delivery() {
+        let base = checkpoint();
+        let mut plan = base.plan;
+        let second_root = WorkflowPlanStep {
+            id: "inspect-backup".to_string(),
+            role: "worker".to_string(),
+            model: "worker".to_string(),
+            subtask: "inspect backup".to_string(),
+            access: Vec::new(),
+            tool_policy: WorkflowToolPolicy::ReadOnlyEvidence,
+            contract: WorkflowStepContract::inferred(
+                "worker",
+                &[],
+                &WorkflowToolPolicy::ReadOnlyEvidence,
+            ),
+        };
+        plan.steps.insert(1, second_root);
+        let synthesis = plan.steps.last_mut().unwrap();
+        synthesis.access = vec!["inspect".to_string(), "inspect-backup".to_string()];
+        synthesis.contract = WorkflowStepContract::inferred(
+            "synthesizer",
+            &synthesis.access,
+            &WorkflowToolPolicy::None,
+        );
+        plan.budget.max_steps = 3;
+        let mut checkpoint = WorkflowExecutionCheckpoint::new("cancelled-branch", plan, 1);
+
+        checkpoint
+            .complete_step(
+                "inspect",
+                "worker",
+                "grounded result".to_string(),
+                "[]".to_string(),
+                2,
+            )
+            .unwrap();
+        checkpoint
+            .cancel_step("inspect-backup", "quorum already satisfied", 3)
+            .unwrap();
+
+        assert_eq!(
+            checkpoint.steps["inspect-backup"].status,
+            WorkflowStepStatus::Cancelled
+        );
+        assert_eq!(
+            checkpoint.execution_frontier(1).unwrap().blocked_steps,
+            vec!["synthesize"]
+        );
+        let recoverable = checkpoint
+            .execution_frontier_with_partial_recovery(1)
+            .unwrap();
+        assert_eq!(recoverable.ready_steps, vec!["synthesize"]);
+
+        let restored = WorkflowExecutionCheckpoint::from_json(
+            &checkpoint.to_json().unwrap(),
+            &["worker".to_string(), "planner".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            restored.steps["inspect-backup"].status,
+            WorkflowStepStatus::Cancelled
+        );
     }
 
     #[test]

@@ -78,6 +78,7 @@ pub(crate) fn append_prompt_mutation_status(
     .map_err(|error| error.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_background_prompt_mutation(
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,

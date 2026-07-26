@@ -223,28 +223,44 @@ pub(crate) fn project_memory_stats(
     })
 }
 
-pub(crate) fn should_recall_agent_memory(context: &RoutingContext, prompt: &str) -> bool {
-    if context.needs_tools
-        || context.needs_retrieval
-        || context.needs_multi_model
-        || context.complexity_score >= 2
-    {
-        return true;
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectMemoryRecallMode {
+    Lexical,
+    Hybrid,
+}
+
+pub(crate) fn project_memory_recall_mode(
+    context: &RoutingContext,
+    prompt: &str,
+) -> Option<ProjectMemoryRecallMode> {
     let normalized = prompt.to_ascii_lowercase();
-    [
+    let explicitly_memory_dependent = [
         "remember",
         "previous",
         "last time",
         "continue",
+        "my name",
+        "call me",
+        "what do you call me",
         "之前",
         "上次",
         "刚才",
         "继续",
         "还记得",
+        "我的名字",
+        "我叫什么",
+        "叫我",
+        "称呼我",
     ]
     .iter()
-    .any(|needle| normalized.contains(needle))
+    .any(|needle| normalized.contains(needle));
+    if explicitly_memory_dependent || context.needs_multi_model {
+        return Some(ProjectMemoryRecallMode::Hybrid);
+    }
+    if context.needs_tools || context.needs_retrieval || context.complexity_score >= 2 {
+        return Some(ProjectMemoryRecallMode::Lexical);
+    }
+    None
 }
 
 #[derive(Debug, Default)]
@@ -282,7 +298,8 @@ pub(crate) fn prepare_run_knowledge_contexts(
     retrieval_mode: &str,
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<PreparedRunKnowledgeContexts, String> {
-    let recall_memory = should_recall_agent_memory(routing_context, prompt);
+    let memory_mode = project_memory_recall_mode(routing_context, prompt);
+    let recall_memory = memory_mode.is_some();
     let retrieve_workspace = should_run_agent_knowledge_retrieval(routing_context);
     if !recall_memory && !retrieve_workspace {
         return Ok(PreparedRunKnowledgeContexts::default());
@@ -305,6 +322,7 @@ pub(crate) fn prepare_run_knowledge_contexts(
                     workspace_root,
                     config,
                     prompt,
+                    memory_mode.expect("memory worker requires a recall mode"),
                     cancellation,
                 )
             })
@@ -639,6 +657,7 @@ pub(crate) fn project_memory_semantic_scores(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn recall_project_memory_for_prompt(
     state: &tauri::State<'_, AppState>,
     task_id: &TaskId,
@@ -646,6 +665,7 @@ pub(crate) fn recall_project_memory_for_prompt(
     workspace_root: &Path,
     config: &ProviderConfig,
     prompt: &str,
+    recall_mode: ProjectMemoryRecallMode,
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<Option<Message>, String> {
     let Some(project_id) = run_context.get("project_id") else {
@@ -662,11 +682,6 @@ pub(crate) fn recall_project_memory_for_prompt(
     if ledger.records.is_empty() {
         return Ok(None);
     }
-    schedule_project_memory_vector_refresh(
-        workspace_root.to_path_buf(),
-        config.clone(),
-        ledger.clone(),
-    );
     let lexical_recalls = recall_memories_at(
         &ledger,
         prompt,
@@ -674,16 +689,26 @@ pub(crate) fn recall_project_memory_for_prompt(
         AGENT_MEMORY_RECALL_LIMIT.saturating_mul(2),
         now_ms,
     );
-    let (semantic_scores, vector_manifest, vector_error) = match project_memory_semantic_scores(
-        workspace_root,
-        project_id,
-        &ledger,
-        config,
-        prompt,
-        cancellation,
-    ) {
-        Ok((scores, manifest)) => (scores, Some(manifest), None),
-        Err(error) => (BTreeMap::new(), None, Some(error)),
+    let (semantic_scores, vector_manifest, vector_error) = match recall_mode {
+        ProjectMemoryRecallMode::Lexical => (BTreeMap::new(), None, None),
+        ProjectMemoryRecallMode::Hybrid => {
+            schedule_project_memory_vector_refresh(
+                workspace_root.to_path_buf(),
+                config.clone(),
+                ledger.clone(),
+            );
+            match project_memory_semantic_scores(
+                workspace_root,
+                project_id,
+                &ledger,
+                config,
+                prompt,
+                cancellation,
+            ) {
+                Ok((scores, manifest)) => (scores, Some(manifest), None),
+                Err(error) => (BTreeMap::new(), None, Some(error)),
+            }
+        }
     };
     let mut recalls = fuse_memory_recalls_at(
         &ledger,
@@ -732,10 +757,12 @@ pub(crate) fn recall_project_memory_for_prompt(
         ("query".to_string(), prompt.to_string()),
         (
             "retrieval_mode".to_string(),
-            if semantic_scores.is_empty() {
-                "project_memory_lexical"
-            } else {
-                "project_memory_hybrid"
+            match recall_mode {
+                ProjectMemoryRecallMode::Lexical => "project_memory_lexical",
+                ProjectMemoryRecallMode::Hybrid if semantic_scores.is_empty() => {
+                    "project_memory_hybrid_fallback"
+                }
+                ProjectMemoryRecallMode::Hybrid => "project_memory_hybrid",
             }
             .to_string(),
         ),

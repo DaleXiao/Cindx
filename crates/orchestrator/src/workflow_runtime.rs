@@ -324,6 +324,7 @@ pub enum WorkflowStepStatus {
     Running,
     Completed,
     Degraded,
+    Cancelled,
     Failed,
 }
 
@@ -355,6 +356,17 @@ pub struct WorkflowStepSemanticState {
 }
 
 impl WorkflowStepStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Degraded => "degraded",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+        }
+    }
+
     fn dependency_resolved(&self) -> bool {
         matches!(self, Self::Completed | Self::Degraded)
     }
@@ -704,6 +716,24 @@ impl WorkflowExecutionCheckpoint {
         step.status = WorkflowStepStatus::Failed;
         step.attempts = step.attempts.max(1);
         step.error = Some(error.into());
+        step.updated_at_ms = now_ms;
+        self.updated_at_ms = now_ms;
+        Ok(())
+    }
+
+    pub fn cancel_step(
+        &mut self,
+        step_id: &str,
+        reason: impl Into<String>,
+        now_ms: u64,
+    ) -> Result<(), String> {
+        let step = self
+            .steps
+            .get_mut(step_id)
+            .ok_or_else(|| format!("unknown workflow checkpoint step: {step_id}"))?;
+        step.status = WorkflowStepStatus::Cancelled;
+        step.attempts = step.attempts.max(1);
+        step.error = Some(reason.into());
         step.updated_at_ms = now_ms;
         self.updated_at_ms = now_ms;
         Ok(())

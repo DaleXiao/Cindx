@@ -15,6 +15,7 @@ pub struct WorkflowExecutionTelemetry {
     pub latency_ms: u64,
     pub total_tokens: u64,
     pub tool_calls: u64,
+    pub successful_tools_by_step: BTreeMap<String, Vec<String>>,
     pub fallback_used: bool,
 }
 
@@ -26,6 +27,7 @@ pub struct WorkflowTopologyStep {
     pub model: String,
     pub access: Vec<usize>,
     pub tool_policy: WorkflowToolPolicy,
+    pub preferred_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -66,13 +68,19 @@ impl WorkflowTopologyPrior {
                         .collect::<Vec<_>>()
                         .join(",")
                 };
+                let preferred_tools = if step.preferred_tools.is_empty() {
+                    "none".to_string()
+                } else {
+                    step.preferred_tools.join(",")
+                };
                 format!(
-                    "{}. role={} model={} access={} tools={}",
+                    "{}. role={} model={} access={} tools={} observed_successful_tools={}",
                     index + 1,
                     step.role,
                     step.model,
                     access,
-                    step.tool_policy.label()
+                    step.tool_policy.label(),
+                    preferred_tools,
                 )
             })
             .collect::<Vec<_>>()
@@ -283,6 +291,7 @@ struct WorkflowPriorAccumulator {
     latency_ms: u64,
     total_tokens: u64,
     tool_calls: u64,
+    successful_tools_by_step: BTreeMap<String, BTreeMap<String, usize>>,
 }
 
 impl WorkflowPriorAccumulator {
@@ -296,6 +305,7 @@ impl WorkflowPriorAccumulator {
             latency_ms: 0,
             total_tokens: 0,
             tool_calls: 0,
+            successful_tools_by_step: BTreeMap::new(),
         }
     }
 
@@ -309,6 +319,22 @@ impl WorkflowPriorAccumulator {
         self.latency_ms = self.latency_ms.saturating_add(telemetry.latency_ms);
         self.total_tokens = self.total_tokens.saturating_add(telemetry.total_tokens);
         self.tool_calls = self.tool_calls.saturating_add(telemetry.tool_calls);
+        if telemetry.succeeded
+            && telemetry.quality_score.unwrap_or_default().clamp(0.0, 1.0)
+                >= ADAPTIVE_WORKFLOW_PRIOR_MIN_QUALITY
+        {
+            for (step_id, tools) in &telemetry.successful_tools_by_step {
+                let counts = self
+                    .successful_tools_by_step
+                    .entry(step_id.clone())
+                    .or_default();
+                for tool in tools {
+                    if !tool.trim().is_empty() && tool.len() <= 128 {
+                        *counts.entry(tool.clone()).or_default() += 1;
+                    }
+                }
+            }
+        }
     }
 
     fn finish(
@@ -329,13 +355,29 @@ impl WorkflowPriorAccumulator {
         let quality = average_quality.unwrap_or(success_rate);
         let score = (success_rate * 10_000.0) as i64 + (quality * 5_000.0) as i64
             - average_latency_ms as i64 / 100;
+        let mut steps = normalized_topology_steps(&self.plan);
+        for (index, step) in self.plan.steps.iter().enumerate() {
+            let Some(counts) = self.successful_tools_by_step.get(&step.id) else {
+                continue;
+            };
+            let mut tools = counts
+                .iter()
+                .filter(|(_, count)| **count >= 2 && **count * 2 >= self.examples)
+                .map(|(tool, count)| (tool.clone(), *count))
+                .collect::<Vec<_>>();
+            tools.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+            if let Some(prior_step) = steps.get_mut(index) {
+                prior_step.preferred_tools =
+                    tools.into_iter().take(3).map(|(tool, _)| tool).collect();
+            }
+        }
         WorkflowTopologyPrior {
             task_class,
             routing_signature,
             effort,
             max_models,
             profile_id: self.plan.prompt_profile.clone(),
-            steps: normalized_topology_steps(&self.plan),
+            steps,
             examples: self.examples,
             success_rate,
             success_confidence,
@@ -366,6 +408,7 @@ fn normalized_topology_steps(plan: &WorkflowPlanIr) -> Vec<WorkflowTopologyStep>
                 .filter_map(|dependency| indexes.get(dependency.as_str()).copied())
                 .collect(),
             tool_policy: step.tool_policy.clone(),
+            preferred_tools: Vec::new(),
         })
         .collect()
 }

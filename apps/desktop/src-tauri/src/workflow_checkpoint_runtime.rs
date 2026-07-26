@@ -94,6 +94,7 @@ pub(crate) fn load_workflow_checkpoint_for_run(
     Ok((resume_key, checkpoint))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn append_workflow_checkpoint_event(
     state: &tauri::State<'_, AppState>,
     task_id: &TaskId,

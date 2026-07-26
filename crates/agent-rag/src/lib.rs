@@ -687,12 +687,14 @@ pub fn search_chunks_semantic(
     limit: usize,
 ) -> Vec<RagSearchResult> {
     let limit = limit.clamp(1, 50);
+    let query_norm = vector_norm(query_embedding);
     let scored = chunks
         .iter()
         .enumerate()
         .filter(|(_, chunk)| chunk.embedding_dimensions == query_embedding.len())
         .filter_map(|(index, chunk)| {
-            let score = cosine_similarity(query_embedding, &chunk.embedding);
+            let score =
+                cosine_similarity_with_left_norm(query_embedding, query_norm, &chunk.embedding);
             (score > 0.0).then_some((index, score))
         })
         .collect::<Vec<_>>();
@@ -765,12 +767,13 @@ pub fn search_chunks_with_embedding(
 ) -> Vec<RagSearchResult> {
     let limit = limit.clamp(1, 50);
     let query_tokens = token_counts(query);
+    let query_norm = vector_norm(query_embedding);
     let scored = chunks
         .iter()
         .enumerate()
         .filter_map(|(index, chunk)| {
             let vector_score = if query_embedding.len() == chunk.embedding_dimensions {
-                cosine_similarity(query_embedding, &chunk.embedding)
+                cosine_similarity_with_left_norm(query_embedding, query_norm, &chunk.embedding)
             } else {
                 0.0
             };
@@ -787,7 +790,8 @@ fn top_scored_chunks(
     mut scored: Vec<(usize, f32)>,
     limit: usize,
 ) -> Vec<RagSearchResult> {
-    scored.sort_by(|(left_index, left_score), (right_index, right_score)| {
+    let compare = |(left_index, left_score): &(usize, f32),
+                   (right_index, right_score): &(usize, f32)| {
         right_score
             .partial_cmp(left_score)
             .unwrap_or(Ordering::Equal)
@@ -797,8 +801,12 @@ fn top_scored_chunks(
                     .start_line
                     .cmp(&chunks[*right_index].start_line)
             })
-    });
-    scored.truncate(limit);
+    };
+    if scored.len() > limit {
+        scored.select_nth_unstable_by(limit, compare);
+        scored.truncate(limit);
+    }
+    scored.sort_by(compare);
     scored
         .into_iter()
         .map(|(index, score)| RagSearchResult {
@@ -1533,14 +1541,18 @@ fn normalize_vector(vector: &mut [f32]) {
     }
 }
 
-fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
-    let dot = left
+fn vector_norm(vector: &[f32]) -> f32 {
+    vector.iter().map(|value| value * value).sum::<f32>().sqrt()
+}
+
+fn cosine_similarity_with_left_norm(left: &[f32], left_norm: f32, right: &[f32]) -> f32 {
+    let (dot, right_squared_norm) = left
         .iter()
         .zip(right.iter())
-        .map(|(left, right)| left * right)
-        .sum::<f32>();
-    let left_norm = left.iter().map(|value| value * value).sum::<f32>().sqrt();
-    let right_norm = right.iter().map(|value| value * value).sum::<f32>().sqrt();
+        .fold((0.0f32, 0.0f32), |(dot, norm), (left, right)| {
+            (dot + left * right, norm + right * right)
+        });
+    let right_norm = right_squared_norm.sqrt();
     if left_norm == 0.0 || right_norm == 0.0 {
         return 0.0;
     }

@@ -441,6 +441,40 @@ fn stage_exhaustion_is_local_and_preserves_terminal_reserve() {
 }
 
 #[test]
+fn internal_terminal_stages_cannot_consume_final_user_delivery_calls() {
+    let mut budget = test_budget();
+    budget.initial_model_calls = 6;
+    budget.max_model_calls = 6;
+    budget.terminal_model_call_reserve = 4;
+    let control = AgentRunControl::with_budget(budget);
+
+    for stage in ["candidate_1", "candidate_2"] {
+        control
+            .begin_stage_model_call(stage, RunStageClass::Candidate)
+            .expect("candidate call");
+        control.finish_model_call();
+    }
+    for stage in ["synthesis_1", "synthesis_2"] {
+        control
+            .begin_stage_model_call(stage, RunStageClass::Synthesizer)
+            .expect("internal terminal call");
+        control.finish_model_call();
+    }
+    assert_eq!(
+        control.begin_stage_model_call("synthesis_3", RunStageClass::Synthesizer),
+        Err(RunStopReason::StageBudgetExhausted)
+    );
+
+    for stage in ["delivery_1", "delivery_2"] {
+        control
+            .begin_stage_model_call(stage, RunStageClass::Finalizer)
+            .expect("finalizer call");
+        control.finish_model_call();
+    }
+    assert_eq!(control.progress().model_calls, 6);
+}
+
+#[test]
 fn main_loop_enters_terminal_commit_before_exhausting_its_last_call() {
     let mut budget = test_budget();
     budget.initial_model_calls = 4;
@@ -477,6 +511,10 @@ fn nonterminal_model_timeout_cannot_consume_terminal_time_reserve() {
     let terminal = control.stage_model_call_timeout(RunStageClass::Synthesizer);
     assert!(terminal <= Duration::from_secs(50));
     assert!(terminal > Duration::from_secs(49));
+
+    let finalizer = control.stage_model_call_timeout(RunStageClass::Finalizer);
+    assert!(finalizer <= Duration::from_secs(30));
+    assert!(finalizer > Duration::from_secs(29));
 }
 
 #[test]
@@ -517,6 +555,19 @@ fn nonterminal_stage_yields_when_the_terminal_reserve_begins() {
 
     assert!(control.stage_should_stop(RunStageClass::Worker));
     assert!(!control.stage_should_stop(RunStageClass::Synthesizer));
+}
+
+#[test]
+fn internal_terminal_stage_yields_before_the_finalizer_reserve() {
+    let mut budget = test_budget();
+    budget.max_duration = Duration::from_millis(100);
+    budget.terminal_time_reserve = Duration::from_millis(60);
+    let mut snapshot = AgentRunControl::with_budget(budget).snapshot();
+    snapshot.elapsed_active = Duration::from_millis(71);
+    let control = AgentRunControl::from_snapshot(snapshot);
+
+    assert!(control.stage_should_stop(RunStageClass::Synthesizer));
+    assert!(!control.stage_should_stop(RunStageClass::Finalizer));
 }
 
 #[test]

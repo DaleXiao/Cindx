@@ -8,6 +8,7 @@ pub const CONTEXT_SOURCE_SCHEMA: &str = "cindx.context-source.v1";
 pub enum ContextSourceKind {
     ImageGenerationPolicy,
     WorkflowExecutionContract,
+    AgentEvidence,
     RestorePack,
     ArtifactManifest,
     WorkspaceKnowledge,
@@ -26,6 +27,7 @@ impl ContextSourceKind {
         Some(match message.metadata.get("kind").map(String::as_str) {
             Some("image_generation_policy") => Self::ImageGenerationPolicy,
             Some("workflow_execution_contract") => Self::WorkflowExecutionContract,
+            Some("agent_evidence_packet") => Self::AgentEvidence,
             Some("context_restore_pack") => Self::RestorePack,
             Some("artifact_manifest") => Self::ArtifactManifest,
             Some("knowledge_context") => Self::WorkspaceKnowledge,
@@ -41,6 +43,7 @@ impl ContextSourceKind {
         match self {
             Self::ImageGenerationPolicy => "image_generation_policy",
             Self::WorkflowExecutionContract => "workflow_execution_contract",
+            Self::AgentEvidence => "agent_evidence_packet",
             Self::RestorePack => "context_restore_pack",
             Self::ArtifactManifest => "artifact_manifest",
             Self::WorkspaceKnowledge => "knowledge_context",
@@ -56,6 +59,7 @@ impl ContextSourceKind {
         match self {
             Self::ImageGenerationPolicy => 100,
             Self::WorkflowExecutionContract => 99,
+            Self::AgentEvidence => 98,
             Self::RestorePack => 95,
             Self::ArtifactManifest => 90,
             Self::WorkspaceKnowledge => 85,
@@ -72,6 +76,7 @@ impl ContextSourceKind {
             self,
             Self::ImageGenerationPolicy
                 | Self::WorkflowExecutionContract
+                | Self::AgentEvidence
                 | Self::RestorePack
                 | Self::ArtifactManifest
         )
@@ -353,6 +358,20 @@ mod tests {
         let source = ContextSourceKind::from_message(&contract).unwrap();
         assert_eq!(source, ContextSourceKind::WorkflowExecutionContract);
         assert_eq!(source.priority(), 99);
+        assert!(source.is_protected());
+    }
+
+    #[test]
+    fn bounded_agent_evidence_is_a_protected_finalization_source() {
+        let mut evidence = message(MessageRole::System, "candidate evidence");
+        evidence
+            .metadata
+            .insert("kind".to_string(), "agent_evidence_packet".to_string());
+
+        let source = ContextSourceKind::from_message(&evidence).unwrap();
+        assert_eq!(source, ContextSourceKind::AgentEvidence);
+        assert_eq!(source.as_str(), "agent_evidence_packet");
+        assert!(source.priority() > ContextSourceKind::ProjectMemory.priority());
         assert!(source.is_protected());
     }
 }

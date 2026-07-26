@@ -26,15 +26,45 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
         })
         .map(|(_, observation)| observation.clone())
         .collect::<Vec<_>>();
+    let rejected_proposals = known_population
+        .iter()
+        .filter_map(|genome| {
+            prompt_proposal_minibatch_decision(
+                genome,
+                &observations,
+                PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
+                PROMPT_EVOLUTION_MINIBATCH_RELATIVE_IMPROVEMENT,
+            )
+            .ok()
+            .filter(PromptProposalMinibatchDecision::is_rejected)
+            .map(|_| genome.id.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    let proposal_is_active =
+        |genome: &ConductorPromptGenome| !rejected_proposals.contains(genome.id.as_str());
+    let active_population = known_population
+        .iter()
+        .filter(|genome| proposal_is_active(genome))
+        .cloned()
+        .collect::<Vec<_>>();
+    let active_ids = active_population
+        .iter()
+        .map(|genome| genome.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let active_observations = observations
+        .iter()
+        .filter(|observation| active_ids.contains(observation.profile_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
     let archive = PromptParetoArchive::build(
-        &known_population,
-        &observations,
+        &active_population,
+        &active_observations,
         PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
         PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS,
     )?;
     let convergence = evaluate_prompt_convergence(
-        &known_population,
-        &observations,
+        &active_population,
+        &active_observations,
         PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
         PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS,
         PROMPT_EVOLUTION_STAGNATION_PATIENCE,
@@ -42,9 +72,9 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
         PROMPT_EVOLUTION_MAX_GENERATION,
     )?;
     let champion = convergence.champion.as_ref();
-    let instance_scores = prompt_instance_pareto_scores(&known_population, &observations);
+    let instance_scores = prompt_instance_pareto_scores(&active_population, &active_observations);
     let instance_archive = PromptInstanceParetoArchive::build(
-        &known_population,
+        &active_population,
         &instance_scores,
         PROMPT_EVOLUTION_MIN_PARETO_REPEATS,
     )?;
@@ -72,13 +102,13 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
         let (train, holdout) = split_counts.get(&genome.id).copied().unwrap_or_default();
         train >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS && holdout >= PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS
     };
-    let aggregate_breeding_parent = if let Some(generation) = known_population
+    let aggregate_breeding_parent = if let Some(generation) = active_population
         .iter()
         .filter(|genome| profile_complete(genome))
         .map(|genome| genome.generation)
         .max()
     {
-        let generation_genomes = known_population
+        let generation_genomes = active_population
             .iter()
             .filter(|genome| genome.generation == generation)
             .cloned()
@@ -87,7 +117,7 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
             .iter()
             .map(|genome| genome.id.as_str())
             .collect::<BTreeSet<_>>();
-        let generation_observations = observations
+        let generation_observations = active_observations
             .iter()
             .filter(|observation| generation_ids.contains(observation.profile_id.as_str()))
             .cloned()
@@ -106,7 +136,7 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
     let instance_breeding_parent = instance_archive
         .select_for_mutation(observations.len() as u64)
         .and_then(|candidate| {
-            known_population
+            active_population
                 .iter()
                 .find(|genome| genome.id == candidate.profile_id)
                 .cloned()
@@ -119,11 +149,16 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
     population.extend(
         known_population
             .iter()
-            .filter(|genome| !profile_complete(genome))
+            .filter(|genome| proposal_is_active(genome) && !profile_complete(genome))
             .cloned(),
     );
     if archive.candidates.is_empty() {
-        population.extend(known_population.iter().cloned());
+        population.extend(
+            known_population
+                .iter()
+                .filter(|genome| proposal_is_active(genome))
+                .cloned(),
+        );
     } else {
         if let Some(parent) = breeding_parent.as_ref() {
             population.extend(parent.mutations());
@@ -211,11 +246,13 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
         .unwrap_or_default();
     let pending_evolved_profile = population.iter().any(|genome| {
         (genome.id.starts_with("learned-") || genome.id.starts_with("merge-"))
+            && proposal_is_active(genome)
             && !profile_complete(genome)
     });
     let learned_child_exists = breeding_parent.as_ref().is_some_and(|parent| {
         known_population.iter().any(|genome| {
             genome.id.starts_with("learned-")
+                && proposal_is_active(genome)
                 && genome
                     .parents
                     .iter()

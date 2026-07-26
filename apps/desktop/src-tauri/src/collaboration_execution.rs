@@ -429,7 +429,9 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
                 control.record_observation("model_result", &stage, &content);
                 let quality = match stage_class {
                     RunStageClass::Reviewer => ResultQuality::Verified,
-                    RunStageClass::Synthesizer => ResultQuality::Synthesized,
+                    RunStageClass::Synthesizer | RunStageClass::Finalizer => {
+                        ResultQuality::Synthesized
+                    }
                     RunStageClass::Candidate | RunStageClass::Worker => ResultQuality::Substantive,
                     _ => ResultQuality::Draft,
                 };
@@ -439,7 +441,10 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
                     quality,
                     0,
                     false,
-                    stage_class == RunStageClass::Synthesizer,
+                    matches!(
+                        stage_class,
+                        RunStageClass::Synthesizer | RunStageClass::Finalizer
+                    ),
                 );
             }
             CollaborationCompletion {

@@ -15,9 +15,12 @@ mod context_engine;
 mod context_governor;
 mod context_projection;
 mod control;
+mod execution;
 mod failure;
 mod kernel;
 mod parallel;
+mod result_frontier;
+mod run_budget;
 mod task_contract;
 mod task_state;
 mod tool_runtime;
@@ -35,9 +38,12 @@ pub use context_governor::{
     bounded_max_output_tokens, ContextBudgetAllocation, ContextGovernorReport,
 };
 pub use control::{
-    AgentRunControl, BestKnownResult, ResultQuality, RunBudget, RunContinuationDirective,
-    RunControlSnapshot, RunProgressSnapshot, RunStageBudget, RunStageClass, RunStageUsageSnapshot,
-    RunSteer, RunStopReason,
+    AgentRunControl, RunContinuationDirective, RunControlSnapshot, RunProgressSnapshot,
+    RunStageUsageSnapshot, RunSteer, RunStopReason,
+};
+pub use execution::{
+    run_no_tool_agent, AgentEvidenceCandidate, AgentEvidencePacket, AgentExecutionGuidance,
+    NoToolAgentOutcome, NoToolAgentRequest, AGENT_EVIDENCE_PACKET_SCHEMA,
 };
 pub use failure::{AgentFailure, AgentFailureClass, AgentRecoveryAction};
 pub use kernel::{
@@ -48,6 +54,8 @@ pub use parallel::{
     InterruptibleQuorumPolicy, ParallelJob, ParallelJobCompletion, ParallelJobSupervisor,
     ParallelTaskError, QuorumExecution,
 };
+pub use result_frontier::{BestKnownResult, ResultQuality};
+pub use run_budget::{RunBudget, RunStageBudget, RunStageClass};
 pub use task_contract::{AgentTaskContract, ContractEvidence, ContractEvidenceKind};
 pub use task_state::{
     AgentTaskStateError, AgentTaskStateSnapshot, PersistedInteractionSurface,

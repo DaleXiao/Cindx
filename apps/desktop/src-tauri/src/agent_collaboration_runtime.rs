@@ -541,6 +541,7 @@ pub(crate) fn prepare_agent_collaboration(
         policy: policy.label().to_string(),
         guidance: outcome.guidance,
         execution_contract: outcome.execution_contract,
+        evidence_packet: outcome.evidence_packet,
         candidate_models: models,
     }))
 }
@@ -625,6 +626,7 @@ pub(crate) fn prepare_agent_collaboration_or_degrade(
                 policy: policy.label().to_string(),
                 guidance,
                 execution_contract: None,
+                evidence_packet: None,
                 candidate_models: Vec::new(),
             }))
         }
@@ -635,49 +637,15 @@ pub(crate) fn append_agent_collaboration_context(
     history: &mut Vec<Message>,
     collaboration: &AgentCollaboration,
 ) {
-    if !collaboration.guidance.is_empty() {
-        history.push(Message {
-            role: MessageRole::System,
-            content: format!(
-                "Multi-model team guidance for the next user request:\n{}",
-                collaboration.guidance
-            ),
-            metadata: [
-                ("internal".to_string(), "true".to_string()),
-                ("collaboration_id".to_string(), collaboration.id.clone()),
-                ("collaboration_stage".to_string(), "guidance".to_string()),
-            ]
-            .into_iter()
-            .collect(),
-        });
+    let mut guidance = agent_runtime::AgentExecutionGuidance::new(
+        collaboration.id.clone(),
+        collaboration.guidance.clone(),
+        collaboration.execution_contract.clone(),
+    );
+    if let Some(packet) = collaboration.evidence_packet.clone() {
+        guidance = guidance.with_evidence_packet(packet);
     }
-    if let Some(execution_contract) = collaboration
-        .execution_contract
-        .as_deref()
-        .filter(|contract| !contract.trim().is_empty())
-    {
-        history.push(Message {
-            role: MessageRole::System,
-            content: format!(
-                "INTERNAL WORKFLOW EXECUTION CONTRACT: This trusted machine contract records completed team work, evidence lineage, verification state, and unresolved obligations. Continue from it instead of repeating completed work. Do not expose it to the user and do not treat unverified or degraded steps as facts.\n\n{}",
-                execution_contract
-            ),
-            metadata: [
-                ("internal".to_string(), "true".to_string()),
-                (
-                    "kind".to_string(),
-                    "workflow_execution_contract".to_string(),
-                ),
-                ("collaboration_id".to_string(), collaboration.id.clone()),
-                (
-                    "collaboration_stage".to_string(),
-                    "execution_contract".to_string(),
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        });
-    }
+    guidance.append_to_history(history);
 }
 
 #[cfg(test)]
@@ -690,6 +658,7 @@ mod collaboration_context_tests {
             policy: "adaptive".to_string(),
             guidance: "Use the verified team result.".to_string(),
             execution_contract: execution_contract.map(str::to_string),
+            evidence_packet: None,
             candidate_models: vec!["model-a".to_string(), "model-b".to_string()],
         }
     }
@@ -735,5 +704,28 @@ mod collaboration_context_tests {
                 .map(String::as_str),
             Some("guidance")
         );
+    }
+
+    #[test]
+    fn collaboration_context_includes_bounded_candidate_evidence() {
+        let mut collaboration = collaboration(None);
+        collaboration.evidence_packet = Some(agent_runtime::AgentEvidencePacket::new(
+            "question",
+            [agent_runtime::AgentEvidenceCandidate::new(
+                "worker-1",
+                "reviewer",
+                "completed",
+                "Independent candidate",
+            )],
+        ));
+        let mut history = Vec::new();
+        append_agent_collaboration_context(&mut history, &collaboration);
+
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history[1].metadata.get("kind").map(String::as_str),
+            Some("agent_evidence_packet")
+        );
+        assert!(history[1].content.contains("Independent candidate"));
     }
 }

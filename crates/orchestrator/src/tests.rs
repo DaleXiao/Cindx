@@ -367,6 +367,9 @@ fn search_teacher_prefers_reliable_efficient_topology() {
             latency_ms: 4_000,
             total_tokens: 4_000,
             tool_calls: 2,
+            successful_tools_by_step: [("approach_a".to_string(), vec!["file.search".to_string()])]
+                .into_iter()
+                .collect(),
             fallback_used: false,
         },
         WorkflowExecutionTelemetry {
@@ -378,6 +381,9 @@ fn search_teacher_prefers_reliable_efficient_topology() {
             latency_ms: 5_000,
             total_tokens: 5_000,
             tool_calls: 2,
+            successful_tools_by_step: [("approach_a".to_string(), vec!["file.search".to_string()])]
+                .into_iter()
+                .collect(),
             fallback_used: false,
         },
         WorkflowExecutionTelemetry {
@@ -389,6 +395,9 @@ fn search_teacher_prefers_reliable_efficient_topology() {
             latency_ms: 4_500,
             total_tokens: 4_500,
             tool_calls: 2,
+            successful_tools_by_step: [("approach_a".to_string(), vec!["file.search".to_string()])]
+                .into_iter()
+                .collect(),
             fallback_used: false,
         },
         WorkflowExecutionTelemetry {
@@ -400,6 +409,9 @@ fn search_teacher_prefers_reliable_efficient_topology() {
             latency_ms: 4_250,
             total_tokens: 4_250,
             tool_calls: 2,
+            successful_tools_by_step: [("approach_a".to_string(), vec!["file.search".to_string()])]
+                .into_iter()
+                .collect(),
             fallback_used: false,
         },
         WorkflowExecutionTelemetry {
@@ -411,6 +423,7 @@ fn search_teacher_prefers_reliable_efficient_topology() {
             latency_ms: 80_000,
             total_tokens: 20_000,
             tool_calls: 8,
+            successful_tools_by_step: BTreeMap::new(),
             fallback_used: false,
         },
         WorkflowExecutionTelemetry {
@@ -422,6 +435,7 @@ fn search_teacher_prefers_reliable_efficient_topology() {
             latency_ms: 70_000,
             total_tokens: 18_000,
             tool_calls: 7,
+            successful_tools_by_step: BTreeMap::new(),
             fallback_used: false,
         },
     ];
@@ -435,6 +449,10 @@ fn search_teacher_prefers_reliable_efficient_topology() {
     assert_eq!(prior.success_rate, 1.0);
     assert!(prior.success_confidence >= LEARNED_ROUTER_MIN_SUCCESS_CONFIDENCE);
     assert!(prior.prompt_hint().contains("Treat this only as a prior"));
+    assert_eq!(prior.steps[0].preferred_tools, vec!["file.search"]);
+    assert!(prior
+        .prompt_hint()
+        .contains("observed_successful_tools=file.search"));
 }
 
 #[test]
@@ -451,6 +469,7 @@ fn search_teacher_withholds_under_evidenced_topology() {
             latency_ms: 4_000,
             total_tokens: 4_000,
             tool_calls: 2,
+            successful_tools_by_step: BTreeMap::new(),
             fallback_used: false,
         })
         .collect::<Vec<_>>();
@@ -1214,7 +1233,7 @@ fn learned_router_uses_successful_trace_table() {
 #[test]
 fn learned_router_can_downshift_a_matching_context_without_tools() {
     let prompt = "Compare two product strategies and explain the tradeoffs.";
-    let context = RoutingContext::from_prompt(&prompt, candidates());
+    let context = RoutingContext::from_prompt(prompt, candidates());
     assert_eq!(
         RuleBasedRouter.route(&context).policy,
         OrchestrationPolicy::PlanExecuteReview

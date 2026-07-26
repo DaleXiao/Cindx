@@ -126,6 +126,10 @@ fn unresolved_step_action(step: &WorkflowStepHandoff) -> Option<String> {
             "Recover failed step {} or use a verified alternative.",
             step.id
         )),
+        WorkflowStepStatus::Cancelled => Some(format!(
+            "Use completed evidence or rerun cancelled step {} only if it is still required.",
+            step.id
+        )),
         WorkflowStepStatus::Running | WorkflowStepStatus::Pending => Some(format!(
             "Complete step {} and satisfy its evidence and verification contract.",
             step.id

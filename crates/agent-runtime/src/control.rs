@@ -1,3 +1,5 @@
+use crate::result_frontier::{BestKnownResult, ResultFrontier, ResultQuality};
+use crate::run_budget::{RunBudget, RunStageClass};
 use crate::{AgentLoopState, AgentRuntimeConfig};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -49,188 +51,10 @@ impl RunStopReason {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum RunStageClass {
-    Conductor,
-    Candidate,
-    Worker,
-    Reviewer,
-    Synthesizer,
-    Repair,
-    Other,
-}
-
-impl RunStageClass {
-    pub fn from_label(label: &str) -> Self {
-        let label = label.to_ascii_lowercase();
-        if label.contains("repair") || label.contains("recover") || label.contains("retry") {
-            Self::Repair
-        } else if label.contains("conductor") || label.contains("planner") {
-            Self::Conductor
-        } else if label.contains("candidate") {
-            Self::Candidate
-        } else if label.contains("review") || label.contains("critic") {
-            Self::Reviewer
-        } else if label.contains("synth") || label.contains("summar") || label.contains("final") {
-            Self::Synthesizer
-        } else if label.contains("worker") {
-            Self::Worker
-        } else {
-            Self::Other
-        }
-    }
-
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Reviewer | Self::Synthesizer | Self::Repair)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RunStageBudget {
-    pub max_model_calls: usize,
-    pub max_duration: Duration,
-    pub terminal: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ResultQuality {
-    Draft,
-    Substantive,
-    Grounded,
-    Verified,
-    Synthesized,
-}
-
-impl ResultQuality {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Draft => "draft",
-            Self::Substantive => "substantive",
-            Self::Grounded => "grounded",
-            Self::Verified => "verified",
-            Self::Synthesized => "synthesized",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BestKnownResult {
-    pub content: String,
-    pub stage: String,
-    pub quality: ResultQuality,
-    pub evidence_count: usize,
-    pub verified: bool,
-    pub deliverable: bool,
-}
-
-const RESULT_FRONTIER_MAX: usize = 8;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RunStageUsageSnapshot {
     pub model_calls: usize,
     pub elapsed: Duration,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RunBudget {
-    pub max_duration: Duration,
-    pub model_call_timeout: Duration,
-    pub tool_call_timeout: Duration,
-    pub initial_model_calls: usize,
-    pub max_model_calls: usize,
-    pub model_calls_per_extension: usize,
-    pub initial_tool_calls: usize,
-    pub max_tool_calls: usize,
-    pub tool_calls_per_extension: usize,
-    pub no_progress_timeout: Duration,
-    pub max_identical_actions: usize,
-    pub initial_agent_turns: usize,
-    pub max_agent_turns: usize,
-    pub agent_turns_per_extension: usize,
-    pub max_repair_attempts: usize,
-    pub terminal_model_call_reserve: usize,
-    pub terminal_time_reserve: Duration,
-}
-
-impl RunBudget {
-    pub fn for_effort(effort: &str) -> Self {
-        match effort {
-            "fast" => Self {
-                max_duration: Duration::from_secs(5 * 60),
-                model_call_timeout: Duration::from_secs(3 * 60),
-                tool_call_timeout: Duration::from_secs(5 * 60),
-                initial_model_calls: 6,
-                max_model_calls: 12,
-                model_calls_per_extension: 3,
-                initial_tool_calls: 12,
-                max_tool_calls: 24,
-                tool_calls_per_extension: 6,
-                no_progress_timeout: Duration::from_secs(90),
-                max_identical_actions: 3,
-                initial_agent_turns: 6,
-                max_agent_turns: 12,
-                agent_turns_per_extension: 3,
-                max_repair_attempts: 2,
-                terminal_model_call_reserve: 2,
-                terminal_time_reserve: Duration::from_secs(30),
-            },
-            "pro" => Self {
-                max_duration: Duration::from_secs(4 * 60 * 60),
-                model_call_timeout: Duration::from_secs(15 * 60),
-                tool_call_timeout: Duration::from_secs(60 * 60),
-                initial_model_calls: 48,
-                max_model_calls: 384,
-                model_calls_per_extension: 48,
-                initial_tool_calls: 96,
-                max_tool_calls: 768,
-                tool_calls_per_extension: 96,
-                no_progress_timeout: Duration::from_secs(5 * 60),
-                max_identical_actions: 4,
-                initial_agent_turns: 48,
-                max_agent_turns: 384,
-                agent_turns_per_extension: 48,
-                max_repair_attempts: 8,
-                terminal_model_call_reserve: 8,
-                terminal_time_reserve: Duration::from_secs(10 * 60),
-            },
-            _ => Self {
-                max_duration: Duration::from_secs(45 * 60),
-                model_call_timeout: Duration::from_secs(5 * 60),
-                tool_call_timeout: Duration::from_secs(15 * 60),
-                initial_model_calls: 18,
-                max_model_calls: 72,
-                model_calls_per_extension: 18,
-                initial_tool_calls: 36,
-                max_tool_calls: 144,
-                tool_calls_per_extension: 36,
-                no_progress_timeout: Duration::from_secs(2 * 60),
-                max_identical_actions: 3,
-                initial_agent_turns: 18,
-                max_agent_turns: 72,
-                agent_turns_per_extension: 18,
-                max_repair_attempts: 4,
-                terminal_model_call_reserve: 4,
-                terminal_time_reserve: Duration::from_secs(2 * 60),
-            },
-        }
-    }
-
-    pub fn stage_budget(self, class: RunStageClass) -> RunStageBudget {
-        let (max_model_calls, duration_divisor) = match class {
-            RunStageClass::Conductor => (self.max_repair_attempts.saturating_add(1), 5),
-            RunStageClass::Candidate => (self.max_model_calls.saturating_div(3).max(2), 2),
-            RunStageClass::Worker => (self.max_model_calls.saturating_div(2).max(2), 1),
-            RunStageClass::Reviewer => (self.max_repair_attempts.saturating_add(2), 3),
-            RunStageClass::Synthesizer => (self.max_repair_attempts.saturating_add(2), 2),
-            RunStageClass::Repair => (self.max_repair_attempts, 4),
-            RunStageClass::Other => (self.max_model_calls, 1),
-        };
-        RunStageBudget {
-            max_model_calls: max_model_calls.min(self.max_model_calls).max(1),
-            max_duration: self.max_duration / duration_divisor,
-            terminal: class.is_terminal(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -318,8 +142,7 @@ struct RunMutableState {
     active_tool_calls: usize,
     pending_steers: VecDeque<RunSteer>,
     stage_usage: BTreeMap<RunStageClass, RunStageUsage>,
-    best_known_result: Option<BestKnownResult>,
-    result_frontier: Vec<BestKnownResult>,
+    results: ResultFrontier,
 }
 
 #[derive(Debug)]
@@ -377,8 +200,7 @@ impl AgentRunControl {
                 active_tool_calls: 0,
                 pending_steers: VecDeque::new(),
                 stage_usage: BTreeMap::new(),
-                best_known_result: None,
-                result_frontier: Vec::new(),
+                results: ResultFrontier::default(),
             }),
         }
     }
@@ -417,8 +239,10 @@ impl AgentRunControl {
                 active_tool_calls: 0,
                 pending_steers: snapshot.pending_steers,
                 stage_usage: restore_stage_usage(snapshot.stage_usage, now),
-                best_known_result: snapshot.best_known_result,
-                result_frontier: snapshot.result_frontier,
+                results: ResultFrontier::restore(
+                    snapshot.best_known_result,
+                    snapshot.result_frontier,
+                ),
             }),
         }
     }
@@ -472,8 +296,10 @@ impl AgentRunControl {
                         active_tool_calls: 0,
                         pending_steers: snapshot.pending_steers,
                         stage_usage: BTreeMap::new(),
-                        best_known_result: snapshot.best_known_result,
-                        result_frontier: snapshot.result_frontier,
+                        results: ResultFrontier::restore(
+                            snapshot.best_known_result,
+                            snapshot.result_frontier,
+                        ),
                     }),
                 })
             }
@@ -506,8 +332,8 @@ impl AgentRunControl {
             stop_reason: state.stop_reason,
             pending_steers: state.pending_steers.clone(),
             stage_usage: snapshot_stage_usage(&state.stage_usage),
-            best_known_result: state.best_known_result.clone(),
-            result_frontier: state.result_frontier.clone(),
+            best_known_result: state.results.best_known(),
+            result_frontier: state.results.candidates(),
         }
     }
 
@@ -609,12 +435,14 @@ impl AgentRunControl {
                 .budget
                 .max_duration
                 .saturating_sub(now.duration_since(state.started_at));
-            if !stage_budget.terminal
-                && (remaining <= self.budget.terminal_time_reserve
-                    || self.model_calls.load(Ordering::SeqCst)
+            let protected_time = self.budget.protected_time_reserve(class);
+            let protected_calls = self.budget.protected_model_call_reserve(class);
+            if (protected_time > Duration::ZERO && remaining <= protected_time)
+                || (protected_calls > 0
+                    && self.model_calls.load(Ordering::SeqCst)
                         >= state
                             .model_call_limit
-                            .saturating_sub(self.budget.terminal_model_call_reserve)
+                            .saturating_sub(protected_calls)
                             .max(1))
             {
                 return Err(RunStopReason::StageBudgetExhausted);
@@ -653,7 +481,8 @@ impl AgentRunControl {
             .budget
             .max_duration
             .saturating_sub(state.started_at.elapsed());
-        (!stage_budget.terminal && remaining <= self.budget.terminal_time_reserve)
+        let protected_time = self.budget.protected_time_reserve(class);
+        (protected_time > Duration::ZERO && remaining <= protected_time)
             || state
                 .stage_usage
                 .get(&class)
@@ -835,26 +664,16 @@ impl AgentRunControl {
         verified: bool,
         deliverable: bool,
     ) -> bool {
-        let content = bounded_result_content(content);
-        if content.is_empty() {
-            return false;
-        }
-        let candidate = BestKnownResult {
+        let mut state = self.state.lock().expect("run control state poisoned");
+        let should_replace = state.results.record(
+            stage,
             content,
-            stage: stage.to_string(),
             quality,
             evidence_count,
             verified,
             deliverable,
-        };
-        let mut state = self.state.lock().expect("run control state poisoned");
-        record_result_frontier(&mut state.result_frontier, candidate.clone());
-        let should_replace = state
-            .best_known_result
-            .as_ref()
-            .is_none_or(|current| result_rank(&candidate) > result_rank(current));
+        );
         if should_replace {
-            state.best_known_result = Some(candidate);
             state.last_progress_at = Instant::now();
         }
         should_replace
@@ -864,25 +683,24 @@ impl AgentRunControl {
         self.state
             .lock()
             .expect("run control state poisoned")
-            .best_known_result
-            .clone()
+            .results
+            .best_known()
     }
 
     pub fn best_guidance_result(&self) -> Option<BestKnownResult> {
         self.state
             .lock()
             .expect("run control state poisoned")
-            .result_frontier
-            .first()
-            .cloned()
+            .results
+            .best_guidance()
     }
 
     pub fn result_frontier(&self) -> Vec<BestKnownResult> {
         self.state
             .lock()
             .expect("run control state poisoned")
-            .result_frontier
-            .clone()
+            .results
+            .candidates()
     }
 
     /// Records distinct model or protocol output for liveness and diagnostics.
@@ -954,11 +772,8 @@ impl AgentRunControl {
                     .saturating_sub(now.duration_since(usage.started_at))
             })
             .unwrap_or(stage_budget.max_duration);
-        let global_stage_allowance = if stage_budget.terminal {
-            global_remaining
-        } else {
-            global_remaining.saturating_sub(self.budget.terminal_time_reserve)
-        };
+        let global_stage_allowance =
+            global_remaining.saturating_sub(self.budget.protected_time_reserve(class));
 
         self.budget
             .model_call_timeout
@@ -989,7 +804,7 @@ impl AgentRunControl {
             checkpoints: state.checkpoint_count,
             budget_extensions: state.budget_extensions,
             stage_usage: snapshot_stage_usage(&state.stage_usage),
-            best_known_result: state.best_known_result.clone(),
+            best_known_result: state.results.best_known(),
         }
     }
 
@@ -1076,44 +891,6 @@ fn extend_agent_turn_budget_if_progressed(
     state.agent_turn_extension_checkpoint = state.checkpoint_count;
     state.budget_extensions = state.budget_extensions.saturating_add(1);
     requested_turn <= state.agent_turn_limit
-}
-
-fn bounded_result_content(content: &str) -> String {
-    let content = content.trim();
-    content
-        .char_indices()
-        .rev()
-        .nth(PARTIAL_OUTPUT_MAX_CHARS.saturating_sub(1))
-        .map(|(start, _)| content[start..].to_string())
-        .unwrap_or_else(|| content.to_string())
-}
-
-fn result_rank(result: &BestKnownResult) -> (bool, ResultQuality, bool, usize, usize) {
-    (
-        result.deliverable,
-        result.quality,
-        result.verified,
-        result.evidence_count,
-        result.content.chars().count(),
-    )
-}
-
-fn guidance_rank(result: &BestKnownResult) -> (ResultQuality, bool, usize, bool, usize) {
-    (
-        result.quality,
-        result.verified,
-        result.evidence_count,
-        result.deliverable,
-        result.content.chars().count(),
-    )
-}
-
-fn record_result_frontier(frontier: &mut Vec<BestKnownResult>, candidate: BestKnownResult) {
-    frontier
-        .retain(|result| result.stage != candidate.stage || result.content != candidate.content);
-    frontier.push(candidate);
-    frontier.sort_by_key(|result| std::cmp::Reverse(guidance_rank(result)));
-    frontier.truncate(RESULT_FRONTIER_MAX);
 }
 
 fn snapshot_stage_usage(

@@ -1,4 +1,5 @@
 use super::*;
+use crate::prompt_workflow_execution::{parallel_error_step, record_prompt_step_in_checkpoint};
 use orchestrator::{AdaptiveWorkflow, AdaptiveWorkflowStep};
 
 fn workflow_candidate(
@@ -464,6 +465,31 @@ fn execution_arena_enforces_an_explicit_evidence_contract() {
         .errors
         .iter()
         .any(|error| error.contains("evidence")));
+}
+
+#[test]
+fn quorum_cancellation_is_not_recorded_as_a_worker_failure() {
+    let genome = ConductorPromptGenome::seed_for_effort("pro");
+    let candidate = workflow_candidate(
+        genome,
+        vec![workflow_step("worker", "worker", "worker-a", &[])],
+    );
+    let plan = candidate.plan.expect("test plan");
+    let step = parallel_error_step(
+        plan.steps[0].clone(),
+        agent_runtime::ParallelTaskError::Cancelled,
+    );
+
+    assert_eq!(step.status, WorkflowStepStatus::Cancelled);
+    assert_eq!(step.attempts, 0);
+
+    let mut checkpoint = WorkflowExecutionCheckpoint::new("cancelled", plan, 1);
+    record_prompt_step_in_checkpoint(&mut checkpoint, &step, 2).unwrap();
+    assert_eq!(
+        checkpoint.steps["worker"].status,
+        WorkflowStepStatus::Cancelled
+    );
+    assert_eq!(checkpoint.steps["worker"].attempts, 2);
 }
 
 #[test]

@@ -236,6 +236,9 @@ fn is_durable_requirement_content(content: &str) -> bool {
 }
 
 fn is_durable_outcome_content(content: &str, has_tool_evidence: bool) -> bool {
+    if contains_instruction_override(content) {
+        return false;
+    }
     if has_tool_evidence {
         return true;
     }
@@ -268,6 +271,24 @@ fn is_durable_outcome_content(content: &str, has_tool_evidence: bool) -> bool {
         "已删除",
         "已生成",
         "测试通过",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn contains_instruction_override(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    [
+        "ignore previous instruction",
+        "ignore all previous",
+        "ignore the system message",
+        "reveal the system prompt",
+        "developer message says",
+        "忽略之前的指令",
+        "忽略所有之前",
+        "忽略系统消息",
+        "泄露系统提示",
+        "显示系统提示词",
     ]
     .iter()
     .any(|marker| lower.contains(marker))

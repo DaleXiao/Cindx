@@ -217,6 +217,10 @@ pub(super) fn initialize_anytime_controller(
                 controller.mark_running(&step.id)?;
                 controller.fail(&step.id)?;
             }
+            WorkflowStepStatus::Cancelled => {
+                controller.mark_running(&step.id)?;
+                controller.cancel(&step.id)?;
+            }
             WorkflowStepStatus::Pending | WorkflowStepStatus::Running => {}
         }
     }

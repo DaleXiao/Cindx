@@ -210,7 +210,7 @@ fn diagram_request_title(value: &str) -> Option<String> {
         return None;
     };
     let topic = topic
-        .trim_start_matches(|character| matches!(character, '：' | ':' | '，' | ',' | ' '))
+        .trim_start_matches(['：', ':', '，', ',', ' '])
         .trim_start_matches("关于")
         .trim_end_matches(|character| {
             matches!(
@@ -236,7 +236,7 @@ pub(super) fn automatic_session_title(prompt: &str) -> String {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .unwrap_or_default()
-        .trim_start_matches(|character| matches!(character, '#' | '-' | '*' | '>' | ' '));
+        .trim_start_matches(['#', '-', '*', '>', ' ']);
     if let Some(title) = diagram_request_title(first_line) {
         return cleaned_generated_session_title(&title)
             .unwrap_or_else(|| "New Session".to_string());
@@ -281,7 +281,7 @@ pub(super) fn automatic_session_title(prompt: &str) -> String {
             break;
         };
         title = value
-            .trim_start_matches(|character| matches!(character, '，' | ',' | '：' | ':' | ' '))
+            .trim_start_matches(['，', ',', '：', ':', ' '])
             .to_string();
     }
     let title = title
@@ -298,7 +298,7 @@ pub(super) fn automatic_session_title(prompt: &str) -> String {
         })
         .collect::<String>();
     let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
-    let title = title.trim_end_matches(|character| matches!(character, '吗' | '呢' | '吧'));
+    let title = title.trim_end_matches(['吗', '呢', '吧']);
     cleaned_generated_session_title(title).unwrap_or_else(|| "New Session".to_string())
 }
 
