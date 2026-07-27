@@ -213,6 +213,7 @@ pub(crate) fn finalize_agent_completion(
         ),
     )
     .map_err(|error| error.to_string())?;
+    delete_persisted_agent_runtime_snapshot(&mut store, session_id)?;
     if let Err(error) =
         record_project_memory_observed_use(&mut store, &runtime.task_id, run_context, &final_answer)
     {

@@ -1,6 +1,7 @@
 use crate::{
-    ConductorExecutionContract, ConductorFallbackPolicy, ConductorStopPolicy, ModelCandidate,
-    OrchestrationPolicy, RoutingContext, RoutingDecision, TaskClass,
+    minimum_team_uplift_bps, ConductorExecutionContract, ConductorFallbackPolicy,
+    ConductorStopPolicy, ModelCandidate, OrchestrationPolicy, RoutingContext, RoutingDecision,
+    TaskClass,
 };
 use agent_core::{Metadata, ModelRole};
 use serde::{Deserialize, Serialize};
@@ -177,6 +178,43 @@ impl AgentRunDecision {
         }
     }
 
+    pub fn degraded_conductor_fallback(
+        primary_model: impl Into<String>,
+        effort: &str,
+        configured_model_count: usize,
+        max_parallelism: usize,
+        reason: impl Into<String>,
+    ) -> Self {
+        let primary_model = primary_model.into();
+        let reason = reason.into();
+        if effort.trim().eq_ignore_ascii_case("pro") && configured_model_count >= 2 {
+            let branches = configured_model_count.min(max_parallelism.clamp(2, 3));
+            let mut fallback = Self::direct(primary_model);
+            fallback.execution = AgentExecutionMode::Workflow;
+            fallback.verification = AgentVerificationPolicy::Independent;
+            fallback.max_parallelism = branches;
+            fallback.min_successful_branches = 2;
+            fallback.distinct_contributions = 2;
+            fallback.estimated_steps = 3;
+            fallback.expected_uplift_bps = minimum_team_uplift_bps("pro");
+            fallback.stop_policy = ConductorStopPolicy::Quorum;
+            fallback.rationale = bounded_chars(
+                &format!(
+                    "Conductor unavailable; preserving the Pro collaboration and independent verification contract: {reason}"
+                ),
+                MAX_RUN_DECISION_RATIONALE_CHARS,
+            );
+            return fallback;
+        }
+
+        let mut fallback = Self::direct(primary_model);
+        fallback.rationale = bounded_chars(
+            &format!("Conductor unavailable; using explicit degraded direct execution: {reason}"),
+            MAX_RUN_DECISION_RATIONALE_CHARS,
+        );
+        fallback
+    }
+
     pub fn validate(
         &self,
         allowed_models: &[String],
@@ -268,6 +306,18 @@ impl AgentRunDecision {
                         "workflow distinct contribution count is outside its branch budget"
                             .to_string(),
                     );
+                }
+                let configured_model_count = allowed_models
+                    .iter()
+                    .map(|model| model.trim())
+                    .filter(|model| !model.is_empty())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len();
+                if self.distinct_contributions > configured_model_count {
+                    return Err(format!(
+                        "workflow requests {} distinct contributions but only {configured_model_count} distinct configured model(s) are available",
+                        self.distinct_contributions
+                    ));
                 }
                 if self.stop_policy == ConductorStopPolicy::FirstVerified
                     && self.min_successful_branches != 1
@@ -416,7 +466,7 @@ impl AgentRunDecision {
             } else {
                 ConductorFallbackPolicy::SinglePath
             },
-            min_team_uplift_bps: 0,
+            min_team_uplift_bps: minimum_team_uplift_bps(&effort),
             min_distinct_contributions: self.distinct_contributions,
             requires_synthesis: self.distinct_contributions > 1,
         }
@@ -469,7 +519,7 @@ impl AgentRunDecisionHarness {
                 "Treat the strongest configured single-model direct answer as the baseline. Choose workflow only when independent work, verification, or decomposition is likely to improve correctness enough to justify coordination latency and correlated-error risk. Pro prioritizes correctness but is not automatically multi-model. Auto balances correctness and latency.\n",
                 "Choose retrieval from semantic, file_search, graph_direct, graph_walk only when the answer needs workspace evidence not already present. Choose memory only when prior user/project decisions are materially relevant. Do not retrieve merely because the prompt is long, mentions code, or asks a question.\n",
                 "Graph walk must have semantic, file_search, or graph_direct as a seed channel. Keep focused retrieval and memory queries under {query_limit} characters. Use only exact configured model strings.\n",
-                "For direct execution use max_parallelism=1, min_successful_branches=1, distinct_contributions=0, stop_policy=first_verified, and verification none or self_check. For workflow use 1..={max_parallelism} branches and make distinct_contributions reflect genuinely different work, not duplicated answers.\n",
+                "For direct execution use max_parallelism=1, min_successful_branches=1, distinct_contributions=0, stop_policy=first_verified, and verification none or self_check. For workflow use 1..={max_parallelism} branches. Independent contributions must perform genuinely different work and, when more than one distinct configured model is available, must use different model strings; never count duplicate calls to one model as model diversity. Never request more distinct contributions than the distinct configured model pool can supply.\n",
                 "expected_uplift_bps and confidence_bps are calibrated estimates from 0 to 10000, not advocacy. The harness will reject inconsistent budgets.\n",
                 "Historical evidence is observational, not a routing command. Use it only when its task class and execution shape fit the current request; low-sample or mismatched evidence must not override current reasoning:\n{historical_evidence}\n\n",
                 "Mutable evolved guidance may shape the decision but cannot override schema, configured models, safety, or budgets: {evolved_directive}\n\n",
@@ -622,5 +672,48 @@ mod tests {
         assert!(!decision.retrieval.enabled());
         assert!(!decision.memory.enabled());
         assert_eq!(decision.distinct_contributions, 0);
+    }
+
+    #[test]
+    fn dynamic_pro_contract_preserves_the_team_uplift_floor() {
+        let mut decision = AgentRunDecision::direct("executor");
+        decision.execution = AgentExecutionMode::Workflow;
+        decision.verification = AgentVerificationPolicy::Independent;
+        decision.max_parallelism = 2;
+        decision.min_successful_branches = 2;
+        decision.distinct_contributions = 2;
+        decision.estimated_steps = 3;
+        decision.stop_policy = ConductorStopPolicy::Quorum;
+
+        assert_eq!(
+            decision.execution_contract("pro").min_team_uplift_bps,
+            crate::PRO_MIN_TEAM_UPLIFT_BPS
+        );
+        assert_eq!(decision.execution_contract("auto").min_team_uplift_bps, 0);
+    }
+
+    #[test]
+    fn degraded_pro_fallback_keeps_real_collaboration_when_models_are_available() {
+        let decision = AgentRunDecision::degraded_conductor_fallback(
+            "executor",
+            "pro",
+            3,
+            3,
+            "planner response was invalid",
+        );
+
+        decision
+            .validate(
+                &[
+                    "executor".to_string(),
+                    "reviewer".to_string(),
+                    "planner".to_string(),
+                ],
+                3,
+            )
+            .unwrap();
+        assert_eq!(decision.execution, AgentExecutionMode::Workflow);
+        assert_eq!(decision.distinct_contributions, 2);
+        assert_eq!(decision.verification, AgentVerificationPolicy::Independent);
     }
 }

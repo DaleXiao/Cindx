@@ -1,17 +1,41 @@
 use super::*;
 
+const SUSPENDED_AGENT_RUN_LIMIT: usize = 16;
+const SUSPENDED_AGENT_RUN_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
+
+fn purge_expired_suspended_agent_runs(
+    runs: &mut BTreeMap<String, SuspendedAgentRun>,
+    now_ms: u64,
+) {
+    runs.retain(|_, run| {
+        now_ms.saturating_sub(run.last_touched_at_ms) <= SUSPENDED_AGENT_RUN_TTL_MS
+    });
+}
+
 pub(crate) fn remember_suspended_agent_run(
     state: &tauri::State<'_, AppState>,
-    run: SuspendedAgentRun,
+    mut run: SuspendedAgentRun,
 ) -> Result<(), String> {
     let Some(session_id) = run.run_context.get("session_id").cloned() else {
         return Ok(());
     };
-    state
+    let now_ms = current_time_millis();
+    run.last_touched_at_ms = now_ms;
+    let mut runs = state
         .suspended_agent_runs
         .lock()
-        .map_err(|error| format!("suspended agent runs lock poisoned: {error}"))?
-        .insert(session_id, run);
+        .map_err(|error| format!("suspended agent runs lock poisoned: {error}"))?;
+    purge_expired_suspended_agent_runs(&mut runs, now_ms);
+    if !runs.contains_key(&session_id) && runs.len() >= SUSPENDED_AGENT_RUN_LIMIT {
+        if let Some(oldest_session_id) = runs
+            .iter()
+            .min_by_key(|(_, run)| run.last_touched_at_ms)
+            .map(|(session_id, _)| session_id.clone())
+        {
+            runs.remove(&oldest_session_id);
+        }
+    }
+    runs.insert(session_id, run);
     Ok(())
 }
 
@@ -19,21 +43,26 @@ pub(crate) fn take_suspended_agent_run(
     state: &tauri::State<'_, AppState>,
     session_id: &str,
 ) -> Result<Option<SuspendedAgentRun>, String> {
-    Ok(state
+    let now_ms = current_time_millis();
+    let mut runs = state
         .suspended_agent_runs
         .lock()
-        .map_err(|error| format!("suspended agent runs lock poisoned: {error}"))?
-        .remove(session_id))
+        .map_err(|error| format!("suspended agent runs lock poisoned: {error}"))?;
+    purge_expired_suspended_agent_runs(&mut runs, now_ms);
+    Ok(runs.remove(session_id))
 }
 
 pub(crate) fn suspended_agent_run_control_snapshot(
     state: &tauri::State<'_, AppState>,
     session_id: &str,
 ) -> Result<Option<RunControlSnapshot>, String> {
-    Ok(state
+    let now_ms = current_time_millis();
+    let mut runs = state
         .suspended_agent_runs
         .lock()
-        .map_err(|error| format!("suspended agent runs lock poisoned: {error}"))?
+        .map_err(|error| format!("suspended agent runs lock poisoned: {error}"))?;
+    purge_expired_suspended_agent_runs(&mut runs, now_ms);
+    Ok(runs
         .get(session_id)
         .map(|run| run.run_control.clone()))
 }

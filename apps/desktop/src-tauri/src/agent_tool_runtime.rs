@@ -46,7 +46,12 @@ pub(crate) fn execute_agent_tool_batch(
                 cancellation,
             )?));
         }
-        let invocation = AgentKernel::new(&mut *runtime, tools).tool_invocation(&call);
+        let mut invocation = AgentKernel::new(&mut *runtime, tools).tool_invocation(&call);
+        let tool = registry.get(&call.tool_name);
+        if let Some(tool) = tool {
+            let effect_spec = tool.effect_spec(&invocation);
+            agent_runtime::apply_tool_spec_runtime_metadata(&mut invocation, &effect_spec);
+        }
         let mut store = state
             .store
             .lock()
@@ -93,10 +98,11 @@ pub(crate) fn execute_agent_tool_batch(
                 run_context,
             )
             .map_err(|error| error.to_string())?;
+            persist_agent_runtime_snapshot(&mut store, runtime, run_context)?;
             continue;
         }
 
-        let Some(tool) = registry.get(&call.tool_name) else {
+        let Some(tool) = tool else {
             let observation = observation_from_tool_result(
                 &call.tool_name,
                 "failed",
@@ -128,6 +134,7 @@ pub(crate) fn execute_agent_tool_batch(
                 run_context,
             )
             .map_err(|error| error.to_string())?;
+            persist_agent_runtime_snapshot(&mut store, runtime, run_context)?;
             continue;
         };
         let tool_risk = tool.spec().risk;
@@ -240,6 +247,7 @@ pub(crate) fn execute_agent_tool_batch(
             run_context,
         )
         .map_err(|error| error.to_string())?;
+        persist_agent_runtime_snapshot(&mut store, runtime, run_context)?;
         drop(store);
         if cancellation.has_pending_steer() && !agent_run_should_stop(cancellation) {
             return Ok(AgentToolBatchOutcome::RestartAfterSteer);
@@ -265,12 +273,14 @@ pub(crate) fn execute_agent_tool_batch(
         let events = agent_events_for_session(&store, &phase16_task_id(), session_id)
             .map_err(|error| error.to_string())?;
         let active_events = active_agent_events_for_session(&events, session_id);
-        let recovery_metadata = agent_recovery_metadata(
+        let task_state = capture_persistable_agent_task_state(runtime);
+        let recovery_metadata = agent_recovery_metadata_with_task_state(
             &active_events,
             run_context,
             "blocked",
             "waiting_for_permission",
             Metadata::new(),
+            Some(&task_state),
         )?;
         append_event(
             &mut store,
@@ -289,6 +299,7 @@ pub(crate) fn execute_agent_tool_batch(
                 workspace_root: workspace_root.to_path_buf(),
                 collaboration: active_collaboration.cloned(),
                 run_control: cancellation.snapshot(),
+                last_touched_at_ms: current_time_millis(),
             },
         )?;
         return Ok(paused_agent_tools(

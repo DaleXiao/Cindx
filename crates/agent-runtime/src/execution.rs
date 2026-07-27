@@ -1,5 +1,6 @@
 use crate::{
     start_agent_loop_with_history, AgentAdvance, AgentFailure, AgentKernel, AgentRuntimeConfig,
+    AgentTurnPreparationError,
 };
 use agent_core::{Message, MessageRole, Metadata, TaskId};
 use model_provider::{ModelRequest, ModelResponse};
@@ -279,12 +280,16 @@ where
                 request.context_window_tokens,
                 request.max_output_tokens,
             )
-            .map_err(|exhausted| {
-                no_tool_turn_exhaustion(
-                    exhausted.max_turns,
+            .map_err(|error| match error {
+                AgentTurnPreparationError::Budget(exhausted) => no_tool_turn_exhaustion(
+                    exhausted.completed_turns,
                     exhausted.max_turns,
                     last_unusable_response,
-                )
+                ),
+                AgentTurnPreparationError::Context(violation) => AgentFailure::contract(
+                    "context_projection_invariant_failed",
+                    violation.to_string(),
+                ),
             })?;
         let response = run_model_turn(prepared.request)?;
         merge_usage(&mut usage, &response.metadata);

@@ -4,10 +4,12 @@ pub(crate) fn prompt_profile_evidence_counts(
     observations: &[PromptEvolutionObservation],
     profile_id: &str,
 ) -> (usize, usize) {
+    let active_dataset_sha256 = orchestrator::latest_scientific_dataset_digest(observations);
     prompt_unique_evidence_counts(
         observations
             .iter()
             .filter(|observation| observation.profile_id == profile_id),
+        active_dataset_sha256,
     )
 }
 
@@ -16,18 +18,26 @@ pub(crate) fn prompt_direct_profile_evidence_counts(
     profile_id: &str,
     opponent_profile_id: &str,
 ) -> (usize, usize) {
+    let active_dataset_sha256 = orchestrator::latest_scientific_dataset_digest(observations);
     prompt_unique_evidence_counts(observations.iter().filter(|observation| {
         observation.profile_id == profile_id
             && observation.opponent_profile_id.as_deref() == Some(opponent_profile_id)
-    }))
+    }), active_dataset_sha256)
 }
 
 fn prompt_unique_evidence_counts<'a>(
     observations: impl Iterator<Item = &'a PromptEvolutionObservation>,
+    dataset_sha256: Option<&str>,
 ) -> (usize, usize) {
+    let Some(dataset_sha256) = dataset_sha256 else {
+        return (0, 0);
+    };
     let mut paired = BTreeSet::new();
     let mut replay = BTreeSet::new();
-    for observation in observations {
+    for observation in observations
+        .filter(|observation| observation.is_scientific_evidence())
+        .filter(|observation| observation.provenance.dataset_sha256 == dataset_sha256)
+    {
         if observation.mode.is_paired_execution() {
             paired.insert(observation.evidence_identity());
         } else if observation.mode.is_replay_execution() {
@@ -271,6 +281,7 @@ pub(crate) fn select_prompt_offline_case(
     challenger_profile_id: &str,
     split: PromptEvaluationSplit,
 ) -> Option<PromptOfflineCase> {
+    let dataset_sha256 = prompt_offline_dataset_digest(dataset);
     dataset
         .iter()
         .filter(|case| case.split == split)
@@ -283,6 +294,8 @@ pub(crate) fn select_prompt_offline_case(
                             && observation.opponent_profile_id.as_deref() == Some(opponent_id)
                             && observation.split == split
                             && observation.task_class == case.task_class
+                            && observation.is_scientific_evidence()
+                            && observation.provenance.dataset_sha256 == dataset_sha256
                             && case_id.is_none_or(|case_id| observation.case_id == case_id)
                     })
                     .map(PromptEvolutionObservation::evidence_identity)
@@ -293,20 +306,16 @@ pub(crate) fn select_prompt_offline_case(
                 evidence_for(current_profile_id, challenger_profile_id, None);
             let challenger_class_repeats =
                 evidence_for(challenger_profile_id, current_profile_id, None);
-            let current_repeats =
-                prompt_unique_evidence_counts(observations.iter().filter(|observation| {
-                    observation.case_id == case.id
-                        && observation.profile_id == current_profile_id
-                        && observation.opponent_profile_id.as_deref() == Some(challenger_profile_id)
-                }));
-            let challenger_repeats =
-                prompt_unique_evidence_counts(observations.iter().filter(|observation| {
-                    observation.case_id == case.id
-                        && observation.profile_id == challenger_profile_id
-                        && observation.opponent_profile_id.as_deref() == Some(current_profile_id)
-                }));
-            let current_repeats = current_repeats.0.saturating_add(current_repeats.1);
-            let challenger_repeats = challenger_repeats.0.saturating_add(challenger_repeats.1);
+            let current_repeats = evidence_for(
+                current_profile_id,
+                challenger_profile_id,
+                Some(case.id.as_str()),
+            );
+            let challenger_repeats = evidence_for(
+                challenger_profile_id,
+                current_profile_id,
+                Some(case.id.as_str()),
+            );
             (
                 current_class_repeats.saturating_add(challenger_class_repeats),
                 current_class_repeats.max(challenger_class_repeats),
@@ -322,11 +331,39 @@ pub(crate) fn prompt_offline_dataset_digest(dataset: &[PromptOfflineCase]) -> St
     sha256_hex(
         dataset
             .iter()
-            .map(|case| format!("{}:{:?}:{}", case.id, case.split, case.source_run_id))
+            .map(|case| format!("{}:{:?}", case.id, case.split))
             .collect::<Vec<_>>()
             .join("\n")
             .as_bytes(),
     )
+}
+
+pub(crate) fn prompt_offline_dataset_for_generation(
+    discovered: Vec<PromptOfflineCase>,
+    previous: Option<&PromptOfflineDatasetState>,
+    generation: u32,
+) -> Vec<PromptOfflineCase> {
+    let Some(previous) = previous.filter(|snapshot| {
+        snapshot.status == "ready"
+            && snapshot.generation == generation
+            && snapshot.case_ids.len() >= PROMPT_EVOLUTION_OFFLINE_MIN_CASES
+    }) else {
+        return discovered;
+    };
+    let by_id = discovered
+        .iter()
+        .map(|case| (case.id.as_str(), case))
+        .collect::<BTreeMap<_, _>>();
+    let frozen = previous
+        .case_ids
+        .iter()
+        .filter_map(|case_id| by_id.get(case_id.as_str()).map(|case| (*case).clone()))
+        .collect::<Vec<_>>();
+    if frozen.len() == previous.case_ids.len() {
+        frozen
+    } else {
+        discovered
+    }
 }
 
 pub(crate) fn append_prompt_offline_dataset_snapshot(
@@ -335,6 +372,7 @@ pub(crate) fn append_prompt_offline_dataset_snapshot(
     run_context: &Metadata,
     effort: &str,
     dataset: &[PromptOfflineCase],
+    generation: u32,
     selected: Option<&PromptOfflineCase>,
 ) -> Result<(), String> {
     let split_manifest = dataset
@@ -344,6 +382,13 @@ pub(crate) fn append_prompt_offline_dataset_snapshot(
     let split_manifest = serde_json::to_string(&split_manifest)
         .map_err(|error| format!("offline split manifest serialization failed: {error}"))?;
     let dataset_digest = prompt_offline_dataset_digest(dataset);
+    let case_ids = serde_json::to_string(
+        &dataset
+            .iter()
+            .map(|case| case.id.as_str())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| format!("offline case id serialization failed: {error}"))?;
     let train_cases = dataset
         .iter()
         .filter(|case| case.split == PromptEvaluationSplit::Train)
@@ -363,6 +408,8 @@ pub(crate) fn append_prompt_offline_dataset_snapshot(
                 ("background_evaluation".to_string(), "true".to_string()),
                 ("prompt_effort".to_string(), effort.to_string()),
                 ("dataset_sha256".to_string(), dataset_digest),
+                ("dataset_generation".to_string(), generation.to_string()),
+                ("dataset_case_ids".to_string(), case_ids),
                 ("dataset_split_manifest".to_string(), split_manifest),
                 ("dataset_case_count".to_string(), dataset.len().to_string()),
                 ("dataset_train_count".to_string(), train_cases.to_string()),

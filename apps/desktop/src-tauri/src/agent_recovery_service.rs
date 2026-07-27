@@ -1,16 +1,19 @@
 use crate::desktop_prelude::*;
 use crate::{
     agent_read_model::{
-        active_agent_events_for_session, agent_events_for_session, is_agent_run_start_event,
-        latest_agent_prompt_from_active_events,
+        active_agent_events_for_session, agent_events_for_session,
+        agent_recovery_prompt_from_active_events, is_agent_run_start_event,
+        primary_agent_user_turn_event,
     },
     app_state::AgentRecoveryEnvelope,
+    agent_runtime_snapshot::{
+        delete_persisted_agent_runtime_snapshot, load_matching_agent_runtime_snapshot,
+    },
     event_persistence::append_event,
     project_session_persistence::metadata_with_context,
     runtime_constants::AGENT_RECOVERY_SCHEMA,
     runtime_values::{current_time_millis, phase16_task_id},
-    tool_execution::message_from_event,
-    workflow_checkpoint_runtime::latest_external_user_turn_event,
+    tool_execution::runtime_message_from_event,
 };
 
 pub(super) fn agent_task_is_cancelled(
@@ -52,10 +55,10 @@ pub(super) fn agent_recovery_identity(
         .cloned()
         .or_else(|| run_context.get("agent_run_id").cloned())
         .unwrap_or_default();
-    let user_turn_sequence = latest_external_user_turn_event(events)
+    let user_turn_sequence = primary_agent_user_turn_event(events)
         .map(|event| event.sequence)
         .unwrap_or_default();
-    let prompt = latest_agent_prompt_from_active_events(events)?;
+    let prompt = agent_recovery_prompt_from_active_events(events)?;
     let prompt_fingerprint = sha256_hex(prompt.as_bytes());
     let project_id = run_context.get("project_id").cloned().unwrap_or_default();
     let resume_key = format!(
@@ -356,7 +359,7 @@ pub(super) fn recovery_safe_transcript(events: &[Event]) -> Vec<Message> {
         .collect::<BTreeSet<_>>();
     let mut synthetic = BTreeSet::new();
     let mut messages = Vec::new();
-    for message in events.iter().filter_map(message_from_event) {
+    for message in events.iter().filter_map(runtime_message_from_event) {
         let unresolved = if message.role == MessageRole::Assistant {
             message
                 .metadata
@@ -441,6 +444,9 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
                 && event.metadata.get("recovery_state").map(String::as_str) == Some("blocked")
         });
         if already_recovered_wait {
+            if let Err(error) = delete_persisted_agent_runtime_snapshot(store, session_id) {
+                eprintln!("stale agent runtime snapshot cleanup unavailable: {error}");
+            }
             continue;
         }
         let pending_permissions = pending_agent_permissions_for_run(
@@ -459,7 +465,22 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
                 "app_restarted_waiting_for_permission",
             )
         };
-        let metadata = agent_recovery_metadata(
+        let task_state = match agent_recovery_identity(&active_events, &run_context) {
+            Some((_, source_run_id, _, prompt_fingerprint, _)) => {
+                load_matching_agent_runtime_snapshot(
+                    store,
+                    &run_context,
+                    &source_run_id,
+                    &prompt_fingerprint,
+                    active_events
+                        .last()
+                        .map(|event| event.sequence)
+                        .unwrap_or_default(),
+                )?
+            }
+            None => None,
+        };
+        let metadata = agent_recovery_metadata_with_task_state(
             &active_events,
             &run_context,
             recovery_state,
@@ -471,6 +492,7 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
             ]
             .into_iter()
             .collect(),
+            task_state.as_ref(),
         )?;
         append_event(
             store,
@@ -480,6 +502,12 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
             metadata,
         )
         .map_err(|error| error.to_string())?;
+        // The recovery event now owns the durable task-state checkpoint. Keeping
+        // the run-scoped snapshot after that handoff only leaves stale state that
+        // can never match a future run id.
+        if let Err(error) = delete_persisted_agent_runtime_snapshot(store, session_id) {
+            eprintln!("recovered agent runtime snapshot cleanup unavailable: {error}");
+        }
         recovered += 1;
     }
     Ok(recovered)

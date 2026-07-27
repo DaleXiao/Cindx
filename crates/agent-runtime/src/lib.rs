@@ -36,6 +36,7 @@ pub use context_engine::{
 };
 pub use context_governor::{
     bounded_max_output_tokens, ContextBudgetAllocation, ContextGovernorReport,
+    ContextInvariantViolation,
 };
 pub use control::{
     AgentRunControl, RunContinuationDirective, RunControlSnapshot, RunProgressSnapshot,
@@ -47,7 +48,8 @@ pub use execution::{
 };
 pub use failure::{AgentFailure, AgentFailureClass, AgentRecoveryAction};
 pub use kernel::{
-    AgentKernel, AgentKernelInstruction, AgentKernelInstructionKind, PreparedAgentTurn,
+    AgentKernel, AgentKernelInstruction, AgentKernelInstructionKind, AgentTurnPreparationError,
+    PreparedAgentTurn,
 };
 pub use parallel::{
     BoundedParallelExecutor, CancellableParallelJob, InterruptibleQuorumExecution,
@@ -62,10 +64,12 @@ pub use task_state::{
     PersistedInteractionVerification, AGENT_TASK_STATE_SCHEMA,
 };
 pub use tool_runtime::{
-    decode_persisted_tool_artifacts, finalize_tool_result, recovery_source_scope_matches,
-    supports_recovery_effect_replay, tool_execution_scope_matches, tool_input_fingerprint,
-    tool_invocation_context, tool_invocation_event_metadata, EFFECT_LEDGER_SCHEMA,
-    TOOL_RESULT_SCHEMA,
+    apply_tool_spec_runtime_metadata, decode_persisted_tool_artifacts, finalize_tool_result,
+    recovery_source_scope_matches, supports_recovery_effect_replay, tool_effect_recovery_policy,
+    tool_execution_scope_matches, tool_input_fingerprint, tool_invocation_context,
+    tool_invocation_event_metadata, tool_risk_label, ToolEffectRecoveryPolicy,
+    EFFECT_LEDGER_SCHEMA, TOOL_RESULT_SCHEMA, TOOL_EFFECT_SEMANTICS_METADATA_KEY,
+    TOOL_EFFECT_VERIFIER_METADATA_KEY, TOOL_RISK_METADATA_KEY,
 };
 pub use turn_budget::AgentTurnBudgetExhausted;
 pub use worker_policy::{WorkerTurnPhase, WorkerTurnPolicy};

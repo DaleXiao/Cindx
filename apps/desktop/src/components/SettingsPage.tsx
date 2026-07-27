@@ -1,5 +1,4 @@
 import {
-  Activity,
   ArchiveRestore,
   ArrowLeft,
   BookOpen,
@@ -10,18 +9,13 @@ import {
   ChevronDown,
   ChevronRight,
   Database,
-  Dna,
-  EyeOff,
-  FileText,
   FolderOpen,
-  Globe2,
   KeyRound,
   LayoutDashboard,
   Link2,
   Monitor,
   Moon,
   PackagePlus,
-  PanelRightOpen,
   RefreshCw,
   Save,
   Search,
@@ -63,8 +57,10 @@ import {
   type ToolSpecView,
   type WebSearchConfigState
 } from "../tauri";
-
-export const DEBUG_ALWAYS_VISIBLE_STORAGE_KEY = "cindx.debug.always-visible";
+import { DEBUG_ALWAYS_VISIBLE_STORAGE_KEY } from "../appShellModel";
+import { SettingsModelsPanel } from "./SettingsModelsPanel";
+import { SettingsPermissionsPanel } from "./SettingsPermissionsPanel";
+import { SettingsToolsPanel, type WebSearchDraft } from "./SettingsToolsPanel";
 
 const appIconUrl = new URL("../../src-tauri/icons/icon.png", import.meta.url).href;
 
@@ -104,11 +100,6 @@ type SidecarDraft = {
   browserPath: string;
   computerPath: string;
   autoConfigure: boolean;
-};
-
-type WebSearchDraft = {
-  endpoint: string;
-  apiKey: string;
 };
 
 export type SettingsPageProps = {
@@ -230,111 +221,6 @@ function formatTime(timestampMs: number | null) {
     minute: "2-digit",
     second: "2-digit"
   }).format(timestampMs);
-}
-
-function formatTokenCount(tokens: number) {
-  if (tokens < 1000) return String(tokens);
-  if (tokens < 1_000_000) return `${(tokens / 1000).toFixed(tokens < 10_000 ? 1 : 0)}k`;
-  return `${(tokens / 1_000_000).toFixed(1)}M`;
-}
-
-function formatObservedDuration(durationMs: number) {
-  if (durationMs <= 0) return "No data";
-  if (durationMs < 60_000) return `${Math.max(1, Math.round(durationMs / 1000))}s`;
-  return `${Math.round(durationMs / 60_000)}m`;
-}
-
-function promptEvolutionProfileLabel(effort: string) {
-  if (effort === "fast") return "Fast";
-  if (effort === "pro") return "Pro";
-  return "Auto";
-}
-
-function promptEvolutionEffortStatus(
-  effort: Phase4State["promptEvolution"]["efforts"][number]
-) {
-  if (!effort.applicable) return "Not applicable";
-  if (effort.evaluationInflight) return "Evaluating";
-  if (effort.rolloutStatus === "canary") return `Canary ${effort.canaryPercent}%`;
-  if (effort.rolloutStatus === "evaluating") return "Gathering evidence";
-  if (effort.rolloutStatus === "rolled_back") return "Rolled back";
-  if (effort.rolloutStatus === "promoted") return "Promoted";
-  if (effort.status === "disabled") return "Off";
-  return "Stable";
-}
-
-function promptEvolutionReadinessLabel(
-  effort: Phase4State["promptEvolution"]["efforts"][number]
-) {
-  switch (effort.readiness) {
-    case "not_applicable":
-      return "Single-model path";
-    case "disabled":
-      return "Enable evolution";
-    case "evaluating":
-      return "Running offline pair";
-    case "collecting_dataset":
-      return `Need ${Math.max(0, 3 - effort.datasetCases)} completed task${Math.max(0, 3 - effort.datasetCases) === 1 ? "" : "s"}`;
-    case "collecting_train_evidence":
-      return "Collect train evidence";
-    case "collecting_holdout_evidence":
-      return "Collect holdout evidence";
-    case "selecting_frontier":
-      return "Select Pareto frontier";
-    case "canary":
-      return "Measure canary";
-    case "rolled_back":
-      return "Explore after rollback";
-    case "promoted":
-      return "Monitor promoted profile";
-    default:
-      return effort.nextMode.replace(/_/g, " ");
-  }
-}
-
-function promptEvolutionProfileStatus(
-  profile: Phase4State["promptEvolution"]["profiles"][number]
-) {
-  if (profile.champion) return "Champion";
-  if (profile.next) return "Next";
-  if (profile.frontier) return "Frontier";
-  if (profile.runs) return "Observed";
-  return "Queued";
-}
-
-function permissionReviewSourceLabel(source: PermissionReviewItem["source"]) {
-  if (source === "agent") return "Agent";
-  if (source === "browser") return "Browser";
-  if (source === "tool") return "Local tool";
-  return "System test";
-}
-
-function ModelSelect({
-  label,
-  value,
-  options,
-  emptyLabel,
-  onChange
-}: {
-  label: string;
-  value: string;
-  options: string[];
-  emptyLabel?: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <label>
-      <span>{label}</span>
-      <select value={value} onChange={(event) => onChange(event.target.value)}>
-        {emptyLabel && <option value="">{emptyLabel}</option>}
-        {options.map((model) => (
-          <option value={model} key={model}>
-            {model}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
 }
 
 function SettingsCategoryIcon({ category }: { category: SettingsCategory }) {
@@ -752,362 +638,22 @@ export function SettingsPage(props: SettingsPageProps) {
                 )}
     
                 {settingsCategory === "models" && (
-                  <>
-                <section className="settings-section" data-settings-group="models">
-                  <div className="section-title">
-                    <KeyRound size={17} aria-hidden="true" />
-                    <h2>Provider</h2>
-                  </div>
-                  {providerDraft && (
-                    <div className="provider-form">
-                      <label>
-                        <span>Base URL</span>
-                        <input
-                          value={providerDraft.baseUrl}
-                          onChange={(event) =>
-                            setProviderDraft({ ...providerDraft, baseUrl: event.target.value })
-                          }
-                        />
-                      </label>
-                      <label>
-                        <span>API key</span>
-                        <input
-                          type="password"
-                          value={providerDraft.apiKey}
-                          autoComplete="off"
-                          spellCheck={false}
-                          placeholder={phase4?.provider.apiKeySet ? "Configured key" : "Enter API key"}
-                          onChange={(event) =>
-                            setProviderDraft({ ...providerDraft, apiKey: event.target.value })
-                          }
-                        />
-                      </label>
-                      <div className="model-catalog-row">
-                        <button
-                          className="secondary-button"
-                          type="button"
-                          disabled={
-                            providerModelsBusy ||
-                            !providerDraft.baseUrl.trim() ||
-                            (!providerDraft.apiKey.trim() && !phase4?.provider.apiKeySet)
-                          }
-                          onClick={() => void handleLoadProviderModels()}
-                        >
-                          <RefreshCw
-                            aria-hidden="true"
-                            className={
-                              providerModelsRefreshTurn > 0 ? "settings-refresh-turn" : undefined
-                            }
-                            key={providerModelsRefreshTurn}
-                          />
-                          <span>{providerModelsBusy ? "Loading models" : "Load models"}</span>
-                        </button>
-                        <span>
-                          {providerModels.length > 0
-                            ? `${providerModels.length} available`
-                            : "Uses the provider model catalog"}
-                        </span>
-                      </div>
-                      {providerModelsError && (
-                        <div className="settings-inline-error">{providerModelsError}</div>
-                      )}
-                      <div className="role-grid provider-meta-grid">
-                        <label>
-                          <span>Default effort</span>
-                          <select
-                            value={providerDraft.collaborationPolicy}
-                            onChange={(event) =>
-                              setProviderDraft({
-                                ...providerDraft,
-                                collaborationPolicy: event.target.value
-                              })
-                            }
-                          >
-                            <option value="single">Cindx Fast</option>
-                            <option value="auto_router">Cindx Auto</option>
-                            <option value="best_of_n">Cindx Pro</option>
-                          </select>
-                        </label>
-                        <label>
-                          <span>Context window</span>
-                          <select
-                            value={providerDraft.contextWindowTokens}
-                            onChange={(event) =>
-                              setProviderDraft({
-                                ...providerDraft,
-                                contextWindowTokens: Number(event.target.value)
-                              })
-                            }
-                          >
-                            {[32768, 65536, 128000, 200000, 262144, 1000000].map((tokens) => (
-                              <option value={tokens} key={tokens}>
-                                {tokens >= 1000000 ? "1M" : `${Math.round(tokens / 1000)}k`}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                      </div>
-                      <ModelSelect
-                        label="Default model"
-                        value={providerDraft.model}
-                        options={providerModelOptions}
-                        onChange={(model) =>
-                          setProviderDraft({
-                            ...providerDraft,
-                            model,
-                            conductorModel: model,
-                            plannerModel: model,
-                            executorModel: model,
-                            reviewerModel: model,
-                            summarizerModel: model,
-                            embeddingModel: providerDraft.embeddingModel
-                          })
-                        }
-                      />
-                      <div className="role-grid provider-meta-grid">
-                        <ModelSelect
-                          label="Conductor"
-                          value={providerDraft.conductorModel}
-                          options={providerModelOptions}
-                          onChange={(conductorModel) =>
-                            setProviderDraft({ ...providerDraft, conductorModel })
-                          }
-                        />
-                        <ModelSelect
-                          label="Planner"
-                          value={providerDraft.plannerModel}
-                          options={providerModelOptions}
-                          onChange={(plannerModel) =>
-                            setProviderDraft({ ...providerDraft, plannerModel })
-                          }
-                        />
-                        <ModelSelect
-                          label="Executor"
-                          value={providerDraft.executorModel}
-                          options={providerModelOptions}
-                          onChange={(executorModel) =>
-                            setProviderDraft({ ...providerDraft, executorModel })
-                          }
-                        />
-                        <ModelSelect
-                          label="Reviewer"
-                          value={providerDraft.reviewerModel}
-                          options={providerModelOptions}
-                          onChange={(reviewerModel) =>
-                            setProviderDraft({ ...providerDraft, reviewerModel })
-                          }
-                        />
-                        <ModelSelect
-                          label="Summary"
-                          value={providerDraft.summarizerModel}
-                          options={providerModelOptions}
-                          onChange={(summarizerModel) =>
-                            setProviderDraft({ ...providerDraft, summarizerModel })
-                          }
-                        />
-                        <ModelSelect
-                          label="Embedding"
-                          value={providerDraft.embeddingModel}
-                          options={providerModelOptions}
-                          onChange={(embeddingModel) =>
-                            setProviderDraft({ ...providerDraft, embeddingModel })
-                          }
-                        />
-                        <ModelSelect
-                          label="Image generation"
-                          value={providerDraft.imageModel}
-                          options={providerModelOptions}
-                          emptyLabel="Not configured"
-                          onChange={(imageModel) =>
-                            setProviderDraft({ ...providerDraft, imageModel })
-                          }
-                        />
-                        <label>
-                          <span>Image API endpoint</span>
-                          <div
-                            className="provider-endpoint-input"
-                            data-validation={imageEndpointValidation}
-                          >
-                            <input
-                              value={providerDraft.imageEndpoint}
-                              spellCheck={false}
-                              placeholder="Uses provider Base URL when empty"
-                              onChange={(event) =>
-                                setProviderDraft({
-                                  ...providerDraft,
-                                  imageEndpoint: event.target.value
-                                })
-                              }
-                            />
-                            {imageEndpointValidation === "valid" && (
-                              <CheckCircle2
-                                className="provider-endpoint-check"
-                                aria-label="Image endpoint verified"
-                              />
-                            )}
-                          </div>
-                        </label>
-                      </div>
-                      <dl className="settings-facts">
-                        <div>
-                          <dt>Team</dt>
-                          <dd>{collaborationModelCount} unique models across 4 worker roles</dd>
-                        </div>
-                      </dl>
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        disabled={providerBusy}
-                        onClick={handleSaveProviderConfig}
-                      >
-                        <Save size={17} aria-hidden="true" />
-                        <span>{providerBusy ? "Saving" : "Save provider"}</span>
-                      </button>
-                    </div>
-                  )}
-                </section>
-    
-                <section className="settings-section" data-settings-group="models">
-                  <div className="prompt-evolution-title">
-                    <div className="section-title">
-                      <Dna size={17} aria-hidden="true" />
-                      <h2>Genetic Pareto</h2>
-                      {phase4?.promptEvolution?.evaluationInflight && (
-                        <span className="prompt-evolution-running">Evaluating in background</span>
-                      )}
-                    </div>
-                    {providerDraft && (
-                      <label className="settings-switch">
-                        <input
-                          type="checkbox"
-                          checked={providerDraft.promptEvolutionEnabled}
-                          disabled={providerBusy}
-                          onChange={(event) =>
-                            void handlePromptEvolutionToggle(event.target.checked)
-                          }
-                        />
-                        <span className="settings-switch-track" aria-hidden="true">
-                          <span />
-                        </span>
-                        <span>{providerDraft.promptEvolutionEnabled ? "On" : "Off"}</span>
-                      </label>
-                    )}
-                  </div>
-                  <p className="settings-section-copy">
-                    Candidate harnesses execute in an isolated arena before promotion. Same-task paired
-                    runs train the population, historical replay runs provide holdout evidence, and a
-                    direct stable-versus-challenger Wilson gate controls staged canary rollout with
-                    automatic rollback.
-                  </p>
-                  <div className="prompt-evolution-summary" aria-label="Evolution overview">
-                    <span><strong>{phase4?.promptEvolution?.observedRuns ?? 0}</strong> observed</span>
-                    <span><strong>{phase4?.promptEvolution?.pairedRuns ?? 0}</strong> paired</span>
-                    <span><strong>{phase4?.promptEvolution?.replayRuns ?? 0}</strong> replay</span>
-                    <span><strong>{phase4?.promptEvolution?.reflectionPackets ?? 0}</strong> reflections</span>
-                    <span><strong>{phase4?.promptEvolution?.learnedProfiles ?? 0}</strong> learned</span>
-                    <span><strong>{phase4?.promptEvolution?.populationSize ?? 0}</strong> profiles</span>
-                    <span><strong>{phase4?.promptEvolution?.generation ?? 0}</strong> generation</span>
-                    <span><strong>{phase4?.promptEvolution?.frontierProfiles ?? 0}</strong> frontier</span>
-                  </div>
-                  <div className="prompt-evolution-table-wrap">
-                    <table className="prompt-evolution-table">
-                      <caption>Rollout by effort</caption>
-                      <thead>
-                        <tr>
-                          <th scope="col">Effort</th>
-                          <th scope="col">State</th>
-                          <th scope="col">Evidence</th>
-                          <th scope="col">Score</th>
-                          <th scope="col">Confidence</th>
-                          <th scope="col">Progress</th>
-                          <th scope="col">Rollbacks</th>
-                          <th scope="col">Next</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {(phase4?.promptEvolution?.efforts ?? []).map((effort) => (
-                          <tr key={effort.effort} title={effort.championId ?? undefined}>
-                            <th scope="row">{promptEvolutionProfileLabel(effort.effort)}</th>
-                            <td>
-                              <span
-                                className={`prompt-evolution-status ${effort.evaluationInflight ? "evaluating" : effort.rolloutStatus}`}
-                              >
-                                {promptEvolutionEffortStatus(effort)}
-                              </span>
-                            </td>
-                            <td title={`${effort.datasetCases} offline cases (${effort.datasetTrainCases} train · ${effort.datasetHoldoutCases} holdout) · ${effort.reflectionPackets} feedback reflections · ${effort.learnedProfiles} learned profiles`}>
-                              {effort.applicable
-                                ? `${effort.pairedRuns}/${effort.requiredPairedRuns} · ${effort.replayRuns}/${effort.requiredReplayRuns} · R${effort.reflectionPackets}`
-                                : "-"}
-                            </td>
-                            <td>{effort.championScore === null ? "-" : `${Math.round(effort.championScore * 100)}%`}</td>
-                            <td>{effort.promotionConfidence === null ? "-" : `${Math.round(effort.promotionConfidence * 100)}%`}</td>
-                            <td title={`Ready ${effort.readyProfiles} · Stagnant ${effort.stagnantGenerations}/3`}>
-                              Gen {effort.evaluatedGenerations} · Ready {effort.readyProfiles}
-                            </td>
-                            <td>{effort.rollbackCount}</td>
-                            <td title={effort.freezeReason ?? undefined}>{promptEvolutionReadinessLabel(effort)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  <div className="prompt-evolution-table-wrap">
-                    <table className="prompt-evolution-table prompt-evolution-profile-table">
-                      <caption>Candidate profiles</caption>
-                      <thead>
-                        <tr>
-                          <th scope="col">Profile</th>
-                          <th scope="col">Evidence</th>
-                          <th scope="col">Success</th>
-                          <th scope="col">Quality</th>
-                          <th scope="col">Reward</th>
-                          <th scope="col">Signal</th>
-                          <th scope="col">Efficiency</th>
-                          <th scope="col">State</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {(phase4?.promptEvolution?.profiles ?? [])
-                          .filter((profile) => profile.next || profile.frontier || profile.runs > 0)
-                          .map((profile) => (
-                            <tr key={profile.id} title={profile.id}>
-                              <th className="prompt-evolution-profile-cell" scope="row">
-                                <strong>{promptEvolutionProfileLabel(profile.effort)}</strong>
-                                <small>{profile.learned ? "Learned" : "Genetic"} · Gen {profile.generation}</small>
-                              </th>
-                              <td title={`${profile.reflectionRuns} feedback reflections`}>
-                                {profile.trainRuns} / {profile.holdoutRuns} · R{profile.reflectionRuns}
-                              </td>
-                              <td>{profile.runs ? `${Math.round(profile.successRate * 100)}%` : "-"}</td>
-                              <td>{profile.averageQuality === null ? "-" : `${Math.round(profile.averageQuality * 100)}%`}</td>
-                              <td>{profile.averageReward === null ? "-" : `${Math.round(profile.averageReward * 100)}%`}</td>
-                              <td className="prompt-evolution-signal-cell">
-                                <span>
-                                  {profile.averageRelativeReward === null
-                                    ? "-"
-                                    : `${profile.averageRelativeReward >= 0 ? "+" : ""}${Math.round(profile.averageRelativeReward * 100)}%`}
-                                </span>
-                                <small>
-                                  Credit {profile.averageStepCredit === null ? "-" : `${Math.round(profile.averageStepCredit * 100)}%`}
-                                </small>
-                              </td>
-                              <td className="prompt-evolution-efficiency-cell">
-                                <span>{formatObservedDuration(profile.averageLatencyMs)}</span>
-                                <small>{profile.averageTokens ? formatTokenCount(profile.averageTokens) : "-"}</small>
-                              </td>
-                              <td>
-                                <span className={profile.frontier || profile.next ? "pareto-frontier active" : "pareto-frontier"}>
-                                  {promptEvolutionProfileStatus(profile)}
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </section>
-                  </>
+                  <SettingsModelsPanel
+                    collaborationModelCount={collaborationModelCount}
+                    handleLoadProviderModels={handleLoadProviderModels}
+                    handlePromptEvolutionToggle={handlePromptEvolutionToggle}
+                    handleSaveProviderConfig={handleSaveProviderConfig}
+                    imageEndpointValidation={imageEndpointValidation}
+                    phase4={phase4}
+                    providerBusy={providerBusy}
+                    providerDraft={providerDraft}
+                    providerModelOptions={providerModelOptions}
+                    providerModels={providerModels}
+                    providerModelsBusy={providerModelsBusy}
+                    providerModelsError={providerModelsError}
+                    providerModelsRefreshTurn={providerModelsRefreshTurn}
+                    setProviderDraft={setProviderDraft}
+                  />
                 )}
     
                 {settingsCategory === "agent" && (
@@ -1156,139 +702,15 @@ export function SettingsPage(props: SettingsPageProps) {
                 )}
     
                 {settingsCategory === "permissions" && (
-                <section className="settings-section" data-settings-group="permissions">
-                  <div className="permission-review-heading">
-                    <div className="section-title">
-                      <ShieldCheck size={17} aria-hidden="true" />
-                      <h2>Pending Reviews</h2>
-                    </div>
-                    <span>{activePermissionReviews.length}</span>
-                  </div>
-                  <p className="settings-section-copy">
-                    Review actions that can modify files, run processes, use the network, or access
-                    sensitive context. Ignored requests remain paused until restored.
-                  </p>
-                  {activePermissionReviews.length === 0 ? (
-                    <div className="permission-review-empty">
-                      <CheckCircle2 aria-hidden="true" />
-                      <span>No actions are waiting for review.</span>
-                    </div>
-                  ) : (
-                    <div className="permission-review-list" aria-label="Pending permission reviews">
-                      {activePermissionReviews.map((review) => {
-                        const sessionBusy = Boolean(
-                          review.sessionId && busySessionIds.has(review.sessionId)
-                        );
-                        return (
-                          <article className="permission-review-row" key={review.requestId}>
-                            <header>
-                              <div>
-                                <strong>{review.action}</strong>
-                                <span>{permissionReviewSourceLabel(review.source)}</span>
-                              </div>
-                              <em data-risk={review.risk}>{review.risk}</em>
-                            </header>
-                            <div className="permission-review-context">
-                              <strong title={review.sessionId ?? undefined}>
-                                {review.sessionName ?? "No related session"}
-                              </strong>
-                              <span>
-                                {review.projectName ?? "Cindx"} · {formatTime(review.requestedAtMs)}
-                              </span>
-                            </div>
-                            <p>{review.reason}</p>
-                            <dl className="permission-review-meta">
-                              <div>
-                                <dt>Scope</dt>
-                                <dd>{review.scope || "Current workspace"}</dd>
-                              </div>
-                            </dl>
-                            {review.input && (
-                              <details className="permission-review-input">
-                                <summary>
-                                  <span>Request details</span>
-                                  <SettingsChevron />
-                                </summary>
-                                <pre>{review.input}</pre>
-                              </details>
-                            )}
-                            <div className="permission-review-actions">
-                              <button
-                                className="permission-approve"
-                                type="button"
-                                disabled={permissionBusy || sessionBusy}
-                                onClick={() =>
-                                  void handleResolvePermissionReview(review, "allow_once")
-                                }
-                              >
-                                <CheckCircle2 aria-hidden="true" />
-                                <span>Approve once</span>
-                              </button>
-                              {review.canAllowSession && (
-                                <button
-                                  className="permission-session"
-                                  type="button"
-                                  disabled={permissionBusy || sessionBusy}
-                                  onClick={() =>
-                                    void handleResolvePermissionReview(
-                                      review,
-                                      "allow_for_session"
-                                    )
-                                  }
-                                >
-                                  <ShieldCheck aria-hidden="true" />
-                                  <span>Allow session</span>
-                                </button>
-                              )}
-                              <button
-                                className="permission-deny"
-                                type="button"
-                                disabled={permissionBusy || sessionBusy}
-                                onClick={() => void handleResolvePermissionReview(review, "deny")}
-                              >
-                                <XCircle aria-hidden="true" />
-                                <span>Reject</span>
-                              </button>
-                              <button
-                                type="button"
-                                disabled={permissionBusy}
-                                onClick={() => handleIgnorePermissionReview(review.requestId)}
-                              >
-                                <EyeOff aria-hidden="true" />
-                                <span>Ignore</span>
-                              </button>
-                            </div>
-                          </article>
-                        );
-                      })}
-                    </div>
-                  )}
-                  {ignoredPermissionReviews.length > 0 && (
-                    <details className="permission-ignored-reviews">
-                      <summary>
-                        <span>Ignored for now ({ignoredPermissionReviews.length})</span>
-                        <SettingsChevron />
-                      </summary>
-                      <div>
-                        {ignoredPermissionReviews.map((review) => (
-                          <div className="permission-ignored-row" key={review.requestId}>
-                            <span>
-                              <strong>{review.action}</strong>
-                              <small>{review.sessionName ?? permissionReviewSourceLabel(review.source)}</small>
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => handleRestorePermissionReview(review.requestId)}
-                            >
-                              <RefreshCw aria-hidden="true" />
-                              <span>Restore</span>
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </details>
-                  )}
-                </section>
+                  <SettingsPermissionsPanel
+                    activeReviews={activePermissionReviews}
+                    busy={permissionBusy}
+                    busySessionIds={busySessionIds}
+                    ignoredReviews={ignoredPermissionReviews}
+                    onIgnore={handleIgnorePermissionReview}
+                    onResolve={handleResolvePermissionReview}
+                    onRestore={handleRestorePermissionReview}
+                  />
                 )}
     
                 {settingsCategory === "knowledge" && (
@@ -1470,307 +892,32 @@ export function SettingsPage(props: SettingsPageProps) {
                 )}
     
                 {settingsCategory === "tools" && (
-                  <>
-                <section className="settings-section" data-settings-group="tools">
-                  <div className="section-title">
-                    <Globe2 size={17} aria-hidden="true" />
-                    <h2>Web search API</h2>
-                  </div>
-                  <div className="provider-form">
-                    <label>
-                      <span>Endpoint</span>
-                      <input
-                        value={webSearchDraft.endpoint}
-                        placeholder="https://search.example.com/api"
-                        onChange={(event) =>
-                          setWebSearchDraft({ ...webSearchDraft, endpoint: event.target.value })
-                        }
-                      />
-                    </label>
-                    <label>
-                      <span>API key</span>
-                      <input
-                        type="password"
-                        value={webSearchDraft.apiKey}
-                        autoComplete="off"
-                        placeholder={webSearchConfig?.apiKeySet ? "Configured" : "Optional"}
-                        onChange={(event) =>
-                          setWebSearchDraft({ ...webSearchDraft, apiKey: event.target.value })
-                        }
-                      />
-                    </label>
-                    <button
-                      className="secondary-button"
-                      type="button"
-                      disabled={webSearchBusy}
-                      onClick={() => void handleSaveWebSearch()}
-                    >
-                      <Save aria-hidden="true" />
-                      <span>{webSearchBusy ? "Saving" : "Save web search"}</span>
-                    </button>
-                  </div>
-                  {webSearchError && (
-                    <div className="settings-inline-error">{webSearchError}</div>
-                  )}
-                </section>
-    
-                <section className="settings-section" data-settings-group="tools">
-                  <div className="section-title">
-                    <Globe2 size={17} aria-hidden="true" />
-                    <h2>Browser</h2>
-                  </div>
-                  <dl className="settings-facts">
-                    <div>
-                      <dt>Status</dt>
-                      <dd>{sidecarState?.browser.healthy ? "Ready" : "Check configuration"}</dd>
-                    </div>
-                    <div>
-                      <dt>Controller</dt>
-                      <dd>Local sidecar</dd>
-                    </div>
-                    <div>
-                      <dt>Permission</dt>
-                      <dd>Reviewed</dd>
-                    </div>
-                  </dl>
-                  <details className="advanced-settings registered-tools-details">
-                    <summary>
-                      <span>Registered tools</span>
-                      <SettingsChevron />
-                      <strong>{phase5?.tools.length ?? runtime?.registeredTools.length ?? 0}</strong>
-                    </summary>
-                    <div className="registered-tool-list">
-                      {(phase5?.tools ?? []).length > 0
-                        ? phase5?.tools.map((tool) => (
-                            <div className="registered-tool-row" key={tool.name}>
-                              <span>
-                                <strong>{tool.name}</strong>
-                                <small>{tool.description}</small>
-                              </span>
-                              <em>{tool.risk}</em>
-                            </div>
-                          ))
-                        : runtime?.registeredTools.map((tool) => (
-                            <div className="registered-tool-row" key={tool}>
-                              <span>
-                                <strong>{tool}</strong>
-                              </span>
-                            </div>
-                          ))}
-                    </div>
-                  </details>
-                  <details className="advanced-settings">
-                    <summary>
-                      <span>Manual browser controls</span>
-                      <SettingsChevron />
-                    </summary>
-                    <div className="tool-runner">
-                    <label>
-                      <span>URL or query</span>
-                      <input
-                        value={browserUrl}
-                        onChange={(event) => setBrowserUrl(event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      <span>Target or tab ID</span>
-                      <input
-                        value={browserTarget}
-                        onChange={(event) => setBrowserTarget(event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      <span>Text</span>
-                      <input
-                        value={browserText}
-                        onChange={(event) => setBrowserText(event.target.value)}
-                      />
-                    </label>
-                    <div className="button-row">
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        disabled={browserBusy || !browserUrl.trim()}
-                        onClick={() => handleRunBrowserTool("web.search")}
-                      >
-                        <Search size={17} aria-hidden="true" />
-                        <span>Search web</span>
-                      </button>
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        disabled={browserBusy || !browserUrl.trim()}
-                        onClick={() => handleRunBrowserTool("browser.open")}
-                      >
-                        <Globe2 size={17} aria-hidden="true" />
-                        <span>Open</span>
-                      </button>
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        disabled={browserBusy || !browserUrl.trim()}
-                        onClick={() => handleRunBrowserTool("browser.extract_text")}
-                      >
-                        <FileText size={17} aria-hidden="true" />
-                        <span>Extract</span>
-                      </button>
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        disabled={browserBusy || !browserUrl.trim()}
-                        onClick={() => handleRunBrowserTool("browser.capture")}
-                      >
-                        <Activity size={17} aria-hidden="true" />
-                        <span>Capture</span>
-                      </button>
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        disabled={browserBusy || !browserUrl.trim()}
-                        onClick={() => handleRunBrowserTool("browser.click")}
-                      >
-                        <Activity size={17} aria-hidden="true" />
-                        <span>Click</span>
-                      </button>
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        disabled={browserBusy || !browserUrl.trim()}
-                        onClick={() => handleRunBrowserTool("browser.type")}
-                      >
-                        <FileText size={17} aria-hidden="true" />
-                        <span>Type</span>
-                      </button>
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        disabled={browserBusy || !browserUrl.trim()}
-                        onClick={() => handleRunBrowserTool("browser.scroll")}
-                      >
-                        <Activity size={17} aria-hidden="true" />
-                        <span>Scroll</span>
-                      </button>
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        disabled={browserBusy}
-                        onClick={() => handleRunBrowserTool("browser.tabs")}
-                      >
-                        <LayoutDashboard size={17} aria-hidden="true" />
-                        <span>List tabs</span>
-                      </button>
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        disabled={browserBusy || !browserTarget.trim()}
-                        onClick={() => handleRunBrowserTool("browser.select_tab")}
-                      >
-                        <PanelRightOpen size={17} aria-hidden="true" />
-                        <span>Select tab</span>
-                      </button>
-                    </div>
-                    </div>
-                  </details>
-                </section>
-    
-                <section className="settings-section" data-settings-group="tools">
-                  <div className="section-title">
-                    <Wrench size={17} aria-hidden="true" />
-                    <h2>Tools</h2>
-                  </div>
-                  <dl className="settings-facts">
-                    <div>
-                      <dt>Registered</dt>
-                      <dd>{phase5?.tools.length ?? runtime?.registeredTools.length ?? 0}</dd>
-                    </div>
-                    <div>
-                      <dt>Scope</dt>
-                      <dd>Active workspace</dd>
-                    </div>
-                    <div>
-                      <dt>Execution</dt>
-                      <dd>Permission gated</dd>
-                    </div>
-                  </dl>
-                  <details className="advanced-settings">
-                    <summary>
-                      <span>Manual tool runner</span>
-                      <SettingsChevron />
-                    </summary>
-                    <div className="tool-runner">
-                    <label>
-                      <span>Tool</span>
-                      <select
-                        value={selectedTool}
-                        onChange={(event) => {
-                          const nextTool = event.target.value;
-                          setSelectedTool(nextTool);
-                          if (nextTool === "file.read") setToolInput("path=README.md");
-                          if (nextTool === "file.list") setToolInput("path=.");
-                          if (nextTool === "file.search") setToolInput("path=.\nquery=Phase");
-                          if (nextTool === "file.write")
-                            setToolInput("path=.cindx/demo.txt\ncontent=hello from Cindx");
-                          if (nextTool === "shell.run") setToolInput("command=pwd\ncwd=.");
-                          if (nextTool === "web.search") setToolInput("query=local agent");
-                          if (nextTool === "browser.open") setToolInput("url=https://example.com");
-                          if (nextTool === "browser.extract_text") setToolInput("url=https://example.com");
-                          if (nextTool === "browser.capture")
-                            setToolInput("url=https://example.com\noutput_dir=.cindx/browser-captures");
-                          if (nextTool === "browser.click")
-                            setToolInput("url=https://example.com\nselector=body\noutput_dir=.cindx/browser-actions");
-                          if (nextTool === "browser.type")
-                            setToolInput("url=https://example.com\nselector=body\ntext=hello\noutput_dir=.cindx/browser-actions");
-                          if (nextTool === "browser.scroll")
-                            setToolInput("url=https://example.com\ndelta_y=600\noutput_dir=.cindx/browser-actions");
-                          if (nextTool === "browser.tabs") setToolInput("");
-                          if (nextTool === "browser.select_tab")
-                            setToolInput("tab_id=<copy from browser.tabs>");
-                          if (nextTool === "computer.screenshot")
-                            setToolInput("redaction=manual\noutput_dir=.cindx/computer-actions");
-                          if (nextTool === "computer.click")
-                            setToolInput("x=120\ny=240\noutput_dir=.cindx/computer-actions");
-                          if (nextTool === "computer.type")
-                            setToolInput("text=hello\noutput_dir=.cindx/computer-actions");
-                          if (nextTool === "computer.key")
-                            setToolInput("key=Cmd+S\ndestructive=false\noutput_dir=.cindx/computer-actions");
-                          if (nextTool === "computer.scroll")
-                            setToolInput("delta_y=600\noutput_dir=.cindx/computer-actions");
-                        }}
-                      >
-                        {(phase5?.tools ?? []).map((tool) => (
-                          <option key={tool.name} value={tool.name}>
-                            {tool.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      <span>Input</span>
-                      <textarea
-                        value={toolInput}
-                        onChange={(event) => setToolInput(event.target.value)}
-                        rows={4}
-                      />
-                    </label>
-                    {selectedToolSpec && (
-                      <div className="tool-schema">
-                        <strong>{selectedToolSpec.risk}</strong>
-                        <span>{selectedToolSpec.inputSchema}</span>
-                      </div>
-                    )}
-                    <button
-                      className="secondary-button"
-                      type="button"
-                      disabled={toolBusy}
-                      onClick={handleRunTool}
-                    >
-                      <span>{toolBusy ? "Running" : "Run tool"}</span>
-                      <SettingsChevron action />
-                    </button>
-                    </div>
-                  </details>
-                </section>
-                  </>
+                  <SettingsToolsPanel
+                    browserBusy={browserBusy}
+                    browserTarget={browserTarget}
+                    browserText={browserText}
+                    browserUrl={browserUrl}
+                    onRunBrowserTool={handleRunBrowserTool}
+                    onRunTool={handleRunTool}
+                    onSaveWebSearch={handleSaveWebSearch}
+                    phase5={phase5}
+                    runtime={runtime}
+                    selectedTool={selectedTool}
+                    selectedToolSpec={selectedToolSpec}
+                    setBrowserTarget={setBrowserTarget}
+                    setBrowserText={setBrowserText}
+                    setBrowserUrl={setBrowserUrl}
+                    setSelectedTool={setSelectedTool}
+                    setToolInput={setToolInput}
+                    setWebSearchDraft={setWebSearchDraft}
+                    sidecarState={sidecarState}
+                    toolBusy={toolBusy}
+                    toolInput={toolInput}
+                    webSearchBusy={webSearchBusy}
+                    webSearchConfig={webSearchConfig}
+                    webSearchDraft={webSearchDraft}
+                    webSearchError={webSearchError}
+                  />
                 )}
     
                 {settingsCategory === "mcp" && (

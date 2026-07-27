@@ -2,13 +2,13 @@ use super::*;
 
 pub(crate) fn evaluate_prompt_candidate_pair(
     config: &ProviderConfig,
+    reviewer_model: &str,
     objective: &str,
     candidate_a: &PromptExecutionCandidate,
     candidate_b: &PromptExecutionCandidate,
     evaluation_id: &str,
     control: &Arc<AgentRunControl>,
 ) -> Result<PromptPairwiseEvaluationPayload, String> {
-    let reviewer_model = config.model_for_role(&ModelRole::Reviewer);
     let candidate_text = |candidate: &PromptExecutionCandidate| {
         let plan = candidate
             .plan
@@ -57,7 +57,7 @@ pub(crate) fn evaluate_prompt_candidate_pair(
     let completion = complete_collaboration_model_with_control(
         config.clone(),
         ModelRole::Reviewer,
-        reviewer_model,
+        reviewer_model.to_string(),
         collaboration_system_prompt_for_run(&config.agent_system_prompt, &Metadata::new()),
         prompt,
         Some(control.clone()),
@@ -135,6 +135,7 @@ pub(crate) fn prompt_pairwise_observation(
     step_scores: &BTreeMap<String, f64>,
     mut actionable_feedback: ActionableSideInformation,
     redaction_secrets: &[String],
+    provenance: PromptEvaluationProvenance,
 ) -> PromptEvolutionObservation {
     let score = score.clamp(0.0, 1.0);
     let succeeded = candidate.execution.succeeded
@@ -358,5 +359,6 @@ pub(crate) fn prompt_pairwise_observation(
         relative_reward: Some((score - opponent_score.clamp(0.0, 1.0)).clamp(-1.0, 1.0)),
         step_credits,
         reflection_packet,
+        provenance,
     }
 }

@@ -4,7 +4,8 @@ use agent_core::{
 };
 use agent_runtime::{
     decode_persisted_tool_artifacts, recovery_source_scope_matches,
-    supports_recovery_effect_replay, tool_execution_scope_matches,
+    supports_recovery_effect_replay, tool_effect_recovery_policy, tool_execution_scope_matches,
+    ToolEffectRecoveryPolicy, TOOL_EFFECT_VERIFIER_METADATA_KEY,
 };
 pub(super) use agent_runtime::{
     finalize_tool_result, tool_input_fingerprint, tool_invocation_context,
@@ -35,6 +36,21 @@ pub(super) fn completed_tool_result(
     let events = store.list_by_task_and_tool_call_id(&invocation.task_id, &invocation.id.0)?;
     if let Some(result) = completed_tool_result_from_events(&events, invocation) {
         return Ok(Some(result));
+    }
+
+    if tool_call_started_without_terminal_result(&events, invocation) {
+        return Ok(match tool_effect_recovery_policy(invocation) {
+            ToolEffectRecoveryPolicy::SafeToRetry => None,
+            ToolEffectRecoveryPolicy::VerifyBeforeRetry
+                if deterministic_effect_is_still_applied(invocation, workspace_root) =>
+            {
+                Some(verified_interrupted_effect_result(invocation))
+            }
+            ToolEffectRecoveryPolicy::VerifyBeforeRetry
+            | ToolEffectRecoveryPolicy::NeverRetryUnknown => {
+                Some(unknown_interrupted_effect_result(invocation))
+            }
+        });
     }
 
     if !supports_recovery_effect_replay(invocation) {
@@ -86,7 +102,7 @@ fn completed_recovery_effect_from_events(
                 .map(String::as_str)
                 != Some(fingerprint.as_str())
             || !recovery_source_scope_matches(&event.metadata, invocation)
-            || !deterministic_effect_is_still_applied(event, invocation, workspace_root)
+            || !deterministic_effect_is_still_applied(invocation, workspace_root)
         {
             return None;
         }
@@ -100,20 +116,50 @@ fn completed_recovery_effect_from_events(
 }
 
 fn deterministic_effect_is_still_applied(
-    _event: &Event,
     invocation: &ToolInvocation,
     workspace_root: &Path,
 ) -> bool {
-    if invocation.tool_name != "file.write" {
-        return false;
+    let verifier = invocation
+        .metadata
+        .get(TOOL_EFFECT_VERIFIER_METADATA_KEY)
+        .map(String::as_str)
+        .or_else(|| (invocation.tool_name == "file.write").then_some("workspace_file_content_v1"));
+    match verifier {
+        Some("workspace_file_content_v1") => {
+            workspace_file_content_matches(invocation, workspace_root)
+        }
+        _ => false,
     }
+}
+
+fn workspace_file_content_matches(invocation: &ToolInvocation, workspace_root: &Path) -> bool {
     let Ok(input) = serde_json::from_str::<serde_json::Value>(&invocation.input_json) else {
         return false;
     };
-    let Some(path) = input.get("path").and_then(serde_json::Value::as_str) else {
+    let effect_input = if invocation.tool_name == "tool.invoke" {
+        if input.get("name").and_then(serde_json::Value::as_str) != Some("file.write") {
+            return false;
+        }
+        let Some(arguments) = input
+            .get("arguments")
+            .filter(|arguments| arguments.is_object())
+        else {
+            return false;
+        };
+        arguments
+    } else {
+        &input
+    };
+    let Some(path) = effect_input
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+    else {
         return false;
     };
-    let Some(content) = input.get("content").and_then(serde_json::Value::as_str) else {
+    let Some(content) = effect_input
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+    else {
         return false;
     };
     let relative = Path::new(path);
@@ -136,6 +182,64 @@ fn deterministic_effect_is_still_applied(
     };
     canonical_candidate.starts_with(&canonical_root)
         && fs::read(canonical_candidate).is_ok_and(|bytes| bytes.as_slice() == content.as_bytes())
+}
+
+fn tool_call_started_without_terminal_result(
+    events: &[Event],
+    invocation: &ToolInvocation,
+) -> bool {
+    let fingerprint = tool_input_fingerprint(&invocation.tool_name, &invocation.input_json);
+    let matches = |event: &Event| {
+        event.metadata.get("tool").map(String::as_str) == Some(invocation.tool_name.as_str())
+            && event
+                .metadata
+                .get("input_fingerprint")
+                .or_else(|| event.metadata.get("result_input_fingerprint"))
+                .map(String::as_str)
+                == Some(fingerprint.as_str())
+            && tool_execution_scope_matches(&event.metadata, invocation)
+    };
+    events
+        .iter()
+        .any(|event| event.kind == EventKind::ToolCallStarted && matches(event))
+        && !events
+            .iter()
+            .any(|event| event.kind == EventKind::ToolCallFinished && matches(event))
+}
+
+fn verified_interrupted_effect_result(invocation: &ToolInvocation) -> ToolResult {
+    let mut result = ToolResult::text(
+        invocation.id.clone(),
+        ToolOutcomeStatus::Succeeded,
+        "The deterministic tool effect was already applied before interruption; Cindx verified the current workspace state and did not repeat it.",
+        Metadata::new(),
+    );
+    result
+        .metadata
+        .insert("idempotent_replay".to_string(), "true".to_string());
+    result.metadata.insert(
+        "effect_replay_mode".to_string(),
+        "verified_interrupted_effect".to_string(),
+    );
+    result
+}
+
+fn unknown_interrupted_effect_result(invocation: &ToolInvocation) -> ToolResult {
+    let message = format!(
+        "The previous {} call started but did not record a terminal result. Cindx will not repeat a potentially external side effect automatically. Inspect the current state before proposing a new call.",
+        invocation.tool_name
+    );
+    let mut result = ToolResult::failed(invocation.id.clone(), message.clone());
+    result.failure = Some(ToolFailure {
+        code: "tool_effect_outcome_unknown".to_string(),
+        message,
+        retryable: false,
+    });
+    result.metadata.insert(
+        "effect_recovery_mode".to_string(),
+        "blocked_unknown_outcome".to_string(),
+    );
+    result
 }
 
 fn result_from_finished_event(
@@ -262,9 +366,45 @@ mod tests {
                 ("project_id".to_string(), "project-1".to_string()),
                 ("session_id".to_string(), "session-1".to_string()),
                 ("agent_run_id".to_string(), agent_run_id.to_string()),
+                (
+                    agent_runtime::TOOL_RISK_METADATA_KEY.to_string(),
+                    "writes_workspace".to_string(),
+                ),
             ]
             .into_iter()
             .collect(),
+        }
+    }
+
+    fn recovery_meta_file_write_invocation(input_json: &str) -> ToolInvocation {
+        ToolInvocation {
+            id: ToolCallId("call-meta-write".to_string()),
+            task_id: TaskId("task-1".to_string()),
+            tool_name: "tool.invoke".to_string(),
+            input_json: input_json.to_string(),
+            proposed_by_model: "test".to_string(),
+            metadata: [
+                ("project_id".to_string(), "project-1".to_string()),
+                ("session_id".to_string(), "session-1".to_string()),
+                (
+                    agent_runtime::TOOL_EFFECT_VERIFIER_METADATA_KEY.to_string(),
+                    "workspace_file_content_v1".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        }
+    }
+
+    fn started_event(invocation: &ToolInvocation) -> Event {
+        Event {
+            id: EventId("event-started".to_string()),
+            task_id: invocation.task_id.clone(),
+            sequence: 6,
+            timestamp_ms: 1,
+            kind: EventKind::ToolCallStarted,
+            summary: "started".to_string(),
+            metadata: tool_invocation_event_metadata(invocation),
         }
     }
 
@@ -445,6 +585,26 @@ mod tests {
     }
 
     #[test]
+    fn deferred_file_write_verification_reads_the_target_arguments() {
+        let root = temporary_workspace("meta-effect-ledger");
+        fs::write(root.join("a.txt"), "written").expect("effect should exist");
+        let invocation = recovery_meta_file_write_invocation(
+            r#"{"name":"file.write","arguments":{"path":"a.txt","content":"written"}}"#,
+        );
+
+        assert!(deterministic_effect_is_still_applied(&invocation, &root));
+
+        let wrong_target = recovery_meta_file_write_invocation(
+            r#"{"name":"shell.run","arguments":{"path":"a.txt","content":"written"}}"#,
+        );
+        assert!(!deterministic_effect_is_still_applied(
+            &wrong_target,
+            &root
+        ));
+        fs::remove_dir_all(root).expect("temporary workspace should be removed");
+    }
+
+    #[test]
     fn recovery_effect_ledger_rejects_cross_run_and_non_recovery_reuse() {
         let root = temporary_workspace("effect-scope");
         fs::write(root.join("a.txt"), "written").expect("effect should exist");
@@ -529,5 +689,52 @@ mod tests {
                 retryable: true,
             })
         );
+    }
+
+    #[test]
+    fn interrupted_external_effect_is_not_implicitly_repeated() {
+        let mut invocation = invocation(r#"{"command":"send"}"#);
+        invocation.tool_name = "browser.click".to_string();
+        invocation.metadata.insert(
+            agent_runtime::TOOL_RISK_METADATA_KEY.to_string(),
+            "uses_network".to_string(),
+        );
+
+        assert!(tool_call_started_without_terminal_result(
+            &[started_event(&invocation)],
+            &invocation
+        ));
+        let result = unknown_interrupted_effect_result(&invocation);
+        assert_eq!(result.status, ToolOutcomeStatus::Failed);
+        assert_eq!(
+            result.failure.as_ref().map(|failure| failure.code.as_str()),
+            Some("tool_effect_outcome_unknown")
+        );
+        assert_eq!(
+            result
+                .metadata
+                .get("effect_recovery_mode")
+                .map(String::as_str),
+            Some("blocked_unknown_outcome")
+        );
+    }
+
+    #[test]
+    fn interrupted_read_only_call_remains_safe_to_retry() {
+        let mut invocation = invocation(r#"{"path":"README.md"}"#);
+        invocation.tool_name = "file.read".to_string();
+        invocation.metadata.insert(
+            agent_runtime::TOOL_RISK_METADATA_KEY.to_string(),
+            "read_only".to_string(),
+        );
+
+        assert_eq!(
+            tool_effect_recovery_policy(&invocation),
+            ToolEffectRecoveryPolicy::SafeToRetry
+        );
+        assert!(tool_call_started_without_terminal_result(
+            &[started_event(&invocation)],
+            &invocation
+        ));
     }
 }

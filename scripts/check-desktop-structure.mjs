@@ -32,6 +32,13 @@ const listRustSourceFiles = (sourceDirectory) =>
       return [entryPath];
     });
 
+const productionRustLineCount = (source) => {
+  const testModuleIndex = source.search(/\n#\[cfg\(test\)\]\s*\nmod tests\s*\{/);
+  const productionSource =
+    testModuleIndex >= 0 ? source.slice(0, testModuleIndex) : source;
+  return productionSource.split("\n").length;
+};
+
 const parseJson = (relativePath) => JSON.parse(read(relativePath));
 
 const assert = (condition, message) => {
@@ -45,7 +52,26 @@ const packageLock = parseJson("apps/desktop/package-lock.json");
 const tauriConfig = parseJson("apps/desktop/src-tauri/tauri.conf.json");
 const capability = parseJson("apps/desktop/src-tauri/capabilities/default.json");
 const appSource = read("apps/desktop/src/App.tsx");
-const settingsPageSource = read("apps/desktop/src/components/SettingsPage.tsx");
+const settingsPageFileSource = read("apps/desktop/src/components/SettingsPage.tsx");
+const settingsModelsPanelSource = read(
+  "apps/desktop/src/components/SettingsModelsPanel.tsx"
+);
+const settingsPermissionsPanelSource = read(
+  "apps/desktop/src/components/SettingsPermissionsPanel.tsx"
+);
+const settingsToolsPanelSource = read(
+  "apps/desktop/src/components/SettingsToolsPanel.tsx"
+);
+const promptEvolutionPanelSource = read(
+  "apps/desktop/src/components/PromptEvolutionPanel.tsx"
+);
+const settingsPageSource = [
+  settingsPageFileSource,
+  settingsModelsPanelSource,
+  settingsPermissionsPanelSource,
+  settingsToolsPanelSource,
+  promptEvolutionPanelSource,
+].join("\n");
 const preferencesControllerSource = read(
   "apps/desktop/src/controllers/usePreferencesController.ts"
 );
@@ -53,7 +79,54 @@ const settingsUiSource = `${appSource}\n${settingsPageSource}\n${preferencesCont
 const sessionRuntimeModelSource = read(
   "apps/desktop/src/sessionRuntimeModel.ts"
 );
-const sessionThreadSource = read("apps/desktop/src/components/SessionThread.tsx");
+const appShellModelSource = read("apps/desktop/src/appShellModel.ts");
+const appWorkspaceProjectionSource = read(
+  "apps/desktop/src/controllers/useAppWorkspaceProjection.ts"
+);
+const composerAttachmentsSource = read(
+  "apps/desktop/src/controllers/useComposerAttachments.ts"
+);
+const composerDraftsSource = read(
+  "apps/desktop/src/controllers/useComposerDrafts.ts"
+);
+const latestAsyncSelectionSource = read(
+  "apps/desktop/src/controllers/useLatestAsyncSelection.ts"
+);
+const permissionReviewControllerSource = read(
+  "apps/desktop/src/controllers/usePermissionReviewController.ts"
+);
+const sidebarResizeSource = read(
+  "apps/desktop/src/controllers/useSidebarResize.ts"
+);
+const sessionThreadFileSource = read("apps/desktop/src/components/SessionThread.tsx");
+const sessionThreadNavigationSource = read(
+  "apps/desktop/src/components/SessionThreadNavigation.tsx"
+);
+const sessionThreadArtifactsSource = read(
+  "apps/desktop/src/components/SessionThreadArtifacts.tsx"
+);
+const sessionToolChainSource = read(
+  "apps/desktop/src/components/SessionToolChain.tsx"
+);
+const sessionMinimapSource = read(
+  "apps/desktop/src/components/SessionMinimap.tsx"
+);
+const sessionMinimapInteractionSource = read(
+  "apps/desktop/src/components/useSessionMinimapInteraction.ts"
+);
+const agentMarkdownSource = read("apps/desktop/src/components/AgentMarkdown.tsx");
+const sessionThreadSource = [
+  sessionThreadFileSource,
+  sessionThreadNavigationSource,
+  sessionThreadArtifactsSource,
+  sessionToolChainSource,
+  sessionMinimapSource,
+  sessionMinimapInteractionSource,
+  agentMarkdownSource,
+].join("\n");
+const workspaceChromeSource = read(
+  "apps/desktop/src/components/WorkspaceChrome.tsx"
+);
 const sessionThreadProjectionSource = read(
   "apps/desktop/src/components/sessionThreadProjection.ts"
 );
@@ -109,6 +182,12 @@ const tauriBridgeImplementation = read("apps/desktop/src/tauri.ts");
 const tauriTypesSource = read("apps/desktop/src/tauriTypes.ts");
 const tauriBridge = `${tauriBridgeImplementation}\n${tauriTypesSource}`;
 const desktopControllerEntries = [
+  "useAppWorkspaceProjection.ts",
+  "useComposerAttachments.ts",
+  "useComposerDrafts.ts",
+  "useLatestAsyncSelection.ts",
+  "usePermissionReviewController.ts",
+  "useSidebarResize.ts",
   "usePreferencesController.ts",
   "useProviderSettingsController.ts",
   "useIntegrationSettingsController.ts",
@@ -125,6 +204,8 @@ const desktopUiSource = `${appSource}\n${settingsPageSource}\n${desktopControlle
 const localBuildScript = read("scripts/build-local-app.mjs");
 const browserSidecarSource = read("scripts/sidecars/browser-sidecar.js");
 const browserIntegrationTest = read("scripts/test-browser-sidecar.mjs");
+const computerSidecarSource = read("scripts/sidecars/computer-sidecar.js");
+const computerIntegrationTest = read("scripts/test-computer-sidecar.mjs");
 const desktopRustSourceDirectory = path.join(
   root,
   "apps/desktop/src-tauri/src"
@@ -160,6 +241,15 @@ const desktopAgentToolRuntimeSource = read(
 const agentRecoveryServiceSource = read(
   "apps/desktop/src-tauri/src/agent_recovery_service.rs"
 );
+const agentConductorRuntimeSource = read(
+  "apps/desktop/src-tauri/src/agent_conductor_runtime.rs"
+);
+const agentRuntimeSnapshotSource = read(
+  "apps/desktop/src-tauri/src/agent_runtime_snapshot.rs"
+);
+const sessionOutputCacheSource = read(
+  "apps/desktop/src-tauri/src/session_output_cache.rs"
+);
 const promptEvolutionWorkerSource = read(
   "apps/desktop/src-tauri/src/prompt_evolution_worker.rs"
 );
@@ -185,6 +275,9 @@ const sessionTitleServiceSource = read(
 );
 const toolRuntimeServiceSource = read(
   "apps/desktop/src-tauri/src/tool_runtime_service.rs"
+);
+const toolExecutionSource = read(
+  "apps/desktop/src-tauri/src/tool_execution.rs"
 );
 const scheduleSource = read("apps/desktop/src-tauri/src/schedule.rs");
 const cargoToml = read("apps/desktop/src-tauri/Cargo.toml");
@@ -251,7 +344,32 @@ const sessionRefreshBlock = appSource.slice(sessionRefreshStart, sessionRefreshE
 const rustCompositionRootLineCount = rustCompositionRoot.split("\n").length;
 const appLineCount = appSource.split("\n").length;
 const appUseStateCount = (appSource.match(/useState\(/g) ?? []).length;
-const settingsPageLineCount = settingsPageSource.split("\n").length;
+const settingsPageLineCount = settingsPageFileSource.split("\n").length;
+const sessionThreadLineCount = sessionThreadFileSource.split("\n").length;
+const inspectorLineCount = inspectorSource.split("\n").length;
+const extractedDesktopBoundaryBudgets = [
+  ["appShellModel.ts", appShellModelSource, 80],
+  ["useAppWorkspaceProjection.ts", appWorkspaceProjectionSource, 200],
+  ["useComposerAttachments.ts", composerAttachmentsSource, 140],
+  ["useComposerDrafts.ts", composerDraftsSource, 90],
+  ["useLatestAsyncSelection.ts", latestAsyncSelectionSource, 80],
+  ["usePermissionReviewController.ts", permissionReviewControllerSource, 130],
+  ["useSidebarResize.ts", sidebarResizeSource, 80],
+  ["AgentMarkdown.tsx", agentMarkdownSource, 340],
+  ["PromptEvolutionPanel.tsx", promptEvolutionPanelSource, 280],
+  ["SettingsModelsPanel.tsx", settingsModelsPanelSource, 320],
+  ["SettingsPermissionsPanel.tsx", settingsPermissionsPanelSource, 220],
+  ["SettingsToolsPanel.tsx", settingsToolsPanelSource, 420],
+  ["SessionThreadArtifacts.tsx", sessionThreadArtifactsSource, 260],
+  ["SessionThreadNavigation.tsx", sessionThreadNavigationSource, 260],
+  ["SessionToolChain.tsx", sessionToolChainSource, 180],
+  ["SessionMinimap.tsx", sessionMinimapSource, 130],
+  ["useSessionMinimapInteraction.ts", sessionMinimapInteractionSource, 150],
+  ["WorkspaceChrome.tsx", workspaceChromeSource, 150],
+];
+const oversizedExtractedDesktopBoundaries = extractedDesktopBoundaryBudgets.filter(
+  ([, source, budget]) => source.split("\n").length > budget
+);
 const oversizedDesktopControllers = desktopControllers
   .map(({ entry, source }) => ({ entry, lines: source.split("\n").length }))
   .filter(({ lines }) => lines > 500);
@@ -267,6 +385,17 @@ const unguardedTauriFallbacks = tauriBridgeImplementation
       ? []
       : [index + 1];
   });
+const browserWatchdogStart = browserSidecarSource.indexOf(
+  "async function watchBrowserSession"
+);
+const browserWatchdogEnd = browserSidecarSource.indexOf(
+  "function sessionLeaseExpired",
+  browserWatchdogStart
+);
+const browserWatchdogBlock = browserSidecarSource.slice(
+  browserWatchdogStart,
+  browserWatchdogEnd
+);
 const oversizedStyleModules = styleModuleEntries
   .map((entry) => ({
     entry,
@@ -276,15 +405,22 @@ const oversizedStyleModules = styleModuleEntries
   }))
   .filter(({ lines }) => lines > 1_900);
 const oversizedProductionRustModules = desktopRustModules
-  .filter(({ entry }) => entry !== "tests.rs")
+  .filter(
+    ({ entry }) =>
+      entry !== "tests.rs" &&
+      !entry.endsWith("_tests.rs") &&
+      !entry.endsWith("_eval_tests.rs")
+  )
   .map(({ entry, source }) => ({ entry, lines: source.split("\n").length }))
-  .filter(({ lines }) => lines > 2_200);
+  .filter(({ lines }) => lines > 1_200);
 const criticalDesktopAgentModuleBudgets = new Map([
   ["agent_run_engine.rs", 250],
+  ["agent_conductor_runtime.rs", 140],
   ["agent_strategy_runtime.rs", 420],
   ["agent_loop_runtime.rs", 550],
   ["agent_collaboration_runtime.rs", 800],
   ["agent_recovery_service.rs", 550],
+  ["agent_runtime_snapshot.rs", 220],
   ["background_work_runtime.rs", 80],
   ["configuration_persistence.rs", 400],
   ["event_persistence.rs", 180],
@@ -295,6 +431,7 @@ const criticalDesktopAgentModuleBudgets = new Map([
   ["prompt_workflow_execution.rs", 800],
   ["runtime_values.rs", 420],
   ["session_context_service.rs", 550],
+  ["session_output_cache.rs", 180],
   ["sidecar_runtime.rs", 300],
   ["semantic_memory_runtime.rs", 260],
   ["semantic_memory_worker.rs", 240],
@@ -323,14 +460,59 @@ const oversizedAgentCoreModules = ["agent-runtime", "agent-memory", "orchestrato
       })
       .map((file) => {
         const source = fs.readFileSync(file, "utf8");
-        const productionSource = source.split("#[cfg(test)]", 1)[0];
         return {
           file: path.relative(root, file),
-          lines: productionSource.split("\n").length,
+          lines: productionRustLineCount(source),
         };
       })
   )
   .filter(({ lines }) => lines > 1_450);
+const modelProviderModuleBudgets = new Map([
+  ["error.rs", 160],
+  ["image_provider.rs", 430],
+  ["json_wire.rs", 320],
+  ["lib.rs", 900],
+  ["request_builder.rs", 340],
+  ["response_parser.rs", 380],
+  ["streaming_response.rs", 380],
+  ["streaming_wire.rs", 160],
+  ["usage.rs", 220],
+]);
+const modelProviderModules = listRustSourceFiles(
+  path.join(root, "crates", "model-provider", "src")
+).map((file) => ({
+  entry: path.basename(file),
+  lines: productionRustLineCount(fs.readFileSync(file, "utf8")),
+}));
+const oversizedModelProviderModules = modelProviderModules.filter(({ entry, lines }) => {
+  const budget = modelProviderModuleBudgets.get(entry);
+  return budget !== undefined && lines > budget;
+});
+const toolsModuleBudgets = new Map([
+  ["desktop_control.rs", 1_350],
+  ["file_batch.rs", 230],
+  ["file_tools.rs", 540],
+  ["image_generation.rs", 280],
+  ["lib.rs", 720],
+  ["meta_tools.rs", 240],
+  ["process_control.rs", 30],
+  ["shell.rs", 950],
+  ["stream_capture.rs", 60],
+  ["web_search.rs", 420],
+]);
+const toolsModules = listRustSourceFiles(
+  path.join(root, "crates", "tools", "src")
+).map((file) => {
+  const source = fs.readFileSync(file, "utf8");
+  return {
+    entry: path.basename(file),
+    lines: productionRustLineCount(source),
+  };
+});
+const oversizedToolsModules = toolsModules.filter(({ entry, lines }) => {
+  const budget = toolsModuleBudgets.get(entry);
+  return budget !== undefined && lines > budget;
+});
 
 assert(
   rustCompositionRootLineCount <= 250 &&
@@ -340,7 +522,7 @@ assert(
 );
 assert(
   oversizedProductionRustModules.length === 0,
-  `Desktop Rust production modules exceeded the 2,200-line cohesion budget: ${oversizedProductionRustModules
+  `Desktop Rust production modules exceeded the 1,200-line cohesion budget: ${oversizedProductionRustModules
     .map(({ entry, lines }) => `${entry} (${lines})`)
     .join(", ")}`
 );
@@ -377,6 +559,31 @@ assert(
   oversizedAgentCoreModules.length === 0,
   `Agent-core production modules exceeded the 1,450-line cohesion budget: ${oversizedAgentCoreModules
     .map(({ file, lines }) => `${file} (${lines})`)
+    .join(", ")}`
+);
+assert(
+  modelProviderModuleBudgets.size === modelProviderModules.length &&
+    modelProviderModules.every(({ entry }) => modelProviderModuleBudgets.has(entry)) &&
+    oversizedModelProviderModules.length === 0,
+  `Model provider streaming boundaries regressed: ${oversizedModelProviderModules
+    .map(
+      ({ entry, lines }) =>
+        `${entry} (${lines}/${modelProviderModuleBudgets.get(entry)})`
+    )
+    .join(", ")}`
+);
+assert(
+  toolsModuleBudgets.size === toolsModules.length &&
+    toolsModules.every(({ entry }) => toolsModuleBudgets.has(entry)) &&
+    oversizedToolsModules.length === 0 &&
+    read("crates/tools/src/lib.rs").includes("mod file_tools;") &&
+    read("crates/tools/src/lib.rs").includes("mod meta_tools;") &&
+    read("crates/tools/src/lib.rs").includes("mod image_generation;") &&
+    read("crates/tools/src/lib.rs").includes("mod web_search;") &&
+    toolsSource.includes("web_search_is_network_permissioned_but_effect_read_only") &&
+    toolsSource.includes(".with_effect_semantics(ToolEffectSemantics::ReadOnly)"),
+  `Tool ownership boundaries regressed: ${oversizedToolsModules
+    .map(({ entry, lines }) => `${entry} (${lines}/${toolsModuleBudgets.get(entry)})`)
     .join(", ")}`
 );
 assert(
@@ -422,22 +629,45 @@ assert(
   "Offline topology learning must remain isolated from the online router with explicit dependencies"
 );
 assert(
-  appLineCount <= 2_850 &&
+  appLineCount <= 2_400 &&
     appUseStateCount <= 30 &&
-    settingsPageLineCount <= 2_400 &&
-    tauriBridgeImplementationLineCount <= 2_700 &&
-    tauriTypesLineCount <= 900 &&
+    settingsPageLineCount <= 1_400 &&
+    sessionThreadLineCount <= 1_150 &&
+    inspectorLineCount <= 1_350 &&
+    oversizedExtractedDesktopBoundaries.length === 0 &&
+    tauriBridgeImplementationLineCount <= 2_620 &&
+    tauriTypesLineCount <= 800 &&
     oversizedDesktopControllers.length === 0 &&
     desktopControllerEntries.every((entry) =>
       appSource.includes(`./controllers/${entry.replace(/\.ts$/, "")}`)
     ) &&
+    appSource.includes('./appShellModel') &&
+    appSource.includes('./controllers/useAppWorkspaceProjection') &&
+    appSource.includes('./controllers/useComposerAttachments') &&
+    appSource.includes('./controllers/useComposerDrafts') &&
+    appSource.includes('./controllers/useLatestAsyncSelection') &&
+    appSource.includes('./controllers/usePermissionReviewController') &&
+    appSource.includes('./controllers/useSidebarResize') &&
+    appSource.includes('./components/WorkspaceChrome') &&
+    settingsPageSource.includes('./SettingsModelsPanel') &&
+    settingsPageSource.includes('./SettingsPermissionsPanel') &&
+    settingsPageSource.includes('./SettingsToolsPanel') &&
+    settingsModelsPanelSource.includes('./PromptEvolutionPanel') &&
+    sessionThreadSource.includes('./AgentMarkdown') &&
+    sessionThreadSource.includes('./SessionThreadArtifacts') &&
+    sessionThreadSource.includes('./SessionThreadNavigation') &&
+    sessionThreadSource.includes('./SessionToolChain') &&
+    sessionThreadSource.includes('./SessionMinimap') &&
+    sessionThreadSource.includes('./useSessionMinimapInteraction') &&
     tauriBridgeImplementation.includes('export type * from "./tauriTypes";') &&
     unguardedTauriFallbacks.length === 0 &&
     appSource.includes('import("./components/SettingsPage")') &&
     appSource.includes("<SettingsPage") &&
     appSource.includes("<Suspense") &&
     !appSource.includes('className="settings-sidebar"'),
-  `Desktop boundaries regressed (App=${appLineCount}, useState=${appUseStateCount}, Settings=${settingsPageLineCount}, Tauri=${tauriBridgeImplementationLineCount}, Types=${tauriTypesLineCount}, controllers=${oversizedDesktopControllers
+  `Desktop boundaries regressed (App=${appLineCount}, useState=${appUseStateCount}, Settings=${settingsPageLineCount}, SessionThread=${sessionThreadLineCount}, Inspector=${inspectorLineCount}, extracted=${oversizedExtractedDesktopBoundaries
+    .map(([entry, source, budget]) => `${entry}:${source.split("\n").length}/${budget}`)
+    .join(",")}, Tauri=${tauriBridgeImplementationLineCount}, Types=${tauriTypesLineCount}, controllers=${oversizedDesktopControllers
     .map(({ entry, lines }) => `${entry}:${lines}`)
     .join(",")}, unguarded catches=${unguardedTauriFallbacks.join(",")})`
 );
@@ -453,7 +683,9 @@ assert(
     .join(", ")}`
 );
 for (const requiredModule of [
+  "agent_conductor_runtime.rs",
   "agent_loop_runtime.rs",
+  "agent_runtime_snapshot.rs",
   "adaptive_collaboration_setup.rs",
   "adaptive_collaboration_execution.rs",
   "adaptive_collaboration_finalization.rs",
@@ -466,6 +698,7 @@ for (const requiredModule of [
   "project_session_persistence.rs",
   "routing_learning_runtime.rs",
   "runtime_values.rs",
+  "session_output_cache.rs",
   "sidecar_runtime.rs",
   "tool_execution.rs",
 ]) {
@@ -806,6 +1039,17 @@ assert(
     toolRuntimeServiceSource.includes("tool_input_fingerprint") &&
     toolRuntimeServiceSource.includes("idempotent_replay") &&
     toolRuntimeServiceSource.includes("retryable_failure_is_not_replayed") &&
+    agentToolRuntimeSource.includes("apply_tool_spec_runtime_metadata") &&
+    desktopAgentToolRuntimeSource.includes("apply_tool_spec_runtime_metadata") &&
+    toolExecutionSource.match(/apply_tool_spec_runtime_metadata/g)?.length >= 2 &&
+    toolsSource.includes("fn effect_spec(&self, _invocation: &ToolInvocation)") &&
+    toolsSource.includes("fn meta_invoke_preserves_target_effect_semantics()") &&
+    toolRuntimeServiceSource.includes(
+      "fn deferred_file_write_verification_reads_the_target_arguments()"
+    ) &&
+    toolRuntimeServiceSource.includes(
+      'input.get("name").and_then(serde_json::Value::as_str) != Some("file.write")'
+    ) &&
     agentStorageSource.includes("list_by_task_and_tool_call_id") &&
     agentStorageSource.includes("idx_events_task_tool_call_sequence") &&
     agentStorageSource.includes("list_by_task_and_effect_fingerprint") &&
@@ -820,8 +1064,13 @@ assert(
     rustLib.includes("let retrieve_workspace = decision.retrieval.enabled()") &&
     rustLib.includes("let workspace_handle = retrieve_workspace.then") &&
     rustLib.includes("if effort == AgentEffort::Fast") &&
-    rustLib.includes('"dynamic_conductor_v1".to_string()') &&
-    rustLib.includes('"dynamic_conductor_fallback_direct".to_string()') &&
+    rustLib.includes('"dynamic_conductor_v2"') &&
+    rustLib.includes('"dynamic_conductor_replanned"') &&
+    rustLib.includes('"dynamic_conductor_degraded_workflow"') &&
+    rustLib.includes('"dynamic_conductor_degraded_direct"') &&
+    agentConductorRuntimeSource.includes("conductor_model_sequence") &&
+    agentConductorRuntimeSource.includes("attempt_conductor_decision") &&
+    agentConductorRuntimeSource.includes("CONDUCTOR_MAX_ATTEMPTS") &&
     rustLib.includes("index_graph_chunks_cancellable") &&
     rustLib.includes("upsert_all(extractions)") &&
     ragSource.includes("index_workspace_cancellable") &&
@@ -2300,6 +2549,33 @@ assert(
   "Long agent runs must recover durably without replaying unknown tool outcomes"
 );
 assert(
+  /let task_state = match agent_recovery_identity[\s\S]*?load_matching_agent_runtime_snapshot[\s\S]*?agent_recovery_metadata_with_task_state[\s\S]*?append_event\([\s\S]*?delete_persisted_agent_runtime_snapshot/.test(
+    agentRecoveryServiceSource
+  ) &&
+    agentRecoveryServiceSource.includes("already_recovered_wait") &&
+    agentRecoveryServiceSource.includes("stale agent runtime snapshot cleanup unavailable") &&
+    agentRuntimeSnapshotSource.includes("PersistedAgentRuntimeSnapshot") &&
+    agentRuntimeSnapshotSource.includes("event_revision_by_metadata") &&
+    agentRuntimeSnapshotSource.includes("prompt_fingerprint") &&
+    agentRuntimeSnapshotSource.includes("load_matching_agent_runtime_snapshot") &&
+    agentRuntimeSnapshotSource.includes("capture_persistable_agent_task_state") &&
+    rustLib.includes("runtime_snapshot_matches_the_redacted_durable_projection"),
+  "Restart recovery must transfer task state into the recovery event and retire stale run snapshots"
+);
+assert(
+  sessionOutputCacheSource.includes("SESSION_OUTPUT_CACHE_LIMIT: usize = 32") &&
+    sessionOutputCacheSource.includes("event_revision_by_metadata") &&
+    sessionOutputCacheSource.includes("list_by_task_and_metadata_after") &&
+    sessionOutputCacheSource.includes("merge_agent_output_delta") &&
+    sessionOutputCacheSource.includes("rebuild_agent_output_artifacts") &&
+    rustLib.includes("session_output_cache: Mutex<BTreeMap") &&
+    rustLib.includes("outputs.remove(session_id)") &&
+    rustLib.includes(
+      "delete_read_model(AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE, session_id)"
+    ),
+  "Session outputs must survive restarts through revisioned reconstruction and invalidate with session runtime state"
+);
+assert(
   agentMemorySource.includes('MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v4"') &&
     agentMemorySource.includes("mod extraction;") &&
     agentMemorySource.includes("mod ledger;") &&
@@ -2419,6 +2695,10 @@ assert(
     rustLib.includes("reconcile_prompt_rollout") &&
     rustLib.includes("next_prompt_canary_stage") &&
     rustLib.includes("prompt_canary_degraded") &&
+    rustLib.includes('status == "promoted" && frozen_profile.is_none()') &&
+    rustLib.includes("snapshot.genome.id == rollout.stable_profile_id") &&
+    rustLib.includes("promoted_prompt_rollout_without_a_valid_frozen_profile_is_ignored") &&
+    rustLib.includes("stable_prompt_rollout_uses_the_evidence_bound_frozen_genome") &&
     rustLib.includes('"Conductor prompt rollout updated"') &&
     rustLib.includes('"evaluation_required"') &&
     tauriBridge.includes("setPromptEvolutionEnabled") &&
@@ -2636,6 +2916,15 @@ assert(
   "Composer attachments must be staged and validated inside the active project"
 );
 assert(
+  rustLib.includes("model_message_from_event") &&
+    rustLib.includes('"model_content"') &&
+    rustLib.includes('"recovery_prompt"') &&
+    rustLib.includes("agent_recovery_prompt_from_active_events") &&
+    rustLib.includes("attachment_message_separates_display_and_model_content") &&
+    rustLib.includes("recovery_identity_stays_on_root_prompt_after_steer"),
+  "Attachment and steer recovery must separate display, model, and root prompt identity"
+);
+assert(
     rustLib.includes("append_visual_reference_message") &&
     rustLib.includes('"image_paths"') &&
     modelProviderSource.includes("image_url") &&
@@ -2648,7 +2937,11 @@ assert(rustLib.includes("fn restore_session("), "Session restore command is miss
 assert(rustLib.includes("fn delete_session("), "Session delete command is missing");
 assert(
   rustLib.includes("async fn resolve_agent_permission(") &&
-    rustLib.includes("Agent task resumed after permission"),
+    rustLib.includes("Agent task resumed after permission") &&
+    rustLib.includes("checkpoint_transcript_before_resolved_tools") &&
+    rustLib.includes(
+      "permission_recovery_checkpoint_excludes_resolved_tool_suffix"
+    ),
   "Permission resolution must resume the agent off the IPC thread"
 );
 assert(
@@ -2772,6 +3065,11 @@ assert(
     sessionContextServiceSource.includes("context_events_for_covered_history_prefix") &&
     sessionContextServiceSource.includes('"covered_events"') &&
     sessionContextServiceSource.includes("recent_history_start") &&
+    sessionContextServiceSource.includes("if can_reuse_checkpoint") &&
+    sessionContextServiceSource.includes("} else if plan.should_compact {") &&
+    !sessionContextServiceSource.includes(
+      "if plan.should_compact && !can_reuse_checkpoint"
+    ) &&
     agentMemorySource.includes("conversation_memory_to_markdown") &&
     sessionContextServiceSource.includes("Session context restored for agent run") &&
     rustLib.includes("event_matches_context"),
@@ -2940,6 +3238,7 @@ assert(
   rustLib.includes("browser.capture") &&
     rustLib.includes("browser.tabs") &&
     rustLib.includes("browser.select_tab") &&
+    rustLib.includes("browser.close") &&
     rustLib.includes("phase8_state") &&
     toolsSource.includes("BROWSER_CONTROL_REQUEST_SCHEMA") &&
     toolsSource.includes("run_json_sidecar_controlled"),
@@ -2954,10 +3253,35 @@ assert(
     browserSidecarSource.includes("ariaSnapshot") &&
     browserIntegrationTest.includes("browser sidecar integration ok") &&
     browserIntegrationTest.includes('invoke("select_tab"') &&
+    browserIntegrationTest.includes('const closedAgain = await invoke("close")') &&
     browserControlDoc.includes("CDP owns browser process discovery") &&
     ciWorkflow.includes("Test Browser Control v2") &&
-    localBuildScript.includes("test-browser-sidecar.mjs"),
-  "Browser Control v2 must combine CDP transport, Playwright semantics, and a real-browser gate"
+    localBuildScript.includes("test-browser-sidecar.mjs") &&
+    computerSidecarSource.includes('const REQUEST_SCHEMA = "cindx.computer-control.v1"') &&
+    computerIntegrationTest.includes("computer sidecar integration ok") &&
+    ciWorkflow.includes("Test Computer Control") &&
+    localBuildScript.includes("test-computer-sidecar.mjs"),
+  "Browser and Computer Control must retain lifecycle-safe sidecars and CI integration gates"
+);
+assert(
+  browserWatchdogStart >= 0 &&
+    browserWatchdogEnd > browserWatchdogStart &&
+    browserWatchdogBlock.includes("acquireSessionLock(") &&
+    browserWatchdogBlock.includes("sessionLeaseExpired(current, statePath)") &&
+    browserWatchdogBlock.includes("current.launch_token !== launchToken") &&
+    browserWatchdogBlock.includes("finally") &&
+    browserWatchdogBlock.includes("release?.()") &&
+    browserSidecarSource.includes("renewSessionLease(statePath)") &&
+    browserSidecarSource.includes("cleanupExpiredSiblingSessions(sessionDir)") &&
+    browserSidecarSource.includes("MALFORMED_LOCK_GRACE_MS") &&
+    browserSidecarSource.includes(
+      ".sort((left, right) => left.stateModifiedAtMs - right.stateModifiedAtMs)"
+    ) &&
+    browserIntegrationTest.includes("an abandoned partial lock should be reclaimed") &&
+    browserIntegrationTest.includes(
+      "the oldest expired sibling session should be cleaned"
+    ),
+  "Browser watchdog cleanup must share the per-session lock and revalidate ownership and lease state"
 );
 
 assert(

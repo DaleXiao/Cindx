@@ -1,46 +1,4 @@
 import {
-  Activity,
-  ArrowLeft,
-  ArchiveRestore,
-  BookOpen,
-  Bot,
-  Bug,
-  Cable,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  Database,
-  Dna,
-  EyeOff,
-  FileText,
-  FolderOpen,
-  Globe2,
-  Info,
-  KeyRound,
-  LayoutDashboard,
-  Link2,
-  Monitor,
-  Moon,
-  PackagePlus,
-  PanelLeftClose,
-  PanelLeftOpen,
-  PanelRightClose,
-  PanelRightOpen,
-  RefreshCw,
-  Save,
-  Search,
-  Send,
-  Settings,
-  ShieldCheck,
-  Sun,
-  TerminalSquare,
-  Trash2,
-  TriangleAlert,
-  UserRound,
-  Wrench,
-  XCircle
-} from "lucide-react";
-import {
   lazy,
   startTransition,
   Suspense,
@@ -49,26 +7,37 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
-  type PointerEvent as ReactPointerEvent
+  type CSSProperties
 } from "react";
 import { Inspector, type InspectorTab } from "./components/Inspector";
 import { Composer } from "./components/Composer";
 import { QueuedMessages } from "./components/QueuedMessages";
 import { Sidebar, type WorkspaceView } from "./components/Sidebar";
 import type { SettingsCategory } from "./components/SettingsPage";
+import { WorkspaceChrome } from "./components/WorkspaceChrome";
+import {
+  BACKGROUND_AGENT_POLL_INTERVAL_MS,
+  FOREGROUND_AGENT_POLL_INTERVAL_MS,
+  loadDebugAlwaysVisible,
+  queuedMessageClientId,
+  runBudgetForEffort
+} from "./appShellModel";
+import { useAppWorkspaceProjection } from "./controllers/useAppWorkspaceProjection";
+import { useComposerAttachments } from "./controllers/useComposerAttachments";
+import { useComposerDrafts } from "./controllers/useComposerDrafts";
 import { usePreferencesController } from "./controllers/usePreferencesController";
 import { useProviderSettingsController } from "./controllers/useProviderSettingsController";
 import { useIntegrationSettingsController } from "./controllers/useIntegrationSettingsController";
 import { useKnowledgeToolingController } from "./controllers/useKnowledgeToolingController";
-import { fileDataBase64 } from "./utils/fileDataBase64";
+import { useLatestAsyncSelection } from "./controllers/useLatestAsyncSelection";
+import { usePermissionReviewController } from "./controllers/usePermissionReviewController";
+import { useSidebarResize } from "./controllers/useSidebarResize";
 import {
   LiveSessionThread,
   type SessionThreadSelection
 } from "./components/SessionThread";
 import {
   AgentState,
-  AgentAttachment,
   AgentEffort,
   AgentTraceState,
   ChatMessageView,
@@ -80,7 +49,6 @@ import {
   deleteQueuedAgentMessage,
   deleteProject,
   deleteSession,
-  DESKTOP_VERSION,
   exportAgentTraceJsonl,
   getAgentState,
   getAgentStateDelta,
@@ -88,13 +56,11 @@ import {
   getAgentStateRevision,
   getAgentTraceState,
   getContextState,
-  getPermissionReviewState,
   getProjectSessionState,
   getRuntimeStatus,
   editQueuedAgentMessage,
   forkSession,
   PermissionReviewItem,
-  PermissionReviewState,
   ProjectSessionState,
   QueuedAgentMessage,
   QueuedAgentMessageActionReceipt,
@@ -106,7 +72,6 @@ import {
   resolvePermission,
   RuntimeStatus,
   retryAgentTask,
-  removeAgentAttachment,
   renameProject,
   renameSession,
   restoreSession,
@@ -119,11 +84,9 @@ import {
   setSessionEffort,
   steerQueuedAgentMessage,
   subscribeToSessionTitleUpdates,
-  stageAgentAttachments,
   queueAgentMessage
 } from "./tauri";
 import {
-  SESSION_STATE_CACHE_LIMIT,
   SessionRuntimeCache,
   agentStateUnchanged,
   agentTraceUnchanged,
@@ -132,23 +95,8 @@ import {
   mergeAgentStateDelta,
   mergeAgentStateSnapshot,
   mergeQueuedAgentMessage,
-  mergeSequencedItems,
-  messagesWithOptimisticUserMessages
+  mergeSequencedItems
 } from "./sessionRuntimeModel";
-
-const DEBUG_ALWAYS_VISIBLE_STORAGE_KEY = "cindx.debug.always-visible";
-const IGNORED_PERMISSION_REVIEWS_STORAGE_KEY = "cindx.permissions.ignored";
-const FOREGROUND_AGENT_POLL_INTERVAL_MS = 1_000;
-const BACKGROUND_AGENT_POLL_INTERVAL_MS = 5_000;
-
-function queuedMessageClientId() {
-  const randomId =
-    typeof globalThis.crypto !== "undefined" &&
-    typeof globalThis.crypto.randomUUID === "function"
-      ? globalThis.crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return `agent-queue-client-${randomId}`;
-}
 
 const ScheduleView = lazy(() =>
   import("./components/ScheduleView").then((module) => ({
@@ -162,48 +110,6 @@ const SettingsPage = lazy(() =>
   }))
 );
 
-function loadDebugAlwaysVisible() {
-  if (typeof window === "undefined") return false;
-  try {
-    return window.localStorage.getItem(DEBUG_ALWAYS_VISIBLE_STORAGE_KEY) === "true";
-  } catch {
-    return false;
-  }
-}
-
-function loadIgnoredPermissionReviewIds() {
-  if (typeof window === "undefined") return new Set<string>();
-  try {
-    const values = JSON.parse(
-      window.localStorage.getItem(IGNORED_PERMISSION_REVIEWS_STORAGE_KEY) ?? "[]"
-    );
-    return new Set<string>(Array.isArray(values) ? values.filter((value) => typeof value === "string") : []);
-  } catch {
-    return new Set<string>();
-  }
-}
-
-function normalizedSessionEffort(effort: string | undefined): AgentEffort {
-  if (effort === "fast" || effort === "pro") return effort;
-  return "auto";
-}
-
-function runBudgetForEffort(effort: AgentEffort) {
-  if (effort === "fast") return { durationMs: 3 * 60_000, modelCalls: 6, toolCalls: 12 };
-  if (effort === "pro") return { durationMs: 60 * 60_000, modelCalls: 96, toolCalls: 180 };
-  return { durationMs: 8 * 60_000, modelCalls: 18, toolCalls: 36 };
-}
-
-function formatTokenCount(tokens: number) {
-  if (tokens < 1000) return String(tokens);
-  if (tokens < 1_000_000) return `${(tokens / 1000).toFixed(tokens < 10_000 ? 1 : 0)}k`;
-  return `${(tokens / 1_000_000).toFixed(1)}M`;
-}
-
-function clampSidebarWidth(width: number) {
-  return Math.min(320, Math.max(200, width));
-}
-
 export function App() {
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [activeView, setActiveView] = useState<WorkspaceView>("timeline");
@@ -211,8 +117,12 @@ export function App() {
   const [workspaceViewBeforeSettings, setWorkspaceViewBeforeSettings] =
     useState<Exclude<WorkspaceView, "settings">>("timeline");
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [sidebarWidth, setSidebarWidth] = useState(236);
-  const [sidebarResizing, setSidebarResizing] = useState(false);
+  const {
+    beginResize: beginSidebarResize,
+    handleResizeKeyDown: handleSidebarResizeKeyDown,
+    resizing: sidebarResizing,
+    width: sidebarWidth
+  } = useSidebarResize();
   const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>("runtime");
   const {
     appearanceMode,
@@ -239,10 +149,14 @@ export function App() {
   const [inspectorWidth, setInspectorWidth] = useState(320);
   const [inspectorResizing, setInspectorResizing] = useState(false);
   const [debugAlwaysVisible, setDebugAlwaysVisible] = useState(loadDebugAlwaysVisible);
-  const [permissionReviewState, setPermissionReviewState] =
-    useState<PermissionReviewState | null>(null);
-  const [ignoredPermissionReviewIds, setIgnoredPermissionReviewIds] = useState(
-    loadIgnoredPermissionReviewIds
+  const {
+    activeReviews: activePermissionReviews,
+    ignoreReview: handleIgnorePermissionReview,
+    ignoredReviews: ignoredPermissionReviews,
+    refresh: refreshPermissionReviews,
+    restoreReview: handleRestorePermissionReview
+  } = usePermissionReviewController(
+    activeView === "settings" && settingsCategory === "permissions"
   );
   const [agentState, setAgentState] = useState<AgentState | null>(null);
   const [sessionLoadingId, setSessionLoadingId] = useState<string | null>(null);
@@ -256,12 +170,6 @@ export function App() {
   const [projectCreateOpen, setProjectCreateOpen] = useState(false);
   const [sidebarSearchOpen, setSidebarSearchOpen] = useState(false);
   const [sidebarQuery, setSidebarQuery] = useState("");
-  const [composerDrafts, setComposerDrafts] = useState<Record<string, string>>({});
-  const [attachmentDrafts, setAttachmentDrafts] = useState<Record<string, AgentAttachment[]>>({});
-  const [attachmentBusySessionIds, setAttachmentBusySessionIds] = useState<Set<string>>(
-    () => new Set()
-  );
-  const [composerFocusRequest, setComposerFocusRequest] = useState(0);
   const [streamResetVersion, setStreamResetVersion] = useState(0);
   const [permissionBusy, setPermissionBusy] = useState(false);
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
@@ -281,14 +189,7 @@ export function App() {
   const agentHistoryRequestsRef = useRef<Set<string>>(new Set());
   const [loadingOlderSessionId, setLoadingOlderSessionId] = useState<string | null>(null);
   const sessionSelectionRequestRef = useRef(0);
-  const sessionSelectionRunningRef = useRef(false);
-  const sessionSelectionPendingRef = useRef<{
-    operation: () => Promise<ProjectSessionState>;
-    waiters: Array<{
-      resolve: (state: ProjectSessionState) => void;
-      reject: (error: unknown) => void;
-    }>;
-  } | null>(null);
+  const enqueueProjectSessionSelection = useLatestAsyncSelection<ProjectSessionState>();
   const sessionRefreshRequestRef = useRef(0);
   const sessionLifecycleRefreshRef = useRef(0);
   const optimisticUserMessagesRef = useRef<Map<string, ChatMessageView[]>>(new Map());
@@ -474,13 +375,6 @@ export function App() {
     setInspectorOpen(true);
   }, []);
 
-  const handleThreadMessageEdit = useCallback((content: string) => {
-    const sessionId = activeSessionIdRef.current;
-    if (!sessionId) return;
-    setComposerDrafts((current) => ({ ...current, [sessionId]: content }));
-    setComposerFocusRequest((request) => request + 1);
-  }, []);
-
   useEffect(() => {
     let disposed = false;
     let unsubscribe: (() => void) | null = null;
@@ -567,7 +461,7 @@ export function App() {
     const loadDeferredState = () => {
       if (disposed) return;
       loadIntegrationState();
-      getPermissionReviewState().then(setPermissionReviewState);
+      void refreshPermissionReviews().catch(() => {});
       void loadProviderState();
       loadKnowledgeState();
     };
@@ -615,68 +509,48 @@ export function App() {
     };
   }, [projectSessionState, runtime]);
 
-  useEffect(() => {
-    if (activeView !== "settings" || settingsCategory !== "permissions") return;
-    let disposed = false;
-    let inFlight = false;
-    const refresh = () => {
-      if (disposed || inFlight) return;
-      inFlight = true;
-      void getPermissionReviewState()
-        .then((next) => {
-          if (!disposed) setPermissionReviewState(next);
-        })
-        .finally(() => {
-          inFlight = false;
-        });
-    };
-    refresh();
-    const timer = window.setInterval(refresh, 2_000);
-    return () => {
-      disposed = true;
-      window.clearInterval(timer);
-    };
-  }, [activeView, settingsCategory]);
-
-  useEffect(() => {
-    if (!permissionReviewState) return;
-    const pendingIds = new Set(
-      permissionReviewState.pending.map((review) => review.requestId)
-    );
-    setIgnoredPermissionReviewIds((current) => {
-      const next = new Set([...current].filter((requestId) => pendingIds.has(requestId)));
-      if (next.size === current.size) return current;
-      try {
-        window.localStorage.setItem(
-          IGNORED_PERMISSION_REVIEWS_STORAGE_KEY,
-          JSON.stringify([...next])
-        );
-      } catch {
-        // Keep the preference for this app session when storage is unavailable.
-      }
-      return next;
-    });
-  }, [permissionReviewState]);
-
   const statusText = useMemo(() => {
     if (!runtime) return "Connecting";
     if (runtime.kernelStatus === "kernel bridge online") return "Ready";
     return runtime.kernelStatus;
   }, [runtime]);
 
-  const activeProject = useMemo(
-    () => projectSessionState?.projects.find((project) => project.active) ?? null,
-    [projectSessionState?.projects]
-  );
-
-  const activeSession = useMemo(
-    () => projectSessionState?.sessions.find((session) => session.active) ?? null,
-    [projectSessionState?.sessions]
-  );
-  const agentEffort = normalizedSessionEffort(activeSession?.effort);
-  const activeAgentState =
-    activeSession && agentState?.sessionId === activeSession.id ? agentState : null;
-  const activeSessionBusy = Boolean(activeSession && busySessionIds.has(activeSession.id));
+  const {
+    activeAgentState,
+    activeProject,
+    activeSession,
+    activeSessionBusy,
+    activeSessionTraceSteps,
+    agentEffort,
+    archivedSessions,
+    projects,
+    selectedTraceStep,
+    sessionPrefetchKey,
+    sessions,
+    visibleAgentMessages
+  } = useAppWorkspaceProjection({
+    activeView,
+    agentState,
+    agentTraceState,
+    busySessionIds,
+    optimisticUserMessages: optimisticUserMessagesRef.current,
+    optimisticUserMessageRevision,
+    projectSessionState,
+    selectedTraceStepId,
+    sidebarQuery
+  });
+  const {
+    attachments: composerAttachments,
+    busy: attachmentBusy,
+    clear: clearAttachments,
+    forget: forgetAttachments,
+    pick: handlePickAttachments,
+    remove: handleRemoveAttachment,
+    restoreIfEmpty: restoreAttachmentsIfEmpty
+  } = useComposerAttachments({
+    reportError: reportComposerError,
+    sessionId: activeSession?.id ?? null
+  });
 
   function preserveOptimisticQueuedMessages(sessionId: string, state: AgentState) {
     let queuedMessages = state.queuedMessages;
@@ -764,32 +638,6 @@ export function App() {
     if (!agentTraceState?.sessionId) return;
     sessionRuntimeCache.rememberTrace(agentTraceState.sessionId, agentTraceState);
   }, [agentTraceState, sessionRuntimeCache]);
-
-  const sessionPrefetchKey = useMemo(() => {
-    if (!projectSessionState?.activeProjectId) return "";
-    const sessions = projectSessionState.sessions.filter(
-      (session) =>
-        session.projectId === projectSessionState.activeProjectId && !session.archived
-    );
-    const activeIndex = sessions.findIndex(
-      (session) => session.id === projectSessionState.activeSessionId
-    );
-    const prioritized = activeIndex >= 0
-      ? [
-          sessions[activeIndex - 1],
-          sessions[activeIndex + 1],
-          sessions[0],
-          sessions[sessions.length - 1],
-          ...sessions
-        ]
-      : sessions;
-    return [...new Set(prioritized
-      .filter((session): session is (typeof sessions)[number] => Boolean(session))
-      .map((session) => session.id))]
-      .filter((sessionId) => sessionId !== projectSessionState.activeSessionId)
-      .slice(0, SESSION_STATE_CACHE_LIMIT - 1)
-      .join("|");
-  }, [projectSessionState]);
 
   useEffect(() => {
     if (!sessionPrefetchKey || activeSessionBusy) return;
@@ -934,166 +782,20 @@ export function App() {
     };
   }, [activeSession?.id, activeSessionBusy, inspectorOpen, sessionRuntimeCache]);
 
-  const composerDraft = activeSession ? composerDrafts[activeSession.id] ?? "" : "";
-  const composerAttachments = activeSession ? attachmentDrafts[activeSession.id] ?? [] : [];
-  const attachmentBusy = activeSession
-    ? attachmentBusySessionIds.has(activeSession.id)
-    : false;
-
-  function setActiveComposerDraft(value: string) {
-    const sessionId = activeSessionIdRef.current ?? activeSession?.id;
-    if (!sessionId) return;
-    setComposerDrafts((current) => ({ ...current, [sessionId]: value }));
-  }
-
-  async function handlePickAttachments(files: File[]) {
-    const sessionId = activeSessionIdRef.current ?? activeSession?.id;
-    if (!sessionId || files.length === 0) return;
-    const existing = attachmentDrafts[sessionId] ?? [];
-    const available = Math.max(0, 10 - existing.length);
-    if (files.length > available) {
-      setComposerError("A message can include at most 10 attachments.");
-      return;
-    }
-    setAttachmentBusySessionIds((current) => new Set(current).add(sessionId));
-    setComposerError(null);
-    try {
-      const uploads = await Promise.all(
-        files.map(async (file) => ({
-          name: file.name,
-          mimeType: file.type || "application/octet-stream",
-          dataBase64: await fileDataBase64(file)
-        }))
-      );
-      const staged = await stageAgentAttachments(sessionId, uploads);
-      setAttachmentDrafts((current) => ({
-        ...current,
-        [sessionId]: [...(current[sessionId] ?? []), ...staged]
-      }));
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setAttachmentBusySessionIds((current) => {
-        const next = new Set(current);
-        next.delete(sessionId);
-        return next;
-      });
-    }
-  }
-
-  function handleRemoveAttachment(attachment: AgentAttachment) {
-    const sessionId = activeSessionIdRef.current ?? activeSession?.id;
-    if (!sessionId) return;
-    setAttachmentDrafts((current) => ({
-      ...current,
-      [sessionId]: (current[sessionId] ?? []).filter((item) => item.id !== attachment.id)
-    }));
-    void removeAgentAttachment(sessionId, attachment.path).catch((error) => {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    });
-  }
-
-  const normalizedSidebarQuery = sidebarQuery.trim().toLowerCase();
-
-  const sessions = useMemo(
-    () =>
-      (projectSessionState?.sessions ?? [])
-        .filter((session) => {
-          if (session.archived) return false;
-          if (normalizedSidebarQuery) {
-            return `${session.name} ${session.detail}`
-              .toLowerCase()
-              .includes(normalizedSidebarQuery);
-          }
-          return !activeProject || session.projectId === activeProject.id;
-        })
-        .map((session) =>
-          busySessionIds.has(session.id)
-            ? { ...session, status: "Working", activity: "working" as const }
-            : session
-        ),
-    [
-      activeProject,
-      busySessionIds,
-      normalizedSidebarQuery,
-      projectSessionState?.sessions
-    ]
-  );
-
-  const archivedSessions = useMemo(
-    () =>
-      (projectSessionState?.sessions ?? [])
-        .filter((session) => session.archived)
-        .sort((left, right) => (right.archivedAtMs ?? 0) - (left.archivedAtMs ?? 0)),
-    [projectSessionState?.sessions]
-  );
-
-  const projects = useMemo(
-    () =>
-      (projectSessionState?.projects ?? []).filter((project) => {
-        if (!normalizedSidebarQuery) return true;
-        const projectMatches = `${project.name} ${project.detail} ${project.root}`
-          .toLowerCase()
-          .includes(normalizedSidebarQuery);
-        const matchingSessionExists = (projectSessionState?.sessions ?? []).some(
-          (session) =>
-            !session.archived &&
-            session.projectId === project.id &&
-            `${session.name} ${session.detail}`
-              .toLowerCase()
-              .includes(normalizedSidebarQuery)
-        );
-        return projectMatches || matchingSessionExists;
-      }),
-    [normalizedSidebarQuery, projectSessionState?.projects, projectSessionState?.sessions]
-  );
+  const {
+    value: composerDraft,
+    focusRequest: composerFocusRequest,
+    setActiveDraft: setActiveComposerDraft,
+    editActiveDraft: handleThreadMessageEdit,
+    restoreDraftIfEmpty,
+    forgetDrafts
+  } = useComposerDrafts(activeSession?.id ?? null, activeSessionIdRef);
 
   const agentApprovals = activeAgentState?.pendingApprovals ?? [];
-  const permissionReviews = permissionReviewState?.pending ?? [];
-  const activePermissionReviews = permissionReviews.filter(
-    (review) => !ignoredPermissionReviewIds.has(review.requestId)
-  );
-  const ignoredPermissionReviews = permissionReviews.filter((review) =>
-    ignoredPermissionReviewIds.has(review.requestId)
-  );
   const agentCanCancel = Boolean(activeAgentState?.canCancel || activeSessionBusy);
   const agentCanRetry = Boolean(activeAgentState?.canRetry);
   const agentCanContinue = Boolean(activeAgentState?.canContinue);
   const agentWorking = Boolean(activeSessionBusy || activeAgentState?.status === "running");
-  const traceTurns = useMemo(
-    () => (activeView === "timeline" ? agentTraceState?.turns ?? [] : []),
-    [activeView, agentTraceState?.turns]
-  );
-  const traceSteps = useMemo(
-    () => traceTurns.flatMap((turn) => turn.steps),
-    [traceTurns]
-  );
-  const activeSessionTraceSteps = useMemo(
-    () =>
-      activeSession && agentTraceState?.sessionId === activeSession.id ? traceSteps : [],
-    [activeSession, agentTraceState?.sessionId, traceSteps]
-  );
-  const visibleAgentMessages = useMemo(
-    () =>
-      activeView === "timeline"
-        ? messagesWithOptimisticUserMessages(
-            activeAgentState?.messages ?? [],
-            activeSession
-              ? optimisticUserMessagesRef.current.get(activeSession.id)
-              : undefined
-          )
-        : [],
-    [
-      activeAgentState?.messages,
-      activeSession,
-      activeView,
-      optimisticUserMessageRevision
-    ]
-  );
-  const selectedTraceStep = useMemo(
-    () => traceSteps.find((step) => step.id === selectedTraceStepId) ?? null,
-    [selectedTraceStepId, traceSteps]
-  );
   function markSessionBusy(sessionId: string, busy: boolean) {
     setBusySessionIds((current) => {
       const next = new Set(current);
@@ -1189,36 +891,6 @@ export function App() {
       setComposerError((current) => current ?? next.lastError);
     }
     return next;
-  }
-
-  async function refreshPermissionReviews() {
-    const next = await getPermissionReviewState();
-    setPermissionReviewState(next);
-    return next;
-  }
-
-  function persistIgnoredPermissionReviewIds(ids: Set<string>) {
-    setIgnoredPermissionReviewIds(ids);
-    try {
-      window.localStorage.setItem(
-        IGNORED_PERMISSION_REVIEWS_STORAGE_KEY,
-        JSON.stringify([...ids])
-      );
-    } catch {
-      // Keep the preference for this app session when storage is unavailable.
-    }
-  }
-
-  function handleIgnorePermissionReview(requestId: string) {
-    const next = new Set(ignoredPermissionReviewIds);
-    next.add(requestId);
-    persistIgnoredPermissionReviewIds(next);
-  }
-
-  function handleRestorePermissionReview(requestId: string) {
-    const next = new Set(ignoredPermissionReviewIds);
-    next.delete(requestId);
-    persistIgnoredPermissionReviewIds(next);
   }
 
   async function handleResolvePermissionReview(
@@ -1363,58 +1035,12 @@ export function App() {
     if (workspaceChanged) refreshWorkspaceScopedState();
   }
 
-  async function drainProjectSessionSelections() {
-    if (sessionSelectionRunningRef.current) return;
-    sessionSelectionRunningRef.current = true;
-    try {
-      while (sessionSelectionPendingRef.current) {
-        const pending = sessionSelectionPendingRef.current;
-        sessionSelectionPendingRef.current = null;
-        try {
-          const state = await pending.operation();
-          pending.waiters.forEach(({ resolve }) => resolve(state));
-        } catch (error) {
-          pending.waiters.forEach(({ reject }) => reject(error));
-        }
-      }
-    } finally {
-      sessionSelectionRunningRef.current = false;
-    }
-  }
-
-  function enqueueProjectSessionSelection(
-    operation: () => Promise<ProjectSessionState>
-  ) {
-    const request = new Promise<ProjectSessionState>((resolve, reject) => {
-      const pending = sessionSelectionPendingRef.current;
-      if (pending) {
-        pending.operation = operation;
-        pending.waiters.push({ resolve, reject });
-      } else {
-        sessionSelectionPendingRef.current = {
-          operation,
-          waiters: [{ resolve, reject }]
-        };
-      }
-    });
-    void drainProjectSessionSelections();
-    return request;
-  }
-
   function forgetDeletedSessions(sessionIds: string[]) {
     if (sessionIds.length === 0) return;
     const deleted = new Set(sessionIds);
-    const withoutDeletedKeys = <Value,>(current: Record<string, Value>) => {
-      const next = { ...current };
-      deleted.forEach((sessionId) => delete next[sessionId]);
-      return next;
-    };
-    setComposerDrafts(withoutDeletedKeys);
-    setAttachmentDrafts(withoutDeletedKeys);
+    forgetDrafts(sessionIds);
+    forgetAttachments(sessionIds);
     setBusySessionIds((current) => new Set([...current].filter((id) => !deleted.has(id))));
-    setAttachmentBusySessionIds(
-      (current) => new Set([...current].filter((id) => !deleted.has(id)))
-    );
     deleted.forEach((sessionId) => {
       agentStateRevisionsRef.current.delete(sessionId);
       sessionRuntimeCache.forget(sessionId);
@@ -2066,11 +1692,11 @@ export function App() {
   async function handleSendPrompt(value: string) {
     const nextPrompt = value.trim();
     const sessionId = activeSession?.id;
-    const attachments = sessionId ? attachmentDrafts[sessionId] ?? [] : [];
+    const attachments = composerAttachments;
     if (
       (!nextPrompt && attachments.length === 0) ||
       !sessionId ||
-      attachmentBusySessionIds.has(sessionId)
+      attachmentBusy
     ) {
       return;
     }
@@ -2108,7 +1734,7 @@ export function App() {
       updateQueuedMessagesForSession(sessionId, (messages) =>
         mergeQueuedAgentMessage(messages, optimisticMessage)
       );
-      setAttachmentDrafts((current) => ({ ...current, [sessionId]: [] }));
+      clearAttachments(sessionId);
       try {
         const receipt = await queueAgentMessage(
           nextPrompt,
@@ -2124,17 +1750,8 @@ export function App() {
         updateQueuedMessagesForSession(sessionId, (messages) =>
           messages.filter((message) => message.id !== queueId)
         );
-        if (attachments.length > 0) {
-          setAttachmentDrafts((current) =>
-            (current[sessionId] ?? []).length > 0
-              ? current
-              : { ...current, [sessionId]: attachments }
-          );
-        }
-        setComposerDrafts((current) => ({
-          ...current,
-          [sessionId]: current[sessionId]?.trim() ? current[sessionId] : value
-        }));
+        restoreAttachmentsIfEmpty(sessionId, attachments);
+        restoreDraftIfEmpty(sessionId, value);
         setComposerError(error instanceof Error ? error.message : String(error));
       } finally {
         setPersistingQueuedMessageIds((current) => {
@@ -2148,7 +1765,7 @@ export function App() {
     }
     setStreamResetVersion((version) => version + 1);
     setComposerError(null);
-    setAttachmentDrafts((current) => ({ ...current, [sessionId]: [] }));
+    clearAttachments(sessionId);
     markSessionBusy(sessionId, true);
     const submittedAt = Date.now();
     const optimisticUserMessage: ChatMessageView = {
@@ -2204,10 +1821,7 @@ export function App() {
       setProjectSessionState(await getProjectSessionState());
       await refreshAgentTrace(true, sessionId);
     } catch (error) {
-      setAttachmentDrafts((current) => ({
-        ...current,
-        [sessionId]: current[sessionId]?.length ? current[sessionId] : attachments
-      }));
+      restoreAttachmentsIfEmpty(sessionId, attachments);
       updateSessionStatus(sessionId, "failed");
       if (activeSessionIdRef.current === sessionId) {
         setComposerError(error instanceof Error ? error.message : String(error));
@@ -2371,33 +1985,6 @@ export function App() {
     }
   }
 
-  function beginSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
-    event.preventDefault();
-    const startX = event.clientX;
-    const startWidth = sidebarWidth;
-    const previousCursor = document.body.style.cursor;
-    const previousUserSelect = document.body.style.userSelect;
-    setSidebarResizing(true);
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-
-    const handleMove = (moveEvent: PointerEvent) => {
-      setSidebarWidth(clampSidebarWidth(startWidth + moveEvent.clientX - startX));
-    };
-    const handleUp = () => {
-      window.removeEventListener("pointermove", handleMove);
-      window.removeEventListener("pointerup", handleUp);
-      window.removeEventListener("pointercancel", handleUp);
-      document.body.style.cursor = previousCursor;
-      document.body.style.userSelect = previousUserSelect;
-      setSidebarResizing(false);
-    };
-
-    window.addEventListener("pointermove", handleMove);
-    window.addEventListener("pointerup", handleUp);
-    window.addEventListener("pointercancel", handleUp);
-  }
-
   useEffect(() => {
     const sessionId = activeAgentState?.sessionId;
     if (
@@ -2435,83 +2022,29 @@ export function App() {
         } as CSSProperties
       }
     >
-      <header className="window-toolbar" data-tauri-drag-region>
-        <span className="window-toolbar-panel window-toolbar-panel-left" aria-hidden="true" />
-        <span className="window-toolbar-panel window-toolbar-panel-right" aria-hidden="true" />
-        {activeView !== "settings" && (
-          <button
-            className="window-pane-toggle sidebar-pane-toggle"
-            type="button"
-            aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
-            aria-pressed={sidebarOpen}
-            data-open={sidebarOpen}
-            title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
-            onClick={() => setSidebarOpen((open) => !open)}
-          >
-            <span className="window-pane-toggle-icon" aria-hidden="true">
-              <PanelLeftClose className="pane-icon-open" />
-              <PanelLeftOpen className="pane-icon-closed" />
-            </span>
-          </button>
-        )}
-        {activeView === "timeline" && (
-          <button
-            className="window-pane-toggle inspector-pane-toggle"
-            type="button"
-            aria-label={inspectorOpen ? "Hide inspector" : "Show inspector"}
-            aria-pressed={inspectorOpen}
-            data-open={inspectorOpen}
-            title={inspectorOpen ? "Hide inspector" : "Show inspector"}
-            onClick={() => setInspectorOpen((open) => !open)}
-          >
-            <span className="window-pane-toggle-icon" aria-hidden="true">
-              <PanelRightClose className="pane-icon-open" />
-              <PanelRightOpen className="pane-icon-closed" />
-            </span>
-          </button>
-        )}
-      </header>
-
-      <div className="window-workspace-header">
-        <div className="topbar-title">
-          <div>
-            <h1>
-              {activeView === "settings"
-                ? "Settings"
-                : activeView === "schedule"
-                  ? "Schedule"
-                  : activeSession?.name ?? "Session"}
-            </h1>
-          </div>
-        </div>
-        {activeView === "timeline" && <div className="topbar-actions">
-            <div
-              className="context-usage"
-              title={`${activeAgentState?.contextTokensUsed ?? 0} of ${
-                activeAgentState?.contextWindowTokens ??
-                phase4?.provider.contextWindowTokens ??
-                128000
-              } context tokens${activeAgentState?.contextUsageEstimated ? " (estimated)" : ""}`}
-            >
-              <span>
-                {activeAgentState?.contextUsageEstimated ? "~" : ""}
-                {formatTokenCount(activeAgentState?.contextTokensUsed ?? 0)} tokens
-              </span>
-              <strong>
-                {Math.round(activeAgentState?.contextRemainingPercent ?? 100)}% left
-              </strong>
-              <progress
-                max={100}
-                value={activeAgentState?.contextRemainingPercent ?? 100}
-                aria-label="Context window remaining"
-              />
-            </div>
-            <div className={`runtime-pill ${statusText === "Ready" ? "ready" : ""}`}>
-              <CheckCircle2 size={16} aria-hidden="true" />
-              <span>{statusText}</span>
-            </div>
-        </div>}
-      </div>
+      <WorkspaceChrome
+        activeView={activeView}
+        contextEstimated={activeAgentState?.contextUsageEstimated ?? false}
+        contextRemainingPercent={activeAgentState?.contextRemainingPercent ?? 100}
+        contextTokensUsed={activeAgentState?.contextTokensUsed ?? 0}
+        contextWindowTokens={
+          activeAgentState?.contextWindowTokens ??
+          phase4?.provider.contextWindowTokens ??
+          128000
+        }
+        inspectorOpen={inspectorOpen}
+        onInspectorToggle={() => setInspectorOpen((open) => !open)}
+        onSidebarToggle={() => setSidebarOpen((open) => !open)}
+        sidebarOpen={sidebarOpen}
+        statusText={statusText}
+        title={
+          activeView === "settings"
+            ? "Settings"
+            : activeView === "schedule"
+              ? "Schedule"
+              : activeSession?.name ?? "Session"
+        }
+      />
 
       {activeView !== "settings" && sidebarOpen && (
         <div
@@ -2524,16 +2057,7 @@ export function App() {
           aria-valuenow={sidebarWidth}
           tabIndex={0}
           onPointerDown={beginSidebarResize}
-          onKeyDown={(event) => {
-            if (event.key === "ArrowLeft") {
-              event.preventDefault();
-              setSidebarWidth((width) => clampSidebarWidth(width - 16));
-            }
-            if (event.key === "ArrowRight") {
-              event.preventDefault();
-              setSidebarWidth((width) => clampSidebarWidth(width + 16));
-            }
-          }}
+          onKeyDown={handleSidebarResizeKeyDown}
         />
       )}
 

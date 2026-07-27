@@ -1,25 +1,28 @@
 use std::collections::BTreeMap;
-use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(test)]
+use std::{
+    env, thread,
+    time::{Duration, Instant},
+};
 
 use agent_core::{
-    Metadata, PermissionRequest, PermissionRequestId, PermissionRisk, TaskId, ToolArtifact,
-    ToolCallId, ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
-};
-use model_provider::{
-    ImageGenerationRequest, OpenAiCompatibleImageConfig, OpenAiCompatibleImageProvider,
-    MODEL_REQUEST_CANCELLED,
+    Metadata, PermissionRequest, PermissionRequestId, PermissionRisk, TaskId, ToolCallId,
+    ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
 };
 mod desktop_control;
 mod file_batch;
+mod file_tools;
+mod image_generation;
+mod meta_tools;
 mod process_control;
 mod shell;
+mod stream_capture;
+mod web_search;
 
 #[cfg(test)]
 use desktop_control::{
@@ -28,14 +31,19 @@ use desktop_control::{
 };
 pub use desktop_control::{BrowserTool, ComputerTool};
 pub use file_batch::ReadFilesTool;
+pub use file_tools::{ListDirectoryTool, ReadFileTool, SearchFilesTool, WriteFileTool};
+pub use image_generation::ImageGenerationTool;
 pub use shell::ShellRunTool;
+pub use web_search::WebSearchTool;
 
-const DEFAULT_FILE_READ_BYTES: usize = 128 * 1024;
-const MAX_FILE_READ_BYTES: usize = 256 * 1024;
-const WEB_RESPONSE_MAX_BYTES: usize = 8 * 1024 * 1024;
-const WEB_STDERR_MAX_BYTES: usize = 256 * 1024;
-const SEARCH_FILE_SCAN_MAX_BYTES: u64 = 8 * 1024 * 1024;
-const SEARCH_MATCH_PREVIEW_CHARS: usize = 512;
+use meta_tools::{ToolInspectMeta, ToolInvokeMeta, ToolSearchMeta};
+
+#[cfg(test)]
+use image_generation::image_output_path;
+#[cfg(test)]
+use web_search::html_to_text;
+#[cfg(test)]
+use agent_core::ToolEffectSemantics;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolError {
@@ -93,6 +101,10 @@ impl ToolExecutionControl {
 
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
+
+    fn effect_spec(&self, _invocation: &ToolInvocation) -> ToolSpec {
+        self.spec()
+    }
 
     fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest>;
 
@@ -201,6 +213,7 @@ impl ToolRegistry {
         registry.register(Box::new(BrowserTool::scroll(workspace_root.clone())));
         registry.register(Box::new(BrowserTool::tabs(workspace_root.clone())));
         registry.register(Box::new(BrowserTool::select_tab(workspace_root.clone())));
+        registry.register(Box::new(BrowserTool::close(workspace_root.clone())));
         registry.register(Box::new(ComputerTool::screenshot(workspace_root.clone())));
         registry.register(Box::new(ComputerTool::click(workspace_root.clone())));
         registry.register(Box::new(ComputerTool::type_text(workspace_root.clone())));
@@ -389,865 +402,6 @@ pub fn prompt_requests_image_generation(prompt: &str) -> bool {
     .iter()
     .any(|token| prompt.contains(token));
     has_visual_noun && has_generation_action
-}
-
-struct ToolSearchMeta {
-    catalog: ToolRegistry,
-}
-
-impl Tool for ToolSearchMeta {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            "tool.search",
-            "meta",
-            "Search the deferred Cindx tool catalog by query or namespace.",
-            ToolRisk::ReadOnly,
-            agent_core::ToolSource::BuiltIn,
-            agent_core::ToolExposure::Inline,
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string" },
-                    "namespace": { "type": "string" }
-                },
-                "additionalProperties": false
-            })
-            .to_string(),
-        )
-    }
-
-    fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
-        None
-    }
-
-    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
-        let input: serde_json::Value = serde_json::from_str(&invocation.input_json)
-            .map_err(|error| ToolError::new(format!("invalid tool search input: {error}")))?;
-        let query = input
-            .get("query")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let namespace = input.get("namespace").and_then(serde_json::Value::as_str);
-        let mut rows = self
-            .catalog
-            .specs()
-            .into_iter()
-            .filter(|spec| spec.namespace != "meta")
-            .filter(|spec| namespace.is_none_or(|namespace| spec.namespace == namespace))
-            .filter(|spec| {
-                query.is_empty()
-                    || format!("{} {} {}", spec.name, spec.namespace, spec.description)
-                        .to_ascii_lowercase()
-                        .contains(&query)
-            })
-            .map(|spec| format!("{}\t{}\t{}", spec.name, spec.namespace, spec.description))
-            .collect::<Vec<_>>();
-        rows.sort();
-        rows.truncate(20);
-        Ok(ToolResult::text(
-            invocation.id,
-            ToolOutcomeStatus::Succeeded,
-            if rows.is_empty() {
-                "No matching tools.".to_string()
-            } else {
-                rows.join("\n")
-            },
-            Metadata::new(),
-        ))
-    }
-}
-
-struct ToolInspectMeta {
-    catalog: ToolRegistry,
-}
-
-impl Tool for ToolInspectMeta {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            "tool.inspect",
-            "meta",
-            "Inspect one deferred tool's description and JSON schema before invoking it.",
-            ToolRisk::ReadOnly,
-            agent_core::ToolSource::BuiltIn,
-            agent_core::ToolExposure::Inline,
-            serde_json::json!({
-                "type": "object",
-                "properties": { "name": { "type": "string" } },
-                "required": ["name"],
-                "additionalProperties": false
-            })
-            .to_string(),
-        )
-    }
-
-    fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
-        None
-    }
-
-    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
-        let (name, _) = meta_target(&invocation.input_json)?;
-        let spec = self
-            .catalog
-            .get(&name)
-            .map(Tool::spec)
-            .ok_or_else(|| ToolError::new(format!("unknown tool: {name}")))?;
-        let output = serde_json::json!({
-            "name": spec.name,
-            "namespace": spec.namespace,
-            "description": spec.description,
-            "inputSchema": serde_json::from_str::<serde_json::Value>(&spec.input_schema_json).unwrap_or_default(),
-            "risk": format!("{:?}", spec.risk),
-        })
-        .to_string();
-        Ok(ToolResult::text(
-            invocation.id,
-            ToolOutcomeStatus::Succeeded,
-            output,
-            Metadata::new(),
-        ))
-    }
-}
-
-struct ToolInvokeMeta {
-    catalog: ToolRegistry,
-}
-
-impl ToolInvokeMeta {
-    fn target_invocation(&self, invocation: &ToolInvocation) -> Result<ToolInvocation, ToolError> {
-        let (name, arguments) = meta_target(&invocation.input_json)?;
-        if name.starts_with("tool.") {
-            return Err(ToolError::new("meta tools cannot invoke other meta tools"));
-        }
-        if self.catalog.get(&name).is_none() {
-            return Err(ToolError::new(format!("unknown tool: {name}")));
-        }
-        Ok(ToolInvocation {
-            id: invocation.id.clone(),
-            task_id: invocation.task_id.clone(),
-            tool_name: name,
-            input_json: arguments.to_string(),
-            proposed_by_model: invocation.proposed_by_model.clone(),
-            metadata: invocation.metadata.clone(),
-        })
-    }
-}
-
-impl Tool for ToolInvokeMeta {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            "tool.invoke",
-            "meta",
-            "Invoke a deferred tool by exact name with a JSON arguments object.",
-            ToolRisk::SensitiveContext,
-            agent_core::ToolSource::BuiltIn,
-            agent_core::ToolExposure::Inline,
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string" },
-                    "arguments": { "type": "object" }
-                },
-                "required": ["name", "arguments"],
-                "additionalProperties": false
-            })
-            .to_string(),
-        )
-    }
-
-    fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
-        let target = self.target_invocation(invocation).ok()?;
-        self.catalog
-            .get(&target.tool_name)
-            .and_then(|tool| tool.permission_request(&target))
-    }
-
-    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
-        let target = self.target_invocation(&invocation)?;
-        self.catalog
-            .get(&target.tool_name)
-            .ok_or_else(|| ToolError::new(format!("unknown tool: {}", target.tool_name)))?
-            .execute(target)
-    }
-}
-
-fn meta_target(input: &str) -> Result<(String, serde_json::Value), ToolError> {
-    let input: serde_json::Value = serde_json::from_str(input)
-        .map_err(|error| ToolError::new(format!("invalid meta tool input: {error}")))?;
-    let name = input
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .filter(|name| !name.trim().is_empty())
-        .ok_or_else(|| ToolError::new("meta tool requires a target name"))?
-        .to_string();
-    let arguments = input
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
-    if !arguments.is_object() {
-        return Err(ToolError::new("meta tool arguments must be an object"));
-    }
-    Ok((name, arguments))
-}
-
-pub struct ReadFileTool {
-    workspace_root: PathBuf,
-}
-
-impl ReadFileTool {
-    pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
-        Self {
-            workspace_root: workspace_root.into(),
-        }
-    }
-}
-
-impl Tool for ReadFileTool {
-    fn spec(&self) -> ToolSpec {
-        builtin_tool_spec(
-            "file.read",
-            "Read a bounded UTF-8 byte range inside the workspace. Large files return a continuation offset.",
-            ToolRisk::ReadOnly,
-            "path=<workspace-relative-path>\noffset_bytes=<optional byte offset, default 0>\nmax_bytes=<optional 1-262144, default 131072>",
-        )
-    }
-
-    fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
-        None
-    }
-
-    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
-        let input = parse_input(&invocation.input_json);
-        let path = required_input(&input, "path")?;
-        let offset_bytes = parse_bounded_usize_input(&input, "offset_bytes", 0, 0, usize::MAX)?;
-        let max_bytes = parse_bounded_usize_input(
-            &input,
-            "max_bytes",
-            DEFAULT_FILE_READ_BYTES,
-            1,
-            MAX_FILE_READ_BYTES,
-        )?;
-        let resolved = resolve_workspace_path(&self.workspace_root, &path)?;
-        let resolved = resolve_workspace_read_path(&self.workspace_root, &resolved)?;
-        reject_sensitive_read_path(&self.workspace_root, &resolved)?;
-        let mut file = fs::File::open(&resolved)
-            .map_err(|error| ToolError::new(format!("failed to read file: {error}")))?;
-        let total_bytes = file
-            .metadata()
-            .map_err(|error| ToolError::new(format!("failed to inspect file: {error}")))?
-            .len();
-        let offset = (offset_bytes as u64).min(total_bytes);
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|error| ToolError::new(format!("failed to seek file: {error}")))?;
-        let mut bytes = Vec::with_capacity(max_bytes.saturating_add(4));
-        file.take(max_bytes.saturating_add(4) as u64)
-            .read_to_end(&mut bytes)
-            .map_err(|error| ToolError::new(format!("failed to read file range: {error}")))?;
-        let skipped_prefix = bytes
-            .iter()
-            .take(3)
-            .take_while(|byte| **byte & 0b1100_0000 == 0b1000_0000)
-            .count();
-        if skipped_prefix > 0 {
-            bytes.drain(..skipped_prefix);
-        }
-        let offset = offset.saturating_add(skipped_prefix as u64);
-        let end = utf8_page_end(&bytes, max_bytes);
-        bytes.truncate(end);
-        let returned_bytes = bytes.len();
-        let next_offset = offset.saturating_add(returned_bytes as u64);
-        let truncated = next_offset < total_bytes;
-        let mut output = String::from_utf8_lossy(&bytes).to_string();
-        if truncated {
-            if !output.ends_with('\n') {
-                output.push('\n');
-            }
-            output.push_str(&format!(
-                "\n[File read bounded at {returned_bytes} bytes. Continue with offset_bytes={next_offset}. Total file size: {total_bytes} bytes.]"
-            ));
-        }
-        let mut metadata = Metadata::new();
-        metadata.insert("path".to_string(), path);
-        metadata.insert("bytes".to_string(), total_bytes.to_string());
-        metadata.insert("offset_bytes".to_string(), offset.to_string());
-        metadata.insert("returned_bytes".to_string(), returned_bytes.to_string());
-        metadata.insert("next_offset_bytes".to_string(), next_offset.to_string());
-        metadata.insert("truncated".to_string(), truncated.to_string());
-
-        Ok(tool_result(
-            invocation.id,
-            ToolOutcomeStatus::Succeeded,
-            output,
-            metadata,
-        ))
-    }
-}
-
-fn utf8_page_end(bytes: &[u8], max_bytes: usize) -> usize {
-    let candidate = bytes.len().min(max_bytes);
-    match std::str::from_utf8(&bytes[..candidate]) {
-        Ok(_) => candidate,
-        Err(error) if error.error_len().is_none() => {
-            let valid = error.valid_up_to();
-            if valid > 0 {
-                return valid;
-            }
-            let width = utf8_sequence_width(bytes.first().copied().unwrap_or_default());
-            if width > 1 && bytes.len() >= width && std::str::from_utf8(&bytes[..width]).is_ok() {
-                width
-            } else {
-                candidate
-            }
-        }
-        Err(_) => candidate,
-    }
-}
-
-fn utf8_sequence_width(first: u8) -> usize {
-    match first {
-        0x00..=0x7f => 1,
-        0xc2..=0xdf => 2,
-        0xe0..=0xef => 3,
-        0xf0..=0xf4 => 4,
-        _ => 1,
-    }
-}
-
-pub struct ListDirectoryTool {
-    workspace_root: PathBuf,
-}
-
-impl ListDirectoryTool {
-    pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
-        Self {
-            workspace_root: workspace_root.into(),
-        }
-    }
-}
-
-impl Tool for ListDirectoryTool {
-    fn spec(&self) -> ToolSpec {
-        builtin_tool_spec(
-            "file.list",
-            "List files and directories inside the workspace.",
-            ToolRisk::ReadOnly,
-            "path=<optional workspace-relative-path>",
-        )
-    }
-
-    fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
-        None
-    }
-
-    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
-        let input = parse_input(&invocation.input_json);
-        let path = input
-            .get("path")
-            .cloned()
-            .unwrap_or_else(|| ".".to_string());
-        let resolved = resolve_workspace_path(&self.workspace_root, &path)?;
-        let resolved = resolve_workspace_read_path(&self.workspace_root, &resolved)?;
-        let mut rows = Vec::new();
-        let entries = fs::read_dir(&resolved)
-            .map_err(|error| ToolError::new(format!("failed to list directory: {error}")))?;
-
-        for entry in entries {
-            let entry = entry.map_err(|error| {
-                ToolError::new(format!("failed to read directory entry: {error}"))
-            })?;
-            let metadata = entry
-                .metadata()
-                .map_err(|error| ToolError::new(format!("failed to read metadata: {error}")))?;
-            let kind = if metadata.is_dir() { "dir" } else { "file" };
-            rows.push(format!(
-                "{}\t{}\t{}",
-                kind,
-                metadata.len(),
-                entry.file_name().to_string_lossy()
-            ));
-        }
-        rows.sort();
-
-        let mut metadata = Metadata::new();
-        metadata.insert("path".to_string(), path);
-        metadata.insert("entries".to_string(), rows.len().to_string());
-
-        Ok(tool_result(
-            invocation.id,
-            ToolOutcomeStatus::Succeeded,
-            rows.join("\n"),
-            metadata,
-        ))
-    }
-}
-
-pub struct SearchFilesTool {
-    workspace_root: PathBuf,
-}
-
-impl SearchFilesTool {
-    pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
-        Self {
-            workspace_root: workspace_root.into(),
-        }
-    }
-}
-
-impl Tool for SearchFilesTool {
-    fn spec(&self) -> ToolSpec {
-        builtin_tool_spec(
-            "file.search",
-            "Search UTF-8 files inside the workspace for a literal query.",
-            ToolRisk::ReadOnly,
-            "query=<literal text>\npath=<optional workspace-relative path>\nmax_results=<optional number>",
-        )
-    }
-
-    fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
-        None
-    }
-
-    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
-        let input = parse_input(&invocation.input_json);
-        let query = required_input(&input, "query")?;
-        let path = input
-            .get("path")
-            .cloned()
-            .unwrap_or_else(|| ".".to_string());
-        let max_results = input
-            .get("max_results")
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(50)
-            .min(200);
-        let root = resolve_workspace_path(&self.workspace_root, &path)?;
-        let root = resolve_workspace_read_path(&self.workspace_root, &root)?;
-        reject_sensitive_read_path(&self.workspace_root, &root)?;
-        let mut results = Vec::new();
-        search_directory(
-            &self.workspace_root,
-            &root,
-            &query,
-            max_results,
-            &mut results,
-        )?;
-
-        let mut metadata = Metadata::new();
-        metadata.insert("query".to_string(), query);
-        metadata.insert("path".to_string(), path);
-        metadata.insert("matches".to_string(), results.len().to_string());
-
-        Ok(tool_result(
-            invocation.id,
-            ToolOutcomeStatus::Succeeded,
-            results.join("\n"),
-            metadata,
-        ))
-    }
-}
-
-pub struct WriteFileTool {
-    workspace_root: PathBuf,
-}
-
-impl WriteFileTool {
-    pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
-        Self {
-            workspace_root: workspace_root.into(),
-        }
-    }
-}
-
-impl Tool for WriteFileTool {
-    fn spec(&self) -> ToolSpec {
-        builtin_tool_spec(
-            "file.write",
-            "Write UTF-8 content to a file inside the workspace.",
-            ToolRisk::WritesWorkspace,
-            "path=<workspace-relative-path>\ncontent=<utf-8 content>",
-        )
-    }
-
-    fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
-        let input = parse_input(&invocation.input_json);
-        let path = input
-            .get("path")
-            .cloned()
-            .unwrap_or_else(|| "<missing path>".to_string());
-        Some(permission_request(
-            &invocation.task_id,
-            PermissionRisk::Write,
-            "file.write",
-            "Write a file in the selected workspace.",
-            &path,
-            [
-                ("tool_call_id".to_string(), invocation.id.0.clone()),
-                ("tool_name".to_string(), invocation.tool_name.clone()),
-            ]
-            .into_iter()
-            .collect(),
-        ))
-    }
-
-    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
-        let input = parse_input(&invocation.input_json);
-        let path = required_input(&input, "path")?;
-        let content = required_input(&input, "content")?;
-        let resolved = resolve_workspace_path(&self.workspace_root, &path)?;
-        let session_key = invocation
-            .metadata
-            .get("session_id")
-            .map(|session_id| stable_hash(session_id).to_string())
-            .unwrap_or_else(|| "unscoped".to_string());
-        let version_key = stable_hash(&invocation.id.0).to_string();
-        let snapshot_relative = PathBuf::from(".cindx")
-            .join("output-history")
-            .join(session_key)
-            .join(version_key)
-            .join(&path);
-        let snapshot = self.workspace_root.join(&snapshot_relative);
-        if let Some(parent) = snapshot.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                ToolError::new(format!(
-                    "failed to create output history directory: {error}"
-                ))
-            })?;
-        }
-        fs::write(&snapshot, content.as_bytes()).map_err(|error| {
-            ToolError::new(format!("failed to preserve output version: {error}"))
-        })?;
-        if let Some(parent) = resolved.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                ToolError::new(format!("failed to create parent directory: {error}"))
-            })?;
-        }
-        fs::write(&resolved, content.as_bytes())
-            .map_err(|error| ToolError::new(format!("failed to write file: {error}")))?;
-
-        let mut metadata = Metadata::new();
-        metadata.insert("path".to_string(), path);
-        metadata.insert("source_path".to_string(), resolved.display().to_string());
-        metadata.insert(
-            "artifact_path".to_string(),
-            snapshot_relative.display().to_string(),
-        );
-        metadata.insert("bytes".to_string(), content.len().to_string());
-
-        Ok(tool_result(
-            invocation.id,
-            ToolOutcomeStatus::Succeeded,
-            "file written".to_string(),
-            metadata,
-        ))
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct WebSearchTool {
-    config: WebSearchConfig,
-}
-
-impl WebSearchTool {
-    pub fn new(config: WebSearchConfig) -> Self {
-        Self { config }
-    }
-}
-
-impl Tool for WebSearchTool {
-    fn spec(&self) -> ToolSpec {
-        builtin_tool_spec(
-            "web.search",
-            "Search the web through the configured search API or the built-in public fallback.",
-            ToolRisk::UsesNetwork,
-            "query=<search query>\nmax_results=<optional number>",
-        )
-    }
-
-    fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
-        let input = parse_input(&invocation.input_json);
-        let query = input
-            .get("query")
-            .cloned()
-            .unwrap_or_else(|| "<missing query>".to_string());
-        Some(permission_request(
-            &invocation.task_id,
-            PermissionRisk::Network,
-            "web.search",
-            "Search the public web.",
-            &query,
-            [
-                ("tool_call_id".to_string(), invocation.id.0.clone()),
-                ("tool_name".to_string(), invocation.tool_name.clone()),
-            ]
-            .into_iter()
-            .collect(),
-        ))
-    }
-
-    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
-        let input = parse_input(&invocation.input_json);
-        let query = required_input(&input, "query")?;
-        let max_results = input
-            .get("max_results")
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(8)
-            .clamp(1, 20);
-        let (text, url, provider) = if self.config.endpoint.trim().is_empty() {
-            let url = format!("https://duckduckgo.com/html/?q={}", url_encode(&query));
-            let html = fetch_url(&url)?;
-            (
-                trim_lines(&html_to_text(&html), max_results * 4),
-                url,
-                "public_fallback".to_string(),
-            )
-        } else {
-            let endpoint = self.config.endpoint.trim().to_string();
-            let response = fetch_search_api(&self.config, &query, max_results)?;
-            (
-                response.chars().take(64_000).collect(),
-                endpoint,
-                "configured_api".to_string(),
-            )
-        };
-
-        let mut metadata = Metadata::new();
-        metadata.insert("query".to_string(), query);
-        metadata.insert("url".to_string(), url);
-        metadata.insert("max_results".to_string(), max_results.to_string());
-        metadata.insert("provider".to_string(), provider);
-
-        Ok(tool_result(
-            invocation.id,
-            ToolOutcomeStatus::Succeeded,
-            text,
-            metadata,
-        ))
-    }
-}
-
-pub struct ImageGenerationTool {
-    workspace_root: PathBuf,
-    config: ImageGenerationConfig,
-}
-
-impl ImageGenerationTool {
-    pub fn new(workspace_root: impl Into<PathBuf>, config: ImageGenerationConfig) -> Self {
-        Self {
-            workspace_root: workspace_root.into(),
-            config,
-        }
-    }
-}
-
-impl Tool for ImageGenerationTool {
-    fn spec(&self) -> ToolSpec {
-        let mut spec = ToolSpec::new(
-            "image.generate",
-            "image",
-            format!(
-                "Generate one raster image using the user-configured model `{}` and save it in the active workspace. The model and provider are controlled by Settings and cannot be overridden in tool input.",
-                self.config.model
-            ),
-            ToolRisk::UsesNetwork,
-            agent_core::ToolSource::BuiltIn,
-            agent_core::ToolExposure::Auto,
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "A detailed visual description of the image to generate."
-                    },
-                    "size": {
-                        "type": "string",
-                        "description": "Optional provider-supported size such as 1024x1024."
-                    },
-                    "output_path": {
-                        "type": "string",
-                        "description": "Optional workspace-relative output path. The file extension is normalized to the returned image format."
-                    }
-                },
-                "required": ["prompt"],
-                "additionalProperties": false
-            })
-            .to_string(),
-        );
-        spec.output_schema_json = Some(
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string" },
-                    "mimeType": { "type": "string" },
-                    "model": { "type": "string" }
-                },
-                "required": ["path", "mimeType", "model"]
-            })
-            .to_string(),
-        );
-        spec
-    }
-
-    fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
-        let input = parse_input(&invocation.input_json);
-        let output_path = input
-            .get("output_path")
-            .filter(|value| !value.trim().is_empty())
-            .cloned()
-            .unwrap_or_else(|| "generated-images/".to_string());
-        Some(permission_request(
-            &invocation.task_id,
-            PermissionRisk::Network,
-            "image.generate",
-            "Send a visual prompt to the configured image provider and write the result in the workspace.",
-            &output_path,
-            [
-                ("tool_call_id".to_string(), invocation.id.0.clone()),
-                ("tool_name".to_string(), invocation.tool_name.clone()),
-                ("model".to_string(), self.config.model.clone()),
-            ]
-            .into_iter()
-            .collect(),
-        ))
-    }
-
-    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
-        self.execute_with_control(invocation, &ToolExecutionControl::never_cancelled())
-    }
-
-    fn execute_with_control(
-        &self,
-        invocation: ToolInvocation,
-        control: &ToolExecutionControl,
-    ) -> Result<ToolResult, ToolError> {
-        if control.should_cancel() {
-            return Ok(ToolResult::text(
-                invocation.id,
-                ToolOutcomeStatus::Cancelled,
-                "Image generation cancelled before it started.",
-                Metadata::new(),
-            ));
-        }
-        let input = parse_input(&invocation.input_json);
-        let prompt = required_input(&input, "prompt")?;
-        let size = input
-            .get("size")
-            .filter(|value| !value.trim().is_empty())
-            .cloned();
-        let provider = OpenAiCompatibleImageProvider::new(OpenAiCompatibleImageConfig {
-            base_url: self.config.base_url.clone(),
-            api_key: self.config.api_key.clone(),
-            model: self.config.model.clone(),
-            timeout_seconds: self.config.timeout_seconds.max(1),
-        });
-        let response = match provider.generate_cancellable(
-            ImageGenerationRequest {
-                prompt,
-                size: size.clone(),
-                metadata: Metadata::new(),
-            },
-            || control.should_cancel(),
-        ) {
-            Ok(response) => response,
-            Err(error) if error.message == MODEL_REQUEST_CANCELLED => {
-                return Ok(ToolResult::text(
-                    invocation.id,
-                    ToolOutcomeStatus::Cancelled,
-                    "Image generation cancelled.",
-                    Metadata::new(),
-                ));
-            }
-            Err(error) => return Err(ToolError::new(error.message)),
-        };
-        let image = response
-            .images
-            .into_iter()
-            .next()
-            .ok_or_else(|| ToolError::new("image provider returned no image"))?;
-        if control.should_cancel() {
-            return Ok(ToolResult::text(
-                invocation.id,
-                ToolOutcomeStatus::Cancelled,
-                "Image generation cancelled.",
-                Metadata::new(),
-            ));
-        }
-
-        let requested_path = input.get("output_path").map(String::as_str);
-        let (resolved_path, relative_path) =
-            image_output_path(&self.workspace_root, requested_path, &image.mime_type)?;
-        if let Some(parent) = resolved_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                ToolError::new(format!("failed to create image output directory: {error}"))
-            })?;
-        }
-        fs::write(&resolved_path, &image.bytes)
-            .map_err(|error| ToolError::new(format!("failed to write generated image: {error}")))?;
-
-        let mut metadata = Metadata::new();
-        metadata.insert("artifact_path".to_string(), relative_path.clone());
-        metadata.insert("model".to_string(), response.model.clone());
-        metadata.insert("mime_type".to_string(), image.mime_type.clone());
-        metadata.insert("bytes".to_string(), image.bytes.len().to_string());
-        if let Some(size) = size {
-            metadata.insert("size".to_string(), size);
-        }
-        let title = resolved_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("Generated image")
-            .to_string();
-        let mut result = ToolResult::text(
-            invocation.id,
-            ToolOutcomeStatus::Succeeded,
-            format!("Generated image: {relative_path}"),
-            metadata,
-        );
-        result.artifacts.push(ToolArtifact {
-            path: relative_path.clone(),
-            mime_type: Some(image.mime_type.clone()),
-            title: Some(title),
-        });
-        result.structured_output_json = Some(
-            serde_json::json!({
-                "path": relative_path,
-                "mimeType": image.mime_type,
-                "model": response.model,
-                "revisedPrompt": image.revised_prompt
-            })
-            .to_string(),
-        );
-        Ok(result)
-    }
-}
-
-fn image_output_path(
-    workspace_root: &Path,
-    requested_path: Option<&str>,
-    mime_type: &str,
-) -> Result<(PathBuf, String), ToolError> {
-    let extension = match mime_type {
-        "image/jpeg" => "jpg",
-        "image/gif" => "gif",
-        "image/webp" => "webp",
-        "image/avif" => "avif",
-        "image/png" => "png",
-        _ => return Err(ToolError::new("unsupported generated image format")),
-    };
-    let timestamp = current_time_millis();
-    let mut relative = requested_path
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(format!("generated-images/image-{timestamp}.{extension}"))
-        });
-    if relative.file_name().is_none() || requested_path.is_some_and(|value| value.ends_with('/')) {
-        relative.push(format!("image-{timestamp}.{extension}"));
-    } else {
-        relative.set_extension(extension);
-    }
-    let relative_path = relative.to_string_lossy().to_string();
-    let resolved = resolve_workspace_path(workspace_root, &relative_path)?;
-    Ok((resolved, relative_path))
 }
 
 pub(crate) fn builtin_tool_spec(
@@ -1479,140 +633,6 @@ pub(crate) fn resolve_workspace_read_path(
     Ok(canonical_path)
 }
 
-fn reject_sensitive_read_path(workspace_root: &Path, path: &Path) -> Result<(), ToolError> {
-    if is_sensitive_workspace_path(workspace_root, path) {
-        Err(ToolError::new(
-            "access to local credential files is blocked; configure providers in Settings",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-fn is_sensitive_workspace_path(workspace_root: &Path, path: &Path) -> bool {
-    let relative = path.strip_prefix(workspace_root).unwrap_or(path);
-    let normalized = relative
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => Some(value.to_string_lossy().to_ascii_lowercase()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let joined = normalized.join("/");
-    if joined == ".cindx/provider.conf" || joined.ends_with("/.cindx/provider.conf") {
-        return true;
-    }
-
-    let Some(file_name) = normalized.last().map(String::as_str) else {
-        return false;
-    };
-    let is_env_file = (file_name == ".env" || file_name.starts_with(".env."))
-        && !file_name.ends_with(".example")
-        && !file_name.ends_with(".sample")
-        && !file_name.ends_with(".template");
-    is_env_file
-        || matches!(
-            file_name,
-            ".npmrc" | ".pypirc" | "credentials" | "credentials.json" | "id_rsa" | "id_ed25519"
-        )
-        || file_name.ends_with(".pem")
-        || file_name.ends_with(".key")
-}
-
-fn search_directory(
-    workspace_root: &Path,
-    directory: &Path,
-    query: &str,
-    max_results: usize,
-    results: &mut Vec<String>,
-) -> Result<(), ToolError> {
-    if results.len() >= max_results {
-        return Ok(());
-    }
-
-    let metadata = fs::metadata(directory)
-        .map_err(|error| ToolError::new(format!("failed to read search path: {error}")))?;
-    if metadata.is_file() {
-        search_file(workspace_root, directory, query, max_results, results)?;
-        return Ok(());
-    }
-
-    let entries = fs::read_dir(directory)
-        .map_err(|error| ToolError::new(format!("failed to search directory: {error}")))?;
-    for entry in entries {
-        if results.len() >= max_results {
-            break;
-        }
-        let entry = entry
-            .map_err(|error| ToolError::new(format!("failed to read directory entry: {error}")))?;
-        let path = entry.path();
-        let file_name = entry.file_name();
-        if file_name.to_string_lossy().starts_with('.') {
-            continue;
-        }
-        let file_type = entry
-            .file_type()
-            .map_err(|error| ToolError::new(format!("failed to read file type: {error}")))?;
-        if file_type.is_symlink() {
-            continue;
-        }
-        let metadata = entry
-            .metadata()
-            .map_err(|error| ToolError::new(format!("failed to read metadata: {error}")))?;
-        if metadata.is_dir() {
-            search_directory(workspace_root, &path, query, max_results, results)?;
-        } else if metadata.is_file() {
-            search_file(workspace_root, &path, query, max_results, results)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn search_file(
-    workspace_root: &Path,
-    path: &Path,
-    query: &str,
-    max_results: usize,
-    results: &mut Vec<String>,
-) -> Result<(), ToolError> {
-    if results.len() >= max_results {
-        return Ok(());
-    }
-    if is_sensitive_workspace_path(workspace_root, path) {
-        return Ok(());
-    }
-    let Ok(file) = fs::File::open(path) else {
-        return Ok(());
-    };
-    let relative = path.strip_prefix(workspace_root).unwrap_or(path);
-    let mut reader = BufReader::new(file.take(SEARCH_FILE_SCAN_MAX_BYTES));
-    let mut line = String::new();
-    let mut index = 0usize;
-    loop {
-        if results.len() >= max_results {
-            break;
-        }
-        line.clear();
-        let Ok(read) = reader.read_line(&mut line) else {
-            break;
-        };
-        if read == 0 {
-            break;
-        }
-        index += 1;
-        if line.contains(query) {
-            let preview: String = line
-                .trim()
-                .chars()
-                .take(SEARCH_MATCH_PREVIEW_CHARS)
-                .collect();
-            results.push(format!("{}:{}:{}", relative.display(), index, preview));
-        }
-    }
-    Ok(())
-}
-
 fn input_value_is_true(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -1631,304 +651,6 @@ fn required_url(input: &BTreeMap<String, String>) -> Result<String, ToolError> {
     }
 
     Ok(normalized)
-}
-
-fn fetch_url(url: &str) -> Result<String, ToolError> {
-    let mut command = Command::new("/usr/bin/curl");
-    command
-        .arg("-L")
-        .arg("--silent")
-        .arg("--show-error")
-        .arg("--max-time")
-        .arg("25")
-        .arg("--user-agent")
-        .arg("LocalAgent/0.1")
-        .arg(url);
-    let output = run_command_with_limited_output(
-        &mut command,
-        WEB_RESPONSE_MAX_BYTES,
-        WEB_STDERR_MAX_BYTES,
-        "curl",
-    )?;
-
-    if !output.status.success() {
-        return Err(ToolError::new(format!(
-            "curl failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-fn fetch_search_api(
-    config: &WebSearchConfig,
-    query: &str,
-    max_results: usize,
-) -> Result<String, ToolError> {
-    let endpoint = config.endpoint.trim();
-    if endpoint.contains('\n')
-        || endpoint.contains('\r')
-        || !(endpoint.starts_with("https://") || endpoint.starts_with("http://"))
-    {
-        return Err(ToolError::new(
-            "web search endpoint must be a single-line HTTP or HTTPS URL",
-        ));
-    }
-    if config.api_key.contains('\n') || config.api_key.contains('\r') {
-        return Err(ToolError::new("web search API key must be a single line"));
-    }
-
-    let uses_url_template = endpoint.contains("{query}") || endpoint.contains("{limit}");
-    let url = endpoint
-        .replace("{query}", &url_encode(query))
-        .replace("{limit}", &max_results.to_string());
-    let mut command = Command::new("/usr/bin/curl");
-    command
-        .arg("-L")
-        .arg("--silent")
-        .arg("--show-error")
-        .arg("--fail")
-        .arg("--max-time")
-        .arg("25")
-        .arg("--user-agent")
-        .arg("Cindx/1");
-    if !config.api_key.trim().is_empty() {
-        command
-            .arg("--header")
-            .arg(format!("Authorization: Bearer {}", config.api_key.trim()));
-    }
-    if !uses_url_template {
-        command
-            .arg("--request")
-            .arg("POST")
-            .arg("--header")
-            .arg("Content-Type: application/json")
-            .arg("--data")
-            .arg(
-                serde_json::json!({
-                    "query": query,
-                    "max_results": max_results
-                })
-                .to_string(),
-            );
-    }
-    command.arg(&url);
-    let output = run_command_with_limited_output(
-        &mut command,
-        WEB_RESPONSE_MAX_BYTES,
-        WEB_STDERR_MAX_BYTES,
-        "search API request",
-    )?;
-    if !output.status.success() {
-        return Err(ToolError::new(format!(
-            "search API request failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-#[derive(Default)]
-struct LimitedStreamCapture {
-    bytes: Vec<u8>,
-    total_bytes: u64,
-    truncated: bool,
-    error: Option<String>,
-}
-
-fn capture_stream_limited(mut stream: impl Read, max_bytes: usize) -> LimitedStreamCapture {
-    let mut capture = LimitedStreamCapture {
-        bytes: Vec::with_capacity(max_bytes.min(64 * 1024)),
-        ..LimitedStreamCapture::default()
-    };
-    let mut buffer = [0u8; 16 * 1024];
-    loop {
-        let count = match stream.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(count) => count,
-            Err(error) => {
-                capture.error = Some(error.to_string());
-                break;
-            }
-        };
-        capture.total_bytes = capture.total_bytes.saturating_add(count as u64);
-        let remaining = max_bytes.saturating_sub(capture.bytes.len());
-        let retained = remaining.min(count);
-        capture.bytes.extend_from_slice(&buffer[..retained]);
-        capture.truncated |= retained < count;
-    }
-    capture
-}
-
-struct LimitedCommandOutput {
-    status: ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-}
-
-fn run_command_with_limited_output(
-    command: &mut Command,
-    stdout_max_bytes: usize,
-    stderr_max_bytes: usize,
-    label: &str,
-) -> Result<LimitedCommandOutput, ToolError> {
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| ToolError::new(format!("failed to run {label}: {error}")))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| ToolError::new(format!("{label} stdout is unavailable")))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| ToolError::new(format!("{label} stderr is unavailable")))?;
-    let stdout_reader = thread::spawn(move || capture_stream_limited(stdout, stdout_max_bytes));
-    let stderr_reader = thread::spawn(move || capture_stream_limited(stderr, stderr_max_bytes));
-    let status = child
-        .wait()
-        .map_err(|error| ToolError::new(format!("failed to wait for {label}: {error}")))?;
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| ToolError::new(format!("{label} stdout reader panicked")))?;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| ToolError::new(format!("{label} stderr reader panicked")))?;
-    if let Some(error) = stdout.error {
-        return Err(ToolError::new(format!(
-            "failed to read {label} stdout: {error}"
-        )));
-    }
-    if stdout.truncated {
-        return Err(ToolError::new(format!(
-            "{label} response exceeded the {stdout_max_bytes} byte safety limit ({} bytes produced)",
-            stdout.total_bytes
-        )));
-    }
-    if let Some(error) = stderr.error {
-        return Err(ToolError::new(format!(
-            "failed to read {label} stderr: {error}"
-        )));
-    }
-    Ok(LimitedCommandOutput {
-        status,
-        stdout: stdout.bytes,
-        stderr: stderr.bytes,
-    })
-}
-
-fn html_to_text(html: &str) -> String {
-    let mut text = String::new();
-    let mut in_tag = false;
-    let mut entity = String::new();
-    let mut in_entity = false;
-
-    for character in html.chars() {
-        if in_tag {
-            if character == '>' {
-                in_tag = false;
-                text.push(' ');
-            }
-            continue;
-        }
-        if in_entity {
-            if character == ';' {
-                text.push_str(&decode_entity(&entity));
-                entity.clear();
-                in_entity = false;
-            } else if entity.len() < 12 {
-                entity.push(character);
-            } else {
-                text.push('&');
-                text.push_str(&entity);
-                entity.clear();
-                in_entity = false;
-                text.push(character);
-            }
-            continue;
-        }
-
-        match character {
-            '<' => in_tag = true,
-            '&' => in_entity = true,
-            _ => text.push(character),
-        }
-    }
-    if in_entity {
-        text.push('&');
-        text.push_str(&entity);
-    }
-
-    collapse_whitespace(&text)
-}
-
-fn decode_entity(entity: &str) -> String {
-    match entity {
-        "amp" => "&".to_string(),
-        "lt" => "<".to_string(),
-        "gt" => ">".to_string(),
-        "quot" => "\"".to_string(),
-        "apos" | "#39" => "'".to_string(),
-        "nbsp" => " ".to_string(),
-        other if other.starts_with("#x") => u32::from_str_radix(&other[2..], 16)
-            .ok()
-            .and_then(char::from_u32)
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
-        other if other.starts_with('#') => other[1..]
-            .parse::<u32>()
-            .ok()
-            .and_then(char::from_u32)
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
-        _ => String::new(),
-    }
-}
-
-fn collapse_whitespace(value: &str) -> String {
-    let mut output = String::new();
-    let mut previous_was_space = true;
-    for character in value.chars() {
-        if character == '\n' {
-            if !output.ends_with('\n') {
-                output.push('\n');
-            }
-            previous_was_space = true;
-        } else if character.is_whitespace() {
-            if !previous_was_space {
-                output.push(' ');
-                previous_was_space = true;
-            }
-        } else {
-            output.push(character);
-            previous_was_space = false;
-        }
-    }
-    output.trim().to_string()
-}
-
-fn trim_lines(value: &str, max_lines: usize) -> String {
-    value
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .take(max_lines)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn url_encode(value: &str) -> String {
-    let mut encoded = String::new();
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            encoded.push(byte as char);
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded
 }
 
 fn json_field(key: &str, value: &str) -> String {
@@ -2251,6 +973,42 @@ mod tests {
         assert_eq!(
             request.metadata.get("tool_name").map(String::as_str),
             Some("file.write")
+        );
+    }
+
+    #[test]
+    fn meta_invoke_preserves_target_effect_semantics() {
+        let root = temp_workspace();
+        let mut registry = ToolRegistry::with_workspace_tools(root);
+        registry.install_meta_tools();
+        let meta = registry.get("tool.invoke").expect("meta tool registered");
+
+        let read = invocation(
+            "tool.invoke",
+            serde_json::json!({
+                "name": "file.read",
+                "arguments": { "path": "note.txt" }
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            meta.effect_spec(&read).effect_semantics,
+            ToolEffectSemantics::ReadOnly
+        );
+
+        let write = invocation(
+            "tool.invoke",
+            serde_json::json!({
+                "name": "file.write",
+                "arguments": { "path": "note.txt", "content": "hello" }
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            meta.effect_spec(&write).effect_semantics,
+            ToolEffectSemantics::Verifiable {
+                verifier: "workspace_file_content_v1".to_string(),
+            }
         );
     }
 
@@ -2685,6 +1443,25 @@ mod tests {
         assert_eq!(request["timeout_ms"], "9000");
         assert_eq!(request["session_dir"], session_dir.display().to_string());
         assert_eq!(request["output_dir"], output_dir.display().to_string());
+    }
+
+    #[test]
+    fn browser_close_request_targets_the_reusable_session() {
+        let root = temp_workspace();
+        let request = browser_request_json(
+            "browser-close",
+            BrowserToolKind::Close,
+            "session-alpha",
+            &root.join("session"),
+            &root.join("artifacts"),
+            &BTreeMap::new(),
+        )
+        .expect("browser close request should encode");
+        let request: serde_json::Value =
+            serde_json::from_str(&request).expect("browser close request should be JSON");
+
+        assert_eq!(request["action"], "close");
+        assert_eq!(request["session_id"], "session-alpha");
     }
 
     #[test]

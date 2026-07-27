@@ -278,7 +278,12 @@ pub(super) fn prepare_session_history_context(
     let can_reuse_checkpoint = existing_checkpoint.as_ref().is_some_and(|checkpoint| {
         context_checkpoint_is_within_reuse_window(checkpoint, &history, plan, context_window_tokens)
     });
-    let (checkpoint, checkpoint_reused) = if plan.should_compact && !can_reuse_checkpoint {
+    let (checkpoint, checkpoint_reused) = if can_reuse_checkpoint {
+        (
+            existing_checkpoint.expect("validated reusable checkpoint should exist"),
+            true,
+        )
+    } else if plan.should_compact {
         if plan.recent_start == 0 {
             return Ok(history);
         }
@@ -370,10 +375,7 @@ pub(super) fn prepare_session_history_context(
             false,
         )
     } else {
-        let Some(checkpoint) = existing_checkpoint else {
-            return Ok(history);
-        };
-        (checkpoint, true)
+        return Ok(history);
     };
     let covered_messages = checkpoint.covered_messages;
     let retained_messages = history.len().saturating_sub(covered_messages);

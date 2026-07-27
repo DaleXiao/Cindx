@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const FITNESS_WINDOW_PER_SPLIT: usize = 12;
 const PROMOTION_WILSON_Z: f64 = 1.96;
-pub(super) const PROMOTION_MIN_LOWER_BOUND: f64 = 0.50;
+pub(super) const PROMOTION_MIN_LOWER_BOUND: f64 = 0.55;
 
 impl PromptParetoArchive {
     pub fn build(
@@ -13,6 +13,7 @@ impl PromptParetoArchive {
         minimum_train_runs: usize,
         minimum_holdout_runs: usize,
     ) -> Result<Self, String> {
+        let active_dataset_sha256 = latest_scientific_dataset_digest(observations);
         let mut genome_ids = BTreeSet::new();
         for genome in genomes {
             genome.validate()?;
@@ -37,11 +38,20 @@ impl PromptParetoArchive {
             let train = summarize(observations.iter().filter(|observation| {
                 observation.profile_id == genome.id
                     && observation.split == PromptEvaluationSplit::Train
+                    && observation.mode == PromptEvaluationMode::PairedExecution
+                    && observation.is_scientific_evidence()
+                    && active_dataset_sha256.is_some_and(|digest| {
+                        observation.provenance.dataset_sha256 == digest
+                    })
             }));
             let holdout = summarize(observations.iter().filter(|observation| {
                 observation.profile_id == genome.id
                     && observation.split == PromptEvaluationSplit::Holdout
-                    && observation.mode.is_replay()
+                    && observation.mode == PromptEvaluationMode::ReplayExecution
+                    && observation.is_scientific_evidence()
+                    && active_dataset_sha256.is_some_and(|digest| {
+                        observation.provenance.dataset_sha256 == digest
+                    })
             }));
             if train.paired_runs < minimum_train_runs
                 || holdout.replay_runs < minimum_holdout_runs
@@ -61,6 +71,10 @@ impl PromptParetoArchive {
                     observation.profile_id == genome.id
                         && observation.split == PromptEvaluationSplit::Holdout
                         && observation.mode == PromptEvaluationMode::ReplayExecution
+                        && observation.is_scientific_evidence()
+                        && active_dataset_sha256.is_some_and(|digest| {
+                            observation.provenance.dataset_sha256 == digest
+                        })
                 }));
             if confidence.wilson_lower_bound < PROMOTION_MIN_LOWER_BOUND {
                 rejected_profiles.push(genome.id.clone());
@@ -424,7 +438,7 @@ pub fn prompt_promotion_confidence<'a>(
     let mut ties = 0usize;
     let mut seen = BTreeSet::new();
     for reward in observations
-        .filter(|observation| observation.mode.is_execution())
+        .filter(|observation| observation.is_scientific_evidence())
         .filter_map(|observation| {
             seen.insert(observation.evidence_identity())
                 .then_some(observation.relative_reward)
@@ -491,12 +505,17 @@ pub fn prompt_proposal_minibatch_decision(
         .iter()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
+    let active_dataset_sha256 = latest_scientific_dataset_digest(observations);
     let mut parent_pairs = BTreeSet::new();
     for observation in observations.iter().filter(|observation| {
         parent_ids.contains(observation.profile_id.as_str())
             && observation.opponent_profile_id.as_deref() == Some(proposal.id.as_str())
             && observation.split == PromptEvaluationSplit::Train
             && observation.mode == PromptEvaluationMode::PairedExecution
+            && observation.is_scientific_evidence()
+            && active_dataset_sha256.is_some_and(|digest| {
+                observation.provenance.dataset_sha256 == digest
+            })
     }) {
         parent_pairs.insert((
             observation.evaluation_id.as_str(),
@@ -516,6 +535,10 @@ pub fn prompt_proposal_minibatch_decision(
                     .is_some_and(|opponent| parent_ids.contains(opponent))
                 && observation.split == PromptEvaluationSplit::Train
                 && observation.mode == PromptEvaluationMode::PairedExecution
+                && observation.is_scientific_evidence()
+                && active_dataset_sha256.is_some_and(|digest| {
+                    observation.provenance.dataset_sha256 == digest
+                })
         })
         .filter(|observation| {
             let Some(parent_id) = observation.opponent_profile_id.as_deref() else {

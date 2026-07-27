@@ -91,6 +91,7 @@ pub fn run() {
             schedule_last_error: Mutex::new(schedule_last_error),
             mcp_catalog: Mutex::new(mcp_catalog),
             suspended_agent_runs: Mutex::new(BTreeMap::new()),
+            session_output_cache: Mutex::new(BTreeMap::new()),
             agent_run_controls: Mutex::new(BTreeMap::new()),
             prompt_evaluation_controls: Mutex::new(BTreeMap::new()),
             queue_dispatching_sessions: Mutex::new(BTreeSet::new()),

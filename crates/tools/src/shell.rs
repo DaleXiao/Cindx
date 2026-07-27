@@ -519,6 +519,12 @@ fn classify_shell_permission(command: &str) -> (PermissionRisk, Option<&'static 
         let Some(executable) = executable else {
             continue;
         };
+        if opaque_interpreter_execution(segment, &executable) {
+            return (
+                PermissionRisk::Destructive,
+                Some("opaque interpreter execution"),
+            );
+        }
         match executable.as_str() {
             "rm" | "rmdir" | "unlink" | "shred" | "truncate" => {
                 return (PermissionRisk::Destructive, Some("filesystem deletion"));
@@ -591,6 +597,64 @@ fn classify_shell_permission(command: &str) -> (PermissionRisk, Option<&'static 
     }
 
     (PermissionRisk::Execute, None)
+}
+
+fn opaque_interpreter_execution(segment: &[String], executable: &str) -> bool {
+    let executable_index = segment
+        .iter()
+        .position(|token| executable_basename(token) == executable);
+    let nested_interpreter_index = matches!(executable, "find" | "xargs")
+        .then(|| {
+            segment.iter().position(|token| {
+                matches!(
+                    executable_basename(token).as_str(),
+                    "eval"
+                        | "sh"
+                        | "bash"
+                        | "zsh"
+                        | "dash"
+                        | "ksh"
+                        | "python"
+                        | "python3"
+                        | "node"
+                        | "ruby"
+                        | "perl"
+                        | "php"
+                )
+            })
+        })
+        .flatten();
+    let Some(executable_index) = nested_interpreter_index.or(executable_index) else {
+        return false;
+    };
+    let executable = executable_basename(&segment[executable_index]);
+    let arguments = &segment[executable_index.saturating_add(1)..];
+    match executable.as_str() {
+        "eval" => true,
+        "sh" | "bash" | "zsh" | "dash" | "ksh" => arguments.iter().any(|argument| {
+            short_option_enables(argument, 'c')
+                || argument == "--command"
+                || argument.starts_with("--command=")
+                || !argument.starts_with('-')
+        }),
+        "python" | "python3" | "node" | "ruby" | "perl" | "php" => arguments
+            .iter()
+            .any(|argument| {
+                short_option_enables(argument, 'c')
+                    || short_option_enables(argument, 'e')
+                    || argument == "--eval"
+                    || argument.starts_with("--eval=")
+                    || (!argument.starts_with('-')
+                        && !matches!(argument.as_str(), "-" | "--"))
+            }),
+        _ => false,
+    }
+}
+
+fn short_option_enables(argument: &str, option: char) -> bool {
+    argument.starts_with('-')
+        && !argument.starts_with("--")
+        && argument.chars().skip(1).any(|value| value == option)
 }
 
 fn shell_command_segments(command: &str) -> Vec<Vec<String>> {
@@ -834,6 +898,29 @@ mod tests {
             assert_eq!(
                 classify_shell_permission(command),
                 (PermissionRisk::Execute, None)
+            );
+        }
+    }
+
+    #[test]
+    fn interpreter_wrappers_cannot_hide_destructive_or_arbitrary_code() {
+        for command in [
+            "sh -c 'rm -rf target'",
+            "env bash -lc 'git reset --hard HEAD'",
+            "bash -c 'git reset --hard HEAD'",
+            "python3 -c 'import os; os.remove(\"a.txt\")'",
+            "node -e 'require(\"fs\").rmSync(\"target\", {recursive:true})'",
+            "zsh ./scripts/mutate.sh",
+            "find . -exec sh -c 'rm -rf target' {} +",
+            "printf '%s\\n' target | xargs sh -c 'rm -rf \"$@\"' --",
+        ] {
+            assert_eq!(
+                classify_shell_permission(command),
+                (
+                    PermissionRisk::Destructive,
+                    Some("opaque interpreter execution")
+                ),
+                "{command} must be one-shot permission gated"
             );
         }
     }

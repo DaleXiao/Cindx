@@ -125,14 +125,11 @@ impl AgentTaskStateSnapshot {
                 "agent task checkpoint does not match the active user prompt",
             ));
         }
-        let durable_messages = durable_messages(&messages);
-        if self.durable_message_count != durable_messages.len()
-            || self.transcript_fingerprint != transcript_fingerprint(&durable_messages)
-        {
+        let Some(messages) = self.matching_runtime_projection(messages) else {
             return Err(AgentTaskStateError::new(
                 "agent task checkpoint does not match the durable transcript",
             ));
-        }
+        };
 
         let mut pending_interaction_verifications = BTreeMap::new();
         for pending in &self.pending_interaction_verifications {
@@ -191,6 +188,35 @@ impl AgentTaskStateSnapshot {
         })
     }
 
+    fn matching_runtime_projection(&self, messages: Vec<Message>) -> Option<Vec<Message>> {
+        let durable_indices = messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| is_durable_message(message).then_some(index))
+            .collect::<Vec<_>>();
+        if self.durable_message_count > durable_indices.len() {
+            return None;
+        }
+        if self.durable_message_count == 0 {
+            return (self.transcript_fingerprint == transcript_fingerprint(&[]))
+                .then(Vec::new);
+        }
+
+        // Context compaction replaces an older durable prefix with a transient
+        // restore pack. The remaining durable messages are therefore a suffix
+        // of the event transcript, not necessarily the whole transcript.
+        let first_durable = durable_indices[durable_indices.len() - self.durable_message_count];
+        let projection = messages[first_durable..]
+            .iter()
+            .filter(|message| !is_transient_run_context(message))
+            .cloned()
+            .collect::<Vec<_>>();
+        let durable_projection = durable_messages(&projection);
+        (durable_projection.len() == self.durable_message_count
+            && self.transcript_fingerprint == transcript_fingerprint(&durable_projection))
+        .then_some(projection)
+    }
+
     pub fn to_json(&self) -> Result<String, AgentTaskStateError> {
         serde_json::to_string(self).map_err(|error| {
             AgentTaskStateError::new(format!("failed to encode agent task checkpoint: {error}"))
@@ -227,13 +253,38 @@ impl AgentTaskStateSnapshot {
 }
 
 fn durable_messages(messages: &[Message]) -> Vec<&Message> {
-    messages
-        .iter()
-        .filter(|message| {
-            message.metadata.get("kind").map(String::as_str) != Some("recovery_observation")
-                && message.metadata.get("model").map(String::as_str) != Some("run-control")
-        })
-        .collect()
+    messages.iter().filter(|message| is_durable_message(message)).collect()
+}
+
+fn is_durable_message(message: &Message) -> bool {
+    message.metadata.get("kind").map(String::as_str) != Some("recovery_observation")
+        && message.metadata.get("model").map(String::as_str) != Some("run-control")
+        && !is_transient_run_context(message)
+}
+
+fn is_transient_run_context(message: &Message) -> bool {
+    if !matches!(message.role, MessageRole::System)
+        || message.metadata.get("internal").map(String::as_str) != Some("true")
+    {
+        return false;
+    }
+    if message.metadata.contains_key("collaboration_stage") {
+        return true;
+    }
+    matches!(
+        message.metadata.get("kind").map(String::as_str),
+        Some(
+            "image_generation_policy"
+                | "workflow_execution_contract"
+                | "agent_evidence_packet"
+                | "context_restore_pack"
+                | "artifact_manifest"
+                | "knowledge_context"
+                | "project_memory"
+                | "skill_context"
+                | "single_model_policy_guidance"
+        )
+    )
 }
 
 fn transcript_fingerprint(messages: &[&Message]) -> String {
@@ -337,6 +388,92 @@ mod tests {
             .restore(state.user_prompt.clone(), messages.clone())
             .expect("synthetic recovery message is additive");
         assert_eq!(restored.messages, messages);
+    }
+
+    #[test]
+    fn transient_run_context_does_not_enter_checkpoint_lineage() {
+        let mut state = start_agent_loop(
+            TaskId("task-1".to_string()),
+            "inspect the workspace",
+            AgentRuntimeConfig::default(),
+        );
+        state.messages.insert(
+            0,
+            Message {
+                role: MessageRole::System,
+                content: "request-scoped retrieved evidence".to_string(),
+                metadata: [
+                    ("internal".to_string(), "true".to_string()),
+                    ("kind".to_string(), "knowledge_context".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        );
+        let snapshot = AgentTaskStateSnapshot::capture(&state);
+        let durable_transcript = state.messages[1..].to_vec();
+
+        let restored = snapshot
+            .restore(state.user_prompt.clone(), state.messages.clone())
+            .expect("request-scoped context should be regenerated, not persisted");
+        assert_eq!(restored.messages, durable_transcript);
+    }
+
+    #[test]
+    fn compacted_checkpoint_matches_a_verified_transcript_suffix() {
+        let mut state = start_agent_loop(
+            TaskId("task-1".to_string()),
+            "continue the implementation",
+            AgentRuntimeConfig::default(),
+        );
+        let old_message = Message {
+            role: MessageRole::Assistant,
+            content: "old completed discussion".to_string(),
+            metadata: Metadata::new(),
+        };
+        let recent_message = Message {
+            role: MessageRole::Assistant,
+            content: "recent verified work".to_string(),
+            metadata: Metadata::new(),
+        };
+        state.messages = vec![recent_message.clone()];
+        let snapshot = AgentTaskStateSnapshot::capture(&state);
+
+        let restored = snapshot
+            .restore(
+                state.user_prompt.clone(),
+                vec![old_message, recent_message.clone()],
+            )
+            .expect("compacted durable suffix should restore");
+        assert_eq!(restored.messages, vec![recent_message]);
+    }
+
+    #[test]
+    fn durable_internal_instructions_remain_in_checkpoint_lineage() {
+        let mut state = start_agent_loop(
+            TaskId("task-1".to_string()),
+            "inspect the workspace",
+            AgentRuntimeConfig::default(),
+        );
+        state.messages.push(Message {
+            role: MessageRole::System,
+            content: "verify before completion".to_string(),
+            metadata: [
+                ("internal".to_string(), "true".to_string()),
+                ("kind".to_string(), "completion_verification".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        });
+        let snapshot = AgentTaskStateSnapshot::capture(&state);
+        let mut missing_instruction = state.messages.clone();
+        missing_instruction.pop();
+
+        assert!(snapshot
+            .restore(state.user_prompt.clone(), missing_instruction)
+            .unwrap_err()
+            .to_string()
+            .contains("durable transcript"));
     }
 
     #[test]

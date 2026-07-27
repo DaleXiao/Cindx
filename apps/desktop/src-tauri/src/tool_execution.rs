@@ -93,6 +93,10 @@ pub(crate) fn execute_agent_tool_invocation(
             .entry(key.clone())
             .or_insert_with(|| value.clone());
     }
+    if let Some(tool) = registry.get(&invocation.tool_name) {
+        let effect_spec = tool.effect_spec(&invocation);
+        agent_runtime::apply_tool_spec_runtime_metadata(&mut invocation, &effect_spec);
+    }
     let task_id = invocation.task_id.clone();
     let tool_call_id = invocation.id.0.clone();
     let tool_name = invocation.tool_name.clone();
@@ -547,11 +551,21 @@ fn preserve_primary_tool_artifact_version(
 
 pub(crate) fn execute_tool_invocation_with_result(
     store: &mut SqliteStore,
-    invocation: ToolInvocation,
+    mut invocation: ToolInvocation,
     workspace_root: &Path,
     registry: Option<&ToolRegistry>,
     run_context: Option<&Metadata>,
 ) -> Result<ToolResult, StorageError> {
+    let fallback_registry = registry
+        .is_none()
+        .then(|| ToolRegistry::with_workspace_tools(workspace_root.to_path_buf()));
+    let registry = registry
+        .or(fallback_registry.as_ref())
+        .expect("tool registry should be available");
+    if let Some(tool) = registry.get(&invocation.tool_name) {
+        let effect_spec = tool.effect_spec(&invocation);
+        agent_runtime::apply_tool_spec_runtime_metadata(&mut invocation, &effect_spec);
+    }
     if let Some(result) = completed_tool_result(store, &invocation, workspace_root)? {
         return Ok(result);
     }
@@ -576,12 +590,6 @@ pub(crate) fn execute_tool_invocation_with_result(
     let tool_call_id = invocation.id.0.clone();
     let tool_name = invocation.tool_name.clone();
     let input_fingerprint = tool_input_fingerprint(&tool_name, &invocation.input_json);
-    let fallback_registry = registry
-        .is_none()
-        .then(|| ToolRegistry::with_workspace_tools(workspace_root.to_path_buf()));
-    let registry = registry
-        .or(fallback_registry.as_ref())
-        .expect("tool registry should be available");
     let Some(tool) = registry.get(&invocation.tool_name) else {
         let mut result = ToolResult::failed(invocation.id, "unknown tool");
         finalize_tool_result(
@@ -994,17 +1002,42 @@ pub(crate) fn attachment_views_from_event(event: &Event) -> Vec<AgentAttachmentV
 }
 
 pub(crate) fn message_from_event(event: &Event) -> Option<Message> {
+    message_from_event_with_policy(event, false, false)
+}
+
+pub(crate) fn model_message_from_event(event: &Event) -> Option<Message> {
+    message_from_event_with_policy(event, false, true)
+}
+
+pub(crate) fn runtime_message_from_event(event: &Event) -> Option<Message> {
+    message_from_event_with_policy(event, true, true)
+}
+
+fn message_from_event_with_policy(
+    event: &Event,
+    include_internal: bool,
+    prefer_model_content: bool,
+) -> Option<Message> {
     if event.kind != EventKind::MessageAdded {
         return None;
     }
-    if event.metadata.get("internal").map(String::as_str) == Some("true")
+    if !include_internal
+        && event.metadata.get("internal").map(String::as_str) == Some("true")
         && event.metadata.get("kind").map(String::as_str) != Some("visual_reference")
     {
         return None;
     }
 
     let role = message_role_from_label(event.metadata.get("role")?)?;
-    let mut content = redact_sensitive_text(event.metadata.get("content")?);
+    let stored_content = if prefer_model_content && role == MessageRole::User {
+        event
+            .metadata
+            .get("model_content")
+            .or_else(|| event.metadata.get("content"))?
+    } else {
+        event.metadata.get("content")?
+    };
+    let mut content = redact_sensitive_text(stored_content);
     if role == MessageRole::Assistant {
         content = sanitize_assistant_content(&content);
     }

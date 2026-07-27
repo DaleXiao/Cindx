@@ -97,8 +97,8 @@ fn prompt_promotion_gate_config() -> PromptPromotionGateConfig {
     PromptPromotionGateConfig {
         minimum_train_runs: PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
         minimum_holdout_runs: PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS,
-        minimum_unique_train_cases: 2,
-        minimum_unique_holdout_cases: 2,
+        minimum_unique_train_cases: 4,
+        minimum_unique_holdout_cases: 4,
         minimum_train_task_classes: 2,
         minimum_holdout_task_classes: 2,
         minimum_wilson_lower_bound: PROMPT_EVOLUTION_MIN_PROMOTION_WILSON,
@@ -130,12 +130,22 @@ fn frozen_prompt_profile_for_promotion(
         .filter(|(observed_effort, observation)| {
             observed_effort == effort
                 && observation.mode.is_execution()
+                && observation.is_scientific_evidence()
                 && ((observation.profile_id == candidate_id
                     && observation.opponent_profile_id.as_deref() == Some(stable_profile_id))
                     || (observation.profile_id == stable_profile_id
                         && observation.opponent_profile_id.as_deref() == Some(candidate_id)))
         })
         .map(|(_, observation)| observation.clone())
+        .collect::<Vec<_>>();
+    let Some(dataset_sha256) = orchestrator::latest_scientific_dataset_digest(&observations)
+        .map(str::to_string)
+    else {
+        return Ok(None);
+    };
+    let observations = observations
+        .into_iter()
+        .filter(|observation| observation.provenance.dataset_sha256 == dataset_sha256)
         .collect::<Vec<_>>();
     let gate = evaluate_prompt_promotion_gate(
         &observations,
@@ -155,24 +165,15 @@ fn frozen_prompt_profile_for_promotion(
         ));
     }
 
-    let split_label = |observation: &PromptEvolutionObservation| match observation.split {
-        PromptEvaluationSplit::Train => "train",
-        PromptEvaluationSplit::Holdout => "holdout",
-    };
-    let dataset_manifest = observations
-        .iter()
-        .map(|observation| {
-            format!(
-                "{}\u{1f}{}\u{1f}{}",
-                observation.case_id,
-                observation.task_class,
-                split_label(observation)
-            )
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let dataset_sha256 = sha256_hex(dataset_manifest.join("\n").as_bytes());
+    let candidate_prompt_sha256 = serde_json::to_vec(&record.genome)
+        .map(|encoded| sha256_hex(&encoded))
+        .map_err(|error| format!("promotion genome serialization failed: {error}"))?;
+    if observations.iter().any(|observation| {
+        observation.profile_id == candidate_id
+            && observation.provenance.candidate_prompt_sha256 != candidate_prompt_sha256
+    }) {
+        return Err("cannot freeze GEPA profile with mismatched prompt lineage".to_string());
+    }
     let mut evidence = observations;
     evidence.sort_by_key(PromptEvolutionObservation::evidence_identity);
     let paired_evidence_sha256 = sha256_hex(
@@ -352,20 +353,31 @@ pub(crate) fn apply_prompt_rollout_selection(
     } else {
         Some(rollout.stable_profile_id.as_str())
     };
-    let selected = selected_id
-        .and_then(|id| {
-            evaluation
-                .population
-                .iter()
-                .find(|profile| profile.id == id)
-                .cloned()
-                .or_else(|| {
-                    model
-                        .genomes
-                        .iter()
-                        .find(|record| record.effort == effort && record.genome.id == id)
-                        .map(|record| record.genome.clone())
-                })
+    let frozen_stable = (!canary_selected)
+        .then_some(rollout.frozen_profile.as_ref())
+        .flatten()
+        .filter(|snapshot| {
+            snapshot.validate().is_ok()
+                && snapshot.effort == effort
+                && snapshot.genome.id == rollout.stable_profile_id
+        })
+        .map(|snapshot| snapshot.genome.clone());
+    let selected = frozen_stable
+        .or_else(|| {
+            selected_id.and_then(|id| {
+                evaluation
+                    .population
+                    .iter()
+                    .find(|profile| profile.id == id)
+                    .cloned()
+                    .or_else(|| {
+                        model
+                            .genomes
+                            .iter()
+                            .find(|record| record.effort == effort && record.genome.id == id)
+                            .map(|record| record.genome.clone())
+                    })
+            })
         })
         .unwrap_or_else(|| ConductorPromptGenome::seed_for_effort(effort));
     evaluation.next_profile = selected;

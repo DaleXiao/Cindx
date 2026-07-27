@@ -4,6 +4,7 @@ pub(crate) fn prompt_instance_pareto_scores(
     population: &[ConductorPromptGenome],
     observations: &[PromptEvolutionObservation],
 ) -> Vec<AgentEvaluationCaseScore> {
+    let active_dataset_sha256 = orchestrator::latest_scientific_dataset_digest(observations);
     let fingerprints = population
         .iter()
         .map(|genome| {
@@ -16,6 +17,12 @@ pub(crate) fn prompt_instance_pareto_scores(
     observations
         .iter()
         .filter(|observation| observation.mode == PromptEvaluationMode::ReplayExecution)
+        .filter(|observation| observation.is_scientific_evidence())
+        .filter(|observation| {
+            active_dataset_sha256.is_some_and(|digest| {
+                observation.provenance.dataset_sha256 == digest
+            })
+        })
         .filter(|observation| !observation.case_id.trim().is_empty())
         .filter_map(|observation| {
             let fingerprint = fingerprints.get(observation.profile_id.as_str())?;

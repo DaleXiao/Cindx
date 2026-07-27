@@ -25,6 +25,69 @@ pub(crate) fn schedule_prompt_pairwise_evaluation(
     }
 }
 
+fn prompt_evaluation_model_partition(
+    config: &ProviderConfig,
+    worker_models: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let conductor_model = config.model_for_conductor();
+    let mut reviewer_candidates = Vec::new();
+    for model in [
+        config.model_for_role(&ModelRole::Reviewer),
+        config.model_for_role(&ModelRole::Summarizer),
+        config.model_for_role(&ModelRole::Planner),
+        config.model.clone(),
+        config.model_for_role(&ModelRole::Executor),
+    ] {
+        if !model.trim().is_empty()
+            && model != conductor_model
+            && !reviewer_candidates.iter().any(|existing| existing == &model)
+        {
+            reviewer_candidates.push(model);
+        }
+    }
+
+    for reviewer_model in reviewer_candidates {
+        let retained_workers = worker_models
+            .iter()
+            .filter(|model| *model != &reviewer_model)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !retained_workers.is_empty() {
+            return (retained_workers, vec![reviewer_model]);
+        }
+        if conductor_model != reviewer_model && !conductor_model.trim().is_empty() {
+            return (vec![conductor_model.clone()], vec![reviewer_model]);
+        }
+    }
+
+    (worker_models.to_vec(), Vec::new())
+}
+
+fn prompt_candidate_models(candidates: [&PromptExecutionCandidate; 2]) -> BTreeSet<String> {
+    let mut models = BTreeSet::new();
+    for candidate in candidates {
+        if let Some(plan) = candidate.plan.plan.as_ref() {
+            models.insert(plan.coordinator_model.clone());
+            models.extend(plan.steps.iter().map(|step| step.model.clone()));
+        }
+        models.extend(
+            candidate
+                .execution
+                .steps
+                .iter()
+                .map(|step| step.model.clone()),
+        );
+    }
+    models.retain(|model| !model.trim().is_empty());
+    models
+}
+
+fn prompt_genome_sha256(genome: &ConductorPromptGenome) -> Result<String, String> {
+    serde_json::to_vec(genome)
+        .map(|encoded| sha256_hex(&encoded))
+        .map_err(|error| format!("prompt genome serialization failed: {error}"))
+}
+
 fn prompt_pairwise_campaign_snapshot(
     config: &ProviderConfig,
     effort: &str,
@@ -32,9 +95,18 @@ fn prompt_pairwise_campaign_snapshot(
     evaluation: &PromptEvolutionEvaluation,
     rollout: Option<&PromptRolloutState>,
 ) -> Result<PromptEvolutionCampaignSnapshot, String> {
+    let active_dataset_sha256 =
+        orchestrator::latest_scientific_dataset_digest(&evaluation.observations);
+    let is_active_scientific = |observation: &&PromptEvolutionObservation| {
+        observation.is_scientific_evidence()
+            && active_dataset_sha256.is_some_and(|digest| {
+                observation.provenance.dataset_sha256 == digest
+            })
+    };
     let paired_runs = evaluation
         .observations
         .iter()
+        .filter(is_active_scientific)
         .filter(|observation| observation.mode.is_paired_execution())
         .map(|observation| observation.evaluation_id.as_str())
         .collect::<BTreeSet<_>>()
@@ -42,6 +114,7 @@ fn prompt_pairwise_campaign_snapshot(
     let replay_runs = evaluation
         .observations
         .iter()
+        .filter(is_active_scientific)
         .filter(|observation| observation.mode.is_replay_execution())
         .map(|observation| observation.evaluation_id.as_str())
         .collect::<BTreeSet<_>>()
@@ -52,6 +125,7 @@ fn prompt_pairwise_campaign_snapshot(
         .filter(|observation| {
             observation.split == PromptEvaluationSplit::Train
                 && observation.mode.is_paired_execution()
+                && is_active_scientific(observation)
                 && observation.reflection_packet.is_some()
         })
         .count();
@@ -105,6 +179,11 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
     if worker_models.is_empty() {
         return Ok(false);
     }
+    let (evaluation_worker_models, reserved_evaluator_models) =
+        prompt_evaluation_model_partition(config, worker_models);
+    if reserved_evaluator_models.is_empty() {
+        return Ok(false);
+    }
     let Some(project_id) = run_context.get("project_id") else {
         return Ok(false);
     };
@@ -113,17 +192,18 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         .map(|root| validate_workspace_root(root))
         .transpose()?
         .unwrap_or(active_workspace_root(state)?);
-    let (evaluation, dataset, rollout, known_profiles, previous_dataset) = {
+    let (evaluation, discovered_dataset, rollout, known_profiles, previous_dataset) = {
         let mut store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
         let model =
             load_prompt_evolution_read_model(&mut store).map_err(|error| error.to_string())?;
+        let scoped_model = prompt_evolution_read_model_for_scope(&model, project_id);
         let events = store
             .list_by_task_and_metadata(task_id, "project_id", project_id)
             .map_err(|error| error.to_string())?;
-        let rollout = model.rollouts.get(effort).cloned();
+        let rollout = scoped_model.rollouts.get(effort).cloned();
         let known_profiles = model
             .genomes
             .iter()
@@ -135,13 +215,25 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
             .get(&prompt_dataset_key(effort, project_id))
             .cloned();
         (
-            evaluate_prompt_evolution_read_model(&model, effort)?,
+            evaluate_prompt_evolution_read_model(&scoped_model, effort)?,
             prompt_offline_dataset(&events, project_id),
             rollout,
             known_profiles,
             previous_dataset,
         )
     };
+    let campaign_generation = evaluation
+        .population
+        .iter()
+        .map(|profile| profile.generation)
+        .chain(std::iter::once(current_profile.generation))
+        .max()
+        .unwrap_or_default();
+    let dataset = prompt_offline_dataset_for_generation(
+        discovered_dataset,
+        previous_dataset.as_ref(),
+        campaign_generation,
+    );
     if dataset.len() < PROMPT_EVOLUTION_OFFLINE_MIN_CASES {
         let digest = prompt_offline_dataset_digest(&dataset);
         if previous_dataset.as_ref().is_none_or(|snapshot| {
@@ -153,6 +245,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
                 run_context,
                 effort,
                 &dataset,
+                campaign_generation,
                 None,
             )?;
         }
@@ -305,6 +398,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         run_context,
         effort,
         &dataset,
+        campaign_generation,
         Some(&selected_case),
     )?;
     let mode = match split {
@@ -313,13 +407,13 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
     };
     let objective = selected_case.objective.clone();
     let task_class = selected_case.task_class.clone();
-    let evaluation_id = unique_id(match mode {
+    let evaluation_id = scoped_prompt_evaluation_id(project_id, &unique_id(match mode {
         PromptEvaluationMode::PairedShadow | PromptEvaluationMode::PairedExecution => "prompt-pair",
         PromptEvaluationMode::ReplayHoldout | PromptEvaluationMode::ReplayExecution => {
             "prompt-replay"
         }
         PromptEvaluationMode::Live => "prompt-live",
-    });
+    }));
     append_prompt_evaluation_status(
         state,
         task_id,
@@ -340,7 +434,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
                 &objective,
                 effort,
                 policy,
-                worker_models,
+                &evaluation_worker_models,
                 agent_budget,
                 current_profile,
                 &evaluation_id,
@@ -353,7 +447,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
                 &objective,
                 effort,
                 policy,
-                worker_models,
+                &evaluation_worker_models,
                 agent_budget,
                 &challenger,
                 &evaluation_id,
@@ -415,13 +509,26 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
     }
     let candidate_a = &current;
     let candidate_b = &challenger;
+    let participant_models = prompt_candidate_models([candidate_a, candidate_b]);
+    let evaluator_models = reserved_evaluator_models
+        .into_iter()
+        .filter(|model| !model.trim().is_empty())
+        .collect::<Vec<_>>();
+    let reviewer_model = evaluator_models
+        .first()
+        .cloned()
+        .unwrap_or_else(|| config.model_for_role(&ModelRole::Reviewer));
+    let participant_models = participant_models.into_iter().collect::<Vec<_>>();
     let objective_ref = objective.as_str();
+    let forward_reviewer_model = reviewer_model.clone();
+    let reverse_reviewer_model = reviewer_model.clone();
     let (forward, reverse) = std::thread::scope(|scope| {
         let forward_id = format!("{evaluation_id}-forward");
         let reverse_id = format!("{evaluation_id}-reverse");
         let forward = scope.spawn(move || {
             prompt_evaluation_feedback::evaluate_prompt_candidate_pair(
                 config,
+                &forward_reviewer_model,
                 objective_ref,
                 candidate_a,
                 candidate_b,
@@ -432,6 +539,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         let reverse = scope.spawn(move || {
             prompt_evaluation_feedback::evaluate_prompt_candidate_pair(
                 config,
+                &reverse_reviewer_model,
                 objective_ref,
                 candidate_b,
                 candidate_a,
@@ -475,6 +583,9 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         | PromptEvaluationMode::PairedExecution
         | PromptEvaluationMode::Live => PromptEvaluationSplit::Train,
     };
+    let dataset_sha256 = prompt_offline_dataset_digest(&dataset);
+    let prompt_sha_a = prompt_genome_sha256(&candidate_a.plan.genome)?;
+    let prompt_sha_b = prompt_genome_sha256(&candidate_b.plan.genome)?;
     let observation_a = prompt_evaluation_feedback::prompt_pairwise_observation(
         candidate_a,
         candidate_b,
@@ -489,6 +600,13 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         &judge.step_scores_a,
         judge.feedback_a,
         std::slice::from_ref(&config.api_key),
+        PromptEvaluationProvenance::blind_pairwise_swap(
+            vec![reviewer_model.clone()],
+            participant_models.clone(),
+            dataset_sha256.clone(),
+            prompt_sha_a.clone(),
+            prompt_sha_b.clone(),
+        ),
     );
     let observation_b = prompt_evaluation_feedback::prompt_pairwise_observation(
         candidate_b,
@@ -504,6 +622,13 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         &judge.step_scores_b,
         judge.feedback_b,
         std::slice::from_ref(&config.api_key),
+        PromptEvaluationProvenance::blind_pairwise_swap(
+            vec![reviewer_model],
+            participant_models,
+            dataset_sha256,
+            prompt_sha_b,
+            prompt_sha_a,
+        ),
     );
     append_prompt_pairwise_observations(
         state,
@@ -521,7 +646,8 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
             .map_err(|error| format!("store lock poisoned: {error}"))?;
         let model =
             load_prompt_evolution_read_model(&mut store).map_err(|error| error.to_string())?;
-        evaluate_prompt_evolution_read_model(&model, effort)?
+        let scoped_model = prompt_evolution_read_model_for_scope(&model, project_id);
+        evaluate_prompt_evolution_read_model(&scoped_model, effort)?
     };
     if let Some(parent) = next_evaluation.mutation_parent.as_ref() {
         if attempted_mutation_parent.as_deref() != Some(parent.id.as_str()) {

@@ -836,6 +836,10 @@ pub(crate) struct PromptOfflineDatasetState {
     pub(crate) effort: String,
     pub(crate) project_id: String,
     pub(crate) digest: String,
+    #[serde(default)]
+    pub(crate) generation: u32,
+    #[serde(default)]
+    pub(crate) case_ids: Vec<String>,
     pub(crate) case_count: usize,
     pub(crate) train_count: usize,
     pub(crate) holdout_count: usize,

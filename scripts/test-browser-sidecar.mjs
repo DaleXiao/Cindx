@@ -12,6 +12,30 @@ const sessionDir = path.join(root, "session");
 const outputDir = path.join(root, "artifacts");
 let requestCounter = 0;
 
+fs.mkdirSync(sessionDir, { recursive: true });
+const abandonedLockPath = path.join(sessionDir, ".action-lock.json");
+fs.writeFileSync(abandonedLockPath, "{}\n", { mode: 0o600 });
+const abandonedAt = new Date(Date.now() - 10_000);
+fs.utimesSync(abandonedLockPath, abandonedAt, abandonedAt);
+
+const staleSessionDir = path.join(root, "stale-session");
+const staleStatePath = path.join(staleSessionDir, "session-state.json");
+const staleProfileDir = path.join(staleSessionDir, "profile");
+fs.mkdirSync(staleProfileDir, { recursive: true });
+fs.writeFileSync(
+  staleStatePath,
+  `${JSON.stringify({
+    schema: "cindx.browser-session.v1",
+    session_id: "stale-session",
+    browser_pid: 2_147_483_647,
+    watchdog_pid: null,
+    profile_dir: staleProfileDir,
+    launch_token: "stale-launch",
+    lease_expires_at_ms: 1
+  })}\n`,
+  { mode: 0o600 }
+);
+
 const server = http.createServer((request, response) => {
   if (request.url === "/frame") {
     response.setHeader("content-type", "text/html; charset=utf-8");
@@ -103,15 +127,37 @@ const baseUrl = `http://127.0.0.1:${address.port}`;
 try {
   const opened = await invoke("open", { url: baseUrl });
   assert(opened.page?.id, "open should return a CDP target id");
+  assert(!fs.existsSync(abandonedLockPath), "an abandoned partial lock should be reclaimed");
+  assert(!fs.existsSync(staleStatePath), "the oldest expired sibling session should be cleaned");
   const statePath = path.join(sessionDir, "session-state.json");
-  const browserPid = JSON.parse(fs.readFileSync(statePath, "utf8")).browser_pid;
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  const browserPid = state.browser_pid;
+  const watchdogPid = state.watchdog_pid;
   assert(processIsAlive(browserPid), "open should leave a live browser process");
+  assert(processIsAlive(watchdogPid), "open should supervise the browser with a watchdog");
+  assert(state.schema === "cindx.browser-session.v1", "browser state should be versioned");
+  assert(state.launch_token, "browser state should identify the Cindx-owned launch");
+  assert(
+    state.lease_expires_at_ms > state.last_used_at_ms,
+    "browser state should carry a renewable inactivity lease"
+  );
 
   await invoke("type", { role: "textbox", name: "Message", text: "hello-cdp" });
   await invoke("click", { role: "button", name: "Increment", wait_for: "#count" });
   const text = await invoke("extract_text", { selector: "body" });
   assert(text.output.includes("hello-cdp"), "typed text should persist across sidecar processes");
   assert(text.output.includes("1"), "click should update the page");
+
+  const [concurrentTabs, concurrentText] = await Promise.all([
+    invoke("tabs"),
+    invoke("extract_text", { selector: "body" })
+  ]);
+  assert(concurrentTabs.tabs.length >= 1, "concurrent tab inspection should be serialized safely");
+  assert(concurrentText.output.includes("hello-cdp"), "concurrent text inspection should succeed");
+  assert(
+    !fs.existsSync(path.join(sessionDir, ".action-lock.json")),
+    "browser action lock should be released after each request"
+  );
 
   await invoke("click", { frame: "child", role: "button", name: "Frame action" });
   const frameText = await invoke("extract_text", { frame: "child", selector: "body" });
@@ -138,6 +184,14 @@ try {
   await invoke("close");
   assert(!processIsAlive(browserPid), "close should terminate the browser process");
   assert(!fs.existsSync(statePath), "close should remove stale browser session state");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert(!processIsAlive(watchdogPid), "close should terminate the session watchdog");
+  const closedAgain = await invoke("close");
+  assert(
+    closedAgain.output === "browser session already closed",
+    "closing an inactive session must be idempotent without relaunching a browser"
+  );
+  assert(!fs.existsSync(statePath), "idempotent close must not recreate browser state");
   process.stdout.write("browser sidecar integration ok\n");
 } finally {
   await new Promise((resolve) => server.close(resolve));

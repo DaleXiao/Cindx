@@ -1,8 +1,11 @@
+use crate::agent_conductor_runtime::{
+    attempt_conductor_decision, conductor_model_sequence, preferred_fallback_model,
+    unique_configured_models,
+};
 use crate::app_state::AppState;
 use crate::collaboration_service::{
     collaboration_recent_context, truncate_for_collaboration, COLLABORATION_STEER_INTERRUPTED,
 };
-use crate::collaboration_stage_runtime::run_collaboration_stage;
 use crate::configuration_models::{AgentEffort, ProviderConfig};
 use crate::event_persistence::append_event;
 use crate::project_session_persistence::metadata_with_context;
@@ -10,14 +13,13 @@ use crate::prompt_evolution_runtime::prompt_evolution_evaluation_for_run;
 use crate::workflow_routing_runtime::{
     append_router_decision_event, conductor_historical_evidence, model_candidates_for_config,
 };
-use agent_core::{EventKind, Message, Metadata, ModelRole, TaskId};
+use agent_core::{EventKind, Message, Metadata, TaskId};
 use model_provider::MODEL_REQUEST_CANCELLED;
 use orchestrator::{
     AgentExecutionMode, AgentRunDecision, AgentRunDecisionHarness, AgentRunDecisionRequest,
     ConductorExecutionContract, ConductorPromptGenome, ModelCandidate, RoutingContext,
-    RoutingDecision, CONDUCTOR_MAX_ATTEMPTS,
+    RoutingDecision,
 };
-use std::collections::BTreeSet;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PlannedAgentRun {
@@ -28,6 +30,9 @@ pub(crate) struct PlannedAgentRun {
     pub(crate) source: String,
     pub(crate) attempts: usize,
     pub(crate) prompt_genome: ConductorPromptGenome,
+    pub(crate) degradation_reason: Option<String>,
+    pub(crate) attempted_conductor_models: Vec<String>,
+    pub(crate) selected_conductor_model: Option<String>,
 }
 
 impl PlannedAgentRun {
@@ -83,6 +88,16 @@ impl PlannedAgentRun {
         run_context.insert("router_examples".to_string(), "0".to_string());
         run_context.insert("router_source".to_string(), self.source.clone());
         run_context.insert(
+            "conductor_degraded".to_string(),
+            self.degradation_reason.is_some().to_string(),
+        );
+        if let Some(reason) = &self.degradation_reason {
+            run_context.insert(
+                "conductor_failure".to_string(),
+                truncate_for_collaboration(reason, 1_200),
+            );
+        }
+        run_context.insert(
             "run_decision".to_string(),
             serde_json::to_string(&self.decision)
                 .map_err(|error| format!("run decision serialization failed: {error}"))?,
@@ -90,6 +105,14 @@ impl PlannedAgentRun {
         run_context.insert(
             "run_decision_attempts".to_string(),
             self.attempts.to_string(),
+        );
+        run_context.insert(
+            "conductor_models_attempted".to_string(),
+            self.attempted_conductor_models.join(","),
+        );
+        run_context.insert(
+            "conductor_selected_model".to_string(),
+            self.selected_conductor_model.clone().unwrap_or_default(),
         );
         run_context.insert("prompt_profile".to_string(), self.prompt_genome.id.clone());
         run_context.insert(
@@ -124,6 +147,9 @@ pub(crate) fn plan_agent_run(
             0,
             profile,
             effort,
+            None,
+            Vec::new(),
+            None,
         )?;
         planned.apply_to_context(run_context, effort)?;
         run_context.insert("prompt_profile_source".to_string(), profile_source.clone());
@@ -136,18 +162,21 @@ pub(crate) fn plan_agent_run(
         AgentEffort::Auto => 2,
         AgentEffort::Pro => 3,
     };
-    let conductor_model = config.model_for_conductor();
-    let harness = AgentRunDecisionHarness::new(AgentRunDecisionRequest {
+    let conductor_models = conductor_model_sequence(config);
+    let base_request = AgentRunDecisionRequest {
         objective: prompt.to_string(),
         recent_context: collaboration_recent_context(history),
         effort: effort.label().to_string(),
-        conductor_model: conductor_model.clone(),
+        conductor_model: conductor_models
+            .first()
+            .cloned()
+            .unwrap_or_else(|| config.model_for_conductor()),
         allowed_models: allowed_models.clone(),
         max_parallelism,
         evolved_directive: profile.conductor_directive(),
         historical_evidence: conductor_historical_evidence(state, &allowed_models)
             .unwrap_or_default(),
-    });
+    };
     let decision_id = format!(
         "{}-run-decision",
         run_context
@@ -155,56 +184,82 @@ pub(crate) fn plan_agent_run(
             .map(String::as_str)
             .unwrap_or("agent")
     );
-    let first = run_collaboration_stage(
-        state,
-        config,
-        task_id,
-        run_context,
-        &decision_id,
-        "run_decision",
-        ModelRole::Planner,
-        &conductor_model,
-        harness.planning_prompt(),
-    );
-    let mut attempts = 1usize;
-    let decision = match first {
-        Ok(response) => match harness.parse(&response) {
-            Ok(decision) => Some(decision),
-            Err(error) if attempts < CONDUCTOR_MAX_ATTEMPTS => {
-                attempts += 1;
-                let repaired = run_collaboration_stage(
-                    state,
-                    config,
-                    task_id,
-                    run_context,
-                    &decision_id,
-                    "run_decision_repair",
-                    ModelRole::Planner,
-                    &conductor_model,
-                    harness.repair_prompt(&response, &error),
-                );
-                match repaired {
-                    Ok(response) => harness.parse(&response).ok(),
-                    Err(error) if error == MODEL_REQUEST_CANCELLED => return Err(error),
-                    Err(error) if error == COLLABORATION_STEER_INTERRUPTED => None,
-                    Err(_) => None,
-                }
+    let mut attempts = 0usize;
+    let mut attempted_conductor_models = Vec::new();
+    let mut failure_reasons = Vec::new();
+    let mut selected_conductor_model = None;
+    let mut planned_decision = None;
+
+    for (model_index, conductor_model) in conductor_models.iter().enumerate() {
+        attempted_conductor_models.push(conductor_model.clone());
+        let mut request = base_request.clone();
+        request.conductor_model = conductor_model.clone();
+        let harness = AgentRunDecisionHarness::new(request);
+        match attempt_conductor_decision(
+            state,
+            config,
+            task_id,
+            run_context,
+            &decision_id,
+            model_index,
+            conductor_model,
+            &harness,
+            &mut attempts,
+        ) {
+            Ok(decision) => {
+                selected_conductor_model = Some(conductor_model.clone());
+                planned_decision = Some(decision);
+                break;
             }
-            Err(_) => None,
-        },
-        Err(error) if error == MODEL_REQUEST_CANCELLED => return Err(error),
-        Err(error) if error == COLLABORATION_STEER_INTERRUPTED => None,
-        Err(_) => None,
-    };
-    let (decision, source) = match decision {
-        Some(decision) => (decision, "dynamic_conductor_v1".to_string()),
-        None => (
-            AgentRunDecision::direct(fallback_model),
-            "dynamic_conductor_fallback_direct".to_string(),
-        ),
+            Err(error) if error == MODEL_REQUEST_CANCELLED => return Err(error),
+            Err(error) if error == COLLABORATION_STEER_INTERRUPTED => {
+                return Err("conductor planning interrupted by a queued steer".to_string())
+            }
+            Err(error) => failure_reasons.push(format!("{conductor_model}: {error}")),
+        }
+    }
+
+    let (decision, source, degradation_reason) = match planned_decision {
+        Some(decision) => {
+            let source = if attempted_conductor_models.len() > 1 {
+                "dynamic_conductor_replanned"
+            } else {
+                "dynamic_conductor_v2"
+            };
+            (decision, source.to_string(), None)
+        }
+        None => {
+            let reason = if failure_reasons.is_empty() {
+                "no configured conductor model was available".to_string()
+            } else {
+                failure_reasons.join(" | ")
+            };
+            let decision = AgentRunDecision::degraded_conductor_fallback(
+                fallback_model,
+                effort.label(),
+                allowed_models.len(),
+                max_parallelism,
+                &reason,
+            );
+            let source = if decision.execution == AgentExecutionMode::Workflow {
+                "dynamic_conductor_degraded_workflow"
+            } else {
+                "dynamic_conductor_degraded_direct"
+            };
+            (decision, source.to_string(), Some(reason))
+        }
     };
     let planned = finalize_planned_run(
-        decision, prompt, candidates, source, attempts, profile, effort,
+        decision,
+        prompt,
+        candidates,
+        source,
+        attempts,
+        profile,
+        effort,
+        degradation_reason,
+        attempted_conductor_models,
+        selected_conductor_model,
     )?;
     planned.apply_to_context(run_context, effort)?;
     run_context.insert("prompt_profile_source".to_string(), profile_source.clone());
@@ -220,6 +275,9 @@ fn finalize_planned_run(
     attempts: usize,
     prompt_genome: ConductorPromptGenome,
     effort: AgentEffort,
+    degradation_reason: Option<String>,
+    attempted_conductor_models: Vec<String>,
+    selected_conductor_model: Option<String>,
 ) -> Result<PlannedAgentRun, String> {
     let routing_context = decision.routing_context(prompt, candidates);
     let routing_decision = decision.routing_decision();
@@ -232,38 +290,10 @@ fn finalize_planned_run(
         source,
         attempts,
         prompt_genome,
+        degradation_reason,
+        attempted_conductor_models,
+        selected_conductor_model,
     })
-}
-
-fn unique_configured_models(candidates: &[ModelCandidate]) -> Vec<String> {
-    let mut seen = BTreeSet::new();
-    candidates
-        .iter()
-        .filter_map(|candidate| {
-            let model = candidate.name.trim();
-            (!model.is_empty() && seen.insert(model.to_string())).then(|| model.to_string())
-        })
-        .collect()
-}
-
-fn preferred_fallback_model(
-    config: &ProviderConfig,
-    effort: AgentEffort,
-    allowed_models: &[String],
-) -> String {
-    let preferred = if effort == AgentEffort::Fast && !config.model.trim().is_empty() {
-        config.model.trim()
-    } else {
-        config.executor_model.trim()
-    };
-    if allowed_models.iter().any(|model| model == preferred) {
-        preferred.to_string()
-    } else {
-        allowed_models
-            .first()
-            .cloned()
-            .unwrap_or_else(|| config.model_for_role(&ModelRole::Executor))
-    }
 }
 
 fn selected_strategy_profile(
@@ -318,6 +348,14 @@ fn record_planned_agent_run(
                     planned.attempts.to_string(),
                 ),
                 (
+                    "conductor_models_attempted".to_string(),
+                    planned.attempted_conductor_models.join(","),
+                ),
+                (
+                    "conductor_selected_model".to_string(),
+                    planned.selected_conductor_model.clone().unwrap_or_default(),
+                ),
+                (
                     "decision".to_string(),
                     serde_json::to_string(&planned.decision).unwrap_or_default(),
                 ),
@@ -326,6 +364,18 @@ fn record_planned_agent_run(
                     planned.prompt_genome.id.clone(),
                 ),
                 ("profile_source".to_string(), profile_source.to_string()),
+                (
+                    "conductor_degraded".to_string(),
+                    planned.degradation_reason.is_some().to_string(),
+                ),
+                (
+                    "conductor_failure".to_string(),
+                    planned
+                        .degradation_reason
+                        .as_deref()
+                        .map(|reason| truncate_for_collaboration(reason, 1_200))
+                        .unwrap_or_default(),
+                ),
                 (
                     "decision_rationale".to_string(),
                     truncate_for_collaboration(&planned.decision.rationale, 1_200),

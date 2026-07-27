@@ -2,12 +2,21 @@
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { spawn, spawnSync } = require("child_process");
 
 const REQUEST_SCHEMA = "cindx.browser-control.v2";
 const RESPONSE_SCHEMA = "cindx.browser-control-result.v2";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_OUTPUT_CHARS = 12_000;
+const SESSION_STATE_SCHEMA = "cindx.browser-session.v1";
+const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1_000;
+const MIN_SESSION_TTL_MS = 5 * 60 * 1_000;
+const MAX_SESSION_TTL_MS = 24 * 60 * 60 * 1_000;
+const SESSION_WATCH_INTERVAL_MS = 15_000;
+const SESSION_LOCK_NAME = ".action-lock.json";
+const MALFORMED_LOCK_GRACE_MS = 5_000;
+const MAX_STALE_SESSION_CLEANUPS_PER_ACTION = 128;
 
 function debug(message) {
   if (process.env.CINDX_BROWSER_DEBUG === "1") {
@@ -65,7 +74,13 @@ function readJson(filePath) {
 
 function writeJson(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  const temporaryPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+    fs.renameSync(temporaryPath, filePath);
+  } finally {
+    fs.rmSync(temporaryPath, { force: true });
+  }
 }
 
 function sleep(milliseconds) {
@@ -87,6 +102,13 @@ function timeoutFor(request) {
   return Math.min(Math.max(asNumber(request.timeout_ms, DEFAULT_TIMEOUT_MS), 1_000), 120_000);
 }
 
+function sessionTtlMs() {
+  return Math.min(
+    Math.max(asNumber(process.env.CINDX_BROWSER_SESSION_TTL_MS, DEFAULT_SESSION_TTL_MS), MIN_SESSION_TTL_MS),
+    MAX_SESSION_TTL_MS
+  );
+}
+
 function truncate(value, maximum = MAX_OUTPUT_CHARS) {
   const text = String(value || "");
   return text.length <= maximum ? text : `${text.slice(0, maximum)}...`;
@@ -98,6 +120,111 @@ function safeFileName(value) {
     .replace(/^-+|-+$/g, "")
     .slice(0, 120);
   return cleaned || "download";
+}
+
+function processCommand(pid) {
+  if (!Number.isInteger(pid) || pid <= 0 || process.platform === "win32") return "";
+  const result = spawnSync("ps", ["-p", String(pid), "-o", "command="], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"]
+  });
+  return result.status === 0 ? String(result.stdout || "").trim() : "";
+}
+
+function browserProcessBelongsToSession(state, profileDir) {
+  const pid = Number(state.browser_pid);
+  if (!processIsAlive(pid)) return false;
+  if (state.profile_dir && path.resolve(state.profile_dir) !== path.resolve(profileDir)) return false;
+  if (process.platform === "win32") {
+    return Boolean(state.launch_token && state.profile_dir);
+  }
+  const command = processCommand(pid);
+  return Boolean(command && command.includes(`--user-data-dir=${profileDir}`));
+}
+
+function watchdogProcessBelongsToSession(state, statePath) {
+  const pid = Number(state.watchdog_pid);
+  if (!processIsAlive(pid)) return false;
+  if (process.platform === "win32") return Boolean(state.launch_token);
+  const command = processCommand(pid);
+  return Boolean(
+    command &&
+      command.includes(path.basename(__filename)) &&
+      command.includes("--watch-session") &&
+      command.includes(statePath) &&
+      command.includes(String(state.launch_token || ""))
+  );
+}
+
+function sessionLockMetadata(lockPath) {
+  try {
+    return readJson(lockPath);
+  } catch {
+    return {};
+  }
+}
+
+function lockOwnerIsAlive(metadata) {
+  const pid = Number(metadata.pid);
+  if (!processIsAlive(pid)) return false;
+  if (process.platform === "win32") return true;
+  const command = processCommand(pid);
+  return Boolean(command && command.includes(path.basename(__filename)));
+}
+
+function sessionLockAgeMs(lockPath, metadata) {
+  const acquiredAtMs = asNumber(metadata.acquired_at_ms, 0);
+  if (acquiredAtMs > 0) return Math.max(0, Date.now() - acquiredAtMs);
+  try {
+    return Math.max(0, Date.now() - fs.statSync(lockPath).mtimeMs);
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+async function acquireSessionLock(sessionDir, requestId, waitMs) {
+  const lockPath = path.join(sessionDir, SESSION_LOCK_NAME);
+  const deadline = Date.now() + Math.max(0, waitMs);
+  const owner = {
+    schema: "cindx.browser-session-lock.v1",
+    pid: process.pid,
+    request_id: String(requestId || "unknown"),
+    acquired_at_ms: Date.now()
+  };
+
+  for (;;) {
+    try {
+      const handle = fs.openSync(lockPath, "wx", 0o600);
+      try {
+        fs.writeFileSync(handle, `${JSON.stringify(owner, null, 2)}\n`);
+      } finally {
+        fs.closeSync(handle);
+      }
+      return () => {
+        const current = sessionLockMetadata(lockPath);
+        if (current.pid === owner.pid && current.request_id === owner.request_id) {
+          fs.rmSync(lockPath, { force: true });
+        }
+      };
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      const metadata = sessionLockMetadata(lockPath);
+      const ageMs = sessionLockAgeMs(lockPath, metadata);
+      const hasOwner = Number.isInteger(Number(metadata.pid)) && Number(metadata.pid) > 0;
+      if (
+        (hasOwner && !lockOwnerIsAlive(metadata)) ||
+        (!hasOwner && ageMs > MALFORMED_LOCK_GRACE_MS) ||
+        ageMs > 10 * 60 * 1_000
+      ) {
+        fs.rmSync(lockPath, { force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`browser session is busy with request ${metadata.request_id || "unknown"}`);
+      }
+      await sleep(50);
+    }
+  }
 }
 
 function endpointFromProfile(profileDir) {
@@ -139,17 +266,35 @@ async function launchBrowser(request, profileDir, statePath, timeoutMs) {
   if (asBoolean(request.headless)) args.unshift("--headless=new", "--disable-gpu");
   const child = spawn(executable, args, { detached: true, stdio: "ignore" });
   child.unref();
-  writeJson(statePath, { browser_pid: child.pid, executable, active_tab_id: null });
+  const launchToken = crypto.randomUUID();
+  const createdAt = Date.now();
+  writeJson(statePath, {
+    schema: SESSION_STATE_SCHEMA,
+    session_id: request.session_id,
+    browser_pid: child.pid,
+    watchdog_pid: null,
+    executable,
+    profile_dir: profileDir,
+    launch_token: launchToken,
+    active_tab_id: null,
+    created_at_ms: createdAt,
+    last_used_at_ms: createdAt,
+    lease_expires_at_ms: createdAt + sessionTtlMs()
+  });
 
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const endpoint = endpointFromProfile(profileDir);
-    if (await endpointIsAlive(endpoint)) return endpoint;
+    if (await endpointIsAlive(endpoint)) {
+      ensureSessionWatchdog(statePath);
+      return endpoint;
+    }
     await sleep(50);
   }
   terminateProcessTree(child.pid, "SIGTERM");
   await sleep(100);
   terminateProcessTree(child.pid, "SIGKILL");
+  fs.rmSync(statePath, { force: true });
   throw new Error(`browser CDP endpoint did not start within ${timeoutMs}ms`);
 }
 
@@ -179,41 +324,205 @@ function terminateProcessTree(pid, signal) {
   } catch {}
 }
 
+function renewSessionLease(statePath) {
+  const state = sessionState(statePath);
+  if (!state.launch_token) return state;
+  const now = Date.now();
+  const renewed = {
+    ...state,
+    last_used_at_ms: now,
+    lease_expires_at_ms: now + sessionTtlMs()
+  };
+  writeJson(statePath, renewed);
+  return renewed;
+}
+
+function ensureSessionWatchdog(statePath) {
+  const state = sessionState(statePath);
+  if (!state.launch_token) return;
+  if (watchdogProcessBelongsToSession(state, statePath)) {
+    renewSessionLease(statePath);
+    return;
+  }
+  const child = spawn(
+    process.execPath,
+    [__filename, "--watch-session", statePath, String(state.launch_token)],
+    { detached: true, stdio: "ignore" }
+  );
+  child.unref();
+  const now = Date.now();
+  writeJson(statePath, {
+    ...state,
+    watchdog_pid: child.pid,
+    last_used_at_ms: now,
+    lease_expires_at_ms: now + sessionTtlMs()
+  });
+}
+
+function stopSessionWatchdog(state, statePath) {
+  if (!watchdogProcessBelongsToSession(state, statePath)) return;
+  terminateProcessTree(Number(state.watchdog_pid), "SIGTERM");
+}
+
+async function waitForBrowserExit(state, profileDir, endpoint, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const ownedProcessAlive = browserProcessBelongsToSession(state, profileDir);
+    if (!ownedProcessAlive && !(await endpointIsAlive(endpoint))) return true;
+    await sleep(50);
+  }
+  return false;
+}
+
+async function terminateOwnedBrowserSession(statePath, endpoint, gracefulMs = 2_000) {
+  const state = sessionState(statePath);
+  const profileDir = state.profile_dir || path.join(path.dirname(statePath), "profile");
+  const browserPid = Number(state.browser_pid);
+  if (processIsAlive(browserPid) && !browserProcessBelongsToSession(state, profileDir)) {
+    throw new Error(`refusing to terminate unverified browser process ${browserPid}`);
+  }
+  if (browserProcessBelongsToSession(state, profileDir)) {
+    terminateProcessTree(browserPid, "SIGTERM");
+  }
+  if (!(await waitForBrowserExit(state, profileDir, endpoint, gracefulMs))) {
+    if (!browserProcessBelongsToSession(state, profileDir)) {
+      throw new Error(`browser process ${browserPid || "unknown"} ownership changed before forced close`);
+    }
+    terminateProcessTree(browserPid, "SIGKILL");
+  }
+  if (!(await waitForBrowserExit(state, profileDir, endpoint, 1_000))) {
+    throw new Error(`browser process ${browserPid || "unknown"} did not stop`);
+  }
+}
+
+async function watchBrowserSession(statePath, launchToken) {
+  const sessionDir = path.dirname(statePath);
+  for (;;) {
+    const state = sessionState(statePath);
+    if (!state.launch_token || state.launch_token !== launchToken) return;
+    const expiresAt = asNumber(state.lease_expires_at_ms, 0);
+    if (Date.now() < expiresAt) {
+      await sleep(Math.min(SESSION_WATCH_INTERVAL_MS, Math.max(1_000, expiresAt - Date.now())));
+      continue;
+    }
+    let release = null;
+    try {
+      release = await acquireSessionLock(
+        sessionDir,
+        `watchdog-${process.pid}-${launchToken}`,
+        0
+      );
+    } catch {
+      await sleep(SESSION_WATCH_INTERVAL_MS);
+      continue;
+    }
+    let retry = false;
+    try {
+      const current = sessionState(statePath);
+      if (!current.launch_token || current.launch_token !== launchToken) return;
+      if (!sessionLeaseExpired(current, statePath)) continue;
+      const profileDir = current.profile_dir || path.join(sessionDir, "profile");
+      const endpoint = endpointFromProfile(profileDir);
+      await terminateOwnedBrowserSession(statePath, endpoint);
+      const latest = sessionState(statePath);
+      if (latest.launch_token === launchToken) {
+        fs.rmSync(path.join(profileDir, "DevToolsActivePort"), { force: true });
+        fs.rmSync(statePath, { force: true });
+      }
+    } catch (error) {
+      debug(`watchdog cleanup skipped: ${error.message}`);
+      retry = true;
+    } finally {
+      release?.();
+    }
+    if (retry) {
+      await sleep(SESSION_WATCH_INTERVAL_MS);
+      continue;
+    }
+    return;
+  }
+}
+
+function sessionLeaseExpired(state, statePath) {
+  const explicitExpiry = asNumber(state.lease_expires_at_ms, 0);
+  if (explicitExpiry > 0) return Date.now() >= explicitExpiry;
+  try {
+    return Date.now() >= fs.statSync(statePath).mtimeMs + sessionTtlMs();
+  } catch {
+    return false;
+  }
+}
+
+async function cleanupExpiredSession(sessionDir) {
+  const statePath = path.join(sessionDir, "session-state.json");
+  let state = sessionState(statePath);
+  if (!state.browser_pid || !sessionLeaseExpired(state, statePath)) return;
+  let release = null;
+  try {
+    release = await acquireSessionLock(sessionDir, `cleanup-${process.pid}`, 0);
+  } catch {
+    return;
+  }
+  try {
+    state = sessionState(statePath);
+    if (!state.browser_pid || !sessionLeaseExpired(state, statePath)) return;
+    const profileDir = state.profile_dir || path.join(sessionDir, "profile");
+    const endpoint = endpointFromProfile(profileDir);
+    if (processIsAlive(Number(state.browser_pid)) || (await endpointIsAlive(endpoint))) {
+      await terminateOwnedBrowserSession(statePath, endpoint);
+    }
+    stopSessionWatchdog(state, statePath);
+    fs.rmSync(path.join(profileDir, "DevToolsActivePort"), { force: true });
+    fs.rmSync(statePath, { force: true });
+  } catch (error) {
+    debug(`expired session cleanup skipped for ${sessionDir}: ${error.message}`);
+  } finally {
+    release?.();
+  }
+}
+
+async function cleanupExpiredSiblingSessions(activeSessionDir) {
+  const sessionsRoot = path.dirname(activeSessionDir);
+  let entries = [];
+  try {
+    entries = fs.readdirSync(sessionsRoot, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  const candidates = entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(sessionsRoot, entry.name))
+    .filter((candidate) => path.resolve(candidate) !== path.resolve(activeSessionDir))
+    .map((candidate) => {
+      try {
+        return {
+          candidate,
+          stateModifiedAtMs: fs.statSync(path.join(candidate, "session-state.json")).mtimeMs
+        };
+      } catch {
+        return { candidate, stateModifiedAtMs: Number.POSITIVE_INFINITY };
+      }
+    })
+    .sort((left, right) => left.stateModifiedAtMs - right.stateModifiedAtMs)
+    .slice(0, MAX_STALE_SESSION_CLEANUPS_PER_ACTION);
+  for (const { candidate } of candidates) {
+    await cleanupExpiredSession(candidate);
+  }
+}
+
 async function closeBrowserSession(runtime) {
   const state = sessionState(runtime.statePath);
-  const browserPid = Number(state.browser_pid);
   await Promise.race([
     runtime.browser.close().catch(() => {}),
     sleep(1_000)
   ]);
-
-  if (processIsAlive(browserPid) || (await endpointIsAlive(runtime.endpoint))) {
-    terminateProcessTree(browserPid, "SIGTERM");
+  if (processIsAlive(Number(state.browser_pid)) || (await endpointIsAlive(runtime.endpoint))) {
+    await terminateOwnedBrowserSession(runtime.statePath, runtime.endpoint);
   }
-  const gracefulDeadline = Date.now() + 2_000;
-  while (
-    Date.now() < gracefulDeadline &&
-    (processIsAlive(browserPid) || (await endpointIsAlive(runtime.endpoint)))
-  ) {
-    await sleep(50);
-  }
-  if (processIsAlive(browserPid) || (await endpointIsAlive(runtime.endpoint))) {
-    terminateProcessTree(browserPid, "SIGKILL");
-  }
-  const forcedDeadline = Date.now() + 1_000;
-  while (
-    Date.now() < forcedDeadline &&
-    (processIsAlive(browserPid) || (await endpointIsAlive(runtime.endpoint)))
-  ) {
-    await sleep(50);
-  }
-
   const sessionDir = path.dirname(runtime.statePath);
   fs.rmSync(path.join(sessionDir, "profile", "DevToolsActivePort"), { force: true });
+  stopSessionWatchdog(state, runtime.statePath);
   fs.rmSync(runtime.statePath, { force: true });
-  if (processIsAlive(browserPid) || (await endpointIsAlive(runtime.endpoint))) {
-    throw new Error(`browser process ${browserPid || "unknown"} did not stop`);
-  }
 }
 
 async function connectBrowser(request) {
@@ -226,17 +535,47 @@ async function connectBrowser(request) {
   const statePath = path.join(sessionDir, "session-state.json");
   fs.mkdirSync(sessionDir, { recursive: true });
   let endpoint = endpointFromProfile(profileDir);
-  if (!(await endpointIsAlive(endpoint))) {
+  let state = sessionState(statePath);
+  if (await endpointIsAlive(endpoint)) {
+    if (state.session_id && state.session_id !== request.session_id) {
+      throw new Error("browser session state belongs to a different Cindx session");
+    }
+    if (!browserProcessBelongsToSession(state, profileDir)) {
+      throw new Error("live browser session ownership could not be verified");
+    }
+    if (!state.launch_token) {
+      const now = Date.now();
+      state = {
+        ...state,
+        schema: SESSION_STATE_SCHEMA,
+        session_id: request.session_id,
+        profile_dir: profileDir,
+        launch_token: crypto.randomUUID(),
+        created_at_ms: now,
+        last_used_at_ms: now,
+        lease_expires_at_ms: now + sessionTtlMs()
+      };
+      writeJson(statePath, state);
+    }
+    ensureSessionWatchdog(statePath);
+  } else {
+    if (browserProcessBelongsToSession(state, profileDir)) {
+      await terminateOwnedBrowserSession(statePath, endpoint);
+    }
+    stopSessionWatchdog(state, statePath);
+    fs.rmSync(path.join(profileDir, "DevToolsActivePort"), { force: true });
+    fs.rmSync(statePath, { force: true });
     debug("launching browser");
     endpoint = await launchBrowser(request, profileDir, statePath, timeoutMs);
   }
+  renewSessionLease(statePath);
   debug(`connecting CDP ${endpoint}`);
   const { chromium } = playwrightCore().api;
   const browser = await chromium.connectOverCDP(endpoint, { timeout: timeoutMs });
   debug("CDP connected");
   const context = browser.contexts()[0];
   if (!context) throw new Error("CDP browser did not expose a default context");
-  return { browser, context, endpoint, statePath, timeoutMs };
+  return { browser, context, endpoint, statePath, profileDir, timeoutMs };
 }
 
 async function pageId(context, page) {
@@ -265,7 +604,13 @@ function sessionState(statePath) {
 
 function saveActiveTab(statePath, activeTabId) {
   const state = sessionState(statePath);
-  writeJson(statePath, { ...state, active_tab_id: activeTabId });
+  const now = Date.now();
+  writeJson(statePath, {
+    ...state,
+    active_tab_id: activeTabId,
+    last_used_at_ms: now,
+    lease_expires_at_ms: now + sessionTtlMs()
+  });
 }
 
 async function selectPage(context, request, statePath) {
@@ -512,63 +857,106 @@ async function execute(request) {
   let telemetry = null;
   let actionResult = null;
   let error = null;
+  let releaseSessionLock = null;
   try {
     debug(`execute ${request.id} begin`);
     if (request.schema !== REQUEST_SCHEMA) throw new Error(`unsupported schema ${request.schema}`);
-    runtime = await connectBrowser(request);
-    debug("selecting page");
-    const selected = request.action === "tabs" || request.action === "close"
-      ? null
-      : await selectPage(runtime.context, request, runtime.statePath);
-    debug("attaching CDP telemetry");
-    telemetry = selected ? await cdpTelemetry(runtime.context, selected.page) : null;
-    debug("dispatching action");
-    actionResult = await runAction(request, runtime);
-    debug("action complete");
+    const sessionDir = request.session_dir;
+    if (!sessionDir || !path.isAbsolute(sessionDir)) {
+      throw new Error("session_dir must be an absolute path supplied by Cindx");
+    }
+    fs.mkdirSync(sessionDir, { recursive: true });
+    await cleanupExpiredSiblingSessions(sessionDir);
+    releaseSessionLock = await acquireSessionLock(
+      sessionDir,
+      request.id,
+      timeoutFor(request) + 5_000
+    );
+    if (request.action === "close") {
+      const profileDir = path.join(sessionDir, "profile");
+      const statePath = path.join(sessionDir, "session-state.json");
+      const endpoint = endpointFromProfile(profileDir);
+      if (!(await endpointIsAlive(endpoint))) {
+        const state = sessionState(statePath);
+        if (processIsAlive(Number(state.browser_pid))) {
+          await terminateOwnedBrowserSession(statePath, endpoint);
+        }
+        stopSessionWatchdog(state, statePath);
+        fs.rmSync(path.join(profileDir, "DevToolsActivePort"), { force: true });
+        fs.rmSync(statePath, { force: true });
+        actionResult = { output: "browser session already closed", page: null, artifacts: [] };
+      }
+    }
+    if (actionResult) {
+      debug("browser close required no live runtime");
+    } else {
+      runtime = await connectBrowser(request);
+      debug("selecting page");
+      const selected = request.action === "tabs" || request.action === "close"
+        ? null
+        : await selectPage(runtime.context, request, runtime.statePath);
+      debug("attaching CDP telemetry");
+      telemetry = selected ? await cdpTelemetry(runtime.context, selected.page) : null;
+      debug("dispatching action");
+      actionResult = await runAction(request, runtime);
+      debug("action complete");
+    }
   } catch (caught) {
     error = caught instanceof Error ? caught : new Error(String(caught));
   }
 
-  const page = actionResult?.page || null;
-  const pageInfo = page && runtime ? await pageSummary(runtime.context, page).catch(() => null) : null;
-  if (telemetry) await telemetry.session.detach().catch(() => {});
-  const trace = {
-    schema: "cindx.browser-control-trace.v2",
-    id: request.id,
-    session_id: request.session_id,
-    action: request.action,
-    started_at_ms: startedAt,
-    duration_ms: Date.now() - startedAt,
-    request: traceRequest(request),
-    cdp_endpoint: runtime?.endpoint || null,
-    cdp_events: telemetry?.events || null,
-    page: pageInfo,
-    ok: !error,
-    error: error?.message || null
-  };
-  const tracePath = writeTrace(request, trace);
-  debug(`trace written ${tracePath}`);
-  const response = {
-    schema: RESPONSE_SCHEMA,
-    ok: !error,
-    id: request.id,
-    action: request.action,
-    session_id: request.session_id,
-    controller: "cdp_playwright",
-    page: pageInfo,
-    tabs: actionResult?.tabs || null,
-    output: error ? error.message : actionResult?.output || "browser action completed",
-    artifacts: actionResult?.artifacts || [],
-    trace_path: tracePath,
-    duration_ms: trace.duration_ms,
-    cdp_events: trace.cdp_events
-  };
-  return response;
+  try {
+    const page = actionResult?.page || null;
+    const pageInfo = page && runtime ? await pageSummary(runtime.context, page).catch(() => null) : null;
+    if (telemetry) await telemetry.session.detach().catch(() => {});
+    const trace = {
+      schema: "cindx.browser-control-trace.v2",
+      id: request.id,
+      session_id: request.session_id,
+      action: request.action,
+      started_at_ms: startedAt,
+      duration_ms: Date.now() - startedAt,
+      request: traceRequest(request),
+      cdp_endpoint: runtime?.endpoint || null,
+      cdp_events: telemetry?.events || null,
+      page: pageInfo,
+      ok: !error,
+      error: error?.message || null
+    };
+    const tracePath = writeTrace(request, trace);
+    debug(`trace written ${tracePath}`);
+    return {
+      schema: RESPONSE_SCHEMA,
+      ok: !error,
+      id: request.id,
+      action: request.action,
+      session_id: request.session_id,
+      controller: "cdp_playwright",
+      page: pageInfo,
+      tabs: actionResult?.tabs || null,
+      output: error ? error.message : actionResult?.output || "browser action completed",
+      artifacts: actionResult?.artifacts || [],
+      trace_path: tracePath,
+      duration_ms: trace.duration_ms,
+      cdp_events: trace.cdp_events
+    };
+  } finally {
+    releaseSessionLock?.();
+  }
 }
 
 async function main() {
   if (process.argv.includes("--health")) {
     health();
+    return;
+  }
+  if (process.argv[2] === "--watch-session") {
+    const statePath = process.argv[3];
+    const launchToken = process.argv[4];
+    if (!statePath || !path.isAbsolute(statePath) || !launchToken) {
+      throw new Error("browser session watchdog requires an absolute state path and launch token");
+    }
+    await watchBrowserSession(statePath, launchToken);
     return;
   }
   const requestPath = process.argv[2];

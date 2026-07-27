@@ -128,6 +128,40 @@ pub enum ToolExposure {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolEffectSemantics {
+    ReadOnly,
+    Idempotent,
+    Verifiable { verifier: String },
+    NonIdempotent,
+}
+
+impl ToolEffectSemantics {
+    pub fn conservative_default(risk: &ToolRisk) -> Self {
+        if matches!(risk, ToolRisk::ReadOnly) {
+            Self::ReadOnly
+        } else {
+            Self::NonIdempotent
+        }
+    }
+
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::Idempotent => "idempotent",
+            Self::Verifiable { .. } => "verifiable",
+            Self::NonIdempotent => "non_idempotent",
+        }
+    }
+
+    pub fn verifier(&self) -> Option<&str> {
+        match self {
+            Self::Verifiable { verifier } => Some(verifier.as_str()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolSpec {
     pub name: String,
     pub namespace: String,
@@ -137,6 +171,7 @@ pub struct ToolSpec {
     pub exposure: ToolExposure,
     pub input_schema_json: String,
     pub output_schema_json: Option<String>,
+    pub effect_semantics: ToolEffectSemantics,
 }
 
 impl ToolSpec {
@@ -149,6 +184,7 @@ impl ToolSpec {
         exposure: ToolExposure,
         input_schema_json: impl Into<String>,
     ) -> Self {
+        let effect_semantics = ToolEffectSemantics::conservative_default(&risk);
         Self {
             name: name.into(),
             namespace: namespace.into(),
@@ -158,7 +194,13 @@ impl ToolSpec {
             exposure,
             input_schema_json: input_schema_json.into(),
             output_schema_json: None,
+            effect_semantics,
         }
+    }
+
+    pub fn with_effect_semantics(mut self, effect_semantics: ToolEffectSemantics) -> Self {
+        self.effect_semantics = effect_semantics;
+        self
     }
 
     pub fn builtin(

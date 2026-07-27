@@ -12,5 +12,6 @@ if [ ! -d "apps/desktop/node_modules" ]; then
 fi
 
 node scripts/test-browser-sidecar.mjs
+node scripts/test-computer-sidecar.mjs
 (cd apps/desktop && npm run build)
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml

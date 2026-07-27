@@ -52,6 +52,9 @@ jobs:
       - name: Test Browser Control v2
         run: node scripts/test-browser-sidecar.mjs
 
+      - name: Test Computer Control
+        run: node scripts/test-computer-sidecar.mjs
+
       - name: Test Rust workspace
         run: cargo test --workspace --locked
 

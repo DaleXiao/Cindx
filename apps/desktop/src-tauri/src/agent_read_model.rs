@@ -263,13 +263,30 @@ pub(crate) fn agent_state_with_error_in_context(
         ),
     )
     .map_err(|error| error.to_string())?;
+    delete_persisted_agent_runtime_snapshot(&mut store, session_id)?;
 
     agent_state_for_session(&store, Some(message), session_id).map_err(|error| error.to_string())
 }
 
 pub(crate) fn latest_agent_prompt_from_active_events(active_events: &[Event]) -> Option<String> {
     latest_external_user_turn_event(active_events)
-        .and_then(|event| event.metadata.get("content").cloned())
+        .and_then(model_prompt_from_message_event)
+        .or_else(|| {
+            active_events
+                .iter()
+                .find(|event| {
+                    matches!(event.kind, EventKind::TaskStatusChanged)
+                        && is_agent_run_start_event(event)
+                })
+                .and_then(model_prompt_from_run_start)
+        })
+}
+
+pub(crate) fn latest_agent_display_prompt_from_active_events(
+    active_events: &[Event],
+) -> Option<String> {
+    latest_external_user_turn_event(active_events)
+        .and_then(display_prompt_from_message_event)
         .or_else(|| {
             active_events
                 .iter()
@@ -279,6 +296,68 @@ pub(crate) fn latest_agent_prompt_from_active_events(active_events: &[Event]) ->
                 })
                 .and_then(|event| event.metadata.get("prompt").cloned())
         })
+}
+
+pub(crate) fn agent_recovery_prompt_from_active_events(
+    active_events: &[Event],
+) -> Option<String> {
+    primary_agent_user_turn_event(active_events)
+        .and_then(model_prompt_from_message_event)
+        .or_else(|| {
+            active_events
+                .iter()
+                .find(|event| {
+                    matches!(event.kind, EventKind::TaskStatusChanged)
+                        && is_agent_run_start_event(event)
+                })
+                .and_then(|event| {
+                    event
+                        .metadata
+                        .get("recovery_prompt")
+                        .or_else(|| event.metadata.get("model_prompt"))
+                        .or_else(|| event.metadata.get("prompt"))
+                        .cloned()
+                })
+        })
+}
+
+pub(crate) fn primary_agent_user_turn_event(active_events: &[Event]) -> Option<&Event> {
+    active_events.iter().find(|event| {
+        event.kind == EventKind::MessageAdded
+            && event.metadata.get("role").map(String::as_str) == Some("user")
+            && event
+                .metadata
+                .get("continuation_replay")
+                .map(String::as_str)
+                != Some("true")
+            && event.metadata.get("internal").map(String::as_str) != Some("true")
+            && event.metadata.get("steer").map(String::as_str) != Some("true")
+            && event.metadata.get("queue_mode").map(String::as_str) != Some("steer")
+    })
+}
+
+fn model_prompt_from_message_event(event: &Event) -> Option<String> {
+    event
+        .metadata
+        .get("model_content")
+        .or_else(|| event.metadata.get("content"))
+        .cloned()
+}
+
+fn display_prompt_from_message_event(event: &Event) -> Option<String> {
+    event
+        .metadata
+        .get("display_content")
+        .or_else(|| event.metadata.get("content"))
+        .cloned()
+}
+
+fn model_prompt_from_run_start(event: &Event) -> Option<String> {
+    event
+        .metadata
+        .get("model_prompt")
+        .or_else(|| event.metadata.get("prompt"))
+        .cloned()
 }
 
 pub(crate) fn agent_effort_from_active_events(active_events: &[Event]) -> AgentEffort {
@@ -292,6 +371,13 @@ pub(crate) fn agent_effort_from_active_events(active_events: &[Event]) -> AgentE
 
 pub(crate) fn agent_transcript_from_active_events(events: &[Event]) -> Vec<Message> {
     events.iter().filter_map(message_from_event).collect()
+}
+
+pub(crate) fn agent_runtime_transcript_from_active_events(events: &[Event]) -> Vec<Message> {
+    events
+        .iter()
+        .filter_map(runtime_message_from_event)
+        .collect()
 }
 
 pub(crate) fn agent_trace_state_for_session(
