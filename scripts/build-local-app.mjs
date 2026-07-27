@@ -134,6 +134,7 @@ try {
   run("rustup", ["target", "add", targetTriple]);
   if (!skipTests) {
     run(process.execPath, [path.join(repoRoot, "scripts", "test-browser-sidecar.mjs")]);
+    run(process.execPath, [path.join(repoRoot, "scripts", "test-computer-sidecar.mjs")]);
     run("npm", ["test"], { cwd: desktopRoot });
     run("cargo", ["test", "--workspace", "--locked"]);
     run("cargo", ["test", "--manifest-path", path.join(tauriRoot, "Cargo.toml"), "--locked"]);

@@ -300,10 +300,22 @@ pub(crate) fn prompt_evolution_evaluation_for_run(
         .map_err(|error| format!("store lock poisoned: {error}"))?;
     let mut model =
         load_prompt_evolution_read_model(&mut store).map_err(|error| error.to_string())?;
-    let mut evaluation = evaluate_prompt_evolution_read_model(&model, effort)?;
-    let previous_rollout = model.rollouts.get(effort).cloned();
-    let rollout = reconcile_prompt_rollout(&mut model, effort, &evaluation);
-    apply_prompt_rollout_selection(&mut evaluation, &rollout, &model, run_context, effort);
+    let evidence_scope = run_context
+        .get("project_id")
+        .cloned()
+        .unwrap_or_else(|| "global".to_string());
+    let mut scoped_model = prompt_evolution_read_model_for_scope(&model, &evidence_scope);
+    let mut evaluation = evaluate_prompt_evolution_read_model(&scoped_model, effort)?;
+    let previous_rollout = scoped_model.rollouts.get(effort).cloned();
+    let rollout = reconcile_prompt_rollout(&mut scoped_model, effort, &evaluation);
+    persist_scoped_prompt_rollout(&mut model, &evidence_scope, effort, rollout.clone());
+    apply_prompt_rollout_selection(
+        &mut evaluation,
+        &rollout,
+        &scoped_model,
+        run_context,
+        effort,
+    );
     if previous_rollout.as_ref() != Some(&rollout) {
         save_prompt_evolution_read_model(&mut store, &model).map_err(|error| error.to_string())?;
         append_event(
@@ -314,6 +326,10 @@ pub(crate) fn prompt_evolution_evaluation_for_run(
             metadata_with_context(
                 [
                     ("prompt_effort".to_string(), effort.to_string()),
+                    (
+                        "prompt_rollout_scope".to_string(),
+                        evidence_scope.clone(),
+                    ),
                     (
                         "stable_profile".to_string(),
                         rollout.stable_profile_id.clone(),
@@ -424,7 +440,12 @@ pub(crate) fn prompt_evolution_state(
 ) -> Result<PromptEvolutionState, StorageError> {
     let model = load_prompt_evolution_read_model(store)?;
     let events = prompt_evolution_profile_events(&model);
-    let rollouts = model.rollouts.clone();
+    let rollouts = ["fast", "auto", "pro"]
+        .into_iter()
+        .filter_map(|effort| {
+            visible_prompt_rollout(&model, effort).map(|rollout| (effort.to_string(), rollout))
+        })
+        .collect::<BTreeMap<_, _>>();
     let datasets = model.datasets.clone();
     let observations = model.observations;
     let mut profile_rows = Vec::new();
@@ -448,9 +469,18 @@ pub(crate) fn prompt_evolution_state(
         observed_runs += evaluation.observations.len();
         population_size += evaluation.population.len();
         frontier_profiles += evaluation.frontier_ids.len();
+        let active_dataset_sha256 =
+            orchestrator::latest_scientific_dataset_digest(&evaluation.observations);
+        let is_active_scientific = |observation: &&PromptEvolutionObservation| {
+            observation.is_scientific_evidence()
+                && active_dataset_sha256.is_some_and(|digest| {
+                    observation.provenance.dataset_sha256 == digest
+                })
+        };
         let effort_paired_runs = evaluation
             .observations
             .iter()
+            .filter(is_active_scientific)
             .filter(|observation| observation.mode.is_paired_execution())
             .map(|observation| observation.evaluation_id.as_str())
             .collect::<BTreeSet<_>>()
@@ -458,6 +488,7 @@ pub(crate) fn prompt_evolution_state(
         let effort_replay_runs = evaluation
             .observations
             .iter()
+            .filter(is_active_scientific)
             .filter(|observation| observation.mode.is_replay_execution())
             .map(|observation| observation.evaluation_id.as_str())
             .collect::<BTreeSet<_>>()
@@ -468,6 +499,10 @@ pub(crate) fn prompt_evolution_state(
             .filter(|observation| {
                 observation.split == PromptEvaluationSplit::Train
                     && observation.mode.is_paired_execution()
+                    && observation.is_scientific_evidence()
+                    && active_dataset_sha256.is_some_and(|digest| {
+                        observation.provenance.dataset_sha256 == digest
+                    })
                     && observation.reflection_packet.is_some()
             })
             .count();
@@ -590,6 +625,13 @@ pub(crate) fn prompt_evolution_state(
                 .observations
                 .iter()
                 .filter(|observation| observation.profile_id == genome.id)
+                .filter(|observation| {
+                    observation.mode == PromptEvaluationMode::Live
+                        || (observation.is_scientific_evidence()
+                            && active_dataset_sha256.is_some_and(|digest| {
+                                observation.provenance.dataset_sha256 == digest
+                            }))
+                })
             {
                 profile.runs += 1;
                 if observation.mode.is_paired_execution() {

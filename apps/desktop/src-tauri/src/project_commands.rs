@@ -745,6 +745,15 @@ pub(crate) fn clear_session_runtime_state(
         }
     }
     {
+        let mut outputs = state
+            .session_output_cache
+            .lock()
+            .map_err(|error| format!("session output cache lock poisoned: {error}"))?;
+        for session_id in session_ids {
+            outputs.remove(session_id);
+        }
+    }
+    {
         let mut dispatching = state
             .queue_dispatching_sessions
             .lock()
@@ -773,6 +782,9 @@ pub(crate) fn delete_session_history(
             .map_err(|error| error.to_string())?;
         store
             .delete_read_model(AGENT_SESSION_READ_MODEL_NAMESPACE, session_id)
+            .map_err(|error| error.to_string())?;
+        store
+            .delete_read_model(AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE, session_id)
             .map_err(|error| error.to_string())?;
     }
     store
@@ -1098,6 +1110,7 @@ pub(crate) fn runtime_status_for_root(root: PathBuf) -> RuntimeStatus {
             "browser.scroll".to_string(),
             "browser.tabs".to_string(),
             "browser.select_tab".to_string(),
+            "browser.close".to_string(),
             "computer.screenshot".to_string(),
             "computer.click".to_string(),
             "computer.type".to_string(),

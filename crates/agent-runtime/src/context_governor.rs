@@ -7,6 +7,7 @@ use crate::context_projection::{
 };
 use agent_core::{Message, MessageRole, Metadata, ToolSpec};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContextBudgetAllocation {
@@ -22,6 +23,8 @@ pub struct ContextBudgetAllocation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextGovernorReport {
     pub applied: bool,
+    pub repair_attempted: bool,
+    pub repair_succeeded: bool,
     pub context_window_tokens: u64,
     pub input_budget_tokens: u64,
     pub estimated_original_tokens: u64,
@@ -41,7 +44,49 @@ pub struct ContextGovernorReport {
     pub allocation: ContextBudgetAllocation,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextInvariantViolation {
+    pub failed_invariants: Vec<String>,
+    pub report: ContextGovernorReport,
+}
+
+impl fmt::Display for ContextInvariantViolation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "context projection rejected before model dispatch; failed invariants: {}",
+            self.failed_invariants.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for ContextInvariantViolation {}
+
 impl ContextGovernorReport {
+    pub fn validate_required_invariants(&self) -> Result<(), ContextInvariantViolation> {
+        let mut failed_invariants = Vec::new();
+        if !self.hard_limit_satisfied {
+            failed_invariants.push("hard_limit_satisfied".to_string());
+        }
+        if !self.current_request_preserved {
+            failed_invariants.push("current_request_preserved".to_string());
+        }
+        if !self.protected_sources_satisfied {
+            failed_invariants.push("protected_sources_satisfied".to_string());
+        }
+        if !self.tool_round_integrity_satisfied {
+            failed_invariants.push("tool_round_integrity_satisfied".to_string());
+        }
+        if failed_invariants.is_empty() {
+            Ok(())
+        } else {
+            Err(ContextInvariantViolation {
+                failed_invariants,
+                report: self.clone(),
+            })
+        }
+    }
+
     pub(crate) fn insert_metadata(&self, metadata: &mut Metadata) {
         metadata.insert(
             "context_governor_schema".to_string(),
@@ -50,6 +95,14 @@ impl ContextGovernorReport {
         metadata.insert(
             "context_governor_applied".to_string(),
             self.applied.to_string(),
+        );
+        metadata.insert(
+            "context_governor_repair_attempted".to_string(),
+            self.repair_attempted.to_string(),
+        );
+        metadata.insert(
+            "context_governor_repair_succeeded".to_string(),
+            self.repair_succeeded.to_string(),
         );
         metadata.insert(
             "context_input_budget_tokens".to_string(),
@@ -165,17 +218,19 @@ pub(crate) fn govern_model_messages(
         .saturating_add(tool_tokens);
     if estimated_original_tokens <= input_budget_tokens {
         let mut messages = Vec::with_capacity(state_messages.len() + 1);
-        messages.push(system_message);
+        messages.push(system_message.clone());
         messages.extend(state_messages.iter().cloned());
         let selected_context_sources = context_source_labels(&messages);
         let selected_source_tokens = context_source_token_ledger(&messages);
         let current_request_preserved = current_request_preserved(state_messages, &messages);
         let protected_sources_satisfied = protected_sources_satisfied(state_messages, &messages);
         let tool_round_integrity_satisfied = tool_round_integrity_satisfied(&messages);
-        return (
+        let projected = (
             messages,
             ContextGovernorReport {
                 applied: false,
+                repair_attempted: false,
+                repair_succeeded: false,
                 context_window_tokens,
                 input_budget_tokens,
                 estimated_original_tokens,
@@ -217,6 +272,17 @@ pub(crate) fn govern_model_messages(
                     unused_tokens: input_budget_tokens.saturating_sub(estimated_original_tokens),
                 },
             },
+        );
+        return repair_projection_if_needed(
+            state_messages,
+            &system_message,
+            &state_message_tokens,
+            system_tokens,
+            tool_tokens,
+            context_window_tokens,
+            input_budget_tokens,
+            estimated_original_tokens,
+            projected,
         );
     }
 
@@ -319,7 +385,7 @@ pub(crate) fn govern_model_messages(
     let digest = build_omitted_context_digest(state_messages, &omitted_indices, digest_budget);
 
     let mut messages = Vec::with_capacity(selected.len() + usize::from(digest.is_some()) + 1);
-    messages.push(system_message);
+    messages.push(system_message.clone());
     for index in selected.iter().filter(|index| {
         state_messages
             .get(**index)
@@ -393,6 +459,8 @@ pub(crate) fn govern_model_messages(
         .sum::<u64>();
     let report = ContextGovernorReport {
         applied: true,
+        repair_attempted: false,
+        repair_succeeded: false,
         context_window_tokens,
         input_budget_tokens,
         estimated_original_tokens,
@@ -419,7 +487,359 @@ pub(crate) fn govern_model_messages(
             unused_tokens: input_budget_tokens.saturating_sub(estimated_projected_tokens),
         },
     };
+    repair_projection_if_needed(
+        state_messages,
+        &system_message,
+        &state_message_tokens,
+        system_tokens,
+        tool_tokens,
+        context_window_tokens,
+        input_budget_tokens,
+        estimated_original_tokens,
+        (messages, report),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn repair_projection_if_needed(
+    state_messages: &[Message],
+    system_message: &Message,
+    state_message_tokens: &[u64],
+    system_tokens: u64,
+    tool_tokens: u64,
+    context_window_tokens: u64,
+    input_budget_tokens: u64,
+    estimated_original_tokens: u64,
+    projected: (Vec<Message>, ContextGovernorReport),
+) -> (Vec<Message>, ContextGovernorReport) {
+    if projected.1.validate_required_invariants().is_ok() {
+        return projected;
+    }
+
+    if let Some((messages, mut report)) = repair_context_projection(
+        state_messages,
+        system_message,
+        state_message_tokens,
+        system_tokens,
+        tool_tokens,
+        context_window_tokens,
+        input_budget_tokens,
+        estimated_original_tokens,
+    ) {
+        report.repair_attempted = true;
+        report.repair_succeeded = report.validate_required_invariants().is_ok();
+        return (messages, report);
+    }
+
+    let (messages, mut report) = projected;
+    report.repair_attempted = true;
+    report.repair_succeeded = false;
     (messages, report)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn repair_context_projection(
+    state_messages: &[Message],
+    system_message: &Message,
+    state_message_tokens: &[u64],
+    system_tokens: u64,
+    tool_tokens: u64,
+    context_window_tokens: u64,
+    input_budget_tokens: u64,
+    estimated_original_tokens: u64,
+) -> Option<(Vec<Message>, ContextGovernorReport)> {
+    let fixed_tokens = system_tokens.saturating_add(tool_tokens);
+    if fixed_tokens >= input_budget_tokens {
+        return None;
+    }
+    let available_tokens = input_budget_tokens.saturating_sub(fixed_tokens);
+    let current_user_index = state_messages.iter().rposition(is_user_turn_start);
+
+    let mut protected_latest = BTreeMap::<ContextSourceKind, usize>::new();
+    for (index, message) in state_messages.iter().enumerate() {
+        if let Some(source) =
+            ContextSourceKind::from_message(message).filter(|source| source.is_protected())
+        {
+            protected_latest.insert(source, index);
+        }
+    }
+    let mut required = Vec::with_capacity(protected_latest.len() + 1);
+    if let Some(index) = current_user_index {
+        required.push(index);
+    }
+    let mut protected = protected_latest.into_iter().collect::<Vec<_>>();
+    protected.sort_by(|left, right| {
+        right
+            .0
+            .priority()
+            .cmp(&left.0.priority())
+            .then(right.1.cmp(&left.1))
+    });
+    required.extend(protected.into_iter().map(|(_, index)| index));
+    required.sort_unstable();
+    required.dedup();
+
+    let mut selected = BTreeSet::new();
+    let mut replacements = BTreeMap::new();
+    let mut truncated_messages = 0usize;
+    let mut remaining = available_tokens;
+    for (position, index) in required.iter().copied().enumerate() {
+        let slots_after = required.len().saturating_sub(position + 1) as u64;
+        let reserve_after = slots_after.saturating_mul(64);
+        let maximum_budget = remaining.saturating_sub(reserve_after);
+        if maximum_budget < 8 {
+            return None;
+        }
+        let fair_budget = (remaining / (slots_after + 1))
+            .max(64)
+            .min(maximum_budget);
+        let message = state_messages.get(index)?;
+        let fitted = if Some(index) == current_user_index {
+            fit_required_user_message_to_budget(message, fair_budget)
+                .or_else(|| fit_required_user_message_to_budget(message, maximum_budget))
+        } else {
+            fit_message_to_budget_with_estimate(message, fair_budget, state_message_tokens[index])
+                .or_else(|| {
+                    fit_message_to_budget_with_estimate(
+                        message,
+                        maximum_budget,
+                        state_message_tokens[index],
+                    )
+                })
+        }?;
+        let tokens = estimate_model_message_tokens(&fitted.0);
+        if tokens > remaining {
+            return None;
+        }
+        selected.insert(index);
+        if fitted.1 {
+            replacements.insert(index, fitted.0);
+            truncated_messages += 1;
+        }
+        remaining = remaining.saturating_sub(tokens);
+    }
+
+    let digest_reserve = remaining.min((available_tokens / 10).clamp(64, 2_048));
+    let mut optional_budget = remaining.saturating_sub(digest_reserve);
+    for group in complete_tool_rounds_newest_first(state_messages) {
+        if group.iter().any(|index| selected.contains(index)) {
+            continue;
+        }
+        let tokens = group
+            .iter()
+            .map(|index| state_message_tokens[*index])
+            .sum::<u64>();
+        if tokens <= optional_budget {
+            selected.extend(group);
+            optional_budget = optional_budget.saturating_sub(tokens);
+        }
+    }
+    for index in (0..state_messages.len()).rev() {
+        if selected.contains(&index)
+            || matches!(
+                state_messages[index].role,
+                MessageRole::System | MessageRole::Tool
+            )
+            || state_messages[index]
+                .metadata
+                .contains_key("raw_tool_calls_json")
+        {
+            continue;
+        }
+        let tokens = state_message_tokens[index];
+        if tokens <= optional_budget {
+            selected.insert(index);
+            optional_budget = optional_budget.saturating_sub(tokens);
+        }
+    }
+
+    let selected_tokens = selected
+        .iter()
+        .map(|index| {
+            replacements.get(index).map_or_else(
+                || state_message_tokens[*index],
+                estimate_model_message_tokens,
+            )
+        })
+        .sum::<u64>();
+    let omitted_indices = (0..state_messages.len())
+        .filter(|index| !selected.contains(index))
+        .collect::<Vec<_>>();
+    let digest_budget = available_tokens.saturating_sub(selected_tokens);
+    let digest = build_omitted_context_digest(state_messages, &omitted_indices, digest_budget);
+
+    let mut messages = Vec::with_capacity(selected.len() + usize::from(digest.is_some()) + 1);
+    messages.push(system_message.clone());
+    append_selected_messages(
+        &mut messages,
+        state_messages,
+        &selected,
+        &replacements,
+        true,
+    );
+    if let Some(digest) = digest {
+        messages.push(digest);
+    }
+    append_selected_messages(
+        &mut messages,
+        state_messages,
+        &selected,
+        &replacements,
+        false,
+    );
+
+    let estimated_projected_tokens =
+        estimate_messages_tokens(&messages).saturating_add(tool_tokens);
+    let selected_context_sources = context_source_labels(&messages);
+    let selected_source_tokens = context_source_token_ledger(&messages);
+    let omitted_context_sources = omitted_indices
+        .iter()
+        .filter_map(|index| state_messages.get(*index))
+        .filter_map(ContextSourceKind::from_message)
+        .map(ContextSourceKind::as_str)
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let omitted_source_tokens = context_source_token_ledger_for_indices(
+        state_messages,
+        state_message_tokens,
+        &omitted_indices,
+    );
+    let archive_digest_tokens = messages
+        .iter()
+        .find(|message| {
+            message.metadata.get("kind").map(String::as_str) == Some("context_governor_digest")
+        })
+        .map(estimate_model_message_tokens)
+        .unwrap_or_default();
+    let current_request_tokens = current_user_index
+        .filter(|index| selected.contains(index))
+        .map(|index| {
+            replacements.get(&index).map_or_else(
+                || state_message_tokens[index],
+                estimate_model_message_tokens,
+            )
+        })
+        .unwrap_or_default();
+    let protected_context_tokens =
+        selected_context_tokens_by_protection(state_messages, &selected, &replacements, true);
+    let supplemental_context_tokens =
+        selected_context_tokens_by_protection(state_messages, &selected, &replacements, false);
+    let recent_conversation_tokens = selected
+        .iter()
+        .filter(|index| Some(**index) != current_user_index)
+        .filter(|index| !matches!(state_messages[**index].role, MessageRole::System))
+        .map(|index| {
+            replacements.get(index).map_or_else(
+                || state_message_tokens[*index],
+                estimate_model_message_tokens,
+            )
+        })
+        .sum::<u64>();
+    let report = ContextGovernorReport {
+        applied: true,
+        repair_attempted: true,
+        repair_succeeded: false,
+        context_window_tokens,
+        input_budget_tokens,
+        estimated_original_tokens,
+        estimated_projected_tokens,
+        original_messages: state_messages.len(),
+        projected_messages: messages.len(),
+        omitted_messages: omitted_indices.len(),
+        truncated_messages,
+        hard_limit_satisfied: estimated_projected_tokens <= input_budget_tokens,
+        selected_context_sources,
+        omitted_context_sources,
+        selected_source_tokens,
+        omitted_source_tokens,
+        current_request_preserved: current_request_preserved(state_messages, &messages),
+        protected_sources_satisfied: protected_sources_satisfied(state_messages, &messages),
+        tool_round_integrity_satisfied: tool_round_integrity_satisfied(&messages),
+        allocation: ContextBudgetAllocation {
+            core_tokens: fixed_tokens,
+            current_request_tokens,
+            protected_context_tokens,
+            supplemental_context_tokens,
+            recent_conversation_tokens,
+            archive_digest_tokens,
+            unused_tokens: input_budget_tokens.saturating_sub(estimated_projected_tokens),
+        },
+    };
+    Some((messages, report))
+}
+
+fn append_selected_messages(
+    output: &mut Vec<Message>,
+    state_messages: &[Message],
+    selected: &BTreeSet<usize>,
+    replacements: &BTreeMap<usize, Message>,
+    system_messages: bool,
+) {
+    for index in selected.iter().filter(|index| {
+        state_messages.get(**index).is_some_and(|message| {
+            matches!(message.role, MessageRole::System) == system_messages
+        })
+    }) {
+        if let Some(message) = replacements
+            .get(index)
+            .or_else(|| state_messages.get(*index))
+        {
+            output.push(message.clone());
+        }
+    }
+}
+
+fn complete_tool_rounds_newest_first(messages: &[Message]) -> Vec<Vec<usize>> {
+    let mut rounds = Vec::new();
+    for (assistant_index, message) in messages.iter().enumerate().rev() {
+        if !matches!(message.role, MessageRole::Assistant) {
+            continue;
+        }
+        let call_ids = tool_call_ids(message);
+        if call_ids.is_empty() {
+            continue;
+        }
+        let mut observed = BTreeMap::new();
+        for (index, candidate) in messages.iter().enumerate().skip(assistant_index + 1) {
+            if matches!(candidate.role, MessageRole::Assistant | MessageRole::User) {
+                break;
+            }
+            if matches!(candidate.role, MessageRole::Tool) {
+                if let Some(call_id) = candidate.metadata.get("tool_call_id") {
+                    observed.insert(call_id.clone(), index);
+                }
+            }
+        }
+        if call_ids.iter().all(|call_id| observed.contains_key(call_id)) {
+            let mut round = vec![assistant_index];
+            round.extend(
+                call_ids
+                    .iter()
+                    .filter_map(|call_id| observed.get(call_id).copied()),
+            );
+            round.sort_unstable();
+            rounds.push(round);
+        }
+    }
+    rounds
+}
+
+fn tool_call_ids(message: &Message) -> BTreeSet<String> {
+    message
+        .metadata
+        .get("raw_tool_calls_json")
+        .and_then(|raw_calls| serde_json::from_str::<serde_json::Value>(raw_calls).ok())
+        .and_then(|value| value.as_array().cloned())
+        .into_iter()
+        .flatten()
+        .filter_map(|call| {
+            call.get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 fn input_budget_tokens(context_window_tokens: u64, requested_output_tokens: u64) -> u64 {

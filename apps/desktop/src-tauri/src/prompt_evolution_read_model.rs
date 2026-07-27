@@ -95,6 +95,11 @@ pub(crate) fn prompt_evolution_observations_from_events(
                 .get("prompt_effort")
                 .cloned()
                 .or_else(|| plan.as_ref().map(|plan| plan.effort.clone()))?;
+            let evidence_scope = profile_event
+                .metadata
+                .get("project_id")
+                .map(String::as_str)
+                .unwrap_or("global");
             let bounded_profile = profile_event
                 .metadata
                 .get("collaboration_profile")
@@ -203,7 +208,7 @@ pub(crate) fn prompt_evolution_observations_from_events(
                 effort,
                 PromptEvolutionObservation {
                     profile_id,
-                    evaluation_id: workflow_id.clone(),
+                    evaluation_id: scoped_prompt_evaluation_id(evidence_scope, &workflow_id),
                     case_id: workflow_id,
                     opponent_profile_id: None,
                     task_class: profile_event
@@ -215,7 +220,7 @@ pub(crate) fn prompt_evolution_observations_from_events(
                     mode: PromptEvaluationMode::Live,
                     format_valid: plan.is_some() || bounded_profile,
                     succeeded,
-                    quality_score: measured_quality.unwrap_or(if succeeded { 0.5 } else { 0.0 }),
+                    quality_score: measured_quality.unwrap_or(0.0),
                     latency_ms: terminal
                         .timestamp_ms
                         .saturating_sub(profile_event.timestamp_ms),
@@ -226,6 +231,7 @@ pub(crate) fn prompt_evolution_observations_from_events(
                     relative_reward,
                     step_credits,
                     reflection_packet: None,
+                    provenance: Default::default(),
                 },
             ))
         })
@@ -308,6 +314,12 @@ pub(crate) fn prompt_rollout_record_from_event(
         return None;
     }
     let effort = event.metadata.get("prompt_effort")?.clone();
+    let rollout_key = event
+        .metadata
+        .get("prompt_rollout_scope")
+        .filter(|scope| !scope.trim().is_empty())
+        .map(|scope| prompt_rollout_key(scope, &effort))
+        .unwrap_or_else(|| effort.clone());
     let stable_profile_id = event.metadata.get("stable_profile")?.clone();
     if effort.trim().is_empty() || stable_profile_id.trim().is_empty() {
         return None;
@@ -326,8 +338,26 @@ pub(crate) fn prompt_rollout_record_from_event(
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or_default()
     };
+    let status = event
+        .metadata
+        .get("rollout_status")
+        .cloned()
+        .unwrap_or_else(|| "stable".to_string());
+    let frozen_profile = event
+        .metadata
+        .get("frozen_prompt_profile")
+        .filter(|value| !value.trim().is_empty())
+        .and_then(|value| serde_json::from_str::<FrozenPromptProfileSnapshot>(value).ok())
+        .filter(|snapshot| {
+            snapshot.validate().is_ok()
+                && snapshot.effort == effort
+                && snapshot.genome.id == stable_profile_id
+        });
+    if status == "promoted" && frozen_profile.is_none() {
+        return None;
+    }
     Some((
-        effort,
+        rollout_key,
         PromptRolloutState {
             stable_profile_id,
             canary_profile_id: optional_text("canary_profile"),
@@ -340,24 +370,94 @@ pub(crate) fn prompt_rollout_record_from_event(
             evidence_checkpoint: parse_usize("evidence_checkpoint"),
             live_checkpoint: parse_usize("live_checkpoint"),
             rollback_count: parse_usize("rollback_count"),
-            status: event
-                .metadata
-                .get("rollout_status")
-                .cloned()
-                .unwrap_or_else(|| "stable".to_string()),
+            status,
             last_reason: optional_text("rollout_reason"),
             promotion_confidence: event
                 .metadata
                 .get("promotion_confidence")
                 .and_then(|value| value.parse::<f64>().ok())
                 .filter(|value| value.is_finite()),
-            frozen_profile: event
-                .metadata
-                .get("frozen_prompt_profile")
-                .and_then(|value| serde_json::from_str(value).ok())
-                .filter(|snapshot: &FrozenPromptProfileSnapshot| snapshot.validate().is_ok()),
+            frozen_profile,
         },
     ))
+}
+
+const PROMPT_EVIDENCE_SCOPE_SEPARATOR: &str = "::";
+
+pub(crate) fn scoped_prompt_evaluation_id(scope: &str, evaluation_id: &str) -> String {
+    let scope = scope.trim();
+    let scope = if scope.is_empty() { "global" } else { scope };
+    format!("{scope}{PROMPT_EVIDENCE_SCOPE_SEPARATOR}{evaluation_id}")
+}
+
+pub(crate) fn prompt_rollout_key(scope: &str, effort: &str) -> String {
+    scoped_prompt_evaluation_id(scope, effort)
+}
+
+fn prompt_observation_matches_scope(
+    observation: &PromptEvolutionObservation,
+    scope: &str,
+) -> bool {
+    observation
+        .evaluation_id
+        .split_once(PROMPT_EVIDENCE_SCOPE_SEPARATOR)
+        .is_some_and(|(observed_scope, _)| observed_scope == scope)
+}
+
+pub(crate) fn prompt_evolution_read_model_for_scope(
+    model: &PromptEvolutionReadModel,
+    scope: &str,
+) -> PromptEvolutionReadModel {
+    let mut scoped = model.clone();
+    scoped
+        .observations
+        .retain(|(_, observation)| prompt_observation_matches_scope(observation, scope));
+    scoped.datasets.retain(|_, dataset| dataset.project_id == scope);
+    scoped.rollouts = ["fast", "auto", "pro"]
+        .into_iter()
+        .filter_map(|effort| {
+            model
+                .rollouts
+                .get(&prompt_rollout_key(scope, effort))
+                .or_else(|| model.rollouts.get(effort))
+                .cloned()
+                .map(|rollout| (effort.to_string(), rollout))
+        })
+        .collect();
+    scoped
+}
+
+pub(crate) fn persist_scoped_prompt_rollout(
+    model: &mut PromptEvolutionReadModel,
+    scope: &str,
+    effort: &str,
+    rollout: PromptRolloutState,
+) {
+    model
+        .rollouts
+        .insert(prompt_rollout_key(scope, effort), rollout);
+}
+
+pub(crate) fn visible_prompt_rollout(
+    model: &PromptEvolutionReadModel,
+    effort: &str,
+) -> Option<PromptRolloutState> {
+    model.rollouts.get(effort).cloned().or_else(|| {
+        let suffix = format!("{PROMPT_EVIDENCE_SCOPE_SEPARATOR}{effort}");
+        model
+            .rollouts
+            .iter()
+            .filter(|(key, _)| key.ends_with(&suffix))
+            .map(|(_, rollout)| rollout)
+            .max_by_key(|rollout| {
+                (
+                    rollout.evidence_checkpoint,
+                    rollout.live_checkpoint,
+                    rollout.rollback_count,
+                )
+            })
+            .cloned()
+    })
 }
 
 pub(crate) fn prompt_dataset_key(effort: &str, project_id: &str) -> String {
@@ -388,6 +488,11 @@ pub(crate) fn prompt_dataset_record_from_event(
         .get("selected_case_id")
         .filter(|value| !value.trim().is_empty())
         .cloned();
+    let case_ids = event
+        .metadata
+        .get("dataset_case_ids")
+        .and_then(|encoded| serde_json::from_str::<Vec<String>>(encoded).ok())
+        .unwrap_or_default();
     let key = prompt_dataset_key(&effort, &project_id);
     Some((
         key,
@@ -395,6 +500,12 @@ pub(crate) fn prompt_dataset_record_from_event(
             effort,
             project_id,
             digest,
+            generation: event
+                .metadata
+                .get("dataset_generation")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or_default(),
+            case_ids,
             case_count: parse_usize("dataset_case_count"),
             train_count: parse_usize("dataset_train_count"),
             holdout_count: parse_usize("dataset_holdout_count"),

@@ -16,12 +16,14 @@ mod adaptive_workflow_observability;
 mod agent_collaboration_runtime;
 mod agent_commands;
 mod agent_completion_runtime;
+mod agent_conductor_runtime;
 mod agent_loop_runtime;
 mod agent_loop_service;
 mod agent_model_turn_runtime;
 mod agent_query_commands;
 mod agent_read_model;
 mod agent_recovery_service;
+mod agent_runtime_snapshot;
 mod agent_run_engine;
 mod agent_strategy_runtime;
 mod agent_tool_runtime;
@@ -75,6 +77,7 @@ mod schedule_commands;
 mod semantic_memory_runtime;
 mod semantic_memory_worker;
 mod session_context_service;
+mod session_output_cache;
 mod session_projection;
 mod session_title_service;
 mod settings_commands;
@@ -153,7 +156,9 @@ use workflow_checkpoint_runtime::*;
 use workflow_routing_runtime::*;
 
 use agent_recovery_service::*;
+use agent_runtime_snapshot::*;
 use session_context_service::*;
+use session_output_cache::*;
 use session_title_service::*;
 
 #[cfg(test)]

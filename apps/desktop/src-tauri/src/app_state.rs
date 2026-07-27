@@ -16,6 +16,7 @@ pub(crate) struct AppState {
     pub(crate) schedule_last_error: Mutex<Option<String>>,
     pub(crate) mcp_catalog: Mutex<McpCatalogService>,
     pub(crate) suspended_agent_runs: Mutex<BTreeMap<String, SuspendedAgentRun>>,
+    pub(crate) session_output_cache: Mutex<BTreeMap<String, SessionOutputCacheEntry>>,
     pub(crate) agent_run_controls: Mutex<BTreeMap<String, Arc<AgentRunControl>>>,
     pub(crate) prompt_evaluation_controls: Mutex<BTreeMap<String, Arc<AgentRunControl>>>,
     pub(crate) queue_dispatching_sessions: Mutex<BTreeSet<String>>,
@@ -90,6 +91,15 @@ pub(crate) struct SuspendedAgentRun {
     pub(crate) workspace_root: PathBuf,
     pub(crate) collaboration: Option<AgentCollaboration>,
     pub(crate) run_control: RunControlSnapshot,
+    pub(crate) last_touched_at_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SessionOutputCacheEntry {
+    pub(crate) event_count: u64,
+    pub(crate) latest_sequence: u64,
+    pub(crate) outputs: Vec<AgentOutputArtifactView>,
+    pub(crate) last_accessed_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

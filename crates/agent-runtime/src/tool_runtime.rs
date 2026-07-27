@@ -1,5 +1,6 @@
 use agent_core::{
-    Metadata, ToolArtifact, ToolFailure, ToolInvocation, ToolOutcomeStatus, ToolResult,
+    Metadata, ToolArtifact, ToolFailure, ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk,
+    ToolSpec,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -7,6 +8,81 @@ use std::time::Duration;
 
 pub const TOOL_RESULT_SCHEMA: &str = "cindx.tool-result.v1";
 pub const EFFECT_LEDGER_SCHEMA: &str = "cindx.effect-ledger.v1";
+pub const TOOL_RISK_METADATA_KEY: &str = "tool_risk";
+pub const TOOL_EFFECT_SEMANTICS_METADATA_KEY: &str = "tool_effect_semantics";
+pub const TOOL_EFFECT_VERIFIER_METADATA_KEY: &str = "tool_effect_verifier";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolEffectRecoveryPolicy {
+    SafeToRetry,
+    VerifyBeforeRetry,
+    NeverRetryUnknown,
+}
+
+pub fn tool_risk_label(risk: &ToolRisk) -> &'static str {
+    match risk {
+        ToolRisk::ReadOnly => "read_only",
+        ToolRisk::WritesWorkspace => "writes_workspace",
+        ToolRisk::ExecutesProcess => "executes_process",
+        ToolRisk::UsesNetwork => "uses_network",
+        ToolRisk::SensitiveContext => "sensitive_context",
+        ToolRisk::Destructive => "destructive",
+    }
+}
+
+pub fn apply_tool_spec_runtime_metadata(invocation: &mut ToolInvocation, spec: &ToolSpec) {
+    invocation.metadata.insert(
+        TOOL_RISK_METADATA_KEY.to_string(),
+        tool_risk_label(&spec.risk).to_string(),
+    );
+    invocation.metadata.insert(
+        TOOL_EFFECT_SEMANTICS_METADATA_KEY.to_string(),
+        spec.effect_semantics.label().to_string(),
+    );
+    match spec.effect_semantics.verifier() {
+        Some(verifier) => {
+            invocation.metadata.insert(
+                TOOL_EFFECT_VERIFIER_METADATA_KEY.to_string(),
+                verifier.to_string(),
+            );
+        }
+        None => {
+            invocation
+                .metadata
+                .remove(TOOL_EFFECT_VERIFIER_METADATA_KEY);
+        }
+    }
+}
+
+pub fn tool_effect_recovery_policy(invocation: &ToolInvocation) -> ToolEffectRecoveryPolicy {
+    match invocation
+        .metadata
+        .get(TOOL_EFFECT_SEMANTICS_METADATA_KEY)
+        .map(String::as_str)
+    {
+        Some("read_only" | "idempotent") => ToolEffectRecoveryPolicy::SafeToRetry,
+        Some("verifiable")
+            if invocation
+                .metadata
+                .get(TOOL_EFFECT_VERIFIER_METADATA_KEY)
+                .is_some_and(|verifier| !verifier.trim().is_empty()) =>
+        {
+            ToolEffectRecoveryPolicy::VerifyBeforeRetry
+        }
+        Some("verifiable" | "non_idempotent") => ToolEffectRecoveryPolicy::NeverRetryUnknown,
+        _ => match invocation
+        .metadata
+        .get(TOOL_RISK_METADATA_KEY)
+        .map(String::as_str)
+        {
+            Some("read_only") => ToolEffectRecoveryPolicy::SafeToRetry,
+            Some("writes_workspace") if invocation.tool_name == "file.write" => {
+                ToolEffectRecoveryPolicy::VerifyBeforeRetry
+            }
+            _ => ToolEffectRecoveryPolicy::NeverRetryUnknown,
+        },
+    }
+}
 
 const EXECUTION_SCOPE_KEYS: [&str; 4] = [
     "project_id",
@@ -59,6 +135,15 @@ pub fn tool_invocation_event_metadata(invocation: &ToolInvocation) -> Metadata {
     .into_iter()
     .collect::<Metadata>();
     metadata.extend(tool_invocation_context(invocation));
+    for key in [
+        TOOL_RISK_METADATA_KEY,
+        TOOL_EFFECT_SEMANTICS_METADATA_KEY,
+        TOOL_EFFECT_VERIFIER_METADATA_KEY,
+    ] {
+        if let Some(value) = invocation.metadata.get(key) {
+            metadata.insert(key.to_string(), value.clone());
+        }
+    }
     metadata
 }
 
@@ -190,7 +275,7 @@ pub fn tool_execution_scope_matches(
 }
 
 pub fn supports_recovery_effect_replay(invocation: &ToolInvocation) -> bool {
-    invocation.tool_name == "file.write"
+    tool_effect_recovery_policy(invocation) == ToolEffectRecoveryPolicy::VerifyBeforeRetry
         && invocation
             .metadata
             .get("source_agent_run_id")
@@ -224,7 +309,7 @@ pub fn recovery_source_scope_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{TaskId, ToolCallId};
+    use agent_core::{TaskId, ToolCallId, ToolEffectSemantics};
 
     fn invocation(input_json: &str) -> ToolInvocation {
         ToolInvocation {
@@ -237,6 +322,61 @@ mod tests {
                 .into_iter()
                 .collect(),
         }
+    }
+
+    #[test]
+    fn tool_spec_metadata_is_authoritative_and_clears_stale_verifiers() {
+        let mut write = invocation(r#"{"path":"a.txt","content":"ok"}"#);
+        write.metadata.insert(
+            TOOL_EFFECT_SEMANTICS_METADATA_KEY.to_string(),
+            "non_idempotent".to_string(),
+        );
+        let write_spec = ToolSpec::builtin(
+            "file.write",
+            "file",
+            "write",
+            ToolRisk::WritesWorkspace,
+            "{}",
+        )
+        .with_effect_semantics(ToolEffectSemantics::Verifiable {
+            verifier: "workspace_file_content_v1".to_string(),
+        });
+
+        apply_tool_spec_runtime_metadata(&mut write, &write_spec);
+
+        assert_eq!(
+            write
+                .metadata
+                .get(TOOL_EFFECT_SEMANTICS_METADATA_KEY)
+                .map(String::as_str),
+            Some("verifiable")
+        );
+        assert_eq!(
+            write
+                .metadata
+                .get(TOOL_EFFECT_VERIFIER_METADATA_KEY)
+                .map(String::as_str),
+            Some("workspace_file_content_v1")
+        );
+
+        let read_spec = ToolSpec::builtin(
+            "file.read",
+            "file",
+            "read",
+            ToolRisk::ReadOnly,
+            "{}",
+        );
+        apply_tool_spec_runtime_metadata(&mut write, &read_spec);
+        assert_eq!(
+            write
+                .metadata
+                .get(TOOL_EFFECT_SEMANTICS_METADATA_KEY)
+                .map(String::as_str),
+            Some("read_only")
+        );
+        assert!(!write
+            .metadata
+            .contains_key(TOOL_EFFECT_VERIFIER_METADATA_KEY));
     }
 
     #[test]
@@ -264,5 +404,67 @@ mod tests {
             .metadata
             .insert("source_agent_run_id".to_string(), "run-source".to_string());
         assert!(tool_execution_scope_matches(&event, &invocation));
+    }
+
+    #[test]
+    fn effect_recovery_policy_is_explicit_and_conservative() {
+        let mut read = invocation("{}");
+        read.tool_name = "file.read".to_string();
+        read.metadata.insert(
+            TOOL_RISK_METADATA_KEY.to_string(),
+            tool_risk_label(&ToolRisk::ReadOnly).to_string(),
+        );
+        assert_eq!(
+            tool_effect_recovery_policy(&read),
+            ToolEffectRecoveryPolicy::SafeToRetry
+        );
+
+        let mut idempotent = invocation("{}");
+        idempotent.tool_name = "browser.close".to_string();
+        idempotent.metadata.insert(
+            TOOL_EFFECT_SEMANTICS_METADATA_KEY.to_string(),
+            "idempotent".to_string(),
+        );
+        assert_eq!(
+            tool_effect_recovery_policy(&idempotent),
+            ToolEffectRecoveryPolicy::SafeToRetry
+        );
+
+        let mut write = invocation(r#"{"path":"a.txt","content":"ok"}"#);
+        write.metadata.insert(
+            TOOL_RISK_METADATA_KEY.to_string(),
+            tool_risk_label(&ToolRisk::WritesWorkspace).to_string(),
+        );
+        assert_eq!(
+            tool_effect_recovery_policy(&write),
+            ToolEffectRecoveryPolicy::VerifyBeforeRetry
+        );
+        write.metadata.insert(
+            TOOL_EFFECT_SEMANTICS_METADATA_KEY.to_string(),
+            "verifiable".to_string(),
+        );
+        assert_eq!(
+            tool_effect_recovery_policy(&write),
+            ToolEffectRecoveryPolicy::NeverRetryUnknown
+        );
+        write.metadata.insert(
+            TOOL_EFFECT_VERIFIER_METADATA_KEY.to_string(),
+            "workspace_file_content_v1".to_string(),
+        );
+        assert_eq!(
+            tool_effect_recovery_policy(&write),
+            ToolEffectRecoveryPolicy::VerifyBeforeRetry
+        );
+
+        let mut shell = invocation(r#"{"command":"echo ok"}"#);
+        shell.tool_name = "shell.run".to_string();
+        shell.metadata.insert(
+            TOOL_RISK_METADATA_KEY.to_string(),
+            tool_risk_label(&ToolRisk::ExecutesProcess).to_string(),
+        );
+        assert_eq!(
+            tool_effect_recovery_policy(&shell),
+            ToolEffectRecoveryPolicy::NeverRetryUnknown
+        );
     }
 }

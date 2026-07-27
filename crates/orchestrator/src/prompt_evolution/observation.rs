@@ -46,6 +46,92 @@ fn default_evaluation_mode() -> PromptEvaluationMode {
     PromptEvaluationMode::Live
 }
 
+pub const PROMPT_EVALUATION_PROTOCOL_BLIND_PAIRWISE_SWAP_V1: &str =
+    "blind_pairwise_swap_v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PromptEvaluationProvenance {
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub evaluator_models: Vec<String>,
+    #[serde(default)]
+    pub participant_models: Vec<String>,
+    #[serde(default)]
+    pub evaluator_independent: bool,
+    #[serde(default)]
+    pub dataset_sha256: String,
+    #[serde(default)]
+    pub candidate_prompt_sha256: String,
+    #[serde(default)]
+    pub opponent_prompt_sha256: String,
+}
+
+impl PromptEvaluationProvenance {
+    pub fn blind_pairwise_swap(
+        evaluator_models: Vec<String>,
+        participant_models: Vec<String>,
+        dataset_sha256: impl Into<String>,
+        candidate_prompt_sha256: impl Into<String>,
+        opponent_prompt_sha256: impl Into<String>,
+    ) -> Self {
+        let evaluator_set = evaluator_models
+            .iter()
+            .map(|model| model.trim())
+            .filter(|model| !model.is_empty())
+            .collect::<BTreeSet<_>>();
+        let participant_set = participant_models
+            .iter()
+            .map(|model| model.trim())
+            .filter(|model| !model.is_empty())
+            .collect::<BTreeSet<_>>();
+        let evaluator_independent = !evaluator_set.is_empty()
+            && !participant_set.is_empty()
+            && evaluator_set.is_disjoint(&participant_set);
+        Self {
+            protocol: PROMPT_EVALUATION_PROTOCOL_BLIND_PAIRWISE_SWAP_V1.to_string(),
+            evaluator_models,
+            participant_models,
+            evaluator_independent,
+            dataset_sha256: dataset_sha256.into(),
+            candidate_prompt_sha256: candidate_prompt_sha256.into(),
+            opponent_prompt_sha256: opponent_prompt_sha256.into(),
+        }
+    }
+
+    pub fn is_scientific(&self) -> bool {
+        let evaluator_set = self
+            .evaluator_models
+            .iter()
+            .map(|model| model.trim())
+            .filter(|model| !model.is_empty())
+            .collect::<BTreeSet<_>>();
+        let participant_set = self
+            .participant_models
+            .iter()
+            .map(|model| model.trim())
+            .filter(|model| !model.is_empty())
+            .collect::<BTreeSet<_>>();
+        self.protocol == PROMPT_EVALUATION_PROTOCOL_BLIND_PAIRWISE_SWAP_V1
+            && self.evaluator_independent
+            && evaluator_set.len() == self.evaluator_models.len()
+            && participant_set.len() == self.participant_models.len()
+            && !evaluator_set.is_empty()
+            && !participant_set.is_empty()
+            && evaluator_set.is_disjoint(&participant_set)
+            && is_sha256(&self.dataset_sha256)
+            && is_sha256(&self.candidate_prompt_sha256)
+            && is_sha256(&self.opponent_prompt_sha256)
+    }
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromptStepCredit {
     pub step_id: String,
@@ -85,6 +171,8 @@ pub struct PromptEvolutionObservation {
     pub step_credits: Vec<PromptStepCredit>,
     #[serde(default)]
     pub reflection_packet: Option<AgentEvaluationReflectionPacket>,
+    #[serde(default)]
+    pub provenance: PromptEvaluationProvenance,
 }
 
 fn default_true() -> bool {
@@ -92,9 +180,24 @@ fn default_true() -> bool {
 }
 
 impl PromptEvolutionObservation {
+    pub fn is_scientific_evidence(&self) -> bool {
+        self.mode.is_execution()
+            && !self.evaluation_id.trim().is_empty()
+            && !self.case_id.trim().is_empty()
+            && self.quality_score.is_finite()
+            && self.relative_reward.is_some_and(f64::is_finite)
+            && self.provenance.is_scientific()
+    }
+
     pub fn evidence_identity(&self) -> String {
         if !self.evaluation_id.trim().is_empty() {
-            return format!("{}:{}", self.profile_id, self.evaluation_id.trim());
+            return format!(
+                "{}:{}:{}:{}",
+                self.profile_id,
+                self.evaluation_id.trim(),
+                self.provenance.dataset_sha256,
+                self.provenance.candidate_prompt_sha256
+            );
         }
         serde_json::to_string(self).unwrap_or_else(|_| {
             format!(
@@ -134,6 +237,16 @@ impl PromptEvolutionObservation {
     }
 }
 
+pub fn latest_scientific_dataset_digest(
+    observations: &[PromptEvolutionObservation],
+) -> Option<&str> {
+    observations
+        .iter()
+        .rev()
+        .find(|observation| observation.is_scientific_evidence())
+        .map(|observation| observation.provenance.dataset_sha256.as_str())
+}
+
 pub fn prompt_reflection_packets(
     observations: &[PromptEvolutionObservation],
     profile_id: &str,
@@ -143,6 +256,9 @@ pub fn prompt_reflection_packets(
         return Vec::new();
     }
 
+    let Some(active_dataset_sha256) = latest_scientific_dataset_digest(observations) else {
+        return Vec::new();
+    };
     let mut seen_runs = BTreeSet::new();
     observations
         .iter()
@@ -151,6 +267,8 @@ pub fn prompt_reflection_packets(
             observation.profile_id == profile_id
                 && observation.split == PromptEvaluationSplit::Train
                 && observation.mode == PromptEvaluationMode::PairedExecution
+                && observation.is_scientific_evidence()
+                && observation.provenance.dataset_sha256 == active_dataset_sha256
         })
         .filter_map(|observation| observation.reflection_packet.as_ref())
         .filter(|packet| packet.candidate_id == profile_id)

@@ -110,6 +110,7 @@ pub(crate) fn run_agent_task_blocking_inner(
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
+        delete_persisted_agent_runtime_snapshot(&mut store, session_id)?;
         let events = agent_events_for_session(&store, &task_id, session_id)
             .map_err(|error| error.to_string())?;
         let session_events = session_id
@@ -117,11 +118,13 @@ pub(crate) fn run_agent_task_blocking_inner(
             .unwrap_or_default();
         let history = session_events
             .iter()
-            .filter_map(message_from_event)
+            .filter_map(model_message_from_event)
             .collect::<Vec<_>>();
         let artifact_manifest = artifact_manifest_message(&session_events);
         let mut start_metadata = run_context.clone();
         start_metadata.insert("prompt".to_string(), display_prompt.clone());
+        start_metadata.insert("model_prompt".to_string(), prompt.clone());
+        start_metadata.insert("recovery_prompt".to_string(), prompt.clone());
         start_metadata.insert(
             "context_window_tokens".to_string(),
             config.context_window_tokens.to_string(),
@@ -135,6 +138,7 @@ pub(crate) fn run_agent_task_blocking_inner(
         )
         .map_err(|error| error.to_string())?;
         let mut message_metadata = run_context.clone();
+        message_metadata.insert("model_content".to_string(), prompt.clone());
         add_attachment_metadata(&mut message_metadata, &attachments);
         append_message_event_with_metadata(
             &mut store,
@@ -191,6 +195,12 @@ pub(crate) fn run_agent_task_blocking_inner(
         .find(|message| matches!(message.role, MessageRole::User))
     {
         add_attachment_metadata(&mut message.metadata, &attachments);
+        message
+            .metadata
+            .insert("model_content".to_string(), prompt.clone());
+        message
+            .metadata
+            .insert("display_content".to_string(), display_prompt);
     }
     continue_agent_loop(
         app,
@@ -238,6 +248,7 @@ pub(crate) fn cancel_agent_task(
         ),
     )
     .map_err(|error| error.to_string())?;
+    delete_persisted_agent_runtime_snapshot(&mut store, session_id)?;
     if let Err(error) = refresh_project_memory_after_run(&mut store, &run_context) {
         eprintln!("project memory checkpoint unavailable: {error}");
     }
@@ -313,6 +324,7 @@ pub(crate) fn resume_suspended_agent_run(
         workspace_root,
         collaboration,
         run_control: _,
+        last_touched_at_ms: _,
     } = suspended;
     let config = clone_provider_config(state)?;
     if !config.is_ready() {
@@ -355,6 +367,15 @@ pub(crate) fn resume_suspended_agent_run(
     add_agent_run_budget_metadata(&mut run_context, cancellation);
     cancellation.extend_runtime_budget(&mut runtime);
     cancellation.mark_progress("continuation", "Resuming saved execution state");
+    let recovery_prompt = runtime.user_prompt.clone();
+    let display_prompt = runtime
+        .messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == MessageRole::User)
+        .find_map(|message| message.metadata.get("display_content"))
+        .cloned()
+        .unwrap_or_else(|| prompt.clone());
     {
         let mut store = state
             .store
@@ -367,7 +388,9 @@ pub(crate) fn resume_suspended_agent_run(
             "Agent task retry started",
             metadata_with_context(
                 [
-                    ("prompt".to_string(), prompt.clone()),
+                    ("prompt".to_string(), display_prompt),
+                    ("model_prompt".to_string(), prompt.clone()),
+                    ("recovery_prompt".to_string(), recovery_prompt),
                     ("continuation".to_string(), "true".to_string()),
                     (
                         "context_window_tokens".to_string(),
@@ -420,7 +443,7 @@ pub(crate) fn retry_agent_task_blocking_inner(
         .unwrap_or(active_workspace_root(&state)?);
     let session_id = run_context.get("session_id").cloned();
     let task_id = phase16_task_id();
-    let (prompt, effort, recovery) = {
+    let (prompt, display_prompt, recovery_prompt, effort, recovery) = {
         let mut store = state
             .store
             .lock()
@@ -431,10 +454,14 @@ pub(crate) fn retry_agent_task_blocking_inner(
         let active_events = active_agent_events_for_session(&events, session_id.as_deref());
         let prompt = latest_agent_prompt_from_active_events(&active_events)
             .ok_or_else(|| "No previous agent prompt to retry".to_string())?;
+        let display_prompt = latest_agent_display_prompt_from_active_events(&active_events)
+            .unwrap_or_else(|| prompt.clone());
+        let recovery_prompt = agent_recovery_prompt_from_active_events(&active_events)
+            .unwrap_or_else(|| prompt.clone());
         let effort = agent_effort_from_active_events(&active_events);
         let recovery =
             claim_agent_recovery_envelope(&mut store, &run_context, &["paused"], "user_continued")?;
-        (prompt, effort, recovery)
+        (prompt, display_prompt, recovery_prompt, effort, recovery)
     };
     if let Some(recovery) = recovery.as_ref() {
         run_context.insert(
@@ -469,7 +496,9 @@ pub(crate) fn retry_agent_task_blocking_inner(
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
         let mut start_metadata = run_context.clone();
-        start_metadata.insert("prompt".to_string(), prompt.clone());
+        start_metadata.insert("prompt".to_string(), display_prompt.clone());
+        start_metadata.insert("model_prompt".to_string(), prompt.clone());
+        start_metadata.insert("recovery_prompt".to_string(), recovery_prompt.clone());
         start_metadata.insert(
             "context_window_tokens".to_string(),
             config.context_window_tokens.to_string(),
@@ -484,11 +513,13 @@ pub(crate) fn retry_agent_task_blocking_inner(
         .map_err(|error| error.to_string())?;
         let mut continuation_metadata = run_context.clone();
         continuation_metadata.insert("continuation_replay".to_string(), "true".to_string());
+        continuation_metadata.insert("display_content".to_string(), display_prompt.clone());
+        continuation_metadata.insert("model_content".to_string(), prompt.clone());
         append_message_event_with_metadata(
             &mut store,
             &task_id,
             MessageRole::User,
-            &prompt,
+            &display_prompt,
             continuation_metadata,
         )
         .map_err(|error| error.to_string())?;
@@ -518,7 +549,7 @@ pub(crate) fn retry_agent_task_blocking_inner(
             .as_ref()
             .and_then(|recovery| recovery.task_state.as_ref())
             .and_then(
-                |snapshot| match snapshot.restore(prompt.clone(), messages.clone()) {
+                |snapshot| match snapshot.restore(recovery_prompt.clone(), messages.clone()) {
                     Ok(runtime) => Some(runtime),
                     Err(error) => {
                         let _ = append_event(
@@ -581,7 +612,7 @@ pub(crate) fn retry_agent_task_blocking_inner(
         collaboration,
     } = prepared;
     let runtime_config = cancellation.runtime_config();
-    let runtime = if let Some(mut runtime) = restored_task_state {
+    let mut runtime = if let Some(mut runtime) = restored_task_state {
         runtime.messages = history;
         runtime.messages.push(Message {
             role: MessageRole::User,
@@ -595,6 +626,7 @@ pub(crate) fn retry_agent_task_blocking_inner(
     } else {
         start_agent_loop_with_history(task_id, prompt.clone(), history, runtime_config)
     };
+    runtime.user_prompt = recovery_prompt;
     continue_agent_loop(
         app,
         &state,

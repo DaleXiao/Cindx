@@ -1,29 +1,39 @@
-use agent_core::{Message, MessageRole, Metadata, ModelRole, ToolSpec};
-use base64::Engine;
-use futures_util::{Stream, StreamExt};
+use agent_core::{Message, Metadata, ModelRole, ToolSpec};
+use futures_util::StreamExt;
 use reqwest::{header, Client, RequestBuilder, Response, StatusCode};
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::future::Future;
-use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
 mod error;
+mod image_provider;
 mod json_wire;
+mod request_builder;
 mod response_parser;
+mod streaming_response;
 mod streaming_wire;
 mod usage;
 
 use json_wire::{
-    extract_json_array_after, extract_json_number_field, extract_json_string_field, json_escape,
-    parse_number_array, split_top_level_objects,
+    extract_json_array_after, extract_json_string_field, split_top_level_objects,
 };
-use streaming_wire::{parse_stream_event, StreamingToolCall};
+use request_builder::{
+    build_chat_request_json_with_tools_and_output_limit, model_supports_vision_content,
+};
+use streaming_response::{
+    consume_streaming_body, consume_streaming_response, finish_streaming_response,
+};
 
 pub use error::{classify_provider_failure, ProviderFailureClass};
-use response_parser::{normalize_dsml_tool_calls, serialize_tool_calls};
+pub use image_provider::{
+    build_image_generation_request_json, OpenAiCompatibleImageConfig,
+    OpenAiCompatibleImageProvider,
+};
+pub use request_builder::{
+    build_chat_request_json, build_chat_request_json_with_tools, build_embedding_request_json,
+    parse_embedding_response,
+};
 pub use response_parser::{
     parse_chat_response, parse_model_response, parse_provider_error, parse_tool_calls,
     tool_arguments_to_key_value_input, tool_function_name,
@@ -38,8 +48,6 @@ pub const MODEL_REQUEST_CANCELLED: &str = "model request cancelled";
 const STREAMING_HARD_TIMEOUT_MULTIPLIER: u64 = 4;
 const HTTP_POLL_INTERVAL: Duration = Duration::from_millis(40);
 const MAX_MODEL_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_IMAGE_RESPONSE_BYTES: usize = 48 * 1024 * 1024;
-const MAX_GENERATED_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const DSML_TOOL_CALLS_OPEN: &str = "<｜DSML｜tool_calls>";
 const DSML_TOOL_CALLS_CLOSE: &str = "</｜DSML｜tool_calls>";
 const DSML_INVOKE_OPEN: &str = "<｜DSML｜invoke";
@@ -270,50 +278,6 @@ pub struct OpenAiCompatibleConfig {
     pub timeout_seconds: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenAiCompatibleImageConfig {
-    pub base_url: String,
-    pub api_key: String,
-    pub model: String,
-    pub timeout_seconds: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ImageGenerationProtocol {
-    OpenAiImages,
-    DashScopeMultimodal,
-}
-
-impl OpenAiCompatibleImageConfig {
-    pub fn images_url(&self) -> String {
-        let endpoint = self.base_url.trim_end_matches('/');
-        if endpoint.ends_with("/images/generations")
-            || endpoint.ends_with("/api/v1/services/aigc/multimodal-generation/generation")
-        {
-            endpoint.to_string()
-        } else {
-            format!("{endpoint}/images/generations")
-        }
-    }
-
-    pub fn is_ready(&self) -> bool {
-        !self.api_key.trim().is_empty()
-            && !self.model.trim().is_empty()
-            && !self.base_url.trim().is_empty()
-    }
-
-    fn protocol(&self) -> ImageGenerationProtocol {
-        if self
-            .images_url()
-            .contains("/api/v1/services/aigc/multimodal-generation/generation")
-        {
-            ImageGenerationProtocol::DashScopeMultimodal
-        } else {
-            ImageGenerationProtocol::OpenAiImages
-        }
-    }
-}
-
 impl OpenAiCompatibleConfig {
     pub fn models_url(&self) -> String {
         format!("{}/models", self.base_url.trim_end_matches('/'))
@@ -342,10 +306,6 @@ impl OpenAiCompatibleConfig {
 
 pub struct OpenAiCompatibleProvider {
     config: OpenAiCompatibleConfig,
-}
-
-pub struct OpenAiCompatibleImageProvider {
-    config: OpenAiCompatibleImageConfig,
 }
 
 fn streaming_hard_timeout_seconds(idle_timeout_seconds: u64) -> u64 {
@@ -606,261 +566,6 @@ fn marker_prefix_suffix_len(value: &str, marker: &str) -> usize {
     longest
 }
 
-fn apply_stream_line(
-    line: &str,
-    answer: &mut String,
-    streamed_tool_calls: &mut BTreeMap<usize, StreamingToolCall>,
-    finish_reason: &mut Option<String>,
-    on_delta: &mut impl FnMut(&str),
-) -> Result<(), ModelError> {
-    if let Some(event) = parse_stream_event(line)? {
-        if event.finish_reason.is_some() {
-            *finish_reason = event.finish_reason;
-        }
-        if let Some(delta) = event.content {
-            answer.push_str(&delta);
-            on_delta(&delta);
-        }
-        for delta in event.tool_calls {
-            streamed_tool_calls
-                .entry(delta.index)
-                .or_default()
-                .merge(delta);
-        }
-    }
-    Ok(())
-}
-
-fn apply_complete_stream_lines(
-    pending: &mut Vec<u8>,
-    answer: &mut String,
-    streamed_tool_calls: &mut BTreeMap<usize, StreamingToolCall>,
-    finish_reason: &mut Option<String>,
-    on_delta: &mut impl FnMut(&str),
-) -> Result<(), ModelError> {
-    let mut consumed = 0;
-    for index in 0..pending.len() {
-        if pending[index] != b'\n' {
-            continue;
-        }
-        let line = String::from_utf8_lossy(&pending[consumed..=index]);
-        apply_stream_line(&line, answer, streamed_tool_calls, finish_reason, on_delta)?;
-        consumed = index + 1;
-    }
-    if consumed > 0 {
-        pending.drain(..consumed);
-    }
-    Ok(())
-}
-
-fn finish_streaming_response(
-    raw_response: String,
-    mut answer: String,
-    streamed_tool_calls: BTreeMap<usize, StreamingToolCall>,
-    mut finish_reason: Option<String>,
-    model: &str,
-    base_url: &str,
-) -> Result<ModelResponse, ModelError> {
-    let mut metadata = Metadata::new();
-    metadata.insert("provider".to_string(), "openai-compatible".to_string());
-    metadata.insert("model".to_string(), model.to_string());
-    metadata.insert("base_url".to_string(), base_url.to_string());
-    metadata.insert("streamed".to_string(), "true".to_string());
-    for field in ["prompt_tokens", "completion_tokens", "total_tokens"] {
-        if let Some(value) = extract_json_number_field(&raw_response, field) {
-            metadata.insert(field.to_string(), value);
-        }
-    }
-    let mut tool_calls = streamed_tool_calls
-        .into_iter()
-        .filter_map(|(index, call)| call.finish(index))
-        .collect::<Vec<_>>();
-    let mut raw_tool_calls_json = None;
-    if answer.is_empty() && tool_calls.is_empty() {
-        let fallback = parse_model_response(&raw_response)?;
-        answer = fallback.message.content;
-        tool_calls = fallback.tool_calls;
-        raw_tool_calls_json = fallback.raw_tool_calls_json;
-        if finish_reason.is_none() {
-            finish_reason = fallback.metadata.get("finish_reason").cloned();
-        }
-        for key in [
-            "prompt_tokens",
-            "completion_tokens",
-            "total_tokens",
-            "tool_protocol",
-        ] {
-            if let Some(value) = fallback.metadata.get(key) {
-                metadata.insert(key.to_string(), value.clone());
-            }
-        }
-    }
-    if normalize_dsml_tool_calls(&mut answer, &mut tool_calls)? {
-        metadata.insert("tool_protocol".to_string(), "dsml".to_string());
-    }
-    metadata.insert("tool_calls".to_string(), tool_calls.len().to_string());
-    if let Some(finish_reason) = finish_reason.filter(|value| !value.trim().is_empty()) {
-        metadata.insert("finish_reason".to_string(), finish_reason);
-    }
-    if raw_tool_calls_json.is_none() && !tool_calls.is_empty() {
-        raw_tool_calls_json = Some(serialize_tool_calls(&tool_calls));
-    }
-
-    Ok(ModelResponse {
-        message: Message {
-            role: MessageRole::Assistant,
-            content: answer,
-            metadata: metadata.clone(),
-        },
-        raw_tool_calls_json,
-        tool_calls,
-        metadata,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn consume_streaming_body<S, B, E>(
-    stream: S,
-    model: &str,
-    base_url: &str,
-    idle_timeout: Duration,
-    hard_timeout: Duration,
-    deadline: Instant,
-    on_delta: &mut impl FnMut(&str),
-    should_cancel: &mut impl FnMut() -> bool,
-) -> Result<ModelResponse, ModelError>
-where
-    S: Stream<Item = Result<B, E>>,
-    B: AsRef<[u8]>,
-    E: std::fmt::Display,
-{
-    let idle_timeout = if idle_timeout.is_zero() {
-        Duration::from_secs(1)
-    } else {
-        idle_timeout
-    };
-    let mut stream = Box::pin(stream);
-    let mut raw_response = Vec::new();
-    let mut pending = Vec::new();
-    let mut answer = String::new();
-    let mut streamed_tool_calls = BTreeMap::<usize, StreamingToolCall>::new();
-    let mut finish_reason = None;
-    let mut last_activity = Instant::now();
-    let mut dsml_filter = DsmlStreamDeltaFilter::default();
-    let mut filtered_on_delta = |delta: &str| dsml_filter.push(delta, on_delta);
-
-    loop {
-        if should_cancel() {
-            return Err(ModelError::new(MODEL_REQUEST_CANCELLED));
-        }
-        if Instant::now() >= deadline {
-            return Err(ModelError::new(format!(
-                "model stream timed out after {} seconds",
-                hard_timeout.as_secs().max(1)
-            )));
-        }
-        match tokio::time::timeout(HTTP_POLL_INTERVAL, stream.next()).await {
-            Ok(Some(Ok(chunk))) => {
-                last_activity = Instant::now();
-                let chunk = chunk.as_ref();
-                if raw_response.len().saturating_add(chunk.len()) > MAX_MODEL_RESPONSE_BYTES {
-                    return Err(ModelError::new("model stream exceeded 64 MB"));
-                }
-                raw_response.extend_from_slice(chunk);
-                pending.extend_from_slice(chunk);
-                apply_complete_stream_lines(
-                    &mut pending,
-                    &mut answer,
-                    &mut streamed_tool_calls,
-                    &mut finish_reason,
-                    &mut filtered_on_delta,
-                )?;
-            }
-            Ok(Some(Err(error))) => {
-                return Err(ModelError::new(format!(
-                    "model stream failed while reading response: {error}"
-                )))
-            }
-            Ok(None) => break,
-            Err(_) => {
-                if last_activity.elapsed() >= idle_timeout {
-                    return Err(ModelError::new(format!(
-                        "model stream timed out after {} seconds without receiving data",
-                        idle_timeout.as_secs().max(1)
-                    )));
-                }
-            }
-        }
-    }
-
-    if !pending.is_empty() {
-        let line = String::from_utf8_lossy(&pending).into_owned();
-        apply_stream_line(
-            &line,
-            &mut answer,
-            &mut streamed_tool_calls,
-            &mut finish_reason,
-            &mut filtered_on_delta,
-        )?;
-    }
-    dsml_filter.finish(on_delta);
-    finish_streaming_response(
-        String::from_utf8_lossy(&raw_response).into_owned(),
-        answer,
-        streamed_tool_calls,
-        finish_reason,
-        model,
-        base_url,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn consume_streaming_response(
-    response: Response,
-    model: &str,
-    base_url: &str,
-    idle_timeout: Duration,
-    hard_timeout: Duration,
-    deadline: Instant,
-    on_delta: &mut impl FnMut(&str),
-    should_cancel: &mut impl FnMut() -> bool,
-) -> Result<ModelResponse, ModelError> {
-    let status = response.status();
-    if !status.is_success() {
-        let body = collect_response_body(
-            response,
-            MAX_MODEL_RESPONSE_BYTES,
-            deadline,
-            hard_timeout,
-            "model response",
-            should_cancel,
-        )
-        .await?;
-        let text = String::from_utf8_lossy(&body).into_owned();
-        let provider_error = parse_provider_error(&text).unwrap_or_default();
-        return Err(ModelError::with_status(
-            status.as_u16(),
-            if provider_error.trim().is_empty() {
-                format!("model request failed with status {status}")
-            } else {
-                provider_error
-            },
-        ));
-    }
-
-    consume_streaming_body(
-        response.bytes_stream(),
-        model,
-        base_url,
-        idle_timeout,
-        hard_timeout,
-        deadline,
-        on_delta,
-        should_cancel,
-    )
-    .await
-}
-
 impl OpenAiCompatibleProvider {
     pub fn new(config: OpenAiCompatibleConfig) -> Self {
         Self { config }
@@ -1068,182 +773,6 @@ impl OpenAiCompatibleProvider {
     }
 }
 
-enum ImagePayload {
-    Base64(String),
-    Url(String),
-}
-
-struct ParsedImagePayload {
-    payload: ImagePayload,
-    revised_prompt: Option<String>,
-}
-
-impl OpenAiCompatibleImageProvider {
-    pub fn new(config: OpenAiCompatibleImageConfig) -> Self {
-        Self { config }
-    }
-
-    pub fn validate_endpoint(&self) -> Result<String, ModelError> {
-        if self.config.base_url.trim().is_empty() || self.config.model.trim().is_empty() {
-            return Err(ModelError::new(
-                "image generation endpoint and model are required",
-            ));
-        }
-        let endpoint = self.config.images_url();
-        let output = execute_http(
-            &endpoint,
-            &self.config.api_key,
-            Some("{}"),
-            self.config.timeout_seconds.clamp(1, 10),
-            64 * 1024,
-        )?;
-        if image_endpoint_probe_succeeded(output.status) {
-            Ok(endpoint)
-        } else {
-            Err(ModelError::with_status(
-                output.status.as_u16(),
-                format!("image endpoint probe returned status {}", output.status),
-            ))
-        }
-    }
-
-    pub fn generate(
-        &self,
-        request: ImageGenerationRequest,
-    ) -> Result<ImageGenerationResponse, ModelError> {
-        self.generate_cancellable(request, || false)
-    }
-
-    pub fn generate_cancellable(
-        &self,
-        request: ImageGenerationRequest,
-        mut should_cancel: impl FnMut() -> bool,
-    ) -> Result<ImageGenerationResponse, ModelError> {
-        if !self.config.is_ready() {
-            return Err(ModelError::new(
-                "image generation provider config is incomplete",
-            ));
-        }
-        if request.prompt.trim().is_empty() {
-            return Err(ModelError::new("image generation prompt is empty"));
-        }
-
-        let protocol = self.config.protocol();
-        let request_body = match protocol {
-            ImageGenerationProtocol::OpenAiImages => build_image_generation_request_json(
-                &self.config.model,
-                &request.prompt,
-                request.size.as_deref(),
-            )?,
-            ImageGenerationProtocol::DashScopeMultimodal => {
-                build_dashscope_image_generation_request_json(
-                    &self.config.model,
-                    &request.prompt,
-                    request.size.as_deref(),
-                )?
-            }
-        };
-        let output = execute_http_cancellable(
-            &self.config.images_url(),
-            &self.config.api_key,
-            Some(&request_body),
-            self.config.timeout_seconds,
-            MAX_IMAGE_RESPONSE_BYTES,
-            &mut should_cancel,
-        )?;
-        let stdout = String::from_utf8_lossy(&output.body).to_string();
-        if !output.status.is_success() {
-            let provider_error = parse_provider_error(&stdout).unwrap_or_default();
-            return Err(ModelError::with_status(
-                output.status.as_u16(),
-                if provider_error.is_empty() {
-                    format!(
-                        "image generation request failed with status {}",
-                        output.status
-                    )
-                } else {
-                    provider_error
-                },
-            ));
-        }
-        if output.body.len() > MAX_IMAGE_RESPONSE_BYTES {
-            return Err(ModelError::new("image generation response exceeded 48 MB"));
-        }
-
-        let (response_model, payloads) =
-            parse_image_generation_payloads(&stdout, &self.config.model)?;
-        let mut images = Vec::with_capacity(payloads.len());
-        for parsed in payloads {
-            if should_cancel() {
-                return Err(ModelError::new(MODEL_REQUEST_CANCELLED));
-            }
-            let bytes = match parsed.payload {
-                ImagePayload::Base64(value) => decode_generated_image(&value)?,
-                ImagePayload::Url(url) => {
-                    if !url.starts_with("https://") && !url.starts_with("http://") {
-                        return Err(ModelError::new(
-                            "image generation response included an unsupported URL",
-                        ));
-                    }
-                    let output = execute_http_cancellable(
-                        &url,
-                        "",
-                        None,
-                        self.config.timeout_seconds,
-                        MAX_GENERATED_IMAGE_BYTES,
-                        &mut should_cancel,
-                    )?;
-                    if !output.status.is_success() {
-                        return Err(ModelError::with_status(
-                            output.status.as_u16(),
-                            format!(
-                                "generated image download failed with status {}",
-                                output.status
-                            ),
-                        ));
-                    }
-                    output.body
-                }
-            };
-            if bytes.is_empty() {
-                return Err(ModelError::new("image generation returned an empty image"));
-            }
-            if bytes.len() > MAX_GENERATED_IMAGE_BYTES {
-                return Err(ModelError::new("generated image exceeded 32 MB"));
-            }
-            let mime_type = generated_image_mime_type(&bytes)
-                .ok_or_else(|| ModelError::new("image generation returned unsupported data"))?
-                .to_string();
-            images.push(GeneratedImage {
-                bytes,
-                mime_type,
-                revised_prompt: parsed.revised_prompt,
-            });
-        }
-
-        let mut metadata = request.metadata;
-        metadata.insert("model".to_string(), response_model.clone());
-        metadata.insert("images".to_string(), images.len().to_string());
-        metadata.insert(
-            "protocol".to_string(),
-            match protocol {
-                ImageGenerationProtocol::OpenAiImages => "openai-images",
-                ImageGenerationProtocol::DashScopeMultimodal => "dashscope-multimodal",
-            }
-            .to_string(),
-        );
-        Ok(ImageGenerationResponse {
-            model: response_model,
-            images,
-            metadata,
-        })
-    }
-}
-
-fn image_endpoint_probe_succeeded(status: StatusCode) -> bool {
-    status.is_success() || matches!(status.as_u16(), 400 | 401 | 403 | 422 | 429)
-}
-
 pub fn parse_model_list_response(text: &str) -> Result<Vec<String>, ModelError> {
     if let Some(message) = parse_provider_error(text) {
         return Err(ModelError::new(message));
@@ -1303,492 +832,20 @@ impl ModelProvider for OpenAiCompatibleProvider {
     }
 }
 
-pub fn build_embedding_request_json(
-    model: &str,
-    input: &[String],
-    dimensions: Option<usize>,
-) -> Result<String, ModelError> {
-    if model.trim().is_empty() {
-        return Err(ModelError::new("embedding model is empty"));
-    }
-    if input.is_empty() {
-        return Err(ModelError::new("embedding input is empty"));
-    }
-
-    let inputs = input
-        .iter()
-        .map(|value| format!("\"{}\"", json_escape(value)))
-        .collect::<Vec<_>>();
-    let dimensions = dimensions
-        .map(|value| format!(",\"dimensions\":{value}"))
-        .unwrap_or_default();
-
-    Ok(format!(
-        "{{\"model\":\"{}\",\"input\":[{}]{}}}",
-        json_escape(model),
-        inputs.join(","),
-        dimensions
-    ))
-}
-
-pub fn build_image_generation_request_json(
-    model: &str,
-    prompt: &str,
-    size: Option<&str>,
-) -> Result<String, ModelError> {
-    if model.trim().is_empty() {
-        return Err(ModelError::new("image generation model is empty"));
-    }
-    if prompt.trim().is_empty() {
-        return Err(ModelError::new("image generation prompt is empty"));
-    }
-
-    let mut body = serde_json::json!({
-        "model": model,
-        "prompt": prompt,
-        "n": 1
-    });
-    if let Some(size) = size.filter(|value| !value.trim().is_empty()) {
-        body["size"] = serde_json::Value::String(size.to_string());
-    }
-    serde_json::to_string(&body)
-        .map_err(|error| ModelError::new(format!("failed to encode image request: {error}")))
-}
-
-fn build_dashscope_image_generation_request_json(
-    model: &str,
-    prompt: &str,
-    size: Option<&str>,
-) -> Result<String, ModelError> {
-    if model.trim().is_empty() {
-        return Err(ModelError::new("image generation model is empty"));
-    }
-    if prompt.trim().is_empty() {
-        return Err(ModelError::new("image generation prompt is empty"));
-    }
-
-    let mut parameters = serde_json::json!({
-        "n": 1,
-        "watermark": false
-    });
-    if let Some(size) = size.filter(|value| !value.trim().is_empty()) {
-        parameters["size"] = serde_json::Value::String(size.replace('x', "*"));
-    }
-    let body = serde_json::json!({
-        "model": model,
-        "input": {
-            "messages": [{
-                "role": "user",
-                "content": [{ "text": prompt }]
-            }]
-        },
-        "parameters": parameters
-    });
-    serde_json::to_string(&body)
-        .map_err(|error| ModelError::new(format!("failed to encode image request: {error}")))
-}
-
-fn parse_image_generation_payloads(
-    text: &str,
-    fallback_model: &str,
-) -> Result<(String, Vec<ParsedImagePayload>), ModelError> {
-    if let Some(message) = parse_provider_error(text) {
-        return Err(ModelError::new(message));
-    }
-    let value: serde_json::Value = serde_json::from_str(text)
-        .map_err(|error| ModelError::new(format!("invalid image generation response: {error}")))?;
-    if let Some(message) = value
-        .get("message")
-        .and_then(serde_json::Value::as_str)
-        .filter(|message| !message.trim().is_empty())
-        .filter(|_| value.get("code").is_some())
-    {
-        return Err(ModelError::new(message));
-    }
-    let model = value
-        .get("model")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(fallback_model)
-        .to_string();
-    let mut payloads = Vec::new();
-    if let Some(data) = value.get("data").and_then(serde_json::Value::as_array) {
-        for item in data {
-            let revised_prompt = item
-                .get("revised_prompt")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string);
-            let payload = if let Some(value) = item
-                .get("b64_json")
-                .and_then(serde_json::Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-            {
-                ImagePayload::Base64(value.to_string())
-            } else if let Some(value) = item
-                .get("url")
-                .and_then(serde_json::Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-            {
-                ImagePayload::Url(value.to_string())
-            } else {
-                return Err(ModelError::new(
-                    "image generation item did not include image data",
-                ));
-            };
-            payloads.push(ParsedImagePayload {
-                payload,
-                revised_prompt,
-            });
-        }
-    } else if let Some(choices) = value
-        .pointer("/output/choices")
-        .and_then(serde_json::Value::as_array)
-    {
-        for content in choices.iter().filter_map(|choice| {
-            choice
-                .pointer("/message/content")
-                .and_then(serde_json::Value::as_array)
-        }) {
-            for item in content {
-                if let Some(url) = item
-                    .get("image")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|value| !value.trim().is_empty())
-                {
-                    payloads.push(ParsedImagePayload {
-                        payload: ImagePayload::Url(url.to_string()),
-                        revised_prompt: None,
-                    });
-                }
-            }
-        }
-    } else {
-        return Err(ModelError::new(
-            "image generation response did not include image data",
-        ));
-    }
-    if payloads.is_empty() {
-        return Err(ModelError::new("image generation returned no images"));
-    }
-    Ok((model, payloads))
-}
-
-fn decode_generated_image(value: &str) -> Result<Vec<u8>, ModelError> {
-    let encoded = value
-        .strip_prefix("data:")
-        .and_then(|data| data.split_once(',').map(|(_, encoded)| encoded))
-        .unwrap_or(value);
-    let compact = encoded
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect::<String>();
-    base64::engine::general_purpose::STANDARD
-        .decode(compact)
-        .map_err(|error| ModelError::new(format!("invalid generated image data: {error}")))
-}
-
-fn generated_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else if bytes.len() >= 12
-        && &bytes[4..8] == b"ftyp"
-        && (&bytes[8..12] == b"avif" || &bytes[8..12] == b"avis")
-    {
-        Some("image/avif")
-    } else {
-        None
-    }
-}
-
-pub fn parse_embedding_response(text: &str) -> Result<EmbeddingResponse, ModelError> {
-    if let Some(message) = parse_provider_error(text) {
-        return Err(ModelError::new(message));
-    }
-
-    let model = extract_json_string_field(text, "model")
-        .ok_or_else(|| ModelError::new("embedding response did not include model"))?;
-    let data = extract_json_array_after(text, "\"data\"")
-        .ok_or_else(|| ModelError::new("embedding response did not include data"))?;
-    let mut vectors = Vec::new();
-
-    for object in split_top_level_objects(&data) {
-        let index = extract_json_number_field(&object, "index")
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(vectors.len());
-        let embedding_text = extract_json_array_after(&object, "\"embedding\"")
-            .ok_or_else(|| ModelError::new("embedding item did not include vector"))?;
-        let embedding = parse_number_array(&embedding_text)?;
-        vectors.push(EmbeddingVector { index, embedding });
-    }
-    vectors.sort_by_key(|vector| vector.index);
-
-    let mut metadata = Metadata::new();
-    metadata.insert("model".to_string(), model.clone());
-    metadata.insert("vectors".to_string(), vectors.len().to_string());
-
-    Ok(EmbeddingResponse {
-        model,
-        vectors,
-        metadata,
-    })
-}
-
-pub fn build_chat_request_json(
-    model: &str,
-    messages: &[Message],
-    stream: bool,
-) -> Result<String, ModelError> {
-    build_chat_request_json_with_tools(model, messages, stream, &[])
-}
-
-pub fn build_chat_request_json_with_tools(
-    model: &str,
-    messages: &[Message],
-    stream: bool,
-    tools: &[ToolSpec],
-) -> Result<String, ModelError> {
-    build_chat_request_json_with_tools_and_output_limit(model, messages, stream, tools, None)
-}
-
-fn build_chat_request_json_with_tools_and_output_limit(
-    model: &str,
-    messages: &[Message],
-    stream: bool,
-    tools: &[ToolSpec],
-    max_output_tokens: Option<u64>,
-) -> Result<String, ModelError> {
-    let mut declared_tool_calls = BTreeSet::new();
-    let messages_json = messages
-        .iter()
-        .filter_map(|message| match message.role {
-            MessageRole::Assistant => {
-                if let Some(tool_calls_json) = assistant_tool_calls_json(message) {
-                    declared_tool_calls.extend(tool_call_ids_from_json(&tool_calls_json));
-                    Some(format!(
-                        "{{\"role\":\"assistant\",\"content\":\"{}\",\"tool_calls\":{}}}",
-                        json_escape(&message.content),
-                        tool_calls_json
-                    ))
-                } else {
-                    Some(format!(
-                        "{{\"role\":\"assistant\",\"content\":\"{}\"}}",
-                        json_escape(&message.content)
-                    ))
-                }
-            }
-            MessageRole::Tool => {
-                let tool_call_id = message
-                    .metadata
-                    .get("tool_call_id")
-                    .map(String::as_str)
-                    .unwrap_or("tool-call");
-                if !declared_tool_calls.remove(tool_call_id) {
-                    return None;
-                }
-                Some(format!(
-                    "{{\"role\":\"tool\",\"tool_call_id\":\"{}\",\"content\":\"{}\"}}",
-                    json_escape(tool_call_id),
-                    json_escape(&message.content)
-                ))
-            }
-            _ => Some(format!(
-                "{{\"role\":\"{}\",\"content\":{}}}",
-                json_escape(message_role_to_str(&message.role)),
-                message_content_json(model, message)
-            )),
-        })
-        .collect::<Vec<_>>();
-    let tools_json = if tools.is_empty() {
-        String::new()
-    } else {
-        format!(
-            ",\"tools\":[{}],\"tool_choice\":\"auto\"",
-            tools
-                .iter()
-                .map(tool_spec_json)
-                .collect::<Vec<_>>()
-                .join(",")
-        )
-    };
-    let output_limit_json = max_output_tokens
-        .filter(|value| *value > 0)
-        .map(|value| format!(",\"max_tokens\":{value}"))
-        .unwrap_or_default();
-
-    Ok(format!(
-        "{{\"model\":\"{}\",\"stream\":{},\"messages\":[{}]{}{}}}",
-        json_escape(model),
-        if stream { "true" } else { "false" },
-        messages_json.join(","),
-        output_limit_json,
-        tools_json
-    ))
-}
-
-fn message_content_json(model: &str, message: &Message) -> String {
-    let Some(paths) = message.metadata.get("image_paths") else {
-        return format!("\"{}\"", json_escape(&message.content));
-    };
-    if !model_supports_vision_content(model) {
-        return format!(
-            "\"{}\"",
-            json_escape(&format!(
-                "{}\n\n[Image attachment omitted because the selected model does not support vision.]",
-                message.content
-            ))
-        );
-    }
-    let images = paths.lines().filter_map(image_data_url).collect::<Vec<_>>();
-    if images.is_empty() {
-        return format!("\"{}\"", json_escape(&message.content));
-    }
-    let mut parts = vec![format!(
-        "{{\"type\":\"text\",\"text\":\"{}\"}}",
-        json_escape(&message.content)
-    )];
-    parts.extend(images.into_iter().map(|data_url| {
-        format!(
-            "{{\"type\":\"image_url\",\"image_url\":{{\"url\":\"{}\"}}}}",
-            json_escape(&data_url)
-        )
-    }));
-    format!("[{}]", parts.join(","))
-}
-
-fn model_supports_vision_content(model: &str) -> bool {
-    let model = model.trim().to_ascii_lowercase().replace('_', "-");
-    model.contains("vision")
-        || model.contains("-vl")
-        || model.contains("omni")
-        || model.contains("pixtral")
-        || model.contains("llava")
-        || model.contains("glm-4v")
-        || model.starts_with("gpt-4o")
-        || model.starts_with("gpt-4.1")
-        || model.starts_with("gpt-5")
-        || model.starts_with("gemini")
-        || model.starts_with("claude-3")
-        || model.starts_with("claude-4")
-}
-
-fn image_data_url(value: &str) -> Option<String> {
-    let path = Path::new(value.trim());
-    if !path.is_absolute()
-        || !path
-            .components()
-            .any(|component| component.as_os_str() == ".cindx")
-    {
-        return None;
-    }
-    let metadata = fs::metadata(path).ok()?;
-    if !metadata.is_file() || metadata.len() > 24 * 1024 * 1024 {
-        return None;
-    }
-    let mime_type = match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "avif" => "image/avif",
-        "gif" => "image/gif",
-        "jpeg" | "jpg" => "image/jpeg",
-        "png" => "image/png",
-        "webp" => "image/webp",
-        _ => return None,
-    };
-    let bytes = fs::read(path).ok()?;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-    Some(format!("data:{mime_type};base64,{encoded}"))
-}
-
-fn message_role_to_str(role: &MessageRole) -> &'static str {
-    match role {
-        MessageRole::System => "system",
-        MessageRole::User => "user",
-        MessageRole::Assistant => "assistant",
-        MessageRole::Tool => "tool",
-        MessageRole::Reviewer => "assistant",
-    }
-}
-
-fn tool_spec_json(tool: &ToolSpec) -> String {
-    let function_name = tool_function_name(&tool.name);
-    let description = format!("{} Original tool name: {}.", tool.description, tool.name);
-    let parameters = serde_json::from_str::<serde_json::Value>(&tool.input_schema_json)
-        .ok()
-        .filter(|schema| schema.get("type").and_then(serde_json::Value::as_str) == Some("object"))
-        .unwrap_or_else(|| {
-            serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            })
-        });
-    format!(
-        "{{\"type\":\"function\",\"function\":{{\"name\":\"{}\",\"description\":\"{}\",\"parameters\":{}}}}}",
-        json_escape(&function_name),
-        json_escape(&description),
-        parameters
-    )
-}
-
-fn assistant_tool_calls_json(message: &Message) -> Option<String> {
-    let raw = message
-        .metadata
-        .get("raw_tool_calls_json")
-        .map(String::as_str)?
-        .trim();
-    let parsed = serde_json::from_str::<serde_json::Value>(raw).ok()?;
-    let calls = parsed.as_array()?;
-    (!calls.is_empty() && calls.iter().all(valid_tool_call_value))
-        .then(|| serde_json::to_string(&parsed).ok())
-        .flatten()
-}
-
-fn valid_tool_call_value(value: &serde_json::Value) -> bool {
-    value
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|id| !id.trim().is_empty())
-        && value
-            .get("function")
-            .and_then(|function| function.get("name"))
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|name| !name.trim().is_empty())
-        && value
-            .get("function")
-            .and_then(|function| function.get("arguments"))
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|arguments| serde_json::from_str::<serde_json::Value>(arguments).is_ok())
-}
-
-fn tool_call_ids_from_json(raw: &str) -> Vec<String> {
-    serde_json::from_str::<serde_json::Value>(raw)
-        .ok()
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|call| {
-            call.get("id")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use agent_core::{MessageRole, ToolRisk};
-    use futures_util::stream;
+    use base64::Engine;
+    use crate::image_provider::{
+        build_dashscope_image_generation_request_json, decode_generated_image,
+        generated_image_mime_type, image_endpoint_probe_succeeded,
+        parse_image_generation_payloads, ImagePayload,
+    };
+    use crate::streaming_wire::{parse_stream_event, StreamingToolCall};
+    use std::fs;
+    use futures_util::{stream, Stream};
+    use std::collections::BTreeMap;
     use std::time::Instant;
 
     struct ScriptedStreamingProvider;
@@ -1873,6 +930,43 @@ mod tests {
             on_delta,
             should_cancel,
         ))
+    }
+
+    #[test]
+    fn streaming_reader_preserves_incremental_usage_without_buffering_raw_body() {
+        let mut visible = String::new();
+        let response = consume_test_stream(
+            vec![
+                (
+                    Duration::ZERO,
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n",
+                ),
+                (
+                    Duration::ZERO,
+                    "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":21,\"completion_tokens\":4,\"total_tokens\":25}}\n\n",
+                ),
+                (Duration::ZERO, "data: [DONE]\n\n"),
+            ],
+            Duration::from_secs(1),
+            &mut |delta| visible.push_str(delta),
+            &mut || false,
+        )
+        .expect("stream should preserve usage metadata");
+
+        assert_eq!(visible, "done");
+        assert_eq!(response.message.content, "done");
+        assert_eq!(
+            response.metadata.get("prompt_tokens").map(String::as_str),
+            Some("21")
+        );
+        assert_eq!(
+            response.metadata.get("completion_tokens").map(String::as_str),
+            Some("4")
+        );
+        assert_eq!(
+            response.metadata.get("total_tokens").map(String::as_str),
+            Some("25")
+        );
     }
 
     #[test]
@@ -2331,9 +1425,11 @@ mod tests {
     fn streaming_reader_accepts_non_streaming_tool_call_fallback() {
         let response = finish_streaming_response(
             r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"file_read","arguments":"{\"input\":\"path=README.md\"}"}}]}}]}"#.to_string(),
+            false,
             String::new(),
             BTreeMap::new(),
             None,
+            Metadata::new(),
             "test-model",
             "http://example.test/v1",
         )
@@ -2358,9 +1454,11 @@ mod tests {
         );
         let response = finish_streaming_response(
             String::new(),
+            false,
             dsml.to_string(),
             BTreeMap::new(),
             None,
+            Metadata::new(),
             "test-model",
             "http://example.test/v1",
         )
@@ -2445,9 +1543,11 @@ mod tests {
     fn incomplete_dsml_tool_protocol_is_rejected() {
         let result = finish_streaming_response(
             String::new(),
+            false,
             "<｜DSML｜tool_calls><｜DSML｜invoke name=\"shell_run\">".to_string(),
             BTreeMap::new(),
             None,
+            Metadata::new(),
             "test-model",
             "http://example.test/v1",
         );

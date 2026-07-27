@@ -3,7 +3,7 @@ use crate::{
     append_tool_observation, model_request_for_turn_with_context_budget,
     record_tool_outcome_with_risk, repeated_tool_failure_count, tool_invocation_from_request,
     AgentAdvance, AgentLoopState, AgentTaskStateSnapshot, AgentToolRequest,
-    AgentTurnBudgetExhausted, ContextGovernorReport,
+    AgentTurnBudgetExhausted, ContextGovernorReport, ContextInvariantViolation,
 };
 use agent_core::{Metadata, ToolInvocation, ToolOutcomeStatus, ToolRisk, ToolSpec};
 use model_provider::{ModelRequest, ModelResponse};
@@ -33,6 +33,39 @@ pub struct AgentKernelInstruction {
 pub struct PreparedAgentTurn {
     pub request: ModelRequest,
     pub context: ContextGovernorReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentTurnPreparationError {
+    Budget(AgentTurnBudgetExhausted),
+    Context(ContextInvariantViolation),
+}
+
+impl std::fmt::Display for AgentTurnPreparationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Budget(exhausted) => write!(
+                formatter,
+                "agent turn budget exhausted after {} of {} turns",
+                exhausted.completed_turns, exhausted.max_turns
+            ),
+            Self::Context(violation) => write!(formatter, "{violation}"),
+        }
+    }
+}
+
+impl std::error::Error for AgentTurnPreparationError {}
+
+impl From<AgentTurnBudgetExhausted> for AgentTurnPreparationError {
+    fn from(exhausted: AgentTurnBudgetExhausted) -> Self {
+        Self::Budget(exhausted)
+    }
+}
+
+impl From<ContextInvariantViolation> for AgentTurnPreparationError {
+    fn from(violation: ContextInvariantViolation) -> Self {
+        Self::Context(violation)
+    }
 }
 
 /// Typed façade over the pure agent state machine.
@@ -68,7 +101,7 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         runtime_context: Option<&str>,
         context_window_tokens: u64,
         max_output_tokens: u64,
-    ) -> Result<PreparedAgentTurn, AgentTurnBudgetExhausted> {
+    ) -> Result<PreparedAgentTurn, AgentTurnPreparationError> {
         self.prepare_model_turn_with_contract(
             user_instructions,
             runtime_context,
@@ -85,7 +118,7 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         workspace_verification_required: bool,
         context_window_tokens: u64,
         max_output_tokens: u64,
-    ) -> Result<PreparedAgentTurn, AgentTurnBudgetExhausted> {
+    ) -> Result<PreparedAgentTurn, AgentTurnPreparationError> {
         crate::turn_budget::ensure_model_turn_available(self.state)?;
         let contract_context = self
             .state
@@ -100,6 +133,7 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             context_window_tokens,
             max_output_tokens,
         );
+        context.validate_required_invariants()?;
         Ok(PreparedAgentTurn { request, context })
     }
 
@@ -324,5 +358,27 @@ mod tests {
             .task_contract
             .completion_instruction(true, &tools)
             .is_ok());
+    }
+
+    #[test]
+    fn rejects_an_unsatisfied_context_projection_before_model_dispatch() {
+        let mut state = start_agent_loop(
+            TaskId("context-gate".to_string()),
+            "preserve this request",
+            AgentRuntimeConfig::default(),
+        );
+        let tools = vec![ToolSpec::builtin(
+            "oversized.tool",
+            "test",
+            "oversized schema",
+            ToolRisk::ReadOnly,
+            format!(r#"{{"type":"object","description":"{}"}}"#, "x".repeat(100_000)),
+        )];
+
+        let error = AgentKernel::new(&mut state, &tools)
+            .prepare_model_turn(None, None, 4_096, 1_024)
+            .expect_err("invalid projection must be rejected locally");
+
+        assert!(matches!(error, AgentTurnPreparationError::Context(_)));
     }
 }

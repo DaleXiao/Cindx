@@ -1,5 +1,10 @@
 use super::*;
 use crate::process_control::terminate_process_group;
+use crate::stream_capture::capture_stream_limited;
+use std::env;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub(crate) const BROWSER_CONTROL_REQUEST_SCHEMA: &str = "cindx.browser-control.v2";
 pub(crate) const BROWSER_CONTROL_RESPONSE_SCHEMA: &str = "cindx.browser-control-result.v2";
@@ -16,6 +21,7 @@ pub(crate) enum BrowserToolKind {
     Scroll,
     Tabs,
     SelectTab,
+    Close,
 }
 
 impl BrowserToolKind {
@@ -29,6 +35,7 @@ impl BrowserToolKind {
             Self::Scroll => "browser.scroll",
             Self::Tabs => "browser.tabs",
             Self::SelectTab => "browser.select_tab",
+            Self::Close => "browser.close",
         }
     }
 
@@ -42,6 +49,7 @@ impl BrowserToolKind {
             Self::Scroll => "scroll",
             Self::Tabs => "tabs",
             Self::SelectTab => "select_tab",
+            Self::Close => "close",
         }
     }
 
@@ -57,6 +65,7 @@ impl BrowserToolKind {
             Self::Scroll => "Scroll the current page or a selected scroll container.",
             Self::Tabs => "List tabs in the reusable browser session.",
             Self::SelectTab => "Select and focus one tab by its CDP target id.",
+            Self::Close => "Close the reusable browser session and release its browser process.",
         }
     }
 
@@ -84,19 +93,32 @@ impl BrowserToolKind {
             Self::SelectTab => {
                 "tab_id=<CDP target id>\nsession_id=<optional browser session>"
             }
+            Self::Close => "session_id=<optional browser session>",
         }
     }
 
     fn risk(self) -> ToolRisk {
         match self {
             Self::TypeText => ToolRisk::SensitiveContext,
+            Self::Close => ToolRisk::Destructive,
             _ => ToolRisk::UsesNetwork,
+        }
+    }
+
+    fn effect_semantics(self) -> ToolEffectSemantics {
+        match self {
+            Self::ExtractText | Self::Capture | Self::Tabs => ToolEffectSemantics::ReadOnly,
+            Self::SelectTab | Self::Close => ToolEffectSemantics::Idempotent,
+            Self::Open | Self::Click | Self::TypeText | Self::Scroll => {
+                ToolEffectSemantics::NonIdempotent
+            }
         }
     }
 
     fn permission_risk(self) -> PermissionRisk {
         match self {
             Self::TypeText => PermissionRisk::Sensitive,
+            Self::Close => PermissionRisk::Destructive,
             _ => PermissionRisk::Network,
         }
     }
@@ -111,6 +133,7 @@ impl BrowserToolKind {
             Self::Scroll => "Scroll inside a browser session.",
             Self::Tabs => "Inspect open browser tabs.",
             Self::SelectTab => "Focus an open browser tab.",
+            Self::Close => "Close this reusable browser session and discard open tabs.",
         }
     }
 }
@@ -158,6 +181,10 @@ impl BrowserTool {
 
     pub(crate) fn select_tab(workspace_root: impl Into<PathBuf>) -> Self {
         Self::new(workspace_root, BrowserToolKind::SelectTab)
+    }
+
+    pub(crate) fn close(workspace_root: impl Into<PathBuf>) -> Self {
+        Self::new(workspace_root, BrowserToolKind::Close)
     }
 
     fn execute_inner(
@@ -348,6 +375,7 @@ impl Tool for BrowserTool {
             self.kind.risk(),
             self.kind.schema(),
         )
+        .with_effect_semantics(self.kind.effect_semantics())
     }
 
     fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -686,12 +714,18 @@ impl ComputerTool {
 
 impl Tool for ComputerTool {
     fn spec(&self) -> ToolSpec {
+        let semantics = if self.kind == ComputerActionKind::Screenshot {
+            ToolEffectSemantics::ReadOnly
+        } else {
+            ToolEffectSemantics::NonIdempotent
+        };
         builtin_tool_spec(
             self.kind.tool_name(),
             self.kind.description(),
             self.kind.risk(),
             self.kind.schema(),
         )
+        .with_effect_semantics(semantics)
     }
 
     fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -787,7 +821,8 @@ fn validate_browser_input(
         BrowserToolKind::ExtractText
         | BrowserToolKind::Capture
         | BrowserToolKind::Scroll
-        | BrowserToolKind::Tabs => Ok(()),
+        | BrowserToolKind::Tabs
+        | BrowserToolKind::Close => Ok(()),
     }
 }
 

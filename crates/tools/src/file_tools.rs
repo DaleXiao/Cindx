@@ -1,0 +1,504 @@
+use super::{
+    builtin_tool_spec, parse_bounded_usize_input, parse_input, permission_request, required_input,
+    resolve_workspace_path, resolve_workspace_read_path, stable_hash, tool_result, Tool, ToolError,
+};
+use agent_core::{
+    Metadata, PermissionRequest, PermissionRisk, ToolEffectSemantics, ToolInvocation,
+    ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
+};
+use std::fs;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::path::{Component, Path, PathBuf};
+
+const DEFAULT_FILE_READ_BYTES: usize = 128 * 1024;
+const MAX_FILE_READ_BYTES: usize = 256 * 1024;
+const SEARCH_FILE_SCAN_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const SEARCH_MATCH_PREVIEW_CHARS: usize = 512;
+
+pub struct ReadFileTool {
+    workspace_root: PathBuf,
+}
+
+impl ReadFileTool {
+    pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
+        Self {
+            workspace_root: workspace_root.into(),
+        }
+    }
+}
+
+impl Tool for ReadFileTool {
+    fn spec(&self) -> ToolSpec {
+        builtin_tool_spec(
+            "file.read",
+            "Read a bounded UTF-8 byte range inside the workspace. Large files return a continuation offset.",
+            ToolRisk::ReadOnly,
+            "path=<workspace-relative-path>\noffset_bytes=<optional byte offset, default 0>\nmax_bytes=<optional 1-262144, default 131072>",
+        )
+    }
+
+    fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
+        None
+    }
+
+    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
+        let input = parse_input(&invocation.input_json);
+        let path = required_input(&input, "path")?;
+        let offset_bytes = parse_bounded_usize_input(&input, "offset_bytes", 0, 0, usize::MAX)?;
+        let max_bytes = parse_bounded_usize_input(
+            &input,
+            "max_bytes",
+            DEFAULT_FILE_READ_BYTES,
+            1,
+            MAX_FILE_READ_BYTES,
+        )?;
+        let resolved = resolve_workspace_path(&self.workspace_root, &path)?;
+        let resolved = resolve_workspace_read_path(&self.workspace_root, &resolved)?;
+        reject_sensitive_read_path(&self.workspace_root, &resolved)?;
+        let mut file = fs::File::open(&resolved)
+            .map_err(|error| ToolError::new(format!("failed to read file: {error}")))?;
+        let total_bytes = file
+            .metadata()
+            .map_err(|error| ToolError::new(format!("failed to inspect file: {error}")))?
+            .len();
+        let offset = (offset_bytes as u64).min(total_bytes);
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|error| ToolError::new(format!("failed to seek file: {error}")))?;
+        let mut bytes = Vec::with_capacity(max_bytes.saturating_add(4));
+        file.take(max_bytes.saturating_add(4) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| ToolError::new(format!("failed to read file range: {error}")))?;
+        let skipped_prefix = bytes
+            .iter()
+            .take(3)
+            .take_while(|byte| **byte & 0b1100_0000 == 0b1000_0000)
+            .count();
+        if skipped_prefix > 0 {
+            bytes.drain(..skipped_prefix);
+        }
+        let offset = offset.saturating_add(skipped_prefix as u64);
+        let end = utf8_page_end(&bytes, max_bytes);
+        bytes.truncate(end);
+        let returned_bytes = bytes.len();
+        let next_offset = offset.saturating_add(returned_bytes as u64);
+        let truncated = next_offset < total_bytes;
+        let mut output = String::from_utf8_lossy(&bytes).to_string();
+        if truncated {
+            if !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str(&format!(
+                "\n[File read bounded at {returned_bytes} bytes. Continue with offset_bytes={next_offset}. Total file size: {total_bytes} bytes.]"
+            ));
+        }
+        let mut metadata = Metadata::new();
+        metadata.insert("path".to_string(), path);
+        metadata.insert("bytes".to_string(), total_bytes.to_string());
+        metadata.insert("offset_bytes".to_string(), offset.to_string());
+        metadata.insert("returned_bytes".to_string(), returned_bytes.to_string());
+        metadata.insert("next_offset_bytes".to_string(), next_offset.to_string());
+        metadata.insert("truncated".to_string(), truncated.to_string());
+
+        Ok(tool_result(
+            invocation.id,
+            ToolOutcomeStatus::Succeeded,
+            output,
+            metadata,
+        ))
+    }
+}
+
+fn utf8_page_end(bytes: &[u8], max_bytes: usize) -> usize {
+    let candidate = bytes.len().min(max_bytes);
+    match std::str::from_utf8(&bytes[..candidate]) {
+        Ok(_) => candidate,
+        Err(error) if error.error_len().is_none() => {
+            let valid = error.valid_up_to();
+            if valid > 0 {
+                return valid;
+            }
+            let width = utf8_sequence_width(bytes.first().copied().unwrap_or_default());
+            if width > 1 && bytes.len() >= width && std::str::from_utf8(&bytes[..width]).is_ok() {
+                width
+            } else {
+                candidate
+            }
+        }
+        Err(_) => candidate,
+    }
+}
+
+fn utf8_sequence_width(first: u8) -> usize {
+    match first {
+        0x00..=0x7f => 1,
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => 1,
+    }
+}
+
+pub struct ListDirectoryTool {
+    workspace_root: PathBuf,
+}
+
+impl ListDirectoryTool {
+    pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
+        Self {
+            workspace_root: workspace_root.into(),
+        }
+    }
+}
+
+impl Tool for ListDirectoryTool {
+    fn spec(&self) -> ToolSpec {
+        builtin_tool_spec(
+            "file.list",
+            "List files and directories inside the workspace.",
+            ToolRisk::ReadOnly,
+            "path=<optional workspace-relative-path>",
+        )
+    }
+
+    fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
+        None
+    }
+
+    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
+        let input = parse_input(&invocation.input_json);
+        let path = input
+            .get("path")
+            .cloned()
+            .unwrap_or_else(|| ".".to_string());
+        let resolved = resolve_workspace_path(&self.workspace_root, &path)?;
+        let resolved = resolve_workspace_read_path(&self.workspace_root, &resolved)?;
+        let mut rows = Vec::new();
+        let entries = fs::read_dir(&resolved)
+            .map_err(|error| ToolError::new(format!("failed to list directory: {error}")))?;
+
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                ToolError::new(format!("failed to read directory entry: {error}"))
+            })?;
+            let metadata = entry
+                .metadata()
+                .map_err(|error| ToolError::new(format!("failed to read metadata: {error}")))?;
+            let kind = if metadata.is_dir() { "dir" } else { "file" };
+            rows.push(format!(
+                "{}\t{}\t{}",
+                kind,
+                metadata.len(),
+                entry.file_name().to_string_lossy()
+            ));
+        }
+        rows.sort();
+
+        let mut metadata = Metadata::new();
+        metadata.insert("path".to_string(), path);
+        metadata.insert("entries".to_string(), rows.len().to_string());
+
+        Ok(tool_result(
+            invocation.id,
+            ToolOutcomeStatus::Succeeded,
+            rows.join("\n"),
+            metadata,
+        ))
+    }
+}
+
+pub struct SearchFilesTool {
+    workspace_root: PathBuf,
+}
+
+impl SearchFilesTool {
+    pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
+        Self {
+            workspace_root: workspace_root.into(),
+        }
+    }
+}
+
+impl Tool for SearchFilesTool {
+    fn spec(&self) -> ToolSpec {
+        builtin_tool_spec(
+            "file.search",
+            "Search UTF-8 files inside the workspace for a literal query.",
+            ToolRisk::ReadOnly,
+            "query=<literal text>\npath=<optional workspace-relative path>\nmax_results=<optional number>",
+        )
+    }
+
+    fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
+        None
+    }
+
+    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
+        let input = parse_input(&invocation.input_json);
+        let query = required_input(&input, "query")?;
+        let path = input
+            .get("path")
+            .cloned()
+            .unwrap_or_else(|| ".".to_string());
+        let max_results = input
+            .get("max_results")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(50)
+            .min(200);
+        let root = resolve_workspace_path(&self.workspace_root, &path)?;
+        let root = resolve_workspace_read_path(&self.workspace_root, &root)?;
+        reject_sensitive_read_path(&self.workspace_root, &root)?;
+        let mut results = Vec::new();
+        search_directory(
+            &self.workspace_root,
+            &root,
+            &query,
+            max_results,
+            &mut results,
+        )?;
+
+        let mut metadata = Metadata::new();
+        metadata.insert("query".to_string(), query);
+        metadata.insert("path".to_string(), path);
+        metadata.insert("matches".to_string(), results.len().to_string());
+
+        Ok(tool_result(
+            invocation.id,
+            ToolOutcomeStatus::Succeeded,
+            results.join("\n"),
+            metadata,
+        ))
+    }
+}
+
+pub struct WriteFileTool {
+    workspace_root: PathBuf,
+}
+
+impl WriteFileTool {
+    pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
+        Self {
+            workspace_root: workspace_root.into(),
+        }
+    }
+}
+
+impl Tool for WriteFileTool {
+    fn spec(&self) -> ToolSpec {
+        builtin_tool_spec(
+            "file.write",
+            "Write UTF-8 content to a file inside the workspace.",
+            ToolRisk::WritesWorkspace,
+            "path=<workspace-relative-path>\ncontent=<utf-8 content>",
+        )
+        .with_effect_semantics(ToolEffectSemantics::Verifiable {
+            verifier: "workspace_file_content_v1".to_string(),
+        })
+    }
+
+    fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
+        let input = parse_input(&invocation.input_json);
+        let path = input
+            .get("path")
+            .cloned()
+            .unwrap_or_else(|| "<missing path>".to_string());
+        Some(permission_request(
+            &invocation.task_id,
+            PermissionRisk::Write,
+            "file.write",
+            "Write a file in the selected workspace.",
+            &path,
+            [
+                ("tool_call_id".to_string(), invocation.id.0.clone()),
+                ("tool_name".to_string(), invocation.tool_name.clone()),
+            ]
+            .into_iter()
+            .collect(),
+        ))
+    }
+
+    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
+        let input = parse_input(&invocation.input_json);
+        let path = required_input(&input, "path")?;
+        let content = required_input(&input, "content")?;
+        let resolved = resolve_workspace_path(&self.workspace_root, &path)?;
+        let session_key = invocation
+            .metadata
+            .get("session_id")
+            .map(|session_id| stable_hash(session_id).to_string())
+            .unwrap_or_else(|| "unscoped".to_string());
+        let version_key = stable_hash(&invocation.id.0).to_string();
+        let snapshot_relative = PathBuf::from(".cindx")
+            .join("output-history")
+            .join(session_key)
+            .join(version_key)
+            .join(&path);
+        let snapshot = self.workspace_root.join(&snapshot_relative);
+        if let Some(parent) = snapshot.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                ToolError::new(format!(
+                    "failed to create output history directory: {error}"
+                ))
+            })?;
+        }
+        fs::write(&snapshot, content.as_bytes()).map_err(|error| {
+            ToolError::new(format!("failed to preserve output version: {error}"))
+        })?;
+        if let Some(parent) = resolved.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                ToolError::new(format!("failed to create parent directory: {error}"))
+            })?;
+        }
+        fs::write(&resolved, content.as_bytes())
+            .map_err(|error| ToolError::new(format!("failed to write file: {error}")))?;
+
+        let mut metadata = Metadata::new();
+        metadata.insert("path".to_string(), path);
+        metadata.insert("source_path".to_string(), resolved.display().to_string());
+        metadata.insert(
+            "artifact_path".to_string(),
+            snapshot_relative.display().to_string(),
+        );
+        metadata.insert("bytes".to_string(), content.len().to_string());
+
+        Ok(tool_result(
+            invocation.id,
+            ToolOutcomeStatus::Succeeded,
+            "file written".to_string(),
+            metadata,
+        ))
+    }
+}
+
+fn reject_sensitive_read_path(workspace_root: &Path, path: &Path) -> Result<(), ToolError> {
+    if is_sensitive_workspace_path(workspace_root, path) {
+        Err(ToolError::new(
+            "access to local credential files is blocked; configure providers in Settings",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn is_sensitive_workspace_path(workspace_root: &Path, path: &Path) -> bool {
+    let relative = path.strip_prefix(workspace_root).unwrap_or(path);
+    let normalized = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let joined = normalized.join("/");
+    if joined == ".cindx/provider.conf" || joined.ends_with("/.cindx/provider.conf") {
+        return true;
+    }
+
+    let Some(file_name) = normalized.last().map(String::as_str) else {
+        return false;
+    };
+    let is_env_file = (file_name == ".env" || file_name.starts_with(".env."))
+        && !file_name.ends_with(".example")
+        && !file_name.ends_with(".sample")
+        && !file_name.ends_with(".template");
+    is_env_file
+        || matches!(
+            file_name,
+            ".npmrc" | ".pypirc" | "credentials" | "credentials.json" | "id_rsa" | "id_ed25519"
+        )
+        || file_name.ends_with(".pem")
+        || file_name.ends_with(".key")
+}
+
+fn search_directory(
+    workspace_root: &Path,
+    directory: &Path,
+    query: &str,
+    max_results: usize,
+    results: &mut Vec<String>,
+) -> Result<(), ToolError> {
+    if results.len() >= max_results {
+        return Ok(());
+    }
+
+    let metadata = fs::metadata(directory)
+        .map_err(|error| ToolError::new(format!("failed to read search path: {error}")))?;
+    if metadata.is_file() {
+        search_file(workspace_root, directory, query, max_results, results)?;
+        return Ok(());
+    }
+
+    let entries = fs::read_dir(directory)
+        .map_err(|error| ToolError::new(format!("failed to search directory: {error}")))?;
+    for entry in entries {
+        if results.len() >= max_results {
+            break;
+        }
+        let entry = entry
+            .map_err(|error| ToolError::new(format!("failed to read directory entry: {error}")))?;
+        let path = entry.path();
+        let file_name = entry.file_name();
+        if file_name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let file_type = entry
+            .file_type()
+            .map_err(|error| ToolError::new(format!("failed to read file type: {error}")))?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|error| ToolError::new(format!("failed to read metadata: {error}")))?;
+        if metadata.is_dir() {
+            search_directory(workspace_root, &path, query, max_results, results)?;
+        } else if metadata.is_file() {
+            search_file(workspace_root, &path, query, max_results, results)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn search_file(
+    workspace_root: &Path,
+    path: &Path,
+    query: &str,
+    max_results: usize,
+    results: &mut Vec<String>,
+) -> Result<(), ToolError> {
+    if results.len() >= max_results {
+        return Ok(());
+    }
+    if is_sensitive_workspace_path(workspace_root, path) {
+        return Ok(());
+    }
+    let Ok(file) = fs::File::open(path) else {
+        return Ok(());
+    };
+    let relative = path.strip_prefix(workspace_root).unwrap_or(path);
+    let mut reader = BufReader::new(file.take(SEARCH_FILE_SCAN_MAX_BYTES));
+    let mut line = String::new();
+    let mut index = 0usize;
+    loop {
+        if results.len() >= max_results {
+            break;
+        }
+        line.clear();
+        let Ok(read) = reader.read_line(&mut line) else {
+            break;
+        };
+        if read == 0 {
+            break;
+        }
+        index += 1;
+        if line.contains(query) {
+            let preview: String = line
+                .trim()
+                .chars()
+                .take(SEARCH_MATCH_PREVIEW_CHARS)
+                .collect();
+            results.push(format!("{}:{}:{}", relative.display(), index, preview));
+        }
+    }
+    Ok(())
+}

@@ -212,13 +212,11 @@ pub(crate) async fn get_agent_session_outputs(
             .map(String::as_str)
             .unwrap_or(session_id.as_str());
         let store = open_app_read_store()?;
-        let events = agent_events_for_session(&store, &phase16_task_id(), Some(session_id))
-            .map_err(|error| error.to_string())?;
+        let mut outputs = cached_agent_output_artifacts(&state, &store, session_id)?;
         let root = run_context
             .get("project_root")
             .map(PathBuf::from)
             .unwrap_or(active_workspace_root(&state)?);
-        let mut outputs = agent_output_artifacts_from_events(&events);
         for output in &mut outputs {
             let path = PathBuf::from(&output.path);
             let resolved = if path.is_absolute() {
@@ -248,10 +246,7 @@ pub(crate) fn export_agent_trace_jsonl(
         .unwrap_or(active_workspace_root(&state)?);
     let session_id_owned = run_context.get("session_id").cloned();
     let session_id = session_id_owned.as_deref();
-    let store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let store = open_app_read_store()?;
     let export_path =
         write_agent_trace_jsonl(&root, &store, session_id).map_err(|error| error.to_string())?;
     agent_trace_state_for_session(&store, Some(export_path), None, session_id)

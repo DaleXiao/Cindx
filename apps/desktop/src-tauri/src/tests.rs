@@ -6,6 +6,19 @@ use crate::agent_collaboration_runtime::{
 use orchestrator::{AdaptiveWorkflow, AdaptiveWorkflowStep};
 use tools::encode_input;
 
+fn test_prompt_evaluation_provenance(
+    candidate_id: &str,
+    opponent_id: &str,
+) -> PromptEvaluationProvenance {
+    PromptEvaluationProvenance::blind_pairwise_swap(
+        vec!["independent-judge".to_string()],
+        vec!["candidate-worker".to_string()],
+        "d".repeat(64),
+        sha256_hex(candidate_id.as_bytes()),
+        sha256_hex(opponent_id.as_bytes()),
+    )
+}
+
 fn test_conductor_harness(models: Vec<String>, agent_budget: usize) -> ConductorHarness {
     let routing = RoutingContext::from_prompt("Test the conductor", Vec::new());
     ConductorHarness::new(ConductorRequest {
@@ -838,6 +851,171 @@ fn user_message_projection_preserves_attachment_metadata() {
 }
 
 #[test]
+fn attachment_message_separates_display_and_model_content() {
+    let event = Event {
+        id: EventId("message-with-model-content".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 10,
+        timestamp_ms: 100,
+        kind: EventKind::MessageAdded,
+        summary: "user message".to_string(),
+        metadata: [
+            ("role".to_string(), "user".to_string()),
+            ("content".to_string(), "Review this file".to_string()),
+            (
+                "model_content".to_string(),
+                "Review this file\n\nAttached files: /workspace/report.pdf".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    let display = message_from_event(&event).expect("display transcript should project");
+    let model = model_message_from_event(&event).expect("model transcript should project");
+    let runtime = runtime_message_from_event(&event).expect("runtime transcript should project");
+
+    assert_eq!(display.content, "Review this file");
+    assert_eq!(model.content, runtime.content);
+    assert!(model.content.contains("/workspace/report.pdf"));
+}
+
+#[test]
+fn recovery_identity_stays_on_root_prompt_after_steer() {
+    let run_start = Event {
+        id: EventId("run-start".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 20,
+        timestamp_ms: 100,
+        kind: EventKind::TaskStatusChanged,
+        summary: "Agent task started".to_string(),
+        metadata: [
+            ("agent_run_id".to_string(), "run-a".to_string()),
+            ("prompt".to_string(), "Review the report".to_string()),
+            (
+                "model_prompt".to_string(),
+                "Review the report\n\nAttached files: /workspace/report.pdf".to_string(),
+            ),
+            (
+                "recovery_prompt".to_string(),
+                "Review the report\n\nAttached files: /workspace/report.pdf".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let root_turn = Event {
+        id: EventId("root-turn".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 21,
+        timestamp_ms: 101,
+        kind: EventKind::MessageAdded,
+        summary: "user message".to_string(),
+        metadata: [
+            ("role".to_string(), "user".to_string()),
+            ("content".to_string(), "Review the report".to_string()),
+            (
+                "model_content".to_string(),
+                "Review the report\n\nAttached files: /workspace/report.pdf".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let steer_turn = Event {
+        id: EventId("steer-turn".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 22,
+        timestamp_ms: 102,
+        kind: EventKind::MessageAdded,
+        summary: "user message".to_string(),
+        metadata: [
+            ("role".to_string(), "user".to_string()),
+            ("content".to_string(), "Focus on security findings".to_string()),
+            (
+                "display_content".to_string(),
+                "Focus on security findings".to_string(),
+            ),
+            ("steer".to_string(), "true".to_string()),
+            ("queue_mode".to_string(), "steer".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let events = vec![run_start, root_turn, steer_turn];
+
+    assert_eq!(
+        latest_agent_prompt_from_active_events(&events).as_deref(),
+        Some("Focus on security findings")
+    );
+    assert_eq!(
+        latest_agent_display_prompt_from_active_events(&events).as_deref(),
+        Some("Focus on security findings")
+    );
+    assert_eq!(
+        agent_recovery_prompt_from_active_events(&events).as_deref(),
+        Some("Review the report\n\nAttached files: /workspace/report.pdf")
+    );
+    assert_eq!(
+        primary_agent_user_turn_event(&events).map(|event| event.sequence),
+        Some(21)
+    );
+    let recovery_context = [
+        ("session_id".to_string(), "session-a".to_string()),
+        ("project_id".to_string(), "project-a".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let (_, source_run_id, user_turn_sequence, prompt_fingerprint, recovery_prompt) =
+        agent_recovery_identity(&events, &recovery_context)
+            .expect("recovery identity should resolve");
+    assert_eq!(source_run_id, "run-a");
+    assert_eq!(user_turn_sequence, 21);
+    assert_eq!(
+        prompt_fingerprint,
+        sha256_hex("Review the report\n\nAttached files: /workspace/report.pdf".as_bytes())
+    );
+    assert_eq!(
+        recovery_prompt,
+        "Review the report\n\nAttached files: /workspace/report.pdf"
+    );
+}
+
+#[test]
+fn runtime_snapshot_matches_the_redacted_durable_projection() {
+    let mut runtime = start_agent_loop(
+        phase16_task_id(),
+        "api_key=super-secret".to_string(),
+        AgentRuntimeConfig::default(),
+    );
+    runtime.messages.push(Message {
+        role: MessageRole::Assistant,
+        content: "<think>private scratchpad</think>\nFinished".to_string(),
+        metadata: Metadata::new(),
+    });
+
+    let snapshot = capture_persistable_agent_task_state(&runtime);
+    let mut persisted_messages = runtime.messages.clone();
+    for message in &mut persisted_messages {
+        if message.role == MessageRole::Assistant {
+            message.content = sanitize_assistant_content(&message.content);
+        }
+        message.content = redact_sensitive_text(&message.content);
+        message.metadata = redact_metadata(&message.metadata);
+    }
+
+    assert!(snapshot
+        .restore(
+            redact_sensitive_text(&runtime.user_prompt),
+            persisted_messages,
+        )
+        .is_ok());
+    assert!(snapshot
+        .restore(runtime.user_prompt.clone(), runtime.messages.clone())
+        .is_err());
+}
+
+#[test]
 fn assistant_reasoning_control_only_message_is_sanitized_for_chat() {
     let event = Event {
         id: EventId("assistant-reasoning-control".to_string()),
@@ -895,6 +1073,38 @@ fn assistant_dsml_tool_protocol_is_sanitized_for_chat_and_transcript() {
     assert_eq!(chat_message.content, "");
     let transcript_message = message_from_event(&event).expect("message should remain");
     assert_eq!(transcript_message.content, "");
+}
+
+#[test]
+fn durable_internal_instruction_is_hidden_from_chat_but_restored_for_runtime() {
+    let event = Event {
+        id: EventId("internal-verification-instruction".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 12,
+        timestamp_ms: 100,
+        kind: EventKind::MessageAdded,
+        summary: "system message".to_string(),
+        metadata: [
+            ("role".to_string(), "system".to_string()),
+            ("content".to_string(), "verify the mutation".to_string()),
+            ("internal".to_string(), "true".to_string()),
+            (
+                "kind".to_string(),
+                "completion_verification".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    assert!(message_from_event(&event).is_none());
+    let runtime_message =
+        runtime_message_from_event(&event).expect("runtime instruction should restore");
+    assert_eq!(runtime_message.content, "verify the mutation");
+    assert_eq!(
+        runtime_message.metadata.get("kind").map(String::as_str),
+        Some("completion_verification")
+    );
 }
 
 #[test]
@@ -1727,6 +1937,7 @@ fn prompt_evolution_read_model_only_indexes_evaluation_evidence() {
         relative_reward: Some(0.2),
         step_credits: Vec::new(),
         reflection_packet: None,
+        provenance: test_prompt_evaluation_provenance("candidate", "opponent"),
     };
     append_event(
         &mut store,
@@ -1950,14 +2161,16 @@ fn prompt_evolution_read_model_restores_an_atomic_observation_pair() {
         relative_reward: Some(0.2),
         step_credits: Vec::new(),
         reflection_packet: None,
+        provenance: test_prompt_evaluation_provenance(&genome_a.id, &genome_b.id),
     };
-    let observation_b = PromptEvolutionObservation {
+    let mut observation_b = PromptEvolutionObservation {
         profile_id: genome_b.id.clone(),
         opponent_profile_id: Some(genome_a.id.clone()),
         quality_score: 0.6,
         relative_reward: Some(-0.2),
         ..observation_a.clone()
     };
+    observation_b.provenance = test_prompt_evaluation_provenance(&genome_b.id, &genome_a.id);
     append_event(
         &mut store,
         &phase16_task_id(),
@@ -2015,6 +2228,7 @@ fn prompt_evolution_evidence_counts_ignore_legacy_plan_only_modes() {
             relative_reward: Some(0.2),
             step_credits: Vec::new(),
             reflection_packet: None,
+            provenance: test_prompt_evaluation_provenance(profile_id, "challenger"),
         };
     let observations = vec![
         observation("legacy-paired", PromptEvaluationMode::PairedShadow),
@@ -2051,6 +2265,7 @@ fn prompt_evolution_direct_evidence_does_not_reuse_a_weaker_opponent() {
         relative_reward: Some(0.4),
         step_credits: Vec::new(),
         reflection_packet: None,
+        provenance: test_prompt_evaluation_provenance("candidate", opponent),
     };
     let observations = vec![
         observation("weak-1", "weak-profile"),
@@ -2086,6 +2301,7 @@ fn prompt_instance_pareto_seeds_are_stable_across_event_order() {
         relative_reward: Some(0.2),
         step_credits: Vec::new(),
         reflection_packet: None,
+        provenance: test_prompt_evaluation_provenance(&genome.id, "challenger"),
     };
     let forward = vec![
         observation("replay-a", "case-a"),
@@ -2169,6 +2385,7 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
             relative_reward: Some(0.4),
             step_credits: Vec::new(),
             reflection_packet: None,
+            provenance: test_prompt_evaluation_provenance(&candidate.id, &stable.id),
         };
     for index in 0..3 {
         let candidate_observation = direct_observation(index, PromptEvaluationSplit::Train);
@@ -2176,6 +2393,8 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
         stable_observation.profile_id = stable.id.clone();
         stable_observation.opponent_profile_id = Some(candidate.id.clone());
         stable_observation.relative_reward = Some(-0.4);
+        stable_observation.provenance =
+            test_prompt_evaluation_provenance(&stable.id, &candidate.id);
         model
             .observations
             .push(("auto".to_string(), candidate_observation));
@@ -2189,6 +2408,8 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
         stable_observation.profile_id = stable.id.clone();
         stable_observation.opponent_profile_id = Some(candidate.id.clone());
         stable_observation.relative_reward = Some(-0.4);
+        stable_observation.provenance =
+            test_prompt_evaluation_provenance(&stable.id, &candidate.id);
         model
             .observations
             .push(("auto".to_string(), candidate_observation));
@@ -2221,6 +2442,7 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
             relative_reward: None,
             step_credits: Vec::new(),
             reflection_packet: None,
+            provenance: test_prompt_evaluation_provenance("candidate", "opponent"),
         },
     ));
     for index in 0..2 {
@@ -2229,6 +2451,8 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
         stable_observation.profile_id = stable.id.clone();
         stable_observation.opponent_profile_id = Some(candidate.id.clone());
         stable_observation.relative_reward = Some(-0.4);
+        stable_observation.provenance =
+            test_prompt_evaluation_provenance(&stable.id, &candidate.id);
         model
             .observations
             .push(("auto".to_string(), candidate_observation));
@@ -2259,6 +2483,7 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
             relative_reward: None,
             step_credits: Vec::new(),
             reflection_packet: None,
+            provenance: test_prompt_evaluation_provenance("candidate", "opponent"),
         },
     ));
     let rolled_back = reconcile_prompt_rollout(&mut model, "auto", &evaluation(8));
@@ -2322,12 +2547,15 @@ fn completed_gepa_canary_persists_a_verified_frozen_profile() {
             relative_reward: Some(0.5),
             step_credits: Vec::new(),
             reflection_packet: None,
+            provenance: test_prompt_evaluation_provenance(&candidate.id, &stable.id),
         };
         let mut stable_observation = candidate_observation.clone();
         stable_observation.profile_id = stable.id.clone();
         stable_observation.opponent_profile_id = Some(candidate.id.clone());
         stable_observation.quality_score = 0.45;
         stable_observation.relative_reward = Some(-0.5);
+        stable_observation.provenance =
+            test_prompt_evaluation_provenance(&stable.id, &candidate.id);
         model
             .observations
             .push(("auto".to_string(), candidate_observation));
@@ -2355,6 +2583,7 @@ fn completed_gepa_canary_persists_a_verified_frozen_profile() {
             relative_reward: None,
             step_credits: Vec::new(),
             reflection_packet: None,
+            provenance: test_prompt_evaluation_provenance("candidate", "opponent"),
         },
     ));
     let evaluation = PromptEvolutionEvaluation {
@@ -2430,6 +2659,104 @@ fn prompt_rollout_rebuilds_from_durable_events() {
     assert_eq!(rollout.live_checkpoint, 3);
     assert_eq!(rollout.rollback_count, 2);
     assert_eq!(rollout.promotion_confidence, Some(0.61));
+}
+
+#[test]
+fn promoted_prompt_rollout_without_a_valid_frozen_profile_is_ignored() {
+    let event = Event {
+        id: EventId("invalid-promotion".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 8,
+        timestamp_ms: 80,
+        kind: EventKind::TaskStatusChanged,
+        summary: "Conductor prompt rollout updated".to_string(),
+        metadata: [
+            ("prompt_effort".to_string(), "auto".to_string()),
+            ("stable_profile".to_string(), "learned-auto".to_string()),
+            ("rollout_status".to_string(), "promoted".to_string()),
+            (
+                "frozen_prompt_profile".to_string(),
+                "{\"schema\":\"tampered\"}".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    let model = build_prompt_evolution_read_model(&[event], 8, 1);
+
+    assert!(model.rollouts.is_empty());
+}
+
+#[test]
+fn stable_prompt_rollout_uses_the_evidence_bound_frozen_genome() {
+    let seed = ConductorPromptGenome::seed_for_effort("auto");
+    let certified = seed
+        .mutations()
+        .into_iter()
+        .next()
+        .expect("seed should have an evolved candidate");
+    let snapshot = FrozenPromptProfileSnapshot::new_gepa(
+        "auto",
+        certified.clone(),
+        seed.id,
+        "a".repeat(64),
+        "b".repeat(64),
+    )
+    .expect("frozen profile should validate");
+    let mut mutable_copy = certified.clone();
+    mutable_copy.custom_directive = "changed after certification".to_string();
+    let model = PromptEvolutionReadModel {
+        schema: PROMPT_EVOLUTION_READ_MODEL_NAMESPACE.to_string(),
+        revision: 0,
+        event_count: 0,
+        genomes: vec![PromptGenomeRecord {
+            effort: "auto".to_string(),
+            genome: mutable_copy,
+            evolution_method: Some(PromptEvolutionMethod::GepaReflectivePaired),
+        }],
+        observations: Vec::new(),
+        rollouts: BTreeMap::new(),
+        datasets: BTreeMap::new(),
+    };
+    let rollout = PromptRolloutState {
+        stable_profile_id: certified.id.clone(),
+        canary_profile_id: None,
+        canary_percent: 0,
+        evidence_checkpoint: 0,
+        live_checkpoint: 0,
+        rollback_count: 0,
+        status: "stable".to_string(),
+        last_reason: None,
+        promotion_confidence: Some(0.8),
+        frozen_profile: Some(snapshot),
+    };
+    let mut evaluation = PromptEvolutionEvaluation {
+        population: Vec::new(),
+        observations: Vec::new(),
+        frontier_ids: BTreeSet::new(),
+        champion_id: None,
+        champion_score: None,
+        champion_confidence: None,
+        status: "stable".to_string(),
+        freeze_reason: None,
+        stagnant_generations: 0,
+        evaluated_generations: 0,
+        next_mode: "stable".to_string(),
+        next_profile: ConductorPromptGenome::seed_for_effort("auto"),
+        mutation_parent: None,
+        mutation_trajectories: Vec::new(),
+    };
+
+    apply_prompt_rollout_selection(
+        &mut evaluation,
+        &rollout,
+        &model,
+        &Metadata::new(),
+        "auto",
+    );
+
+    assert_eq!(evaluation.next_profile, certified);
 }
 
 #[test]
@@ -4514,6 +4841,7 @@ fn prompt_evolution_uses_holdout_results_to_select_a_new_generation() {
                 credit: 0.9,
             }],
             reflection_packet,
+            provenance: test_prompt_evaluation_provenance(&seed.id, "baseline-opponent"),
         };
         events.push(Event {
             id: EventId(format!("pair-event-{evaluation_index}")),
@@ -4869,6 +5197,77 @@ fn offline_prompt_dataset_stratifies_task_classes_without_split_drift() {
 }
 
 #[test]
+fn offline_prompt_dataset_stays_frozen_within_a_generation() {
+    let discovered = ["a", "b", "c", "d", "e"]
+        .into_iter()
+        .map(|id| PromptOfflineCase {
+            id: id.to_string(),
+            objective: format!("Evaluate {id}"),
+            task_class: "coding".to_string(),
+            project_id: "project-a".to_string(),
+            source_run_id: format!("run-{id}"),
+            split: PromptEvaluationSplit::Train,
+        })
+        .collect::<Vec<_>>();
+    let frozen_ids = discovered
+        .iter()
+        .take(4)
+        .map(|case| case.id.clone())
+        .collect::<Vec<_>>();
+    let previous = PromptOfflineDatasetState {
+        effort: "auto".to_string(),
+        project_id: "project-a".to_string(),
+        digest: "d".repeat(64),
+        generation: 2,
+        case_ids: frozen_ids.clone(),
+        case_count: frozen_ids.len(),
+        train_count: frozen_ids.len(),
+        holdout_count: 0,
+        selected_case_id: None,
+        status: "ready".to_string(),
+        updated_at_ms: 1,
+    };
+
+    let same_generation =
+        prompt_offline_dataset_for_generation(discovered.clone(), Some(&previous), 2);
+    let next_generation =
+        prompt_offline_dataset_for_generation(discovered.clone(), Some(&previous), 3);
+
+    assert_eq!(
+        same_generation
+            .iter()
+            .map(|case| case.id.clone())
+            .collect::<Vec<_>>(),
+        frozen_ids
+    );
+    assert_eq!(next_generation, discovered);
+}
+
+#[test]
+fn offline_prompt_dataset_digest_tracks_the_frozen_cohort_not_source_runs() {
+    let case = |source_run_id: &str, split| PromptOfflineCase {
+        id: "coding-a".to_string(),
+        objective: "Evaluate coding-a".to_string(),
+        task_class: "coding".to_string(),
+        project_id: "project-a".to_string(),
+        source_run_id: source_run_id.to_string(),
+        split,
+    };
+    let original = vec![case("run-a", PromptEvaluationSplit::Train)];
+    let repeated_source = vec![case("run-b", PromptEvaluationSplit::Train)];
+    let changed_split = vec![case("run-a", PromptEvaluationSplit::Holdout)];
+
+    assert_eq!(
+        prompt_offline_dataset_digest(&original),
+        prompt_offline_dataset_digest(&repeated_source)
+    );
+    assert_ne!(
+        prompt_offline_dataset_digest(&original),
+        prompt_offline_dataset_digest(&changed_split)
+    );
+}
+
+#[test]
 fn offline_prompt_scheduler_prioritizes_underrepresented_task_class() {
     let dataset = [
         ("coding-a", "coding"),
@@ -4907,6 +5306,7 @@ fn offline_prompt_scheduler_prioritizes_underrepresented_task_class() {
                     relative_reward: Some(0.1),
                     step_credits: Vec::new(),
                     reflection_packet: None,
+                    provenance: test_prompt_evaluation_provenance(profile_id, opponent_id),
                 },
             )
         })
@@ -5146,6 +5546,10 @@ fn pairwise_observation_keeps_relative_and_per_step_credit() {
             ..ActionableSideInformation::default()
         },
         &[],
+        test_prompt_evaluation_provenance(
+            &candidate.plan.genome.id,
+            &opponent.plan.genome.id,
+        ),
     );
 
     assert!((observation.relative_reward.unwrap_or_default() - 0.3).abs() < f64::EPSILON * 4.0);
@@ -5182,6 +5586,10 @@ fn pairwise_observation_keeps_relative_and_per_step_credit() {
             ..ActionableSideInformation::default()
         },
         std::slice::from_ref(&secret),
+        test_prompt_evaluation_provenance(
+            &traced_candidate.plan.genome.id,
+            &opponent.plan.genome.id,
+        ),
     );
     let packet = traced
         .reflection_packet

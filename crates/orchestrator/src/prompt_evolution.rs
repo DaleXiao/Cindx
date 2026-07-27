@@ -15,6 +15,19 @@ mod tests {
     use crate::{AgentEvaluationCaseScore, AgentEvaluationReflectionPacket, AgentEvaluationSplit};
     use std::collections::{BTreeMap, BTreeSet};
 
+    fn scientific_provenance(
+        candidate_id: &str,
+        opponent_id: &str,
+    ) -> PromptEvaluationProvenance {
+        PromptEvaluationProvenance::blind_pairwise_swap(
+            vec!["independent-judge".to_string()],
+            vec!["candidate-worker".to_string()],
+            "d".repeat(64),
+            crate::sha256_hex(candidate_id.as_bytes()),
+            crate::sha256_hex(opponent_id.as_bytes()),
+        )
+    }
+
     fn observation(
         profile_id: &str,
         split: PromptEvaluationSplit,
@@ -55,6 +68,7 @@ mod tests {
                 credit: quality,
             }],
             reflection_packet: None,
+            provenance: scientific_provenance(profile_id, "baseline"),
         }
     }
 
@@ -81,6 +95,31 @@ mod tests {
             total_tokens: 100,
             safety_violations: 0,
         }
+    }
+
+    #[test]
+    fn non_independent_evaluation_cannot_train_prompt_evolution() {
+        let mut evidence = observation(
+            "candidate",
+            PromptEvaluationSplit::Train,
+            0.9,
+            100,
+            100,
+        );
+        evidence.provenance.evaluator_independent = false;
+
+        assert!(!evidence.is_scientific_evidence());
+        assert!(prompt_reflection_packets(&[evidence], "candidate", 1).is_empty());
+
+        let overlapping = PromptEvaluationProvenance::blind_pairwise_swap(
+            vec!["shared-model".to_string()],
+            vec!["shared-model".to_string()],
+            "d".repeat(64),
+            crate::sha256_hex(b"candidate"),
+            crate::sha256_hex(b"opponent"),
+        );
+        assert!(!overlapping.evaluator_independent);
+        assert!(!overlapping.is_scientific());
     }
 
     fn paired_minibatch_observations(
@@ -389,6 +428,7 @@ mod tests {
                     relative_reward: Some(0.5),
                     step_credits: Vec::new(),
                     reflection_packet,
+                    provenance: scientific_provenance(profile_id, "challenger"),
                 }
             };
         let observations = vec![
@@ -608,7 +648,7 @@ mod tests {
         assert_eq!(sparse_confidence.comparisons, 2);
         assert!(sparse_confidence.wilson_lower_bound < PROMOTION_MIN_LOWER_BOUND);
 
-        let repeated = (0..4)
+        let repeated = (0..6)
             .map(|round| {
                 let split = if round % 2 == 0 {
                     PromptEvaluationSplit::Train
@@ -619,7 +659,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let repeated_confidence = prompt_promotion_confidence(repeated.iter());
-        assert_eq!(repeated_confidence.comparisons, 4);
+        assert_eq!(repeated_confidence.comparisons, 6);
         assert!(repeated_confidence.wilson_lower_bound >= PROMOTION_MIN_LOWER_BOUND);
     }
 

@@ -198,12 +198,13 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
             .map_err(|error| error.to_string());
     }
 
-    if let Some(recovery) = claim_agent_recovery_envelope(
+    let recovery = claim_agent_recovery_envelope(
         &mut store,
         &run_context,
         &["blocked"],
         "permission_resolved",
-    )? {
+    )?;
+    if let Some(recovery) = recovery.as_ref() {
         run_context.insert(
             "recovery_resume_key".to_string(),
             recovery.resume_key.clone(),
@@ -217,8 +218,8 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
             recovery.attempts.to_string(),
         );
         run_context.insert("continuation".to_string(), "true".to_string());
-        if let Some(queue_id) = recovery.queue_id {
-            run_context.insert("queue_id".to_string(), queue_id);
+        if let Some(queue_id) = recovery.queue_id.as_ref() {
+            run_context.insert("queue_id".to_string(), queue_id.clone());
         }
     }
 
@@ -253,7 +254,15 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
     let active_events = active_agent_events_for_session(&events, session_id);
     let prompt = latest_agent_prompt_from_active_events(&active_events)
         .unwrap_or_else(|| "Continue the agent task.".to_string());
-    let transcript = agent_transcript_from_active_events(&active_events);
+    let recovery_prompt = agent_recovery_prompt_from_active_events(&active_events)
+        .unwrap_or_else(|| prompt.clone());
+    let transcript = agent_runtime_transcript_from_active_events(&active_events);
+    let resolved_call_ids = resolved_observations
+        .iter()
+        .map(|observation| observation.call_id.0.clone())
+        .collect::<BTreeSet<_>>();
+    let checkpoint_transcript =
+        checkpoint_transcript_before_resolved_tools(&transcript, &resolved_call_ids);
     drop(store);
 
     if let Some(session_id) = session_id {
@@ -276,12 +285,44 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         }
     }
 
-    let mut runtime = resume_agent_loop_from_messages(
-        phase16_task_id(),
-        prompt.clone(),
-        transcript,
-        cancellation.runtime_config(),
-    );
+    let mut runtime = recovery
+        .as_ref()
+        .and_then(|recovery| recovery.task_state.as_ref())
+        .and_then(|snapshot| {
+            snapshot
+                .restore(recovery_prompt.clone(), checkpoint_transcript.clone())
+                .ok()
+        })
+        .map(|mut runtime| {
+            for resolved in &resolved_observations {
+                let request = AgentToolRequest {
+                    call_id: resolved.call_id.clone(),
+                    tool_name: resolved.tool_name.clone(),
+                    input: resolved.input_json.clone(),
+                };
+                AgentKernel::new(&mut runtime, &[]).apply_tool_observation(
+                    &request,
+                    &resolved.status,
+                    None,
+                    &resolved.observation,
+                );
+                append_visual_reference_message(
+                    &mut runtime,
+                    &resolved.tool_name,
+                    &resolved.image_paths,
+                );
+            }
+            runtime.messages = transcript.clone();
+            runtime
+        })
+        .unwrap_or_else(|| {
+            resume_agent_loop_from_messages(
+                phase16_task_id(),
+                recovery_prompt,
+                transcript,
+                cancellation.runtime_config(),
+            )
+        });
     cancellation.extend_runtime_budget(&mut runtime);
     continue_agent_loop(
         app,
@@ -294,6 +335,23 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         None,
         cancellation,
     )
+}
+
+fn checkpoint_transcript_before_resolved_tools(
+    transcript: &[Message],
+    resolved_call_ids: &BTreeSet<String>,
+) -> Vec<Message> {
+    let boundary = transcript
+        .iter()
+        .position(|message| {
+            message.role == MessageRole::Tool
+                && message
+                    .metadata
+                    .get("tool_call_id")
+                    .is_some_and(|call_id| resolved_call_ids.contains(call_id))
+        })
+        .unwrap_or(transcript.len());
+    transcript[..boundary].to_vec()
 }
 
 pub(crate) fn resolve_agent_permission_request(
@@ -440,4 +498,53 @@ pub(crate) fn resolve_agent_permission_request(
         observation,
         image_paths,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(role: MessageRole, content: &str, metadata: Metadata) -> Message {
+        Message {
+            role,
+            content: content.to_string(),
+            metadata,
+        }
+    }
+
+    #[test]
+    fn permission_recovery_checkpoint_excludes_resolved_tool_suffix() {
+        let transcript = vec![
+            message(MessageRole::User, "capture the page", Metadata::new()),
+            message(
+                MessageRole::Assistant,
+                "",
+                [("raw_tool_calls_json".to_string(), "[]".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+            message(
+                MessageRole::Tool,
+                "captured",
+                [("tool_call_id".to_string(), "call-1".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+            message(
+                MessageRole::User,
+                "Visual reference captured by browser.capture.",
+                [("kind".to_string(), "visual_reference".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+        ];
+
+        let checkpoint = checkpoint_transcript_before_resolved_tools(
+            &transcript,
+            &["call-1".to_string()].into_iter().collect(),
+        );
+
+        assert_eq!(checkpoint.len(), 2);
+        assert_eq!(checkpoint[0].content, "capture the page");
+    }
 }

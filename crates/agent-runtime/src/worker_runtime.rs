@@ -1,8 +1,8 @@
 use crate::{
     sanitize_assistant_content, start_agent_loop, tool_invocation_from_request, AgentAdvance,
     AgentFailure, AgentKernel, AgentLoopState, AgentRuntimeConfig, AgentToolRequest,
-    AgentTurnBudgetExhausted, ContextGovernorReport, PreparedAgentTurn, WorkerTurnPhase,
-    WorkerTurnPolicy, MAX_IDENTICAL_TOOL_FAILURES,
+    AgentTurnBudgetExhausted, AgentTurnPreparationError, ContextGovernorReport,
+    PreparedAgentTurn, WorkerTurnPhase, WorkerTurnPolicy, MAX_IDENTICAL_TOOL_FAILURES,
 };
 use agent_core::{Metadata, TaskId, ToolInvocation, ToolOutcomeStatus, ToolRisk, ToolSpec};
 use model_provider::ModelResponse;
@@ -29,6 +29,15 @@ impl WorkerFailure {
                 ),
             ),
             partial_content: exhausted.partial_answer,
+        }
+    }
+
+    fn from_turn_preparation(error: AgentTurnPreparationError) -> Self {
+        match error {
+            AgentTurnPreparationError::Budget(exhausted) => Self::from_turn_budget(exhausted),
+            AgentTurnPreparationError::Context(violation) => Self::from_failure(
+                AgentFailure::contract("context_projection_invariant_failed", violation.to_string()),
+            ),
         }
     }
 
@@ -209,7 +218,7 @@ impl IsolatedWorkerRuntime {
                 context_window_tokens,
                 max_output_tokens,
             )
-            .map_err(WorkerFailure::from_turn_budget)?;
+            .map_err(WorkerFailure::from_turn_preparation)?;
         self.record_context(&turn.context);
         Ok(PreparedWorkerTurn {
             turn,

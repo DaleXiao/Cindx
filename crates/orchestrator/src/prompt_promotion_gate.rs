@@ -77,6 +77,7 @@ struct PairKey {
     case_id: String,
     split: PromptEvaluationSplit,
     mode: PromptEvaluationMode,
+    dataset_sha256: String,
 }
 
 impl PairKey {
@@ -91,6 +92,7 @@ impl PairKey {
             case_id: case_id.to_string(),
             split: observation.split,
             mode: observation.mode,
+            dataset_sha256: observation.provenance.dataset_sha256.clone(),
         })
     }
 }
@@ -106,10 +108,16 @@ pub fn evaluate_prompt_promotion_gate(
     let mut stable_by_pair = BTreeMap::new();
     let mut candidate_seen = BTreeSet::new();
     let mut stable_seen = BTreeSet::new();
+    let active_dataset_sha256 = crate::latest_scientific_dataset_digest(observations);
 
     for observation in observations
         .iter()
-        .filter(|observation| observation.mode.is_execution())
+        .filter(|observation| observation.is_scientific_evidence())
+        .filter(|observation| {
+            active_dataset_sha256.is_some_and(|digest| {
+                observation.provenance.dataset_sha256 == digest
+            })
+        })
     {
         let is_candidate = observation.profile_id == candidate_id
             && observation.opponent_profile_id.as_deref() == Some(stable_id);
@@ -154,6 +162,18 @@ pub fn evaluate_prompt_promotion_gate(
         .filter_map(|key| {
             let candidate = candidate_by_pair.get(key).copied()?;
             let stable = stable_by_pair.get(key).copied()?;
+            let mirrored_prompt_lineage = candidate.provenance.candidate_prompt_sha256
+                == stable.provenance.opponent_prompt_sha256
+                && candidate.provenance.opponent_prompt_sha256
+                    == stable.provenance.candidate_prompt_sha256;
+            let same_evaluator_protocol = candidate.provenance.protocol == stable.provenance.protocol
+                && candidate.provenance.evaluator_models == stable.provenance.evaluator_models
+                && candidate.provenance.participant_models
+                    == stable.provenance.participant_models;
+            if !mirrored_prompt_lineage || !same_evaluator_protocol {
+                blockers.insert(PromptPromotionBlocker::InvalidEvidenceShape);
+                return None;
+            }
             if !candidate.format_valid || !stable.format_valid {
                 blockers.insert(PromptPromotionBlocker::InvalidFormat);
             }
@@ -294,6 +314,13 @@ mod tests {
             relative_reward: Some(relative_reward),
             step_credits: Vec::new(),
             reflection_packet: None,
+            provenance: crate::PromptEvaluationProvenance::blind_pairwise_swap(
+                vec!["independent-judge".to_string()],
+                vec!["candidate-worker".to_string()],
+                "d".repeat(64),
+                crate::sha256_hex(profile_id.as_bytes()),
+                crate::sha256_hex(opponent_id.as_bytes()),
+            ),
         }
     }
 
@@ -440,6 +467,41 @@ mod tests {
         assert!(result
             .blockers
             .contains(&PromptPromotionBlocker::SafetyViolation));
+    }
+
+    #[test]
+    fn mixed_dataset_cohorts_cannot_be_combined_for_promotion() {
+        let mut evidence = complete_evidence();
+        for observation in evidence.iter_mut().take(4) {
+            observation.provenance.dataset_sha256 = "a".repeat(64);
+        }
+        for observation in evidence.iter_mut().skip(4) {
+            observation.provenance.dataset_sha256 = "b".repeat(64);
+        }
+
+        let result = evaluate_prompt_promotion_gate(&evidence, "candidate", "stable", config());
+
+        assert!(!result.eligible);
+        assert!(result
+            .blockers
+            .contains(&PromptPromotionBlocker::InsufficientTrainRuns));
+    }
+
+    #[test]
+    fn mismatched_prompt_lineage_blocks_promotion() {
+        let mut evidence = complete_evidence();
+        let stable = evidence
+            .iter_mut()
+            .find(|observation| observation.profile_id == "stable")
+            .expect("stable evidence exists");
+        stable.provenance.opponent_prompt_sha256 = crate::sha256_hex(b"other-candidate");
+
+        let result = evaluate_prompt_promotion_gate(&evidence, "candidate", "stable", config());
+
+        assert!(!result.eligible);
+        assert!(result
+            .blockers
+            .contains(&PromptPromotionBlocker::InvalidEvidenceShape));
     }
 
     #[test]

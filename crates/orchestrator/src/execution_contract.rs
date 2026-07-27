@@ -8,6 +8,12 @@ pub const AUTO_COLLABORATION_MIN_UPLIFT_BPS: u16 = 3_000;
 pub const AUTO_COLLABORATION_MIN_CONFIDENCE_BPS: u16 = 5_500;
 pub const PRO_MIN_TEAM_UPLIFT_BPS: u16 = 250;
 
+pub fn minimum_team_uplift_bps(effort: &str) -> u16 {
+    (normalize_effort(effort) == "pro")
+        .then_some(PRO_MIN_TEAM_UPLIFT_BPS)
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConductorStopPolicy {
@@ -119,11 +125,7 @@ impl ConductorExecutionContract {
                 min_distinct_contributions.max(1)
             }
         };
-        let min_team_uplift_bps = if effort == "pro" {
-            PRO_MIN_TEAM_UPLIFT_BPS
-        } else {
-            0
-        };
+        let min_team_uplift_bps = minimum_team_uplift_bps(&effort);
         let requires_synthesis = min_distinct_contributions >= 2;
 
         Self {
@@ -217,7 +219,7 @@ impl ConductorExecutionContract {
         {
             return Err("workflow execution contract requires a verification path".to_string());
         }
-        let distinct_contributors = plan
+        let contributors = plan
             .steps
             .iter()
             .take(plan.steps.len().saturating_sub(1))
@@ -225,12 +227,27 @@ impl ConductorExecutionContract {
                 step.contract.output_kind != WorkflowOutputKind::Verification
                     && step.access.is_empty()
             })
-            .count();
+            .collect::<Vec<_>>();
+        let distinct_contributors = contributors.len();
         if distinct_contributors < self.min_distinct_contributions {
             return Err(format!(
                 "collaboration workflow has {distinct_contributors} independent contribution(s), but {} are required by the task",
                 self.min_distinct_contributions
             ));
+        }
+        if self.min_distinct_contributions >= 2 {
+            let distinct_models = contributors
+                .iter()
+                .map(|step| step.model.trim())
+                .filter(|model| !model.is_empty())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            if distinct_models < self.min_distinct_contributions {
+                return Err(format!(
+                    "collaboration workflow has {distinct_models} distinct contributor model(s), but {} are required by the task",
+                    self.min_distinct_contributions
+                ));
+            }
         }
         if self.requires_synthesis {
             let Some(final_step) = plan.steps.last() else {
@@ -398,7 +415,7 @@ mod tests {
                     AdaptiveWorkflowStep {
                         id: "a".into(),
                         role: "worker".into(),
-                        model: "worker".into(),
+                        model: "worker-b".into(),
                         subtask: "a".into(),
                         access: vec![],
                     },
@@ -420,7 +437,7 @@ mod tests {
             },
             WorkflowBudget {
                 max_steps: 3,
-                max_models: 1,
+                max_models: 2,
                 max_model_turns_per_step: 2,
                 max_tool_calls_per_step: 1,
                 max_output_tokens_per_step: 2_048,

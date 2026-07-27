@@ -1,4 +1,5 @@
 use super::{parse_provider_error, ModelError, ModelToolCall};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct StreamingToolCall {
@@ -50,6 +51,7 @@ pub(super) struct StreamEvent {
     pub(super) content: Option<String>,
     pub(super) tool_calls: Vec<StreamingToolCallDelta>,
     pub(super) finish_reason: Option<String>,
+    pub(super) usage: BTreeMap<String, String>,
 }
 
 pub(super) fn parse_stream_event(line: &str) -> Result<Option<StreamEvent>, ModelError> {
@@ -69,12 +71,22 @@ pub(super) fn parse_stream_event(line: &str) -> Result<Option<StreamEvent>, Mode
 
     let value = serde_json::from_str::<serde_json::Value>(payload)
         .map_err(|error| ModelError::new(format!("invalid model stream event: {error}")))?;
+    let usage = ["prompt_tokens", "completion_tokens", "total_tokens"]
+        .into_iter()
+        .filter_map(|field| {
+            value
+                .pointer(&format!("/usage/{field}"))
+                .and_then(serde_json::Value::as_u64)
+                .map(|value| (field.to_string(), value.to_string()))
+        })
+        .collect::<BTreeMap<_, _>>();
     let Some(delta) = value.pointer("/choices/0/delta") else {
         return Ok(Some(StreamEvent {
             finish_reason: value
                 .pointer("/choices/0/finish_reason")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
+            usage,
             ..StreamEvent::default()
         }));
     };
@@ -114,6 +126,7 @@ pub(super) fn parse_stream_event(line: &str) -> Result<Option<StreamEvent>, Mode
             .pointer("/choices/0/finish_reason")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        usage,
     }))
 }
 

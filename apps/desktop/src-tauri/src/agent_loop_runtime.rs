@@ -12,6 +12,9 @@ use crate::{
         finish_agent_run_for_control_stop_with_task_state,
     },
     agent_read_model::agent_state_with_error_in_context,
+    agent_runtime_snapshot::{
+        capture_persistable_agent_task_state, persist_agent_runtime_snapshot,
+    },
     agent_tool_runtime::{execute_agent_tool_batch, AgentToolBatchOutcome},
     app_state::{AppState, SuspendedAgentRun},
     configuration_models::{agent_model_for_run, ProviderConfig},
@@ -47,10 +50,11 @@ pub(crate) fn pause_agent_loop_for_control_stop(
                 workspace_root: workspace_root.to_path_buf(),
                 collaboration: collaboration.cloned(),
                 run_control: cancellation.snapshot(),
+                last_touched_at_ms: current_time_millis(),
             },
         )?;
     }
-    let task_state = AgentTaskStateSnapshot::capture(runtime);
+    let task_state = capture_persistable_agent_task_state(runtime);
     finish_agent_run_for_control_stop_with_task_state(
         app,
         state,
@@ -129,6 +133,7 @@ pub(crate) fn apply_pending_agent_steers(
             run_context,
         )
         .map_err(|error| error.to_string())?;
+        persist_agent_runtime_snapshot(&mut store, runtime, run_context)?;
         latest_prompt = Some(model_prompt);
     }
     if latest_prompt.is_some() {
@@ -256,7 +261,23 @@ pub(crate) fn continue_agent_loop_with_provider(
             RunContinuationDirective::CommitTerminalResult
         );
         if terminal_commit {
+            let previous_message_count = runtime.messages.len();
             ensure_terminal_commit_instruction(&mut runtime);
+            if runtime.messages.len() > previous_message_count {
+                let mut store = state
+                    .store
+                    .lock()
+                    .map_err(|error| format!("store lock poisoned: {error}"))?;
+                persist_new_runtime_messages(
+                    &mut store,
+                    &runtime.task_id,
+                    &runtime.messages,
+                    previous_message_count,
+                    &run_context,
+                )
+                .map_err(|error| error.to_string())?;
+                persist_agent_runtime_snapshot(&mut store, &runtime, &run_context)?;
+            }
         }
         let verification_required = run_context
             .get("verification_required")
@@ -270,7 +291,7 @@ pub(crate) fn continue_agent_loop_with_provider(
                 max_output_tokens,
             ) {
             Ok(prepared_turn) => prepared_turn,
-            Err(exhausted) => {
+            Err(AgentTurnPreparationError::Budget(exhausted)) => {
                 if let Some(partial_answer) = exhausted.partial_answer {
                     cancellation.record_partial_output(&partial_answer);
                 }
@@ -285,6 +306,9 @@ pub(crate) fn continue_agent_loop_with_provider(
                     active_collaboration,
                     cancellation,
                 );
+            }
+            Err(AgentTurnPreparationError::Context(violation)) => {
+                return Err(violation.to_string());
             }
         };
         let mut request = prepared_turn.request;
@@ -331,6 +355,19 @@ pub(crate) fn continue_agent_loop_with_provider(
                 Ok(Some(instruction)) => {
                     runtime.messages.truncate(previous_message_count);
                     AgentKernel::new(&mut runtime, &tools).apply_instruction(&instruction);
+                    let mut store = state
+                        .store
+                        .lock()
+                        .map_err(|error| format!("store lock poisoned: {error}"))?;
+                    persist_new_runtime_messages(
+                        &mut store,
+                        &runtime.task_id,
+                        &runtime.messages,
+                        previous_message_count,
+                        &run_context,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    persist_agent_runtime_snapshot(&mut store, &runtime, &run_context)?;
                     cancellation
                         .mark_progress("verification", "Waiting for task-contract evidence");
                     continue;
@@ -355,6 +392,7 @@ pub(crate) fn continue_agent_loop_with_provider(
                 &run_context,
             )
             .map_err(|error| error.to_string())?;
+            persist_agent_runtime_snapshot(&mut store, &runtime, &run_context)?;
         }
 
         match advance {
@@ -416,6 +454,7 @@ pub(crate) fn continue_agent_loop_with_provider(
                     &run_context,
                 )
                 .map_err(|error| error.to_string())?;
+                persist_agent_runtime_snapshot(&mut store, &runtime, &run_context)?;
                 drop(store);
                 cancellation.mark_progress("model_retry", "Recovering incomplete model response");
                 continue;

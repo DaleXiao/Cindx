@@ -1,24 +1,13 @@
 import {
-  Activity,
   Bot,
   CheckCircle2,
   ChevronDown,
-  ChevronRight,
-  ChevronUp,
   Copy,
-  FileText,
-  FolderOpen,
-  Image as ImageIcon,
-  Maximize2,
   Pencil,
-  Search,
-  ShieldCheck,
   TerminalSquare,
   X
 } from "lucide-react";
 import {
-  Children,
-  isValidElement,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -26,35 +15,37 @@ import {
   useMemo,
   useRef,
   useState,
-  type ComponentPropsWithoutRef,
-  type KeyboardEvent as ReactKeyboardEvent,
-  type PointerEvent as ReactPointerEvent,
-  type ReactNode,
-  type RefObject
+  type KeyboardEvent as ReactKeyboardEvent
 } from "react";
-import Markdown from "markdown-to-jsx";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import {
-  getAgentSessionOutputs,
-  openArtifact,
-  openExternalUrl,
-  readArtifactPreview,
-  subscribeToModelStream
-} from "../tauri";
+import { getAgentSessionOutputs, subscribeToModelStream } from "../tauri";
 import type {
-  AgentAttachment,
   AgentOutputArtifactView,
   AgentState,
   ChatMessageView,
   TimelineEntry
 } from "../tauri";
 import { readSessionState, rememberSessionState } from "../sessionRuntimeModel";
-import { DiagramFullscreen } from "./DiagramFullscreen";
+import { AgentMarkdown } from "./AgentMarkdown";
 import { DisclosureTriangle } from "./DisclosureTriangle";
-import { MarkmapDiagram } from "./MarkmapDiagram";
-import { MermaidDiagram } from "./MermaidDiagram";
+import { ThreadOutputArtifacts, UserMessageAttachments } from "./SessionThreadArtifacts";
+import {
+  activeRunProgress,
+  estimateThreadRowSize,
+  formatThreadTime,
+  LATEST_OUTPUT_THRESHOLD,
+  MAX_MINIMAP_MARKERS,
+  MIN_MINIMAP_MARKERS,
+  RunProgressStatus,
+  ThreadFind
+} from "./SessionThreadNavigation";
+import { SessionMinimap } from "./SessionMinimap";
+import {
+  EventIcon,
+  ToolChainDisclosure,
+  toolMessageSummary
+} from "./SessionToolChain";
 import { TraceStatusIcon } from "./TraceStatusIcon";
-import { markdownDiagramForCode } from "./markdownDiagramModel";
 import {
   associateOutputArtifacts,
   isToolRequestPlaceholder,
@@ -63,9 +54,9 @@ import {
   threadRowKey,
   updateSessionThreadProjection,
   type SessionThreadProjection,
-  type SessionThreadSelection,
-  type ThreadRow
+  type SessionThreadSelection
 } from "./sessionThreadProjection";
+import { useSessionMinimapInteraction } from "./useSessionMinimapInteraction";
 
 export type { SessionThreadSelection } from "./sessionThreadProjection";
 
@@ -92,851 +83,17 @@ type LiveSessionThreadProps = Omit<SessionThreadProps, "streamAnswer"> & {
   onStreamDone: (sessionId: string) => void;
 };
 
-type ThreadFindProps = {
-  open: boolean;
-  query: string;
-  currentIndex: number;
-  matchCount: number;
-  inputRef: RefObject<HTMLInputElement>;
-  onQueryChange: (query: string) => void;
-  onMove: (direction: number) => void;
-  onClose: () => void;
-};
-
 type ThreadScrollMetrics = {
   scrollTop: number;
   scrollHeight: number;
   clientHeight: number;
 };
-
-const MIN_MINIMAP_MARKERS = 2;
-const MAX_MINIMAP_MARKERS = 32;
-const MINIMAP_MARKER_GAP = 12;
-const LATEST_OUTPUT_THRESHOLD = 48;
 const SESSION_THREAD_PROJECTION_CACHE_LIMIT = 4;
-const threadTimeFormatter = new Intl.DateTimeFormat(undefined, {
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23"
-});
-
-function formatThreadTime(timestampMs: number) {
-  return Number.isFinite(timestampMs) ? threadTimeFormatter.format(timestampMs) : "";
-}
-
-function ThreadFind({
-  open,
-  query,
-  currentIndex,
-  matchCount,
-  inputRef,
-  onQueryChange,
-  onMove,
-  onClose
-}: ThreadFindProps) {
-  if (!open) return null;
-  return (
-    <div className="thread-find" role="search">
-      <Search aria-hidden="true" />
-      <input
-        ref={inputRef}
-        value={query}
-        aria-label="Find in current session"
-        placeholder="Find in session"
-        onChange={(event) => onQueryChange(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.preventDefault();
-            onClose();
-          }
-          if (event.key === "Enter") {
-            event.preventDefault();
-            onMove(event.shiftKey ? -1 : 1);
-          }
-        }}
-      />
-      <span aria-live="polite">
-        {query ? `${matchCount === 0 ? 0 : currentIndex + 1}/${matchCount}` : ""}
-      </span>
-      <button
-        type="button"
-        disabled={matchCount === 0}
-        aria-label="Previous match"
-        title="Previous match"
-        onClick={() => onMove(-1)}
-      >
-        <ChevronUp aria-hidden="true" />
-      </button>
-      <button
-        type="button"
-        disabled={matchCount === 0}
-        aria-label="Next match"
-        title="Next match"
-        onClick={() => onMove(1)}
-      >
-        <ChevronDown aria-hidden="true" />
-      </button>
-      <button type="button" aria-label="Close find" title="Close" onClick={onClose}>
-        <X aria-hidden="true" />
-      </button>
-    </div>
-  );
-}
-
-function minimapMarkerPosition(index: number, markerCount: number) {
-  const centerIndex = Math.max(0, markerCount - 1) / 2;
-  const centerOffset = (index - centerIndex) * MINIMAP_MARKER_GAP;
-  if (centerOffset === 0) return "50%";
-  return `calc(50% ${centerOffset < 0 ? "-" : "+"} ${Math.abs(centerOffset)}px)`;
-}
-
-function activeRunProgress(timeline: TimelineEntry[], runStartedAtMs: number) {
-  let startIndex = -1;
-  for (let index = timeline.length - 1; index >= 0; index -= 1) {
-    const event = timeline[index];
-    if (event.label === "Status" && /agent task started/i.test(event.detail)) {
-      startIndex = index;
-      break;
-    }
-  }
-  const timelineStartedAtMs = startIndex >= 0 ? timeline[startIndex].timestampMs : 0;
-  const startedAtMs = runStartedAtMs || timelineStartedAtMs || Date.now();
-  let latest: TimelineEntry | undefined;
-  let latestWorkflow: TimelineEntry["workflowProgress"] | undefined;
-  let candidateStarts = 0;
-  let candidateFinishes = 0;
-  for (let index = timeline.length - 1; index >= 0; index -= 1) {
-    const event = timeline[index];
-    if (event.timestampMs < startedAtMs) break;
-    if (/^Candidate \d+$/.test(event.label)) {
-      if (/started/i.test(event.detail)) candidateStarts += 1;
-      if (/finished/i.test(event.detail)) candidateFinishes += 1;
-    }
-    if (!latestWorkflow && event.workflowProgress) latestWorkflow = event.workflowProgress;
-    if (!latest && event.label !== "Message" && !/agent router selected/i.test(event.detail)) {
-      latest = event;
-    }
-  }
-  if (!latest) {
-    return {
-      label: "Thinking",
-      detail: "Cindx is working",
-      workflow: latestWorkflow ?? null
-    };
-  }
-
-  let label = "Thinking";
-  if (latest.label === "Tool started") {
-    label = latest.detail.replace(/^Executing\s+/i, "Running ");
-  } else if (latest.label === "Tool proposed") {
-    label = "Preparing tool call";
-  } else if (latest.label === "Tool finished") {
-    label = "Processing tool result";
-  } else if (latest.label === "Permission requested") {
-    label = "Waiting for approval";
-  } else if (latest.label === "Permission resolved") {
-    label = "Resuming after approval";
-  } else if (/preparing workspace knowledge/i.test(latest.detail)) {
-    label = "Searching workspace knowledge";
-  } else if (/preparing execution strategy/i.test(latest.detail)) {
-    label = "Planning work";
-  } else if (/starting execution/i.test(latest.detail)) {
-    label = "Executing plan";
-  } else if (/^Candidate \d+$/.test(latest.label)) {
-    label = `Exploring approaches ${Math.min(candidateFinishes, candidateStarts)}/${Math.max(
-      1,
-      candidateStarts
-    )}`;
-  } else if (latest.label === "Conductor" || latest.label === "Planner") {
-    label = "Planning work";
-  } else if (/collaboration layer \d+\/\d+ started/i.test(latest.detail)) {
-    const progress = latest.detail.match(/layer (\d+\/\d+)/i)?.[1];
-    label = progress ? `Coordinating models ${progress}` : "Coordinating models";
-  } else if (latest.label === "Arbiter") {
-    label = "Selecting approach";
-  } else if (latest.label === "Executor" || latest.label === "Model started") {
-    label = "Executing plan";
-  } else if (latest.label === "Reviewer") {
-    label = "Reviewing result";
-  } else if (latest.label === "Synthesis") {
-    label = "Writing final response";
-  }
-
-  if (latestWorkflow) {
-    const remaining = Math.max(0, latestWorkflow.totalSteps - latestWorkflow.completedSteps);
-    const step = latestWorkflow.currentStepId
-      ? ` · ${latestWorkflow.currentStepId}`
-      : "";
-    if (latestWorkflow.stepStatus === "failed") {
-      label = "Checkpoint saved";
-    } else if (/workflow resumed/i.test(latest.detail)) {
-      label = "Resuming plan";
-    } else if (remaining === 0) {
-      label = "Finalizing plan";
-    } else {
-      label = "Executing plan";
-    }
-    latest = {
-      ...latest,
-      detail: `${latest.detail} · ${latestWorkflow.completedSteps}/${latestWorkflow.totalSteps} complete · ${remaining} remaining${step}${latestWorkflow.continuations ? ` · continuation ${latestWorkflow.continuations}` : ""}${latestWorkflow.recoverable ? " · checkpointed" : ""}`
-    };
-  }
-
-  return { label, detail: latest.detail, workflow: latestWorkflow ?? null };
-}
-
-const RunProgressStatus = memo(function RunProgressStatus({
-  progress,
-  className
-}: {
-  progress: ReturnType<typeof activeRunProgress>;
-  className: string;
-}) {
-  return (
-    <div className={`thread-thinking ${className}`} role="status">
-      <span title={progress.detail}>{progress.label}</span>
-      {progress.workflow && (
-        <small title={progress.detail}>
-          {progress.workflow.completedSteps}/{progress.workflow.totalSteps}
-          {progress.workflow.currentStepId ? ` · ${progress.workflow.currentStepId}` : ""}
-        </small>
-      )}
-    </div>
-  );
-});
-
-function EventIcon({ event }: { event: TimelineEntry }) {
-  if (event.kind === "tool") return <TerminalSquare aria-hidden="true" />;
-  if (event.kind === "permission") return <ShieldCheck aria-hidden="true" />;
-  if (event.kind === "model") return <Activity aria-hidden="true" />;
-  return <FileText aria-hidden="true" />;
-}
 
 function MessageIcon({ role }: { role: ChatMessageView["role"] }) {
   if (role === "tool") return <TerminalSquare aria-hidden="true" />;
   return <Bot aria-hidden="true" />;
 }
-
-function toolMessageSummary(content: string) {
-  const tool = content.match(/^tool=(.+)$/m)?.[1]?.trim();
-  const status = content.match(/^status=(.+)$/m)?.[1]?.trim();
-  return {
-    label: tool || "Tool output",
-    status: status || "done"
-  };
-}
-
-function toolMessageDetail(content: string) {
-  return (
-    content
-      .split("\n")
-      .map((line) => line.trim())
-      .find((line) => line && !/^(tool|status)=/i.test(line)) ?? "Tool output"
-  );
-}
-
-function estimateThreadRowSize(row: ThreadRow) {
-  if (row.type === "tool-chain") return 54;
-  if (row.item.type === "event" || row.item.message.role === "tool") return 54;
-  const content = row.item.message.content;
-  const explicitLines = Math.max(1, content.split("\n").length);
-  const wrappedLines = Math.max(1, Math.ceil(content.length / 72));
-  const lineCount = Math.max(explicitLines, wrappedLines);
-  if (row.item.message.role === "user") {
-    const attachmentRows = Math.ceil((row.item.message.attachments?.length ?? 0) / 2);
-    return 64 + Math.min(8, lineCount) * 18 + attachmentRows * 148;
-  }
-  return 48 + Math.min(48, lineCount) * 20;
-}
-
-const MESSAGE_ATTACHMENT_PREVIEW_CACHE_LIMIT = 8;
-const messageAttachmentPreviewCache = new Map<string, string>();
-
-function cacheMessageAttachmentPreview(path: string, dataUrl: string) {
-  messageAttachmentPreviewCache.delete(path);
-  messageAttachmentPreviewCache.set(path, dataUrl);
-  while (messageAttachmentPreviewCache.size > MESSAGE_ATTACHMENT_PREVIEW_CACHE_LIMIT) {
-    const oldestPath = messageAttachmentPreviewCache.keys().next().value;
-    if (!oldestPath) break;
-    messageAttachmentPreviewCache.delete(oldestPath);
-  }
-}
-
-function MessageAttachmentPreview({ attachment }: { attachment: AgentAttachment }) {
-  const [dataUrl, setDataUrl] = useState<string | null>(
-    () => messageAttachmentPreviewCache.get(attachment.path) ?? null
-  );
-
-  useEffect(() => {
-    const cached = messageAttachmentPreviewCache.get(attachment.path);
-    if (cached) {
-      setDataUrl(cached);
-      return;
-    }
-    let active = true;
-    setDataUrl(null);
-    void readArtifactPreview(attachment.path)
-      .then((preview) => {
-        if (!active || preview.kind !== "image" || !preview.dataUrl) return;
-        cacheMessageAttachmentPreview(attachment.path, preview.dataUrl);
-        setDataUrl(preview.dataUrl);
-      })
-      .catch(() => {
-        if (active) setDataUrl(null);
-      });
-    return () => {
-      active = false;
-    };
-  }, [attachment.path]);
-
-  if (dataUrl) {
-    return <img src={dataUrl} alt={attachment.name} />;
-  }
-  return (
-    <span className="thread-message-attachment-placeholder">
-      <ImageIcon aria-hidden="true" />
-      <span>{attachment.name}</span>
-    </span>
-  );
-}
-
-function UserMessageAttachments({
-  attachments,
-  onOpenError
-}: {
-  attachments: AgentAttachment[];
-  onOpenError: (message: string) => void;
-}) {
-  return (
-    <div className="thread-message-attachments" aria-label="Message attachments">
-      {attachments.map((attachment) => {
-        const isImage = attachment.mimeType.startsWith("image/");
-        return (
-          <button
-            className="thread-message-attachment"
-            data-image={isImage}
-            type="button"
-            aria-label={`Open ${attachment.name}`}
-            title={attachment.name}
-            key={attachment.id}
-            onClick={(event) => {
-              event.stopPropagation();
-              void openArtifact(attachment.path).catch((error) => {
-                const detail = error instanceof Error ? error.message : String(error);
-                onOpenError(`Could not open ${attachment.name}: ${detail}`);
-              });
-            }}
-          >
-            {isImage ? (
-              <MessageAttachmentPreview attachment={attachment} />
-            ) : (
-              <>
-                <FileText aria-hidden="true" />
-                <span>{attachment.name}</span>
-              </>
-            )}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function artifactName(path: string) {
-  const parts = path.split(/[\\/]/).filter(Boolean);
-  return parts[parts.length - 1] ?? path;
-}
-
-function artifactDisplayPath(artifact: AgentOutputArtifactView) {
-  return artifact.sourcePath ?? artifact.path;
-}
-
-function ArtifactImagePreview({ artifact }: { artifact: AgentOutputArtifactView }) {
-  const [dataUrl, setDataUrl] = useState<string | null>(
-    () => messageAttachmentPreviewCache.get(artifact.path) ?? null
-  );
-
-  useEffect(() => {
-    const cached = messageAttachmentPreviewCache.get(artifact.path);
-    if (cached) {
-      setDataUrl(cached);
-      return;
-    }
-    let active = true;
-    setDataUrl(null);
-    void readArtifactPreview(artifact.path)
-      .then((preview) => {
-        if (!active || preview.kind !== "image" || !preview.dataUrl) return;
-        cacheMessageAttachmentPreview(artifact.path, preview.dataUrl);
-        setDataUrl(preview.dataUrl);
-      })
-      .catch(() => {
-        if (active) setDataUrl(null);
-      });
-    return () => {
-      active = false;
-    };
-  }, [artifact.path]);
-
-  if (dataUrl) return <img src={dataUrl} alt={artifactName(artifactDisplayPath(artifact))} />;
-  return (
-    <span className="thread-output-image-placeholder">
-      <ImageIcon aria-hidden="true" />
-    </span>
-  );
-}
-
-function ThreadOutputArtifacts({
-  artifacts,
-  onInspect,
-  onOpenError
-}: {
-  artifacts: AgentOutputArtifactView[];
-  onInspect: (path: string) => void;
-  onOpenError: (message: string) => void;
-}) {
-  if (artifacts.length === 0) return null;
-
-  const openWithSystem = (artifact: AgentOutputArtifactView) => {
-    void openArtifact(artifact.path).catch((error) => {
-      const detail = error instanceof Error ? error.message : String(error);
-      onOpenError(`Could not open ${artifactName(artifactDisplayPath(artifact))}: ${detail}`);
-    });
-  };
-
-  return (
-    <div
-      className="thread-output-artifacts"
-      aria-label="Agent outputs"
-      onClick={(event) => event.stopPropagation()}
-    >
-      {artifacts.map((artifact) => {
-        const displayPath = artifactDisplayPath(artifact);
-        const name = artifactName(displayPath);
-        const versionLabel = artifact.version > 1 ? `v${artifact.version}` : null;
-        if (artifact.kind === "image") {
-          return (
-            <div className="thread-output-image" key={`${artifact.id}-${artifact.path}`}>
-              <button
-                className="thread-output-image-preview"
-                type="button"
-                aria-label={`Open ${name}`}
-                title={`Open ${name}`}
-                onClick={() => openWithSystem(artifact)}
-              >
-                <ArtifactImagePreview artifact={artifact} />
-              </button>
-              <button
-                className="thread-output-name"
-                type="button"
-                title={`Preview ${name}`}
-                onClick={() => onInspect(artifact.path)}
-              >
-                <span>{name}</span>
-                {versionLabel && <small>{versionLabel}</small>}
-              </button>
-            </div>
-          );
-        }
-
-        return (
-          <button
-            className="thread-output-link"
-            type="button"
-            key={`${artifact.id}-${artifact.path}`}
-            title={artifact.kind === "directory" ? `Open ${displayPath} in Finder` : `Preview ${name}`}
-            onClick={() => {
-              if (artifact.kind === "directory") openWithSystem(artifact);
-              else onInspect(artifact.path);
-            }}
-          >
-            {artifact.kind === "directory" ? (
-              <FolderOpen aria-hidden="true" />
-            ) : (
-              <FileText aria-hidden="true" />
-            )}
-            <span>{artifact.kind === "directory" ? displayPath : name}</span>
-            {versionLabel && <small>{versionLabel}</small>}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function ToolChainItem({
-  item,
-  selected,
-  onSelect
-}: {
-  item: SessionThreadSelection;
-  selected: boolean;
-  onSelect: (selection: SessionThreadSelection) => void;
-}) {
-  if (isToolRequestPlaceholder(item)) return null;
-
-  if (item.type === "event") {
-    return (
-      <button
-        className={`thread-tool-chain-item ${selected ? "selected" : ""}`}
-        type="button"
-        onClick={() => onSelect(item)}
-      >
-        <span className="thread-event-icon">
-          <EventIcon event={item.event} />
-        </span>
-        <span className="thread-tool-chain-copy">
-          <strong>{item.event.label}</strong>
-          <small>{item.event.detail}</small>
-        </span>
-        <span className="thread-event-meta">
-          <TraceStatusIcon status={item.event.state} />
-        </span>
-      </button>
-    );
-  }
-
-  const summary = toolMessageSummary(item.message.content);
-  return (
-    <button
-      className={`thread-tool-chain-item ${selected ? "selected" : ""}`}
-      type="button"
-      onClick={() => onSelect(item)}
-    >
-      <TerminalSquare aria-hidden="true" />
-      <span className="thread-tool-chain-copy">
-        <strong>{summary.label}</strong>
-        <small>{toolMessageDetail(item.message.content)}</small>
-      </span>
-      <span className="thread-event-meta">
-        <TraceStatusIcon status={summary.status} />
-      </span>
-    </button>
-  );
-}
-
-const ToolChainDisclosure = memo(function ToolChainDisclosure({
-  row,
-  selectedId,
-  onSelect
-}: {
-  row: Extract<ThreadRow, { type: "tool-chain" }>;
-  selectedId: string | null;
-  onSelect: (selection: SessionThreadSelection) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const selected = row.items.some((item) => item.id === selectedId);
-
-  return (
-    <details
-      className={`thread-tool-chain ${selected ? "selected" : ""}`}
-      data-minimap-id={row.id}
-      data-minimap-index={row.itemIndex}
-      data-minimap-kind="tool-chain"
-      onToggle={(event) => setOpen(event.currentTarget.open)}
-    >
-      <summary>
-        <strong>Agent actions</strong>
-        <ChevronRight className="thread-tool-chain-chevron" aria-hidden="true" />
-      </summary>
-      {open && (
-        <div className="thread-tool-chain-items">
-          {row.items
-            .filter((item) => !isToolRequestPlaceholder(item))
-            .map((item) => (
-              <ToolChainItem
-                item={item}
-                selected={selectedId === item.id}
-                onSelect={onSelect}
-                key={item.id}
-              />
-            ))}
-        </div>
-      )}
-    </details>
-  );
-});
-
-type MarkdownLinkProps = ComponentPropsWithoutRef<"a"> & {
-  onOpenError?: (message: string) => void;
-};
-
-type MarkdownCodeBlockProps = ComponentPropsWithoutRef<"pre"> & {
-  onCopyCode?: (content: string) => void;
-  onDiagramError?: (message: string) => void;
-  renderDiagrams?: boolean;
-};
-
-function externalLinkTarget(href: string) {
-  if (/^(https?:|mailto:)/i.test(href)) return href;
-  if (/^www\./i.test(href)) return `https://${href}`;
-  return null;
-}
-
-function artifactLinkTarget(href: string) {
-  let target = href;
-  if (/^file:\/\//i.test(target)) {
-    try {
-      target = new URL(target).pathname;
-    } catch {
-      target = target.replace(/^file:\/\//i, "");
-    }
-  } else {
-    target = target.split(/[?#]/, 1)[0];
-  }
-  try {
-    target = decodeURIComponent(target);
-  } catch {
-    // Keep the original path when a link contains a malformed escape.
-  }
-  return target.replace(/:\d+(?::\d+)?$/, "");
-}
-
-function MarkdownLink({
-  children,
-  href,
-  onClick,
-  onKeyDown,
-  onOpenError,
-  ...props
-}: MarkdownLinkProps) {
-  const externalTarget = href ? externalLinkTarget(href) : null;
-  const reportError = (target: string, error: unknown) => {
-    const detail = error instanceof Error ? error.message : String(error);
-    onOpenError?.(`Could not open ${target}: ${detail}`);
-  };
-  return (
-    <a
-      {...props}
-      href={href}
-      target={externalTarget ? "_blank" : undefined}
-      rel={externalTarget ? "noreferrer noopener" : undefined}
-      onClick={(event) => {
-        event.stopPropagation();
-        onClick?.(event);
-        if (event.defaultPrevented || !href || href.startsWith("#")) return;
-        event.preventDefault();
-        if (externalTarget) {
-          void openExternalUrl(externalTarget).catch((error) => reportError(externalTarget, error));
-          return;
-        }
-        const artifactTarget = artifactLinkTarget(href);
-        if (artifactTarget) {
-          void openArtifact(artifactTarget).catch((error) => reportError(artifactTarget, error));
-        }
-      }}
-      onKeyDown={(event) => {
-        event.stopPropagation();
-        onKeyDown?.(event);
-      }}
-    >
-      {children}
-    </a>
-  );
-}
-
-function markdownNodeText(node: ReactNode): string {
-  if (typeof node === "string" || typeof node === "number") return String(node);
-  if (Array.isArray(node)) return node.map(markdownNodeText).join("");
-  if (isValidElement<{ children?: ReactNode }>(node)) {
-    return markdownNodeText(node.props.children);
-  }
-  return "";
-}
-
-function MarkdownCodeBlock({
-  children,
-  onCopyCode,
-  onDiagramError,
-  renderDiagrams = true,
-  ...props
-}: MarkdownCodeBlockProps) {
-  const fullscreenTriggerRef = useRef<HTMLButtonElement>(null);
-  const [fullscreen, setFullscreen] = useState(false);
-  const codeElement = Children.toArray(children).find((child) =>
-    isValidElement<{ className?: string }>(child)
-  );
-  const codeClassName = isValidElement<{ className?: string }>(codeElement)
-    ? codeElement.props.className ?? ""
-    : "";
-  const language = codeClassName.match(/(?:language|lang)-([^\s]+)/)?.[1] ?? "code";
-  const code = markdownNodeText(children).replace(/\n$/, "");
-  const diagram = renderDiagrams ? markdownDiagramForCode(language, code) : null;
-  const closeFullscreen = useCallback(() => {
-    setFullscreen(false);
-    window.requestAnimationFrame(() =>
-      fullscreenTriggerRef.current?.focus({ preventScroll: true })
-    );
-  }, []);
-
-  return (
-    <div className="thread-code-block">
-      <header className="thread-code-block-header">
-        <span>{language}</span>
-        <div className="thread-code-block-actions">
-          {diagram && (
-            <button
-              ref={fullscreenTriggerRef}
-              type="button"
-              aria-label={`Open ${diagram.kind === "mindmap" ? "mind map" : "Mermaid diagram"} fullscreen`}
-              title="Full screen"
-              onClick={(event) => {
-                event.stopPropagation();
-                setFullscreen(true);
-              }}
-            >
-              <Maximize2 aria-hidden="true" />
-            </button>
-          )}
-          <button
-            type="button"
-            aria-label="Copy code"
-            title="Copy code"
-            onClick={(event) => {
-              event.stopPropagation();
-              onCopyCode?.(code);
-            }}
-          >
-            <Copy aria-hidden="true" />
-          </button>
-        </div>
-      </header>
-      {diagram?.kind === "mindmap" ? (
-        <MarkmapDiagram source={diagram.source} />
-      ) : diagram ? (
-        <MermaidDiagram source={diagram.source} />
-      ) : (
-        <pre {...props}>{children}</pre>
-      )}
-      {fullscreen && diagram ? (
-        <DiagramFullscreen
-          diagram={diagram}
-          onClose={closeFullscreen}
-          onError={(message) => onDiagramError?.(message)}
-        />
-      ) : null}
-    </div>
-  );
-}
-
-const STREAMING_MARKDOWN_CHUNK_TARGET = 1_600;
-
-function splitStreamingMarkdown(content: string) {
-  if (content.length <= STREAMING_MARKDOWN_CHUNK_TARGET) return [content];
-  const chunks: string[] = [];
-  let start = 0;
-  let offset = 0;
-  let fenceCharacter = "";
-  let fenceLength = 0;
-  for (const line of content.match(/.*(?:\n|$)/g) ?? []) {
-    if (!line) continue;
-    const trimmed = line.replace(/\n$/, "").trim();
-    const fence = trimmed.match(/^(`{3,}|~{3,})/);
-    if (fence) {
-      const marker = fence[1];
-      if (!fenceCharacter) {
-        fenceCharacter = marker[0];
-        fenceLength = marker.length;
-      } else if (marker[0] === fenceCharacter && marker.length >= fenceLength) {
-        fenceCharacter = "";
-        fenceLength = 0;
-      }
-    }
-    offset += line.length;
-    if (
-      !fenceCharacter &&
-      trimmed === "" &&
-      offset - start >= STREAMING_MARKDOWN_CHUNK_TARGET
-    ) {
-      chunks.push(content.slice(start, offset));
-      start = offset;
-    }
-  }
-  if (start < content.length) chunks.push(content.slice(start));
-  return chunks.length > 0 ? chunks : [content];
-}
-
-const MarkdownChunk = memo(function MarkdownChunk({
-  content,
-  streaming,
-  className,
-  onOpenError,
-  onCopyCode
-}: {
-  content: string;
-  streaming: boolean;
-  className: string;
-  onOpenError: (message: string) => void;
-  onCopyCode: (content: string) => void;
-}) {
-  return (
-    <Markdown
-      className={className}
-      options={{
-        disableParsingRawHTML: true,
-        enforceAtxHeadings: true,
-        forceBlock: true,
-        forceWrapper: true,
-        optimizeForStreaming: streaming,
-        wrapper: "div",
-        overrides: {
-          a: {
-            component: MarkdownLink,
-            props: { onOpenError }
-          },
-          pre: {
-            component: MarkdownCodeBlock,
-            props: { onCopyCode, onDiagramError: onOpenError, renderDiagrams: !streaming }
-          }
-        }
-      }}
-    >
-      {content || "Tool request"}
-    </Markdown>
-  );
-});
-
-const AgentMarkdown = memo(function AgentMarkdown({
-  content,
-  streaming = false,
-  onOpenError,
-  onCopyCode
-}: {
-  content: string;
-  streaming?: boolean;
-  onOpenError: (message: string) => void;
-  onCopyCode: (content: string) => void;
-}) {
-  const streamingChunks = useMemo(
-    () => (streaming ? splitStreamingMarkdown(content) : []),
-    [content, streaming]
-  );
-  if (streaming) {
-    return (
-      <div className="thread-markdown thread-markdown-stream">
-        {streamingChunks.map((chunk, index) => (
-          <MarkdownChunk
-            key={index}
-            content={chunk}
-            streaming={index === streamingChunks.length - 1}
-            className="thread-markdown-chunk"
-            onOpenError={onOpenError}
-            onCopyCode={onCopyCode}
-          />
-        ))}
-      </div>
-    );
-  }
-  return (
-    <MarkdownChunk
-      className="thread-markdown"
-      content={content}
-      streaming={false}
-      onOpenError={onOpenError}
-      onCopyCode={onCopyCode}
-    />
-  );
-});
 
 export const SessionThread = memo(function SessionThread({
   sessionId,
@@ -958,8 +115,6 @@ export const SessionThread = memo(function SessionThread({
   const threadRef = useRef<HTMLElement>(null);
   const threadContentRef = useRef<HTMLDivElement>(null);
   const threadFindInputRef = useRef<HTMLInputElement>(null);
-  const minimapRef = useRef<HTMLDivElement>(null);
-  const minimapPointerRef = useRef<number | null>(null);
   const clipboardToastTimerRef = useRef<number | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [clipboardToast, setClipboardToast] = useState<{
@@ -967,9 +122,6 @@ export const SessionThread = memo(function SessionThread({
     message: string;
     failed: boolean;
   } | null>(null);
-  const [hoveredMinimapIndex, setHoveredMinimapIndex] = useState<number | null>(null);
-  const [previewMinimapIndex, setPreviewMinimapIndex] = useState<number | null>(null);
-  const [minimapDragging, setMinimapDragging] = useState(false);
   const [threadFindOpen, setThreadFindOpen] = useState(false);
   const [threadFindQuery, setThreadFindQuery] = useState("");
   const [threadFindIndex, setThreadFindIndex] = useState(0);
@@ -1426,16 +578,6 @@ export const SessionThread = memo(function SessionThread({
     }
   }, [items, loadingOlderHistory]);
 
-  useEffect(() => {
-    setPreviewMinimapIndex(null);
-    if (hoveredMinimapIndex === null || minimapDragging) return;
-
-    const timeout = window.setTimeout(() => {
-      setPreviewMinimapIndex(hoveredMinimapIndex);
-    }, 420);
-    return () => window.clearTimeout(timeout);
-  }, [hoveredMinimapIndex, minimapDragging]);
-
   useLayoutEffect(() => {
     const thread = threadRef.current;
     if (!thread) return;
@@ -1465,91 +607,42 @@ export const SessionThread = memo(function SessionThread({
     syncScrollMetrics();
   }, [items, pinLatestOutput, sessionId, status, streamAnswer, syncScrollMetrics]);
 
-  function minimapIndexFromPointer(clientY: number) {
-    const minimap = minimapRef.current;
-    if (!minimap || minimapMarkers.length === 0) return null;
-    const bounds = minimap.getBoundingClientRect();
-    const groupHeight = (minimapMarkers.length - 1) * MINIMAP_MARKER_GAP;
-    const groupStart = (bounds.height - groupHeight) / 2;
-    const localY = clientY - bounds.top;
-    if (
-      localY < groupStart - MINIMAP_MARKER_GAP / 2 ||
-      localY > groupStart + groupHeight + MINIMAP_MARKER_GAP / 2
-    ) {
-      return null;
-    }
-    const index = Math.round((localY - groupStart) / MINIMAP_MARKER_GAP);
-    return Math.min(minimapMarkers.length - 1, Math.max(0, index));
-  }
-
-  function scrollThreadToMarker(index: number) {
-    const thread = threadRef.current;
-    const marker = minimapMarkers[index];
-    if (!thread || !marker) return;
-    if (marker.id === "streaming-answer") {
-      jumpingToLatestRef.current = true;
-      followLatestRef.current = true;
-      historyScrollIntentRef.current = false;
-      setShowJumpToLatest(false);
-      thread.scrollTop = thread.scrollHeight;
-    } else {
-      const rowIndex = rowIndexByItemId.get(marker.id);
-      if (rowIndex === undefined) return;
-      pauseLatestFollow();
-      rowVirtualizer.scrollToIndex(rowIndex, { align: "start" });
-    }
-    window.requestAnimationFrame(syncScrollMetrics);
-  }
-
-  function scrollThreadToPointer(clientY: number) {
-    const index = minimapIndexFromPointer(clientY);
-    if (index !== null) scrollThreadToMarker(index);
-  }
-
-  function updateMinimapHover(clientY: number) {
-    const index = minimapIndexFromPointer(clientY);
-    setHoveredMinimapIndex((current) => (current === index ? current : index));
-  }
-
-  function handleMinimapPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
-    if (scrollMetrics.scrollHeight <= scrollMetrics.clientHeight) return;
-    const markerIndex = minimapIndexFromPointer(event.clientY);
-    if (markerIndex === null) return;
-    event.preventDefault();
-    minimapPointerRef.current = event.pointerId;
-    setMinimapDragging(true);
-    setPreviewMinimapIndex(null);
-    setHoveredMinimapIndex(markerIndex);
-    event.currentTarget.setPointerCapture(event.pointerId);
-    scrollThreadToMarker(markerIndex);
-  }
-
-  function handleMinimapPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
-    if (minimapPointerRef.current === event.pointerId) {
-      scrollThreadToPointer(event.clientY);
-      return;
-    }
-    updateMinimapHover(event.clientY);
-  }
-
-  function handleMinimapPointerEnd(event: ReactPointerEvent<HTMLDivElement>) {
-    if (minimapPointerRef.current !== event.pointerId) return;
-    minimapPointerRef.current = null;
-    setMinimapDragging(false);
-    updateMinimapHover(event.clientY);
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-  }
-
-  function handleMinimapPointerCancel(event: ReactPointerEvent<HTMLDivElement>) {
-    if (minimapPointerRef.current === event.pointerId) {
-      minimapPointerRef.current = null;
-      setMinimapDragging(false);
-    }
-    setHoveredMinimapIndex(null);
-    setPreviewMinimapIndex(null);
-  }
+  const scrollThreadToMarker = useCallback(
+    (index: number) => {
+      const thread = threadRef.current;
+      const marker = minimapMarkers[index];
+      if (!thread || !marker) return;
+      if (marker.id === "streaming-answer") {
+        jumpingToLatestRef.current = true;
+        followLatestRef.current = true;
+        historyScrollIntentRef.current = false;
+        setShowJumpToLatest(false);
+        thread.scrollTop = thread.scrollHeight;
+      } else {
+        const rowIndex = rowIndexByItemId.get(marker.id);
+        if (rowIndex === undefined) return;
+        pauseLatestFollow();
+        rowVirtualizer.scrollToIndex(rowIndex, { align: "start" });
+      }
+      window.requestAnimationFrame(syncScrollMetrics);
+    },
+    [minimapMarkers, pauseLatestFollow, rowIndexByItemId, rowVirtualizer, syncScrollMetrics]
+  );
+  const {
+    handlePointerCancel: handleMinimapPointerCancel,
+    handlePointerDown: handleMinimapPointerDown,
+    handlePointerEnd: handleMinimapPointerEnd,
+    handlePointerEnter: handleMinimapPointerEnter,
+    handlePointerLeave: handleMinimapPointerLeave,
+    handlePointerMove: handleMinimapPointerMove,
+    hoveredIndex: hoveredMinimapIndex,
+    minimapRef,
+    previewIndex: previewMinimapIndex
+  } = useSessionMinimapInteraction(
+    minimapMarkers.length,
+    scrollThreadToMarker,
+    scrollMetrics.scrollHeight > scrollMetrics.clientHeight
+  );
 
   function handleMinimapKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
     const thread = threadRef.current;
@@ -1889,71 +982,23 @@ export const SessionThread = memo(function SessionThread({
         </button>
       )}
 
-      <div
-        className="thread-minimap"
-        data-scrollable={minimapAvailable}
-        ref={minimapRef}
-        role="scrollbar"
-        aria-label="Navigate conversation"
-        aria-controls="session-thread-scroll"
-        aria-orientation="vertical"
-        aria-valuemin={0}
-        aria-valuemax={Math.round(scrollRange)}
-        aria-valuenow={Math.round(scrollMetrics.scrollTop)}
-        tabIndex={minimapAvailable ? 0 : -1}
+      <SessionMinimap
+        available={minimapAvailable}
+        hoveredIndex={hoveredMinimapIndex}
+        markers={minimapMarkers}
+        minimapRef={minimapRef}
         onKeyDown={handleMinimapKeyDown}
-        onPointerEnter={(event) => updateMinimapHover(event.clientY)}
+        onPointerCancel={handleMinimapPointerCancel}
         onPointerDown={handleMinimapPointerDown}
+        onPointerEnter={handleMinimapPointerEnter}
+        onPointerLeave={handleMinimapPointerLeave}
         onPointerMove={handleMinimapPointerMove}
         onPointerUp={handleMinimapPointerEnd}
-        onPointerCancel={handleMinimapPointerCancel}
-        onPointerLeave={() => {
-          if (minimapPointerRef.current !== null) return;
-          setHoveredMinimapIndex(null);
-          setPreviewMinimapIndex(null);
-        }}
-      >
-        <div className="thread-minimap-track" aria-hidden="true">
-          {minimapMarkers.map((marker, index) => {
-            const waveDistance =
-              hoveredMinimapIndex === null ? null : Math.abs(index - hoveredMinimapIndex);
-            return (
-              <span
-                className={`thread-minimap-marker thread-minimap-marker-${marker.kind}`}
-                data-wave-distance={
-                  waveDistance !== null && waveDistance <= 2 ? waveDistance : undefined
-                }
-                data-edge-fade={index < 3 ? index : undefined}
-                key={marker.id}
-                style={{ top: minimapMarkerPosition(index, minimapMarkers.length) }}
-              />
-            );
-          })}
-          <span
-            className="thread-minimap-position"
-            style={{
-              top: minimapMarkerPosition(minimapPositionIndex, minimapMarkers.length)
-            }}
-          />
-        </div>
-        {previewMinimapIndex !== null && minimapMarkers[previewMinimapIndex] && (
-          <aside
-            className="thread-minimap-preview"
-            role="tooltip"
-            style={{
-              top: `clamp(48px, ${minimapMarkerPosition(
-                previewMinimapIndex,
-                minimapMarkers.length
-              )}, calc(100% - 48px))`
-            }}
-          >
-            <header>
-              <strong>{minimapMarkers[previewMinimapIndex].label}</strong>
-            </header>
-            <p>{minimapMarkers[previewMinimapIndex].preview}</p>
-          </aside>
-        )}
-      </div>
+        positionIndex={minimapPositionIndex}
+        previewIndex={previewMinimapIndex}
+        scrollRange={scrollRange}
+        scrollTop={scrollMetrics.scrollTop}
+      />
       {clipboardToast && (
         <div
           className="clipboard-toast"
