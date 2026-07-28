@@ -148,10 +148,37 @@ pub(crate) fn apply_pending_agent_steers(
     Ok(latest_prompt)
 }
 
+pub(crate) fn workspace_verification_policy_for_run_context(
+    run_context: &Metadata,
+) -> Result<WorkspaceVerificationPolicy, String> {
+    if let Some(serialized) = run_context.get("conductor_contract") {
+        let contract = ConductorExecutionContract::from_json(serialized)?;
+        return Ok(if contract.verification_required {
+            WorkspaceVerificationPolicy::RequiredAfterMutation
+        } else {
+            WorkspaceVerificationPolicy::NotRequired
+        });
+    }
+
+    Ok(
+        if run_context
+            .get("verification_required")
+            .is_some_and(|value| value == "true")
+        {
+            WorkspaceVerificationPolicy::RequiredAfterMutation
+        } else {
+            WorkspaceVerificationPolicy::NotRequired
+        },
+    )
+}
+
 pub(crate) fn apply_run_task_contract(
     runtime: &mut agent_runtime::AgentLoopState,
     run_context: &Metadata,
-) {
+) -> Result<(), String> {
+    AgentKernel::new(runtime, &[]).merge_workspace_verification_policy(
+        workspace_verification_policy_for_run_context(run_context)?,
+    );
     if run_context
         .get("image_generation_required")
         .map(String::as_str)
@@ -159,6 +186,7 @@ pub(crate) fn apply_run_task_contract(
     {
         AgentKernel::new(runtime, &[]).require_tool_success("image.generate");
     }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -228,7 +256,7 @@ pub(crate) fn continue_agent_loop_with_provider(
     let mut tools = registry
         .exposure_plan(&prompt, config.context_window_tokens)
         .inline;
-    apply_run_task_contract(&mut runtime, &run_context);
+    apply_run_task_contract(&mut runtime, &run_context)?;
     let mut runtime_context = agent_runtime_context_for_run(&run_context);
     let mut active_collaboration = collaboration;
 
@@ -246,7 +274,7 @@ pub(crate) fn continue_agent_loop_with_provider(
             tools = registry
                 .exposure_plan(&prompt, config.context_window_tokens)
                 .inline;
-            apply_run_task_contract(&mut runtime, &run_context);
+            apply_run_task_contract(&mut runtime, &run_context)?;
             runtime_context = agent_runtime_context_for_run(&run_context);
             cancellation.mark_progress("steering", "User guidance applied");
             append_agent_progress_event(
@@ -281,17 +309,12 @@ pub(crate) fn continue_agent_loop_with_provider(
                 persist_agent_runtime_snapshot(&mut store, &runtime, &run_context)?;
             }
         }
-        let verification_required = run_context
-            .get("verification_required")
-            .is_some_and(|value| value == "true");
-        let prepared_turn = match AgentKernel::new(&mut runtime, &tools)
-            .prepare_model_turn_with_contract(
-                Some(&config.agent_system_prompt),
-                runtime_context.as_deref(),
-                verification_required,
-                config.context_window_tokens,
-                max_output_tokens,
-            ) {
+        let prepared_turn = match AgentKernel::new(&mut runtime, &tools).prepare_model_turn(
+            Some(&config.agent_system_prompt),
+            runtime_context.as_deref(),
+            config.context_window_tokens,
+            max_output_tokens,
+        ) {
             Ok(prepared_turn) => prepared_turn,
             Err(AgentTurnPreparationError::Budget(exhausted)) => {
                 if let Some(partial_answer) = exhausted.partial_answer {
@@ -352,7 +375,7 @@ pub(crate) fn continue_agent_loop_with_provider(
         let mut advance = AgentKernel::new(&mut runtime, &tools).advance_model_response(response);
         if matches!(&advance, AgentAdvance::Completed { .. }) {
             let verification_instruction =
-                AgentKernel::new(&mut runtime, &tools).completion_gate(verification_required);
+                AgentKernel::new(&mut runtime, &tools).completion_gate_for_task();
             match verification_instruction {
                 Ok(Some(instruction)) => {
                     runtime.messages.truncate(previous_message_count);

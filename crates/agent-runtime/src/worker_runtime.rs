@@ -187,7 +187,7 @@ impl IsolatedWorkerRuntime {
             && self.turn_policy.supports_evidence_repair()
         {
             let instruction = AgentKernel::new(&mut self.state, &self.tools)
-                .completion_gate(false)
+                .completion_gate_for_task()
                 .map_err(WorkerFailure::from_failure)?;
             if let Some(instruction) = instruction {
                 AgentKernel::new(&mut self.state, &self.tools).apply_instruction(&instruction);
@@ -365,7 +365,7 @@ impl IsolatedWorkerRuntime {
     }
 
     fn complete_or_repair(&mut self, answer: String) -> WorkerAdvance {
-        let gate = AgentKernel::new(&mut self.state, &self.tools).completion_gate(false);
+        let gate = AgentKernel::new(&mut self.state, &self.tools).completion_gate_for_task();
         match gate {
             Ok(None) => WorkerAdvance::Completed { answer },
             Ok(Some(instruction))

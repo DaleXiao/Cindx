@@ -617,6 +617,9 @@ fn completion_gate_requests_post_mutation_verification_once() {
             r#"{"type":"object"}"#,
         ),
     ];
+    state
+        .task_contract
+        .merge_workspace_verification_policy(WorkspaceVerificationPolicy::RequiredAfterMutation);
     record_tool_outcome_with_risk(
         &mut state,
         "file.write",
@@ -627,18 +630,18 @@ fn completion_gate_requests_post_mutation_verification_once() {
 
     assert!(state
         .task_contract
-        .completion_instruction(true, &tools)
+        .completion_instruction_for_task(&tools)
         .unwrap()
         .is_some());
     assert!(state
         .task_contract
-        .completion_instruction(true, &tools)
+        .completion_instruction_for_task(&tools)
         .unwrap()
         .is_some());
     assert_eq!(
         state
             .task_contract
-            .completion_instruction(true, &tools)
+            .completion_instruction_for_task(&tools)
             .unwrap_err()
             .code,
         "task_contract_unsatisfied"
@@ -663,6 +666,9 @@ fn verification_gate_does_not_affect_read_only_or_unverified_tasks() {
         "read the file",
         AgentRuntimeConfig::default(),
     );
+    state
+        .task_contract
+        .merge_workspace_verification_policy(WorkspaceVerificationPolicy::RequiredAfterMutation);
     record_tool_outcome(
         &mut state,
         "file.read",
@@ -671,6 +677,11 @@ fn verification_gate_does_not_affect_read_only_or_unverified_tasks() {
     );
     assert!(completion_verification_instruction(&mut state, true, &tools).is_none());
 
+    let mut state = start_agent_loop(
+        TaskId("task-no-verification".to_string()),
+        "change the file without a verification contract",
+        AgentRuntimeConfig::default(),
+    );
     record_tool_outcome_with_risk(
         &mut state,
         "file.write",

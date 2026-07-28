@@ -21,6 +21,28 @@ pub enum ContractEvidenceKind {
     OtherTool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceVerificationPolicy {
+    #[default]
+    NotRequired,
+    RequiredAfterMutation,
+}
+
+impl WorkspaceVerificationPolicy {
+    pub fn is_required(self) -> bool {
+        self == Self::RequiredAfterMutation
+    }
+
+    fn merge(self, other: Self) -> Self {
+        if self.is_required() || other.is_required() {
+            Self::RequiredAfterMutation
+        } else {
+            Self::NotRequired
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContractEvidence {
@@ -75,6 +97,8 @@ struct TaskContractEvidenceSummary {
 #[serde(rename_all = "camelCase")]
 pub struct AgentTaskContract {
     #[serde(default)]
+    workspace_verification_policy: WorkspaceVerificationPolicy,
+    #[serde(default)]
     required_tool_successes: BTreeSet<String>,
     #[serde(default)]
     required_any_tool_successes: BTreeMap<String, BTreeSet<String>>,
@@ -97,6 +121,14 @@ pub struct AgentTaskContract {
 }
 
 impl AgentTaskContract {
+    pub fn merge_workspace_verification_policy(&mut self, policy: WorkspaceVerificationPolicy) {
+        self.workspace_verification_policy = self.workspace_verification_policy.merge(policy);
+    }
+
+    pub fn workspace_verification_policy(&self) -> WorkspaceVerificationPolicy {
+        self.workspace_verification_policy
+    }
+
     pub fn require_tool_success(&mut self, tool_name: impl Into<String>) {
         let tool_name = tool_name.into();
         if !tool_name.trim().is_empty() {
@@ -154,6 +186,18 @@ impl AgentTaskContract {
     /// Rendering this context is deliberately side-effect free: repair-attempt
     /// accounting belongs to the completion gate, not to ordinary model turns.
     pub fn model_context(&self, verification_required: bool, tools: &[ToolSpec]) -> Option<String> {
+        self.model_context_with_requirement(verification_required, tools)
+    }
+
+    pub fn model_context_for_task(&self, tools: &[ToolSpec]) -> Option<String> {
+        self.model_context_with_requirement(self.workspace_verification_policy.is_required(), tools)
+    }
+
+    fn model_context_with_requirement(
+        &self,
+        verification_required: bool,
+        tools: &[ToolSpec],
+    ) -> Option<String> {
         let available_tools = tools
             .iter()
             .map(|tool| tool.name.as_str())
@@ -357,6 +401,24 @@ impl AgentTaskContract {
     }
 
     pub fn completion_instruction(
+        &mut self,
+        verification_required: bool,
+        tools: &[ToolSpec],
+    ) -> Result<Option<String>, AgentFailure> {
+        self.completion_instruction_with_requirement(verification_required, tools)
+    }
+
+    pub fn completion_instruction_for_task(
+        &mut self,
+        tools: &[ToolSpec],
+    ) -> Result<Option<String>, AgentFailure> {
+        self.completion_instruction_with_requirement(
+            self.workspace_verification_policy.is_required(),
+            tools,
+        )
+    }
+
+    fn completion_instruction_with_requirement(
         &mut self,
         verification_required: bool,
         tools: &[ToolSpec],
@@ -655,7 +717,7 @@ mod tests {
         let tools = vec![tool("image.generate", ToolRisk::UsesNetwork)];
 
         assert!(contract
-            .completion_instruction(false, &tools)
+            .completion_instruction_for_task(&tools)
             .unwrap()
             .unwrap()
             .contains("image.generate"));
@@ -665,7 +727,7 @@ mod tests {
             &ToolOutcomeStatus::Succeeded,
             Some(&ToolRisk::UsesNetwork),
         );
-        assert_eq!(contract.completion_instruction(false, &tools), Ok(None));
+        assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
     }
 
     #[test]
@@ -682,7 +744,7 @@ mod tests {
         ];
 
         let instruction = contract
-            .completion_instruction(false, &tools)
+            .completion_instruction_for_task(&tools)
             .expect("completion gate")
             .expect("requirement should be active");
         assert!(instruction.contains("workspace_content"));
@@ -694,7 +756,7 @@ mod tests {
             &ToolOutcomeStatus::Succeeded,
             Some(&ToolRisk::ReadOnly),
         );
-        assert_eq!(contract.completion_instruction(false, &tools), Ok(None));
+        assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
     }
 
     #[test]
@@ -714,7 +776,7 @@ mod tests {
             Some(&ToolRisk::ReadOnly),
         );
         assert!(contract
-            .completion_instruction(false, &tools)
+            .completion_instruction_for_task(&tools)
             .expect("completion gate")
             .is_some());
     }
@@ -772,16 +834,16 @@ mod tests {
         let tools = vec![tool("image.generate", ToolRisk::UsesNetwork)];
 
         let first = contract
-            .model_context(false, &tools)
+            .model_context_for_task(&tools)
             .expect("required tool should be visible");
         let second = contract
-            .model_context(false, &tools)
+            .model_context_for_task(&tools)
             .expect("rendering should be repeatable");
 
         assert_eq!(first, second);
         assert!(first.contains("image.generate"));
         assert!(contract.gate_attempts.is_empty());
-        assert!(contract.completion_instruction(false, &tools).is_ok());
+        assert!(contract.completion_instruction_for_task(&tools).is_ok());
     }
 
     #[test]
@@ -795,11 +857,20 @@ mod tests {
         );
         let tools = vec![tool("file.read", ToolRisk::ReadOnly)];
 
+        assert!(contract.model_context_for_task(&tools).is_none());
+        contract.merge_workspace_verification_policy(
+            WorkspaceVerificationPolicy::RequiredAfterMutation,
+        );
+
         let pending = contract
-            .model_context(true, &tools)
+            .model_context_for_task(&tools)
             .expect("mutation should require verification");
         assert!(pending.contains("src/main.rs"));
-        assert!(contract.model_context(false, &tools).is_none());
+        contract.merge_workspace_verification_policy(WorkspaceVerificationPolicy::NotRequired);
+        assert_eq!(
+            contract.workspace_verification_policy(),
+            WorkspaceVerificationPolicy::RequiredAfterMutation
+        );
 
         contract.record_tool_outcome(
             "file.read",
@@ -807,7 +878,32 @@ mod tests {
             &ToolOutcomeStatus::Succeeded,
             Some(&ToolRisk::ReadOnly),
         );
-        assert!(contract.model_context(true, &tools).is_none());
+        assert!(contract.model_context_for_task(&tools).is_none());
+    }
+
+    #[test]
+    fn explicit_verification_arguments_preserve_legacy_behavior() {
+        let mut contract = AgentTaskContract::default();
+        contract.record_tool_outcome(
+            "file.write",
+            r#"{"path":"src/main.rs"}"#,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::WritesWorkspace),
+        );
+        contract.merge_workspace_verification_policy(
+            WorkspaceVerificationPolicy::RequiredAfterMutation,
+        );
+        let tools = vec![tool("file.read", ToolRisk::ReadOnly)];
+
+        assert!(contract.model_context(false, &tools).is_none());
+        assert!(contract.model_context(true, &tools).is_some());
+
+        let mut disabled = contract.clone();
+        assert_eq!(disabled.completion_instruction(false, &tools), Ok(None));
+        assert!(contract
+            .completion_instruction(true, &tools)
+            .expect("legacy completion gate evaluates")
+            .is_some());
     }
 
     #[test]
@@ -822,7 +918,7 @@ mod tests {
         let tools = vec![tool("computer.screenshot", ToolRisk::ReadOnly)];
 
         let context = contract
-            .model_context(false, &tools)
+            .model_context_for_task(&tools)
             .expect("fresh observation should be required");
         assert!(context.contains("computer.click"));
         assert!(context.contains("computer.screenshot"));

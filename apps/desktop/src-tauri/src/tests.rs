@@ -3,7 +3,8 @@ use crate::agent_collaboration_runtime::{
     collaboration_candidate_handoff, collaboration_candidate_quorum,
     collaboration_candidate_quorum_grace, collaboration_error_blocks_executor,
 };
-use orchestrator::{AdaptiveWorkflow, AdaptiveWorkflowStep};
+use crate::agent_strategy_runtime::PlannedAgentRun;
+use orchestrator::{AdaptiveWorkflow, AdaptiveWorkflowStep, AgentVerificationPolicy};
 use tools::encode_input;
 
 fn test_prompt_evaluation_provenance(
@@ -53,6 +54,86 @@ fn test_conductor_harness(models: Vec<String>, agent_budget: usize) -> Conductor
         prompt_evolution_enabled: true,
         prompt_genome: ConductorPromptGenome::seed_for_effort("pro"),
     })
+}
+
+fn test_planned_agent_run(decision: AgentRunDecision, effort: AgentEffort) -> PlannedAgentRun {
+    let routing_context = decision.routing_context("update the workspace", Vec::new());
+    let routing_decision = decision.routing_decision();
+    let execution_contract = decision.execution_contract(effort.label());
+    PlannedAgentRun {
+        decision,
+        routing_context,
+        routing_decision,
+        execution_contract,
+        source: "test".to_string(),
+        attempts: 1,
+        prompt_genome: ConductorPromptGenome::seed_for_effort(effort.label()),
+        degradation_reason: None,
+        attempted_conductor_models: Vec::new(),
+        selected_conductor_model: None,
+    }
+}
+
+#[test]
+fn conductor_verification_policies_reach_the_persistent_task_contract() {
+    let mut none = AgentRunDecision::direct("executor");
+    none.verification = AgentVerificationPolicy::None;
+    let independent = AgentRunDecision::degraded_conductor_fallback(
+        "executor",
+        "pro",
+        2,
+        2,
+        "test conductor failure",
+    );
+    independent
+        .validate(&["executor".to_string(), "reviewer".to_string()], 2)
+        .expect("independent fallback should remain valid");
+
+    for (decision, effort, expected) in [
+        (
+            none,
+            AgentEffort::Fast,
+            WorkspaceVerificationPolicy::NotRequired,
+        ),
+        (
+            AgentRunDecision::direct("executor"),
+            AgentEffort::Auto,
+            WorkspaceVerificationPolicy::RequiredAfterMutation,
+        ),
+        (
+            independent,
+            AgentEffort::Pro,
+            WorkspaceVerificationPolicy::RequiredAfterMutation,
+        ),
+    ] {
+        let planned = test_planned_agent_run(decision, effort);
+        let mut run_context = Metadata::new();
+        planned
+            .apply_to_context(&mut run_context, effort)
+            .expect("plan should populate run context");
+        let encoded = run_context
+            .get("conductor_contract")
+            .expect("typed contract should be persisted");
+        let decoded = serde_json::from_str::<ConductorExecutionContract>(encoded)
+            .expect("persisted contract should decode");
+        assert_eq!(decoded.verification_required, expected.is_required());
+
+        let mut runtime = start_agent_loop(
+            TaskId("verification-policy-test".to_string()),
+            "update the workspace",
+            AgentRuntimeConfig::default(),
+        );
+        apply_run_task_contract(&mut runtime, &run_context)
+            .expect("runtime contract should accept the policy");
+        assert_eq!(
+            runtime.task_contract.workspace_verification_policy(),
+            expected
+        );
+        assert_eq!(
+            planned.routing_decision.verifier_role == Some(ModelRole::Reviewer),
+            planned.decision.verification == AgentVerificationPolicy::Independent
+        );
+    }
 }
 
 #[test]
@@ -5702,7 +5783,7 @@ fn image_generation_run_cannot_complete_without_the_configured_tool() {
     let run_context = [("image_generation_required".to_string(), "true".to_string())]
         .into_iter()
         .collect();
-    apply_run_task_contract(&mut runtime, &run_context);
+    apply_run_task_contract(&mut runtime, &run_context).expect("task contract applies");
     assert!(!runtime
         .task_contract
         .required_tool_satisfied("image.generate"));

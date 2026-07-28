@@ -1,5 +1,32 @@
 use crate::*;
 
+const PERMISSION_RUN_CONTEXT_KEYS: &[&str] = &[
+    "agent_run_id",
+    "agent_effort",
+    "agent_model",
+    "requested_policy",
+    "collaboration_policy",
+    "current_time",
+    "task_class",
+    "collaboration_profile",
+    "conductor_contract",
+    "verification_required",
+    "queue_id",
+    "recovery_resume_key",
+    "recovery_attempts",
+    "image_generation_required",
+    "configured_image_model",
+    "configured_image_endpoint",
+];
+
+fn restore_permission_run_context(run_context: &mut Metadata, request_metadata: &Metadata) {
+    for key in PERMISSION_RUN_CONTEXT_KEYS {
+        if let Some(value) = request_metadata.get(*key) {
+            run_context.insert((*key).to_string(), value.clone());
+        }
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn resolve_agent_permission(
     app: tauri::AppHandle,
@@ -91,26 +118,7 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         )
         .map_err(|error| error.to_string());
     }
-    for key in [
-        "agent_run_id",
-        "agent_effort",
-        "agent_model",
-        "requested_policy",
-        "collaboration_policy",
-        "current_time",
-        "task_class",
-        "collaboration_profile",
-        "queue_id",
-        "recovery_resume_key",
-        "recovery_attempts",
-        "image_generation_required",
-        "configured_image_model",
-        "configured_image_endpoint",
-    ] {
-        if let Some(value) = request.metadata.get(key) {
-            run_context.insert(key.to_string(), value.clone());
-        }
-    }
+    restore_permission_run_context(&mut run_context, &request.metadata);
     let session_id_owned = run_context.get("session_id").cloned();
     let session_id = session_id_owned.as_deref();
 
@@ -503,6 +511,34 @@ pub(crate) fn resolve_agent_permission_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_cold_recovery_preserves_verification_contract() {
+        let mut run_context = Metadata::new();
+        let conductor_contract = AgentRunDecision::direct("executor")
+            .execution_contract("auto")
+            .to_json()
+            .expect("contract serializes");
+        let request_metadata = [
+            ("conductor_contract".to_string(), conductor_contract.clone()),
+            ("tool_input".to_string(), "sensitive".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        restore_permission_run_context(&mut run_context, &request_metadata);
+
+        assert_eq!(
+            run_context.get("conductor_contract").map(String::as_str),
+            Some(conductor_contract.as_str())
+        );
+        assert!(!run_context.contains_key("tool_input"));
+        assert_eq!(
+            workspace_verification_policy_for_run_context(&run_context)
+                .expect("restored contract decodes"),
+            WorkspaceVerificationPolicy::RequiredAfterMutation
+        );
+    }
 
     fn message(role: MessageRole, content: &str, metadata: Metadata) -> Message {
         Message {
