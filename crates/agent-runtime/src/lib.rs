@@ -58,7 +58,9 @@ pub use parallel::{
 };
 pub use result_frontier::{BestKnownResult, ResultQuality};
 pub use run_budget::{RunBudget, RunStageBudget, RunStageClass};
-pub use task_contract::{AgentTaskContract, ContractEvidence, ContractEvidenceKind};
+pub use task_contract::{
+    AgentTaskContract, ContractEvidence, ContractEvidenceKind, WorkspaceVerificationPolicy,
+};
 pub use task_state::{
     AgentTaskStateError, AgentTaskStateSnapshot, PersistedInteractionSurface,
     PersistedInteractionVerification, AGENT_TASK_STATE_SCHEMA,

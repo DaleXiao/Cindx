@@ -324,7 +324,10 @@ fn message_role_label(role: &MessageRole) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{record_tool_outcome_with_risk, start_agent_loop, AgentRuntimeConfig};
+    use crate::{
+        record_tool_outcome_with_risk, start_agent_loop, AgentRuntimeConfig,
+        WorkspaceVerificationPolicy,
+    };
     use agent_core::{Metadata, TaskId, ToolOutcomeStatus, ToolRisk};
 
     #[test]
@@ -338,6 +341,9 @@ mod tests {
         state
             .failed_tool_signatures
             .insert("shell.run:abc".to_string(), 2);
+        state.task_contract.merge_workspace_verification_policy(
+            WorkspaceVerificationPolicy::RequiredAfterMutation,
+        );
         for path in ["src/one.rs", "src/two.rs", "src/three.rs"] {
             record_tool_outcome_with_risk(
                 &mut state,
