@@ -10,6 +10,10 @@ const css = [
     .map((entry) => fs.readFileSync(`${styleRoot}/${entry}`, "utf8"))
 ].join("\n");
 const appSource = fs.readFileSync("apps/desktop/src/App.tsx", "utf8");
+const workspaceChromeSource = fs.readFileSync(
+  "apps/desktop/src/components/WorkspaceChrome.tsx",
+  "utf8"
+);
 const config = JSON.parse(
   fs.readFileSync("apps/desktop/src-tauri/tauri.conf.json", "utf8")
 );
@@ -40,7 +44,11 @@ assert(css.includes("@media (max-width: 1180px)"), "Compact desktop breakpoint i
 assert(css.includes('position: fixed;\n    z-index: 20;'), "Compact inspector must become an overlay");
 assert(
   /\.window-workspace-header \{[\s\S]*?grid-column: 2;[\s\S]*?grid-row: 1;/.test(css) &&
-    appSource.indexOf('</header>') < appSource.indexOf('<div className="window-workspace-header">'),
+    /\.workspace \{[\s\S]*?grid-column: 2;[\s\S]*?grid-row: 2;/.test(css) &&
+    workspaceChromeSource.indexOf("</header>") <
+      workspaceChromeSource.indexOf('<div className="window-workspace-header">') &&
+    appSource.indexOf("<WorkspaceChrome") <
+      appSource.indexOf('<section className="workspace"'),
   "Workspace title and content must share the same responsive grid column"
 );
 assert(css.includes('.app-shell[data-inspector-open="false"]'), "Inspector must support a collapsed layout");
