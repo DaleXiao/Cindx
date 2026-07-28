@@ -47,27 +47,40 @@ pub(crate) fn save_web_search_config(
     input: WebSearchConfigInput,
 ) -> Result<WebSearchConfigState, String> {
     let endpoint = normalized_config_value(&input.endpoint);
-    if !(endpoint.is_empty() || endpoint.starts_with("https://") || endpoint.starts_with("http://"))
-    {
-        return Err("web search endpoint must start with http:// or https://".to_string());
-    }
+    let requested_api_key = normalized_config_value(&input.api_key);
 
     let mut config = state
         .web_search_config
         .lock()
         .map_err(|error| format!("web search config lock poisoned: {error}"))?;
+    let effective_api_key = if endpoint.is_empty() {
+        ""
+    } else if requested_api_key.is_empty() {
+        &config.api_key
+    } else {
+        &requested_api_key
+    };
+    validate_web_search_transport(&endpoint, effective_api_key)?;
     config.endpoint = endpoint;
     if config.endpoint.is_empty() {
         config.api_key.clear();
-    } else {
-        let api_key = normalized_config_value(&input.api_key);
-        if !api_key.is_empty() {
-            config.api_key = api_key;
-        }
+    } else if !requested_api_key.is_empty() {
+        config.api_key = requested_api_key;
     }
     save_web_search_config_to_disk(&config).map_err(|error| error.to_string())?;
     invalidate_tool_registry_cache(&state)?;
     Ok(web_search_config_state(&config))
+}
+
+fn validate_web_search_transport(endpoint: &str, api_key: &str) -> Result<(), String> {
+    if !(endpoint.is_empty() || endpoint.starts_with("https://") || endpoint.starts_with("http://"))
+    {
+        return Err("web search endpoint must start with http:// or https://".to_string());
+    }
+    if endpoint.starts_with("http://") && !api_key.trim().is_empty() {
+        return Err("web search endpoints with an API key must use HTTPS".to_string());
+    }
+    Ok(())
 }
 
 pub(crate) fn web_search_config_state(config: &WebSearchConfig) -> WebSearchConfigState {
@@ -345,4 +358,20 @@ pub(crate) fn skill_state_after_install(
         skills,
         last_error: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_web_search_transport;
+
+    #[test]
+    fn web_search_transport_requires_https_only_when_an_api_key_is_present() {
+        assert!(validate_web_search_transport("https://search.example.test", "secret").is_ok());
+        assert!(validate_web_search_transport("http://127.0.0.1:8080", "").is_ok());
+        assert!(
+            validate_web_search_transport("http://127.0.0.1:8080", "secret")
+                .unwrap_err()
+                .contains("must use HTTPS")
+        );
+    }
 }

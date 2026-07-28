@@ -1,6 +1,7 @@
 use super::*;
 use crate::process_control::terminate_process_group;
 use crate::stream_capture::capture_stream_limited;
+use agent_core::{ToolArtifact, ToolEffectSemantics};
 use std::env;
 use std::process::{Command, Stdio};
 use std::thread;

@@ -9,6 +9,7 @@ import {
   useState,
   type CSSProperties
 } from "react";
+import { CheckCircle2 } from "lucide-react";
 import { Inspector, type InspectorTab } from "./components/Inspector";
 import { Composer } from "./components/Composer";
 import { QueuedMessages } from "./components/QueuedMessages";

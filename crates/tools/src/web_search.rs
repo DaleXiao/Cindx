@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 
@@ -102,6 +103,7 @@ impl Tool for WebSearchTool {
 fn fetch_url(url: &str) -> Result<String, ToolError> {
     let mut command = Command::new("/usr/bin/curl");
     command
+        .arg("-q")
         .arg("-L")
         .arg("--silent")
         .arg("--show-error")
@@ -115,6 +117,7 @@ fn fetch_url(url: &str) -> Result<String, ToolError> {
         WEB_RESPONSE_MAX_BYTES,
         WEB_STDERR_MAX_BYTES,
         "curl",
+        None,
     )?;
 
     if !output.status.success() {
@@ -132,6 +135,34 @@ fn fetch_search_api(
     query: &str,
     max_results: usize,
 ) -> Result<String, ToolError> {
+    let (mut command, secret_stdin) = search_api_request(config, query, max_results)?;
+    let output = run_command_with_limited_output(
+        &mut command,
+        WEB_RESPONSE_MAX_BYTES,
+        WEB_STDERR_MAX_BYTES,
+        "search API request",
+        secret_stdin.as_deref(),
+    )?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let api_key = config.api_key.trim();
+        let detail = if api_key.is_empty() {
+            detail
+        } else {
+            detail.replace(api_key, "[redacted]")
+        };
+        return Err(ToolError::new(format!(
+            "search API request failed: {detail}"
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn search_api_request(
+    config: &WebSearchConfig,
+    query: &str,
+    max_results: usize,
+) -> Result<(Command, Option<Vec<u8>>), ToolError> {
     let endpoint = config.endpoint.trim();
     if endpoint.contains('\n')
         || endpoint.contains('\r')
@@ -144,14 +175,20 @@ fn fetch_search_api(
     if config.api_key.contains('\n') || config.api_key.contains('\r') {
         return Err(ToolError::new("web search API key must be a single line"));
     }
+    let api_key = config.api_key.trim();
+    if !api_key.is_empty() && endpoint.starts_with("http://") {
+        return Err(ToolError::new(
+            "web search endpoints with an API key must use HTTPS",
+        ));
+    }
 
     let uses_url_template = endpoint.contains("{query}") || endpoint.contains("{limit}");
     let url = endpoint
         .replace("{query}", &url_encode(query))
         .replace("{limit}", &max_results.to_string());
     let mut command = Command::new("/usr/bin/curl");
+    command.args(["-q", "-L"]);
     command
-        .arg("-L")
         .arg("--silent")
         .arg("--show-error")
         .arg("--fail")
@@ -159,11 +196,14 @@ fn fetch_search_api(
         .arg("25")
         .arg("--user-agent")
         .arg("Cindx/1");
-    if !config.api_key.trim().is_empty() {
-        command
-            .arg("--header")
-            .arg(format!("Authorization: Bearer {}", config.api_key.trim()));
-    }
+    let secret_stdin = if api_key.is_empty() {
+        None
+    } else {
+        command.args(["--max-redirs", "0"]);
+        command.args(["--proto", "=https", "--proto-redir", "=https"]);
+        command.args(["--header", "@-"]);
+        Some(format!("Authorization: Bearer {api_key}\n").into_bytes())
+    };
     if !uses_url_template {
         command
             .arg("--request")
@@ -180,19 +220,7 @@ fn fetch_search_api(
             );
     }
     command.arg(&url);
-    let output = run_command_with_limited_output(
-        &mut command,
-        WEB_RESPONSE_MAX_BYTES,
-        WEB_STDERR_MAX_BYTES,
-        "search API request",
-    )?;
-    if !output.status.success() {
-        return Err(ToolError::new(format!(
-            "search API request failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok((command, secret_stdin))
 }
 
 struct LimitedCommandOutput {
@@ -206,7 +234,11 @@ fn run_command_with_limited_output(
     stdout_max_bytes: usize,
     stderr_max_bytes: usize,
     label: &str,
+    stdin_bytes: Option<&[u8]>,
 ) -> Result<LimitedCommandOutput, ToolError> {
+    if stdin_bytes.is_some() {
+        command.stdin(Stdio::piped());
+    }
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -222,9 +254,25 @@ fn run_command_with_limited_output(
         .ok_or_else(|| ToolError::new(format!("{label} stderr is unavailable")))?;
     let stdout_reader = thread::spawn(move || capture_stream_limited(stdout, stdout_max_bytes));
     let stderr_reader = thread::spawn(move || capture_stream_limited(stderr, stderr_max_bytes));
+    let stdin_writer = if let Some(bytes) = stdin_bytes {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| ToolError::new(format!("{label} stdin is unavailable")))?;
+        let bytes = bytes.to_vec();
+        Some(thread::spawn(move || stdin.write_all(&bytes)))
+    } else {
+        None
+    };
     let status = child
         .wait()
         .map_err(|error| ToolError::new(format!("failed to wait for {label}: {error}")))?;
+    if let Some(writer) = stdin_writer {
+        writer
+            .join()
+            .map_err(|_| ToolError::new(format!("{label} stdin writer panicked")))?
+            .map_err(|error| ToolError::new(format!("failed to write {label} stdin: {error}")))?;
+    }
     let stdout = stdout_reader
         .join()
         .map_err(|_| ToolError::new(format!("{label} stdout reader panicked")))?;
@@ -375,5 +423,73 @@ mod tests {
 
         assert_eq!(spec.risk, ToolRisk::UsesNetwork);
         assert_eq!(spec.effect_semantics, ToolEffectSemantics::ReadOnly);
+    }
+
+    #[test]
+    fn credentialed_search_request_keeps_api_key_out_of_curl_arguments() {
+        let api_key = "argv-secret-value";
+        let config = WebSearchConfig {
+            endpoint: "https://search.example.test/api".to_string(),
+            api_key: api_key.to_string(),
+        };
+
+        let (command, secret_stdin) = search_api_request(&config, "local agent", 8).unwrap();
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(args.first().map(String::as_str), Some("-q"));
+        assert!(args.iter().any(|arg| arg == "-L"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--max-redirs" && pair[1] == "0"));
+        assert!(!args.iter().any(|arg| arg.contains(api_key)));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--header" && pair[1] == "@-"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--proto" && pair[1] == "=https"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--proto-redir" && pair[1] == "=https"));
+        assert_eq!(
+            secret_stdin.unwrap(),
+            format!("Authorization: Bearer {api_key}\n").into_bytes()
+        );
+    }
+
+    #[test]
+    fn credentialed_search_rejects_plain_http_without_leaking_the_key() {
+        let api_key = "must-not-appear-in-errors";
+        let config = WebSearchConfig {
+            endpoint: "http://127.0.0.1:8080/search".to_string(),
+            api_key: api_key.to_string(),
+        };
+
+        let error = search_api_request(&config, "local agent", 8).unwrap_err();
+
+        assert!(error.message.contains("must use HTTPS"));
+        assert!(!error.message.contains(api_key));
+    }
+
+    #[test]
+    fn unauthenticated_search_keeps_plain_http_local_endpoint_compatibility() {
+        let config = WebSearchConfig {
+            endpoint: "http://127.0.0.1:8080/search".to_string(),
+            api_key: String::new(),
+        };
+
+        let (command, secret_stdin) = search_api_request(&config, "local agent", 8).unwrap();
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(secret_stdin.is_none());
+        assert_eq!(args.first().map(String::as_str), Some("-q"));
+        assert!(args.iter().any(|arg| arg == "-L"));
+        assert!(args.iter().any(|arg| arg == &config.endpoint));
     }
 }

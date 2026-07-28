@@ -325,7 +325,7 @@ function terminateProcessTree(pid, signal) {
 }
 
 function renewSessionLease(statePath) {
-  const state = sessionState(statePath);
+  const state = sessionState(statePath, { allowMissing: false });
   if (!state.launch_token) return state;
   const now = Date.now();
   const renewed = {
@@ -338,7 +338,7 @@ function renewSessionLease(statePath) {
 }
 
 function ensureSessionWatchdog(statePath) {
-  const state = sessionState(statePath);
+  const state = sessionState(statePath, { allowMissing: false });
   if (!state.launch_token) return;
   if (watchdogProcessBelongsToSession(state, statePath)) {
     renewSessionLease(statePath);
@@ -375,7 +375,7 @@ async function waitForBrowserExit(state, profileDir, endpoint, timeoutMs) {
 }
 
 async function terminateOwnedBrowserSession(statePath, endpoint, gracefulMs = 2_000) {
-  const state = sessionState(statePath);
+  const state = sessionState(statePath, { allowMissing: false });
   const profileDir = state.profile_dir || path.join(path.dirname(statePath), "profile");
   const browserPid = Number(state.browser_pid);
   if (processIsAlive(browserPid) && !browserProcessBelongsToSession(state, profileDir)) {
@@ -398,7 +398,7 @@ async function terminateOwnedBrowserSession(statePath, endpoint, gracefulMs = 2_
 async function watchBrowserSession(statePath, launchToken) {
   const sessionDir = path.dirname(statePath);
   for (;;) {
-    const state = sessionState(statePath);
+    const state = sessionState(statePath, { allowMissing: true });
     if (!state.launch_token || state.launch_token !== launchToken) return;
     const expiresAt = asNumber(state.lease_expires_at_ms, 0);
     if (Date.now() < expiresAt) {
@@ -418,13 +418,13 @@ async function watchBrowserSession(statePath, launchToken) {
     }
     let retry = false;
     try {
-      const current = sessionState(statePath);
+      const current = sessionState(statePath, { allowMissing: true });
       if (!current.launch_token || current.launch_token !== launchToken) return;
       if (!sessionLeaseExpired(current, statePath)) continue;
       const profileDir = current.profile_dir || path.join(sessionDir, "profile");
       const endpoint = endpointFromProfile(profileDir);
       await terminateOwnedBrowserSession(statePath, endpoint);
-      const latest = sessionState(statePath);
+      const latest = sessionState(statePath, { allowMissing: true });
       if (latest.launch_token === launchToken) {
         fs.rmSync(path.join(profileDir, "DevToolsActivePort"), { force: true });
         fs.rmSync(statePath, { force: true });
@@ -455,7 +455,7 @@ function sessionLeaseExpired(state, statePath) {
 
 async function cleanupExpiredSession(sessionDir) {
   const statePath = path.join(sessionDir, "session-state.json");
-  let state = sessionState(statePath);
+  let state = sessionState(statePath, { allowMissing: true });
   if (!state.browser_pid || !sessionLeaseExpired(state, statePath)) return;
   let release = null;
   try {
@@ -464,7 +464,7 @@ async function cleanupExpiredSession(sessionDir) {
     return;
   }
   try {
-    state = sessionState(statePath);
+    state = sessionState(statePath, { allowMissing: true });
     if (!state.browser_pid || !sessionLeaseExpired(state, statePath)) return;
     const profileDir = state.profile_dir || path.join(sessionDir, "profile");
     const endpoint = endpointFromProfile(profileDir);
@@ -506,12 +506,16 @@ async function cleanupExpiredSiblingSessions(activeSessionDir) {
     .sort((left, right) => left.stateModifiedAtMs - right.stateModifiedAtMs)
     .slice(0, MAX_STALE_SESSION_CLEANUPS_PER_ACTION);
   for (const { candidate } of candidates) {
-    await cleanupExpiredSession(candidate);
+    try {
+      await cleanupExpiredSession(candidate);
+    } catch (error) {
+      debug(`expired sibling cleanup skipped for ${candidate}: ${error.message}`);
+    }
   }
 }
 
 async function closeBrowserSession(runtime) {
-  const state = sessionState(runtime.statePath);
+  const state = sessionState(runtime.statePath, { allowMissing: false });
   await Promise.race([
     runtime.browser.close().catch(() => {}),
     sleep(1_000)
@@ -535,7 +539,7 @@ async function connectBrowser(request) {
   const statePath = path.join(sessionDir, "session-state.json");
   fs.mkdirSync(sessionDir, { recursive: true });
   let endpoint = endpointFromProfile(profileDir);
-  let state = sessionState(statePath);
+  let state = sessionState(statePath, { allowMissing: true });
   if (await endpointIsAlive(endpoint)) {
     if (state.session_id && state.session_id !== request.session_id) {
       throw new Error("browser session state belongs to a different Cindx session");
@@ -549,8 +553,10 @@ async function connectBrowser(request) {
         ...state,
         schema: SESSION_STATE_SCHEMA,
         session_id: request.session_id,
+        watchdog_pid: null,
         profile_dir: profileDir,
         launch_token: crypto.randomUUID(),
+        active_tab_id: state.active_tab_id ?? null,
         created_at_ms: now,
         last_used_at_ms: now,
         lease_expires_at_ms: now + sessionTtlMs()
@@ -594,16 +600,93 @@ async function pagesWithIds(context) {
   );
 }
 
-function sessionState(statePath) {
-  try {
-    return readJson(statePath);
-  } catch {
-    return {};
+function validProcessId(value) {
+  return Number.isInteger(value) && value > 0;
+}
+
+function validOptionalTabId(value) {
+  return value === null || value === undefined || typeof value === "string";
+}
+
+function validateSessionState(state, statePath) {
+  if (!state || typeof state !== "object" || Array.isArray(state)) {
+    throw new Error(`browser session state has invalid shape at ${statePath}: expected an object`);
   }
+
+  if (state.schema === undefined) {
+    if (
+      !validProcessId(state.browser_pid) ||
+      typeof state.executable !== "string" ||
+      state.executable.length === 0 ||
+      !validOptionalTabId(state.active_tab_id)
+    ) {
+      throw new Error(
+        `browser session state has invalid shape at ${statePath}: incomplete legacy state`
+      );
+    }
+    return {
+      browser_pid: state.browser_pid,
+      executable: state.executable,
+      active_tab_id: state.active_tab_id ?? null
+    };
+  }
+
+  const expectedProfileDir = path.resolve(path.dirname(statePath), "profile");
+  const validWatchdogPid = state.watchdog_pid === null || validProcessId(state.watchdog_pid);
+  const validActiveTabId = state.active_tab_id === null || typeof state.active_tab_id === "string";
+  const validTimestamp = (value) => Number.isInteger(value) && value > 0;
+  if (
+    state.schema !== SESSION_STATE_SCHEMA ||
+    typeof state.session_id !== "string" ||
+    state.session_id.length === 0 ||
+    !validProcessId(state.browser_pid) ||
+    !validWatchdogPid ||
+    typeof state.executable !== "string" ||
+    state.executable.length === 0 ||
+    typeof state.profile_dir !== "string" ||
+    !path.isAbsolute(state.profile_dir) ||
+    path.resolve(state.profile_dir) !== expectedProfileDir ||
+    typeof state.launch_token !== "string" ||
+    state.launch_token.length === 0 ||
+    !validActiveTabId ||
+    !validTimestamp(state.created_at_ms) ||
+    !validTimestamp(state.last_used_at_ms) ||
+    !validTimestamp(state.lease_expires_at_ms)
+  ) {
+    throw new Error(
+      `browser session state has invalid shape at ${statePath}: expected ${SESSION_STATE_SCHEMA}`
+    );
+  }
+  return state;
+}
+
+function sessionState(statePath, { allowMissing = false } = {}) {
+  let source;
+  try {
+    source = fs.readFileSync(statePath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      if (allowMissing) return {};
+      throw new Error(`browser session state is missing at ${statePath}`);
+    }
+    throw new Error(
+      `browser session state is unreadable at ${statePath}: ${error?.code || error?.message || error}`
+    );
+  }
+
+  let state;
+  try {
+    state = JSON.parse(source);
+  } catch (error) {
+    throw new Error(
+      `browser session state contains invalid JSON at ${statePath}: ${error.message}`
+    );
+  }
+  return validateSessionState(state, statePath);
 }
 
 function saveActiveTab(statePath, activeTabId) {
-  const state = sessionState(statePath);
+  const state = sessionState(statePath, { allowMissing: false });
   const now = Date.now();
   writeJson(statePath, {
     ...state,
@@ -619,7 +702,8 @@ async function selectPage(context, request, statePath) {
     const page = await context.newPage();
     pages = [{ page, index: 0, id: await pageId(context, page) }];
   }
-  const requestedId = request.tab_id || sessionState(statePath).active_tab_id;
+  const requestedId =
+    request.tab_id || sessionState(statePath, { allowMissing: false }).active_tab_id;
   const selected = pages.find((entry) => entry.id === requestedId) || pages[pages.length - 1];
   saveActiveTab(statePath, selected.id);
   return selected;
@@ -877,7 +961,7 @@ async function execute(request) {
       const statePath = path.join(sessionDir, "session-state.json");
       const endpoint = endpointFromProfile(profileDir);
       if (!(await endpointIsAlive(endpoint))) {
-        const state = sessionState(statePath);
+        const state = sessionState(statePath, { allowMissing: true });
         if (processIsAlive(Number(state.browser_pid))) {
           await terminateOwnedBrowserSession(statePath, endpoint);
         }

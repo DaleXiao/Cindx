@@ -1081,8 +1081,12 @@ assert(
 );
 assert(
   appSource.includes("sessionSelectionRequestRef") &&
-    appSource.includes("sessionSelectionRunningRef") &&
-    appSource.includes("sessionSelectionPendingRef") &&
+    latestAsyncSelectionSource.includes("const runningRef = useRef(false)") &&
+    latestAsyncSelectionSource.includes(
+      "const pendingRef = useRef<PendingSelection<Value> | null>(null)"
+    ) &&
+    latestAsyncSelectionSource.includes("while (pendingRef.current)") &&
+    latestAsyncSelectionSource.includes("pending.operation = operation") &&
     appSource.includes("sessionRefreshRequestRef") &&
     appSource.includes("enqueueProjectSessionSelection") &&
     appSource.includes("if (sessionId === activeSessionIdRef.current) return") &&
@@ -1097,7 +1101,7 @@ assert(
 assert(
   sessionRuntimeModelSource.includes("SESSION_STATE_CACHE_LIMIT = 24") &&
     sessionRuntimeModelSource.includes("class SessionRuntimeCache") &&
-    appSource.includes("SESSION_STATE_CACHE_LIMIT") &&
+    appWorkspaceProjectionSource.includes("SESSION_STATE_CACHE_LIMIT") &&
     appSource.includes("sessionRuntimeCache") &&
     !appSource.includes("agentStateCacheRef") &&
     !appSource.includes("agentTraceCacheRef") &&
@@ -1289,7 +1293,9 @@ assert(
   "Agent trace must communicate execution order with a numbered connected timeline"
 );
 assert(
-  appSource.includes('aria-label={inspectorOpen ? "Hide inspector" : "Show inspector"}') &&
+  workspaceChromeSource.includes(
+    'aria-label={inspectorOpen ? "Hide inspector" : "Show inspector"}'
+  ) &&
     !inspectorSource.includes("Close inspector"),
   "Inspector must use one stable toggle instead of duplicate controls"
 );
@@ -1302,8 +1308,10 @@ assert(
   "Inspector must start closed and open only when the user inspects an in-thread output"
 );
 assert(
-  appSource.includes('DEBUG_ALWAYS_VISIBLE_STORAGE_KEY = "cindx.debug.always-visible"') &&
-    appSource.includes("loadDebugAlwaysVisible") &&
+  appShellModelSource.includes(
+    'DEBUG_ALWAYS_VISIBLE_STORAGE_KEY = "cindx.debug.always-visible"'
+  ) &&
+    appShellModelSource.includes("loadDebugAlwaysVisible") &&
     settingsPageSource.includes("Always show Debug") &&
     appSource.includes("showDebug={debugAlwaysVisible}") &&
     inspectorSource.includes('hidden={!showDebug}') &&
@@ -1311,13 +1319,15 @@ assert(
   "Debug entry must stay hidden by default and use the persisted Settings preference"
 );
 assert(
-  appSource.includes("window-toolbar") &&
-    appSource.includes("data-sidebar-open={sidebarOpen}") &&
-    appSource.includes('aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}'),
+  workspaceChromeSource.includes("window-toolbar") &&
+    workspaceChromeSource.includes("data-open={sidebarOpen}") &&
+    workspaceChromeSource.includes(
+      'aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}'
+    ),
   "The titlebar must expose a stable sidebar toggle"
 );
 assert(
-  appSource.includes('className="window-toolbar" data-tauri-drag-region') &&
+  workspaceChromeSource.includes('className="window-toolbar" data-tauri-drag-region') &&
     styles.includes(".window-workspace-header") &&
     styles.includes("pointer-events: none") &&
     !appSource.includes("getCurrentWindow().startDragging()"),
@@ -1336,10 +1346,10 @@ assert(
   "Selecting any sidebar session must leave Settings, including the active session"
 );
 assert(
-  appSource.includes("PanelLeftClose") &&
-    appSource.includes("PanelLeftOpen") &&
-    appSource.includes("PanelRightClose") &&
-    appSource.includes("PanelRightOpen") &&
+  workspaceChromeSource.includes("PanelLeftClose") &&
+    workspaceChromeSource.includes("PanelLeftOpen") &&
+    workspaceChromeSource.includes("PanelRightClose") &&
+    workspaceChromeSource.includes("PanelRightOpen") &&
     styles.includes("window-pane-toggle-icon"),
   "Pane controls must animate between explicit open and close icons"
 );
@@ -1360,8 +1370,8 @@ assert(
   "Icon feedback and full-height pane dividers must retain their polished geometry"
 );
 assert(
-  appSource.includes("window-toolbar-panel-left") &&
-    appSource.includes("window-toolbar-panel-right") &&
+  workspaceChromeSource.includes("window-toolbar-panel-left") &&
+    workspaceChromeSource.includes("window-toolbar-panel-right") &&
     appSource.includes("data-active-view={activeView}") &&
     appSource.includes("data-view={activeView}") &&
     styles.includes("--toolbar-solid: rgba(255, 255, 255, 0.96)") &&
@@ -1490,7 +1500,7 @@ assert(
     appSource.includes("optimisticUserMessagesRef") &&
     appSource.includes("optimisticUserMessageRevision") &&
     appSource.includes("setOptimisticUserMessageRevision") &&
-    appSource.includes("messagesWithOptimisticUserMessage") &&
+    appWorkspaceProjectionSource.includes("messagesWithOptimisticUserMessage") &&
     appSource.includes("messages={visibleAgentMessages}"),
   "Session thread must show submitted user messages before paint and preserve them during polling"
 );
@@ -1511,12 +1521,12 @@ assert(
     sessionThreadSource.includes("MINIMAP_MARKER_GAP = 12") &&
     sessionThreadSource.includes("Math.max(0, markerCount - 1) / 2") &&
     sessionThreadSource.includes("const groupStart = (bounds.height - groupHeight) / 2") &&
-    sessionThreadSource.includes("minimapMarkerPosition(index, minimapMarkers.length)") &&
+    sessionThreadSource.includes("minimapMarkerPosition(index, markers.length)") &&
     sessionThreadSource.includes("MIN_MINIMAP_MARKERS = 2") &&
     sessionThreadSource.includes("data-edge-fade") &&
     sessionThreadSource.includes("data-wave-distance") &&
     sessionThreadSource.includes("thread-minimap-preview") &&
-    sessionThreadSource.includes("}, 420)"),
+    sessionThreadSource.includes("setPreviewIndex(hoveredIndex), 420)"),
   "Minimap markers must grow evenly from the vertical center with a five-tick hover wave and delayed preview"
 );
 assert(
@@ -1571,7 +1581,7 @@ assert(
   !sessionThreadSource.includes('data-content-ready={contentReady}') &&
     sessionThreadSource.includes('className="session-thread-empty-state"') &&
     sessionThreadSource.includes("rowVirtualizer.measureElement(element)") &&
-    appSource.includes("const sessionPrefetchKey = useMemo") &&
+    appWorkspaceProjectionSource.includes("const sessionPrefetchKey = useMemo") &&
     appSource.includes("requestSessionAgentState(sessionId).catch(() => null)") &&
     appSource.includes("await Promise.all([worker(), worker()])") &&
     appSource.includes("const cached = sessionRuntimeCache.read(sessionId)") &&
@@ -1639,7 +1649,10 @@ assert(
     !inspectorSource.includes("DisclosureTriangle") &&
     !settingsPageSource.includes("DisclosureTriangle") &&
     settingsPageSource.includes("function SettingsChevron") &&
-    (settingsPageSource.match(/<SettingsChevron/g)?.length ?? 0) === 9 &&
+    settingsPermissionsPanelSource.includes("function DisclosureChevron") &&
+    (settingsPageSource.match(/<SettingsChevron/g)?.length ?? 0) +
+      (settingsPageSource.match(/<DisclosureChevron/g)?.length ?? 0) ===
+      9 &&
     settingsPageSource.includes('className={action ? "settings-action-chevron" : "settings-disclosure-chevron"}') &&
     (inspectorSource.match(/<ChevronRight/g)?.length ?? 0) >= 1 &&
     inspectorSource.includes('className="inspector-debug-chevron"') &&
@@ -1832,8 +1845,8 @@ assert(
   "Session state and action menu must share one fixed trailing slot and swap on hover"
 );
 assert(
-  appSource.includes("matchingSessionExists") &&
-    appSource.includes("if (normalizedSidebarQuery)") &&
+  appWorkspaceProjectionSource.includes("matchingSessionExists") &&
+    appWorkspaceProjectionSource.includes("if (normalizedSidebarQuery)") &&
     sidebarSource.includes("searchActive") &&
     sidebarSource.includes("projectSessions = sessions.filter") &&
     sidebarSource.includes("selectSessionResult") &&
@@ -2124,7 +2137,9 @@ assert(
     !inspectorSource.includes("contextCheckpoint?.artifacts.forEach") &&
     !inspectorSource.includes("ragSources.forEach") &&
     !inspectorSource.includes("browserObservations.forEach") &&
-    appSource.includes("agentTraceState?.sessionId === activeSession.id") &&
+    appWorkspaceProjectionSource.includes(
+      "agentTraceState?.sessionId === activeSession.id"
+    ) &&
     appSource.includes("sessionTraceSteps={activeSessionTraceSteps}") &&
     styles.includes('.inspector-output-detail[data-fullscreen="true"]') &&
     styles.includes("position: fixed;") &&
@@ -2213,7 +2228,7 @@ assert(
   "Models settings must persist and use a dedicated Conductor model"
 );
 assert(
-  appSource.includes("context-usage") &&
+  workspaceChromeSource.includes("context-usage") &&
     /\.topbar-actions \{[\s\S]*?gap: 12px;/.test(styles) &&
     /\.context-usage \{[\s\S]*?width: 132px;/.test(styles) &&
     /\.context-usage progress \{[\s\S]*?width: 124px;[\s\S]*?height: 2px;[\s\S]*?border-radius: var\(--radius-pill\);/.test(
@@ -2222,7 +2237,7 @@ assert(
   "Topbar must expose compact rounded context usage with breathing room before runtime state"
 );
 assert(
-  appSource.includes('activeView !== "settings"') &&
+  workspaceChromeSource.includes('activeView !== "settings"') &&
     styles.includes(".topbar-title") &&
     styles.includes(".topbar-actions") &&
     !styles.includes("--titlebar-content-offset-y"),
@@ -2236,7 +2251,8 @@ assert(
   "Settings must keep a persistent vertical category tab list with a bold active title"
 );
 assert(
-  appSource.includes("window-workspace-header") && !appSource.includes('className="topbar"'),
+  workspaceChromeSource.includes("window-workspace-header") &&
+    !desktopUiSource.includes('className="topbar"'),
   "Session title, context usage, and runtime status must be integrated into the window titlebar"
 );
 assert(
@@ -2305,7 +2321,13 @@ assert(
     rustLib.includes("web-search.conf") &&
     rustLib.includes("with_workspace_tools_and_services") &&
     toolsSource.includes("fetch_search_api") &&
-    toolsSource.includes('"Authorization: Bearer {}"'),
+    toolsSource.includes('stdin_bytes: Option<&[u8]>') &&
+    toolsSource.includes('command.args(["-q", "-L"])') &&
+    toolsSource.includes('command.args(["--max-redirs", "0"])') &&
+    toolsSource.includes('["--proto", "=https", "--proto-redir", "=https"]') &&
+    toolsSource.includes('command.args(["--header", "@-"])') &&
+    toolsSource.includes("web search endpoints with an API key must use HTTPS") &&
+    !toolsSource.includes('.arg(format!("Authorization: Bearer'),
   "Tools settings must persist a private custom web search API and expand built-in tool details"
 );
 assert(
@@ -2421,7 +2443,7 @@ assert(
 assert(
   appSource.includes("busy={projectSessionBusy}") &&
     appSource.includes("busySessionIds") &&
-    appSource.includes("composerDrafts") &&
+    composerDraftsSource.includes("const [drafts, setDrafts]") &&
     !appSource.includes("agentBusy"),
   "Running one session must not disable navigation to other sessions"
 );
@@ -2456,7 +2478,9 @@ assert(
     composerSource.includes('className="composer-effort-menu"') &&
     composerSource.includes('role="listbox"') &&
     composerSource.includes('role="option"') &&
-    appSource.includes("normalizedSessionEffort(activeSession?.effort)") &&
+    appWorkspaceProjectionSource.includes(
+      "normalizedSessionEffort(activeSession?.effort)"
+    ) &&
     appSource.includes("handleSessionEffortChange") &&
     appSource.includes("setSessionEffort(sessionId, effort)") &&
     !appSource.includes('useState<AgentEffort>("auto")') &&
@@ -2711,7 +2735,9 @@ assert(
     /<Dna size=\{17\} aria-hidden="true" \/>\s*<h2>Genetic Pareto<\/h2>/.test(settingsPageSource) &&
     settingsPageSource.includes("Genetic Pareto") &&
     settingsPageSource.includes("Candidate harnesses execute in an isolated arena before promotion") &&
-    settingsPageSource.includes("direct stable-versus-challenger Wilson gate controls staged canary rollout") &&
+    /direct\s+stable-versus-challenger Wilson gate controls staged canary rollout/.test(
+      settingsPageSource
+    ) &&
     settingsPageSource.includes("Evaluating in background") &&
     settingsPageSource.includes("Rollout by effort") &&
     settingsPageSource.includes("Candidate profiles") &&
@@ -2786,8 +2812,8 @@ assert(desktopUiSource.includes("answerWithRag"), "App must render the Phase 7 R
 assert(settingsPageSource.includes("Search web"), "App must render the Phase 8 web search action");
 assert(desktopUiSource.includes("runBrowserTool"), "App must render the Phase 8 browser flow");
 assert(
-  settingsPageSource.includes('handleRunBrowserTool("browser.tabs")') &&
-    settingsPageSource.includes('handleRunBrowserTool("browser.select_tab")'),
+  settingsPageSource.includes('onRunBrowserTool("browser.tabs")') &&
+    settingsPageSource.includes('onRunBrowserTool("browser.select_tab")'),
   "Browser settings must expose tab listing and selection"
 );
 assert(appSource.includes("getRuntimeStatus"), "App must call the runtime bridge");
@@ -3015,7 +3041,7 @@ assert(
 assert(
   settingsPageSource.includes("const KnowledgeGraph = lazy(() =>") &&
     settingsPageSource.includes("knowledgeGraphOpen ? (") &&
-    appSource.includes("BACKGROUND_AGENT_POLL_INTERVAL_MS = 5_000") &&
+    appShellModelSource.includes("BACKGROUND_AGENT_POLL_INTERVAL_MS = 5_000") &&
     appSource.includes('document.visibilityState === "hidden"') &&
     appSource.includes('document.addEventListener("visibilitychange"'),
   "Heavy graph code and active-session polling must pause or defer while their surfaces are not visible"
