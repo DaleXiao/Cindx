@@ -40,6 +40,29 @@
           "absolute_tolerance_micros": 4000
         }
       ]
+    },
+    {
+      "schema": "cindx.conductor-health-diagnostic.v1",
+      "identity": [
+        "models",
+        "max_health_keys",
+        "max_observations_per_key",
+        "warmup_rounds",
+        "sample_count",
+        "hedge"
+      ],
+      "metrics": [
+        {
+          "field": "cold_path_p95_micros",
+          "max_regression_percent": 5,
+          "absolute_tolerance_micros": 50
+        },
+        {
+          "field": "warm_evidence_p95_micros",
+          "max_regression_percent": 5,
+          "absolute_tolerance_micros": 50
+        }
+      ]
     }
   ]
 }

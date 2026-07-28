@@ -15,6 +15,7 @@ use crate::agent_conductor_scheduler::{
 use crate::app_state::AppState;
 use crate::collaboration_service::{collaboration_recent_context, truncate_for_collaboration};
 use crate::collaboration_stage_runtime::CollaborationStageError;
+use crate::conductor_health_runtime;
 use crate::configuration_models::{AgentEffort, ProviderConfig};
 use crate::event_persistence::append_event;
 use crate::project_session_persistence::metadata_with_context;
@@ -165,6 +166,7 @@ pub(crate) fn plan_agent_run(
     let (profile, profile_source) = selected_strategy_profile(state, config, effort, run_context);
 
     if effort == AgentEffort::Fast {
+        conductor_health_runtime::record_conductor_fast_bypass(run_context);
         let planned = finalize_planned_run(
             AgentRunDecision::direct(fallback_model),
             prompt,
@@ -188,12 +190,15 @@ pub(crate) fn plan_agent_run(
         return Ok(planned);
     }
 
-    let max_parallelism = match effort {
-        AgentEffort::Fast => 1,
-        AgentEffort::Auto => 2,
-        AgentEffort::Pro => 3,
-    };
-    let conductor_models = conductor_model_sequence(config);
+    let max_parallelism = if effort == AgentEffort::Pro { 3 } else { 2 };
+    let configured_conductor_models = conductor_model_sequence(config);
+    let (provider_scope, health_generation, conductor_models) =
+        conductor_health_runtime::route_conductor_models(
+            &state.conductor_health,
+            &config.base_url,
+            &configured_conductor_models,
+            run_context,
+        );
     let base_request = AgentRunDecisionRequest {
         objective: prompt.to_string(),
         recent_context: collaboration_recent_context(history),
@@ -223,7 +228,8 @@ pub(crate) fn plan_agent_run(
             let mut request = base_request.clone();
             request.conductor_model = conductor_model.to_string();
             let harness = AgentRunDecisionHarness::new(request);
-            attempt_conductor_decision(
+            let calls_before = *attempts;
+            let result = attempt_conductor_decision(
                 state,
                 config,
                 task_id,
@@ -234,7 +240,17 @@ pub(crate) fn plan_agent_run(
                 conductor_model,
                 &harness,
                 attempts,
-            )
+            );
+            conductor_health_runtime::record_conductor_attempt(
+                &state.conductor_health,
+                &provider_scope,
+                health_generation,
+                conductor_model,
+                (*attempts).saturating_sub(calls_before),
+                &result,
+                run_context,
+            );
+            result
         },
     )?;
     let ConductorDecisionSchedule {

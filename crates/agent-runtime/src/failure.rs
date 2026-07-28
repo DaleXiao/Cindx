@@ -42,6 +42,7 @@ pub struct AgentFailure {
     pub message: String,
     pub class: AgentFailureClass,
     pub retryable: bool,
+    pub provider_status_code: Option<u16>,
 }
 
 impl AgentFailure {
@@ -56,6 +57,7 @@ impl AgentFailure {
             message: message.into(),
             class,
             retryable,
+            provider_status_code: None,
         }
     }
 
@@ -121,12 +123,14 @@ impl AgentFailure {
             }
             ProviderFailureClass::Unknown => AgentFailureClass::ProviderPermanent,
         };
-        Self::new(
+        let mut failure = Self::new(
             format!("provider_{}", error.class.label()),
             error.message.clone(),
             class,
             error.retryable,
-        )
+        );
+        failure.provider_status_code = error.status_code;
+        failure
     }
 
     pub fn should_retry(&self) -> bool {
@@ -182,6 +186,14 @@ mod tests {
         ));
         assert_eq!(invalid.class, AgentFailureClass::ProviderPermanent);
         assert!(!invalid.should_retry());
+
+        let unauthorized =
+            AgentFailure::from_model_error(&ModelError::with_status(401, "invalid credentials"));
+        assert_eq!(unauthorized.provider_status_code, Some(401));
+
+        let forbidden =
+            AgentFailure::from_model_error(&ModelError::with_status(403, "model is not allowed"));
+        assert_eq!(forbidden.provider_status_code, Some(403));
     }
 
     #[test]
