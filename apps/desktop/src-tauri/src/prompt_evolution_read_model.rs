@@ -394,10 +394,7 @@ pub(crate) fn prompt_rollout_key(scope: &str, effort: &str) -> String {
     scoped_prompt_evaluation_id(scope, effort)
 }
 
-fn prompt_observation_matches_scope(
-    observation: &PromptEvolutionObservation,
-    scope: &str,
-) -> bool {
+fn prompt_observation_matches_scope(observation: &PromptEvolutionObservation, scope: &str) -> bool {
     observation
         .evaluation_id
         .split_once(PROMPT_EVIDENCE_SCOPE_SEPARATOR)
@@ -412,7 +409,9 @@ pub(crate) fn prompt_evolution_read_model_for_scope(
     scoped
         .observations
         .retain(|(_, observation)| prompt_observation_matches_scope(observation, scope));
-    scoped.datasets.retain(|_, dataset| dataset.project_id == scope);
+    scoped
+        .datasets
+        .retain(|_, dataset| dataset.project_id == scope);
     scoped.rollouts = ["fast", "auto", "pro"]
         .into_iter()
         .filter_map(|effort| {

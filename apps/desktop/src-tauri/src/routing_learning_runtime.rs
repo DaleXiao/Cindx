@@ -118,9 +118,32 @@ pub(crate) fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTele
             })?;
             let decision = run_events
                 .iter()
+                .rev()
                 .find(|event| event.summary == "Agent run decision selected")
                 .copied()
                 .unwrap_or(started);
+            let terminal = run_events.iter().rev().find(|event| {
+                matches!(
+                    event.summary.as_str(),
+                    "Agent task completed" | "Agent task cancelled" | "Agent task failed"
+                )
+            })?;
+            let event_epoch = |event: &Event| {
+                event
+                    .metadata
+                    .get("steer_epoch")
+                    .cloned()
+                    .unwrap_or_else(|| "0".to_string())
+            };
+            let stable_epoch = event_epoch(decision);
+            if event_epoch(terminal) != stable_epoch {
+                return None;
+            }
+            let stable_events = run_events
+                .iter()
+                .copied()
+                .filter(|event| event_epoch(event) == stable_epoch)
+                .collect::<Vec<_>>();
             let task_class = parse_task_class_label(decision.metadata.get("task_class")?)?;
             let selected_policy = parse_policy(decision.metadata.get("collaboration_policy")?)?;
             let selected_model = decision
@@ -128,26 +151,20 @@ pub(crate) fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTele
                 .get("agent_model")
                 .or_else(|| decision.metadata.get("router_model"))?
                 .clone();
-            let terminal = run_events.iter().rev().find(|event| {
-                matches!(
-                    event.summary.as_str(),
-                    "Agent task completed" | "Agent task cancelled" | "Agent task failed"
-                )
-            })?;
-            let outcome = routing_outcome_for_run(&run_events, terminal)?;
+            let outcome = routing_outcome_for_run(&stable_events, terminal)?;
             let (quality_score, verification_passed) =
-                routing_quality_signals(&run_events, terminal);
-            let cost_proxy = run_events
+                routing_quality_signals(&stable_events, terminal);
+            let cost_proxy = stable_events
                 .iter()
                 .filter(|event| event.kind == EventKind::ModelRequestFinished)
                 .filter_map(|event| event.metadata.get("total_tokens"))
                 .filter_map(|value| value.parse::<u64>().ok())
                 .sum();
-            let tool_count = run_events
+            let tool_count = stable_events
                 .iter()
                 .filter(|event| event.kind == EventKind::ToolCallFinished)
                 .count() as u64;
-            let retrieval_count = run_events
+            let retrieval_count = stable_events
                 .iter()
                 .filter(|event| event.kind == EventKind::RetrievalPerformed)
                 .count() as u64;
@@ -160,7 +177,12 @@ pub(crate) fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTele
                     .unwrap_or_default(),
                 selected_policy,
                 selected_model,
-                latency_ms: terminal.timestamp_ms.saturating_sub(started.timestamp_ms),
+                latency_ms: terminal.timestamp_ms.saturating_sub(
+                    stable_events
+                        .first()
+                        .map(|event| event.timestamp_ms)
+                        .unwrap_or(started.timestamp_ms),
+                ),
                 outcome,
                 quality_score,
                 verification_passed,

@@ -5,9 +5,13 @@ use crate::{
     configuration_models::ProviderConfig,
     event_persistence::append_event,
     event_security::redact_sensitive_text,
+    knowledge_generation_runtime::{
+        build_and_publish_knowledge_generation_cancellable, knowledge_paths_for_rag_index,
+        with_workspace_knowledge_index_lock,
+    },
     persistence_runtime::{
-        cache_rag_adapter, cached_graph_store_for, cached_rag_adapter_for, graph_store_path_for,
-        index_graph_chunks_cancellable, lancedb_database_path_for, lancedb_export_path_for,
+        cache_rag_adapter, cached_graph_store_for_adapter, cached_rag_adapter_for,
+        open_rag_adapter_for,
     },
     project_session_persistence::metadata_with_context,
     runtime_values::phase7_task_id,
@@ -18,6 +22,14 @@ use crate::{
     },
 };
 
+pub(crate) fn knowledge_preparation_should_interrupt(
+    cancellation: &Arc<AgentRunControl>,
+    expected_epoch: u64,
+) -> bool {
+    agent_run_should_stop(cancellation)
+        || !cancellation.preparation_epoch_is_current(expected_epoch)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_agent_knowledge_context(
     state: &tauri::State<'_, AppState>,
@@ -27,6 +39,7 @@ pub(crate) fn prepare_agent_knowledge_context(
     workspace_root: &Path,
     retrieval_plan: &WorkspaceRetrievalPlan,
     cancellation: &Arc<AgentRunControl>,
+    expected_epoch: u64,
 ) -> Result<Option<Message>, String> {
     let query = retrieval_plan.query.as_str();
     let retrieval_mode = retrieval_plan.mode_label();
@@ -38,12 +51,13 @@ pub(crate) fn prepare_agent_knowledge_context(
         index_cache_hit,
         config,
         cancellation,
+        expected_epoch,
     )?;
     if workspace_knowledge_cache_needs_refresh(index_cache_hit, auto_indexed.is_some()) {
         cache_rag_adapter(state, workspace_root, &adapter)?;
     }
     let index_duration_ms = index_started_at.elapsed().as_millis() as u64;
-    if agent_run_should_stop(cancellation) {
+    if knowledge_preparation_should_interrupt(cancellation, expected_epoch) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
     let graph_store = if retrieval_plan.channels.iter().any(|channel| {
@@ -52,7 +66,7 @@ pub(crate) fn prepare_agent_knowledge_context(
             WorkspaceRetrievalChannel::GraphDirect | WorkspaceRetrievalChannel::GraphWalk
         )
     }) {
-        cached_graph_store_for(state, workspace_root)?
+        cached_graph_store_for_adapter(state, workspace_root, &adapter)?
     } else {
         None
     };
@@ -64,9 +78,14 @@ pub(crate) fn prepare_agent_knowledge_context(
         retrieval_plan,
         graph_store.as_ref(),
         cancellation,
+        expected_epoch,
     )?;
     retrieval.trace.index_cache_hit = index_cache_hit;
     retrieval.trace.index_duration_ms = index_duration_ms;
+
+    if knowledge_preparation_should_interrupt(cancellation, expected_epoch) {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
 
     {
         let mut store = state
@@ -187,107 +206,99 @@ pub(crate) fn ensure_workspace_knowledge_index(
     cache_hit: bool,
     config: &ProviderConfig,
     cancellation: &Arc<AgentRunControl>,
+    expected_epoch: u64,
 ) -> Result<Option<AutomaticKnowledgeIndexResult>, String> {
-    if agent_run_should_stop(cancellation) {
+    if knowledge_preparation_should_interrupt(cancellation, expected_epoch) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
-    if cache_hit
-        && !adapter.chunks().is_empty()
-        && graph_store_path_for(workspace_root).exists()
-        && lancedb_index_exists(lancedb_database_path_for(workspace_root))
-    {
+    if cache_hit && knowledge_snapshot_is_complete(adapter) {
         return Ok(None);
     }
-    let options = IndexOptions::default();
-    let embedding_profile_matches =
-        adapter
-            .embedding_profile()
-            .is_some_and(|(provider, model, _)| {
-                if config.is_ready() {
-                    provider != "local" && model == config.model_for_role(&ModelRole::Embedder)
-                } else {
-                    provider == "local"
-                }
-            });
-    let index_is_fresh = embedding_profile_matches
-        && !adapter.chunks().is_empty()
-        && workspace_index_is_fresh(workspace_root, adapter.chunks(), options.clone(), || {
-            agent_run_should_stop(cancellation)
-        })
-        .map_err(|error| {
-            if error.message == RAG_INDEX_CANCELLED {
-                MODEL_REQUEST_CANCELLED.to_string()
-            } else {
-                error.to_string()
-            }
-        })?;
-    if index_is_fresh {
-        if !graph_store_path_for(workspace_root).exists() {
-            index_graph_chunks_cancellable(workspace_root, adapter.chunks(), || {
-                agent_run_should_stop(cancellation)
-            })?;
+    with_workspace_knowledge_index_lock(workspace_root, || {
+        if knowledge_preparation_should_interrupt(cancellation, expected_epoch) {
+            return Err(MODEL_REQUEST_CANCELLED.to_string());
         }
-        if !lancedb_index_exists(lancedb_database_path_for(workspace_root)) {
-            replace_lancedb_index(lancedb_database_path_for(workspace_root), adapter.index())
-                .map_err(|error| error.to_string())?;
+        *adapter = open_rag_adapter_for(workspace_root)?;
+        let options = IndexOptions::default();
+        let snapshot_paths = knowledge_paths_for_rag_index(adapter.path());
+        let embedding_profile_matches = (adapter.chunks().is_empty()
+            && snapshot_paths.generation_id.is_some())
+            || adapter
+                .embedding_profile()
+                .is_some_and(|(provider, model, _)| {
+                    if config.is_ready() {
+                        provider != "local" && model == config.model_for_role(&ModelRole::Embedder)
+                    } else {
+                        provider == "local"
+                    }
+                });
+        let index_is_fresh = embedding_profile_matches
+            && workspace_index_is_fresh(workspace_root, adapter.chunks(), options.clone(), || {
+                knowledge_preparation_should_interrupt(cancellation, expected_epoch)
+            })
+            .map_err(rag_index_error_for_agent)?;
+        if index_is_fresh && knowledge_snapshot_is_complete(adapter) {
+            return Ok(None);
+        }
+
+        let (index, embedding_backend, embedding_model, fallback_error) = if index_is_fresh {
             let (backend, model) = adapter
                 .embedding_profile()
                 .map(|(provider, model, _)| (provider.to_string(), model.to_string()))
                 .unwrap_or_else(|| ("local".to_string(), "local-hash".to_string()));
-            return Ok(Some(AutomaticKnowledgeIndexResult {
-                stats: adapter.stats().clone(),
-                embedding_backend: format!("{backend}-lancedb-migration"),
-                embedding_model: model,
-                fallback_error: None,
-            }));
-        }
-        return Ok(None);
-    }
-
-    let (index, embedding_backend, embedding_model, fallback_error) = if config.is_ready() {
-        let configured_model = config.model_for_role(&ModelRole::Embedder);
-        let mut embedder = CloudRagEmbedder {
-            config: config.clone(),
-            cancellation: Some(cancellation.clone()),
+            (
+                adapter.index().clone(),
+                format!("{backend}-generation-migration"),
+                model,
+                None,
+            )
+        } else if config.is_ready() {
+            let configured_model = config.model_for_role(&ModelRole::Embedder);
+            let mut embedder = CloudRagEmbedder {
+                config: config.clone(),
+                cancellation: Some(cancellation.clone()),
+                expected_steer_epoch: Some(expected_epoch),
+            };
+            index_workspace_with_cloud_fallback_cancellable(
+                workspace_root,
+                options,
+                &mut embedder,
+                &configured_model,
+                || knowledge_preparation_should_interrupt(cancellation, expected_epoch),
+            )?
+        } else {
+            let index = index_workspace_cancellable(workspace_root, options, || {
+                knowledge_preparation_should_interrupt(cancellation, expected_epoch)
+            })
+            .map_err(rag_index_error_for_agent)?;
+            let model = index
+                .chunks
+                .first()
+                .map(|chunk| chunk.embedding_model.clone())
+                .unwrap_or_else(|| "local-hash".to_string());
+            (index, "local".to_string(), model, None)
         };
-        index_workspace_with_cloud_fallback_cancellable(
-            workspace_root,
-            options,
-            &mut embedder,
-            &configured_model,
-            || agent_run_should_stop(cancellation),
-        )?
-    } else {
-        let index = index_workspace_cancellable(workspace_root, options, || {
-            agent_run_should_stop(cancellation)
-        })
-        .map_err(rag_index_error_for_agent)?;
-        let model = index
-            .chunks
-            .first()
-            .map(|chunk| chunk.embedding_model.clone())
-            .unwrap_or_else(|| "local-hash".to_string());
-        (index, "local".to_string(), model, None)
-    };
-    index_graph_chunks_cancellable(workspace_root, &index.chunks, || {
-        agent_run_should_stop(cancellation)
-    })?;
-    if agent_run_should_stop(cancellation) {
-        return Err(MODEL_REQUEST_CANCELLED.to_string());
-    }
-    export_lancedb_records_jsonl(&index, lancedb_export_path_for(workspace_root))
-        .map_err(|error| error.to_string())?;
-    replace_lancedb_index(lancedb_database_path_for(workspace_root), &index)
-        .map_err(|error| error.to_string())?;
-    let stats = adapter
-        .replace_all(index)
-        .map_err(|error| error.to_string())?;
-    Ok(Some(AutomaticKnowledgeIndexResult {
-        stats,
-        embedding_backend,
-        embedding_model,
-        fallback_error,
-    }))
+        let published =
+            build_and_publish_knowledge_generation_cancellable(workspace_root, index, || {
+                knowledge_preparation_should_interrupt(cancellation, expected_epoch)
+            })?;
+        let stats = published.adapter.stats().clone();
+        *adapter = published.adapter;
+        Ok(Some(AutomaticKnowledgeIndexResult {
+            stats,
+            embedding_backend,
+            embedding_model,
+            fallback_error,
+        }))
+    })
+}
+
+fn knowledge_snapshot_is_complete(adapter: &FileRagAdapter) -> bool {
+    let paths = knowledge_paths_for_rag_index(adapter.path());
+    paths.graph_store.is_file()
+        && (paths.generation_id.is_none() || paths.lancedb_export.is_file())
+        && (adapter.chunks().is_empty() || lancedb_index_exists(paths.lancedb_database))
+        && (!adapter.chunks().is_empty() || paths.generation_id.is_some())
 }
 
 pub(crate) fn rag_index_error_for_agent(error: RagError) -> String {
@@ -346,6 +357,7 @@ pub(crate) fn run_parallel_retrieval(
     cached_graph_store: Option<&FileGraphStore>,
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<ParallelRetrievalResult, String> {
+    let expected_epoch = cancellation.steer_epoch();
     let channels = match retrieval_mode {
         "none" => BTreeSet::new(),
         "four_way_parallel" => [
@@ -376,26 +388,29 @@ pub(crate) fn run_parallel_retrieval(
         &plan,
         cached_graph_store,
         cancellation,
+        expected_epoch,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_planned_retrieval(
-    workspace_root: &Path,
+    _workspace_root: &Path,
     adapter: &FileRagAdapter,
     config: &ProviderConfig,
     query: &str,
     plan: &WorkspaceRetrievalPlan,
     cached_graph_store: Option<&FileGraphStore>,
     cancellation: &Arc<AgentRunControl>,
+    expected_epoch: u64,
 ) -> Result<ParallelRetrievalResult, String> {
-    if agent_run_should_stop(cancellation) {
+    if knowledge_preparation_should_interrupt(cancellation, expected_epoch) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
     let started_at = Instant::now();
     let limit = plan.max_results.clamp(1, 24);
     let channel_limit = limit.saturating_mul(3).min(50);
     let chunks = adapter.chunks();
+    let snapshot_paths = knowledge_paths_for_rag_index(adapter.path());
     let include_graph = plan.channels.iter().any(|channel| {
         matches!(
             channel,
@@ -403,10 +418,7 @@ pub(crate) fn run_planned_retrieval(
         )
     });
     let opened_graph_store = if include_graph && cached_graph_store.is_none() {
-        Some(
-            FileGraphStore::open(graph_store_path_for(workspace_root))
-                .map_err(|error| error.to_string())?,
-        )
+        Some(FileGraphStore::open(&snapshot_paths.graph_store).map_err(|error| error.to_string())?)
     } else {
         None
     };
@@ -422,10 +434,15 @@ pub(crate) fn run_planned_retrieval(
             .then(|| {
                 scope.spawn(|| {
                     timed_retrieval_channel("semantic_rag", || {
-                        let embedding =
-                            query_embedding_for_chunks(config, chunks, query, cancellation)?;
+                        let embedding = query_embedding_for_chunks(
+                            config,
+                            chunks,
+                            query,
+                            cancellation,
+                            expected_epoch,
+                        )?;
                         search_lancedb_index(
-                            lancedb_database_path_for(workspace_root),
+                            &snapshot_paths.lancedb_database,
                             &embedding,
                             channel_limit,
                         )
@@ -441,7 +458,7 @@ pub(crate) fn run_planned_retrieval(
             .map(|store| {
                 scope.spawn(move || {
                     timed_retrieval_channel("graph_recall", || {
-                        if agent_run_should_stop(cancellation) {
+                        if knowledge_preparation_should_interrupt(cancellation, expected_epoch) {
                             return Err(MODEL_REQUEST_CANCELLED.to_string());
                         }
                         Ok(graph_direct_recall(query, chunks, store, channel_limit)
@@ -460,7 +477,7 @@ pub(crate) fn run_planned_retrieval(
             .then(|| {
                 scope.spawn(|| {
                     timed_retrieval_channel("file_search", || {
-                        if agent_run_should_stop(cancellation) {
+                        if knowledge_preparation_should_interrupt(cancellation, expected_epoch) {
                             return Err(MODEL_REQUEST_CANCELLED.to_string());
                         }
                         Ok(search_chunks_literal(chunks, query, channel_limit))
@@ -480,7 +497,7 @@ pub(crate) fn run_planned_retrieval(
         }
         channels
     });
-    if agent_run_should_stop(cancellation) {
+    if knowledge_preparation_should_interrupt(cancellation, expected_epoch) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
     if plan
@@ -492,7 +509,7 @@ pub(crate) fn run_planned_retrieval(
         };
         let graph_seeds = graph_walk_seed_results(&channels, channel_limit);
         channels.push(timed_retrieval_channel("graph_walk", || {
-            if agent_run_should_stop(cancellation) {
+            if knowledge_preparation_should_interrupt(cancellation, expected_epoch) {
                 return Err(MODEL_REQUEST_CANCELLED.to_string());
             }
             Ok(
@@ -615,6 +632,7 @@ pub(crate) fn query_embedding_for_chunks(
     chunks: &[RagChunk],
     query: &str,
     cancellation: &Arc<AgentRunControl>,
+    expected_epoch: u64,
 ) -> Result<Vec<f32>, String> {
     let Some(profile) = chunks.first() else {
         return Ok(local_query_embedding(query));
@@ -637,6 +655,7 @@ pub(crate) fn query_embedding_for_chunks(
     let mut embedder = CloudRagEmbedder {
         config: config.clone(),
         cancellation: Some(cancellation.clone()),
+        expected_steer_epoch: Some(expected_epoch),
     };
     let mut batch = embedder
         .embed_texts(&[query.to_string()])
@@ -802,17 +821,32 @@ pub(crate) fn append_retrieval_event_for_task(
 pub(crate) struct CloudRagEmbedder {
     pub(crate) config: ProviderConfig,
     pub(crate) cancellation: Option<Arc<AgentRunControl>>,
+    pub(crate) expected_steer_epoch: Option<u64>,
 }
 
 impl RagEmbedder for CloudRagEmbedder {
     fn embed_texts(&mut self, texts: &[String]) -> Result<EmbeddingBatch, agent_rag::RagError> {
+        if self.cancellation.as_ref().is_some_and(|control| {
+            self.expected_steer_epoch
+                .is_some_and(|expected| !control.preparation_epoch_is_current(expected))
+        }) {
+            return Err(agent_rag::RagError::new(MODEL_REQUEST_CANCELLED));
+        }
         if let Some(control) = self.cancellation.as_ref() {
-            control.begin_model_call("embedding").map_err(|reason| {
-                agent_rag::RagError::new(format!(
-                    "Run stopped before embedding call: {}",
-                    reason.code()
-                ))
-            })?;
+            let model_call = match self.expected_steer_epoch {
+                Some(expected_epoch) => control.begin_model_call_at(expected_epoch, "embedding"),
+                None => control.begin_model_call("embedding").map(Some),
+            };
+            match model_call {
+                Ok(Some(_)) => {}
+                Ok(None) => return Err(agent_rag::RagError::new(MODEL_REQUEST_CANCELLED)),
+                Err(reason) => {
+                    return Err(agent_rag::RagError::new(format!(
+                        "Run stopped before embedding call: {}",
+                        reason.code()
+                    )))
+                }
+            }
         }
         let model = self.config.model_for_role(&ModelRole::Embedder);
         let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
@@ -833,17 +867,29 @@ impl RagEmbedder for CloudRagEmbedder {
                 metadata: Metadata::new(),
             },
             || {
-                self.cancellation
-                    .as_ref()
-                    .is_some_and(agent_run_should_stop)
+                self.cancellation.as_ref().is_some_and(|control| {
+                    agent_run_should_stop(control)
+                        || self
+                            .expected_steer_epoch
+                            .is_some_and(|expected| !control.preparation_epoch_is_current(expected))
+                })
             },
         );
         if let Some(control) = self.cancellation.as_ref() {
-            control.finish_model_call();
+            if let Some(expected_epoch) = self.expected_steer_epoch {
+                control.finish_model_call_at(expected_epoch);
+            } else {
+                control.finish_model_call();
+            }
         }
         let response = response.map_err(|error| agent_rag::RagError::new(error.to_string()))?;
         if let Some(control) = self.cancellation.as_ref() {
-            control.mark_progress("embedding", &format!("Embedded {} items", texts.len()));
+            let detail = format!("Embedded {} items", texts.len());
+            if let Some(expected_epoch) = self.expected_steer_epoch {
+                control.mark_progress_at(expected_epoch, "embedding", &detail);
+            } else {
+                control.mark_progress("embedding", &detail);
+            }
         }
 
         Ok(EmbeddingBatch {

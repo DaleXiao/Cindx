@@ -1,20 +1,28 @@
+#[path = "agent_strategy_preparation.rs"]
+mod preparation;
+
+pub(crate) use self::preparation::{
+    cumulative_effective_prompt_objective, effective_prompt_objective_for_messages,
+};
+use self::preparation::{ensure_planning_current, selected_strategy_profile};
 use crate::agent_conductor_runtime::{
     attempt_conductor_decision, conductor_model_sequence, preferred_fallback_model,
     unique_configured_models,
 };
-use crate::app_state::AppState;
-use crate::collaboration_service::{
-    collaboration_recent_context, truncate_for_collaboration, COLLABORATION_STEER_INTERRUPTED,
+use crate::agent_conductor_scheduler::{
+    schedule_conductor_decision, ConductorDecisionOutcome, ConductorDecisionSchedule,
 };
+use crate::app_state::AppState;
+use crate::collaboration_service::{collaboration_recent_context, truncate_for_collaboration};
+use crate::collaboration_stage_runtime::CollaborationStageError;
 use crate::configuration_models::{AgentEffort, ProviderConfig};
 use crate::event_persistence::append_event;
 use crate::project_session_persistence::metadata_with_context;
-use crate::prompt_evolution_runtime::prompt_evolution_evaluation_for_run;
 use crate::workflow_routing_runtime::{
     append_router_decision_event, conductor_historical_evidence, model_candidates_for_config,
 };
 use agent_core::{EventKind, Message, Metadata, TaskId};
-use model_provider::MODEL_REQUEST_CANCELLED;
+use agent_runtime::AgentRunControl;
 use orchestrator::{
     AgentExecutionMode, AgentRunDecision, AgentRunDecisionHarness, AgentRunDecisionRequest,
     ConductorExecutionContract, ConductorPromptGenome, ModelCandidate, RoutingContext,
@@ -96,6 +104,8 @@ impl PlannedAgentRun {
                 "conductor_failure".to_string(),
                 truncate_for_collaboration(reason, 1_200),
             );
+        } else {
+            run_context.remove("conductor_failure");
         }
         run_context.insert(
             "run_decision".to_string(),
@@ -132,7 +142,23 @@ pub(crate) fn plan_agent_run(
     prompt: &str,
     history: &[Message],
     effort: AgentEffort,
-) -> Result<PlannedAgentRun, String> {
+    cancellation: &AgentRunControl,
+) -> Result<PlannedAgentRun, CollaborationStageError> {
+    ensure_planning_current(cancellation)?;
+    run_context.insert(
+        "prompt_objective".to_string(),
+        truncate_for_collaboration(prompt, 6_000),
+    );
+    let default_effective_objective = truncate_for_collaboration(
+        run_context
+            .get("initial_prompt_objective")
+            .map(String::as_str)
+            .unwrap_or(prompt),
+        6_000,
+    );
+    run_context
+        .entry("effective_prompt_objective".to_string())
+        .or_insert(default_effective_objective);
     let candidates = model_candidates_for_config(config);
     let allowed_models = unique_configured_models(&candidates);
     let fallback_model = preferred_fallback_model(config, effort, &allowed_models);
@@ -150,10 +176,15 @@ pub(crate) fn plan_agent_run(
             None,
             Vec::new(),
             None,
-        )?;
-        planned.apply_to_context(run_context, effort)?;
+        )
+        .map_err(CollaborationStageError::Failed)?;
+        ensure_planning_current(cancellation)?;
+        planned
+            .apply_to_context(run_context, effort)
+            .map_err(CollaborationStageError::Failed)?;
         run_context.insert("prompt_profile_source".to_string(), profile_source.clone());
-        record_planned_agent_run(state, task_id, run_context, &planned, &profile_source)?;
+        record_planned_agent_run(state, task_id, run_context, &planned, &profile_source)
+            .map_err(CollaborationStageError::Failed)?;
         return Ok(planned);
     }
 
@@ -185,42 +216,36 @@ pub(crate) fn plan_agent_run(
             .unwrap_or("agent")
     );
     let mut attempts = 0usize;
-    let mut attempted_conductor_models = Vec::new();
-    let mut failure_reasons = Vec::new();
-    let mut selected_conductor_model = None;
-    let mut planned_decision = None;
+    let schedule = schedule_conductor_decision(
+        &conductor_models,
+        &mut attempts,
+        |model_index, conductor_model, has_alternate_model, attempts| {
+            let mut request = base_request.clone();
+            request.conductor_model = conductor_model.to_string();
+            let harness = AgentRunDecisionHarness::new(request);
+            attempt_conductor_decision(
+                state,
+                config,
+                task_id,
+                run_context,
+                &decision_id,
+                model_index,
+                has_alternate_model,
+                conductor_model,
+                &harness,
+                attempts,
+            )
+        },
+    )?;
+    let ConductorDecisionSchedule {
+        outcome,
+        attempted_models: attempted_conductor_models,
+        selected_model: selected_conductor_model,
+        failure_reasons,
+    } = schedule;
 
-    for (model_index, conductor_model) in conductor_models.iter().enumerate() {
-        attempted_conductor_models.push(conductor_model.clone());
-        let mut request = base_request.clone();
-        request.conductor_model = conductor_model.clone();
-        let harness = AgentRunDecisionHarness::new(request);
-        match attempt_conductor_decision(
-            state,
-            config,
-            task_id,
-            run_context,
-            &decision_id,
-            model_index,
-            conductor_model,
-            &harness,
-            &mut attempts,
-        ) {
-            Ok(decision) => {
-                selected_conductor_model = Some(conductor_model.clone());
-                planned_decision = Some(decision);
-                break;
-            }
-            Err(error) if error == MODEL_REQUEST_CANCELLED => return Err(error),
-            Err(error) if error == COLLABORATION_STEER_INTERRUPTED => {
-                return Err("conductor planning interrupted by a queued steer".to_string())
-            }
-            Err(error) => failure_reasons.push(format!("{conductor_model}: {error}")),
-        }
-    }
-
-    let (decision, source, degradation_reason) = match planned_decision {
-        Some(decision) => {
+    let (decision, source, degradation_reason) = match outcome {
+        ConductorDecisionOutcome::Selected(decision) => {
             let source = if attempted_conductor_models.len() > 1 {
                 "dynamic_conductor_replanned"
             } else {
@@ -228,7 +253,7 @@ pub(crate) fn plan_agent_run(
             };
             (decision, source.to_string(), None)
         }
-        None => {
+        ConductorDecisionOutcome::Exhausted => {
             let reason = if failure_reasons.is_empty() {
                 "no configured conductor model was available".to_string()
             } else {
@@ -260,10 +285,15 @@ pub(crate) fn plan_agent_run(
         degradation_reason,
         attempted_conductor_models,
         selected_conductor_model,
-    )?;
-    planned.apply_to_context(run_context, effort)?;
+    )
+    .map_err(CollaborationStageError::Failed)?;
+    ensure_planning_current(cancellation)?;
+    planned
+        .apply_to_context(run_context, effort)
+        .map_err(CollaborationStageError::Failed)?;
     run_context.insert("prompt_profile_source".to_string(), profile_source.clone());
-    record_planned_agent_run(state, task_id, run_context, &planned, &profile_source)?;
+    record_planned_agent_run(state, task_id, run_context, &planned, &profile_source)
+        .map_err(CollaborationStageError::Failed)?;
     Ok(planned)
 }
 
@@ -294,25 +324,6 @@ fn finalize_planned_run(
         attempted_conductor_models,
         selected_conductor_model,
     })
-}
-
-fn selected_strategy_profile(
-    state: &tauri::State<'_, AppState>,
-    config: &ProviderConfig,
-    effort: AgentEffort,
-    run_context: &Metadata,
-) -> (ConductorPromptGenome, String) {
-    if config.prompt_evolution_enabled {
-        if let Ok(evaluation) =
-            prompt_evolution_evaluation_for_run(state, effort.label(), run_context)
-        {
-            return (evaluation.next_profile, evaluation.next_mode);
-        }
-    }
-    (
-        ConductorPromptGenome::seed_for_effort(effort.label()),
-        "seed_fallback".to_string(),
-    )
 }
 
 fn record_planned_agent_run(

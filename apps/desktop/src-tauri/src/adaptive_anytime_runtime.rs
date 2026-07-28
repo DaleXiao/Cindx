@@ -314,7 +314,8 @@ pub(super) fn record_direct_anchor_completion(
         .filter(|content| !content.trim().is_empty())
         .cloned();
     if let (Some(control), Some(content)) = (cancellation, content.as_deref()) {
-        control.record_best_known_result(
+        control.record_best_known_result_at(
+            run_context_steer_epoch(run_context),
             "direct_anchor",
             content,
             ResultQuality::Substantive,
@@ -595,7 +596,8 @@ pub(super) fn settle_direct_anchor_verifier(
         controller.revise(DIRECT_ANCHOR_CANDIDATE_ID, verdict)?;
     }
     if let Some(control) = cancellation {
-        control.record_best_known_result(
+        control.record_best_known_result_at(
+            run_context_steer_epoch(run_context),
             "direct_anchor_verifier",
             anchor_output,
             adaptive_quality_result_quality(&gate),

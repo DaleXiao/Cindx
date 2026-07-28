@@ -1054,7 +1054,8 @@ assert(
     agentStorageSource.includes("idx_events_task_tool_call_sequence") &&
     agentStorageSource.includes("list_by_task_and_effect_fingerprint") &&
     agentStorageSource.includes("idx_events_task_effect_fingerprint_sequence") &&
-    agentStorageSource.includes("event_scope_columns_v3"),
+    agentStorageSource.includes("event_scope_columns_v3") &&
+    agentStorageSource.includes("event_queue_scope_v1"),
   "Tool execution must persist metrics and replay only exact non-retryable completed calls through an indexed journal"
 );
 assert(
@@ -1137,6 +1138,7 @@ assert(
 assert(
   agentStorageSource.includes("idx_events_task_session_sequence") &&
     agentStorageSource.includes("event_scope_columns_v3") &&
+    agentStorageSource.includes("event_queue_scope_v1") &&
     agentStorageSource.includes("list_by_task_and_metadata_after") &&
     agentStorageSource.includes("save_read_model") &&
     rustLib.includes("AGENT_SESSION_READ_MODEL_NAMESPACE") &&
@@ -3050,12 +3052,15 @@ assert(
   appSource.includes("onStreamDone={handleAgentStreamDone}") &&
     sessionThreadSource.includes("onStreamDone: (sessionId: string) => void") &&
     sessionThreadSource.includes("if (targetSessionId) onStreamDone(targetSessionId)") &&
-    /let completed_state\s*=\s*agent_state_for_session/.test(rustLib) &&
+    rustLib.includes("let completed_state = match terminal_commit") &&
+    rustLib.includes("RunTerminalCommit::Committed(state) => state") &&
     rustLib.includes(
       'emit_agent_stream_delta(app, request_id, session_id, "", true, false, None);'
     ) &&
     rustLib.includes("Ok(AgentCompletionOutcome::Completed(completed_state))") &&
-    rustLib.includes("AgentCompletionOutcome::Completed(agent_state) => return Ok(agent_state)"),
+    /AgentCompletionOutcome::Completed\(agent_state\)\s*=>\s*\{\s*return Ok\(AgentLoopExecutionOutcome::Finished\(agent_state\)\)/.test(
+      rustLib
+    ),
   "A committed terminal stream event must refresh the active session without waiting for polling"
 );
 assert(

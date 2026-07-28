@@ -1,4 +1,11 @@
 use super::*;
+#[cfg(test)]
+use crate::knowledge_generation_runtime::legacy_knowledge_paths;
+#[cfg(test)]
+use crate::knowledge_generation_runtime::with_active_knowledge_paths;
+use crate::knowledge_generation_runtime::{
+    active_knowledge_paths, knowledge_paths_for_rag_index, open_active_knowledge_adapter,
+};
 
 pub(crate) fn validate_workspace_root(path: &str) -> Result<PathBuf, String> {
     let path = normalized_config_value(path);
@@ -273,15 +280,12 @@ pub(crate) fn mcp_catalog_cache_path() -> PathBuf {
 }
 
 pub(crate) fn rag_index_path_for(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(".cindx").join("rag-index.tsv")
+    active_knowledge_paths(workspace_root).rag_index
 }
 
-pub(crate) fn lancedb_export_path_for(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(".cindx").join("lancedb-records.jsonl")
-}
-
+#[cfg(test)]
 pub(crate) fn lancedb_database_path_for(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(".cindx").join("lancedb")
+    active_knowledge_paths(workspace_root).lancedb_database
 }
 
 pub(crate) fn memory_lancedb_root_for(workspace_root: &Path, project_id: &str) -> PathBuf {
@@ -300,16 +304,34 @@ pub(crate) fn memory_lancedb_manifest_path_for(workspace_root: &Path, project_id
     memory_lancedb_root_for(workspace_root, project_id).join("manifest.json")
 }
 
+#[cfg(test)]
 pub(crate) fn graph_store_path_for(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(".cindx").join("graph.tsv")
+    active_knowledge_paths(workspace_root).graph_store
 }
 
+#[cfg(test)]
 pub(crate) fn graph_state_for(
     workspace_root: &Path,
     focus_paths: &[String],
 ) -> Result<GraphStateView, String> {
-    let store = FileGraphStore::open(graph_store_path_for(workspace_root))
-        .map_err(|error| error.to_string())?;
+    with_active_knowledge_paths(workspace_root, |paths| {
+        graph_state_at_path(&paths.graph_store, focus_paths)
+    })
+}
+
+pub(crate) fn graph_state_for_adapter(
+    adapter: &FileRagAdapter,
+    focus_paths: &[String],
+) -> Result<GraphStateView, String> {
+    let paths = knowledge_paths_for_rag_index(adapter.path());
+    graph_state_at_path(&paths.graph_store, focus_paths)
+}
+
+pub(crate) fn graph_state_at_path(
+    graph_path: &Path,
+    focus_paths: &[String],
+) -> Result<GraphStateView, String> {
+    let store = FileGraphStore::open(graph_path).map_err(|error| error.to_string())?;
     let all_nodes = store.nodes();
     let all_edges = store.edges();
     let total_nodes = all_nodes.len();
@@ -445,7 +467,7 @@ pub(crate) fn agent_trace_export_path_for(workspace_root: &Path) -> PathBuf {
 }
 
 pub(crate) fn open_rag_adapter_for(workspace_root: &Path) -> Result<FileRagAdapter, String> {
-    FileRagAdapter::open(rag_index_path_for(workspace_root)).map_err(|error| error.to_string())
+    open_active_knowledge_adapter(workspace_root)
 }
 
 pub(crate) fn workspace_knowledge_cache_key(workspace_root: &Path) -> String {
@@ -460,12 +482,16 @@ pub(crate) fn cached_rag_adapter_for(
     workspace_root: &Path,
 ) -> Result<(FileRagAdapter, bool), String> {
     let key = workspace_knowledge_cache_key(workspace_root);
+    let active_index_path = rag_index_path_for(workspace_root);
     if let Some(entry) = state
         .workspace_knowledge_cache
         .lock()
         .map_err(|error| format!("workspace knowledge cache lock poisoned: {error}"))?
         .get(&key)
-        .filter(|entry| entry.validated_at.elapsed() <= WORKSPACE_KNOWLEDGE_CACHE_TTL)
+        .filter(|entry| {
+            entry.validated_at.elapsed() <= WORKSPACE_KNOWLEDGE_CACHE_TTL
+                && entry.adapter.path() == active_index_path
+        })
         .cloned()
     {
         return Ok((entry.adapter, true));
@@ -479,7 +505,7 @@ pub(crate) fn cache_rag_adapter(
     adapter: &FileRagAdapter,
 ) -> Result<(), String> {
     let key = workspace_knowledge_cache_key(workspace_root);
-    let graph_path = graph_store_path_for(workspace_root);
+    let graph_path = knowledge_paths_for_rag_index(adapter.path()).graph_store;
     let graph_store = graph_path
         .exists()
         .then(|| FileGraphStore::open(&graph_path).map_err(|error| error.to_string()))
@@ -509,9 +535,10 @@ pub(crate) fn cache_rag_adapter(
     Ok(())
 }
 
-pub(crate) fn cached_graph_store_for(
+pub(crate) fn cached_graph_store_for_adapter(
     state: &tauri::State<'_, AppState>,
     workspace_root: &Path,
+    adapter: &FileRagAdapter,
 ) -> Result<Option<FileGraphStore>, String> {
     let key = workspace_knowledge_cache_key(workspace_root);
     if let Some(graph_store) = state
@@ -519,12 +546,15 @@ pub(crate) fn cached_graph_store_for(
         .lock()
         .map_err(|error| format!("workspace knowledge cache lock poisoned: {error}"))?
         .get(&key)
-        .filter(|entry| entry.validated_at.elapsed() <= WORKSPACE_KNOWLEDGE_CACHE_TTL)
+        .filter(|entry| {
+            entry.validated_at.elapsed() <= WORKSPACE_KNOWLEDGE_CACHE_TTL
+                && entry.adapter.path() == adapter.path()
+        })
         .and_then(|entry| entry.graph_store.clone())
     {
         return Ok(Some(graph_store));
     }
-    let graph_path = graph_store_path_for(workspace_root);
+    let graph_path = knowledge_paths_for_rag_index(adapter.path()).graph_store;
     if !graph_path.exists() {
         return Ok(None);
     }
@@ -545,6 +575,7 @@ pub(crate) fn invalidate_workspace_knowledge_cache(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn index_graph_chunks(
     workspace_root: &Path,
     chunks: &[RagChunk],
@@ -552,12 +583,13 @@ pub(crate) fn index_graph_chunks(
     index_graph_chunks_cancellable(workspace_root, chunks, || false)
 }
 
+#[cfg(test)]
 pub(crate) fn index_graph_chunks_cancellable(
     workspace_root: &Path,
     chunks: &[RagChunk],
     mut should_cancel: impl FnMut() -> bool,
 ) -> Result<(usize, usize), String> {
-    let graph_path = graph_store_path_for(workspace_root);
+    let graph_path = legacy_knowledge_paths(workspace_root).graph_store;
     let file_name = graph_path
         .file_name()
         .and_then(|name| name.to_str())

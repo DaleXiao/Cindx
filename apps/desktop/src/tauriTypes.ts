@@ -725,6 +725,7 @@ export type AgentTraceRoleSummary = {
   models: string[];
   calls: number;
   completed: number;
+  interrupted: number;
   degraded: number;
   latencyMs: number;
   firstTokenLatencyMs: number | null;

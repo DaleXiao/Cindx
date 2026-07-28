@@ -298,9 +298,7 @@ pub(crate) fn latest_agent_display_prompt_from_active_events(
         })
 }
 
-pub(crate) fn agent_recovery_prompt_from_active_events(
-    active_events: &[Event],
-) -> Option<String> {
+pub(crate) fn agent_recovery_prompt_from_active_events(active_events: &[Event]) -> Option<String> {
     primary_agent_user_turn_event(active_events)
         .and_then(model_prompt_from_message_event)
         .or_else(|| {
@@ -396,6 +394,7 @@ pub(crate) struct AgentTraceRoleAccumulator {
     pub(crate) models: BTreeSet<String>,
     pub(crate) calls: usize,
     pub(crate) completed: usize,
+    pub(crate) interrupted: usize,
     pub(crate) degraded: usize,
     pub(crate) latency_ms: u64,
     pub(crate) first_token_latency_ms: u64,
@@ -415,10 +414,10 @@ pub(crate) fn agent_trace_role_summaries(events: &[Event]) -> Vec<AgentTraceRole
         };
         let entry = roles.entry(role.clone()).or_default();
         entry.calls += 1;
-        if event.metadata.get("status").map(String::as_str) == Some("degraded") {
-            entry.degraded += 1;
-        } else {
-            entry.completed += 1;
+        match event.metadata.get("status").map(String::as_str) {
+            Some("completed") => entry.completed += 1,
+            Some("interrupted") => entry.interrupted += 1,
+            _ => entry.degraded += 1,
         }
         if let Some(model) = event
             .metadata
@@ -466,6 +465,7 @@ pub(crate) fn agent_trace_role_summaries(events: &[Event]) -> Vec<AgentTraceRole
             models: summary.models.into_iter().collect(),
             calls: summary.calls,
             completed: summary.completed,
+            interrupted: summary.interrupted,
             degraded: summary.degraded,
             latency_ms: summary.latency_ms,
             first_token_latency_ms: (summary.first_token_samples > 0)

@@ -6,32 +6,19 @@ use crate::{
     event_persistence::append_event,
     event_projection::write_private_file_atomically,
     knowledge_runtime::{prepare_agent_knowledge_context, CloudRagEmbedder},
-    persistence_runtime::{
-        memory_lancedb_database_path_for, memory_lancedb_manifest_path_for, open_app_read_store,
-        skill_catalog_for_root,
+    memory_vector_generation_runtime::{
+        memory_vector_manifest_matches, memory_vector_project_key, memory_vector_projection_sha256,
+        open_memory_vector_snapshot, MemoryVectorManifest, PendingMemoryVectorGeneration,
     },
+    persistence_runtime::{open_app_read_store, skill_catalog_for_root},
     project_session_persistence::metadata_with_context,
     runtime_constants::{
         AGENT_MEMORY_MAX_RECORDS, AGENT_MEMORY_READ_MODEL_NAMESPACE, AGENT_MEMORY_RECALL_LIMIT,
-        MEMORY_VECTOR_FALLBACK_RETRY_MS, MEMORY_VECTOR_MANIFEST_SCHEMA,
-        MEMORY_VECTOR_REFRESH_INFLIGHT,
+        MEMORY_VECTOR_MANIFEST_SCHEMA, MEMORY_VECTOR_REFRESH_INFLIGHT,
     },
     runtime_values::{current_time_millis, phase16_task_id},
     view_models::MemoryStatsView,
 };
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct MemoryVectorManifest {
-    pub(crate) schema: String,
-    pub(crate) projection_sha256: String,
-    pub(crate) record_count: usize,
-    pub(crate) embedding_backend: String,
-    pub(crate) embedding_provider: String,
-    pub(crate) embedding_model: String,
-    pub(crate) embedding_dimensions: usize,
-    pub(crate) generated_at_ms: u64,
-}
 
 pub(crate) fn load_project_memory_ledger(
     store: &mut SqliteStore,
@@ -119,6 +106,7 @@ fn load_project_memory_ledger_inner(
             Some(events) => events,
             None => store.list_by_task_and_metadata(&task_id, "agent_run_id", &run_id)?,
         };
+        let events = memory_events_for_terminal_steer_epoch(events);
         let Some(session_id) = events
             .iter()
             .find_map(|event| event.metadata.get("session_id"))
@@ -148,6 +136,41 @@ fn is_memory_checkpoint_event(event: &Event) -> bool {
             | "Agent task cancelled"
             | "Semantic memory candidates accepted"
     )
+}
+
+pub(crate) fn memory_events_for_terminal_steer_epoch(mut events: Vec<Event>) -> Vec<Event> {
+    let terminal_epoch = events.iter().rev().find_map(|event| {
+        matches!(
+            event.summary.as_str(),
+            "Agent task completed"
+                | "Agent task paused"
+                | "Agent task failed"
+                | "Agent task cancelled"
+        )
+        .then(|| {
+            event
+                .metadata
+                .get("steer_epoch")
+                .and_then(|value| value.parse::<u64>().ok())
+        })
+        .flatten()
+    });
+    let Some(terminal_epoch) = terminal_epoch else {
+        return events;
+    };
+    events.retain(|event| {
+        let event_epoch = event
+            .metadata
+            .get("steer_epoch")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_default();
+        let accepted_user_intent = event.kind == EventKind::MessageAdded
+            && event.metadata.get("role").map(String::as_str) == Some("user")
+            && event.metadata.get("internal").map(String::as_str) != Some("true")
+            && event_epoch <= terminal_epoch;
+        accepted_user_intent || event_epoch == terminal_epoch
+    });
+    events
 }
 
 pub(crate) fn save_project_memory_ledger(
@@ -232,25 +255,36 @@ pub(crate) fn project_memory_stats(
 
 #[derive(Debug, Default)]
 pub(crate) struct PreparedRunKnowledgeContexts {
-    pub(crate) memory: Option<Message>,
+    pub(crate) memory: Option<PreparedMemoryRecall>,
     pub(crate) workspace: Option<Message>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedMemoryRecall {
+    project_id: String,
+    ledger_projection_sha256: String,
+    recalled_at_ms: u64,
+    recalls: Vec<agent_memory::MemoryRecall>,
+    event_metadata: Metadata,
+    message: Message,
 }
 
 pub(crate) fn append_prepared_memory_context(
     run_context: &mut Metadata,
     history: &mut Vec<Message>,
-    memory_context: Option<Message>,
+    memory_context: Option<&PreparedMemoryRecall>,
 ) {
     let Some(memory_context) = memory_context else {
         return;
     };
+    let memory_context = &memory_context.message;
     if let Some(memory_ids) = memory_context.metadata.get("memory_ids") {
         run_context.insert("memory_ids".to_string(), memory_ids.clone());
     }
     if let Some(selected_count) = memory_context.metadata.get("selected_count") {
         run_context.insert("memory_selected_count".to_string(), selected_count.clone());
     }
-    history.push(memory_context);
+    history.push(memory_context.clone());
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -262,6 +296,7 @@ pub(crate) fn prepare_run_knowledge_contexts(
     config: &ProviderConfig,
     decision: &AgentRunDecision,
     cancellation: &Arc<AgentRunControl>,
+    expected_epoch: u64,
 ) -> Result<PreparedRunKnowledgeContexts, String> {
     let recall_memory = !matches!(decision.memory.policy, MemoryRecallPolicy::None);
     let retrieve_workspace = decision.retrieval.enabled();
@@ -269,10 +304,14 @@ pub(crate) fn prepare_run_knowledge_contexts(
         return Ok(PreparedRunKnowledgeContexts::default());
     }
     if recall_memory {
-        cancellation.mark_progress("memory", "Recalling relevant project memory");
+        cancellation.mark_progress_at(
+            expected_epoch,
+            "memory",
+            "Recalling relevant project memory",
+        );
     }
     if retrieve_workspace {
-        cancellation.mark_progress("retrieval", "Preparing workspace knowledge");
+        cancellation.mark_progress_at(expected_epoch, "retrieval", "Preparing workspace knowledge");
         append_agent_progress_event(state, task_id, run_context, "Preparing workspace knowledge")?;
     }
 
@@ -287,6 +326,7 @@ pub(crate) fn prepare_run_knowledge_contexts(
                     config,
                     &decision.memory.query,
                     cancellation,
+                    expected_epoch,
                 )
             })
         });
@@ -300,6 +340,7 @@ pub(crate) fn prepare_run_knowledge_contexts(
                     workspace_root,
                     &decision.retrieval,
                     cancellation,
+                    expected_epoch,
                 )
             })
         });
@@ -316,6 +357,10 @@ pub(crate) fn prepare_run_knowledge_contexts(
             }),
         )
     });
+
+    if !cancellation.preparation_epoch_is_current(expected_epoch) {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
 
     let memory = match memory_result {
         Some(Ok(context)) => context,
@@ -377,50 +422,6 @@ pub(crate) fn append_skill_context_for_run(
     Ok(())
 }
 
-pub(crate) fn memory_vector_projection_sha256(ledger: &MemoryLedger) -> String {
-    let mut records = ledger
-        .records
-        .iter()
-        .map(|record| format!("{}:{}", record.id, record.fingerprint))
-        .collect::<Vec<_>>();
-    records.sort();
-    sha256_hex(format!("{}\n{}", ledger.project_id, records.join("\n")).as_bytes())
-}
-
-pub(crate) fn memory_vector_manifest_matches(
-    manifest: &MemoryVectorManifest,
-    projection_sha256: &str,
-    config: &ProviderConfig,
-    now_ms: u64,
-) -> bool {
-    if manifest.schema != MEMORY_VECTOR_MANIFEST_SCHEMA
-        || manifest.projection_sha256 != projection_sha256
-    {
-        return false;
-    }
-    if config.is_ready() {
-        let configured_model = config.model_for_role(&ModelRole::Embedder);
-        (manifest.embedding_backend == "cloud" && manifest.embedding_model == configured_model)
-            || (manifest.embedding_backend == "local-fallback"
-                && now_ms.saturating_sub(manifest.generated_at_ms)
-                    < MEMORY_VECTOR_FALLBACK_RETRY_MS)
-    } else {
-        manifest.embedding_backend == "local"
-    }
-}
-
-pub(crate) fn load_memory_vector_manifest(
-    path: &Path,
-) -> Result<Option<MemoryVectorManifest>, String> {
-    match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|error| format!("failed to decode memory vector manifest: {error}")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("failed to read memory vector manifest: {error}")),
-    }
-}
-
 pub(crate) fn memory_rag_index(ledger: &MemoryLedger) -> RagIndex {
     let indexed_at_ms = current_time_millis();
     let chunks = ledger
@@ -459,22 +460,44 @@ pub(crate) fn memory_rag_index(ledger: &MemoryLedger) -> RagIndex {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn refresh_project_memory_vector_index(
     workspace_root: &Path,
     config: &ProviderConfig,
     ledger: &MemoryLedger,
 ) -> Result<Option<String>, String> {
+    let key = memory_vector_project_key(workspace_root, &ledger.project_id);
+    let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT.get_or_init(|| Mutex::new(BTreeSet::new()));
+    let Some(_inflight_lease) =
+        ExclusiveKeyLease::try_acquire(inflight, key, "memory vector refresh inflight")?
+    else {
+        return Ok(None);
+    };
+    refresh_project_memory_vector_index_inner(workspace_root, config, ledger)
+}
+
+fn refresh_project_memory_vector_index_inner(
+    workspace_root: &Path,
+    config: &ProviderConfig,
+    ledger: &MemoryLedger,
+) -> Result<Option<String>, String> {
     let projection_sha256 = memory_vector_projection_sha256(ledger);
-    let database_path = memory_lancedb_database_path_for(workspace_root, &ledger.project_id);
-    let manifest_path = memory_lancedb_manifest_path_for(workspace_root, &ledger.project_id);
+    let snapshot = open_memory_vector_snapshot(workspace_root, &ledger.project_id)?;
     let now_ms = current_time_millis();
-    if lancedb_index_exists(&database_path) {
-        if let Some(manifest) = load_memory_vector_manifest(&manifest_path)? {
-            if memory_vector_manifest_matches(&manifest, &projection_sha256, config, now_ms) {
+    if lancedb_index_exists(&snapshot.database_path) {
+        if let Some(manifest) = snapshot.manifest.as_ref() {
+            let generation_matches = snapshot
+                .generation_id
+                .as_deref()
+                .is_none_or(|generation| manifest.generation_id == generation);
+            if generation_matches
+                && memory_vector_manifest_matches(&manifest, &projection_sha256, config, now_ms)
+            {
                 return Ok(None);
             }
         }
     }
+    drop(snapshot);
 
     let mut index = memory_rag_index(ledger);
     let mut embedding_backend = "local".to_string();
@@ -483,6 +506,7 @@ pub(crate) fn refresh_project_memory_vector_index(
         let mut embedder = CloudRagEmbedder {
             config: config.clone(),
             cancellation: None,
+            expected_steer_epoch: None,
         };
         match apply_embeddings_to_index_cancellable(&mut index, &mut embedder, || false) {
             Ok(()) => embedding_backend = "cloud".to_string(),
@@ -492,7 +516,9 @@ pub(crate) fn refresh_project_memory_vector_index(
             }
         }
     }
-    replace_lancedb_index(&database_path, &index).map_err(|error| error.to_string())?;
+    let mut pending = PendingMemoryVectorGeneration::create(workspace_root, &ledger.project_id)?;
+    replace_lancedb_index(&pending.database_path, &index).map_err(|error| error.to_string())?;
+    pending.acquire_lease()?;
     let (embedding_provider, embedding_model, embedding_dimensions) = index
         .chunks
         .first()
@@ -506,6 +532,7 @@ pub(crate) fn refresh_project_memory_vector_index(
         .unwrap_or_else(|| ("local".to_string(), "local-hash".to_string(), 0));
     let manifest = MemoryVectorManifest {
         schema: MEMORY_VECTOR_MANIFEST_SCHEMA.to_string(),
+        generation_id: pending.generation_id.clone(),
         projection_sha256,
         record_count: index.chunks.len(),
         embedding_backend,
@@ -516,7 +543,8 @@ pub(crate) fn refresh_project_memory_vector_index(
     };
     let payload = serde_json::to_vec_pretty(&manifest)
         .map_err(|error| format!("failed to encode memory vector manifest: {error}"))?;
-    write_private_file_atomically(&manifest_path, &payload, "memory vector manifest")?;
+    write_private_file_atomically(&pending.manifest_path, &payload, "memory vector manifest")?;
+    pending.publish()?;
     Ok(fallback_error)
 }
 
@@ -528,18 +556,7 @@ pub(crate) fn schedule_project_memory_vector_refresh(
     if ledger.records.is_empty() {
         return;
     }
-    let projection_sha256 = memory_vector_projection_sha256(&ledger);
-    let target_model = if config.is_ready() {
-        config.model_for_role(&ModelRole::Embedder)
-    } else {
-        "local-hash".to_string()
-    };
-    let key = format!(
-        "{}:{}:{}",
-        workspace_root.display(),
-        projection_sha256,
-        target_model
-    );
+    let key = memory_vector_project_key(&workspace_root, &ledger.project_id);
     let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT.get_or_init(|| Mutex::new(BTreeSet::new()));
     let Ok(Some(inflight_lease)) =
         ExclusiveKeyLease::try_acquire(inflight, key, "memory vector refresh inflight")
@@ -548,7 +565,7 @@ pub(crate) fn schedule_project_memory_vector_refresh(
     };
     tauri::async_runtime::spawn_blocking(move || {
         let _inflight_lease = inflight_lease;
-        match refresh_project_memory_vector_index(&workspace_root, &config, &ledger) {
+        match refresh_project_memory_vector_index_inner(&workspace_root, &config, &ledger) {
             Ok(Some(error)) => {
                 eprintln!(
                     "project memory cloud embedding unavailable; using local vectors: {error}"
@@ -567,12 +584,18 @@ pub(crate) fn project_memory_semantic_scores(
     config: &ProviderConfig,
     prompt: &str,
     cancellation: &Arc<AgentRunControl>,
+    expected_epoch: u64,
 ) -> Result<(BTreeMap<String, f64>, MemoryVectorManifest), String> {
-    let database_path = memory_lancedb_database_path_for(workspace_root, project_id);
-    let manifest_path = memory_lancedb_manifest_path_for(workspace_root, project_id);
-    let manifest = load_memory_vector_manifest(&manifest_path)?
+    let snapshot = open_memory_vector_snapshot(workspace_root, project_id)?;
+    let manifest = snapshot
+        .manifest
+        .as_ref()
         .ok_or_else(|| "memory vector index is not ready".to_string())?;
-    if !lancedb_index_exists(&database_path)
+    if snapshot
+        .generation_id
+        .as_deref()
+        .is_some_and(|generation| manifest.generation_id != generation)
+        || !lancedb_index_exists(&snapshot.database_path)
         || !memory_vector_manifest_matches(
             &manifest,
             &memory_vector_projection_sha256(ledger),
@@ -586,6 +609,7 @@ pub(crate) fn project_memory_semantic_scores(
         let mut embedder = CloudRagEmbedder {
             config: config.clone(),
             cancellation: Some(cancellation.clone()),
+            expected_steer_epoch: Some(expected_epoch),
         };
         embedder
             .embed_texts(&[prompt.to_string()])
@@ -605,7 +629,7 @@ pub(crate) fn project_memory_semantic_scores(
         ));
     }
     let results = search_lancedb_index(
-        &database_path,
+        &snapshot.database_path,
         &query_embedding,
         AGENT_MEMORY_RECALL_LIMIT.saturating_mul(4),
     )
@@ -615,20 +639,24 @@ pub(crate) fn project_memory_semantic_scores(
             .into_iter()
             .map(|result| (result.chunk.id, f64::from(result.score)))
             .collect(),
-        manifest,
+        manifest.clone(),
     ))
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn recall_project_memory_for_prompt(
-    state: &tauri::State<'_, AppState>,
-    task_id: &TaskId,
+    _state: &tauri::State<'_, AppState>,
+    _task_id: &TaskId,
     run_context: &Metadata,
     workspace_root: &Path,
     config: &ProviderConfig,
     prompt: &str,
     cancellation: &Arc<AgentRunControl>,
-) -> Result<Option<Message>, String> {
+    expected_epoch: u64,
+) -> Result<Option<PreparedMemoryRecall>, String> {
+    if !cancellation.preparation_epoch_is_current(expected_epoch) {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
     let Some(project_id) = run_context.get("project_id") else {
         return Ok(None);
     };
@@ -650,6 +678,9 @@ pub(crate) fn recall_project_memory_for_prompt(
         AGENT_MEMORY_RECALL_LIMIT.saturating_mul(2),
         now_ms,
     );
+    if !cancellation.preparation_epoch_is_current(expected_epoch) {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
     schedule_project_memory_vector_refresh(
         workspace_root.to_path_buf(),
         config.clone(),
@@ -662,6 +693,7 @@ pub(crate) fn recall_project_memory_for_prompt(
         config,
         prompt,
         cancellation,
+        expected_epoch,
     ) {
         Ok((scores, manifest)) => (scores, Some(manifest), None),
         Err(error) => (BTreeMap::new(), None, Some(error)),
@@ -684,30 +716,12 @@ pub(crate) fn recall_project_memory_for_prompt(
         });
     }
     recalls.truncate(AGENT_MEMORY_RECALL_LIMIT);
+    if !cancellation.preparation_epoch_is_current(expected_epoch) {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
     if recalls.is_empty() {
         return Ok(None);
     }
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let mut ledger =
-        load_project_memory_ledger(&mut store, project_id).map_err(|error| error.to_string())?;
-    recalls.retain_mut(|recall| {
-        let Some(current) = ledger
-            .records
-            .iter()
-            .find(|record| record.id == recall.record.id)
-        else {
-            return false;
-        };
-        recall.record = current.clone();
-        true
-    });
-    if recalls.is_empty() {
-        return Ok(None);
-    }
-    record_memory_recalls(&mut ledger, &recalls, now_ms);
     let mut metadata = [
         ("action".to_string(), "memory_recall".to_string()),
         ("query".to_string(), prompt.to_string()),
@@ -764,20 +778,7 @@ pub(crate) fn recall_project_memory_for_prompt(
             truncate_for_collaboration(&error, 320),
         );
     }
-    metadata = metadata_with_context(metadata, run_context);
-    append_event(
-        &mut store,
-        task_id,
-        EventKind::RetrievalPerformed,
-        "Project memory recalled",
-        metadata,
-    )
-    .map_err(|error| error.to_string())?;
-    refresh_project_memory_ledger_revision(&mut store, task_id, &mut ledger)
-        .map_err(|error| error.to_string())?;
-    save_project_memory_ledger(&mut store, &ledger).map_err(|error| error.to_string())?;
-
-    Ok(Some(Message {
+    let message = Message {
         role: MessageRole::System,
         content: memory_recalls_to_markdown(&recalls),
         metadata: [
@@ -799,8 +800,74 @@ pub(crate) fn recall_project_memory_for_prompt(
         ]
         .into_iter()
         .collect(),
+    };
+    Ok(Some(PreparedMemoryRecall {
+        project_id: project_id.clone(),
+        ledger_projection_sha256: memory_vector_projection_sha256(&ledger),
+        recalled_at_ms: now_ms,
+        recalls,
+        event_metadata: metadata,
+        message,
     }))
 }
+
+pub(crate) fn commit_prepared_memory_recall(
+    store: &mut SqliteStore,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    prepared: Option<&PreparedMemoryRecall>,
+) -> Result<(), StorageError> {
+    let Some(prepared) = prepared else {
+        return Ok(());
+    };
+    let mut ledger = load_project_memory_ledger(store, &prepared.project_id)?;
+    if memory_vector_projection_sha256(&ledger) != prepared.ledger_projection_sha256 {
+        return Err(StorageError::new(MEMORY_RECALL_STALE_ERROR));
+    }
+    let mut recalls = Vec::with_capacity(prepared.recalls.len());
+    for prepared_recall in &prepared.recalls {
+        let current = ledger
+            .records
+            .iter()
+            .find(|record| record.id == prepared_recall.record.id)
+            .filter(|record| {
+                record.fingerprint == prepared_recall.record.fingerprint
+                    && record.content == prepared_recall.record.content
+                    && record.superseded_by == prepared_recall.record.superseded_by
+            })
+            .ok_or_else(|| StorageError::new(MEMORY_RECALL_STALE_ERROR))?;
+        let mut recall = prepared_recall.clone();
+        recall.record = current.clone();
+        recalls.push(recall);
+    }
+    record_memory_recalls(&mut ledger, &recalls, prepared.recalled_at_ms);
+    let mut metadata = prepared.event_metadata.clone();
+    metadata.insert("selected_count".to_string(), recalls.len().to_string());
+    metadata.insert(
+        "memory_ids".to_string(),
+        recalls
+            .iter()
+            .map(|recall| recall.record.id.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    append_event(
+        store,
+        task_id,
+        EventKind::RetrievalPerformed,
+        "Project memory recalled",
+        metadata_with_context(metadata, run_context),
+    )?;
+    refresh_project_memory_ledger_revision(store, task_id, &mut ledger)?;
+    save_project_memory_ledger(store, &ledger)
+}
+
+pub(crate) const MEMORY_RECALL_STALE_ERROR: &str =
+    "prepared project memory changed before execution handoff";
+
+#[cfg(test)]
+#[path = "memory_runtime_tests.rs"]
+mod tests;
 
 pub(crate) fn refresh_project_memory_after_run(
     store: &mut SqliteStore,

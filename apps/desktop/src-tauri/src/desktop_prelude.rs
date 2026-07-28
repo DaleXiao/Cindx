@@ -1,6 +1,7 @@
+#[cfg(test)]
+pub(crate) use agent_application::project_agent_artifacts as agent_output_artifacts_from_events;
 pub(crate) use agent_application::{
-    artifact_manifest_message, project_agent_artifacts as agent_output_artifacts_from_events,
-    AgentOutputArtifact as AgentOutputArtifactView, SessionTitleState,
+    artifact_manifest_message, AgentOutputArtifact as AgentOutputArtifactView, SessionTitleState,
 };
 pub(crate) use agent_core::{
     Event, EventId, EventKind, Message, MessageRole, Metadata, ModelRole, PermissionDecision,
@@ -18,15 +19,18 @@ pub(crate) use agent_memory::{
     CheckpointOptions, MemoryKind, MemoryLedger, RestoreContextPack, SessionCheckpoint,
     MEMORY_LEDGER_SCHEMA,
 };
+#[cfg(test)]
+pub(crate) use agent_rag::RagAdapter;
 pub(crate) use agent_rag::{
     apply_embeddings_to_index_cancellable, build_grounded_answer_prompt,
-    export_lancedb_records_jsonl,
+    export_lancedb_records_jsonl_cancellable,
     fuse_retrieval_channels_for_query as fuse_rag_retrieval_channels_for_query, index_workspace,
     index_workspace_cancellable, lancedb_index_exists, local_query_embedding,
-    replace_lancedb_index, retrieval_ranges_overlap, search_chunks_literal, search_lancedb_index,
-    workspace_index_is_fresh, EmbeddingBatch, FileRagAdapter, IndexOptions, RagAdapter, RagChunk,
-    RagEmbedder, RagError, RagIndex, RagIndexStats, RagSearchResult, RetrievalChannelOutcome,
-    RAG_INDEX_CANCELLED,
+    remove_file_rag_generation_if_unleased, replace_lancedb_index,
+    replace_lancedb_index_cancellable, retrieval_ranges_overlap, search_chunks_literal,
+    search_lancedb_index, workspace_index_is_fresh, EmbeddingBatch, FileRagAdapter, IndexOptions,
+    RagChunk, RagEmbedder, RagError, RagIndex, RagIndexStats, RagSearchResult,
+    RetrievalChannelOutcome, RAG_INDEX_CANCELLED,
 };
 #[cfg(test)]
 pub(crate) use agent_runtime::{
@@ -36,13 +40,13 @@ pub(crate) use agent_runtime::{
 pub(crate) use agent_runtime::{
     bounded_max_output_tokens, ensure_terminal_commit_instruction, evidence_worker_tools,
     observation_from_tool_result, resume_agent_loop_from_messages, sanitize_assistant_content,
-    start_agent_loop, start_agent_loop_with_history, AgentAdvance,
-    AgentFailure, AgentFailureClass, AgentKernel, AgentRecoveryAction, AgentRunControl,
-    AgentTaskStateSnapshot, AgentToolRequest, AgentTurnPreparationError, ContextGovernorReport,
-    IsolatedWorkerRuntime, WorkspaceVerificationPolicy,
-    ResultQuality, RunBudget, RunContinuationDirective, RunControlSnapshot, RunStageClass,
-    RunStopReason, WorkerAdvance, WorkerToolAdmission, DEFAULT_COLLABORATION_WORKER_TURNS,
-    MAX_COLLABORATION_WORKER_TOOL_CALLS, MAX_IDENTICAL_TOOL_FAILURES,
+    start_agent_loop, start_agent_loop_with_history, AgentAdvance, AgentFailure, AgentFailureClass,
+    AgentKernel, AgentRecoveryAction, AgentRunControl, AgentTaskStateSnapshot, AgentToolRequest,
+    AgentTurnPreparationError, ContextGovernorReport, IsolatedWorkerRuntime, ResultQuality,
+    RunBudget, RunContinuationDirective, RunControlSnapshot, RunStageClass, RunStopReason,
+    WorkerAdvance, WorkerToolAdmission, WorkspaceVerificationPolicy,
+    DEFAULT_COLLABORATION_WORKER_TURNS, MAX_COLLABORATION_WORKER_TOOL_CALLS,
+    MAX_IDENTICAL_TOOL_FAILURES,
 };
 pub(crate) use agent_skills::{
     install_skill_archive as install_skill_archive_package, SkillCatalog, SkillPreference,
@@ -75,16 +79,15 @@ pub(crate) use orchestrator::{
     AgentEvaluationToolTrace, AgentEvaluationTrace, AgentEvaluationTraceStep,
     AgentEvaluationVerifierOutcome, AgentRunDecision, AnytimeCandidate, AnytimeCandidateKind,
     AnytimeCandidateState, AnytimeController, AnytimeControllerConfig, AnytimeDecision,
-    AnytimeVerdict, ConductorExecutionContract, ConductorHarness,
-    ConductorPromptGenome, ConductorRequest, ConductorRoleHints, ConductorStopPolicy,
-    FrozenPromptProfileSnapshot, LearnedModelRouter, MemoryRecallPolicy, ModelCandidate,
-    OrchestrationPolicy, PromptEvaluationMode, PromptEvaluationProvenance, PromptEvaluationSplit,
+    AnytimeVerdict, ConductorExecutionContract, ConductorHarness, ConductorPromptGenome,
+    ConductorRequest, ConductorRoleHints, ConductorStopPolicy, FrozenPromptProfileSnapshot,
+    LearnedModelRouter, MemoryRecallPolicy, ModelCandidate, OrchestrationPolicy,
+    PromptEvaluationMode, PromptEvaluationProvenance, PromptEvaluationSplit,
     PromptEvolutionCampaignInput, PromptEvolutionCampaignSnapshot, PromptEvolutionMethod,
-    PromptEvolutionObservation,
-    PromptInstanceParetoArchive, PromptParetoArchive, PromptPromotionConfidence,
-    PromptPromotionGateConfig, PromptProposalMinibatchDecision, PromptRetryPolicy,
-    PromptStepCredit, PromptVerification, RoutingContext, RoutingDecision, RoutingOutcome,
-    RoutingTelemetry, RuleBasedRouter, TaskClass, TeamAnchorComparison, UpliftGap,
+    PromptEvolutionObservation, PromptInstanceParetoArchive, PromptParetoArchive,
+    PromptPromotionConfidence, PromptPromotionGateConfig, PromptProposalMinibatchDecision,
+    PromptRetryPolicy, PromptStepCredit, PromptVerification, RoutingContext, RoutingDecision,
+    RoutingOutcome, RoutingTelemetry, RuleBasedRouter, TaskClass, TeamAnchorComparison, UpliftGap,
     UpliftGateDecision, UpliftGateInput, WorkflowBudget, WorkflowExecutionCheckpoint,
     WorkflowExecutionTelemetry, WorkflowOutputKind, WorkflowPlanIr, WorkflowSearchTeacher,
     WorkflowStepStatus, WorkflowToolPolicy, WorkflowTopologyPrior, WorkspaceRetrievalChannel,
@@ -120,9 +123,8 @@ pub(crate) use crate::collaboration_service::{
     collaboration_recovery_evidence, collaboration_step_result,
     effective_workflow_model_turn_budget, effective_workflow_step_attempt_budget,
     merge_collaboration_evidence, truncate_for_collaboration, AdaptiveCollaborationOutcome,
-    AdaptiveCollaborationSpec, AgentCollaboration,
-    CollaborationCompletion, CollaborationEvidence, COLLABORATION_STEER_INTERRUPTED,
-    WORKFLOW_RESUMABLE_ERROR_PREFIX, WORKFLOW_SAFETY_ERROR_PREFIX,
+    AdaptiveCollaborationSpec, AgentCollaboration, CollaborationCompletion, CollaborationEvidence,
+    COLLABORATION_STEER_INTERRUPTED, WORKFLOW_RESUMABLE_ERROR_PREFIX, WORKFLOW_SAFETY_ERROR_PREFIX,
 };
 pub(crate) use crate::parallel_execution::{
     model_job_supervisor, run_model_jobs_until_anytime_quorum_interruptible,

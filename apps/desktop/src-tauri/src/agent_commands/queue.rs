@@ -293,24 +293,33 @@ pub(crate) fn steer_queued_agent_message_blocking(
         let _ = can_cancel;
         queued.ok_or_else(|| "queued message not found".to_string())?
     };
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    append_agent_queue_event(
-        &mut store,
-        &run_context,
-        "steer",
-        &queued.id,
-        "steer",
-        queued.created_at_ms,
-        None,
-    )?;
-    drop(store);
-    if let Some(control) = active_agent_run_control(state, Some(&input.session_id))? {
-        let _ = control.request_steer(queued.id.clone());
+    let steer_committed =
+        if let Some(control) = active_agent_run_control(state, Some(&input.session_id))? {
+            matches!(
+                control.commit_steer_request_with(queued.id.clone(), || {
+                    let mut store = state
+                        .store
+                        .lock()
+                        .map_err(|error| format!("store lock poisoned: {error}"))?;
+                    append_agent_queue_event(
+                        &mut store,
+                        &run_context,
+                        "steer",
+                        &queued.id,
+                        "steer",
+                        queued.created_at_ms,
+                        None,
+                    )?;
+                    Ok::<(), String>(())
+                })?,
+                agent_runtime::RunSteerRequestCommit::Committed { .. }
+            )
+        } else {
+            false
+        };
+    if steer_committed {
+        queued.mode = "steer".to_string();
     }
-    queued.mode = "steer".to_string();
     let store = state
         .store
         .lock()

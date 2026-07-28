@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::{mpsc, Arc, Barrier};
 use std::thread;
 
 fn test_budget() -> RunBudget {
@@ -52,6 +53,75 @@ fn runtime_turn_budget_comes_from_the_same_control_budget() {
     runtime.turn = 23;
     control.extend_runtime_budget(&mut runtime);
     assert_eq!(runtime.max_turns, 407);
+}
+
+#[test]
+fn new_at_steer_epoch_starts_with_a_fully_applied_durable_objective() {
+    let control = AgentRunControl::new_at_steer_epoch("pro", 7);
+
+    assert_eq!(control.steer_epoch(), 7);
+    assert!(control.pending_steers_snapshot().is_empty());
+    assert!(control.begin_preparation());
+    assert!(!control.commit_preparation(0));
+    assert!(control.commit_preparation(7));
+    assert!(matches!(
+        control.execution_epoch_lease(),
+        RunEpochLeaseOutcome::Acquired(lease) if lease.epoch() == 7
+    ));
+
+    assert_eq!(control.request_steer("next-objective"), Ok(true));
+    assert_eq!(control.steer_epoch(), 8);
+    assert_eq!(
+        control
+            .pending_steers_snapshot()
+            .into_iter()
+            .map(|steer| (steer.queue_id, steer.epoch))
+            .collect::<Vec<_>>(),
+        vec![("next-objective".to_string(), 8)]
+    );
+}
+
+#[test]
+fn objective_epoch_tool_start_is_atomic_during_preparation() {
+    let control = AgentRunControl::new_at_steer_epoch("pro", 4);
+    assert!(control.begin_preparation());
+    assert!(matches!(
+        control.begin_tool_call_at(4, "collaboration", "file.read", "a"),
+        RunToolCallStart::Started(1)
+    ));
+    control.finish_tool_call();
+
+    assert_eq!(control.request_steer("new-objective"), Ok(true));
+    assert_eq!(
+        control.begin_tool_call_at(4, "collaboration", "file.read", "b"),
+        RunToolCallStart::RestartAfterSteer
+    );
+    assert_eq!(control.progress().tool_calls, 1);
+    assert!(!control.objective_epoch_is_current(4));
+}
+
+#[test]
+fn stale_call_finish_releases_activity_without_advancing_new_epoch_progress() {
+    let control = AgentRunControl::new("pro");
+    assert_eq!(control.begin_model_call_at(0, "old-model"), Ok(Some(1)));
+    assert_eq!(
+        control.begin_tool_call_at(0, "old-tool", "file.read", "old"),
+        RunToolCallStart::Started(1)
+    );
+    assert_eq!(control.request_steer("new-objective"), Ok(true));
+    assert!(control.acknowledge_pending_steer("new-objective"));
+    assert!(control.mark_progress_at(1, "new-epoch", "new objective started"));
+
+    assert!(!control.finish_model_call_at(0));
+    assert!(!control.finish_tool_call_at(0));
+    {
+        let state = control.state.lock().expect("run control state should lock");
+        assert_eq!(state.active_model_calls, 0);
+        assert_eq!(state.active_tool_calls, 0);
+    }
+    let progress = control.progress();
+    assert_eq!(progress.stage, "new-epoch");
+    assert_eq!(progress.detail, "new objective started");
 }
 
 #[test]
@@ -285,7 +355,7 @@ fn continuation_starts_a_fresh_bounded_segment_after_budget_exhaustion() {
     let continued = AgentRunControl::from_snapshot_for_continuation(control.snapshot())
         .expect("budget exhaustion should be resumable");
     assert_eq!(continued.stop_reason(), None);
-    assert_eq!(continued.partial_output(), "verified work");
+    assert!(continued.partial_output().is_empty());
     assert_eq!(continued.progress().model_calls, 0);
     assert_eq!(continued.progress().checkpoints, 1);
     assert_eq!(continued.begin_model_call("continued-one"), Ok(1));
@@ -403,6 +473,601 @@ fn steering_is_deduplicated_and_survives_a_snapshot() {
         vec!["queue-a"]
     );
     assert!(!resumed.has_pending_steer());
+}
+
+#[test]
+fn pending_steer_snapshot_does_not_consume_the_queue() {
+    let control = AgentRunControl::with_budget(test_budget());
+    assert_eq!(control.request_steer("queue-a"), Ok(true));
+    assert_eq!(control.request_steer("queue-b"), Ok(true));
+
+    let queue_ids = || {
+        control
+            .pending_steers_snapshot()
+            .into_iter()
+            .map(|steer| steer.queue_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(queue_ids(), vec!["queue-a", "queue-b"]);
+    assert_eq!(queue_ids(), vec!["queue-a", "queue-b"]);
+    assert!(control.has_pending_steer());
+}
+
+#[test]
+fn unacknowledged_pending_steer_is_not_lost() {
+    let control = AgentRunControl::with_budget(test_budget());
+    assert_eq!(control.request_steer("queue-a"), Ok(true));
+
+    let _work_snapshot = control.pending_steers_snapshot();
+
+    assert_eq!(
+        control
+            .take_pending_steers()
+            .into_iter()
+            .map(|steer| steer.queue_id)
+            .collect::<Vec<_>>(),
+        vec!["queue-a"]
+    );
+}
+
+#[test]
+fn acknowledging_one_pending_steer_preserves_the_remaining_order() {
+    let control = AgentRunControl::with_budget(test_budget());
+    assert_eq!(control.request_steer("queue-a"), Ok(true));
+    assert_eq!(control.request_steer("queue-b"), Ok(true));
+    assert_eq!(control.request_steer("queue-c"), Ok(true));
+
+    assert!(control.acknowledge_pending_steer("queue-b"));
+    assert_eq!(
+        control
+            .pending_steers_snapshot()
+            .into_iter()
+            .map(|steer| steer.queue_id)
+            .collect::<Vec<_>>(),
+        vec!["queue-a", "queue-c"]
+    );
+}
+
+#[test]
+fn acknowledging_a_pending_steer_is_idempotent() {
+    let control = AgentRunControl::with_budget(test_budget());
+    assert_eq!(control.request_steer("queue-a"), Ok(true));
+    assert_eq!(control.request_steer("queue-b"), Ok(true));
+
+    assert!(control.acknowledge_pending_steer("queue-a"));
+    assert!(!control.acknowledge_pending_steer("queue-a"));
+    assert_eq!(
+        control
+            .pending_steers_snapshot()
+            .into_iter()
+            .map(|steer| steer.queue_id)
+            .collect::<Vec<_>>(),
+        vec!["queue-b"]
+    );
+}
+
+#[test]
+fn preparation_commit_linearizes_against_new_steers() {
+    let control = AgentRunControl::with_budget(test_budget());
+    assert_eq!(control.steer_epoch(), 0);
+    assert!(control.begin_preparation());
+    assert!(control.commit_preparation(0));
+
+    assert_eq!(control.request_steer("queue-after-commit"), Ok(true));
+    assert_eq!(control.steer_epoch(), 1);
+    assert!(!control.commit_preparation(0));
+    assert!(matches!(
+        control.execution_epoch_lease(),
+        RunEpochLeaseOutcome::RestartAfterSteer
+    ));
+    assert!(control.acknowledge_pending_steer("queue-after-commit"));
+    assert!(matches!(
+        control.execution_epoch_lease(),
+        RunEpochLeaseOutcome::Acquired(lease) if lease.epoch() == 1
+    ));
+
+    assert!(control.begin_preparation());
+    assert!(control.commit_preparation(1));
+
+    assert_eq!(control.request_steer("queue-next"), Ok(true));
+    assert_eq!(control.steer_epoch(), 2);
+    assert!(!control.commit_preparation(1));
+    assert_eq!(
+        control
+            .pending_steers_snapshot()
+            .into_iter()
+            .map(|steer| (steer.queue_id, steer.epoch))
+            .collect::<Vec<_>>(),
+        vec![("queue-next".to_string(), 2)]
+    );
+}
+
+#[test]
+fn terminal_commit_rejects_a_stale_response_after_the_steer_is_applied() {
+    let control = AgentRunControl::new("pro");
+    let stale_lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("initial execution lease unavailable: {outcome:?}"),
+    };
+    assert_eq!(control.request_steer("new-objective"), Ok(true));
+    assert!(control.acknowledge_pending_steer("new-objective"));
+
+    let mut stale_commit_ran = false;
+    let stale = control
+        .commit_terminal_result_with(stale_lease, || {
+            stale_commit_ran = true;
+            Ok::<_, ()>("stale")
+        })
+        .expect("terminal arbitration should not fail");
+    assert_eq!(stale, RunTerminalCommit::RestartAfterSteer);
+    assert!(!stale_commit_ran);
+
+    let current_lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("current execution lease unavailable: {outcome:?}"),
+    };
+    assert_eq!(current_lease.epoch(), 1);
+    assert_eq!(
+        control
+            .commit_terminal_result_with(current_lease, || Ok::<_, ()>("current"))
+            .expect("current terminal commit should succeed"),
+        RunTerminalCommit::Committed("current")
+    );
+    assert_eq!(control.request_steer("too-late"), Ok(false));
+    assert!(!control.request_cancel());
+    assert_eq!(control.stop_reason(), None);
+}
+
+#[test]
+fn response_step_commit_restarts_without_persisting_after_steer_wins() {
+    let control = AgentRunControl::new("pro");
+    let stale_lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("initial execution lease unavailable: {outcome:?}"),
+    };
+    assert_eq!(control.request_steer("new-response-objective"), Ok(true));
+    assert!(matches!(
+        control
+            .commit_pending_steers_with(|_| Ok::<_, ()>(()))
+            .expect("steer application should succeed"),
+        RunSteerBatchCommit::Committed { .. }
+    ));
+
+    let mut persistence_ran = false;
+    let committed = control
+        .commit_execution_step_with(stale_lease, || {
+            persistence_ran = true;
+            Ok::<_, ()>(())
+        })
+        .expect("response arbitration should not fail");
+
+    assert_eq!(committed, RunExecutionStepCommit::RestartAfterSteer);
+    assert!(!persistence_ran);
+}
+
+#[test]
+fn stale_epoch_cannot_start_a_tool_call_after_steer_wins() {
+    let control = AgentRunControl::new("pro");
+    let stale_lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("initial execution lease unavailable: {outcome:?}"),
+    };
+    assert_eq!(control.request_steer("new-tool-objective"), Ok(true));
+    assert!(matches!(
+        control
+            .commit_pending_steers_with(|_| Ok::<_, ()>(()))
+            .expect("steer application should succeed"),
+        RunSteerBatchCommit::Committed { .. }
+    ));
+
+    assert_eq!(
+        control.begin_tool_call_with_epoch(stale_lease, "main", "file.read", "README.md"),
+        RunToolCallStart::RestartAfterSteer
+    );
+    assert_eq!(control.progress().tool_calls, 0);
+
+    let current_lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("current execution lease unavailable: {outcome:?}"),
+    };
+    assert!(matches!(
+        control.begin_tool_call_with_epoch(current_lease, "main", "file.read", "README.md"),
+        RunToolCallStart::Started(1)
+    ));
+    control.finish_tool_call();
+}
+
+#[test]
+fn stale_epoch_cannot_consume_model_turn_or_repair_budgets() {
+    let control = AgentRunControl::with_budget(test_budget());
+    assert_eq!(control.request_steer("new-budget-objective"), Ok(true));
+    assert!(matches!(
+        control
+            .commit_pending_steers_with(|_| Ok::<_, ()>(()))
+            .expect("steer application should succeed"),
+        RunSteerBatchCommit::Committed { .. }
+    ));
+
+    assert_eq!(
+        control.begin_stage_model_call_at(0, "old-worker", RunStageClass::Worker),
+        Ok(None)
+    );
+    assert_eq!(control.record_agent_turn_at(0, "old-worker"), Ok(None));
+    assert_eq!(
+        control.begin_repair_attempt_at(0, "old-worker-repair"),
+        Ok(None)
+    );
+    assert!(!control.mark_progress_at(0, "old-worker", "stale progress"));
+    let stale_progress = control.progress();
+    assert_eq!(stale_progress.model_calls, 0);
+    assert_eq!(stale_progress.agent_turns, 0);
+    assert_eq!(stale_progress.repair_attempts, 0);
+    assert_eq!(control.stop_reason(), None);
+
+    assert_eq!(
+        control.begin_stage_model_call_at(1, "new-worker", RunStageClass::Worker),
+        Ok(Some(1))
+    );
+    control.finish_model_call();
+    assert_eq!(control.record_agent_turn_at(1, "new-worker"), Ok(Some(1)));
+    assert_eq!(
+        control.begin_repair_attempt_at(1, "new-worker-repair"),
+        Ok(Some(1))
+    );
+}
+
+#[test]
+fn delayed_old_epoch_worker_cannot_write_after_durable_steer_application() {
+    let control = Arc::new(AgentRunControl::new("pro"));
+    let old_lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("initial execution lease unavailable: {outcome:?}"),
+    };
+    let ready = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let worker_control = Arc::clone(&control);
+    let worker_ready = Arc::clone(&ready);
+    let worker_release = Arc::clone(&release);
+    let worker = thread::spawn(move || {
+        worker_ready.wait();
+        worker_release.wait();
+        (
+            worker_control.record_partial_output_at(old_lease.epoch(), "stale partial"),
+            worker_control.record_best_known_result_at(
+                old_lease.epoch(),
+                "stale-worker",
+                "stale result",
+                ResultQuality::Verified,
+                1,
+                true,
+                true,
+            ),
+        )
+    });
+
+    ready.wait();
+    assert_eq!(control.request_steer("durable-new-objective"), Ok(true));
+    assert!(matches!(
+        control
+            .commit_pending_steers_with(|pending| Ok::<_, ()>(pending.len()))
+            .expect("durable steer application should succeed"),
+        RunSteerBatchCommit::Committed { value: 1, .. }
+    ));
+    release.wait();
+
+    assert_eq!(worker.join().expect("worker should join"), (false, false));
+    assert!(control.partial_output().is_empty());
+    assert!(control.result_frontier().is_empty());
+    assert!(matches!(
+        control.execution_epoch_lease(),
+        RunEpochLeaseOutcome::Acquired(lease) if lease.epoch() == 1
+    ));
+}
+
+#[test]
+fn terminal_commit_and_steer_have_one_linearization_order() {
+    let control = Arc::new(AgentRunControl::new("pro"));
+    let lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let commit_control = Arc::clone(&control);
+    let commit = thread::spawn(move || {
+        commit_control
+            .commit_terminal_result_with(lease, || {
+                entered_tx.send(()).expect("entry signal should send");
+                release_rx.recv().expect("commit should be released");
+                Ok::<_, ()>(())
+            })
+            .expect("terminal commit should not fail")
+    });
+    entered_rx.recv().expect("terminal commit should enter");
+
+    let steer_control = Arc::clone(&control);
+    let steer = thread::spawn(move || steer_control.request_steer("racing-steer"));
+    release_tx.send(()).expect("terminal commit should release");
+
+    assert_eq!(
+        commit.join().expect("commit thread should join"),
+        RunTerminalCommit::Committed(())
+    );
+    assert_eq!(steer.join().expect("steer thread should join"), Ok(false));
+    assert_eq!(control.steer_epoch(), 0);
+}
+
+#[test]
+fn failed_steer_persistence_does_not_publish_an_epoch() {
+    let control = AgentRunControl::new("pro");
+
+    let result =
+        control.commit_steer_request_with("not-durable", || Err::<(), _>("storage failed"));
+
+    assert_eq!(result, Err("storage failed"));
+    assert_eq!(control.steer_epoch(), 0);
+    assert!(control.pending_steers_snapshot().is_empty());
+}
+
+#[test]
+fn full_steer_queue_rejects_without_persisting_or_dropping_an_accepted_request() {
+    let control = AgentRunControl::new("pro");
+    for index in 0..16 {
+        let result = control
+            .commit_steer_request_with(format!("steer-{index}"), || Ok::<_, ()>(()))
+            .expect("steer request should arbitrate");
+        assert!(matches!(result, RunSteerRequestCommit::Committed { .. }));
+    }
+    let accepted_before = control.pending_steers_snapshot();
+    let mut persisted = false;
+
+    let rejected = control
+        .commit_steer_request_with("steer-over-capacity", || {
+            persisted = true;
+            Ok::<_, ()>(())
+        })
+        .expect("capacity rejection should arbitrate");
+
+    assert_eq!(rejected, RunSteerRequestCommit::CapacityReached);
+    assert!(!persisted);
+    assert_eq!(control.steer_epoch(), 16);
+    assert_eq!(control.pending_steers_snapshot(), accepted_before);
+}
+
+#[test]
+fn durable_steer_commit_wins_before_terminal_commit() {
+    let control = Arc::new(AgentRunControl::new("pro"));
+    let lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let steer_control = Arc::clone(&control);
+    let steer = thread::spawn(move || {
+        steer_control
+            .commit_steer_request_with("durable-first", || {
+                entered_tx.send(()).expect("entry signal should send");
+                release_rx.recv().expect("steer commit should release");
+                Ok::<_, ()>("persisted")
+            })
+            .expect("steer persistence should succeed")
+    });
+    entered_rx.recv().expect("steer commit should enter");
+
+    let terminal_control = Arc::clone(&control);
+    let terminal = thread::spawn(move || {
+        terminal_control
+            .commit_terminal_result_with(lease, || Ok::<_, ()>(()))
+            .expect("terminal arbitration should succeed")
+    });
+    release_tx.send(()).expect("steer commit should release");
+
+    assert_eq!(
+        steer.join().expect("steer thread should join"),
+        RunSteerRequestCommit::Committed {
+            value: "persisted",
+            steer: RunSteer {
+                queue_id: "durable-first".to_string(),
+                epoch: 1,
+            },
+        }
+    );
+    assert_eq!(
+        terminal.join().expect("terminal thread should join"),
+        RunTerminalCommit::RestartAfterSteer
+    );
+}
+
+#[test]
+fn terminal_commit_wins_without_persisting_a_late_steer() {
+    let control = Arc::new(AgentRunControl::new("pro"));
+    let lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let terminal_control = Arc::clone(&control);
+    let terminal = thread::spawn(move || {
+        terminal_control
+            .commit_terminal_result_with(lease, || {
+                entered_tx.send(()).expect("entry signal should send");
+                release_rx.recv().expect("terminal commit should release");
+                Ok::<_, ()>(())
+            })
+            .expect("terminal arbitration should succeed")
+    });
+    entered_rx.recv().expect("terminal commit should enter");
+
+    let (persisted_tx, persisted_rx) = mpsc::channel();
+    let steer_control = Arc::clone(&control);
+    let steer = thread::spawn(move || {
+        steer_control
+            .commit_steer_request_with("too-late", || {
+                persisted_tx
+                    .send(())
+                    .expect("persistence signal should send");
+                Ok::<_, ()>(())
+            })
+            .expect("steer arbitration should succeed")
+    });
+    release_tx.send(()).expect("terminal commit should release");
+
+    assert_eq!(
+        terminal.join().expect("terminal thread should join"),
+        RunTerminalCommit::Committed(())
+    );
+    assert_eq!(
+        steer.join().expect("steer thread should join"),
+        RunSteerRequestCommit::TerminalCommitted
+    );
+    assert!(persisted_rx.try_recv().is_err());
+    assert_eq!(control.steer_epoch(), 0);
+    assert!(control.pending_steers_snapshot().is_empty());
+}
+
+#[test]
+fn preparation_commit_holds_the_handoff_until_persistence_finishes() {
+    let control = Arc::new(AgentRunControl::new("pro"));
+    assert!(control.begin_preparation());
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let commit_control = Arc::clone(&control);
+    let commit = thread::spawn(move || {
+        commit_control
+            .commit_preparation_with(0, || {
+                entered_tx.send(()).expect("entry signal should send");
+                release_rx.recv().expect("preparation should be released");
+                Ok::<_, ()>("persisted")
+            })
+            .expect("preparation commit should not fail")
+    });
+    entered_rx.recv().expect("preparation commit should enter");
+
+    let steer_control = Arc::clone(&control);
+    let steer = thread::spawn(move || steer_control.request_steer("after-handoff"));
+    release_tx
+        .send(())
+        .expect("preparation commit should release");
+
+    assert_eq!(
+        commit.join().expect("commit thread should join"),
+        RunPreparationCommit::Committed {
+            value: "persisted",
+            lease: RunEpochLease { epoch: 0 },
+        }
+    );
+    assert_eq!(steer.join().expect("steer thread should join"), Ok(true));
+    assert!(matches!(
+        control.execution_epoch_lease(),
+        RunEpochLeaseOutcome::RestartAfterSteer
+    ));
+}
+
+#[test]
+fn pending_steer_commit_is_atomic_with_user_cancellation() {
+    let control = Arc::new(AgentRunControl::new("pro"));
+    assert_eq!(control.request_steer("durable-steer"), Ok(true));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let commit_control = Arc::clone(&control);
+    let commit = thread::spawn(move || {
+        commit_control
+            .commit_pending_steers_with(|pending| {
+                assert_eq!(pending.len(), 1);
+                entered_tx.send(()).expect("entry signal should send");
+                release_rx.recv().expect("steer commit should be released");
+                Ok::<_, ()>(pending[0].queue_id.clone())
+            })
+            .expect("steer commit should not fail")
+    });
+    entered_rx.recv().expect("steer commit should enter");
+
+    let cancel_control = Arc::clone(&control);
+    let cancel = thread::spawn(move || cancel_control.request_cancel());
+    release_tx.send(()).expect("steer commit should release");
+
+    assert_eq!(
+        commit.join().expect("commit thread should join"),
+        RunSteerBatchCommit::Committed {
+            value: "durable-steer".to_string(),
+            steers: vec![RunSteer {
+                queue_id: "durable-steer".to_string(),
+                epoch: 1,
+            }],
+        }
+    );
+    cancel.join().expect("cancel thread should join");
+    assert!(!control.has_pending_steer());
+    assert_eq!(control.stop_reason(), Some(RunStopReason::UserCancelled));
+}
+
+#[test]
+fn stopped_or_failed_steer_commits_leave_the_pending_batch_untouched() {
+    let control = AgentRunControl::new("pro");
+    assert_eq!(control.request_steer("retry-me"), Ok(true));
+    let failed = control.commit_pending_steers_with(|_| Err::<(), _>("storage failed"));
+    assert_eq!(failed, Err("storage failed"));
+    assert_eq!(control.pending_steers_snapshot().len(), 1);
+
+    control.request_cancel();
+    let mut commit_ran = false;
+    let stopped = control
+        .commit_pending_steers_with(|_| {
+            commit_ran = true;
+            Ok::<_, ()>(())
+        })
+        .expect("stop-first arbitration should not fail");
+    assert_eq!(
+        stopped,
+        RunSteerBatchCommit::Stopped(RunStopReason::UserCancelled)
+    );
+    assert!(!commit_ran);
+    assert_eq!(control.pending_steers_snapshot().len(), 1);
+}
+
+#[test]
+fn steering_invalidates_old_partial_output_and_result_frontier() {
+    let control = AgentRunControl::with_budget(test_budget());
+    assert!(control.record_partial_output_at(0, "old partial"));
+    assert!(control.record_best_known_result_at(
+        0,
+        "old-stage",
+        "old result",
+        ResultQuality::Draft,
+        0,
+        false,
+        false,
+    ));
+    assert_eq!(control.partial_output(), "old partial");
+    assert_eq!(control.result_frontier().len(), 1);
+
+    assert_eq!(control.request_steer("new-objective"), Ok(true));
+    assert!(control.partial_output().is_empty());
+    assert!(control.result_frontier().is_empty());
+    assert!(!control.record_partial_output_at(0, "stale partial"));
+    assert!(!control.record_best_known_result_at(
+        0,
+        "stale-stage",
+        "stale result",
+        ResultQuality::Verified,
+        1,
+        true,
+        true,
+    ));
+
+    assert!(control.acknowledge_pending_steer("new-objective"));
+    assert!(control.record_partial_output_at(1, "current partial"));
+    assert!(control.record_best_known_result_at(
+        1,
+        "current-stage",
+        "current result",
+        ResultQuality::Draft,
+        0,
+        false,
+        false,
+    ));
 }
 
 #[test]

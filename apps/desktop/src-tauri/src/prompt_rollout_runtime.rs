@@ -138,8 +138,8 @@ fn frozen_prompt_profile_for_promotion(
         })
         .map(|(_, observation)| observation.clone())
         .collect::<Vec<_>>();
-    let Some(dataset_sha256) = orchestrator::latest_scientific_dataset_digest(&observations)
-        .map(str::to_string)
+    let Some(dataset_sha256) =
+        orchestrator::latest_scientific_dataset_digest(&observations).map(str::to_string)
     else {
         return Ok(None);
     };

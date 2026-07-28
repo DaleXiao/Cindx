@@ -908,6 +908,7 @@ pub(crate) struct AgentTraceRoleSummaryView {
     pub(crate) models: Vec<String>,
     pub(crate) calls: usize,
     pub(crate) completed: usize,
+    pub(crate) interrupted: usize,
     pub(crate) degraded: usize,
     pub(crate) latency_ms: u64,
     pub(crate) first_token_latency_ms: Option<u64>,

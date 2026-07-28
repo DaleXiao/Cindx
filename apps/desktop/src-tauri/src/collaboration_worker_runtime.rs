@@ -20,6 +20,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
     branch_cancellation: Option<Arc<AtomicBool>>,
 ) -> CollaborationCompletion {
     let started_at_ms = current_time_millis();
+    let objective_epoch = run_context_steer_epoch(&run_context);
     let state = app.state::<AppState>();
     let registry = if allow_tools {
         match tool_registry_for_state(&state, &workspace_root) {
@@ -92,14 +93,14 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                 evidence,
             );
         }
-        if cancellation
-            .as_ref()
-            .is_some_and(collaboration_run_should_interrupt)
-        {
-            let message = if cancellation
-                .as_ref()
-                .is_some_and(|control| control.has_pending_steer())
-            {
+        if cancellation.as_ref().is_some_and(|control| {
+            collaboration_run_should_interrupt(control)
+                || !control.preparation_epoch_is_current(objective_epoch)
+        }) {
+            let message = if cancellation.as_ref().is_some_and(|control| {
+                control.has_pending_steer()
+                    || !control.preparation_epoch_is_current(objective_epoch)
+            }) {
                 COLLABORATION_STEER_INTERRUPTED
             } else {
                 MODEL_REQUEST_CANCELLED
@@ -141,7 +142,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                 if let (Some(control), Some(partial_answer)) =
                     (cancellation.as_ref(), failed.partial_content.as_ref())
                 {
-                    control.record_partial_output(partial_answer);
+                    control.record_partial_output_at(objective_epoch, partial_answer);
                 }
                 return CollaborationCompletion::failed_worker(
                     failed.failure,
@@ -153,18 +154,33 @@ pub(crate) fn complete_collaboration_worker_with_tools(
             }
         };
         if let Some(control) = cancellation.as_ref() {
-            if let Err(reason) = control.begin_stage_model_call(&stage, stage_class) {
-                let failure = AgentFailure::from_stop_reason(
-                    reason,
-                    format!("Run stopped before worker model call: {}", reason.code()),
-                );
-                return CollaborationCompletion::failed_worker(
-                    failure,
-                    None,
-                    current_time_millis().saturating_sub(started_at_ms),
-                    worker.completion_usage("isolated_evidence_v2"),
-                    evidence,
-                );
+            match control.begin_stage_model_call_at(objective_epoch, &stage, stage_class) {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return CollaborationCompletion::failed_worker(
+                        AgentFailure::cancelled(
+                            "user_steer",
+                            "worker model call superseded by user steering",
+                        ),
+                        None,
+                        current_time_millis().saturating_sub(started_at_ms),
+                        worker.completion_usage("isolated_evidence_v2"),
+                        evidence,
+                    )
+                }
+                Err(reason) => {
+                    let failure = AgentFailure::from_stop_reason(
+                        reason,
+                        format!("Run stopped before worker model call: {}", reason.code()),
+                    );
+                    return CollaborationCompletion::failed_worker(
+                        failure,
+                        None,
+                        current_time_millis().saturating_sub(started_at_ms),
+                        worker.completion_usage("isolated_evidence_v2"),
+                        evidence,
+                    );
+                }
             }
         }
         let mut request = prepared_turn.turn.request;
@@ -186,26 +202,34 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                     partial_output.push_str(delta);
                 }
                 if let Some(control) = cancellation.as_ref() {
-                    stream_progress.observe(control, "model_stream", &stage, &partial_output);
+                    stream_progress.observe(
+                        control,
+                        objective_epoch,
+                        "model_stream",
+                        &stage,
+                        &partial_output,
+                    );
                 }
             },
             || {
                 cancellation.as_ref().is_some_and(|control| {
                     collaboration_stage_should_interrupt(control, stage_class)
+                        || !control.preparation_epoch_is_current(objective_epoch)
                 }) || branch_cancellation
                     .as_ref()
                     .is_some_and(|cancelled| cancelled.load(Ordering::SeqCst))
             },
         );
         if let Some(control) = cancellation.as_ref() {
-            control.finish_model_call();
+            control.finish_model_call_at(objective_epoch);
         }
         let response = match response {
             Ok(response) => response,
             Err(error) => {
                 let failure = AgentFailure::from_model_error(&error);
                 if let Some(control) = cancellation.as_ref() {
-                    control.record_observation(
+                    control.record_observation_at(
+                        objective_epoch,
                         "provider_failure",
                         error.class.label(),
                         &error.message,
@@ -226,23 +250,38 @@ pub(crate) fn complete_collaboration_worker_with_tools(
             }
         };
         if let Some(control) = cancellation.as_ref() {
-            if let Err(reason) = control.record_agent_turn(&stage) {
-                let failure = AgentFailure::from_stop_reason(
-                    reason,
-                    format!("Run stopped after worker model turn: {}", reason.code()),
-                );
-                return CollaborationCompletion::failed_worker(
-                    failure,
-                    None,
-                    current_time_millis().saturating_sub(started_at_ms),
-                    worker.completion_usage("isolated_evidence_v2"),
-                    evidence,
-                );
+            match control.record_agent_turn_at(objective_epoch, &stage) {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return CollaborationCompletion::failed_worker(
+                        AgentFailure::cancelled(
+                            "user_steer",
+                            "worker model turn superseded by user steering",
+                        ),
+                        None,
+                        current_time_millis().saturating_sub(started_at_ms),
+                        worker.completion_usage("isolated_evidence_v2"),
+                        evidence,
+                    )
+                }
+                Err(reason) => {
+                    let failure = AgentFailure::from_stop_reason(
+                        reason,
+                        format!("Run stopped after worker model turn: {}", reason.code()),
+                    );
+                    return CollaborationCompletion::failed_worker(
+                        failure,
+                        None,
+                        current_time_millis().saturating_sub(started_at_ms),
+                        worker.completion_usage("isolated_evidence_v2"),
+                        evidence,
+                    );
+                }
             }
         }
         if let Some(control) = cancellation.as_ref() {
             if let Some(evidence) = model_response_checkpoint_evidence(&response) {
-                control.record_observation("model_result", &stage, &evidence);
+                control.record_observation_at(objective_epoch, "model_result", &stage, &evidence);
             }
         }
 
@@ -256,8 +295,9 @@ pub(crate) fn complete_collaboration_worker_with_tools(
         match worker.advance_model_response(response) {
             WorkerAdvance::Completed { answer } => {
                 if let Some(control) = cancellation.as_ref() {
-                    control.record_partial_output(&answer);
-                    control.record_best_known_result(
+                    control.record_partial_output_at(objective_epoch, &answer);
+                    control.record_best_known_result_at(
+                        objective_epoch,
                         &stage,
                         &answer,
                         if evidence.is_empty() {
@@ -281,7 +321,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                 if let (Some(control), Some(partial_answer)) =
                     (cancellation.as_ref(), failed.partial_content.as_ref())
                 {
-                    control.record_partial_output(partial_answer);
+                    control.record_partial_output_at(objective_epoch, partial_answer);
                 }
                 return CollaborationCompletion::failed_worker(
                     failed.failure,
@@ -358,18 +398,46 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                         }
                         (ToolOutcomeStatus::Failed, observation)
                     } else {
-                        let result = registry.as_ref().ok_or_else(|| {
-                            "collaboration worker tool registry is unavailable".to_string()
-                        });
-                        match result.and_then(|registry| {
-                            execute_agent_tool_invocation(
+                        let result = match (registry.as_ref(), cancellation.as_ref()) {
+                            (Some(registry), Some(control)) => {
+                                match execute_agent_tool_invocation_for_objective_epoch(
+                                    &state,
+                                    registry,
+                                    invocation,
+                                    &workspace_root,
+                                    &worker_context,
+                                    control,
+                                    objective_epoch,
+                                ) {
+                                    Ok(AgentToolInvocationOutcome::Completed(result)) => Ok(result),
+                                    Ok(AgentToolInvocationOutcome::RestartAfterSteer) => {
+                                        let failure = AgentFailure::cancelled(
+                                            "collaboration_interrupted",
+                                            COLLABORATION_STEER_INTERRUPTED,
+                                        );
+                                        return CollaborationCompletion::failed_worker(
+                                            failure,
+                                            None,
+                                            current_time_millis().saturating_sub(started_at_ms),
+                                            worker.completion_usage("isolated_evidence_v2"),
+                                            evidence,
+                                        );
+                                    }
+                                    Err(error) => Err(error),
+                                }
+                            }
+                            (Some(registry), None) => execute_agent_tool_invocation(
                                 &state,
                                 registry,
                                 invocation,
                                 &workspace_root,
                                 &worker_context,
-                            )
-                        }) {
+                            ),
+                            (None, _) => {
+                                Err("collaboration worker tool registry is unavailable".to_string())
+                            }
+                        };
+                        match result {
                             Ok(result) => {
                                 let status = result.status.clone();
                                 evidence.push(CollaborationEvidence {

@@ -3,8 +3,20 @@ use crate::agent_collaboration_runtime::{
     collaboration_candidate_handoff, collaboration_candidate_quorum,
     collaboration_candidate_quorum_grace, collaboration_error_blocks_executor,
 };
-use crate::agent_strategy_runtime::PlannedAgentRun;
-use orchestrator::{AdaptiveWorkflow, AdaptiveWorkflowStep, AgentVerificationPolicy};
+use crate::agent_conductor_runtime::{conductor_call_limits, conductor_repair_recovery_window};
+use crate::agent_conductor_scheduler::{schedule_conductor_decision, ConductorDecisionOutcome};
+use crate::agent_preparation_runtime::{
+    preparation_prompt_parts, remove_stale_preparation_context,
+};
+use crate::agent_strategy_runtime::{effective_prompt_objective_for_messages, PlannedAgentRun};
+use crate::collaboration_execution::collaboration_model_failure;
+use crate::collaboration_stage_runtime::{
+    collaboration_stage_result, collaboration_stage_terminal_presentation, CollaborationStageError,
+};
+use orchestrator::{
+    AdaptiveWorkflow, AdaptiveWorkflowStep, AgentRunDecisionHarness, AgentRunDecisionRequest,
+    AgentVerificationPolicy,
+};
 use tools::encode_input;
 
 fn test_prompt_evaluation_provenance(
@@ -204,6 +216,732 @@ fn pending_steer_interrupts_collaboration_without_stopping_the_run() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].queue_id, "queue-steer");
     assert!(!collaboration_run_should_interrupt(&control));
+}
+
+#[test]
+fn goal2_collaboration_terminal_status_distinguishes_interruptions_and_stage_deadlines() {
+    let completed = CollaborationCompletion::completed_worker(
+        "usable decision".to_string(),
+        12,
+        Metadata::new(),
+        Vec::new(),
+    );
+    let interrupted =
+        CollaborationCompletion::failed_with(AgentFailure::cancelled("user_steer", "superseded"));
+    let stage_deadline = CollaborationCompletion::failed_with(AgentFailure::budget(
+        RunStopReason::StageBudgetExhausted.code(),
+        "deadline exhausted",
+    ));
+    let unavailable = CollaborationCompletion::failed("provider unavailable");
+
+    assert_eq!(
+        collaboration_stage_terminal_presentation(&completed),
+        ("completed", "finished")
+    );
+    assert_eq!(
+        collaboration_stage_terminal_presentation(&interrupted),
+        ("interrupted", "interrupted")
+    );
+    assert_eq!(
+        collaboration_stage_terminal_presentation(&stage_deadline),
+        ("degraded", "deadline exhausted")
+    );
+    assert_eq!(
+        collaboration_stage_terminal_presentation(&unavailable),
+        ("degraded", "unavailable")
+    );
+    let deadline_result =
+        collaboration_stage_result(CollaborationCompletion::failed_with(AgentFailure::budget(
+            RunStopReason::StageBudgetExhausted.code(),
+            "deadline exhausted",
+        )));
+    assert_eq!(deadline_result, Err(CollaborationStageError::StageDeadline));
+}
+
+#[test]
+fn goal2_collaboration_cancellation_cause_prefers_run_stop_then_steer() {
+    let cancelled = ModelError::new(MODEL_REQUEST_CANCELLED);
+    let control = Arc::new(AgentRunControl::new("pro"));
+    assert_eq!(control.request_steer("steer-first"), Ok(true));
+    let steer_failure =
+        collaboration_model_failure(&cancelled, Some(&control), RunStageClass::Conductor);
+    assert_eq!(steer_failure.code, "user_steer");
+    assert_eq!(steer_failure.class, AgentFailureClass::Cancelled);
+    let mut steer_completion = CollaborationCompletion::failed_with(steer_failure);
+    steer_completion.usage.insert(
+        COLLABORATION_TERMINATION_SCOPE_KEY.to_string(),
+        COLLABORATION_TERMINATION_STEER.to_string(),
+    );
+    let steer_result = collaboration_stage_result(steer_completion);
+    assert_eq!(steer_result, Err(CollaborationStageError::SteerInterrupted));
+
+    control.request_cancel();
+    let cancelled_failure =
+        collaboration_model_failure(&cancelled, Some(&control), RunStageClass::Conductor);
+    assert_eq!(cancelled_failure.code, RunStopReason::UserCancelled.code());
+    assert_eq!(cancelled_failure.class, AgentFailureClass::Cancelled);
+    let mut stop_completion = CollaborationCompletion::failed_with(cancelled_failure);
+    stop_completion.usage.insert(
+        COLLABORATION_TERMINATION_SCOPE_KEY.to_string(),
+        COLLABORATION_TERMINATION_RUN.to_string(),
+    );
+    let stop_result = collaboration_stage_result(stop_completion);
+    assert_eq!(stop_result, Err(CollaborationStageError::RunStopped));
+}
+
+#[test]
+fn goal2_conductor_scheduler_fails_over_but_never_retries_after_steer_or_stage_deadline() {
+    let models = vec![
+        "primary".to_string(),
+        "alternate".to_string(),
+        "last".to_string(),
+    ];
+    let mut attempts = 0;
+    let mut observed = Vec::new();
+    let selected = schedule_conductor_decision(
+        &models,
+        &mut attempts,
+        |index, model, has_alternate, attempts| {
+            *attempts += 1;
+            observed.push((model.to_string(), has_alternate));
+            if index == 0 {
+                Err(CollaborationStageError::Failed(
+                    "provider timeout".to_string(),
+                ))
+            } else {
+                Ok(AgentRunDecision::direct(model))
+            }
+        },
+    )
+    .expect("a provider failure should fail over");
+    assert!(matches!(
+        selected.outcome,
+        ConductorDecisionOutcome::Selected(_)
+    ));
+    assert_eq!(selected.selected_model.as_deref(), Some("alternate"));
+    assert_eq!(selected.attempted_models, vec!["primary", "alternate"]);
+    assert_eq!(selected.failure_reasons.len(), 1);
+    assert_eq!(attempts, 2);
+    assert_eq!(
+        observed,
+        vec![
+            ("primary".to_string(), true),
+            ("alternate".to_string(), true)
+        ]
+    );
+
+    let mut attempts = 0;
+    let mut invoked = Vec::new();
+    let steered = schedule_conductor_decision(&models, &mut attempts, |_, model, _, attempts| {
+        *attempts += 1;
+        invoked.push(model.to_string());
+        Err(CollaborationStageError::SteerInterrupted)
+    });
+    assert!(matches!(
+        steered,
+        Err(CollaborationStageError::SteerInterrupted)
+    ));
+    assert_eq!(invoked, vec!["primary"]);
+    assert_eq!(attempts, 1);
+
+    let mut attempts = 0;
+    let mut invoked = Vec::new();
+    let exhausted = schedule_conductor_decision(&models, &mut attempts, |_, model, _, attempts| {
+        *attempts += 1;
+        invoked.push(model.to_string());
+        Err(CollaborationStageError::StageDeadline)
+    })
+    .expect("a global stage deadline should degrade without another attempt");
+    assert!(matches!(
+        exhausted.outcome,
+        ConductorDecisionOutcome::Exhausted
+    ));
+    assert_eq!(invoked, vec!["primary"]);
+    assert_eq!(attempts, 1);
+
+    let mut attempts = 0;
+    let mut invoked = Vec::new();
+    let recovered =
+        schedule_conductor_decision(&models, &mut attempts, |index, model, _, attempts| {
+            *attempts += 1;
+            invoked.push(model.to_string());
+            if index == 0 {
+                Err(CollaborationStageError::AttemptDeadline)
+            } else {
+                Ok(AgentRunDecision::direct(model))
+            }
+        })
+        .expect("a no-progress attempt deadline should fail over");
+    assert!(matches!(
+        recovered.outcome,
+        ConductorDecisionOutcome::Selected(_)
+    ));
+    assert_eq!(recovered.selected_model.as_deref(), Some("alternate"));
+    assert_eq!(invoked, vec!["primary", "alternate"]);
+
+    let mut attempts = 0;
+    let mut invoked = Vec::new();
+    let stopped = schedule_conductor_decision(&models, &mut attempts, |_, model, _, attempts| {
+        *attempts += 1;
+        invoked.push(model.to_string());
+        Err(CollaborationStageError::RunStopped)
+    });
+    assert!(matches!(stopped, Err(CollaborationStageError::RunStopped)));
+    assert_eq!(invoked, vec!["primary"]);
+    assert_eq!(attempts, 1);
+}
+
+#[test]
+fn goal2_conductor_failover_limits_preserve_quality_after_response_start() {
+    assert!(!collaboration_no_progress_should_cancel(
+        false,
+        Duration::from_secs(44),
+        Some(Duration::from_secs(45))
+    ));
+    assert!(collaboration_no_progress_should_cancel(
+        false,
+        Duration::from_secs(45),
+        Some(Duration::from_secs(45))
+    ));
+    assert!(!collaboration_no_progress_should_cancel(
+        true,
+        Duration::from_secs(900),
+        Some(Duration::from_secs(45))
+    ));
+    assert!(!collaboration_no_progress_should_cancel(
+        false,
+        Duration::from_secs(900),
+        None
+    ));
+    assert_eq!(
+        conductor_repair_recovery_window(true),
+        Some(Duration::from_secs(60))
+    );
+    assert_eq!(conductor_repair_recovery_window(false), None);
+    let primary = conductor_call_limits(true, false);
+    assert_eq!(primary.recovery_window, None);
+    assert_eq!(primary.no_progress_timeout, Some(Duration::from_secs(45)));
+    let repair = conductor_call_limits(true, true);
+    assert_eq!(repair.recovery_window, Some(Duration::from_secs(60)));
+    assert_eq!(repair.no_progress_timeout, Some(Duration::from_secs(45)));
+    assert_eq!(conductor_call_limits(false, false), Default::default());
+    assert_eq!(conductor_call_limits(false, true), Default::default());
+}
+
+#[test]
+fn goal2_preparation_replay_keeps_each_steer_once_and_replans_the_latest_prompt() {
+    let mut runtime = start_agent_loop(
+        TaskId("preparation-replay".to_string()),
+        "original request",
+        AgentRuntimeConfig::default(),
+    );
+    for (queue_id, prompt) in [
+        ("steer-one", "preserve compatibility"),
+        ("steer-two", "also run the focused tests"),
+    ] {
+        AgentKernel::new(&mut runtime, &[]).apply_steer(
+            prompt,
+            [
+                ("queue_id".to_string(), queue_id.to_string()),
+                ("queue_mode".to_string(), "steer".to_string()),
+                ("model_content".to_string(), prompt.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+    }
+
+    let (history, active) = preparation_prompt_parts(&runtime.messages)
+        .expect("the latest steer should be the active planning objective");
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].content, "original request");
+    assert_eq!(history[1].content, "preserve compatibility");
+    assert_eq!(active.content, "also run the focused tests");
+    assert_eq!(
+        active.metadata.get("queue_id").map(String::as_str),
+        Some("steer-two")
+    );
+    let queue_ids = history
+        .iter()
+        .chain(std::iter::once(&active))
+        .filter_map(|message| message.metadata.get("queue_id"))
+        .collect::<Vec<_>>();
+    assert_eq!(queue_ids, vec!["steer-one", "steer-two"]);
+    assert_eq!(
+        effective_prompt_objective_for_messages("original request", &runtime.messages),
+        "Initial request:\noriginal request\n\nAccepted steering 1:\npreserve compatibility\n\nAccepted steering 2:\nalso run the focused tests"
+    );
+}
+
+#[test]
+fn goal2_effective_objective_reclaims_short_steer_budget_for_initial_constraints() {
+    let initial = format!("{}CRITICAL_END_CONSTRAINT", "A".repeat(5_900));
+    let mut runtime = start_agent_loop(
+        TaskId("effective-objective-budget".to_string()),
+        &initial,
+        AgentRuntimeConfig::default(),
+    );
+    for (index, prompt) in ["continue", "preserve data", "keep it fast", "run tests"]
+        .into_iter()
+        .enumerate()
+    {
+        AgentKernel::new(&mut runtime, &[]).apply_steer(
+            prompt,
+            [
+                ("queue_id".to_string(), format!("steer-{index}")),
+                ("queue_mode".to_string(), "steer".to_string()),
+                ("model_content".to_string(), prompt.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+    }
+
+    let objective = effective_prompt_objective_for_messages(&initial, &runtime.messages);
+
+    assert!(objective.chars().count() <= 6_000);
+    assert!(objective.chars().count() > 5_800);
+    assert!(objective.contains("CRITICAL_END_CONSTRAINT"));
+    for prompt in ["continue", "preserve data", "keep it fast", "run tests"] {
+        assert!(objective.contains(prompt));
+    }
+}
+
+#[test]
+fn goal2_execution_steer_replans_and_feeds_terminal_epoch_learning() {
+    let initial =
+        "Inspect the Rust implementation; preserve the public API and do not modify files.";
+    let steer = "Research the upstream algorithm too.";
+    let models = vec!["coding-model".to_string(), "research-model".to_string()];
+    let mut conductor_objectives = Vec::new();
+    let mut select_plan = |objective: &str| {
+        conductor_objectives.push(objective.to_string());
+        let revised = objective.contains("Accepted steering 1:");
+        let model = if revised {
+            "research-model"
+        } else {
+            "coding-model"
+        };
+        let mut expected = AgentRunDecision::direct(model);
+        expected.task_class = if revised {
+            TaskClass::Research
+        } else {
+            TaskClass::Coding
+        };
+        let harness = AgentRunDecisionHarness::new(AgentRunDecisionRequest {
+            objective: objective.to_string(),
+            recent_context: String::new(),
+            effort: "auto".to_string(),
+            conductor_model: "deterministic-test-conductor".to_string(),
+            allowed_models: models.clone(),
+            max_parallelism: 2,
+            evolved_directive: String::new(),
+            historical_evidence: String::new(),
+        });
+        assert!(harness.planning_prompt().contains(objective));
+        let response = serde_json::to_string(&expected).expect("decision should serialize");
+        let decision = harness
+            .parse(&response)
+            .expect("deterministic conductor decision should validate");
+        test_planned_agent_run(decision, AgentEffort::Auto)
+    };
+
+    let base_context = [
+        (
+            "agent_run_id".to_string(),
+            "execution-steer-run".to_string(),
+        ),
+        ("project_id".to_string(), "project-a".to_string()),
+        ("session_id".to_string(), "session-a".to_string()),
+        ("requested_policy".to_string(), "auto_router".to_string()),
+        ("initial_prompt_objective".to_string(), initial.to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    let mut runtime = start_agent_loop(phase16_task_id(), initial, AgentRuntimeConfig::default());
+    let control = AgentRunControl::new("auto");
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task started",
+        metadata_with_context(
+            [("prompt".to_string(), initial.to_string())]
+                .into_iter()
+                .collect(),
+            &base_context,
+        ),
+    )
+    .expect("start should append");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::MessageAdded,
+        "Initial request",
+        metadata_with_context(
+            [
+                ("role".to_string(), "user".to_string()),
+                ("content".to_string(), initial.to_string()),
+                ("display_content".to_string(), initial.to_string()),
+                ("steer_epoch".to_string(), "0".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            &base_context,
+        ),
+    )
+    .expect("initial request should append");
+
+    assert!(control.begin_preparation());
+    let initial_objective = effective_prompt_objective_for_messages(initial, &runtime.messages);
+    let initial_plan = select_plan(&initial_objective);
+    let mut initial_context = base_context.clone();
+    initial_context.insert("steer_epoch".to_string(), "0".to_string());
+    initial_context.insert("prompt_objective".to_string(), initial_objective.clone());
+    initial_context.insert(
+        "effective_prompt_objective".to_string(),
+        initial_objective.clone(),
+    );
+    initial_plan
+        .apply_to_context(&mut initial_context, AgentEffort::Auto)
+        .expect("initial plan should populate context");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent run decision selected",
+        initial_context.clone(),
+    )
+    .expect("initial decision should append");
+    assert!(control.commit_preparation(0));
+    let initial_lease = match control.execution_epoch_lease() {
+        agent_runtime::RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("initial execution lease should be acquired: {outcome:?}"),
+    };
+    assert_eq!(
+        initial_context.get("task_class").map(String::as_str),
+        Some("coding")
+    );
+    assert_eq!(
+        initial_context.get("agent_model").map(String::as_str),
+        Some("coding-model")
+    );
+
+    assert_eq!(control.request_steer("short-steer"), Ok(true));
+    assert!(!control.execution_epoch_lease_is_current(initial_lease));
+    let applied_epoch = match control
+        .commit_pending_steers_with(|pending| {
+            let accepted = pending.last().expect("the short steer should be pending");
+            AgentKernel::new(&mut runtime, &[]).apply_steer(
+                steer,
+                [
+                    ("queue_id".to_string(), accepted.queue_id.clone()),
+                    ("queue_mode".to_string(), "steer".to_string()),
+                    ("display_content".to_string(), steer.to_string()),
+                    ("model_content".to_string(), steer.to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            );
+            Ok::<_, ()>(accepted.epoch)
+        })
+        .expect("steer application should succeed")
+    {
+        agent_runtime::RunSteerBatchCommit::Committed { value, .. } => value,
+        outcome => panic!("steer should commit: {outcome:?}"),
+    };
+    assert_eq!(applied_epoch, 1);
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::MessageAdded,
+        "Accepted user steering",
+        metadata_with_context(
+            [
+                ("role".to_string(), "user".to_string()),
+                ("content".to_string(), steer.to_string()),
+                ("display_content".to_string(), steer.to_string()),
+                ("queue_mode".to_string(), "steer".to_string()),
+                ("queue_id".to_string(), "short-steer".to_string()),
+                ("steer_epoch".to_string(), applied_epoch.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            &base_context,
+        ),
+    )
+    .expect("accepted steer should append");
+
+    assert!(control.begin_preparation());
+    let (history, active) = preparation_prompt_parts(&runtime.messages)
+        .expect("the steer should become the active preparation prompt");
+    assert_eq!(history[0].content, initial);
+    assert_eq!(active.content, steer);
+    let revised_objective = effective_prompt_objective_for_messages(initial, &runtime.messages);
+    let revised_plan = select_plan(&revised_objective);
+    let mut revised_context = base_context.clone();
+    revised_context.insert("steer_epoch".to_string(), applied_epoch.to_string());
+    revised_context.insert("prompt_objective".to_string(), revised_objective.clone());
+    revised_context.insert(
+        "effective_prompt_objective".to_string(),
+        revised_objective.clone(),
+    );
+    revised_plan
+        .apply_to_context(&mut revised_context, AgentEffort::Auto)
+        .expect("revised plan should populate context");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent run decision selected",
+        revised_context.clone(),
+    )
+    .expect("revised decision should append");
+    assert!(control.commit_preparation(applied_epoch));
+    assert_eq!(conductor_objectives.len(), 2);
+    assert_eq!(conductor_objectives[0], initial);
+    assert_eq!(conductor_objectives[1], revised_objective);
+    assert!(revised_objective.contains(initial));
+    assert!(revised_objective.contains("preserve the public API"));
+    assert!(revised_objective.contains(steer));
+    assert_eq!(
+        revised_context.get("task_class").map(String::as_str),
+        Some("research")
+    );
+    assert_eq!(
+        revised_context.get("agent_model").map(String::as_str),
+        Some("research-model")
+    );
+
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::ModelRequestFinished,
+        "Replanned model finished",
+        metadata_with_context(
+            [("total_tokens".to_string(), "11".to_string())]
+                .into_iter()
+                .collect(),
+            &revised_context,
+        ),
+    )
+    .expect("terminal epoch cost should append");
+    let revised_lease = match control.execution_epoch_lease() {
+        agent_runtime::RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("revised execution lease should be acquired: {outcome:?}"),
+    };
+    control
+        .commit_terminal_result_with(revised_lease, || {
+            append_event(
+                &mut store,
+                &phase16_task_id(),
+                EventKind::TaskStatusChanged,
+                "Agent task completed",
+                revised_context.clone(),
+            )
+            .map_err(|error| error.to_string())
+        })
+        .expect("terminal persistence should succeed");
+
+    let events = store
+        .list_by_task(&phase16_task_id())
+        .expect("events should load");
+    let prompt_cases = prompt_offline_dataset(&events, "project-a");
+    assert_eq!(prompt_cases.len(), 1);
+    assert_eq!(prompt_cases[0].objective, revised_objective);
+    assert_eq!(prompt_cases[0].task_class, "research");
+    let routing = routing_telemetry_from_events(&events);
+    assert_eq!(routing.len(), 1);
+    assert_eq!(routing[0].task_class, TaskClass::Research);
+    assert_eq!(routing[0].selected_model, "research-model");
+    assert_eq!(routing[0].cost_proxy, 11);
+}
+
+#[test]
+fn goal2_replanning_replaces_stale_preparation_context_but_keeps_durable_history() {
+    let mut history = vec![
+        Message {
+            role: MessageRole::System,
+            content: "old memory".to_string(),
+            metadata: [
+                ("internal".to_string(), "true".to_string()),
+                ("kind".to_string(), "project_memory".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        },
+        Message {
+            role: MessageRole::System,
+            content: "old collaboration".to_string(),
+            metadata: [
+                ("internal".to_string(), "true".to_string()),
+                ("collaboration_stage".to_string(), "guidance".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        },
+        Message {
+            role: MessageRole::System,
+            content: "durable artifact manifest".to_string(),
+            metadata: [
+                ("internal".to_string(), "true".to_string()),
+                ("kind".to_string(), "artifact_manifest".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        },
+        Message {
+            role: MessageRole::Assistant,
+            content: "completed work evidence".to_string(),
+            metadata: Metadata::new(),
+        },
+    ];
+
+    remove_stale_preparation_context(&mut history);
+
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].content, "durable artifact manifest");
+    assert_eq!(history[1].content, "completed work evidence");
+}
+
+#[test]
+fn goal2_prompt_derived_image_contract_is_refreshed_in_both_directions() {
+    let config = ProviderConfig {
+        base_url: "https://provider.example/v1".to_string(),
+        image_model: "image-model".to_string(),
+        ..ProviderConfig::default()
+    };
+    let mut run_context = Metadata::new();
+
+    add_image_generation_run_context(
+        &mut run_context,
+        &config,
+        "Generate an image of a lighthouse",
+    );
+    assert_eq!(
+        run_context
+            .get("image_generation_required")
+            .map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        run_context
+            .get("configured_image_model")
+            .map(String::as_str),
+        Some("image-model")
+    );
+
+    add_image_generation_run_context(&mut run_context, &config, "Review this Rust module");
+    assert!(!run_context.contains_key("image_generation_required"));
+    assert!(!run_context.contains_key("configured_image_model"));
+    assert!(!run_context.contains_key("configured_image_endpoint"));
+
+    add_image_generation_run_context(
+        &mut run_context,
+        &config,
+        "Create a picture for the release notes",
+    );
+    assert_eq!(
+        run_context
+            .get("image_generation_required")
+            .map(String::as_str),
+        Some("true")
+    );
+}
+
+#[test]
+fn goal2_short_image_steer_keeps_the_cumulative_image_contract() {
+    let config = ProviderConfig {
+        base_url: "https://provider.example/v1".to_string(),
+        image_model: "image-model".to_string(),
+        ..ProviderConfig::default()
+    };
+    let initial = "Generate an image of a lighthouse";
+    let mut runtime = start_agent_loop(
+        TaskId("cumulative-image-contract".to_string()),
+        initial,
+        AgentRuntimeConfig::default(),
+    );
+    AgentKernel::new(&mut runtime, &[]).apply_steer(
+        "Make the background blue",
+        [
+            ("queue_id".to_string(), "image-steer".to_string()),
+            ("queue_mode".to_string(), "steer".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let planning_objective = effective_prompt_objective_for_messages(initial, &runtime.messages);
+    let mut run_context = Metadata::new();
+
+    add_image_generation_run_context(&mut run_context, &config, &planning_objective);
+    run_context.insert(
+        "effective_prompt_objective".to_string(),
+        planning_objective.clone(),
+    );
+
+    assert!(planning_objective.contains(initial));
+    assert!(planning_objective.contains("Make the background blue"));
+    assert_eq!(
+        effective_agent_objective(&run_context, "Make the background blue"),
+        planning_objective
+    );
+    assert_eq!(
+        run_context
+            .get("image_generation_required")
+            .map(String::as_str),
+        Some("true")
+    );
+}
+
+#[test]
+fn goal2_prompt_derived_image_contract_is_scoped_to_the_steer_epoch() {
+    let mut runtime = start_agent_loop(
+        phase16_task_id(),
+        "Generate the first image",
+        AgentRuntimeConfig::default(),
+    );
+    let mut run_context = [
+        ("steer_epoch".to_string(), "0".to_string()),
+        ("image_generation_required".to_string(), "true".to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    apply_run_task_contract(&mut runtime, &run_context).expect("image contract should apply");
+    record_tool_outcome_with_risk(
+        &mut runtime,
+        "image.generate",
+        r#"{"prompt":"first"}"#,
+        &ToolOutcomeStatus::Succeeded,
+        Some(&ToolRisk::UsesNetwork),
+    );
+    assert!(runtime
+        .task_contract
+        .required_tool_satisfied("image.generate"));
+
+    run_context.insert("steer_epoch".to_string(), "1".to_string());
+    run_context.remove("image_generation_required");
+    apply_run_task_contract(&mut runtime, &run_context).expect("text contract should apply");
+    assert!(runtime.task_contract.model_context_for_task(&[]).is_none());
+
+    run_context.insert("steer_epoch".to_string(), "2".to_string());
+    run_context.insert("image_generation_required".to_string(), "true".to_string());
+    apply_run_task_contract(&mut runtime, &run_context).expect("new image contract should apply");
+    assert!(!runtime
+        .task_contract
+        .required_tool_satisfied("image.generate"));
+}
+
+#[test]
+fn goal2_knowledge_preparation_is_superseded_without_stopping_the_run() {
+    let control = Arc::new(AgentRunControl::new("pro"));
+    let epoch = control.steer_epoch();
+    assert!(!knowledge_preparation_should_interrupt(&control, epoch));
+
+    assert_eq!(control.request_steer("replace-objective"), Ok(true));
+    assert!(knowledge_preparation_should_interrupt(&control, epoch));
+    assert_eq!(control.stop_reason(), None);
 }
 
 fn test_message(role: MessageRole, content: impl Into<String>) -> Message {
@@ -1012,7 +1750,10 @@ fn recovery_identity_stays_on_root_prompt_after_steer() {
         summary: "user message".to_string(),
         metadata: [
             ("role".to_string(), "user".to_string()),
-            ("content".to_string(), "Focus on security findings".to_string()),
+            (
+                "content".to_string(),
+                "Focus on security findings".to_string(),
+            ),
             (
                 "display_content".to_string(),
                 "Focus on security findings".to_string(),
@@ -1169,10 +1910,7 @@ fn durable_internal_instruction_is_hidden_from_chat_but_restored_for_runtime() {
             ("role".to_string(), "system".to_string()),
             ("content".to_string(), "verify the mutation".to_string()),
             ("internal".to_string(), "true".to_string()),
-            (
-                "kind".to_string(),
-                "completion_verification".to_string(),
-            ),
+            ("kind".to_string(), "completion_verification".to_string()),
         ]
         .into_iter()
         .collect(),
@@ -1754,7 +2492,8 @@ fn project_memory_projection_persists_and_searches_real_lancedb_vectors() {
     let fallback = refresh_project_memory_vector_index(&root, &ProviderConfig::default(), &ledger)
         .expect("memory vectors should persist");
     assert!(fallback.is_none());
-    let database_path = memory_lancedb_database_path_for(&root, "project-vector-memory");
+    let (database_path, manifest_path, current_generation) =
+        memory_vector_paths_for_read(&root, "project-vector-memory");
     assert!(lancedb_index_exists(&database_path));
     let results = search_lancedb_index(
         &database_path,
@@ -1766,14 +2505,30 @@ fn project_memory_projection_persists_and_searches_real_lancedb_vectors() {
         results.first().map(|result| result.chunk.id.as_str()),
         Some(ledger.records[0].id.as_str())
     );
-    let manifest = load_memory_vector_manifest(&memory_lancedb_manifest_path_for(
-        &root,
-        "project-vector-memory",
-    ))
-    .expect("manifest should load")
-    .expect("manifest should exist");
+    let manifest = load_memory_vector_manifest(&manifest_path)
+        .expect("manifest should load")
+        .expect("manifest should exist");
     assert_eq!(manifest.embedding_backend, "local");
     assert_eq!(manifest.record_count, ledger.records.len());
+    assert_eq!(
+        current_generation.as_deref(),
+        Some(manifest.generation_id.as_str())
+    );
+    let unpublished_generation = unique_id("memory-vector-unpublished");
+    let (_, unpublished_manifest_path) =
+        memory_vector_generation_paths(&root, "project-vector-memory", &unpublished_generation);
+    let mut unpublished_manifest = manifest.clone();
+    unpublished_manifest.generation_id = unpublished_generation;
+    write_private_file_atomically(
+        &unpublished_manifest_path,
+        &serde_json::to_vec(&unpublished_manifest).expect("manifest should encode"),
+        "test unpublished memory vector manifest",
+    )
+    .expect("unpublished manifest should stage");
+    let (still_published_database, _, still_published_generation) =
+        memory_vector_paths_for_read(&root, "project-vector-memory");
+    assert_eq!(still_published_database, database_path);
+    assert_eq!(still_published_generation, current_generation);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -2634,8 +3389,7 @@ fn completed_gepa_canary_persists_a_verified_frozen_profile() {
             reflection_packet: None,
             provenance: test_prompt_evaluation_provenance(&candidate.id, &stable.id),
         };
-        candidate_observation.provenance.candidate_prompt_sha256 =
-            candidate_prompt_sha256.clone();
+        candidate_observation.provenance.candidate_prompt_sha256 = candidate_prompt_sha256.clone();
         candidate_observation.provenance.opponent_prompt_sha256 = stable_prompt_sha256.clone();
         let mut stable_observation = candidate_observation.clone();
         stable_observation.profile_id = stable.id.clone();
@@ -2645,8 +3399,7 @@ fn completed_gepa_canary_persists_a_verified_frozen_profile() {
         stable_observation.provenance =
             test_prompt_evaluation_provenance(&stable.id, &candidate.id);
         stable_observation.provenance.candidate_prompt_sha256 = stable_prompt_sha256.clone();
-        stable_observation.provenance.opponent_prompt_sha256 =
-            candidate_prompt_sha256.clone();
+        stable_observation.provenance.opponent_prompt_sha256 = candidate_prompt_sha256.clone();
         model
             .observations
             .push(("auto".to_string(), candidate_observation));
@@ -2839,13 +3592,7 @@ fn stable_prompt_rollout_uses_the_evidence_bound_frozen_genome() {
         mutation_trajectories: Vec::new(),
     };
 
-    apply_prompt_rollout_selection(
-        &mut evaluation,
-        &rollout,
-        &model,
-        &Metadata::new(),
-        "auto",
-    );
+    apply_prompt_rollout_selection(&mut evaluation, &rollout, &model, &Metadata::new(), "auto");
 
     assert_eq!(evaluation.next_profile, certified);
 }
@@ -3200,7 +3947,6 @@ fn ensemble_uses_distinct_role_models_in_stable_order() {
     ]
     .iter()
     .all(|model| worker_models.contains(model)));
-
 }
 
 #[test]
@@ -4229,6 +4975,176 @@ fn routing_telemetry_is_reconstructed_from_completed_runs() {
     assert_eq!(telemetry[0].outcome, RoutingOutcome::Succeeded);
     assert_eq!(telemetry[0].cost_proxy, 120);
     assert_eq!(telemetry[0].retrieval_count, 1);
+}
+
+#[test]
+fn goal2_routing_telemetry_learns_only_the_latest_replayed_decision() {
+    let base = [
+        ("agent_run_id".to_string(), "run-replanned".to_string()),
+        ("requested_policy".to_string(), "auto_router".to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    let decision = |task_class: &str, policy: &str, model: &str, epoch: &str| {
+        metadata_with_context(
+            [
+                ("task_class".to_string(), task_class.to_string()),
+                ("collaboration_policy".to_string(), policy.to_string()),
+                ("router_model".to_string(), model.to_string()),
+                ("steer_epoch".to_string(), epoch.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            &base,
+        )
+    };
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task started",
+        base.clone(),
+    )
+    .expect("start should append");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent run decision selected",
+        decision("general", "single", "stale-model", "0"),
+    )
+    .expect("stale decision should append");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::ModelRequestFinished,
+        "stale model finished",
+        metadata_with_context(
+            [
+                ("steer_epoch".to_string(), "0".to_string()),
+                ("total_tokens".to_string(), "100".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            &base,
+        ),
+    )
+    .expect("stale cost should append");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent run decision selected",
+        decision("coding", "plan_execute_review", "replanned-model", "1"),
+    )
+    .expect("replayed decision should append");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::ModelRequestFinished,
+        "current model finished",
+        metadata_with_context(
+            [
+                ("steer_epoch".to_string(), "1".to_string()),
+                ("total_tokens".to_string(), "7".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            &base,
+        ),
+    )
+    .expect("current cost should append");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task completed",
+        metadata_with_context(
+            [("steer_epoch".to_string(), "1".to_string())]
+                .into_iter()
+                .collect(),
+            &base,
+        ),
+    )
+    .expect("completion should append");
+
+    let events = store
+        .list_by_task(&phase16_task_id())
+        .expect("events should load");
+    let telemetry = routing_telemetry_from_events(&events);
+    assert_eq!(telemetry.len(), 1);
+    assert_eq!(telemetry[0].task_class, TaskClass::Coding);
+    assert_eq!(telemetry[0].selected_model, "replanned-model");
+    assert_eq!(telemetry[0].cost_proxy, 7);
+}
+
+#[test]
+fn goal2_semantic_memory_keeps_user_intent_lineage_and_only_terminal_epoch_outputs() {
+    let base = [
+        ("agent_run_id".to_string(), "memory-replanned".to_string()),
+        ("project_id".to_string(), "project-a".to_string()),
+        ("session_id".to_string(), "session-a".to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    let event = |sequence: u64, summary: &str, role: Option<&str>, epoch: &str| Event {
+        id: EventId(format!("memory-epoch-event-{sequence}")),
+        task_id: phase16_task_id(),
+        sequence,
+        timestamp_ms: sequence * 10,
+        kind: if role.is_some() {
+            EventKind::MessageAdded
+        } else {
+            EventKind::TaskStatusChanged
+        },
+        summary: summary.to_string(),
+        metadata: metadata_with_context(
+            [
+                ("steer_epoch".to_string(), epoch.to_string()),
+                ("role".to_string(), role.unwrap_or_default().to_string()),
+                ("content".to_string(), format!("objective epoch {epoch}")),
+            ]
+            .into_iter()
+            .collect(),
+            &base,
+        ),
+    };
+    let events = vec![
+        event(1, "Old user objective", Some("user"), "0"),
+        event(2, "Old assistant result", Some("assistant"), "0"),
+        event(3, "Revised user objective", Some("user"), "1"),
+        event(4, "Revised assistant result", Some("assistant"), "1"),
+        event(5, "Agent task completed", None, "1"),
+    ];
+
+    let filtered = memory_events_for_terminal_steer_epoch(events);
+    assert_eq!(filtered.len(), 4);
+    assert!(filtered.iter().any(|event| {
+        event.summary == "Old user objective"
+            && event.metadata.get("steer_epoch").map(String::as_str) == Some("0")
+    }));
+    assert!(filtered.iter().any(|event| {
+        event.summary == "Revised user objective"
+            && event.metadata.get("steer_epoch").map(String::as_str) == Some("1")
+    }));
+    assert!(!filtered
+        .iter()
+        .any(|event| event.summary == "Old assistant result"));
+}
+
+#[test]
+fn goal2_semantic_memory_preserves_legacy_runs_without_epochs() {
+    let events = vec![Event {
+        id: EventId("legacy-complete".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 1,
+        timestamp_ms: 10,
+        kind: EventKind::TaskStatusChanged,
+        summary: "Agent task completed".to_string(),
+        metadata: Metadata::new(),
+    }];
+    assert_eq!(memory_events_for_terminal_steer_epoch(events).len(), 1);
 }
 
 #[test]
@@ -5288,6 +6204,177 @@ fn offline_prompt_dataset_stratifies_task_classes_without_split_drift() {
 }
 
 #[test]
+fn goal2_offline_prompt_dataset_uses_only_the_terminal_steer_epoch() {
+    let base = [
+        ("agent_run_id".to_string(), "replayed-run".to_string()),
+        ("project_id".to_string(), "project-a".to_string()),
+        ("session_id".to_string(), "session-a".to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    let event = |sequence: u64, summary: &str, metadata: Metadata| Event {
+        id: EventId(format!("epoch-event-{sequence}")),
+        task_id: phase16_task_id(),
+        sequence,
+        timestamp_ms: sequence * 10,
+        kind: EventKind::TaskStatusChanged,
+        summary: summary.to_string(),
+        metadata: metadata_with_context(metadata, &base),
+    };
+    let events = vec![
+        event(
+            1,
+            "Agent task started",
+            [
+                ("prompt".to_string(), "Old coding objective".to_string()),
+                ("task_class".to_string(), "coding".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        event(
+            2,
+            "Agent run decision selected",
+            [
+                ("steer_epoch".to_string(), "0".to_string()),
+                ("prompt_objective".to_string(), "Old coding objective".to_string()),
+                ("task_class".to_string(), "coding".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        event(
+            3,
+            "Agent run decision selected",
+            [
+                ("steer_epoch".to_string(), "1".to_string()),
+                (
+                    "prompt_objective".to_string(),
+                    "Research the revised objective".to_string(),
+                ),
+                (
+                    "effective_prompt_objective".to_string(),
+                    "Initial request:\nOld coding objective\n\nAccepted steering 1:\nResearch the revised objective"
+                        .to_string(),
+                ),
+                ("task_class".to_string(), "research".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        event(
+            4,
+            "Agent task completed",
+            [("steer_epoch".to_string(), "1".to_string())]
+                .into_iter()
+                .collect(),
+        ),
+    ];
+
+    let dataset = prompt_offline_dataset(&events, "project-a");
+    assert_eq!(dataset.len(), 1);
+    assert_eq!(
+        dataset[0].objective,
+        "Initial request:\nOld coding objective\n\nAccepted steering 1:\nResearch the revised objective"
+    );
+    assert_eq!(dataset[0].task_class, "research");
+}
+
+#[test]
+fn goal2_offline_prompt_dataset_reconstructs_initial_and_accepted_steer_intent() {
+    let base = [
+        ("agent_run_id".to_string(), "lineage-run".to_string()),
+        ("project_id".to_string(), "project-a".to_string()),
+        ("session_id".to_string(), "session-a".to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    let event = |sequence: u64, kind: EventKind, summary: &str, metadata: Metadata| Event {
+        id: EventId(format!("lineage-event-{sequence}")),
+        task_id: phase16_task_id(),
+        sequence,
+        timestamp_ms: sequence * 10,
+        kind,
+        summary: summary.to_string(),
+        metadata: metadata_with_context(metadata, &base),
+    };
+    let events = vec![
+        event(
+            1,
+            EventKind::TaskStatusChanged,
+            "Agent task started",
+            [
+                (
+                    "prompt".to_string(),
+                    "Keep all checks and run the full test suite".to_string(),
+                ),
+                ("steer_epoch".to_string(), "0".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        event(
+            2,
+            EventKind::MessageAdded,
+            "Initial user objective",
+            [
+                ("role".to_string(), "user".to_string()),
+                (
+                    "content".to_string(),
+                    "Keep all checks and run the full test suite".to_string(),
+                ),
+                ("steer_epoch".to_string(), "0".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        event(
+            3,
+            EventKind::MessageAdded,
+            "Accepted user steer",
+            [
+                ("role".to_string(), "user".to_string()),
+                (
+                    "content".to_string(),
+                    "Continue after fixing it".to_string(),
+                ),
+                ("queue_mode".to_string(), "steer".to_string()),
+                ("steer_epoch".to_string(), "1".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        event(
+            4,
+            EventKind::TaskStatusChanged,
+            "Agent run decision selected",
+            [
+                ("steer_epoch".to_string(), "1".to_string()),
+                ("prompt_objective".to_string(), "Continue".to_string()),
+                ("task_class".to_string(), "coding".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        event(
+            5,
+            EventKind::TaskStatusChanged,
+            "Agent task completed",
+            [("steer_epoch".to_string(), "1".to_string())]
+                .into_iter()
+                .collect(),
+        ),
+    ];
+
+    let dataset = prompt_offline_dataset(&events, "project-a");
+    assert_eq!(dataset.len(), 1);
+    assert_eq!(
+        dataset[0].objective,
+        "Initial request:\nKeep all checks and run the full test suite\n\nAccepted steering 1:\nContinue after fixing it"
+    );
+}
+
+#[test]
 fn offline_prompt_dataset_stays_frozen_within_a_generation() {
     let discovered = ["a", "b", "c", "d", "e"]
         .into_iter()
@@ -5641,10 +6728,7 @@ fn pairwise_observation_keeps_relative_and_per_step_credit() {
             ..ActionableSideInformation::default()
         },
         &[],
-        test_prompt_evaluation_provenance(
-            &candidate.plan.genome.id,
-            &opponent.plan.genome.id,
-        ),
+        test_prompt_evaluation_provenance(&candidate.plan.genome.id, &opponent.plan.genome.id),
     );
 
     assert!((observation.relative_reward.unwrap_or_default() - 0.3).abs() < f64::EPSILON * 4.0);
@@ -7863,6 +8947,148 @@ fn startup_recovery_preserves_unfinished_agent_runs_as_continuations() {
 }
 
 #[test]
+fn goal2_startup_recovery_preserves_the_latest_durable_steer_epoch() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let base = [
+        ("project_id".to_string(), "project-a".to_string()),
+        ("session_id".to_string(), "session-steered".to_string()),
+        ("agent_run_id".to_string(), "run-steered".to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task started",
+        metadata_with_context(
+            [
+                ("prompt".to_string(), "Keep every safety check".to_string()),
+                (
+                    "initial_prompt_objective".to_string(),
+                    "Keep every safety check".to_string(),
+                ),
+                ("steer_epoch".to_string(), "0".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            &base,
+        ),
+    )
+    .expect("run should start");
+    append_message_event_with_metadata(
+        &mut store,
+        &phase16_task_id(),
+        MessageRole::User,
+        "Keep every safety check",
+        metadata_with_context(
+            [("steer_epoch".to_string(), "0".to_string())]
+                .into_iter()
+                .collect(),
+            &base,
+        ),
+    )
+    .expect("initial prompt should persist");
+    append_message_event_with_metadata(
+        &mut store,
+        &phase16_task_id(),
+        MessageRole::User,
+        "Continue after fixing the race",
+        metadata_with_context(
+            [
+                ("steer_epoch".to_string(), "1".to_string()),
+                ("queue_mode".to_string(), "steer".to_string()),
+                ("queue_id".to_string(), "queue-steer-1".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            &base,
+        ),
+    )
+    .expect("steer should persist");
+
+    assert_eq!(
+        reconcile_interrupted_agent_runs(&mut store).expect("recovery should succeed"),
+        1
+    );
+    let events = store
+        .list_by_task_and_metadata_or_unscoped(&phase16_task_id(), "session_id", "session-steered")
+        .expect("events should load");
+    let pause = events
+        .iter()
+        .rev()
+        .find(|event| event.summary == "Agent task paused")
+        .expect("restart should persist a pause");
+    assert_eq!(
+        pause.metadata.get("steer_epoch").map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(latest_applied_agent_steer_epoch(&events), 1);
+    assert_eq!(
+        pause
+            .metadata
+            .get("initial_prompt_objective")
+            .map(String::as_str),
+        Some("Keep every safety check")
+    );
+
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task retry started",
+        metadata_with_context(
+            [
+                (
+                    "prompt".to_string(),
+                    "Continue after fixing the race".to_string(),
+                ),
+                ("steer_epoch".to_string(), "1".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            &base,
+        ),
+    )
+    .expect("retry should start");
+    append_message_event_with_metadata(
+        &mut store,
+        &phase16_task_id(),
+        MessageRole::User,
+        "Continue after fixing the race",
+        metadata_with_context(
+            [
+                ("steer_epoch".to_string(), "1".to_string()),
+                ("continuation_replay".to_string(), "true".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            &base,
+        ),
+    )
+    .expect("retry continuation should persist");
+
+    assert_eq!(
+        reconcile_interrupted_agent_runs(&mut store).expect("second recovery should succeed"),
+        1
+    );
+    let events = store
+        .list_by_task_and_metadata_or_unscoped(&phase16_task_id(), "session_id", "session-steered")
+        .expect("recovered retry events should load");
+    let active_events = active_agent_events_for_session(&events, Some("session-steered"));
+    assert_eq!(latest_applied_agent_steer_epoch(&active_events), 1);
+    let second_pause = active_events
+        .iter()
+        .rev()
+        .find(|event| event.summary == "Agent task paused")
+        .expect("second restart should persist a pause");
+    assert_eq!(
+        second_pause.metadata.get("steer_epoch").map(String::as_str),
+        Some("1")
+    );
+}
+
+#[test]
 fn startup_recovery_preserves_pending_permission_as_blocked() {
     let mut store = SqliteStore::in_memory().expect("store should open");
     let context = [
@@ -8985,6 +10211,15 @@ fn agent_trace_reports_actual_collaboration_role_activity() {
             "40",
             "1",
         ),
+        (
+            "planner",
+            "model-planner",
+            "interrupted",
+            "31",
+            "",
+            "0",
+            "0",
+        ),
     ] {
         append_event(
             &mut store,
@@ -9026,8 +10261,11 @@ fn agent_trace_reports_actual_collaboration_role_activity() {
     assert_eq!(trace.role_summaries.len(), 2);
     assert_eq!(trace.role_summaries[0].role, "planner");
     assert_eq!(trace.role_summaries[0].models, vec!["model-planner"]);
+    assert_eq!(trace.role_summaries[0].calls, 2);
     assert_eq!(trace.role_summaries[0].completed, 1);
-    assert_eq!(trace.role_summaries[0].latency_ms, 120);
+    assert_eq!(trace.role_summaries[0].interrupted, 1);
+    assert_eq!(trace.role_summaries[0].degraded, 0);
+    assert_eq!(trace.role_summaries[0].latency_ms, 151);
     assert_eq!(trace.role_summaries[0].first_token_latency_ms, Some(30));
     assert_eq!(trace.role_summaries[1].role, "reviewer");
     assert_eq!(trace.role_summaries[1].degraded, 1);

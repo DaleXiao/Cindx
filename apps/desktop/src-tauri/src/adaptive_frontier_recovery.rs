@@ -135,7 +135,8 @@ pub(super) fn settle_adaptive_step(
             cancellation.as_ref(),
             effective_completion.best_available_content(),
         ) {
-            control.record_best_known_result(
+            control.record_best_known_result_at(
+                run_context_steer_epoch(run_context),
                 &spec.stage,
                 partial,
                 ResultQuality::Draft,

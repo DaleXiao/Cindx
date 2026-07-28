@@ -326,10 +326,7 @@ pub(crate) fn prompt_evolution_evaluation_for_run(
             metadata_with_context(
                 [
                     ("prompt_effort".to_string(), effort.to_string()),
-                    (
-                        "prompt_rollout_scope".to_string(),
-                        evidence_scope.clone(),
-                    ),
+                    ("prompt_rollout_scope".to_string(), evidence_scope.clone()),
                     (
                         "stable_profile".to_string(),
                         rollout.stable_profile_id.clone(),
@@ -473,9 +470,8 @@ pub(crate) fn prompt_evolution_state(
             orchestrator::latest_scientific_dataset_digest(&evaluation.observations);
         let is_active_scientific = |observation: &&PromptEvolutionObservation| {
             observation.is_scientific_evidence()
-                && active_dataset_sha256.is_some_and(|digest| {
-                    observation.provenance.dataset_sha256 == digest
-                })
+                && active_dataset_sha256
+                    .is_some_and(|digest| observation.provenance.dataset_sha256 == digest)
         };
         let effort_paired_runs = evaluation
             .observations
@@ -500,9 +496,8 @@ pub(crate) fn prompt_evolution_state(
                 observation.split == PromptEvaluationSplit::Train
                     && observation.mode.is_paired_execution()
                     && observation.is_scientific_evidence()
-                    && active_dataset_sha256.is_some_and(|digest| {
-                        observation.provenance.dataset_sha256 == digest
-                    })
+                    && active_dataset_sha256
+                        .is_some_and(|digest| observation.provenance.dataset_sha256 == digest)
                     && observation.reflection_packet.is_some()
             })
             .count();

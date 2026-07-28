@@ -249,7 +249,8 @@ pub(super) fn reconcile_adaptive_wave(
                 workflow_checkpoint,
             )?;
             if let Some(control) = cancellation.as_ref() {
-                control.mark_progress(
+                control.mark_progress_at(
+                    run_context_steer_epoch(run_context),
                     "collaboration",
                     &format!(
                         "Task graph revision {} replaced {} with {}",
@@ -530,7 +531,8 @@ fn record_failure_commit(
         workflow_checkpoint,
     )?;
     if let Some(control) = cancellation {
-        control.record_best_known_result(
+        control.record_best_known_result_at(
+            run_context_steer_epoch(run_context),
             &format!("anytime_failure:{candidate_id}"),
             output,
             if verdict.verified {

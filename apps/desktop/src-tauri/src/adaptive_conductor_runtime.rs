@@ -190,40 +190,47 @@ pub(super) fn plan_adaptive_workflow(
             }
             Err(error) if attempts < CONDUCTOR_MAX_ATTEMPTS => {
                 if let Some(control) = cancellation {
-                    if let Err(reason) = control.begin_repair_attempt("conductor_repair") {
-                        if effort != "fast" {
-                            let workflow_plan = deterministic_conductor_fallback(
+                    match control.begin_repair_attempt_at(
+                        run_context_steer_epoch(run_context),
+                        "conductor_repair",
+                    ) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => return Err(COLLABORATION_STEER_INTERRUPTED.to_string()),
+                        Err(reason) => {
+                            if effort != "fast" {
+                                let workflow_plan = deterministic_conductor_fallback(
+                                    state,
+                                    task_id,
+                                    run_context,
+                                    collaboration_id,
+                                    &harness,
+                                    attempts,
+                                    &format!("repair budget exhausted: {}", reason.code()),
+                                )?;
+                                return Ok(AdaptiveConductorOutcome::Plan {
+                                    workflow_plan: Box::new(workflow_plan),
+                                    attempts,
+                                });
+                            }
+                            if let Some(anchor) = await_direct_anchor_fallback(
                                 state,
                                 task_id,
                                 run_context,
                                 collaboration_id,
-                                &harness,
-                                attempts,
-                                &format!("repair budget exhausted: {}", reason.code()),
-                            )?;
-                            return Ok(AdaptiveConductorOutcome::Plan {
-                                workflow_plan: Box::new(workflow_plan),
-                                attempts,
-                            });
+                                anchor_spec,
+                                prompt_genome.verification,
+                                cancellation,
+                                anchor_supervisor,
+                                direct_anchor_output,
+                                Duration::from_millis(500),
+                            )? {
+                                return Ok(AdaptiveConductorOutcome::DirectCommit(anchor));
+                            }
+                            return Err(format!(
+                                "Conductor repair budget exhausted: {}",
+                                reason.code()
+                            ));
                         }
-                        if let Some(anchor) = await_direct_anchor_fallback(
-                            state,
-                            task_id,
-                            run_context,
-                            collaboration_id,
-                            anchor_spec,
-                            prompt_genome.verification,
-                            cancellation,
-                            anchor_supervisor,
-                            direct_anchor_output,
-                            Duration::from_millis(500),
-                        )? {
-                            return Ok(AdaptiveConductorOutcome::DirectCommit(anchor));
-                        }
-                        return Err(format!(
-                            "Conductor repair budget exhausted: {}",
-                            reason.code()
-                        ));
                     }
                 }
                 record_conductor_rejection(

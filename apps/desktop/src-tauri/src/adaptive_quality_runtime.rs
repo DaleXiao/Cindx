@@ -258,7 +258,8 @@ pub(crate) fn quality_gate_adaptive_output(
             repair_budget,
         );
         if let Some(control) = cancellation.as_ref() {
-            control.record_best_known_result(
+            control.record_best_known_result_at(
+                run_context_steer_epoch(run_context),
                 &format!("quality_gate_revision_{review_index}"),
                 &candidate,
                 adaptive_quality_result_quality(&gate),
@@ -299,12 +300,18 @@ pub(crate) fn quality_gate_adaptive_output(
                 review_errors.push("quality repair stopped at the run deadline".to_string());
                 break;
             }
-            if let Err(reason) = control.begin_repair_attempt(&repair_stage) {
-                review_errors.push(format!(
-                    "quality repair budget exhausted: {}",
-                    reason.code()
-                ));
-                break;
+            match control
+                .begin_repair_attempt_at(run_context_steer_epoch(run_context), &repair_stage)
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(reason) => {
+                    review_errors.push(format!(
+                        "quality repair budget exhausted: {}",
+                        reason.code()
+                    ));
+                    break;
+                }
             }
         }
         let synthesizer_model = repair_models

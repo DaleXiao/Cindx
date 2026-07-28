@@ -4,6 +4,7 @@ pub(crate) struct AgentModelTurnResponse {
     pub response: ModelResponse,
     pub request_id: String,
     pub streamed_output: bool,
+    pub epoch_lease: agent_runtime::RunEpochLease,
 }
 
 pub(crate) enum AgentModelTurnOutcome {
@@ -34,22 +35,74 @@ pub(crate) fn execute_agent_model_turn(
     terminal_commit: bool,
 ) -> Result<AgentModelTurnOutcome, String> {
     let session_id = run_context.get("session_id").map(String::as_str);
-    let model_call = if collaboration.is_some() || terminal_commit {
-        cancellation.begin_stage_model_call("executor", RunStageClass::Finalizer)
-    } else {
-        cancellation.begin_model_call("executor")
+    let epoch_lease = match cancellation.execution_epoch_lease() {
+        agent_runtime::RunEpochLeaseOutcome::Acquired(lease) => lease,
+        agent_runtime::RunEpochLeaseOutcome::RestartAfterSteer => {
+            return Ok(AgentModelTurnOutcome::RestartAfterSteer)
+        }
+        agent_runtime::RunEpochLeaseOutcome::Stopped(_) => {
+            return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
+                app,
+                state,
+                workspace_root,
+                runtime,
+                prompt,
+                run_context,
+                collaboration,
+                cancellation,
+            )?))
+        }
+        agent_runtime::RunEpochLeaseOutcome::TerminalCommitted => {
+            let store = state
+                .store
+                .lock()
+                .map_err(|error| format!("store lock poisoned: {error}"))?;
+            return Ok(finished_agent_turn(
+                agent_state_for_session(&store, None, session_id)
+                    .map_err(|error| error.to_string())?,
+            ));
+        }
     };
-    if model_call.is_err() {
-        return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
-            app,
-            state,
-            workspace_root,
-            runtime,
-            prompt,
-            run_context,
-            collaboration,
-            cancellation,
-        )?));
+    let model_call = if collaboration.is_some() || terminal_commit {
+        cancellation.begin_stage_model_call_at(
+            epoch_lease.epoch(),
+            "executor",
+            RunStageClass::Finalizer,
+        )
+    } else {
+        cancellation.begin_model_call_at(epoch_lease.epoch(), "executor")
+    };
+    match model_call {
+        Ok(Some(_)) => {}
+        Ok(None) => return Ok(AgentModelTurnOutcome::RestartAfterSteer),
+        Err(_) => {
+            return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
+                app,
+                state,
+                workspace_root,
+                runtime,
+                prompt,
+                run_context,
+                collaboration,
+                cancellation,
+            )?))
+        }
+    }
+    if !cancellation.execution_epoch_lease_is_current(epoch_lease) {
+        cancellation.finish_model_call_at(epoch_lease.epoch());
+        if agent_run_should_stop(cancellation) {
+            return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
+                app,
+                state,
+                workspace_root,
+                runtime,
+                prompt,
+                run_context,
+                collaboration,
+                cancellation,
+            )?));
+        }
+        return Ok(AgentModelTurnOutcome::RestartAfterSteer);
     }
 
     let request_id = unique_id("agent-model");
@@ -60,11 +113,11 @@ pub(crate) fn execute_agent_model_turn(
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
         if agent_task_is_cancelled(&mut store, session_id).map_err(|error| error.to_string())? {
-            cancellation.finish_model_call();
-            return Ok(finished_agent_turn(
-                agent_state_for_session(&store, None, session_id)
-                    .map_err(|error| error.to_string())?,
-            ));
+            let agent_state = agent_state_for_session(&store, None, session_id)
+                .map_err(|error| error.to_string())?;
+            drop(store);
+            cancellation.finish_model_call_at(epoch_lease.epoch());
+            return Ok(finished_agent_turn(agent_state));
         }
         let mut metadata = [
             ("request_id".to_string(), request_id.clone()),
@@ -126,15 +179,23 @@ pub(crate) fn execute_agent_model_turn(
             if !delta.is_empty() {
                 first_delta_at_ms.get_or_insert_with(current_time_millis);
                 partial_stream.push_str(delta);
-                stream_progress.observe(cancellation, "model_stream", "executor", &partial_stream);
+                stream_progress.observe(
+                    cancellation,
+                    epoch_lease.epoch(),
+                    "model_stream",
+                    "executor",
+                    &partial_stream,
+                );
             }
             if visible_stream && !delta.is_empty() {
                 streamed_output = true;
                 emit_agent_stream_delta(app, &request_id, session_id, delta, false, false, None);
             }
         };
-        let mut should_cancel =
-            || agent_run_should_stop(cancellation) || cancellation.has_pending_steer();
+        let mut should_cancel = || {
+            agent_run_should_stop(cancellation)
+                || !cancellation.execution_epoch_lease_is_current(epoch_lease)
+        };
         let result = provider.complete_streaming_cancellable(
             request.clone(),
             &mut on_delta,
@@ -143,8 +204,7 @@ pub(crate) fn execute_agent_model_turn(
         match result {
             Ok(response) => break response,
             Err(error) => {
-                if error.is_cancelled()
-                    && cancellation.has_pending_steer()
+                if !cancellation.execution_epoch_lease_is_current(epoch_lease)
                     && !agent_run_should_stop(cancellation)
                 {
                     if visible_stream && streamed_output {
@@ -158,12 +218,30 @@ pub(crate) fn execute_agent_model_turn(
                             None,
                         );
                     }
-                    cancellation.finish_model_call();
+                    cancellation.finish_model_call_at(epoch_lease.epoch());
+                    return Ok(AgentModelTurnOutcome::RestartAfterSteer);
+                }
+                if error.is_cancelled()
+                    && !cancellation.execution_epoch_lease_is_current(epoch_lease)
+                    && !agent_run_should_stop(cancellation)
+                {
+                    if visible_stream && streamed_output {
+                        emit_agent_stream_delta(
+                            app,
+                            &request_id,
+                            session_id,
+                            "",
+                            false,
+                            true,
+                            None,
+                        );
+                    }
+                    cancellation.finish_model_call_at(epoch_lease.epoch());
                     return Ok(AgentModelTurnOutcome::RestartAfterSteer);
                 }
                 if error.is_cancelled() || agent_run_should_stop(cancellation) {
                     emit_agent_stream_delta(app, &request_id, session_id, "", true, true, None);
-                    cancellation.finish_model_call();
+                    cancellation.finish_model_call_at(epoch_lease.epoch());
                     return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
                         app,
                         state,
@@ -177,9 +255,13 @@ pub(crate) fn execute_agent_model_turn(
                 }
                 if transport_attempt < MAX_AGENT_MODEL_TRANSPORT_ATTEMPTS
                     && error.is_retryable()
-                    && cancellation
-                        .begin_repair_attempt("provider_transport_retry")
-                        .is_ok()
+                    && matches!(
+                        cancellation.begin_repair_attempt_at(
+                            epoch_lease.epoch(),
+                            "provider_transport_retry",
+                        ),
+                        Ok(Some(_))
+                    )
                 {
                     if visible_stream && streamed_output {
                         emit_agent_stream_delta(
@@ -193,7 +275,11 @@ pub(crate) fn execute_agent_model_turn(
                         );
                         streamed_output = false;
                     }
-                    cancellation.mark_progress("model_retry", "Transient provider failure");
+                    cancellation.mark_progress_at(
+                        epoch_lease.epoch(),
+                        "model_retry",
+                        "Transient provider failure",
+                    );
                     append_agent_progress_event(
                         state,
                         &runtime.task_id,
@@ -208,10 +294,11 @@ pub(crate) fn execute_agent_model_turn(
                     continue;
                 }
                 if !partial_stream.trim().is_empty() {
-                    cancellation.record_partial_output(&partial_stream);
+                    cancellation.record_partial_output_at(epoch_lease.epoch(), &partial_stream);
                 }
-                cancellation.finish_model_call();
-                cancellation.record_observation(
+                cancellation.finish_model_call_at(epoch_lease.epoch());
+                cancellation.record_observation_at(
+                    epoch_lease.epoch(),
                     "provider_failure",
                     error.class.label(),
                     &error.message,
@@ -238,21 +325,38 @@ pub(crate) fn execute_agent_model_turn(
         }
     };
 
-    cancellation.finish_model_call();
-    if cancellation.record_agent_turn("executor").is_err() {
-        if !partial_stream.trim().is_empty() {
-            cancellation.record_partial_output(&partial_stream);
+    cancellation.finish_model_call_at(epoch_lease.epoch());
+    if !cancellation.execution_epoch_lease_is_current(epoch_lease)
+        && !agent_run_should_stop(cancellation)
+    {
+        if visible_stream && streamed_output {
+            emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
         }
-        return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
-            app,
-            state,
-            workspace_root,
-            runtime,
-            prompt,
-            run_context,
-            collaboration,
-            cancellation,
-        )?));
+        return Ok(AgentModelTurnOutcome::RestartAfterSteer);
+    }
+    match cancellation.record_agent_turn_at(epoch_lease.epoch(), "executor") {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            if visible_stream && streamed_output {
+                emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
+            }
+            return Ok(AgentModelTurnOutcome::RestartAfterSteer);
+        }
+        Err(_) => {
+            if !partial_stream.trim().is_empty() {
+                cancellation.record_partial_output_at(epoch_lease.epoch(), &partial_stream);
+            }
+            return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
+                app,
+                state,
+                workspace_root,
+                runtime,
+                prompt,
+                run_context,
+                collaboration,
+                cancellation,
+            )?));
+        }
     }
 
     let raw_response_content = response.message.content.clone();
@@ -263,10 +367,15 @@ pub(crate) fn execute_agent_model_turn(
         streamed_output = false;
     }
     if !response.message.content.trim().is_empty() {
-        cancellation.record_partial_output(&response.message.content);
+        cancellation.record_partial_output_at(epoch_lease.epoch(), &response.message.content);
     }
     if let Some(evidence) = model_response_checkpoint_evidence(&response) {
-        cancellation.record_observation("model_result", "executor", &evidence);
+        cancellation.record_observation_at(
+            epoch_lease.epoch(),
+            "model_result",
+            "executor",
+            &evidence,
+        );
     }
     if collaboration.is_some()
         && response.tool_calls.is_empty()
@@ -288,6 +397,7 @@ pub(crate) fn execute_agent_model_turn(
         emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
         streamed_output = false;
     }
+    let progress = cancellation.progress();
     {
         let mut store = state
             .store
@@ -318,7 +428,6 @@ pub(crate) fn execute_agent_model_turn(
             "context_projected_tokens".to_string(),
             context_governor.estimated_projected_tokens.to_string(),
         );
-        let progress = cancellation.progress();
         metadata.insert(
             "run_checkpoints".to_string(),
             progress.checkpoints.to_string(),
@@ -385,5 +494,6 @@ pub(crate) fn execute_agent_model_turn(
         response,
         request_id,
         streamed_output,
+        epoch_lease,
     }))
 }

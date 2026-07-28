@@ -240,6 +240,7 @@ pub(crate) fn complete_prompt_evaluation_worker(
     request: PromptEvaluationWorkerRequest,
     control: &Arc<AgentRunControl>,
     branch_cancellation: &Arc<AtomicBool>,
+    objective_epoch: u64,
 ) -> CollaborationCompletion {
     let started_at = Instant::now();
     let stage_class = request.stage_class;
@@ -299,6 +300,18 @@ pub(crate) fn complete_prompt_evaluation_worker(
                 evidence,
             );
         }
+        if !control.preparation_epoch_is_current(objective_epoch) {
+            return CollaborationCompletion::failed_worker(
+                AgentFailure::cancelled(
+                    "user_steer",
+                    "evaluation worker superseded by applied user steering",
+                ),
+                None,
+                prompt_evaluation_elapsed_ms(started_at),
+                worker.completion_usage("read_only_evaluation_v3"),
+                evidence,
+            );
+        }
         if control.stage_should_stop(stage_class) {
             let failure = AgentFailure::from_stop_reason(
                 RunStopReason::StageBudgetExhausted,
@@ -325,7 +338,7 @@ pub(crate) fn complete_prompt_evaluation_worker(
             Ok(prepared_turn) => prepared_turn,
             Err(failed) => {
                 if let Some(partial_answer) = failed.partial_content.as_ref() {
-                    control.record_partial_output(partial_answer);
+                    control.record_partial_output_at(objective_epoch, partial_answer);
                 }
                 return CollaborationCompletion::failed_worker(
                     failed.failure,
@@ -336,21 +349,36 @@ pub(crate) fn complete_prompt_evaluation_worker(
                 );
             }
         };
-        if let Err(reason) = control.begin_stage_model_call(&request.stage, stage_class) {
-            let failure = AgentFailure::from_stop_reason(
-                reason,
-                format!(
-                    "evaluation worker stopped before model call: {}",
-                    reason.code()
-                ),
-            );
-            return CollaborationCompletion::failed_worker(
-                failure,
-                None,
-                prompt_evaluation_elapsed_ms(started_at),
-                worker.completion_usage("read_only_evaluation_v3"),
-                evidence,
-            );
+        match control.begin_stage_model_call_at(objective_epoch, &request.stage, stage_class) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return CollaborationCompletion::failed_worker(
+                    AgentFailure::cancelled(
+                        "user_steer",
+                        "evaluation model call superseded by user steering",
+                    ),
+                    None,
+                    prompt_evaluation_elapsed_ms(started_at),
+                    worker.completion_usage("read_only_evaluation_v3"),
+                    evidence,
+                )
+            }
+            Err(reason) => {
+                let failure = AgentFailure::from_stop_reason(
+                    reason,
+                    format!(
+                        "evaluation worker stopped before model call: {}",
+                        reason.code()
+                    ),
+                );
+                return CollaborationCompletion::failed_worker(
+                    failure,
+                    None,
+                    prompt_evaluation_elapsed_ms(started_at),
+                    worker.completion_usage("read_only_evaluation_v3"),
+                    evidence,
+                );
+            }
         }
         let mut model_request = prepared_turn.turn.request;
         model_request.role = request.role.clone();
@@ -372,10 +400,11 @@ pub(crate) fn complete_prompt_evaluation_worker(
             || {
                 branch_cancellation.load(Ordering::SeqCst)
                     || control.should_stop()
+                    || !control.preparation_epoch_is_current(objective_epoch)
                     || control.stage_should_stop(stage_class)
             },
         );
-        control.finish_model_call();
+        control.finish_model_call_at(objective_epoch);
         let mut response = match response {
             Ok(response) => response,
             Err(error) => {
@@ -389,6 +418,11 @@ pub(crate) fn complete_prompt_evaluation_worker(
                         reason,
                         format!("evaluation worker stopped: {}", reason.code()),
                     )
+                } else if !control.preparation_epoch_is_current(objective_epoch) {
+                    AgentFailure::cancelled(
+                        "user_steer",
+                        "evaluation worker superseded by applied user steering",
+                    )
                 } else if control.stage_should_stop(stage_class) {
                     AgentFailure::from_stop_reason(
                         RunStopReason::StageBudgetExhausted,
@@ -399,7 +433,7 @@ pub(crate) fn complete_prompt_evaluation_worker(
                 };
                 let partial_content = (!streamed.trim().is_empty()).then_some(streamed);
                 if let Some(partial_answer) = partial_content.as_ref() {
-                    control.record_partial_output(partial_answer);
+                    control.record_partial_output_at(objective_epoch, partial_answer);
                 }
                 return CollaborationCompletion::failed_worker(
                     failure,
@@ -414,7 +448,12 @@ pub(crate) fn complete_prompt_evaluation_worker(
             response.message.content = streamed;
         }
         if let Some(evidence) = model_response_checkpoint_evidence(&response) {
-            control.record_checkpoint("model_result", "prompt_evaluation_worker", &evidence);
+            control.record_checkpoint_at(
+                objective_epoch,
+                "model_result",
+                "prompt_evaluation_worker",
+                &evidence,
+            );
         }
         match worker.advance_model_response(response) {
             WorkerAdvance::Completed { answer } => {
@@ -427,7 +466,7 @@ pub(crate) fn complete_prompt_evaluation_worker(
             }
             WorkerAdvance::Failed(failed) => {
                 if let Some(partial_answer) = failed.partial_content.as_ref() {
-                    control.record_partial_output(partial_answer);
+                    control.record_partial_output_at(objective_epoch, partial_answer);
                 }
                 return CollaborationCompletion::failed_worker(
                     failed.failure,

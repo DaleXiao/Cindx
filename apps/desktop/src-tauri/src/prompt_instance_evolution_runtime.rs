@@ -19,9 +19,8 @@ pub(crate) fn prompt_instance_pareto_scores(
         .filter(|observation| observation.mode == PromptEvaluationMode::ReplayExecution)
         .filter(|observation| observation.is_scientific_evidence())
         .filter(|observation| {
-            active_dataset_sha256.is_some_and(|digest| {
-                observation.provenance.dataset_sha256 == digest
-            })
+            active_dataset_sha256
+                .is_some_and(|digest| observation.provenance.dataset_sha256 == digest)
         })
         .filter(|observation| !observation.case_id.trim().is_empty())
         .filter_map(|observation| {

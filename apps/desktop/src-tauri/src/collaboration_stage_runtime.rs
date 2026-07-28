@@ -1,5 +1,97 @@
 use super::*;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CollaborationStageError {
+    RunStopped,
+    SteerInterrupted,
+    AttemptDeadline,
+    StageDeadline,
+    Failed(String),
+}
+
+impl CollaborationStageError {
+    pub(crate) fn message(self) -> String {
+        match self {
+            Self::RunStopped => MODEL_REQUEST_CANCELLED.to_string(),
+            Self::SteerInterrupted => COLLABORATION_STEER_INTERRUPTED.to_string(),
+            Self::AttemptDeadline => {
+                "conductor response did not start before the failover deadline".to_string()
+            }
+            Self::StageDeadline => "collaboration stage deadline exhausted".to_string(),
+            Self::Failed(error) => error,
+        }
+    }
+}
+
+pub(crate) fn collaboration_stage_terminal_presentation(
+    completion: &CollaborationCompletion,
+) -> (&'static str, &'static str) {
+    if completion.content.is_some() {
+        return ("completed", "finished");
+    }
+    match completion
+        .usage
+        .get(COLLABORATION_TERMINATION_SCOPE_KEY)
+        .map(String::as_str)
+    {
+        Some(COLLABORATION_TERMINATION_STEER) => ("interrupted", "interrupted"),
+        Some(COLLABORATION_TERMINATION_ATTEMPT) => ("degraded", "stalled"),
+        Some(COLLABORATION_TERMINATION_STAGE) => ("degraded", "deadline exhausted"),
+        _ => match completion.failure.as_ref() {
+            Some(failure) if failure.class == AgentFailureClass::Cancelled => {
+                ("interrupted", "interrupted")
+            }
+            Some(failure) if failure.code == RunStopReason::StageBudgetExhausted.code() => {
+                ("degraded", "deadline exhausted")
+            }
+            _ => ("degraded", "unavailable"),
+        },
+    }
+}
+
+pub(crate) fn collaboration_stage_result(
+    completion: CollaborationCompletion,
+) -> Result<String, CollaborationStageError> {
+    match completion
+        .usage
+        .get(COLLABORATION_TERMINATION_SCOPE_KEY)
+        .map(String::as_str)
+    {
+        Some(COLLABORATION_TERMINATION_RUN) => return Err(CollaborationStageError::RunStopped),
+        Some(COLLABORATION_TERMINATION_STEER) => {
+            return Err(CollaborationStageError::SteerInterrupted)
+        }
+        Some(COLLABORATION_TERMINATION_ATTEMPT) => {
+            return Err(CollaborationStageError::AttemptDeadline)
+        }
+        Some(COLLABORATION_TERMINATION_STAGE) => {
+            return Err(CollaborationStageError::StageDeadline)
+        }
+        _ => {}
+    }
+    if completion
+        .failure
+        .as_ref()
+        .is_some_and(|failure| failure.code == CONDUCTOR_NO_PROGRESS_DEADLINE_CODE)
+    {
+        return Err(CollaborationStageError::AttemptDeadline);
+    }
+    if completion
+        .failure
+        .as_ref()
+        .is_some_and(|failure| failure.code == RunStopReason::StageBudgetExhausted.code())
+    {
+        return Err(CollaborationStageError::StageDeadline);
+    }
+    completion.content.ok_or_else(|| {
+        CollaborationStageError::Failed(
+            completion
+                .error
+                .unwrap_or_else(|| "collaboration model returned no content".to_string()),
+        )
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_collaboration_stage_finished(
     state: &tauri::State<'_, AppState>,
@@ -55,15 +147,16 @@ pub(crate) fn record_collaboration_stage_finished(
     if let Some(partial) = completion.partial_content.as_ref() {
         metadata.insert("partial_output".to_string(), partial.clone());
     }
+    for (key, value) in &completion.usage {
+        metadata.insert(key.clone(), value.clone());
+    }
+    let (status, terminal_verb) = collaboration_stage_terminal_presentation(completion);
     let summary = if let Some(content) = completion.content.as_ref() {
         metadata.insert("output".to_string(), content.clone());
-        metadata.insert("status".to_string(), "completed".to_string());
-        for (key, value) in &completion.usage {
-            metadata.insert(key.clone(), value.clone());
-        }
-        format!("Collaboration {stage} finished")
+        metadata.insert("status".to_string(), status.to_string());
+        format!("Collaboration {stage} {terminal_verb}")
     } else {
-        metadata.insert("status".to_string(), "degraded".to_string());
+        metadata.insert("status".to_string(), status.to_string());
         metadata.insert(
             "error".to_string(),
             completion
@@ -71,7 +164,14 @@ pub(crate) fn record_collaboration_stage_finished(
                 .clone()
                 .unwrap_or_else(|| "unknown collaboration failure".to_string()),
         );
-        format!("Collaboration {stage} unavailable")
+        if let Some(failure) = completion
+            .failure
+            .as_ref()
+            .filter(|failure| failure.class == AgentFailureClass::Cancelled)
+        {
+            metadata.insert("interruption_reason".to_string(), failure.code.clone());
+        }
+        format!("Collaboration {stage} {terminal_verb}")
     };
     let mut store = state
         .store
@@ -99,7 +199,7 @@ pub(crate) fn run_collaboration_stage(
     model: &str,
     prompt: String,
 ) -> Result<String, String> {
-    run_collaboration_stage_with_delta(
+    run_collaboration_stage_typed(
         state,
         config,
         task_id,
@@ -109,6 +209,36 @@ pub(crate) fn run_collaboration_stage(
         role,
         model,
         prompt,
+        CollaborationCallLimits::default(),
+        |_| {},
+    )
+    .map_err(CollaborationStageError::message)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_conductor_collaboration_stage(
+    state: &tauri::State<'_, AppState>,
+    config: &ProviderConfig,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    collaboration_id: &str,
+    stage: &str,
+    role: ModelRole,
+    model: &str,
+    prompt: String,
+    limits: CollaborationCallLimits,
+) -> Result<String, CollaborationStageError> {
+    run_collaboration_stage_typed(
+        state,
+        config,
+        task_id,
+        run_context,
+        collaboration_id,
+        stage,
+        role,
+        model,
+        prompt,
+        limits,
         |_| {},
     )
 }
@@ -126,16 +256,48 @@ pub(crate) fn run_collaboration_stage_with_delta(
     prompt: String,
     on_delta: impl FnMut(&str),
 ) -> Result<String, String> {
+    run_collaboration_stage_typed(
+        state,
+        config,
+        task_id,
+        run_context,
+        collaboration_id,
+        stage,
+        role,
+        model,
+        prompt,
+        CollaborationCallLimits::default(),
+        on_delta,
+    )
+    .map_err(CollaborationStageError::message)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_collaboration_stage_typed(
+    state: &tauri::State<'_, AppState>,
+    config: &ProviderConfig,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    collaboration_id: &str,
+    stage: &str,
+    role: ModelRole,
+    model: &str,
+    prompt: String,
+    mut limits: CollaborationCallLimits,
+    on_delta: impl FnMut(&str),
+) -> Result<String, CollaborationStageError> {
     let cancellation =
-        active_agent_run_control(state, run_context.get("session_id").map(String::as_str))?;
+        active_agent_run_control(state, run_context.get("session_id").map(String::as_str))
+            .map_err(CollaborationStageError::Failed)?;
     if let Some(control) = cancellation.as_ref() {
-        if control.has_pending_steer() {
-            return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
-        }
         if agent_run_should_stop(control) {
-            return Err(MODEL_REQUEST_CANCELLED.to_string());
+            return Err(CollaborationStageError::RunStopped);
+        }
+        if control.has_pending_steer() {
+            return Err(CollaborationStageError::SteerInterrupted);
         }
     }
+    limits.objective_epoch = Some(run_context_steer_epoch(run_context));
     let request_id = unique_id("collaboration-model");
     record_collaboration_stage_started(
         state,
@@ -147,8 +309,9 @@ pub(crate) fn run_collaboration_stage_with_delta(
         model,
         &request_id,
         &Metadata::new(),
-    )?;
-    let completion = complete_collaboration_model_for_stage_with_control(
+    )
+    .map_err(CollaborationStageError::Failed)?;
+    let completion = complete_collaboration_model_for_stage_with_recovery_control(
         config.clone(),
         stage.to_string(),
         role.clone(),
@@ -156,6 +319,7 @@ pub(crate) fn run_collaboration_stage_with_delta(
         collaboration_system_prompt_for_run(&config.agent_system_prompt, run_context),
         prompt,
         cancellation.clone(),
+        limits,
         on_delta,
     );
     record_collaboration_stage_finished(
@@ -169,16 +333,7 @@ pub(crate) fn run_collaboration_stage_with_delta(
         &request_id,
         &completion,
         &Metadata::new(),
-    )?;
-    if cancellation
-        .as_ref()
-        .is_some_and(|control| control.has_pending_steer())
-    {
-        return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
-    }
-    completion.content.ok_or_else(|| {
-        completion
-            .error
-            .unwrap_or_else(|| "collaboration model returned no content".to_string())
-    })
+    )
+    .map_err(CollaborationStageError::Failed)?;
+    collaboration_stage_result(completion)
 }

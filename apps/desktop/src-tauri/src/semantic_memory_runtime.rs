@@ -3,7 +3,8 @@ use crate::background_work_runtime::foreground_agent_should_preempt;
 use crate::configuration_models::ProviderConfig;
 use crate::event_persistence::append_event;
 use crate::memory_runtime::{
-    refresh_project_memory_after_run, schedule_project_memory_vector_refresh,
+    memory_events_for_terminal_steer_epoch, refresh_project_memory_after_run,
+    schedule_project_memory_vector_refresh,
 };
 use crate::project_session_persistence::metadata_with_context;
 use crate::runtime_values::phase16_task_id;
@@ -33,7 +34,7 @@ pub(crate) fn generate_semantic_memory(
         .get("session_id")
         .ok_or_else(|| "semantic memory requires a session id".to_string())?;
     let task_id = phase16_task_id();
-    let events = {
+    let events = memory_events_for_terminal_steer_epoch({
         let store = state
             .store
             .lock()
@@ -41,7 +42,7 @@ pub(crate) fn generate_semantic_memory(
         store
             .list_by_task_and_metadata(&task_id, "agent_run_id", run_id)
             .map_err(|error| error.to_string())?
-    };
+    });
     if !events
         .iter()
         .any(|event| event.summary == "Agent task completed")

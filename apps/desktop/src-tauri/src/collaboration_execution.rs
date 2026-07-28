@@ -11,6 +11,97 @@ pub(crate) fn collaboration_stage_should_interrupt(
     collaboration_run_should_interrupt(control) || control.stage_should_stop(stage_class)
 }
 
+pub(crate) const COLLABORATION_TERMINATION_SCOPE_KEY: &str = "termination_scope";
+pub(crate) const COLLABORATION_TERMINATION_RUN: &str = "run";
+pub(crate) const COLLABORATION_TERMINATION_STEER: &str = "steer";
+pub(crate) const COLLABORATION_TERMINATION_STAGE: &str = "stage";
+pub(crate) const COLLABORATION_TERMINATION_ATTEMPT: &str = "attempt";
+pub(crate) const CONDUCTOR_NO_PROGRESS_DEADLINE_CODE: &str = "conductor_no_progress_deadline";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CollaborationCallLimits {
+    pub(crate) recovery_window: Option<Duration>,
+    pub(crate) no_progress_timeout: Option<Duration>,
+    pub(crate) objective_epoch: Option<u64>,
+}
+
+pub(crate) fn collaboration_no_progress_should_cancel(
+    response_started: bool,
+    elapsed: Duration,
+    timeout: Option<Duration>,
+) -> bool {
+    !response_started && timeout.is_some_and(|timeout| elapsed >= timeout)
+}
+
+fn collaboration_control_failure(
+    cancellation: Option<&Arc<AgentRunControl>>,
+    stage_class: RunStageClass,
+    attempt_deadline_reached: bool,
+    objective_epoch: Option<u64>,
+) -> Option<(AgentFailure, &'static str)> {
+    let control = cancellation?;
+    if let Some(reason) = control.stop_reason() {
+        return Some((
+            AgentFailure::from_stop_reason(
+                reason,
+                format!("Run stopped during model call: {}", reason.code()),
+            ),
+            COLLABORATION_TERMINATION_RUN,
+        ));
+    }
+    if control.has_pending_steer() {
+        return Some((
+            AgentFailure::cancelled(
+                "user_steer",
+                "model request interrupted by queued user steering",
+            ),
+            COLLABORATION_TERMINATION_STEER,
+        ));
+    }
+    if objective_epoch
+        .is_some_and(|expected_epoch| !control.preparation_epoch_is_current(expected_epoch))
+    {
+        return Some((
+            AgentFailure::cancelled(
+                "user_steer",
+                "model request superseded by applied user steering",
+            ),
+            COLLABORATION_TERMINATION_STEER,
+        ));
+    }
+    if control.stage_should_stop(stage_class) {
+        return Some((
+            AgentFailure::budget(
+                RunStopReason::StageBudgetExhausted.code(),
+                "collaboration stage deadline exhausted",
+            ),
+            COLLABORATION_TERMINATION_STAGE,
+        ));
+    }
+    attempt_deadline_reached.then(|| {
+        (
+            AgentFailure::new(
+                CONDUCTOR_NO_PROGRESS_DEADLINE_CODE,
+                "conductor response did not start before the failover deadline",
+                AgentFailureClass::ProviderTransient,
+                true,
+            ),
+            COLLABORATION_TERMINATION_ATTEMPT,
+        )
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn collaboration_model_failure(
+    error: &model_provider::ModelError,
+    cancellation: Option<&Arc<AgentRunControl>>,
+    stage_class: RunStageClass,
+) -> AgentFailure {
+    collaboration_control_failure(cancellation, stage_class, false, None)
+        .map(|(failure, _)| failure)
+        .unwrap_or_else(|| AgentFailure::from_model_error(error))
+}
+
 #[derive(Debug)]
 pub(crate) struct CollaborationCandidateSpec {
     pub(crate) stage: String,
@@ -236,6 +327,30 @@ pub(crate) fn collaboration_result_frontier_brief(
         .join("\n\n")
 }
 
+fn collaboration_failure_completion(
+    failure: AgentFailure,
+    termination_scope: Option<&str>,
+    partial_content: Option<String>,
+    latency_ms: u64,
+    mut usage: Metadata,
+) -> CollaborationCompletion {
+    if let Some(scope) = termination_scope {
+        usage.insert(
+            COLLABORATION_TERMINATION_SCOPE_KEY.to_string(),
+            scope.to_string(),
+        );
+    }
+    CollaborationCompletion {
+        content: None,
+        partial_content,
+        error: Some(failure.message.clone()),
+        failure: Some(failure),
+        latency_ms,
+        usage,
+        evidence: Vec::new(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_collaboration_stage_started(
     state: &tauri::State<'_, AppState>,
@@ -306,6 +421,31 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
     system_prompt: String,
     prompt: String,
     cancellation: Option<Arc<AgentRunControl>>,
+    on_delta: impl FnMut(&str),
+) -> CollaborationCompletion {
+    complete_collaboration_model_for_stage_with_recovery_control(
+        config,
+        stage,
+        role,
+        model,
+        system_prompt,
+        prompt,
+        cancellation,
+        CollaborationCallLimits::default(),
+        on_delta,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn complete_collaboration_model_for_stage_with_recovery_control(
+    config: ProviderConfig,
+    stage: String,
+    role: ModelRole,
+    model: String,
+    system_prompt: String,
+    prompt: String,
+    cancellation: Option<Arc<AgentRunControl>>,
+    limits: CollaborationCallLimits,
     mut on_delta: impl FnMut(&str),
 ) -> CollaborationCompletion {
     let started_at_ms = current_time_millis();
@@ -316,18 +456,54 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
     } else {
         inferred_stage_class
     };
+    let objective_epoch = limits
+        .objective_epoch
+        .or_else(|| cancellation.as_ref().map(|control| control.steer_epoch()));
     if let Some(control) = cancellation.as_ref() {
-        if let Err(reason) = control.begin_stage_model_call(&stage, stage_class) {
-            return CollaborationCompletion::failed_with(AgentFailure::from_stop_reason(
-                reason,
-                format!("Run stopped before model call: {}", reason.code()),
-            ));
+        let expected_epoch = objective_epoch.unwrap_or_else(|| control.steer_epoch());
+        match control.begin_stage_model_call_at(expected_epoch, &stage, stage_class) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                let mut completion = CollaborationCompletion::failed_with(AgentFailure::cancelled(
+                    "user_steer",
+                    "collaboration model call superseded by user steering",
+                ));
+                completion.usage.insert(
+                    COLLABORATION_TERMINATION_SCOPE_KEY.to_string(),
+                    COLLABORATION_TERMINATION_STEER.to_string(),
+                );
+                return completion;
+            }
+            Err(reason) => {
+                let scope = if reason == RunStopReason::StageBudgetExhausted {
+                    COLLABORATION_TERMINATION_STAGE
+                } else {
+                    COLLABORATION_TERMINATION_RUN
+                };
+                let mut completion =
+                    CollaborationCompletion::failed_with(AgentFailure::from_stop_reason(
+                        reason,
+                        format!("Run stopped before model call: {}", reason.code()),
+                    ));
+                completion.usage.insert(
+                    COLLABORATION_TERMINATION_SCOPE_KEY.to_string(),
+                    scope.to_string(),
+                );
+                return completion;
+            }
         }
     }
-    let timeout_seconds = cancellation
-        .as_ref()
-        .map(|control| control.stage_model_call_timeout_seconds(stage_class))
-        .unwrap_or(180);
+    let timeout_seconds = cancellation.as_ref().map_or(180, |control| {
+        limits.recovery_window.map_or_else(
+            || control.stage_model_call_timeout_seconds(stage_class),
+            |window| {
+                control
+                    .stage_model_call_timeout_with_recovery(stage_class, 1, window)
+                    .as_secs()
+                    .max(1)
+            },
+        )
+    });
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
         base_url: config.base_url.clone(),
         api_key: config.api_key.clone(),
@@ -338,6 +514,9 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
     let mut partial_output = String::new();
     let mut stream_progress = ModelStreamProgress::new();
     let mut first_delta_at_ms = None;
+    let response_started = AtomicBool::new(false);
+    let attempt_deadline_reached = AtomicBool::new(false);
+    let attempt_started_at = Instant::now();
     let response = provider.complete_streaming_cancellable(
         ModelRequest {
             role,
@@ -364,24 +543,48 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
         },
         |delta| {
             if !delta.is_empty() {
+                response_started.store(true, Ordering::Release);
                 first_delta_at_ms.get_or_insert_with(current_time_millis);
                 partial_output.push_str(delta);
             }
             if let Some(control) = cancellation.as_ref() {
-                stream_progress.observe(control, "model_stream", &stage, &partial_output);
+                stream_progress.observe(
+                    control,
+                    objective_epoch.unwrap_or_else(|| control.steer_epoch()),
+                    "model_stream",
+                    &stage,
+                    &partial_output,
+                );
             }
             on_delta(delta);
         },
         || {
-            cancellation
-                .as_ref()
-                .is_some_and(|control| collaboration_stage_should_interrupt(control, stage_class))
+            if cancellation.as_ref().is_some_and(|control| {
+                collaboration_stage_should_interrupt(control, stage_class)
+                    || objective_epoch.is_some_and(|expected_epoch| {
+                        !control.preparation_epoch_is_current(expected_epoch)
+                    })
+            }) {
+                return true;
+            }
+            if collaboration_no_progress_should_cancel(
+                response_started.load(Ordering::Acquire),
+                attempt_started_at.elapsed(),
+                limits.no_progress_timeout,
+            ) {
+                attempt_deadline_reached.store(true, Ordering::Release);
+                return true;
+            }
+            false
         },
     );
     if let Some(control) = cancellation.as_ref() {
-        control.finish_model_call();
+        control.finish_model_call_at(
+            objective_epoch.expect("controlled collaboration call should capture its epoch"),
+        );
     }
     let latency_ms = current_time_millis().saturating_sub(started_at_ms);
+    let attempt_deadline_reached = attempt_deadline_reached.load(Ordering::Acquire);
     match response {
         Ok(response) => {
             let mut usage = Metadata::new();
@@ -402,31 +605,49 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
                     first_delta_at_ms.saturating_sub(started_at_ms).to_string(),
                 );
             }
-            let content = match no_tool_collaboration_content(response, &role_name) {
+            let parsed = no_tool_collaboration_content(response, &role_name);
+            if let Some((failure, scope)) = collaboration_control_failure(
+                cancellation.as_ref(),
+                stage_class,
+                attempt_deadline_reached,
+                objective_epoch,
+            ) {
+                let partial = match parsed {
+                    Ok(content) => Some(content),
+                    Err(_) => (!partial_output.trim().is_empty()).then_some(partial_output),
+                };
+                return collaboration_failure_completion(
+                    failure,
+                    Some(scope),
+                    partial,
+                    latency_ms,
+                    usage,
+                );
+            }
+            let content = match parsed {
                 Ok(content) => content,
                 Err(failure) => {
                     if let Some(control) = cancellation.as_ref() {
-                        control.record_observation(
+                        control.record_observation_at(
+                            objective_epoch.unwrap_or_else(|| control.steer_epoch()),
                             "model_protocol_error",
                             &role_name,
                             &failure.message,
                         );
                     }
-                    return CollaborationCompletion {
-                        content: None,
-                        partial_content: (!partial_output.trim().is_empty())
-                            .then_some(partial_output),
-                        error: Some(failure.message.clone()),
-                        failure: Some(failure),
+                    return collaboration_failure_completion(
+                        failure,
+                        None,
+                        (!partial_output.trim().is_empty()).then_some(partial_output),
                         latency_ms,
                         usage,
-                        evidence: Vec::new(),
-                    };
+                    );
                 }
             };
             if let Some(control) = cancellation.as_ref() {
-                control.record_partial_output(&content);
-                control.record_observation("model_result", &stage, &content);
+                let objective_epoch = objective_epoch.unwrap_or_else(|| control.steer_epoch());
+                control.record_partial_output_at(objective_epoch, &content);
+                control.record_observation_at(objective_epoch, "model_result", &stage, &content);
                 let quality = match stage_class {
                     RunStageClass::Reviewer => ResultQuality::Verified,
                     RunStageClass::Synthesizer | RunStageClass::Finalizer => {
@@ -435,7 +656,8 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
                     RunStageClass::Candidate | RunStageClass::Worker => ResultQuality::Substantive,
                     _ => ResultQuality::Draft,
                 };
-                control.record_best_known_result(
+                control.record_best_known_result_at(
+                    objective_epoch,
                     &stage,
                     &content,
                     quality,
@@ -458,9 +680,22 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
             }
         }
         Err(error) => {
-            let failure = AgentFailure::from_model_error(&error);
+            let terminal = collaboration_control_failure(
+                cancellation.as_ref(),
+                stage_class,
+                attempt_deadline_reached,
+                objective_epoch,
+            );
+            let (failure, termination_scope) = terminal
+                .map(|(failure, scope)| (failure, Some(scope)))
+                .unwrap_or_else(|| (AgentFailure::from_model_error(&error), None));
             if let Some(control) = cancellation.as_ref() {
-                control.record_observation("provider_failure", error.class.label(), &error.message);
+                control.record_observation_at(
+                    objective_epoch.unwrap_or_else(|| control.steer_epoch()),
+                    "provider_failure",
+                    error.class.label(),
+                    &error.message,
+                );
             }
             let mut usage = Metadata::new();
             usage.insert(
@@ -474,15 +709,13 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
             if let Some(status_code) = error.status_code {
                 usage.insert("provider_status_code".to_string(), status_code.to_string());
             }
-            CollaborationCompletion {
-                content: None,
-                partial_content: (!partial_output.trim().is_empty()).then_some(partial_output),
-                error: Some(failure.message.clone()),
-                failure: Some(failure),
+            collaboration_failure_completion(
+                failure,
+                termination_scope,
+                (!partial_output.trim().is_empty()).then_some(partial_output),
                 latency_ms,
                 usage,
-                evidence: Vec::new(),
-            }
+            )
         }
     }
 }

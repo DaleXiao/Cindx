@@ -53,6 +53,7 @@ impl ModelStreamProgress {
     pub(crate) fn observe(
         &mut self,
         control: &AgentRunControl,
+        objective_epoch: u64,
         stage: &str,
         detail: &str,
         partial_output: &str,
@@ -62,11 +63,11 @@ impl ModelStreamProgress {
             .saturating_sub(self.last_snapshot_bytes)
             >= 4 * 1024;
         if snapshot_due {
-            control.record_partial_output(partial_output);
+            control.record_partial_output_at(objective_epoch, partial_output);
             self.last_snapshot_bytes = partial_output.len();
         }
         if snapshot_due || self.last_progress_at.elapsed() >= Duration::from_millis(500) {
-            control.mark_progress(stage, detail);
+            control.mark_progress_at(objective_epoch, stage, detail);
             self.last_progress_at = Instant::now();
         }
     }
