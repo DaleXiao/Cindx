@@ -209,12 +209,23 @@ pub(super) fn repair_adaptive_uplift(
     let UpliftGateDecision::RepairTeam { gaps } = decide_uplift_gate(&gate_input) else {
         return Ok(None);
     };
-    if cancellation.is_some_and(|control| {
-        control.stage_should_stop(RunStageClass::Repair)
-            || control
-                .begin_repair_attempt("targeted_uplift_repair")
-                .is_err()
-    }) {
+    let repair_budget_exhausted = if let Some(control) = cancellation {
+        if control.stage_should_stop(RunStageClass::Repair) {
+            true
+        } else {
+            match control.begin_repair_attempt_at(
+                run_context_steer_epoch(run_context),
+                "targeted_uplift_repair",
+            ) {
+                Ok(Some(_)) => false,
+                Ok(None) => return Ok(None),
+                Err(_) => true,
+            }
+        }
+    } else {
+        false
+    };
+    if repair_budget_exhausted {
         record_uplift_repair_event(
             state,
             task_id,
@@ -385,7 +396,8 @@ pub(super) fn repair_adaptive_uplift(
         .insert(repair_candidate_id.clone(), repaired.clone());
     persist_anytime_controller(workflow_checkpoint, anytime_controller)?;
     if let Some(control) = cancellation {
-        control.record_best_known_result(
+        control.record_best_known_result_at(
+            run_context_steer_epoch(run_context),
             "anytime_targeted_uplift_repair",
             &repaired,
             if quality_gate.passed {

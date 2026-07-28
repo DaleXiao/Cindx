@@ -5,7 +5,7 @@ use agent_core::{
 use model_provider::{
     tool_function_name, ModelCallMode, ModelRequest, ModelResponse, ModelResponseDisposition,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const DSML_TOOL_CALLS_OPEN: &str = "<｜DSML｜tool_calls>";
 const DSML_TOOL_CALLS_CLOSE: &str = "</｜DSML｜tool_calls>";
@@ -15,6 +15,7 @@ mod context_engine;
 mod context_governor;
 mod context_projection;
 mod control;
+mod control_steer;
 mod execution;
 mod failure;
 mod kernel;
@@ -39,8 +40,10 @@ pub use context_governor::{
     ContextInvariantViolation,
 };
 pub use control::{
-    AgentRunControl, RunContinuationDirective, RunControlSnapshot, RunProgressSnapshot,
-    RunStageUsageSnapshot, RunSteer, RunStopReason,
+    AgentRunControl, RunContinuationDirective, RunControlSnapshot, RunEpochLease,
+    RunEpochLeaseOutcome, RunExecutionStepCommit, RunPreparationCommit, RunProgressSnapshot,
+    RunStageUsageSnapshot, RunSteer, RunSteerBatchCommit, RunSteerRequestCommit, RunStopReason,
+    RunTerminalCommit, RunToolCallStart,
 };
 pub use execution::{
     run_no_tool_agent, AgentEvidenceCandidate, AgentEvidencePacket, AgentExecutionGuidance,
@@ -70,8 +73,8 @@ pub use tool_runtime::{
     recovery_source_scope_matches, supports_recovery_effect_replay, tool_effect_recovery_policy,
     tool_execution_scope_matches, tool_input_fingerprint, tool_invocation_context,
     tool_invocation_event_metadata, tool_risk_label, ToolEffectRecoveryPolicy,
-    EFFECT_LEDGER_SCHEMA, TOOL_RESULT_SCHEMA, TOOL_EFFECT_SEMANTICS_METADATA_KEY,
-    TOOL_EFFECT_VERIFIER_METADATA_KEY, TOOL_RISK_METADATA_KEY,
+    EFFECT_LEDGER_SCHEMA, TOOL_EFFECT_SEMANTICS_METADATA_KEY, TOOL_EFFECT_VERIFIER_METADATA_KEY,
+    TOOL_RESULT_SCHEMA, TOOL_RISK_METADATA_KEY,
 };
 pub use turn_budget::AgentTurnBudgetExhausted;
 pub use worker_policy::{WorkerTurnPhase, WorkerTurnPolicy};
@@ -598,7 +601,8 @@ pub fn append_steering_instruction(
     state: &mut AgentLoopState,
     instruction: impl Into<String>,
     mut metadata: Metadata,
-) {
+) -> usize {
+    let closed_tool_calls = close_unmatched_tool_calls_for_steer(state);
     metadata.insert("steer".to_string(), "true".to_string());
     state.messages.push(Message {
         role: MessageRole::User,
@@ -606,6 +610,92 @@ pub fn append_steering_instruction(
         metadata,
     });
     state.consecutive_empty_responses = 0;
+    closed_tool_calls
+}
+
+fn close_unmatched_tool_calls_for_steer(state: &mut AgentLoopState) -> usize {
+    let Some((assistant_index, assistant)) = state
+        .messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, message)| matches!(message.role, MessageRole::Assistant | MessageRole::User))
+    else {
+        return 0;
+    };
+    if !matches!(assistant.role, MessageRole::Assistant) {
+        return 0;
+    }
+    let call_ids = assistant_tool_call_ids(assistant);
+    if call_ids.is_empty() {
+        return 0;
+    }
+    let observed = state.messages[assistant_index + 1..]
+        .iter()
+        .filter(|message| matches!(message.role, MessageRole::Tool))
+        .filter_map(|message| message.metadata.get("tool_call_id").cloned())
+        .collect::<BTreeSet<_>>();
+    let unmatched = call_ids
+        .into_iter()
+        .filter(|call_id| !observed.contains(call_id))
+        .collect::<Vec<_>>();
+
+    for call_id in &unmatched {
+        state.messages.push(Message {
+            role: MessageRole::Tool,
+            content: "status=cancelled\nreason=superseded_by_user_steer\noutput=\nTool call was cancelled before execution because a newer user steering instruction superseded this tool-call round.".to_string(),
+            metadata: [
+                ("kind".to_string(), "tool_observation".to_string()),
+                ("tool_call_id".to_string(), call_id.clone()),
+                ("status".to_string(), "cancelled".to_string()),
+                ("synthetic".to_string(), "true".to_string()),
+                (
+                    "reason".to_string(),
+                    "superseded_by_user_steer".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        });
+    }
+    unmatched.len()
+}
+
+fn assistant_tool_call_ids(message: &Message) -> Vec<String> {
+    if !matches!(message.role, MessageRole::Assistant) {
+        return Vec::new();
+    }
+    let mut seen = BTreeSet::new();
+    let metadata_ids = message
+        .metadata
+        .get("tool_call_ids")
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|call_id| !call_id.is_empty())
+        .filter(|call_id| seen.insert((*call_id).to_string()))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if !metadata_ids.is_empty() {
+        return metadata_ids;
+    }
+
+    message
+        .metadata
+        .get("raw_tool_calls_json")
+        .and_then(|raw_calls| serde_json::from_str::<serde_json::Value>(raw_calls).ok())
+        .and_then(|value| value.as_array().cloned())
+        .into_iter()
+        .flatten()
+        .filter_map(|call| {
+            call.get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|call_id| !call_id.is_empty())
+                .map(str::to_string)
+        })
+        .filter(|call_id| seen.insert(call_id.clone()))
+        .collect()
 }
 
 pub fn append_observation(state: &mut AgentLoopState, observation: &str) {

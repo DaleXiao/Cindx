@@ -5,15 +5,14 @@ use crate::{
         agent_recovery_prompt_from_active_events, is_agent_run_start_event,
         primary_agent_user_turn_event,
     },
-    app_state::AgentRecoveryEnvelope,
     agent_runtime_snapshot::{
         delete_persisted_agent_runtime_snapshot, load_matching_agent_runtime_snapshot,
     },
+    app_state::AgentRecoveryEnvelope,
     event_persistence::append_event,
     project_session_persistence::metadata_with_context,
     runtime_constants::AGENT_RECOVERY_SCHEMA,
     runtime_values::{current_time_millis, phase16_task_id},
-    tool_execution::runtime_message_from_event,
 };
 
 pub(super) fn agent_task_is_cancelled(
@@ -40,6 +39,39 @@ pub(super) fn latest_agent_recovery_envelope(events: &[Event]) -> Option<AgentRe
         let encoded = event.metadata.get("recovery_envelope")?;
         let envelope = serde_json::from_str::<AgentRecoveryEnvelope>(encoded).ok()?;
         (envelope.schema == AGENT_RECOVERY_SCHEMA).then_some(envelope)
+    })
+}
+
+pub(super) fn latest_applied_agent_steer_epoch(events: &[Event]) -> u64 {
+    events
+        .iter()
+        .filter(|event| {
+            is_agent_run_start_event(event)
+                || (event.kind == EventKind::MessageAdded
+                    && event.metadata.get("role").map(String::as_str) == Some("user")
+                    && event.metadata.get("internal").map(String::as_str) != Some("true")
+                    && (event.metadata.get("queue_mode").map(String::as_str) == Some("steer")
+                        || event
+                            .metadata
+                            .get("continuation_replay")
+                            .map(String::as_str)
+                            != Some("true")))
+        })
+        .filter_map(|event| event.metadata.get("steer_epoch"))
+        .filter_map(|value| value.parse::<u64>().ok())
+        .max()
+        .unwrap_or_default()
+}
+
+pub(super) fn initial_agent_objective_from_events(events: &[Event]) -> Option<String> {
+    events.iter().find_map(|event| {
+        is_agent_run_start_event(event).then(|| {
+            event
+                .metadata
+                .get("initial_prompt_objective")
+                .or_else(|| event.metadata.get("prompt"))
+                .cloned()
+        })?
     })
 }
 
@@ -174,6 +206,7 @@ pub(super) fn build_agent_recovery_envelope_with_task_state(
     })
 }
 
+#[cfg(test)]
 pub(super) fn agent_recovery_metadata(
     events: &[Event],
     run_context: &Metadata,
@@ -348,54 +381,9 @@ pub(super) fn claim_agent_recovery_envelope(
     Ok(Some(envelope))
 }
 
-pub(super) fn recovery_safe_transcript(events: &[Event]) -> Vec<Message> {
-    let resolved_tool_calls = events
-        .iter()
-        .filter(|event| {
-            event.kind == EventKind::MessageAdded
-                && event.metadata.get("role").map(String::as_str) == Some("tool")
-        })
-        .filter_map(|event| event.metadata.get("tool_call_id").cloned())
-        .collect::<BTreeSet<_>>();
-    let mut synthetic = BTreeSet::new();
-    let mut messages = Vec::new();
-    for message in events.iter().filter_map(runtime_message_from_event) {
-        let unresolved = if message.role == MessageRole::Assistant {
-            message
-                .metadata
-                .get("tool_call_ids")
-                .map(|ids| {
-                    ids.split(',')
-                        .map(str::trim)
-                        .filter(|id| !id.is_empty())
-                        .filter(|id| !resolved_tool_calls.contains(*id))
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        messages.push(message);
-        for tool_call_id in unresolved {
-            if !synthetic.insert(tool_call_id.clone()) {
-                continue;
-            }
-            messages.push(Message {
-                role: MessageRole::Tool,
-                content: "The prior tool call was interrupted before a durable result was recorded. Treat its outcome as unknown. Inspect current state before retrying, and request permission again for any write or destructive action.".to_string(),
-                metadata: [
-                    ("tool_call_id".to_string(), tool_call_id),
-                    ("status".to_string(), "interrupted".to_string()),
-                    ("kind".to_string(), "recovery_observation".to_string()),
-                ]
-                .into_iter()
-                .collect(),
-            });
-        }
-    }
-    messages
-}
+#[path = "agent_recovery_transcript.rs"]
+mod recovery_transcript;
+pub(super) use recovery_transcript::recovery_safe_transcript;
 
 pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Result<usize, String> {
     let task_id = phase16_task_id();
@@ -434,11 +422,18 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
     }
 
     let mut recovered = 0;
-    for (session_key, run_context) in active_runs {
+    for (session_key, mut run_context) in active_runs {
         let session_id = (session_key != "__default__").then_some(session_key.as_str());
         let events = agent_events_for_session(store, &task_id, session_id)
             .map_err(|error| error.to_string())?;
         let active_events = active_agent_events_for_session(&events, session_id);
+        run_context.insert(
+            "steer_epoch".to_string(),
+            latest_applied_agent_steer_epoch(&active_events).to_string(),
+        );
+        if let Some(initial_objective) = initial_agent_objective_from_events(&active_events) {
+            run_context.insert("initial_prompt_objective".to_string(), initial_objective);
+        }
         let already_recovered_wait = active_events.last().is_some_and(|event| {
             event.summary == "Agent task waiting for permission"
                 && event.metadata.get("recovery_state").map(String::as_str) == Some("blocked")

@@ -1,11 +1,18 @@
 use super::*;
+use crate::knowledge_generation_runtime::{
+    build_and_publish_knowledge_generation_cancellable, knowledge_paths_for_rag_index,
+    with_workspace_knowledge_index_lock, PublishedKnowledgeGeneration,
+};
 
 #[tauri::command]
 pub(crate) fn get_phase7_state(state: tauri::State<'_, AppState>) -> Result<Phase7State, String> {
     let root = active_workspace_root(&state)?;
     let project_id = active_project_id_for_memory(&state)?;
     let (adapter, _) = cached_rag_adapter_for(&state, &root)?;
-    let graph = graph_state_for(&root, &[])?;
+    let graph = graph_state_at_path(
+        &knowledge_paths_for_rag_index(adapter.path()).graph_store,
+        &[],
+    )?;
     let mut store = state
         .store
         .lock()
@@ -73,41 +80,47 @@ pub(crate) fn index_workspace_rag_blocking(
     let root = active_workspace_root(&state)?;
     let project_id = active_project_id_for_memory(&state)?;
     let config = clone_provider_config(&state)?;
-    let mut adapter = open_rag_adapter_for(&root)?;
-    let (index, embedding_backend, embedding_model, embedding_fallback_error) = if config.is_ready()
-    {
-        let configured_model = config.model_for_role(&ModelRole::Embedder);
-        let mut embedder = CloudRagEmbedder {
-            config: config.clone(),
-            cancellation: None,
-        };
-        index_workspace_with_cloud_fallback(
-            &root,
-            IndexOptions::default(),
-            &mut embedder,
-            &configured_model,
-        )
-        .map_err(|error| error.to_string())?
-    } else {
-        let index =
-            index_workspace(&root, IndexOptions::default()).map_err(|error| error.to_string())?;
-        let model = index
-            .chunks
-            .first()
-            .map(|chunk| chunk.embedding_model.clone())
-            .unwrap_or_else(|| "local-hash".to_string());
-        (index, "local".to_string(), model, None)
-    };
-    let lancedb_export_path = lancedb_export_path_for(&root);
-    let lancedb_export_records = export_lancedb_records_jsonl(&index, &lancedb_export_path)
-        .map_err(|error| error.to_string())?;
-    let lancedb_path = lancedb_database_path_for(&root);
-    let lancedb_records =
-        replace_lancedb_index(&lancedb_path, &index).map_err(|error| error.to_string())?;
-    let (graph_nodes, graph_edges) = index_graph_chunks(&root, index.chunks.as_slice())?;
-    let stats = adapter
-        .replace_all(index)
-        .map_err(|error| error.to_string())?;
+    let (published, embedding_backend, embedding_model, embedding_fallback_error) =
+        with_workspace_knowledge_index_lock(&root, || {
+            let (index, backend, model, fallback_error) = if config.is_ready() {
+                let configured_model = config.model_for_role(&ModelRole::Embedder);
+                let mut embedder = CloudRagEmbedder {
+                    config: config.clone(),
+                    cancellation: None,
+                    expected_steer_epoch: None,
+                };
+                index_workspace_with_cloud_fallback(
+                    &root,
+                    IndexOptions::default(),
+                    &mut embedder,
+                    &configured_model,
+                )
+                .map_err(|error| error.to_string())?
+            } else {
+                let index = index_workspace(&root, IndexOptions::default())
+                    .map_err(|error| error.to_string())?;
+                let model = index
+                    .chunks
+                    .first()
+                    .map(|chunk| chunk.embedding_model.clone())
+                    .unwrap_or_else(|| "local-hash".to_string());
+                (index, "local".to_string(), model, None)
+            };
+            let published =
+                build_and_publish_knowledge_generation_cancellable(&root, index, || false)?;
+            Ok((published, backend, model, fallback_error))
+        })?;
+    let PublishedKnowledgeGeneration {
+        paths,
+        adapter,
+        graph_nodes,
+        graph_edges,
+        lancedb_export_records,
+        lancedb_records,
+    } = published;
+    let stats = adapter.stats().clone();
+    let lancedb_export_path = paths.lancedb_export.clone();
+    let lancedb_path = paths.lancedb_database.clone();
     cache_rag_adapter(&state, &root, &adapter)?;
     let mut store = state
         .store
@@ -124,7 +137,7 @@ pub(crate) fn index_workspace_rag_blocking(
         ("indexed_at_ms".to_string(), stats.indexed_at_ms.to_string()),
         (
             "index_path".to_string(),
-            rag_index_path_for(&root).display().to_string(),
+            paths.rag_index.display().to_string(),
         ),
         (
             "lancedb_path".to_string(),
@@ -143,7 +156,7 @@ pub(crate) fn index_workspace_rag_blocking(
         ("embedding_model".to_string(), embedding_model),
         (
             "graph_store_path".to_string(),
-            graph_store_path_for(&root).display().to_string(),
+            paths.graph_store.display().to_string(),
         ),
         ("graph_nodes".to_string(), graph_nodes.to_string()),
         ("graph_edges".to_string(), graph_edges.to_string()),
@@ -162,7 +175,7 @@ pub(crate) fn index_workspace_rag_blocking(
     )
     .map_err(|error| error.to_string())?;
 
-    let graph = graph_state_for(&root, &[])?;
+    let graph = graph_state_at_path(&paths.graph_store, &[])?;
     let memory = project_memory_stats(&mut store, project_id.as_deref())
         .map_err(|error| error.to_string())?;
     phase7_state(
@@ -191,7 +204,7 @@ pub(crate) fn search_rag(
     }
 
     let (adapter, index_cache_hit) = cached_rag_adapter_for(&state, &root)?;
-    let graph_store = cached_graph_store_for(&state, &root)?;
+    let graph_store = cached_graph_store_for_adapter(&state, &root, &adapter)?;
     let config = clone_provider_config(&state)?;
     let cancellation = Arc::new(AgentRunControl::new("auto"));
     let mut retrieval = run_parallel_retrieval(
@@ -210,7 +223,10 @@ pub(crate) fn search_rag(
         .iter()
         .map(|source| source.path.clone())
         .collect::<Vec<_>>();
-    let graph = graph_state_for(&root, &focus_paths)?;
+    let graph = graph_state_at_path(
+        &knowledge_paths_for_rag_index(adapter.path()).graph_store,
+        &focus_paths,
+    )?;
     let mut store = state
         .store
         .lock()
@@ -252,7 +268,7 @@ pub(crate) fn answer_with_rag(
     }
 
     let (adapter, index_cache_hit) = cached_rag_adapter_for(&state, &root)?;
-    let graph_store = cached_graph_store_for(&state, &root)?;
+    let graph_store = cached_graph_store_for_adapter(&state, &root, &adapter)?;
     let config = clone_provider_config(&state)?;
     let cancellation = Arc::new(AgentRunControl::new("auto"));
     let mut retrieval = run_parallel_retrieval(
@@ -272,7 +288,10 @@ pub(crate) fn answer_with_rag(
         .iter()
         .map(|source| source.path.clone())
         .collect::<Vec<_>>();
-    let graph = graph_state_for(&root, &focus_paths)?;
+    let graph = graph_state_at_path(
+        &knowledge_paths_for_rag_index(adapter.path()).graph_store,
+        &focus_paths,
+    )?;
 
     {
         let mut store = state

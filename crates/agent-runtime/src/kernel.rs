@@ -160,8 +160,8 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         advance_with_model_response(self.state, response, self.tools)
     }
 
-    pub fn apply_steer(&mut self, instruction: impl Into<String>, metadata: Metadata) {
-        append_steering_instruction(self.state, instruction, metadata);
+    pub fn apply_steer(&mut self, instruction: impl Into<String>, metadata: Metadata) -> usize {
+        append_steering_instruction(self.state, instruction, metadata)
     }
 
     pub fn apply_instruction(&mut self, instruction: &AgentKernelInstruction) {
@@ -204,6 +204,16 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
 
     pub fn require_tool_success(&mut self, tool_name: impl Into<String>) {
         self.state.task_contract.require_tool_success(tool_name);
+    }
+
+    pub fn replace_prompt_required_tool_successes<I, S>(&mut self, epoch: u64, tools: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.state
+            .task_contract
+            .replace_prompt_required_tool_successes(epoch, tools);
     }
 
     pub fn merge_workspace_verification_policy(&mut self, policy: WorkspaceVerificationPolicy) {
@@ -368,6 +378,45 @@ mod tests {
     }
 
     #[test]
+    fn kernel_rebuilds_prompt_requirements_at_the_requested_epoch() {
+        let mut state = start_agent_loop(
+            TaskId("task-1".to_string()),
+            "generate an image",
+            AgentRuntimeConfig::default(),
+        );
+        let tools = vec![ToolSpec::builtin(
+            "image.generate",
+            "image",
+            "Generate an image",
+            ToolRisk::UsesNetwork,
+            r#"{"type":"object"}"#,
+        )];
+        let mut kernel = AgentKernel::new(&mut state, &tools);
+        kernel.replace_prompt_required_tool_successes(2, ["image.generate"]);
+        kernel.apply_tool_observation(
+            &AgentToolRequest {
+                call_id: ToolCallId("image-1".to_string()),
+                tool_name: "image.generate".to_string(),
+                input: r#"{"prompt":"first"}"#.to_string(),
+            },
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::UsesNetwork),
+            "generated",
+        );
+        assert!(kernel
+            .completion_gate_for_task()
+            .expect("completion gate evaluates")
+            .is_none());
+
+        kernel.replace_prompt_required_tool_successes(3, ["image.generate"]);
+
+        assert!(kernel
+            .completion_gate_for_task()
+            .expect("completion gate evaluates")
+            .is_some());
+    }
+
+    #[test]
     fn prepared_turn_contains_active_contract_without_consuming_repair_attempts() {
         let mut state = start_agent_loop(
             TaskId("task-1".to_string()),
@@ -407,7 +456,10 @@ mod tests {
             "test",
             "oversized schema",
             ToolRisk::ReadOnly,
-            format!(r#"{{"type":"object","description":"{}"}}"#, "x".repeat(100_000)),
+            format!(
+                r#"{{"type":"object","description":"{}"}}"#,
+                "x".repeat(100_000)
+            ),
         )];
 
         let error = AgentKernel::new(&mut state, &tools)

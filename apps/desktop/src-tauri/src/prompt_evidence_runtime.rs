@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent_strategy_runtime::cumulative_effective_prompt_objective;
 
 pub(crate) fn prompt_profile_evidence_counts(
     observations: &[PromptEvolutionObservation],
@@ -19,10 +20,13 @@ pub(crate) fn prompt_direct_profile_evidence_counts(
     opponent_profile_id: &str,
 ) -> (usize, usize) {
     let active_dataset_sha256 = orchestrator::latest_scientific_dataset_digest(observations);
-    prompt_unique_evidence_counts(observations.iter().filter(|observation| {
-        observation.profile_id == profile_id
-            && observation.opponent_profile_id.as_deref() == Some(opponent_profile_id)
-    }), active_dataset_sha256)
+    prompt_unique_evidence_counts(
+        observations.iter().filter(|observation| {
+            observation.profile_id == profile_id
+                && observation.opponent_profile_id.as_deref() == Some(opponent_profile_id)
+        }),
+        active_dataset_sha256,
+    )
 }
 
 fn prompt_unique_evidence_counts<'a>(
@@ -144,25 +148,72 @@ pub(crate) fn prompt_offline_dataset(events: &[Event], project_id: &str) -> Vec<
     let mut cases = BTreeMap::<String, PromptOfflineCase>::new();
     for (run_id, mut run_events) in runs {
         run_events.sort_by_key(|event| event.sequence);
-        if !run_events.iter().any(|event| {
+        let Some(terminal) = run_events.iter().rev().find(|event| {
             matches!(
                 event.summary.as_str(),
                 "Agent task completed" | "Agent task failed" | "Agent task cancelled"
             )
-        }) || !run_events
+        }) else {
+            continue;
+        };
+        if !run_events
             .iter()
             .any(|event| event.metadata.get("project_id").map(String::as_str) == Some(project_id))
         {
             continue;
         }
-        let objective = run_events
-            .iter()
-            .find(|event| event.summary == "Agent task started")
-            .and_then(|event| event.metadata.get("prompt"))
+        let stable_epoch = terminal
+            .metadata
+            .get("steer_epoch")
+            .map(String::as_str)
+            .unwrap_or("0");
+        let decision = run_events.iter().rev().find(|event| {
+            event.summary == "Agent run decision selected"
+                && event
+                    .metadata
+                    .get("steer_epoch")
+                    .map(String::as_str)
+                    .unwrap_or("0")
+                    == stable_epoch
+        });
+        if decision.is_none() && stable_epoch != "0" {
+            continue;
+        }
+        let stable_epoch_number = stable_epoch.parse::<u64>().unwrap_or_default();
+        let reconstructed_objective = cumulative_effective_prompt_objective(
+            run_events
+                .iter()
+                .filter(|event| event.kind == EventKind::MessageAdded)
+                .filter(|event| {
+                    event.metadata.get("role").map(String::as_str) == Some("user")
+                        && event.metadata.get("internal").map(String::as_str) != Some("true")
+                })
+                .filter(|event| {
+                    event
+                        .metadata
+                        .get("steer_epoch")
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .unwrap_or_default()
+                        <= stable_epoch_number
+                })
+                .filter_map(|event| {
+                    event
+                        .metadata
+                        .get("display_content")
+                        .or_else(|| event.metadata.get("content"))
+                        .or_else(|| event.metadata.get("model_content"))
+                        .cloned()
+                }),
+        );
+        let objective = decision
+            .and_then(|event| event.metadata.get("effective_prompt_objective"))
+            .or(reconstructed_objective.as_ref())
+            .or_else(|| decision.and_then(|event| event.metadata.get("prompt_objective")))
             .or_else(|| {
                 run_events
                     .iter()
-                    .find_map(|event| event.metadata.get("prompt_objective"))
+                    .find(|event| event.summary == "Agent task started")
+                    .and_then(|event| event.metadata.get("prompt"))
             })
             .map(|objective| {
                 truncate_for_collaboration(&redact_sensitive_text(objective.trim()), 4_000)
@@ -170,9 +221,13 @@ pub(crate) fn prompt_offline_dataset(events: &[Event], project_id: &str) -> Vec<
         let Some(objective) = objective.filter(|objective| objective.chars().count() >= 4) else {
             continue;
         };
-        let task_class = run_events
-            .iter()
-            .find_map(|event| event.metadata.get("task_class"))
+        let task_class = decision
+            .and_then(|event| event.metadata.get("task_class"))
+            .or_else(|| {
+                run_events
+                    .iter()
+                    .find_map(|event| event.metadata.get("task_class"))
+            })
             .cloned()
             .unwrap_or_else(|| "general".to_string());
         let case_digest = sha256_hex(objective.as_bytes());
@@ -498,7 +553,11 @@ pub(crate) fn prompt_replay_case(
                 .get("agent_run_id")
                 .is_some_and(|run_id| completed_agent_runs.contains(run_id))
         {
-            event.metadata.get("prompt_objective").cloned()
+            event
+                .metadata
+                .get("effective_prompt_objective")
+                .or_else(|| event.metadata.get("prompt_objective"))
+                .cloned()
         } else {
             None
         };

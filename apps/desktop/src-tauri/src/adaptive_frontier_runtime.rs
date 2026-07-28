@@ -184,7 +184,8 @@ pub(super) fn run_adaptive_frontier(
                 anytime_best_known_output(&anytime_controller, &workflow_checkpoint)
             {
                 if let Some(control) = cancellation.as_ref() {
-                    control.record_best_known_result(
+                    control.record_best_known_result_at(
+                        run_context_steer_epoch(run_context),
                         &format!("anytime_frontier_blocked:{candidate_id}"),
                         &output,
                         if verdict.verified {

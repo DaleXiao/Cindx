@@ -131,12 +131,13 @@ pub struct StoredReadModel {
     pub payload: String,
 }
 
-const EVENT_SCOPE_COLUMNS: [(&str, &str); 6] = [
+const EVENT_SCOPE_COLUMNS: [(&str, &str); 7] = [
     ("project_id", "project_id"),
     ("session_id", "session_id"),
     ("agent_run_id", "agent_run_id"),
     ("collaboration_id", "collaboration_id"),
     ("prompt_profile", "prompt_profile"),
+    ("queue_id", "queue_id"),
     ("result_effect_fingerprint", "effect_fingerprint"),
 ];
 const PERMISSION_SCOPE_COLUMNS: [(&str, &str); 2] = [
@@ -256,6 +257,26 @@ impl SqliteStore {
         }
     }
 
+    pub fn with_immediate_transaction<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
+        self.exec_batch("begin immediate transaction;")?;
+        match operation(self) {
+            Ok(value) => match self.exec_batch("commit;") {
+                Ok(()) => Ok(value),
+                Err(error) => {
+                    let _ = self.exec_batch("rollback;");
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = self.exec_batch("rollback;");
+                Err(error)
+            }
+        }
+    }
+
     pub fn next_sequence(&self, task_id: &TaskId) -> Result<u64, StorageError> {
         let mut statement =
             self.prepare("select coalesce(max(sequence), 0) + 1 from events where task_id = ?1")?;
@@ -282,12 +303,12 @@ impl SqliteStore {
             insert into events(
               id, task_id, sequence, timestamp_ms, kind, summary, metadata_text,
               project_id, session_id, agent_run_id, collaboration_id, prompt_profile,
-              tool_call_id, effect_fingerprint
+              queue_id, tool_call_id, effect_fingerprint
             )
             values (
               ?1, ?2,
               (select coalesce(max(sequence), 0) + 1 from events where task_id = ?2),
-              ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+              ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
             )
             ",
         )?;
@@ -303,9 +324,47 @@ impl SqliteStore {
         statement.bind_optional_text(9, metadata.get("agent_run_id").map(String::as_str))?;
         statement.bind_optional_text(10, metadata.get("collaboration_id").map(String::as_str))?;
         statement.bind_optional_text(11, metadata.get("prompt_profile").map(String::as_str))?;
-        statement.bind_optional_text(12, metadata.get("tool_call_id").map(String::as_str))?;
-        statement.bind_optional_text(13, event_effect_fingerprint(&metadata))?;
+        statement.bind_optional_text(12, metadata.get("queue_id").map(String::as_str))?;
+        statement.bind_optional_text(13, metadata.get("tool_call_id").map(String::as_str))?;
+        statement.bind_optional_text(14, event_effect_fingerprint(&metadata))?;
         statement.expect_done()
+    }
+
+    pub fn list_by_task_and_metadata_values_in_scope(
+        &self,
+        task_id: &TaskId,
+        key: &str,
+        values: &[String],
+        scope_key: &str,
+        scope_value: &str,
+    ) -> Result<Vec<Event>, StorageError> {
+        if values.is_empty() {
+            return Ok(Vec::new());
+        }
+        let column = event_scope_column(key).ok_or_else(|| {
+            StorageError::new(format!("event metadata key is not indexed: {key}"))
+        })?;
+        let scope_column = event_scope_column(scope_key).ok_or_else(|| {
+            StorageError::new(format!(
+                "event scope metadata key is not indexed: {scope_key}"
+            ))
+        })?;
+        let placeholders = (0..values.len())
+            .map(|index| format!("?{}", index + 3))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut statement = self.prepare(&format!(
+            "select id, task_id, sequence, timestamp_ms, kind, summary, metadata_text
+             from events
+             where task_id = ?1 and {scope_column} = ?2 and {column} in ({placeholders})
+             order by sequence asc"
+        ))?;
+        statement.bind_text(1, &task_id.0)?;
+        statement.bind_text(2, scope_value)?;
+        for (index, value) in values.iter().enumerate() {
+            statement.bind_text((index + 3) as c_int, value)?;
+        }
+        events_from_statement(&mut statement)
     }
 
     pub fn event_revision(&self, task_id: &TaskId) -> Result<EventRevision, StorageError> {
@@ -944,9 +1003,10 @@ impl SqliteStore {
                  agent_run_id = ?5,
                  collaboration_id = ?6,
                  prompt_profile = ?7,
-                 tool_call_id = ?8,
-                 effect_fingerprint = ?9
-             where id = ?10",
+                 queue_id = ?8,
+                 tool_call_id = ?9,
+                 effect_fingerprint = ?10
+             where id = ?11",
         )?;
         statement.bind_text(1, &event.summary)?;
         statement.bind_text(2, &metadata_to_text(&event.metadata))?;
@@ -959,9 +1019,10 @@ impl SqliteStore {
         )?;
         statement
             .bind_optional_text(7, event.metadata.get("prompt_profile").map(String::as_str))?;
-        statement.bind_optional_text(8, event.metadata.get("tool_call_id").map(String::as_str))?;
-        statement.bind_optional_text(9, event_effect_fingerprint(&event.metadata))?;
-        statement.bind_text(10, &event.id.0)?;
+        statement.bind_optional_text(8, event.metadata.get("queue_id").map(String::as_str))?;
+        statement.bind_optional_text(9, event.metadata.get("tool_call_id").map(String::as_str))?;
+        statement.bind_optional_text(10, event_effect_fingerprint(&event.metadata))?;
+        statement.bind_text(11, &event.id.0)?;
         statement.expect_done()
     }
 
@@ -981,6 +1042,7 @@ impl SqliteStore {
               agent_run_id text,
               collaboration_id text,
               prompt_profile text,
+              queue_id text,
               tool_call_id text,
               effect_fingerprint text
             );
@@ -1043,6 +1105,8 @@ impl SqliteStore {
               on events(task_id, collaboration_id, sequence);
             create index if not exists idx_events_task_prompt_profile_sequence
               on events(task_id, prompt_profile, sequence);
+            create index if not exists idx_events_task_queue_sequence
+              on events(task_id, queue_id, sequence);
             create index if not exists idx_events_task_tool_call_sequence
               on events(task_id, tool_call_id, sequence);
             create index if not exists idx_events_task_effect_fingerprint_sequence
@@ -1056,6 +1120,7 @@ impl SqliteStore {
             ",
         )?;
         self.backfill_event_scope_columns()?;
+        self.backfill_event_queue_scope_column()?;
         self.backfill_permission_scope_columns()
     }
 
@@ -1156,6 +1221,49 @@ impl SqliteStore {
             let mut marker =
                 self.prepare("insert or replace into storage_meta(key, value) values (?1, ?2)")?;
             marker.bind_text(1, "event_scope_columns_v3")?;
+            marker.bind_text(2, "complete")?;
+            marker.expect_done()
+        })();
+        match result {
+            Ok(()) => self.exec_batch("commit"),
+            Err(error) => {
+                let _ = self.exec_batch("rollback");
+                Err(error)
+            }
+        }
+    }
+
+    fn backfill_event_queue_scope_column(&self) -> Result<(), StorageError> {
+        if self.storage_meta_value("event_queue_scope_v1")?.as_deref() == Some("complete") {
+            return Ok(());
+        }
+
+        let queue_key_prefix = format!("{}\t", hex_encode(b"queue_id"));
+        let mut statement = self.prepare(
+            "select id, metadata_text from events
+             where queue_id is null and
+               instr(char(10) || metadata_text, char(10) || ?1) > 0
+             order by task_id asc, sequence asc",
+        )?;
+        statement.bind_text(1, &queue_key_prefix)?;
+        let mut rows = Vec::new();
+        while statement.step()? == StepResult::Row {
+            rows.push((statement.column_text(0)?, statement.column_text(1)?));
+        }
+        drop(statement);
+
+        self.exec_batch("begin immediate transaction")?;
+        let result = (|| {
+            for (event_id, metadata_text) in rows {
+                let metadata = metadata_from_text(&metadata_text)?;
+                let mut update = self.prepare("update events set queue_id = ?1 where id = ?2")?;
+                update.bind_optional_text(1, metadata.get("queue_id").map(String::as_str))?;
+                update.bind_text(2, &event_id)?;
+                update.expect_done()?;
+            }
+            let mut marker =
+                self.prepare("insert or replace into storage_meta(key, value) values (?1, ?2)")?;
+            marker.bind_text(1, "event_queue_scope_v1")?;
             marker.bind_text(2, "complete")?;
             marker.expect_done()
         })();
@@ -1287,9 +1395,9 @@ impl EventStore for SqliteStore {
             insert into events(
               id, task_id, sequence, timestamp_ms, kind, summary, metadata_text,
               project_id, session_id, agent_run_id, collaboration_id, prompt_profile,
-              tool_call_id, effect_fingerprint
+              queue_id, tool_call_id, effect_fingerprint
             )
-            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             ",
         )?;
 
@@ -1309,8 +1417,9 @@ impl EventStore for SqliteStore {
         )?;
         statement
             .bind_optional_text(12, event.metadata.get("prompt_profile").map(String::as_str))?;
-        statement.bind_optional_text(13, event.metadata.get("tool_call_id").map(String::as_str))?;
-        statement.bind_optional_text(14, event_effect_fingerprint(&event.metadata))?;
+        statement.bind_optional_text(13, event.metadata.get("queue_id").map(String::as_str))?;
+        statement.bind_optional_text(14, event.metadata.get("tool_call_id").map(String::as_str))?;
+        statement.bind_optional_text(15, event_effect_fingerprint(&event.metadata))?;
         statement.expect_done()
     }
 
@@ -1995,6 +2104,7 @@ mod tests {
         let mut store = SqliteStore::in_memory().expect("store should open");
         let mut metadata = Metadata::new();
         metadata.insert("output".to_string(), "api_key=secret".to_string());
+        metadata.insert("queue_id".to_string(), "queue-before".to_string());
         let mut event = Event {
             id: EventId("event-sensitive".to_string()),
             task_id: TaskId("task-sensitive".to_string()),
@@ -2010,6 +2120,9 @@ mod tests {
         event
             .metadata
             .insert("output".to_string(), "api_key=[REDACTED]".to_string());
+        event
+            .metadata
+            .insert("queue_id".to_string(), "queue-after".to_string());
         store
             .update_event_content(&event)
             .expect("update should succeed");
@@ -2020,6 +2133,17 @@ mod tests {
         assert_eq!(
             events[0].metadata.get("output").map(String::as_str),
             Some("api_key=[REDACTED]")
+        );
+        assert!(store
+            .list_by_task_and_metadata(&event.task_id, "queue_id", "queue-before")
+            .expect("old queue scope should query")
+            .is_empty());
+        assert_eq!(
+            store
+                .list_by_task_and_metadata(&event.task_id, "queue_id", "queue-after")
+                .expect("new queue scope should query")
+                .len(),
+            1
         );
     }
 
@@ -2348,6 +2472,7 @@ mod tests {
         let metadata = [
             ("project_id".to_string(), "legacy-project".to_string()),
             ("session_id".to_string(), "legacy-session".to_string()),
+            ("queue_id".to_string(), "legacy-queue".to_string()),
             (
                 "result_input_fingerprint".to_string(),
                 "legacy-effect".to_string(),
@@ -2374,15 +2499,29 @@ mod tests {
         statement.expect_done().unwrap();
         drop(statement);
         store
-            .exec_batch("delete from storage_meta where key = 'event_scope_columns_v3'")
+            .exec_batch(
+                "delete from storage_meta
+                 where key in ('event_scope_columns_v3', 'event_queue_scope_v1')",
+            )
             .unwrap();
 
         store.backfill_event_scope_columns().unwrap();
+        store.backfill_event_queue_scope_column().unwrap();
 
         let events = store
             .list_by_task_and_metadata(&task_id, "session_id", "legacy-session")
             .unwrap();
         assert_eq!(events.len(), 1);
+        let queue_events = store
+            .list_by_task_and_metadata_values_in_scope(
+                &task_id,
+                "queue_id",
+                &["legacy-queue".to_string()],
+                "session_id",
+                "legacy-session",
+            )
+            .unwrap();
+        assert_eq!(queue_events.len(), 1);
         assert_eq!(events[0].id.0, "legacy-event");
         assert_eq!(
             store
@@ -2695,5 +2834,85 @@ mod tests {
             .load_read_model("agent-session-v1", "session-a")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn immediate_transaction_commits_or_rolls_back_events_and_read_models_together() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("transaction-task".to_string());
+        store
+            .with_immediate_transaction(|transaction| {
+                transaction.append_next_event(
+                    EventId("committed-event".to_string()),
+                    task_id.clone(),
+                    1,
+                    EventKind::MessageAdded,
+                    "committed".to_string(),
+                    Metadata::new(),
+                )?;
+                transaction.save_read_model("transaction-test", "committed", 1, "ok")
+            })
+            .expect("transaction should commit");
+        assert_eq!(
+            store
+                .list_by_task(&task_id)
+                .expect("events should load")
+                .len(),
+            1
+        );
+
+        let rolled_back = store.with_immediate_transaction(|transaction| {
+            transaction.append_next_event(
+                EventId("rolled-back-event".to_string()),
+                task_id.clone(),
+                2,
+                EventKind::MessageAdded,
+                "rolled back".to_string(),
+                Metadata::new(),
+            )?;
+            transaction.save_read_model("transaction-test", "rolled-back", 2, "no")?;
+            Err::<(), _>(StorageError::new("injected transaction failure"))
+        });
+        assert!(rolled_back.is_err());
+        assert_eq!(
+            store
+                .list_by_task(&task_id)
+                .expect("events should load")
+                .len(),
+            1
+        );
+        assert!(store
+            .load_read_model("transaction-test", "rolled-back")
+            .expect("read model should load")
+            .is_none());
+    }
+
+    #[test]
+    fn immediate_transaction_rolls_back_after_commit_failure() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        store
+            .exec_batch(
+                "
+                pragma foreign_keys = ON;
+                create table transaction_parent(id integer primary key);
+                create table transaction_child(
+                  parent_id integer references transaction_parent(id)
+                    deferrable initially deferred
+                );
+                ",
+            )
+            .expect("test schema should initialize");
+
+        let commit_failed = store.with_immediate_transaction(|transaction| {
+            transaction.exec_batch("insert into transaction_child(parent_id) values (1);")
+        });
+        assert!(commit_failed.is_err());
+
+        store
+            .with_immediate_transaction(|transaction| {
+                transaction.exec_batch("insert into transaction_parent(id) values (1);")?;
+                transaction.exec_batch("insert into transaction_child(parent_id) values (1);")
+            })
+            .expect("connection should accept a new transaction after failed commit");
     }
 }

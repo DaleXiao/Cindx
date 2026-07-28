@@ -105,6 +105,12 @@ pub struct AgentTaskContract {
     #[serde(default)]
     successful_tools: BTreeSet<String>,
     #[serde(default)]
+    prompt_requirement_epoch: u64,
+    #[serde(default)]
+    prompt_required_tool_successes: BTreeSet<String>,
+    #[serde(default)]
+    prompt_successful_tools: BTreeSet<String>,
+    #[serde(default)]
     mutation_targets: BTreeSet<String>,
     #[serde(default)]
     mutation_epoch: u64,
@@ -136,6 +142,36 @@ impl AgentTaskContract {
         }
     }
 
+    /// Replaces requirements derived from the active prompt.
+    ///
+    /// Prompt-scoped success evidence is retained when the same epoch is
+    /// replayed, but is discarded when steering advances to a new epoch.
+    /// Run-wide requirements and evidence are deliberately unaffected.
+    pub fn replace_prompt_required_tool_successes<I, S>(&mut self, epoch: u64, tools: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let required_tools = tools
+            .into_iter()
+            .map(Into::into)
+            .map(|tool: String| tool.trim().to_string())
+            .filter(|tool| !tool.is_empty())
+            .collect::<BTreeSet<_>>();
+        let epoch_changed = self.prompt_requirement_epoch != epoch;
+        let requirements_changed = self.prompt_required_tool_successes != required_tools;
+
+        if epoch_changed {
+            self.prompt_requirement_epoch = epoch;
+            self.prompt_successful_tools.clear();
+        }
+        if epoch_changed || requirements_changed {
+            self.gate_attempts
+                .retain(|key, _| !key.starts_with("prompt_tool:"));
+        }
+        self.prompt_required_tool_successes = required_tools;
+    }
+
     pub fn require_any_tool_success<I, S>(&mut self, requirement_id: impl Into<String>, tools: I)
     where
         I: IntoIterator<Item = S>,
@@ -162,7 +198,11 @@ impl AgentTaskContract {
     }
 
     pub fn required_tool_satisfied(&self, tool_name: &str) -> bool {
-        self.successful_tools.contains(tool_name)
+        if self.prompt_required_tool_successes.contains(tool_name) {
+            self.prompt_successful_tools.contains(tool_name)
+        } else {
+            self.successful_tools.contains(tool_name)
+        }
     }
 
     pub fn successful_mutations(&self) -> usize {
@@ -207,6 +247,14 @@ impl AgentTaskContract {
             .iter()
             .filter(|tool_name| !self.successful_tools.contains(*tool_name))
             .cloned()
+            .chain(
+                self.prompt_required_tool_successes
+                    .iter()
+                    .filter(|tool_name| !self.prompt_successful_tools.contains(*tool_name))
+                    .cloned(),
+            )
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect::<Vec<_>>();
         let unresolved_any_tool_requirements = self
             .required_any_tool_successes
@@ -312,6 +360,7 @@ impl AgentTaskContract {
         }
 
         self.successful_tools.insert(tool_name.to_string());
+        self.prompt_successful_tools.insert(tool_name.to_string());
         for requirement_id in self
             .required_any_tool_successes
             .iter()
@@ -324,6 +373,16 @@ impl AgentTaskContract {
         }
         if self.required_tool_successes.contains(tool_name) {
             self.gate_attempts.remove(&format!("tool:{tool_name}"));
+        }
+        if self.prompt_required_tool_successes.contains(tool_name) {
+            self.gate_attempts.remove(&format!(
+                "prompt_tool:{}:{tool_name}",
+                self.prompt_requirement_epoch
+            ));
+        }
+        if self.required_tool_successes.contains(tool_name)
+            || self.prompt_required_tool_successes.contains(tool_name)
+        {
             self.record_evidence(ContractEvidenceKind::RequiredTool, tool_name, input_json);
         }
 
@@ -441,6 +500,27 @@ impl AgentTaskContract {
                 ));
             }
             self.claim_gate(format!("tool:{tool_name}"))?;
+            return Ok(Some(format!(
+                "The task contract is not satisfied yet. Use `{tool_name}` successfully before finishing. Do not substitute another implementation or merely describe the intended result."
+            )));
+        }
+
+        if let Some(tool_name) = self
+            .prompt_required_tool_successes
+            .iter()
+            .find(|tool_name| !self.prompt_successful_tools.contains(*tool_name))
+            .cloned()
+        {
+            if !available_tools.contains(tool_name.as_str()) {
+                return Err(AgentFailure::contract(
+                    "required_tool_unavailable",
+                    format!("task contract requires unavailable tool `{tool_name}`"),
+                ));
+            }
+            self.claim_gate(format!(
+                "prompt_tool:{}:{tool_name}",
+                self.prompt_requirement_epoch
+            ))?;
             return Ok(Some(format!(
                 "The task contract is not satisfied yet. Use `{tool_name}` successfully before finishing. Do not substitute another implementation or merely describe the intended result."
             )));
@@ -728,6 +808,121 @@ mod tests {
             Some(&ToolRisk::UsesNetwork),
         );
         assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
+    }
+
+    #[test]
+    fn prompt_requirement_is_removed_when_a_new_epoch_no_longer_needs_it() {
+        let mut contract = AgentTaskContract::default();
+        let tools = vec![tool("image.generate", ToolRisk::UsesNetwork)];
+        contract.replace_prompt_required_tool_successes(0, ["image.generate"]);
+
+        contract.record_tool_outcome(
+            "image.generate",
+            r#"{"prompt":"city"}"#,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::UsesNetwork),
+        );
+        assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
+
+        contract.replace_prompt_required_tool_successes(1, std::iter::empty::<&str>());
+
+        assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
+    }
+
+    #[test]
+    fn prompt_requirement_does_not_reuse_success_from_an_older_epoch() {
+        let mut contract = AgentTaskContract::default();
+        let tools = vec![tool("image.generate", ToolRisk::UsesNetwork)];
+        contract.replace_prompt_required_tool_successes(3, ["image.generate"]);
+        contract.record_tool_outcome(
+            "image.generate",
+            r#"{"prompt":"first image"}"#,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::UsesNetwork),
+        );
+        assert!(contract.required_tool_satisfied("image.generate"));
+
+        contract.replace_prompt_required_tool_successes(4, ["image.generate"]);
+
+        assert!(!contract.required_tool_satisfied("image.generate"));
+        assert!(contract
+            .model_context_for_task(&tools)
+            .expect("new epoch should expose the renewed requirement")
+            .contains("image.generate"));
+        assert!(contract
+            .completion_instruction_for_task(&tools)
+            .expect("completion gate evaluates")
+            .expect("new epoch requires new success evidence")
+            .contains("image.generate"));
+
+        contract.record_tool_outcome(
+            "image.generate",
+            r#"{"prompt":"second image"}"#,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::UsesNetwork),
+        );
+        contract.replace_prompt_required_tool_successes(4, ["image.generate"]);
+        assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
+    }
+
+    #[test]
+    fn rebuilding_prompt_requirements_preserves_run_wide_contract_state() {
+        let mut contract = AgentTaskContract::default();
+        contract.require_tool_success("file.read");
+        contract.merge_workspace_verification_policy(
+            WorkspaceVerificationPolicy::RequiredAfterMutation,
+        );
+        contract.record_tool_outcome(
+            "file.write",
+            r#"{"path":"src/main.rs"}"#,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::WritesWorkspace),
+        );
+        contract.record_tool_outcome(
+            "file.read",
+            r#"{"path":"README.md"}"#,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ReadOnly),
+        );
+        contract.record_tool_outcome("computer.click", "{}", &ToolOutcomeStatus::Succeeded, None);
+        let evidence = contract.evidence().to_vec();
+
+        contract.replace_prompt_required_tool_successes(7, ["image.generate"]);
+        contract.replace_prompt_required_tool_successes(8, std::iter::empty::<&str>());
+
+        assert_eq!(
+            contract.workspace_verification_policy(),
+            WorkspaceVerificationPolicy::RequiredAfterMutation
+        );
+        assert_eq!(contract.successful_mutations(), 1);
+        assert!(!contract.latest_mutation_verified());
+        assert!(contract.required_tool_satisfied("file.read"));
+        assert_eq!(
+            contract.pending_interactions()[&InteractionSurface::Computer],
+            "computer.click"
+        );
+        assert_eq!(contract.evidence(), evidence);
+    }
+
+    #[test]
+    fn legacy_snapshot_without_prompt_epoch_fields_remains_compatible() {
+        let encoded = r#"{
+            "requiredToolSuccesses":["image.generate"],
+            "successfulTools":["image.generate"]
+        }"#;
+        let mut contract = serde_json::from_str::<AgentTaskContract>(encoded)
+            .expect("legacy task contract should decode");
+        let tools = vec![tool("image.generate", ToolRisk::UsesNetwork)];
+
+        assert!(contract.required_tool_satisfied("image.generate"));
+        assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
+
+        contract.replace_prompt_required_tool_successes(1, ["image.generate"]);
+        assert!(!contract.required_tool_satisfied("image.generate"));
+        assert!(contract
+            .completion_instruction_for_task(&tools)
+            .expect("completion gate evaluates")
+            .is_some());
     }
 
     #[test]

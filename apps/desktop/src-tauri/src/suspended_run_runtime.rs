@@ -3,10 +3,7 @@ use super::*;
 const SUSPENDED_AGENT_RUN_LIMIT: usize = 16;
 const SUSPENDED_AGENT_RUN_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
 
-fn purge_expired_suspended_agent_runs(
-    runs: &mut BTreeMap<String, SuspendedAgentRun>,
-    now_ms: u64,
-) {
+fn purge_expired_suspended_agent_runs(runs: &mut BTreeMap<String, SuspendedAgentRun>, now_ms: u64) {
     runs.retain(|_, run| {
         now_ms.saturating_sub(run.last_touched_at_ms) <= SUSPENDED_AGENT_RUN_TTL_MS
     });
@@ -62,9 +59,7 @@ pub(crate) fn suspended_agent_run_control_snapshot(
         .lock()
         .map_err(|error| format!("suspended agent runs lock poisoned: {error}"))?;
     purge_expired_suspended_agent_runs(&mut runs, now_ms);
-    Ok(runs
-        .get(session_id)
-        .map(|run| run.run_control.clone()))
+    Ok(runs.get(session_id).map(|run| run.run_control.clone()))
 }
 
 pub(crate) fn clear_suspended_agent_run(

@@ -64,7 +64,8 @@ pub(super) fn prepare_adaptive_wave(
     if let Some(control) =
         active_agent_run_control(state, run_context.get("session_id").map(String::as_str))?
     {
-        control.mark_progress(
+        control.mark_progress_at(
+            run_context_steer_epoch(run_context),
             "collaboration",
             &format!(
                 "Frontier wave {} · {}/{} steps restored",

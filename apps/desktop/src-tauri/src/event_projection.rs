@@ -334,7 +334,8 @@ pub(crate) fn phase7_state_with_error(
         .iter()
         .map(|source| source.path.clone())
         .collect::<Vec<_>>();
-    let graph = graph_state_for(&root, &focus_paths).unwrap_or_else(|_| empty_graph_state());
+    let graph =
+        graph_state_for_adapter(&adapter, &focus_paths).unwrap_or_else(|_| empty_graph_state());
     let mut store = state
         .store
         .lock()

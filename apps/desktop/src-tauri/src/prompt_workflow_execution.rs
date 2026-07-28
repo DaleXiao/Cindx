@@ -27,6 +27,7 @@ pub(super) fn execute_prompt_workflow_candidate_impl(
 ) -> PromptExecutionCandidate {
     let config = config.clone();
     let workspace_root = workspace_root.to_path_buf();
+    let objective_epoch = control.steer_epoch();
     let control = Arc::clone(control);
     execute_prompt_workflow_candidate_with_runner_impl(
         objective,
@@ -40,6 +41,7 @@ pub(super) fn execute_prompt_workflow_candidate_impl(
                     request,
                     &control,
                     &branch_cancellation,
+                    objective_epoch,
                 )
             }
         }),
@@ -56,6 +58,7 @@ pub(super) fn execute_prompt_workflow_candidate_with_runner_impl(
     enable_direct_anchor: bool,
 ) -> PromptExecutionCandidate {
     let started_at = Instant::now();
+    let objective_epoch = control.as_ref().map(|control| control.steer_epoch());
     let Some(plan) = candidate.plan.clone() else {
         return failed_execution(candidate);
     };
@@ -87,6 +90,11 @@ pub(super) fn execute_prompt_workflow_candidate_with_runner_impl(
         .collect::<Vec<_>>();
 
     loop {
+        if control.as_ref().is_some_and(|control| {
+            objective_epoch.is_some_and(|epoch| !control.preparation_epoch_is_current(epoch))
+        }) {
+            return failed_execution(candidate);
+        }
         let Ok(delivery) = checkpoint.delivery_frontier_with_partial_recovery(max_attempts) else {
             return failed_execution(candidate);
         };
@@ -202,6 +210,7 @@ pub(super) fn execute_prompt_workflow_candidate_with_runner_impl(
                         initial_prompt: scheduled_step.initial_prompt,
                         runner,
                         control,
+                        objective_epoch,
                         branch_cancellation,
                         alternate_models,
                         retry_policy,
@@ -412,6 +421,7 @@ struct ExecuteStepRequest {
     initial_prompt: String,
     runner: PromptEvaluationRunner,
     control: Option<Arc<AgentRunControl>>,
+    objective_epoch: Option<u64>,
     branch_cancellation: Arc<AtomicBool>,
     alternate_models: Vec<String>,
     retry_policy: PromptRetryPolicy,
@@ -429,6 +439,7 @@ fn execute_step(request: ExecuteStepRequest) -> PromptExecutionStep {
         initial_prompt,
         runner,
         control,
+        objective_epoch,
         branch_cancellation,
         alternate_models,
         retry_policy,
@@ -460,9 +471,19 @@ fn execute_step(request: ExecuteStepRequest) -> PromptExecutionStep {
         }
         if attempts > 0 {
             if let Some(control) = control.as_ref() {
-                if let Err(reason) = control.begin_repair_attempt("prompt_evaluation_retry") {
-                    errors.push(format!("retry budget exhausted: {}", reason.code()));
-                    break;
+                match control.begin_repair_attempt_at(
+                    objective_epoch.unwrap_or_default(),
+                    "prompt_evaluation_retry",
+                ) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        errors.push("prompt evaluation superseded by user steering".to_string());
+                        break;
+                    }
+                    Err(reason) => {
+                        errors.push(format!("retry budget exhausted: {}", reason.code()));
+                        break;
+                    }
                 }
             }
         }

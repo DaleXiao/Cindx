@@ -21,7 +21,12 @@ pub(crate) fn finalize_agent_completion(
     session_id: Option<&str>,
     streamed_output: bool,
     answer: String,
+    epoch_lease: agent_runtime::RunEpochLease,
 ) -> Result<AgentCompletionOutcome, String> {
+    if !cancellation.execution_epoch_lease_is_current(epoch_lease) {
+        emit_agent_stream_delta(app, request_id, session_id, "", false, true, None);
+        return Ok(AgentCompletionOutcome::RestartAfterSteer);
+    }
     clear_suspended_agent_run_for_context(state, run_context)?;
     let (completion_evidence, routing_learning_eligible) = completion_learning_signal(runtime);
     let completion_evidence_count = runtime
@@ -29,7 +34,8 @@ pub(crate) fn finalize_agent_completion(
         .iter()
         .filter(|message| matches!(message.role, MessageRole::Tool))
         .count();
-    cancellation.record_best_known_result(
+    cancellation.record_best_known_result_at(
+        epoch_lease.epoch(),
         "executor",
         &answer,
         if completion_evidence_count > 0 {
@@ -43,19 +49,23 @@ pub(crate) fn finalize_agent_completion(
     );
 
     let (final_answer, synthesized) = if let Some(collaboration) = collaboration {
+        let synthesis_objective = effective_agent_objective(run_context, prompt);
         match synthesize_agent_answer(
             app,
             state,
             config,
             runtime,
-            prompt,
+            synthesis_objective,
             &answer,
             run_context,
             collaboration,
             cancellation,
         ) {
             Ok(answer) => (answer, true),
-            Err(_) if cancellation.has_pending_steer() && !agent_run_should_stop(cancellation) => {
+            Err(_)
+                if !cancellation.execution_epoch_lease_is_current(epoch_lease)
+                    && !agent_run_should_stop(cancellation) =>
+            {
                 emit_agent_stream_delta(app, request_id, session_id, "", false, true, None);
                 return Ok(AgentCompletionOutcome::RestartAfterSteer);
             }
@@ -86,7 +96,8 @@ pub(crate) fn finalize_agent_completion(
         (answer.clone(), false)
     };
 
-    cancellation.record_best_known_result(
+    cancellation.record_best_known_result_at(
+        epoch_lease.epoch(),
         if synthesized {
             "synthesizer"
         } else if completion_evidence_count > 0 {
@@ -108,120 +119,154 @@ pub(crate) fn finalize_agent_completion(
     );
 
     let completion_progress = cancellation.progress();
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    if synthesized {
-        append_message_event_with_metadata(
-            &mut store,
-            &runtime.task_id,
-            MessageRole::Assistant,
-            &final_answer,
-            metadata_with_context(
-                [
-                    ("collaboration_final".to_string(), "true".to_string()),
-                    (
-                        "model".to_string(),
-                        config.model_for_role(&ModelRole::Summarizer),
+    let terminal_commit = cancellation.commit_terminal_result_with(epoch_lease, || {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .with_immediate_transaction(|store| {
+                if synthesized {
+                    append_message_event_with_metadata(
+                        store,
+                        &runtime.task_id,
+                        MessageRole::Assistant,
+                        &final_answer,
+                        metadata_with_context(
+                            [
+                                ("collaboration_final".to_string(), "true".to_string()),
+                                (
+                                    "model".to_string(),
+                                    config.model_for_role(&ModelRole::Summarizer),
+                                ),
+                            ]
+                            .into_iter()
+                            .collect(),
+                            run_context,
+                        ),
+                    )?;
+                }
+                append_event(
+                    store,
+                    &runtime.task_id,
+                    EventKind::TaskStatusChanged,
+                    "Agent task completed",
+                    metadata_with_context(
+                        [
+                            ("answer_length".to_string(), final_answer.len().to_string()),
+                            (
+                                "collaboration".to_string(),
+                                collaboration.is_some().to_string(),
+                            ),
+                            (
+                                "collaboration_synthesized".to_string(),
+                                synthesized.to_string(),
+                            ),
+                            (
+                                "elapsed_ms".to_string(),
+                                completion_progress.elapsed.as_millis().to_string(),
+                            ),
+                            (
+                                "model_calls".to_string(),
+                                completion_progress.model_calls.to_string(),
+                            ),
+                            (
+                                "tool_calls".to_string(),
+                                completion_progress.tool_calls.to_string(),
+                            ),
+                            (
+                                "agent_turns".to_string(),
+                                completion_progress.agent_turns.to_string(),
+                            ),
+                            (
+                                "repair_attempts".to_string(),
+                                completion_progress.repair_attempts.to_string(),
+                            ),
+                            (
+                                "completion_evidence".to_string(),
+                                completion_evidence.to_string(),
+                            ),
+                            (
+                                "routing_learning_eligible".to_string(),
+                                routing_learning_eligible.to_string(),
+                            ),
+                            (
+                                "verification_gate_requests".to_string(),
+                                runtime.verification_gate_requests.to_string(),
+                            ),
+                            (
+                                "interaction_verification_gate_requests".to_string(),
+                                runtime.interaction_verification_gate_requests.to_string(),
+                            ),
+                            (
+                                "verified_interactions".to_string(),
+                                runtime.verified_interactions.to_string(),
+                            ),
+                            (
+                                "pending_interaction_verifications".to_string(),
+                                runtime.pending_interaction_verifications.len().to_string(),
+                            ),
+                            (
+                                "checkpoints".to_string(),
+                                completion_progress.checkpoints.to_string(),
+                            ),
+                            (
+                                "observations".to_string(),
+                                completion_progress.observations.to_string(),
+                            ),
+                            (
+                                "budget_extensions".to_string(),
+                                completion_progress.budget_extensions.to_string(),
+                            ),
+                            ("last_stage".to_string(), completion_progress.stage.clone()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        run_context,
                     ),
-                ]
-                .into_iter()
-                .collect(),
-                run_context,
-            ),
-        )
-        .map_err(|error| error.to_string())?;
-    }
-    append_event(
-        &mut store,
-        &runtime.task_id,
-        EventKind::TaskStatusChanged,
-        "Agent task completed",
-        metadata_with_context(
-            [
-                ("answer_length".to_string(), final_answer.len().to_string()),
-                (
-                    "collaboration".to_string(),
-                    collaboration.is_some().to_string(),
-                ),
-                (
-                    "collaboration_synthesized".to_string(),
-                    synthesized.to_string(),
-                ),
-                (
-                    "elapsed_ms".to_string(),
-                    completion_progress.elapsed.as_millis().to_string(),
-                ),
-                (
-                    "model_calls".to_string(),
-                    completion_progress.model_calls.to_string(),
-                ),
-                (
-                    "tool_calls".to_string(),
-                    completion_progress.tool_calls.to_string(),
-                ),
-                (
-                    "agent_turns".to_string(),
-                    completion_progress.agent_turns.to_string(),
-                ),
-                (
-                    "repair_attempts".to_string(),
-                    completion_progress.repair_attempts.to_string(),
-                ),
-                (
-                    "completion_evidence".to_string(),
-                    completion_evidence.to_string(),
-                ),
-                (
-                    "routing_learning_eligible".to_string(),
-                    routing_learning_eligible.to_string(),
-                ),
-                (
-                    "verification_gate_requests".to_string(),
-                    runtime.verification_gate_requests.to_string(),
-                ),
-                (
-                    "interaction_verification_gate_requests".to_string(),
-                    runtime.interaction_verification_gate_requests.to_string(),
-                ),
-                (
-                    "verified_interactions".to_string(),
-                    runtime.verified_interactions.to_string(),
-                ),
-                (
-                    "pending_interaction_verifications".to_string(),
-                    runtime.pending_interaction_verifications.len().to_string(),
-                ),
-                (
-                    "checkpoints".to_string(),
-                    completion_progress.checkpoints.to_string(),
-                ),
-                (
-                    "observations".to_string(),
-                    completion_progress.observations.to_string(),
-                ),
-                (
-                    "budget_extensions".to_string(),
-                    completion_progress.budget_extensions.to_string(),
-                ),
-                ("last_stage".to_string(), completion_progress.stage),
-            ]
-            .into_iter()
-            .collect(),
-            run_context,
-        ),
-    )
-    .map_err(|error| error.to_string())?;
-    delete_persisted_agent_runtime_snapshot(&mut store, session_id)?;
-    if let Err(error) =
-        record_project_memory_observed_use(&mut store, &runtime.task_id, run_context, &final_answer)
-    {
-        eprintln!("project memory utilization unavailable: {error}");
-    }
-    let completed_state =
-        agent_state_for_session(&store, None, session_id).map_err(|error| error.to_string())?;
-    drop(store);
+                )?;
+                delete_persisted_agent_runtime_snapshot(store, session_id)
+                    .map_err(agent_storage::StorageError::new)?;
+                if let Err(error) = record_project_memory_observed_use(
+                    store,
+                    &runtime.task_id,
+                    run_context,
+                    &final_answer,
+                ) {
+                    eprintln!("project memory utilization unavailable: {error}");
+                }
+                agent_state_for_session(store, None, session_id)
+            })
+            .map_err(|error| error.to_string())
+    })?;
+    let completed_state = match terminal_commit {
+        agent_runtime::RunTerminalCommit::Committed(state) => state,
+        agent_runtime::RunTerminalCommit::RestartAfterSteer => {
+            emit_agent_stream_delta(app, request_id, session_id, "", false, true, None);
+            return Ok(AgentCompletionOutcome::RestartAfterSteer);
+        }
+        agent_runtime::RunTerminalCommit::Stopped(_) => {
+            return Ok(AgentCompletionOutcome::Paused(
+                pause_agent_loop_for_control_stop(
+                    app,
+                    state,
+                    workspace_root,
+                    runtime,
+                    prompt,
+                    run_context,
+                    collaboration,
+                    cancellation,
+                )?,
+            ));
+        }
+        agent_runtime::RunTerminalCommit::AlreadyCommitted => {
+            let store = state
+                .store
+                .lock()
+                .map_err(|error| format!("store lock poisoned: {error}"))?;
+            agent_state_for_session(&store, None, session_id).map_err(|error| error.to_string())?
+        }
+    };
     emit_agent_stream_delta(app, request_id, session_id, "", true, false, None);
     crate::semantic_memory_worker::schedule_semantic_memory_refresh(
         app.clone(),

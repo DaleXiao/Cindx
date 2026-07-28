@@ -88,6 +88,15 @@ pub(crate) fn run_agent_task_blocking_inner(
     let prompt = prompt_with_attachments(&display_prompt, &attachments);
     run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
     run_context.insert("agent_run_id".to_string(), unique_id("agent-run"));
+    run_context.insert("steer_epoch".to_string(), "0".to_string());
+    run_context.insert(
+        "initial_prompt_objective".to_string(),
+        truncate_for_collaboration(&display_prompt, 6_000),
+    );
+    run_context.insert(
+        "effective_prompt_objective".to_string(),
+        truncate_for_collaboration(&display_prompt, 6_000),
+    );
     if let Some(queue_id) = queue_id {
         run_context.insert("queue_id".to_string(), queue_id);
     }
@@ -151,6 +160,21 @@ pub(crate) fn run_agent_task_blocking_inner(
         (history, artifact_manifest)
     };
 
+    let runtime_config = cancellation.runtime_config();
+    let mut runtime = if history.is_empty() {
+        start_agent_loop(task_id.clone(), prompt.clone(), runtime_config.clone())
+    } else {
+        start_agent_loop_with_history(task_id.clone(), prompt.clone(), history, runtime_config)
+    };
+    if let Some(message) = runtime.messages.last_mut() {
+        add_attachment_metadata(&mut message.metadata, &attachments);
+        message
+            .metadata
+            .insert("model_content".to_string(), prompt.clone());
+        message
+            .metadata
+            .insert("display_content".to_string(), display_prompt.clone());
+    }
     let prepared = match prepare_agent_execution(
         app,
         &state,
@@ -158,8 +182,8 @@ pub(crate) fn run_agent_task_blocking_inner(
         &task_id,
         &root,
         run_context,
-        &prompt,
-        history,
+        runtime,
+        prompt,
         artifact_manifest,
         effort,
         cancellation,
@@ -175,44 +199,11 @@ pub(crate) fn run_agent_task_blocking_inner(
                 format!("Collaboration failed: {error}"),
             );
         }
-        Err(AgentRunPreparationError::Runtime(error)) => return Err(error),
+        Err(AgentRunPreparationError::Runtime { error, run_context }) => {
+            return agent_state_with_error_in_context(&state, &run_context, error)
+        }
     };
-    let PreparedAgentExecution {
-        run_context,
-        history,
-        collaboration,
-    } = prepared;
-    let runtime_config = cancellation.runtime_config();
-    let mut runtime = if history.is_empty() {
-        start_agent_loop(task_id, prompt.clone(), runtime_config.clone())
-    } else {
-        start_agent_loop_with_history(task_id, prompt.clone(), history, runtime_config)
-    };
-    if let Some(message) = runtime
-        .messages
-        .iter_mut()
-        .rev()
-        .find(|message| matches!(message.role, MessageRole::User))
-    {
-        add_attachment_metadata(&mut message.metadata, &attachments);
-        message
-            .metadata
-            .insert("model_content".to_string(), prompt.clone());
-        message
-            .metadata
-            .insert("display_content".to_string(), display_prompt);
-    }
-    continue_agent_loop(
-        app,
-        &state,
-        &config,
-        &root,
-        runtime,
-        prompt,
-        run_context,
-        collaboration.as_ref(),
-        cancellation,
-    )
+    continue_agent_loop(app, &state, &config, &root, prepared, effort, cancellation)
 }
 
 #[tauri::command]
@@ -285,7 +276,7 @@ pub(crate) fn retry_agent_task_blocking(
     input: SessionActionInput,
 ) -> Result<AgentState, String> {
     let session_id = input.session_id.clone();
-    let effort = {
+    let (effort, applied_steer_epoch) = {
         let store = state
             .store
             .lock()
@@ -294,13 +285,21 @@ pub(crate) fn retry_agent_task_blocking(
             .list_by_task_and_metadata_or_unscoped(&phase16_task_id(), "session_id", &session_id)
             .map_err(|error| error.to_string())?;
         let active_events = active_agent_events_for_session(&events, Some(&session_id));
-        agent_effort_from_active_events(&active_events)
+        (
+            agent_effort_from_active_events(&active_events),
+            latest_applied_agent_steer_epoch(&active_events),
+        )
     };
     let suspended_snapshot = suspended_agent_run_control_snapshot(&state, &session_id)?;
     let run_control_lease = if let Some(snapshot) = suspended_snapshot {
         begin_agent_run_control_for_continuation(&state, &session_id, snapshot)?
     } else {
-        begin_agent_run_control_for_effort(&state, &session_id, effort.label(), None)?
+        begin_agent_run_control_at_steer_epoch(
+            &state,
+            &session_id,
+            effort.label(),
+            applied_steer_epoch,
+        )?
     };
     let cancellation = run_control_lease.control();
     let suspended = take_suspended_agent_run(&state, &session_id)?;
@@ -366,7 +365,11 @@ pub(crate) fn resume_suspended_agent_run(
     );
     add_agent_run_budget_metadata(&mut run_context, cancellation);
     cancellation.extend_runtime_budget(&mut runtime);
-    cancellation.mark_progress("continuation", "Resuming saved execution state");
+    cancellation.mark_progress_at(
+        run_context_steer_epoch(&run_context),
+        "continuation",
+        "Resuming saved execution state",
+    );
     let recovery_prompt = runtime.user_prompt.clone();
     let display_prompt = runtime
         .messages
@@ -404,15 +407,26 @@ pub(crate) fn resume_suspended_agent_run(
         )
         .map_err(|error| error.to_string())?;
     }
+    let effort = AgentEffort::parse(
+        run_context
+            .get("agent_effort")
+            .map(String::as_str)
+            .unwrap_or("auto"),
+    );
+    let prepared = PreparedAgentExecution {
+        base_run_context: run_context.clone(),
+        run_context,
+        runtime,
+        prompt,
+        collaboration,
+    };
     continue_agent_loop(
         app,
         state,
         &config,
         &workspace_root,
-        runtime,
-        prompt,
-        run_context,
-        collaboration.as_ref(),
+        prepared,
+        effort,
         cancellation,
     )
 }
@@ -443,7 +457,15 @@ pub(crate) fn retry_agent_task_blocking_inner(
         .unwrap_or(active_workspace_root(&state)?);
     let session_id = run_context.get("session_id").cloned();
     let task_id = phase16_task_id();
-    let (prompt, display_prompt, recovery_prompt, effort, recovery) = {
+    let (
+        prompt,
+        display_prompt,
+        recovery_prompt,
+        effort,
+        recovery,
+        applied_steer_epoch,
+        initial_objective,
+    ) = {
         let mut store = state
             .store
             .lock()
@@ -461,8 +483,21 @@ pub(crate) fn retry_agent_task_blocking_inner(
         let effort = agent_effort_from_active_events(&active_events);
         let recovery =
             claim_agent_recovery_envelope(&mut store, &run_context, &["paused"], "user_continued")?;
-        (prompt, display_prompt, recovery_prompt, effort, recovery)
+        let applied_steer_epoch = latest_applied_agent_steer_epoch(&active_events);
+        let initial_objective = initial_agent_objective_from_events(&active_events)
+            .unwrap_or_else(|| display_prompt.clone());
+        (
+            prompt,
+            display_prompt,
+            recovery_prompt,
+            effort,
+            recovery,
+            applied_steer_epoch,
+            initial_objective,
+        )
     };
+    run_context.insert("steer_epoch".to_string(), applied_steer_epoch.to_string());
+    run_context.insert("initial_prompt_objective".to_string(), initial_objective);
     if let Some(recovery) = recovery.as_ref() {
         run_context.insert(
             "recovery_resume_key".to_string(),
@@ -548,8 +583,8 @@ pub(crate) fn retry_agent_task_blocking_inner(
         let restored_task_state = recovery
             .as_ref()
             .and_then(|recovery| recovery.task_state.as_ref())
-            .and_then(
-                |snapshot| match snapshot.restore(recovery_prompt.clone(), messages.clone()) {
+            .and_then(|snapshot| {
+                match snapshot.restore(recovery_prompt.clone(), messages.clone()) {
                     Ok(runtime) => Some(runtime),
                     Err(error) => {
                         let _ = append_event(
@@ -572,14 +607,41 @@ pub(crate) fn retry_agent_task_blocking_inner(
                         );
                         None
                     }
-                },
-            );
+                }
+            });
         (
             messages,
             artifact_manifest_message(&session_events),
             restored_task_state,
         )
     };
+    let runtime_config = cancellation.runtime_config();
+    let mut runtime = if let Some(mut runtime) = restored_task_state {
+        runtime.messages = history;
+        runtime.messages.push(Message {
+            role: MessageRole::User,
+            content: prompt.clone(),
+            metadata: Metadata::new(),
+        });
+        cancellation.extend_runtime_budget(&mut runtime);
+        runtime
+    } else if history.is_empty() {
+        start_agent_loop(task_id.clone(), prompt.clone(), runtime_config.clone())
+    } else {
+        start_agent_loop_with_history(task_id.clone(), prompt.clone(), history, runtime_config)
+    };
+    runtime.user_prompt = recovery_prompt;
+    if let Some(message) = runtime.messages.last_mut() {
+        message
+            .metadata
+            .insert("continuation_replay".to_string(), "true".to_string());
+        message
+            .metadata
+            .insert("display_content".to_string(), display_prompt);
+        message
+            .metadata
+            .insert("model_content".to_string(), prompt.clone());
+    }
     let prepared = match prepare_agent_execution(
         app,
         &state,
@@ -587,8 +649,8 @@ pub(crate) fn retry_agent_task_blocking_inner(
         &task_id,
         &root,
         run_context,
-        &prompt,
-        history,
+        runtime,
+        prompt,
         artifact_manifest,
         effort,
         cancellation,
@@ -604,38 +666,9 @@ pub(crate) fn retry_agent_task_blocking_inner(
                 format!("Collaboration failed: {error}"),
             );
         }
-        Err(AgentRunPreparationError::Runtime(error)) => return Err(error),
+        Err(AgentRunPreparationError::Runtime { error, run_context }) => {
+            return agent_state_with_error_in_context(&state, &run_context, error)
+        }
     };
-    let PreparedAgentExecution {
-        run_context,
-        history,
-        collaboration,
-    } = prepared;
-    let runtime_config = cancellation.runtime_config();
-    let mut runtime = if let Some(mut runtime) = restored_task_state {
-        runtime.messages = history;
-        runtime.messages.push(Message {
-            role: MessageRole::User,
-            content: prompt.clone(),
-            metadata: Metadata::new(),
-        });
-        cancellation.extend_runtime_budget(&mut runtime);
-        runtime
-    } else if history.is_empty() {
-        start_agent_loop(task_id, prompt.clone(), runtime_config.clone())
-    } else {
-        start_agent_loop_with_history(task_id, prompt.clone(), history, runtime_config)
-    };
-    runtime.user_prompt = recovery_prompt;
-    continue_agent_loop(
-        app,
-        &state,
-        &config,
-        &root,
-        runtime,
-        prompt,
-        run_context,
-        collaboration.as_ref(),
-        cancellation,
-    )
+    continue_agent_loop(app, &state, &config, &root, prepared, effort, cancellation)
 }

@@ -130,7 +130,8 @@ pub(super) fn finalize_adaptive_collaboration(
         .insert(final_step_id.clone(), final_output.clone());
     persist_anytime_controller(workflow_checkpoint, anytime_controller)?;
     if let Some(control) = cancellation {
-        control.record_best_known_result(
+        control.record_best_known_result_at(
+            run_context_steer_epoch(run_context),
             "anytime_workflow_final",
             &final_output,
             if quality_gate.passed {

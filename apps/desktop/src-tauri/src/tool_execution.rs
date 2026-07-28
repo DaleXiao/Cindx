@@ -80,13 +80,131 @@ pub(crate) fn execute_tool_invocation(
         .map(|_| ())
 }
 
+pub(crate) enum AgentToolInvocationOutcome {
+    Completed(ToolResult),
+    RestartAfterSteer,
+}
+
+#[derive(Clone)]
+struct AgentToolEpochGuard {
+    control: Arc<AgentRunControl>,
+    epoch: AgentToolEpoch,
+}
+
+#[derive(Clone, Copy)]
+enum AgentToolEpoch {
+    Execution(agent_runtime::RunEpochLease),
+    Objective(u64),
+}
+
+impl AgentToolEpochGuard {
+    fn epoch(&self) -> u64 {
+        match self.epoch {
+            AgentToolEpoch::Execution(lease) => lease.epoch(),
+            AgentToolEpoch::Objective(epoch) => epoch,
+        }
+    }
+
+    fn is_current(&self) -> bool {
+        match self.epoch {
+            AgentToolEpoch::Execution(lease) => {
+                self.control.execution_epoch_lease_is_current(lease)
+            }
+            AgentToolEpoch::Objective(epoch) => self.control.objective_epoch_is_current(epoch),
+        }
+    }
+
+    fn begin_tool_call(
+        &self,
+        scope: &str,
+        tool_name: &str,
+        input: &str,
+    ) -> agent_runtime::RunToolCallStart {
+        match self.epoch {
+            AgentToolEpoch::Execution(lease) => self
+                .control
+                .begin_tool_call_with_epoch(lease, scope, tool_name, input),
+            AgentToolEpoch::Objective(epoch) => self
+                .control
+                .begin_tool_call_at(epoch, scope, tool_name, input),
+        }
+    }
+}
+
 pub(crate) fn execute_agent_tool_invocation(
+    state: &tauri::State<'_, AppState>,
+    registry: &ToolRegistry,
+    invocation: ToolInvocation,
+    workspace_root: &Path,
+    run_context: &Metadata,
+) -> Result<ToolResult, String> {
+    match execute_agent_tool_invocation_inner(
+        state,
+        registry,
+        invocation,
+        workspace_root,
+        run_context,
+        None,
+    )? {
+        AgentToolInvocationOutcome::Completed(result) => Ok(result),
+        AgentToolInvocationOutcome::RestartAfterSteer => {
+            Err("agent tool invocation interrupted before execution".to_string())
+        }
+    }
+}
+
+pub(crate) fn execute_agent_tool_invocation_for_epoch(
+    state: &tauri::State<'_, AppState>,
+    registry: &ToolRegistry,
+    invocation: ToolInvocation,
+    workspace_root: &Path,
+    run_context: &Metadata,
+    control: &Arc<AgentRunControl>,
+    lease: agent_runtime::RunEpochLease,
+) -> Result<AgentToolInvocationOutcome, String> {
+    execute_agent_tool_invocation_inner(
+        state,
+        registry,
+        invocation,
+        workspace_root,
+        run_context,
+        Some(AgentToolEpochGuard {
+            control: Arc::clone(control),
+            epoch: AgentToolEpoch::Execution(lease),
+        }),
+    )
+}
+
+pub(crate) fn execute_agent_tool_invocation_for_objective_epoch(
+    state: &tauri::State<'_, AppState>,
+    registry: &ToolRegistry,
+    invocation: ToolInvocation,
+    workspace_root: &Path,
+    run_context: &Metadata,
+    control: &Arc<AgentRunControl>,
+    expected_epoch: u64,
+) -> Result<AgentToolInvocationOutcome, String> {
+    execute_agent_tool_invocation_inner(
+        state,
+        registry,
+        invocation,
+        workspace_root,
+        run_context,
+        Some(AgentToolEpochGuard {
+            control: Arc::clone(control),
+            epoch: AgentToolEpoch::Objective(expected_epoch),
+        }),
+    )
+}
+
+fn execute_agent_tool_invocation_inner(
     state: &tauri::State<'_, AppState>,
     registry: &ToolRegistry,
     mut invocation: ToolInvocation,
     workspace_root: &Path,
     run_context: &Metadata,
-) -> Result<ToolResult, String> {
+    epoch_guard: Option<AgentToolEpochGuard>,
+) -> Result<AgentToolInvocationOutcome, String> {
     for (key, value) in run_context {
         invocation
             .metadata
@@ -102,16 +220,58 @@ pub(crate) fn execute_agent_tool_invocation(
     let tool_name = invocation.tool_name.clone();
     let tool_input = invocation.input_json.clone();
     let input_fingerprint = tool_input_fingerprint(&tool_name, &tool_input);
+    let run_control = match epoch_guard.as_ref() {
+        Some(guard) => Some(Arc::clone(&guard.control)),
+        None => active_agent_run_control(state, run_context.get("session_id").map(String::as_str))?,
+    };
+    let completed_result = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        completed_tool_result(&store, &invocation, workspace_root)
+            .map_err(|error| error.to_string())?
+    };
+    if let Some(result) = completed_result {
+        if epoch_guard
+            .as_ref()
+            .is_some_and(|guard| !guard.is_current())
+        {
+            return Ok(AgentToolInvocationOutcome::RestartAfterSteer);
+        }
+        return Ok(AgentToolInvocationOutcome::Completed(result));
+    }
+
+    let execution_started_at = Instant::now();
+    let scope = run_context
+        .get("stage")
+        .or_else(|| run_context.get("collaboration_stage"))
+        .map(String::as_str)
+        .unwrap_or("executor");
+    let (budget_stop, tool_started) = match (run_control.as_ref(), epoch_guard.as_ref()) {
+        (Some(_), Some(guard)) => {
+            match guard.begin_tool_call(scope, &tool_name, &invocation.input_json) {
+                agent_runtime::RunToolCallStart::Started(_) => (None, true),
+                agent_runtime::RunToolCallStart::RestartAfterSteer
+                | agent_runtime::RunToolCallStart::TerminalCommitted => {
+                    return Ok(AgentToolInvocationOutcome::RestartAfterSteer)
+                }
+                agent_runtime::RunToolCallStart::Stopped(reason) => (Some(reason), false),
+            }
+        }
+        (Some(control), None) => {
+            match control.begin_tool_call(scope, &tool_name, &invocation.input_json) {
+                Ok(_) => (None, true),
+                Err(reason) => (Some(reason), false),
+            }
+        }
+        (None, _) => (None, false),
+    };
     {
         let mut store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        if let Some(result) = completed_tool_result(&store, &invocation, workspace_root)
-            .map_err(|error| error.to_string())?
-        {
-            return Ok(result);
-        }
         append_event(
             &mut store,
             &task_id,
@@ -121,32 +281,21 @@ pub(crate) fn execute_agent_tool_invocation(
         )
         .map_err(|error| error.to_string())?;
     }
-
-    let execution_started_at = Instant::now();
-    let run_control =
-        active_agent_run_control(state, run_context.get("session_id").map(String::as_str))?;
-    let scope = run_context
-        .get("stage")
-        .or_else(|| run_context.get("collaboration_stage"))
-        .map(String::as_str)
-        .unwrap_or("executor");
-    let budget_stop = run_control.as_ref().and_then(|control| {
-        control
-            .begin_tool_call(scope, &tool_name, &invocation.input_json)
-            .err()
-    });
     let tool_control = ToolExecutionControl::new({
         let run_control = run_control.clone();
+        let epoch_guard = epoch_guard.clone();
         move || {
             run_control
                 .as_ref()
                 .is_some_and(|control| control.should_stop())
+                || epoch_guard
+                    .as_ref()
+                    .is_some_and(|guard| !guard.is_current())
         }
     });
     let mutates_workspace = registry
         .get(&tool_name)
         .is_some_and(|tool| tool_may_mutate_workspace(&tool_name, &tool.spec().risk));
-    let tool_started = budget_stop.is_none();
     let mut result = if let Some(reason) = budget_stop {
         ToolResult::text(
             invocation.id,
@@ -169,13 +318,25 @@ pub(crate) fn execute_agent_tool_invocation(
             }
         }
     };
+    let stale_epoch = epoch_guard
+        .as_ref()
+        .is_some_and(|guard| !guard.is_current());
     if let Some(control) = run_control.as_ref() {
         if tool_started {
-            control.finish_tool_call();
+            if let Some(guard) = epoch_guard.as_ref() {
+                control.finish_tool_call_at(guard.epoch());
+            } else {
+                control.finish_tool_call();
+            }
         }
-        control.mark_progress("tool_result", &tool_name);
+        let objective_epoch = epoch_guard
+            .as_ref()
+            .map(AgentToolEpochGuard::epoch)
+            .unwrap_or_else(|| run_context_steer_epoch(run_context));
+        control.mark_progress_at(objective_epoch, "tool_result", &tool_name);
         if matches!(result.status, ToolOutcomeStatus::Succeeded) {
-            control.record_checkpoint(
+            control.record_checkpoint_at(
+                objective_epoch,
                 "tool_result",
                 &tool_name,
                 &format!("{tool_name}\n{tool_input}\n{}", result.output),
@@ -202,6 +363,11 @@ pub(crate) fn execute_agent_tool_invocation(
         &input_fingerprint,
         execution_started_at.elapsed(),
     );
+    if stale_epoch {
+        result
+            .metadata
+            .insert("superseded_by_steer".to_string(), "true".to_string());
+    }
     if mutates_workspace && matches!(result.status, ToolOutcomeStatus::Succeeded) {
         if let Err(error) = invalidate_workspace_knowledge_cache(state, workspace_root) {
             eprintln!("workspace knowledge cache invalidation failed: {error}");
@@ -223,7 +389,11 @@ pub(crate) fn execute_agent_tool_invocation(
         Some(run_context),
     )
     .map_err(|error| error.to_string())?;
-    Ok(result)
+    if stale_epoch {
+        Ok(AgentToolInvocationOutcome::RestartAfterSteer)
+    } else {
+        Ok(AgentToolInvocationOutcome::Completed(result))
+    }
 }
 
 pub(crate) fn tool_may_mutate_workspace(tool_name: &str, risk: &ToolRisk) -> bool {
@@ -896,227 +1066,9 @@ pub(crate) fn permission_audit(record: PermissionAuditRecord) -> PermissionAudit
     }
 }
 
-pub(crate) fn message_view_from_event(event: &Event) -> Option<ChatMessageView> {
-    if event.kind != EventKind::MessageAdded {
-        return None;
-    }
-    if event.metadata.get("internal").map(String::as_str) == Some("true") {
-        return None;
-    }
-
-    let role = event.metadata.get("role")?.to_string();
-    let mut content = redact_sensitive_text(
-        event
-            .metadata
-            .get("display_content")
-            .or_else(|| event.metadata.get("content"))?,
-    );
-    if role == "assistant" {
-        content = sanitize_assistant_content(&content);
-    }
-
-    Some(ChatMessageView {
-        sequence: event.sequence,
-        role,
-        content,
-        timestamp_ms: event.timestamp_ms,
-        run_id: event.metadata.get("agent_run_id").cloned(),
-        queue_id: event.metadata.get("queue_id").cloned(),
-        attachments: attachment_views_from_event(event),
-    })
-}
-
-pub(crate) fn attachment_views_from_event(event: &Event) -> Vec<AgentAttachmentView> {
-    let paths = event
-        .metadata
-        .get("attachment_paths")
-        .map(|value| value.lines().collect::<Vec<_>>())
-        .unwrap_or_default();
-    if paths.is_empty() {
-        return Vec::new();
-    }
-
-    let names = event
-        .metadata
-        .get("attachment_names")
-        .map(|value| value.lines().collect::<Vec<_>>())
-        .unwrap_or_default();
-    let ids = event
-        .metadata
-        .get("attachment_ids")
-        .map(|value| value.lines().collect::<Vec<_>>())
-        .unwrap_or_default();
-    let mime_types = event
-        .metadata
-        .get("attachment_mime_types")
-        .map(|value| value.lines().collect::<Vec<_>>())
-        .unwrap_or_default();
-    let sizes = event
-        .metadata
-        .get("attachment_sizes")
-        .map(|value| value.lines().collect::<Vec<_>>())
-        .unwrap_or_default();
-    let image_paths = event
-        .metadata
-        .get("image_paths")
-        .map(|value| value.lines().collect::<Vec<_>>())
-        .unwrap_or_default();
-
-    paths
-        .into_iter()
-        .enumerate()
-        .filter(|(_, path)| !path.trim().is_empty())
-        .map(|(index, path)| {
-            let inferred_mime = normalized_attachment_mime("", Path::new(path));
-            let mime_type = mime_types
-                .get(index)
-                .filter(|value| !value.trim().is_empty())
-                .map(|value| (*value).to_string())
-                .unwrap_or_else(|| {
-                    if image_paths.contains(&path) && !inferred_mime.starts_with("image/") {
-                        "image/*".to_string()
-                    } else {
-                        inferred_mime
-                    }
-                });
-            AgentAttachmentView {
-                id: ids
-                    .get(index)
-                    .filter(|value| !value.trim().is_empty())
-                    .map(|value| (*value).to_string())
-                    .unwrap_or_else(|| format!("message-attachment-{}-{index}", event.sequence)),
-                name: names
-                    .get(index)
-                    .filter(|value| !value.trim().is_empty())
-                    .map(|value| (*value).to_string())
-                    .unwrap_or_else(|| safe_attachment_name(path)),
-                path: path.to_string(),
-                mime_type,
-                size_bytes: sizes
-                    .get(index)
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .unwrap_or_default(),
-            }
-        })
-        .collect()
-}
-
-pub(crate) fn message_from_event(event: &Event) -> Option<Message> {
-    message_from_event_with_policy(event, false, false)
-}
-
-pub(crate) fn model_message_from_event(event: &Event) -> Option<Message> {
-    message_from_event_with_policy(event, false, true)
-}
-
-pub(crate) fn runtime_message_from_event(event: &Event) -> Option<Message> {
-    message_from_event_with_policy(event, true, true)
-}
-
-fn message_from_event_with_policy(
-    event: &Event,
-    include_internal: bool,
-    prefer_model_content: bool,
-) -> Option<Message> {
-    if event.kind != EventKind::MessageAdded {
-        return None;
-    }
-    if !include_internal
-        && event.metadata.get("internal").map(String::as_str) == Some("true")
-        && event.metadata.get("kind").map(String::as_str) != Some("visual_reference")
-    {
-        return None;
-    }
-
-    let role = message_role_from_label(event.metadata.get("role")?)?;
-    let stored_content = if prefer_model_content && role == MessageRole::User {
-        event
-            .metadata
-            .get("model_content")
-            .or_else(|| event.metadata.get("content"))?
-    } else {
-        event.metadata.get("content")?
-    };
-    let mut content = redact_sensitive_text(stored_content);
-    if role == MessageRole::Assistant {
-        content = sanitize_assistant_content(&content);
-    }
-
-    let mut metadata = redact_metadata(&event.metadata);
-    if role == MessageRole::Assistant {
-        metadata.insert("content".to_string(), content.clone());
-        if metadata.contains_key("display_content") {
-            metadata.insert("display_content".to_string(), content.clone());
-        }
-    }
-
-    Some(Message {
-        role,
-        content,
-        metadata,
-    })
-}
-
-pub(crate) fn tool_run_from_event(event: &Event) -> Option<ToolRunView> {
-    if event.kind != EventKind::ToolCallFinished {
-        return None;
-    }
-
-    Some(ToolRunView {
-        invocation_id: event.metadata.get("tool_call_id")?.to_string(),
-        tool_name: event.metadata.get("tool")?.to_string(),
-        status: event.metadata.get("status")?.to_string(),
-        output: event
-            .metadata
-            .get("output")
-            .map(|value| redact_sensitive_text(value))
-            .unwrap_or_default(),
-        timestamp_ms: event.timestamp_ms,
-    })
-}
-
-pub(crate) fn tool_approval_from_audit(record: PermissionAuditRecord) -> Option<ToolApprovalView> {
-    Some(ToolApprovalView {
-        request_id: record.request.id.0,
-        invocation_id: record.request.metadata.get("tool_call_id")?.to_string(),
-        tool_name: record.request.metadata.get("tool_name")?.to_string(),
-        risk: permission_risk_label(&record.request.risk).to_string(),
-        reason: redact_sensitive_text(&record.request.reason),
-        scope: redact_sensitive_text(&record.request.scope),
-        input: record
-            .request
-            .metadata
-            .get("tool_input")
-            .map(|value| redact_sensitive_text(value))
-            .unwrap_or_default(),
-        requested_at_ms: record.requested_at_ms,
-    })
-}
-
-pub(crate) fn orchestration_step_from_event(event: &Event) -> Option<OrchestrationStepView> {
-    if event.kind != EventKind::ModelRequestFinished {
-        return None;
-    }
-    let orchestration_id = event.metadata.get("orchestration_id")?.to_string();
-
-    Some(OrchestrationStepView {
-        orchestration_id,
-        policy: event.metadata.get("policy")?.to_string(),
-        step_index: event.metadata.get("step_index")?.parse().ok()?,
-        role: event.metadata.get("role")?.to_string(),
-        model: event.metadata.get("model")?.to_string(),
-        output: event
-            .metadata
-            .get("output")
-            .map(|value| redact_sensitive_text(value))
-            .unwrap_or_default(),
-        latency_ms: event
-            .metadata
-            .get("latency_ms")
-            .and_then(|value| value.parse().ok()),
-        timestamp_ms: event.timestamp_ms,
-    })
-}
+#[path = "tool_execution_event_projection.rs"]
+mod event_projection_helpers;
+pub(crate) use event_projection_helpers::*;
 
 #[derive(Debug)]
 pub(crate) struct ParallelRetrievalResult {

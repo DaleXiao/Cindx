@@ -150,10 +150,7 @@ fn workspace_file_content_matches(invocation: &ToolInvocation, workspace_root: &
     } else {
         &input
     };
-    let Some(path) = effect_input
-        .get("path")
-        .and_then(serde_json::Value::as_str)
-    else {
+    let Some(path) = effect_input.get("path").and_then(serde_json::Value::as_str) else {
         return false;
     };
     let Some(content) = effect_input
@@ -597,10 +594,7 @@ mod tests {
         let wrong_target = recovery_meta_file_write_invocation(
             r#"{"name":"shell.run","arguments":{"path":"a.txt","content":"written"}}"#,
         );
-        assert!(!deterministic_effect_is_still_applied(
-            &wrong_target,
-            &root
-        ));
+        assert!(!deterministic_effect_is_still_applied(&wrong_target, &root));
         fs::remove_dir_all(root).expect("temporary workspace should be removed");
     }
 

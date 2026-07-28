@@ -313,6 +313,7 @@ function roleSummaryUnchanged(
     current.role === next.role &&
     current.calls === next.calls &&
     current.completed === next.completed &&
+    current.interrupted === next.interrupted &&
     current.degraded === next.degraded &&
     current.latencyMs === next.latencyMs &&
     current.firstTokenLatencyMs === next.firstTokenLatencyMs &&

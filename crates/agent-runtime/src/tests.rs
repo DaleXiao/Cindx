@@ -595,6 +595,113 @@ fn steering_is_preserved_as_user_guidance() {
 }
 
 #[test]
+fn steering_closes_every_unobserved_call_in_the_latest_tool_round() {
+    let mut state = start_agent_loop(
+        TaskId("task-steer-tools".to_string()),
+        "inspect the workspace",
+        AgentRuntimeConfig::default(),
+    );
+    state.messages.push(Message {
+        role: MessageRole::Assistant,
+        content: String::new(),
+        metadata: [(
+            "tool_call_ids".to_string(),
+            "call-1,call-2,call-3".to_string(),
+        )]
+        .into_iter()
+        .collect(),
+    });
+    state.messages.push(Message {
+        role: MessageRole::Tool,
+        content: "tool=file.read\nstatus=succeeded\noutput=done".to_string(),
+        metadata: [("tool_call_id".to_string(), "call-2".to_string())]
+            .into_iter()
+            .collect(),
+    });
+
+    let closed =
+        append_steering_instruction(&mut state, "Stop reading and summarize", Metadata::new());
+
+    assert_eq!(closed, 2);
+    let tail = &state.messages[state.messages.len() - 3..];
+    assert_eq!(tail[0].role, MessageRole::Tool);
+    assert_eq!(tail[0].metadata["tool_call_id"], "call-1");
+    assert_eq!(tail[1].role, MessageRole::Tool);
+    assert_eq!(tail[1].metadata["tool_call_id"], "call-3");
+    for message in &tail[..2] {
+        assert_eq!(message.metadata["status"], "cancelled");
+        assert_eq!(message.metadata["synthetic"], "true");
+        assert_eq!(message.metadata["reason"], "superseded_by_user_steer");
+        assert!(message.content.contains("superseded"));
+    }
+    assert_eq!(tail[2].role, MessageRole::User);
+    assert_eq!(tail[2].content, "Stop reading and summarize");
+}
+
+#[test]
+fn steering_falls_back_to_raw_tool_calls_when_ids_metadata_is_absent() {
+    let mut state = start_agent_loop(
+        TaskId("task-steer-raw-tools".to_string()),
+        "inspect the workspace",
+        AgentRuntimeConfig::default(),
+    );
+    state.messages.push(Message {
+        role: MessageRole::Assistant,
+        content: String::new(),
+        metadata: [(
+            "raw_tool_calls_json".to_string(),
+            r#"[{"id":"raw-1"},{"id":"raw-2"}]"#.to_string(),
+        )]
+        .into_iter()
+        .collect(),
+    });
+
+    let closed = append_steering_instruction(&mut state, "Change direction", Metadata::new());
+
+    assert_eq!(closed, 2);
+    let closed_ids = state.messages[state.messages.len() - 3..state.messages.len() - 1]
+        .iter()
+        .map(|message| message.metadata["tool_call_id"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(closed_ids, ["raw-1", "raw-2"]);
+}
+
+#[test]
+fn steering_does_not_duplicate_already_observed_tool_calls() {
+    let mut state = start_agent_loop(
+        TaskId("task-steer-observed-tools".to_string()),
+        "inspect the workspace",
+        AgentRuntimeConfig::default(),
+    );
+    state.messages.push(Message {
+        role: MessageRole::Assistant,
+        content: String::new(),
+        metadata: [("tool_call_ids".to_string(), "call-1,call-2".to_string())]
+            .into_iter()
+            .collect(),
+    });
+    for call_id in ["call-1", "call-2"] {
+        state.messages.push(Message {
+            role: MessageRole::Tool,
+            content: "status=succeeded".to_string(),
+            metadata: [("tool_call_id".to_string(), call_id.to_string())]
+                .into_iter()
+                .collect(),
+        });
+    }
+    let message_count = state.messages.len();
+
+    let closed = append_steering_instruction(&mut state, "Continue differently", Metadata::new());
+
+    assert_eq!(closed, 0);
+    assert_eq!(state.messages.len(), message_count + 1);
+    assert_eq!(
+        state.messages.last().expect("steer").role,
+        MessageRole::User
+    );
+}
+
+#[test]
 fn completion_gate_requests_post_mutation_verification_once() {
     let mut state = start_agent_loop(
         TaskId("task-verify".to_string()),

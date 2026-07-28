@@ -1,3 +1,4 @@
+use crate::agent_run_engine::PreparedAgentExecution;
 use crate::*;
 
 const PERMISSION_RUN_CONTEXT_KEYS: &[&str] = &[
@@ -153,6 +154,7 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         "local-user",
         &root,
         &run_context,
+        cancellation,
     )?];
 
     if matches!(&decision, PermissionDecision::AllowForSession) {
@@ -180,6 +182,7 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
                 "session-grant",
                 &root,
                 &run_context,
+                cancellation,
             )?);
         }
     }
@@ -262,8 +265,8 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
     let active_events = active_agent_events_for_session(&events, session_id);
     let prompt = latest_agent_prompt_from_active_events(&active_events)
         .unwrap_or_else(|| "Continue the agent task.".to_string());
-    let recovery_prompt = agent_recovery_prompt_from_active_events(&active_events)
-        .unwrap_or_else(|| prompt.clone());
+    let recovery_prompt =
+        agent_recovery_prompt_from_active_events(&active_events).unwrap_or_else(|| prompt.clone());
     let transcript = agent_runtime_transcript_from_active_events(&active_events);
     let resolved_call_ids = resolved_observations
         .iter()
@@ -279,15 +282,27 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
             for (key, value) in &run_context {
                 suspended.run_context.insert(key.clone(), value.clone());
             }
+            let effort = AgentEffort::parse(
+                suspended
+                    .run_context
+                    .get("agent_effort")
+                    .map(String::as_str)
+                    .unwrap_or("auto"),
+            );
+            let prepared = PreparedAgentExecution {
+                base_run_context: suspended.run_context.clone(),
+                run_context: suspended.run_context,
+                runtime: suspended.runtime,
+                prompt: suspended.prompt,
+                collaboration: suspended.collaboration,
+            };
             return continue_agent_loop(
                 app,
                 &state,
                 &config,
                 &suspended.workspace_root,
-                suspended.runtime,
-                suspended.prompt,
-                suspended.run_context,
-                suspended.collaboration.as_ref(),
+                prepared,
+                effort,
                 cancellation,
             );
         }
@@ -332,17 +347,20 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
             )
         });
     cancellation.extend_runtime_budget(&mut runtime);
-    continue_agent_loop(
-        app,
-        &state,
-        &config,
-        &root,
+    let effort = AgentEffort::parse(
+        run_context
+            .get("agent_effort")
+            .map(String::as_str)
+            .unwrap_or("auto"),
+    );
+    let prepared = PreparedAgentExecution {
+        base_run_context: run_context.clone(),
+        run_context,
         runtime,
         prompt,
-        run_context,
-        None,
-        cancellation,
-    )
+        collaboration: None,
+    };
+    continue_agent_loop(app, &state, &config, &root, prepared, effort, cancellation)
 }
 
 fn checkpoint_transcript_before_resolved_tools(
@@ -369,6 +387,7 @@ pub(crate) fn resolve_agent_permission_request(
     resolved_by: &str,
     root: &Path,
     run_context: &Metadata,
+    cancellation: &Arc<AgentRunControl>,
 ) -> Result<ResolvedToolObservation, String> {
     let request_id = request.id.clone();
     let tool_call_id = request
@@ -434,10 +453,31 @@ pub(crate) fn resolve_agent_permission_request(
         };
         drop(store);
         let registry = tool_registry_for_state(state, root)?;
-        let result =
-            execute_agent_tool_invocation(state, &registry, invocation, root, run_context)?;
-        let observation = observation_from_agent_tool_result(&tool_name, &result);
-        let image_paths = tool_result_image_paths(&result);
+        let (observation, status, image_paths) =
+            match execute_agent_tool_invocation_for_objective_epoch(
+                state,
+                &registry,
+                invocation,
+                root,
+                run_context,
+                cancellation,
+                run_context_steer_epoch(run_context),
+            )? {
+                AgentToolInvocationOutcome::Completed(result) => (
+                    observation_from_agent_tool_result(&tool_name, &result),
+                    result.status.clone(),
+                    tool_result_image_paths(&result),
+                ),
+                AgentToolInvocationOutcome::RestartAfterSteer => (
+                    observation_from_tool_result(
+                        &tool_name,
+                        "cancelled",
+                        "Permission-approved tool call was superseded by user steering before its result could enter the agent transcript.",
+                    ),
+                    ToolOutcomeStatus::Cancelled,
+                    Vec::new(),
+                ),
+            };
         let mut store = state
             .store
             .lock()
@@ -447,7 +487,7 @@ pub(crate) fn resolve_agent_permission_request(
             &request.task_id,
             &tool_call_id,
             &tool_name,
-            tool_outcome_label(&result.status),
+            tool_outcome_label(&status),
             &observation,
             Some(run_context),
         )
@@ -461,7 +501,7 @@ pub(crate) fn resolve_agent_permission_request(
                 run_context,
             )?;
         }
-        (observation, result.status, image_paths)
+        (observation, status, image_paths)
     } else {
         let observation = observation_from_tool_result(
             &request.action,

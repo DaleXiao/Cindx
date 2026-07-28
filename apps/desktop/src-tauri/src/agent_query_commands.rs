@@ -293,6 +293,22 @@ pub(crate) fn begin_agent_run_control_for_continuation<'a>(
     )
 }
 
+pub(crate) fn begin_agent_run_control_at_steer_epoch<'a>(
+    state: &'a tauri::State<'_, AppState>,
+    session_id: &str,
+    effort: &str,
+    applied_epoch: u64,
+) -> Result<RegisteredRunControl<'a>, String> {
+    cancel_background_prompt_evaluations(state)?;
+    RegisteredRunControl::register(
+        &state.agent_run_controls,
+        session_id,
+        Arc::new(AgentRunControl::new_at_steer_epoch(effort, applied_epoch)),
+        "agent run control",
+        "agent run is already active for this session",
+    )
+}
+
 pub(crate) fn cancel_background_prompt_evaluations(
     state: &tauri::State<'_, AppState>,
 ) -> Result<(), String> {
@@ -326,8 +342,7 @@ pub(crate) fn request_agent_run_cancel(
     session_id: &str,
 ) -> Result<bool, String> {
     if let Some(control) = active_agent_run_control(state, Some(session_id))? {
-        control.request_cancel();
-        return Ok(true);
+        return Ok(control.request_cancel());
     }
     Ok(false)
 }

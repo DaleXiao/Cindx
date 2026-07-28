@@ -1,9 +1,14 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+#[cfg(feature = "lancedb-store")]
+use std::future::Future;
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+#[cfg(feature = "lancedb-store")]
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod retrieval_fusion;
@@ -29,9 +34,6 @@ use lancedb::{
     query::{ExecutableQuery, QueryBase},
     DistanceType,
 };
-#[cfg(feature = "lancedb-store")]
-use std::sync::OnceLock;
-
 const EMBEDDING_DIMS: usize = 64;
 const DEFAULT_MAX_FILE_BYTES: u64 = 512 * 1024;
 const DEFAULT_MAX_FILES: usize = 10_000;
@@ -41,13 +43,21 @@ const DEFAULT_EMBEDDING_BATCH_SIZE: usize = 20;
 const FILE_SEARCH_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const FILE_SEARCH_MAX_FILES: usize = 20_000;
 const FILE_SEARCH_CONTEXT_LINES: usize = 2;
+static STAGING_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static FILE_RAG_PATH_LEASES: OnceLock<Mutex<BTreeMap<PathBuf, Weak<()>>>> = OnceLock::new();
 #[cfg(feature = "lancedb-store")]
 const LANCEDB_WORKSPACE_TABLE: &str = "workspace_chunks";
 #[cfg(feature = "lancedb-store")]
 const LANCEDB_ANN_MIN_ROWS: usize = 256;
+#[cfg(feature = "lancedb-store")]
+const LANCEDB_RECORD_BATCH_ROWS: usize = 256;
+#[cfg(feature = "lancedb-store")]
+const LANCEDB_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[cfg(feature = "lancedb-store")]
 static LANCEDB_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+#[cfg(feature = "lancedb-store")]
+static LANCEDB_PATH_LOCKS: OnceLock<Mutex<BTreeMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
 
 pub const RAG_INDEX_CANCELLED: &str = "RAG indexing cancelled";
 
@@ -155,8 +165,13 @@ pub struct LanceDbRecord {
 
 #[cfg(feature = "lancedb-store")]
 pub fn lancedb_index_exists(database_path: impl AsRef<Path>) -> bool {
+    let database_path = database_path.as_ref();
+    let path_lock = lancedb_path_lock(database_path);
+    let Ok(_guard) = path_lock.lock() else {
+        return false;
+    };
+    let _ = recover_lancedb_swap(database_path);
     database_path
-        .as_ref()
         .join(format!("{LANCEDB_WORKSPACE_TABLE}.lance"))
         .exists()
 }
@@ -166,7 +181,24 @@ pub fn replace_lancedb_index(
     database_path: impl AsRef<Path>,
     index: &RagIndex,
 ) -> Result<usize, RagError> {
+    replace_lancedb_index_cancellable(database_path, index, || false)
+}
+
+#[cfg(feature = "lancedb-store")]
+pub fn replace_lancedb_index_cancellable(
+    database_path: impl AsRef<Path>,
+    index: &RagIndex,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<usize, RagError> {
     let database_path = database_path.as_ref();
+    let path_lock = lancedb_path_lock(database_path);
+    let _guard = path_lock
+        .lock()
+        .map_err(|error| RagError::new(format!("LanceDB path lock poisoned: {error}")))?;
+    recover_lancedb_swap(database_path)?;
+    if should_cancel() {
+        return Err(RagError::new(RAG_INDEX_CANCELLED));
+    }
     if index.chunks.is_empty() {
         if database_path.exists() {
             fs::remove_dir_all(database_path).map_err(|error| {
@@ -176,57 +208,95 @@ pub fn replace_lancedb_index(
         return Ok(0);
     }
     let dimensions = index.chunks[0].embedding_dimensions;
-    if dimensions == 0
-        || index.chunks.iter().any(|chunk| {
-            chunk.embedding_dimensions != dimensions || chunk.embedding.len() != dimensions
-        })
-    {
+    if dimensions == 0 {
         return Err(RagError::new(
             "LanceDB index requires one non-empty embedding dimension",
         ));
+    }
+    for chunk in &index.chunks {
+        if should_cancel() {
+            return Err(RagError::new(RAG_INDEX_CANCELLED));
+        }
+        if chunk.embedding_dimensions != dimensions || chunk.embedding.len() != dimensions {
+            return Err(RagError::new(
+                "LanceDB index requires one non-empty embedding dimension",
+            ));
+        }
     }
     let parent = database_path
         .parent()
         .ok_or_else(|| RagError::new("LanceDB path has no parent directory"))?;
     fs::create_dir_all(parent)
         .map_err(|error| RagError::new(format!("failed to create LanceDB parent: {error}")))?;
-    let staging = parent.join(format!(
-        ".lancedb-staging-{}-{}",
-        std::process::id(),
-        current_time_millis()
-    ));
-    if staging.exists() {
-        fs::remove_dir_all(&staging)
-            .map_err(|error| RagError::new(format!("failed to reset LanceDB staging: {error}")))?;
+    let staging = unique_lancedb_sibling(database_path, "staging");
+    if should_cancel() {
+        return Err(RagError::new(RAG_INDEX_CANCELLED));
     }
-    let batch = lancedb_record_batch(index, dimensions)?;
+    let batches = lancedb_record_batches_cancellable(index, dimensions, &mut should_cancel)?;
     let row_count = index.chunks.len();
-    lancedb_runtime()?.block_on(async {
-        let database = lancedb::connect(&staging.to_string_lossy())
-            .execute()
-            .await
-            .map_err(|error| RagError::new(format!("failed to open LanceDB staging: {error}")))?;
-        let schema = batch.schema();
-        let reader: Box<dyn arrow_array::RecordBatchReader + Send> =
-            Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema));
-        let table = database
-            .create_table(LANCEDB_WORKSPACE_TABLE, reader)
-            .mode(CreateTableMode::Overwrite)
-            .execute()
-            .await
-            .map_err(|error| RagError::new(format!("failed to replace LanceDB table: {error}")))?;
+    if should_cancel() {
+        return Err(RagError::new(RAG_INDEX_CANCELLED));
+    }
+    let build_result = lancedb_runtime()?.block_on(async {
+        let database = await_lancedb_operation_cancellable(
+            async {
+                lancedb::connect(&staging.to_string_lossy())
+                    .execute()
+                    .await
+                    .map_err(|error| {
+                        RagError::new(format!("failed to open LanceDB staging: {error}"))
+                    })
+            },
+            &mut should_cancel,
+        )
+        .await?;
+        let schema = batches[0].schema();
+        let reader: Box<dyn arrow_array::RecordBatchReader + Send> = Box::new(
+            RecordBatchIterator::new(batches.into_iter().map(Ok), schema),
+        );
+        let table = await_lancedb_operation_cancellable(
+            async {
+                database
+                    .create_table(LANCEDB_WORKSPACE_TABLE, reader)
+                    .mode(CreateTableMode::Overwrite)
+                    .execute()
+                    .await
+                    .map_err(|error| {
+                        RagError::new(format!("failed to replace LanceDB table: {error}"))
+                    })
+            },
+            &mut should_cancel,
+        )
+        .await?;
         if row_count >= LANCEDB_ANN_MIN_ROWS {
-            table
-                .create_index(&["vector"], Index::Auto)
-                .execute()
-                .await
-                .map_err(|error| {
-                    RagError::new(format!("failed to build LanceDB ANN index: {error}"))
-                })?;
+            await_lancedb_operation_cancellable(
+                async {
+                    table
+                        .create_index(&["vector"], Index::Auto)
+                        .execute()
+                        .await
+                        .map_err(|error| {
+                            RagError::new(format!("failed to build LanceDB ANN index: {error}"))
+                        })
+                },
+                &mut should_cancel,
+            )
+            .await?;
         }
         Ok::<(), RagError>(())
-    })?;
-    swap_lancedb_directory(database_path, &staging)?;
+    });
+    if let Err(error) = build_result {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    if should_cancel() {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(RagError::new(RAG_INDEX_CANCELLED));
+    }
+    if let Err(error) = swap_lancedb_directory(database_path, &staging) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
     Ok(row_count)
 }
 
@@ -240,7 +310,15 @@ pub fn search_lancedb_index(
         return Err(RagError::new("LanceDB query embedding is empty"));
     }
     let database_path = database_path.as_ref();
-    if !lancedb_index_exists(database_path) {
+    let path_lock = lancedb_path_lock(database_path);
+    let _guard = path_lock
+        .lock()
+        .map_err(|error| RagError::new(format!("LanceDB path lock poisoned: {error}")))?;
+    recover_lancedb_swap(database_path)?;
+    if !database_path
+        .join(format!("{LANCEDB_WORKSPACE_TABLE}.lance"))
+        .exists()
+    {
         return Err(RagError::new("LanceDB workspace index is missing"));
     }
     lancedb_runtime()?.block_on(async {
@@ -283,9 +361,49 @@ fn lancedb_runtime() -> Result<&'static tokio::runtime::Runtime, RagError> {
 }
 
 #[cfg(feature = "lancedb-store")]
-fn lancedb_record_batch(index: &RagIndex, dimensions: usize) -> Result<RecordBatch, RagError> {
+async fn await_lancedb_operation_cancellable<T>(
+    operation: impl Future<Output = Result<T, RagError>>,
+    should_cancel: &mut dyn FnMut() -> bool,
+) -> Result<T, RagError> {
+    tokio::pin!(operation);
+    loop {
+        if should_cancel() {
+            return Err(RagError::new(RAG_INDEX_CANCELLED));
+        }
+        match tokio::time::timeout(LANCEDB_CANCEL_POLL_INTERVAL, operation.as_mut()).await {
+            Ok(result) => return result,
+            Err(_) => continue,
+        }
+    }
+}
+
+#[cfg(feature = "lancedb-store")]
+fn lancedb_record_batches_cancellable(
+    index: &RagIndex,
+    dimensions: usize,
+    should_cancel: &mut dyn FnMut() -> bool,
+) -> Result<Vec<RecordBatch>, RagError> {
+    let mut batches = Vec::with_capacity(index.chunks.len().div_ceil(LANCEDB_RECORD_BATCH_ROWS));
+    for chunks in index.chunks.chunks(LANCEDB_RECORD_BATCH_ROWS) {
+        ensure_rag_index_not_cancelled(should_cancel)?;
+        batches.push(lancedb_record_batch_cancellable(
+            chunks,
+            dimensions,
+            should_cancel,
+        )?);
+    }
+    Ok(batches)
+}
+
+#[cfg(feature = "lancedb-store")]
+fn lancedb_record_batch_cancellable(
+    chunks: &[RagChunk],
+    dimensions: usize,
+    should_cancel: &mut dyn FnMut() -> bool,
+) -> Result<RecordBatch, RagError> {
+    ensure_rag_index_not_cancelled(should_cancel)?;
     let vector = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-        index.chunks.iter().map(|chunk| {
+        chunks.iter().map(|chunk| {
             Some(
                 chunk
                     .embedding
@@ -298,6 +416,7 @@ fn lancedb_record_batch(index: &RagIndex, dimensions: usize) -> Result<RecordBat
         i32::try_from(dimensions)
             .map_err(|_| RagError::new("LanceDB vector dimensions exceed i32"))?,
     );
+    ensure_rag_index_not_cancelled(should_cancel)?;
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
         Field::new("path", DataType::Utf8, false),
@@ -314,51 +433,52 @@ fn lancedb_record_batch(index: &RagIndex, dimensions: usize) -> Result<RecordBat
     ]));
     let columns: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from_iter_values(
-            index.chunks.iter().map(|chunk| chunk.id.as_str()),
+            chunks.iter().map(|chunk| chunk.id.as_str()),
         )),
         Arc::new(StringArray::from_iter_values(
-            index.chunks.iter().map(|chunk| chunk.path.as_str()),
+            chunks.iter().map(|chunk| chunk.path.as_str()),
         )),
         Arc::new(StringArray::from_iter_values(
-            index.chunks.iter().map(|chunk| chunk.file_hash.as_str()),
+            chunks.iter().map(|chunk| chunk.file_hash.as_str()),
         )),
         Arc::new(UInt64Array::from_iter_values(
-            index.chunks.iter().map(|chunk| chunk.modified_time_ms),
+            chunks.iter().map(|chunk| chunk.modified_time_ms),
         )),
         Arc::new(UInt64Array::from_iter_values(
-            index.chunks.iter().map(|chunk| chunk.start_line),
+            chunks.iter().map(|chunk| chunk.start_line),
         )),
         Arc::new(UInt64Array::from_iter_values(
-            index.chunks.iter().map(|chunk| chunk.end_line),
+            chunks.iter().map(|chunk| chunk.end_line),
         )),
         Arc::new(UInt64Array::from_iter_values(
-            index.chunks.iter().map(|chunk| chunk.indexed_at_ms),
+            chunks.iter().map(|chunk| chunk.indexed_at_ms),
         )),
         Arc::new(StringArray::from_iter_values(
-            index.chunks.iter().map(|chunk| chunk.text.as_str()),
+            chunks.iter().map(|chunk| chunk.text.as_str()),
         )),
         Arc::new(StringArray::from_iter_values(
-            index
-                .chunks
-                .iter()
-                .map(|chunk| chunk.embedding_provider.as_str()),
+            chunks.iter().map(|chunk| chunk.embedding_provider.as_str()),
         )),
         Arc::new(StringArray::from_iter_values(
-            index
-                .chunks
-                .iter()
-                .map(|chunk| chunk.embedding_model.as_str()),
+            chunks.iter().map(|chunk| chunk.embedding_model.as_str()),
         )),
         Arc::new(UInt64Array::from_iter_values(
-            index
-                .chunks
-                .iter()
-                .map(|chunk| chunk.embedding_dimensions as u64),
+            chunks.iter().map(|chunk| chunk.embedding_dimensions as u64),
         )),
         Arc::new(vector),
     ];
+    ensure_rag_index_not_cancelled(should_cancel)?;
     RecordBatch::try_new(schema, columns)
         .map_err(|error| RagError::new(format!("failed to build LanceDB record batch: {error}")))
+}
+
+#[cfg(feature = "lancedb-store")]
+fn ensure_rag_index_not_cancelled(should_cancel: &mut dyn FnMut() -> bool) -> Result<(), RagError> {
+    if should_cancel() {
+        Err(RagError::new(RAG_INDEX_CANCELLED))
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(feature = "lancedb-store")]
@@ -438,29 +558,171 @@ fn swap_lancedb_directory(database_path: &Path, staging: &Path) -> Result<(), Ra
     let parent = database_path
         .parent()
         .ok_or_else(|| RagError::new("LanceDB path has no parent directory"))?;
-    let backup = parent.join(format!(
-        ".lancedb-backup-{}-{}",
-        std::process::id(),
-        current_time_millis()
-    ));
     let had_existing = database_path.exists();
-    if had_existing {
-        fs::rename(database_path, &backup)
-            .map_err(|error| RagError::new(format!("failed to stage old LanceDB: {error}")))?;
+    if !had_existing {
+        return fs::rename(staging, database_path)
+            .map_err(|error| RagError::new(format!("failed to activate LanceDB index: {error}")));
     }
+    let backup = unique_lancedb_sibling(database_path, "backup");
+    let marker = lancedb_swap_marker_path(database_path)?;
+    write_lancedb_swap_marker(&marker, staging, &backup)?;
+    fs::rename(database_path, &backup)
+        .map_err(|error| RagError::new(format!("failed to stage old LanceDB: {error}")))?;
     if let Err(error) = fs::rename(staging, database_path) {
-        if had_existing {
-            let _ = fs::rename(&backup, database_path);
-        }
+        let _ = fs::rename(&backup, database_path);
+        let _ = fs::remove_file(&marker);
         return Err(RagError::new(format!(
             "failed to activate LanceDB index: {error}"
         )));
     }
-    if had_existing {
-        fs::remove_dir_all(&backup)
-            .map_err(|error| RagError::new(format!("failed to remove old LanceDB: {error}")))?;
+    if let Ok(directory) = fs::File::open(parent) {
+        let _ = directory.sync_all();
     }
+    let _ = fs::remove_dir_all(&backup);
+    let _ = fs::remove_file(&marker);
     Ok(())
+}
+
+#[cfg(feature = "lancedb-store")]
+fn lancedb_path_lock(database_path: &Path) -> Arc<Mutex<()>> {
+    let key = fs::canonicalize(database_path).unwrap_or_else(|_| database_path.to_path_buf());
+    let mut locks = LANCEDB_PATH_LOCKS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        lock
+    } else {
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(key, Arc::downgrade(&lock));
+        lock
+    }
+}
+
+#[cfg(feature = "lancedb-store")]
+fn unique_lancedb_sibling(database_path: &Path, label: &str) -> PathBuf {
+    let parent = database_path.parent().unwrap_or_else(|| Path::new("."));
+    let name = database_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("lancedb");
+    parent.join(format!(
+        ".{name}-{label}-{}-{}-{}",
+        std::process::id(),
+        current_time_millis(),
+        STAGING_FILE_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed)
+    ))
+}
+
+#[cfg(feature = "lancedb-store")]
+fn lancedb_swap_marker_path(database_path: &Path) -> Result<PathBuf, RagError> {
+    let parent = database_path
+        .parent()
+        .ok_or_else(|| RagError::new("LanceDB path has no parent directory"))?;
+    let name = database_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("lancedb");
+    Ok(parent.join(format!(".{name}-swap")))
+}
+
+#[cfg(feature = "lancedb-store")]
+fn write_lancedb_swap_marker(marker: &Path, staging: &Path, backup: &Path) -> Result<(), RagError> {
+    let staging_name = staging
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| RagError::new("LanceDB staging path is invalid"))?;
+    let backup_name = backup
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| RagError::new("LanceDB backup path is invalid"))?;
+    let temporary = staging_file_path(marker, "swap-marker");
+    let result = (|| {
+        let mut file = fs::File::create(&temporary).map_err(|error| {
+            RagError::new(format!("failed to create LanceDB swap marker: {error}"))
+        })?;
+        writeln!(file, "{staging_name}")
+            .and_then(|_| writeln!(file, "{backup_name}"))
+            .map_err(|error| {
+                RagError::new(format!("failed to write LanceDB swap marker: {error}"))
+            })?;
+        file.sync_all().map_err(|error| {
+            RagError::new(format!("failed to sync LanceDB swap marker: {error}"))
+        })?;
+        fs::rename(&temporary, marker).map_err(|error| {
+            RagError::new(format!("failed to commit LanceDB swap marker: {error}"))
+        })?;
+        if let Some(parent) = marker.parent() {
+            if let Ok(directory) = fs::File::open(parent) {
+                directory.sync_all().map_err(|error| {
+                    RagError::new(format!("failed to sync LanceDB swap directory: {error}"))
+                })?;
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[cfg(feature = "lancedb-store")]
+fn recover_lancedb_swap(database_path: &Path) -> Result<(), RagError> {
+    let marker = lancedb_swap_marker_path(database_path)?;
+    if !marker.exists() {
+        return Ok(());
+    }
+    let parent = database_path
+        .parent()
+        .ok_or_else(|| RagError::new("LanceDB path has no parent directory"))?;
+    let marker_text = fs::read_to_string(&marker).ok();
+    let siblings = marker_text.as_deref().and_then(|marker_text| {
+        let mut lines = marker_text.lines();
+        let staging = lines
+            .next()
+            .filter(|value| valid_lancedb_sibling_name(value))?;
+        let backup = lines
+            .next()
+            .filter(|value| valid_lancedb_sibling_name(value))?;
+        Some((parent.join(staging), parent.join(backup)))
+    });
+    if database_path.exists() {
+        if let Some((staging, backup)) = siblings {
+            let _ = fs::remove_dir_all(staging);
+            let _ = fs::remove_dir_all(backup);
+        }
+        let _ = fs::remove_file(&marker);
+        return Ok(());
+    }
+    let (staging, backup) = siblings.ok_or_else(|| {
+        RagError::new("LanceDB swap marker is unreadable while the database is unavailable")
+    })?;
+    if staging.exists() {
+        fs::rename(&staging, database_path).map_err(|error| {
+            RagError::new(format!("failed to recover staged LanceDB index: {error}"))
+        })?;
+        let _ = fs::remove_dir_all(&backup);
+        let _ = fs::remove_file(&marker);
+        return Ok(());
+    }
+    if backup.exists() {
+        fs::rename(&backup, database_path).map_err(|error| {
+            RagError::new(format!("failed to restore previous LanceDB index: {error}"))
+        })?;
+    }
+    let _ = fs::remove_file(&marker);
+    Ok(())
+}
+
+#[cfg(feature = "lancedb-store")]
+fn valid_lancedb_sibling_name(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && !value.contains('/')
+        && !value.contains('\\')
 }
 
 pub trait RagAdapter {
@@ -473,11 +735,13 @@ pub trait RagAdapter {
 pub struct FileRagAdapter {
     path: PathBuf,
     index: Arc<RagIndex>,
+    _path_lease: Arc<()>,
 }
 
 impl FileRagAdapter {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, RagError> {
         let path = path.into();
+        let path_lease = acquire_file_rag_path_lease(&path)?;
         let index = if path.exists() {
             load_index(&path)?
         } else {
@@ -487,6 +751,7 @@ impl FileRagAdapter {
         Ok(Self {
             path,
             index: Arc::new(index),
+            _path_lease: path_lease,
         })
     }
 
@@ -502,6 +767,10 @@ impl FileRagAdapter {
         &self.index
     }
 
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn embedding_profile(&self) -> Option<(&str, &str, usize)> {
         self.index.chunks.first().map(|chunk| {
             (
@@ -511,19 +780,106 @@ impl FileRagAdapter {
             )
         })
     }
-}
 
-impl RagAdapter for FileRagAdapter {
-    fn replace_all(&mut self, index: RagIndex) -> Result<RagIndexStats, RagError> {
+    pub fn replace_all_cancellable(
+        &mut self,
+        index: RagIndex,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<RagIndexStats, RagError> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 RagError::new(format!("failed to create RAG directory: {error}"))
             })?;
         }
-        save_index(&self.path, &index)?;
+        save_index_cancellable(&self.path, &index, should_cancel)?;
         self.index = Arc::new(index);
-
         Ok(self.index.stats.clone())
+    }
+}
+
+fn acquire_file_rag_path_lease(path: &Path) -> Result<Arc<()>, RagError> {
+    let path = stable_path_identity(path);
+    let mut leases = FILE_RAG_PATH_LEASES
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .map_err(|error| RagError::new(format!("RAG path lease registry poisoned: {error}")))?;
+    leases.retain(|_, lease| lease.strong_count() > 0);
+    if let Some(lease) = leases.get(&path).and_then(Weak::upgrade) {
+        return Ok(lease);
+    }
+    let lease = Arc::new(());
+    leases.insert(path, Arc::downgrade(&lease));
+    Ok(lease)
+}
+
+pub fn remove_file_rag_generation_if_unleased(
+    index_path: &Path,
+    generation_root: &Path,
+) -> Result<bool, RagError> {
+    let index_path = stable_path_identity(index_path);
+    let mut leases = FILE_RAG_PATH_LEASES
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .map_err(|error| RagError::new(format!("RAG path lease registry poisoned: {error}")))?;
+    leases.retain(|_, lease| lease.strong_count() > 0);
+    if leases.get(&index_path).and_then(Weak::upgrade).is_some() {
+        return Ok(false);
+    }
+    fs::remove_dir_all(generation_root)
+        .map_err(|error| RagError::new(format!("failed to remove RAG generation: {error}")))?;
+    Ok(true)
+}
+
+fn stable_path_identity(path: &Path) -> PathBuf {
+    let mut candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    let mut unresolved = Vec::new();
+    loop {
+        if let Ok(mut resolved) = fs::canonicalize(&candidate) {
+            for component in unresolved.iter().rev() {
+                resolved.push(component);
+            }
+            return lexically_normalize_path(&resolved);
+        }
+        let Some(parent) = candidate.parent() else {
+            return lexically_normalize_path(&candidate);
+        };
+        let component = candidate
+            .strip_prefix(parent)
+            .unwrap_or(candidate.as_path())
+            .to_path_buf();
+        if component.as_os_str().is_empty() {
+            return lexically_normalize_path(&candidate);
+        }
+        unresolved.push(component);
+        candidate = parent.to_path_buf();
+    }
+}
+
+fn lexically_normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::Normal(value) => normalized.push(value),
+        }
+    }
+    normalized
+}
+
+impl RagAdapter for FileRagAdapter {
+    fn replace_all(&mut self, index: RagIndex) -> Result<RagIndexStats, RagError> {
+        self.replace_all_cancellable(index, || false)
     }
 
     fn search(&self, query: &str, limit: usize) -> Result<Vec<RagSearchResult>, RagError> {
@@ -573,9 +929,6 @@ pub fn workspace_index_is_fresh(
     options: IndexOptions,
     mut should_cancel: impl FnMut() -> bool,
 ) -> Result<bool, RagError> {
-    if chunks.is_empty() {
-        return Ok(false);
-    }
     let indexed_files = chunks
         .iter()
         .map(|chunk| (chunk.path.clone(), chunk.modified_time_ms))
@@ -855,6 +1208,14 @@ pub fn export_lancedb_records_jsonl(
     index: &RagIndex,
     path: impl AsRef<Path>,
 ) -> Result<usize, RagError> {
+    export_lancedb_records_jsonl_cancellable(index, path, || false)
+}
+
+pub fn export_lancedb_records_jsonl_cancellable(
+    index: &RagIndex,
+    path: impl AsRef<Path>,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<usize, RagError> {
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -863,15 +1224,57 @@ pub fn export_lancedb_records_jsonl(
             ))
         })?;
     }
-
-    let rows = lancedb_records(index)
-        .into_iter()
-        .map(|record| lancedb_record_json(&record))
-        .collect::<Vec<_>>();
-    fs::write(path, rows.join("\n"))
-        .map_err(|error| RagError::new(format!("failed to export LanceDB records: {error}")))?;
-
-    Ok(rows.len())
+    let staging = staging_file_path(path, "lancedb-export");
+    let result = (|| {
+        let file = fs::File::create(&staging).map_err(|error| {
+            RagError::new(format!(
+                "failed to create LanceDB export staging file: {error}"
+            ))
+        })?;
+        let mut writer = BufWriter::new(file);
+        for (index, chunk) in index.chunks.iter().enumerate() {
+            if should_cancel() {
+                return Err(RagError::new(RAG_INDEX_CANCELLED));
+            }
+            if index > 0 {
+                writer.write_all(b"\n").map_err(|error| {
+                    RagError::new(format!("failed to write LanceDB export: {error}"))
+                })?;
+            }
+            let record = LanceDbRecord {
+                id: chunk.id.clone(),
+                path: chunk.path.clone(),
+                file_hash: chunk.file_hash.clone(),
+                modified_time_ms: chunk.modified_time_ms,
+                start_line: chunk.start_line,
+                end_line: chunk.end_line,
+                indexed_at_ms: chunk.indexed_at_ms,
+                text: chunk.text.clone(),
+                vector: chunk.embedding.clone(),
+                embedding_provider: chunk.embedding_provider.clone(),
+                embedding_model: chunk.embedding_model.clone(),
+                embedding_dimensions: chunk.embedding_dimensions,
+            };
+            writer
+                .write_all(lancedb_record_json(&record).as_bytes())
+                .map_err(|error| {
+                    RagError::new(format!("failed to write LanceDB export: {error}"))
+                })?;
+        }
+        writer
+            .flush()
+            .map_err(|error| RagError::new(format!("failed to flush LanceDB export: {error}")))?;
+        if should_cancel() {
+            return Err(RagError::new(RAG_INDEX_CANCELLED));
+        }
+        fs::rename(&staging, path)
+            .map_err(|error| RagError::new(format!("failed to commit LanceDB export: {error}")))?;
+        Ok(index.chunks.len())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&staging);
+    }
+    result
 }
 
 fn lancedb_record_json(record: &LanceDbRecord) -> String {
@@ -1632,31 +2035,70 @@ fn empty_index() -> RagIndex {
     }
 }
 
-fn save_index(path: &Path, index: &RagIndex) -> Result<(), RagError> {
-    let mut rows = Vec::new();
-    rows.push(format!(
-        "stats\t{}\t{}\t{}",
-        index.stats.files_indexed, index.stats.chunks_indexed, index.stats.indexed_at_ms
-    ));
-    for chunk in &index.chunks {
-        rows.push(format!(
-            "chunk\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            chunk.id,
-            hex_encode(chunk.path.as_bytes()),
-            chunk.file_hash,
-            chunk.modified_time_ms,
-            chunk.start_line,
-            chunk.end_line,
-            chunk.indexed_at_ms,
-            hex_encode(chunk.embedding_provider.as_bytes()),
-            hex_encode(chunk.embedding_model.as_bytes()),
-            chunk.embedding_dimensions,
-            encode_embedding(&chunk.embedding),
-            hex_encode(chunk.text.as_bytes())
-        ));
+fn staging_file_path(path: &Path, label: &str) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("index");
+    path.with_file_name(format!(
+        ".{file_name}.{label}-{}-{}-{}",
+        std::process::id(),
+        current_time_millis(),
+        STAGING_FILE_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed)
+    ))
+}
+
+fn save_index_cancellable(
+    path: &Path,
+    index: &RagIndex,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<(), RagError> {
+    let staging = staging_file_path(path, "rag-staging");
+    let result = (|| {
+        let file = fs::File::create(&staging)
+            .map_err(|error| RagError::new(format!("failed to create RAG staging: {error}")))?;
+        let mut writer = BufWriter::new(file);
+        write!(
+            writer,
+            "stats\t{}\t{}\t{}",
+            index.stats.files_indexed, index.stats.chunks_indexed, index.stats.indexed_at_ms
+        )
+        .map_err(|error| RagError::new(format!("failed to save RAG index: {error}")))?;
+        for chunk in &index.chunks {
+            if should_cancel() {
+                return Err(RagError::new(RAG_INDEX_CANCELLED));
+            }
+            write!(
+                writer,
+                "\nchunk\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                chunk.id,
+                hex_encode(chunk.path.as_bytes()),
+                chunk.file_hash,
+                chunk.modified_time_ms,
+                chunk.start_line,
+                chunk.end_line,
+                chunk.indexed_at_ms,
+                hex_encode(chunk.embedding_provider.as_bytes()),
+                hex_encode(chunk.embedding_model.as_bytes()),
+                chunk.embedding_dimensions,
+                encode_embedding(&chunk.embedding),
+                hex_encode(chunk.text.as_bytes())
+            )
+            .map_err(|error| RagError::new(format!("failed to save RAG index: {error}")))?;
+        }
+        writer
+            .flush()
+            .map_err(|error| RagError::new(format!("failed to flush RAG index: {error}")))?;
+        if should_cancel() {
+            return Err(RagError::new(RAG_INDEX_CANCELLED));
+        }
+        fs::rename(&staging, path)
+            .map_err(|error| RagError::new(format!("failed to commit RAG index: {error}")))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&staging);
     }
-    fs::write(path, rows.join("\n"))
-        .map_err(|error| RagError::new(format!("failed to save RAG index: {error}")))
+    result
 }
 
 fn load_index(path: &Path) -> Result<RagIndex, RagError> {
@@ -1847,6 +2289,45 @@ mod tests {
         path
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn missing_rag_path_lease_has_stable_symlink_and_parent_identity() {
+        use std::os::unix::fs::symlink;
+
+        let container = temp_workspace();
+        let real_root = container.join("real");
+        fs::create_dir_all(&real_root).expect("real root should exist");
+        let alias_root = container.join("alias");
+        symlink(&real_root, &alias_root).expect("workspace alias should exist");
+        let aliased_index = alias_root
+            .join("missing")
+            .join("..")
+            .join("generation")
+            .join("rag-index.tsv");
+        let real_index = real_root.join("generation").join("rag-index.tsv");
+        assert_eq!(
+            stable_path_identity(&aliased_index),
+            stable_path_identity(&real_index)
+        );
+
+        let adapter = FileRagAdapter::open(&aliased_index)
+            .expect("missing generation adapter should acquire a path lease");
+        let generation_root = real_root.join("generation");
+        fs::create_dir_all(&generation_root).expect("generation should exist");
+        fs::write(&real_index, "stats\t0\t0\t0\n").expect("RAG index should exist");
+        assert!(
+            !remove_file_rag_generation_if_unleased(&real_index, &generation_root)
+                .expect("leased generation removal should be checked")
+        );
+        assert!(generation_root.is_dir());
+        drop(adapter);
+        assert!(
+            remove_file_rag_generation_if_unleased(&real_index, &generation_root)
+                .expect("unleased generation should be removed")
+        );
+        assert!(!generation_root.exists());
+    }
+
     #[test]
     fn indexes_workspace_files_with_line_provenance() {
         let root = temp_workspace();
@@ -1900,6 +2381,23 @@ mod tests {
         assert!(
             !workspace_index_is_fresh(&root, &updated.chunks, IndexOptions::default(), || false)
                 .expect("deleted file should be detected")
+        );
+    }
+
+    #[test]
+    fn empty_workspace_index_is_fresh_until_an_indexable_file_appears() {
+        let root = temp_workspace();
+        let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+        assert!(index.chunks.is_empty());
+        assert!(
+            workspace_index_is_fresh(&root, &index.chunks, IndexOptions::default(), || false)
+                .expect("empty workspace freshness should be checked")
+        );
+
+        fs::write(root.join("notes.md"), "new knowledge").expect("fixture should write");
+        assert!(
+            !workspace_index_is_fresh(&root, &index.chunks, IndexOptions::default(), || false)
+                .expect("new file should invalidate the empty index")
         );
     }
 
@@ -1991,6 +2489,77 @@ mod tests {
             results[0].chunk.embedding_model,
             format!("local-hash-{EMBEDDING_DIMS}")
         );
+    }
+
+    #[test]
+    fn cancelled_file_adapter_replace_keeps_the_previous_snapshot() {
+        let root = temp_workspace();
+        let index_path = root.join(".cindx").join("rag-index.tsv");
+        fs::write(root.join("readme.md"), "stable retrieval snapshot").expect("file should write");
+        let original = index_workspace(&root, IndexOptions::default()).expect("index should build");
+        let mut replacement = original.clone();
+        replacement.chunks[0].path = "replacement.md".to_string();
+        let mut adapter = FileRagAdapter::open(&index_path).expect("adapter should open");
+        adapter
+            .replace_all(original)
+            .expect("original index should save");
+
+        let error = adapter
+            .replace_all_cancellable(replacement, || true)
+            .expect_err("replacement should cancel");
+
+        assert_eq!(error.message, RAG_INDEX_CANCELLED);
+        assert_eq!(adapter.chunks()[0].path, "readme.md");
+        let restored = FileRagAdapter::open(&index_path).expect("index should reload");
+        assert_eq!(restored.chunks()[0].path, "readme.md");
+    }
+
+    #[test]
+    fn concurrent_staging_files_never_share_a_path() {
+        let destination = Path::new("rag-index.tsv");
+
+        let first = staging_file_path(destination, "rag-staging");
+        let second = staging_file_path(destination, "rag-staging");
+
+        assert_ne!(first, second);
+    }
+
+    #[cfg(feature = "lancedb-store")]
+    #[test]
+    fn concurrent_lancedb_directories_never_share_a_path() {
+        let destination = Path::new(".cindx/lancedb");
+
+        let first = unique_lancedb_sibling(destination, "staging");
+        let second = unique_lancedb_sibling(destination, "staging");
+        let backup = unique_lancedb_sibling(destination, "backup");
+
+        assert_ne!(first, second);
+        assert_ne!(first, backup);
+        assert_ne!(second, backup);
+    }
+
+    #[cfg(feature = "lancedb-store")]
+    #[test]
+    fn interrupted_lancedb_swap_activates_the_complete_staging_directory() {
+        let root = temp_workspace();
+        let database = root.join(".cindx").join("lancedb");
+        let parent = database.parent().expect("database should have parent");
+        fs::create_dir_all(&database).expect("old database should exist");
+        fs::write(database.join("old"), "old").expect("old marker should write");
+        let staging = unique_lancedb_sibling(&database, "staging");
+        let backup = unique_lancedb_sibling(&database, "backup");
+        fs::create_dir_all(&staging).expect("staging database should exist");
+        fs::write(staging.join("new"), "new").expect("new marker should write");
+        let marker = lancedb_swap_marker_path(&database).expect("marker path should resolve");
+        write_lancedb_swap_marker(&marker, &staging, &backup).expect("swap marker should persist");
+        fs::rename(&database, &backup).expect("old database should be staged");
+
+        recover_lancedb_swap(&database).expect("interrupted swap should recover");
+
+        assert!(database.join("new").is_file());
+        assert!(!backup.exists());
+        assert!(!marker.exists());
+        assert!(parent.exists());
     }
 
     #[test]
@@ -2230,6 +2799,113 @@ mod tests {
         assert!(output.contains("\"path\":\"readme.md\""));
         assert!(output.contains("\"vector\":["));
         assert!(output.contains("\"embedding_provider\":\"local\""));
+    }
+
+    #[test]
+    fn cancelled_lancedb_export_preserves_the_previous_file() {
+        let root = temp_workspace();
+        fs::write(root.join("readme.md"), "lancedb cancellable export").expect("file should write");
+        let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+        let output_path = root.join(".cindx").join("lancedb-records.jsonl");
+        fs::create_dir_all(output_path.parent().expect("output should have parent"))
+            .expect("output directory should exist");
+        fs::write(&output_path, "stable export").expect("previous export should write");
+
+        let error = export_lancedb_records_jsonl_cancellable(&index, &output_path, || true)
+            .expect_err("export should cancel");
+
+        assert_eq!(error.message, RAG_INDEX_CANCELLED);
+        assert_eq!(
+            fs::read_to_string(output_path).expect("previous export should remain"),
+            "stable export"
+        );
+    }
+
+    #[cfg(feature = "lancedb-store")]
+    #[test]
+    fn cancellable_lancedb_replace_stops_before_building() {
+        let root = temp_workspace();
+        fs::write(root.join("a.md"), "cancelled lancedb replacement").expect("file should write");
+        let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+        let database_path = root.join(".cindx").join("lancedb");
+
+        let error = replace_lancedb_index_cancellable(&database_path, &index, || true)
+            .expect_err("replacement should cancel");
+
+        assert_eq!(error.message, RAG_INDEX_CANCELLED);
+        assert!(!database_path.exists());
+    }
+
+    #[cfg(feature = "lancedb-store")]
+    #[test]
+    fn arrow_record_batch_build_observes_cancellation_between_bounded_steps() {
+        let root = temp_workspace();
+        fs::write(root.join("a.md"), "cancel during Arrow conversion").expect("file should write");
+        let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+        let dimensions = index.chunks[0].embedding_dimensions;
+        let mut cancellation_checks = 0usize;
+
+        let error = lancedb_record_batches_cancellable(&index, dimensions, &mut || {
+            cancellation_checks += 1;
+            cancellation_checks == 3
+        })
+        .expect_err("Arrow conversion should stop at the requested boundary");
+
+        assert_eq!(error.message, RAG_INDEX_CANCELLED);
+        assert_eq!(cancellation_checks, 3);
+    }
+
+    #[cfg(feature = "lancedb-store")]
+    #[test]
+    fn bounded_arrow_batches_preserve_every_row_and_schema() {
+        let root = temp_workspace();
+        fs::write(root.join("a.md"), "bounded Arrow batches").expect("file should write");
+        let mut index =
+            index_workspace(&root, IndexOptions::default()).expect("index should build");
+        let prototype = index.chunks[0].clone();
+        let row_count = LANCEDB_RECORD_BATCH_ROWS + 1;
+        index.chunks = (0..row_count)
+            .map(|row| {
+                let mut chunk = prototype.clone();
+                chunk.id = format!("chunk-{row}");
+                chunk
+            })
+            .collect();
+        let dimensions = prototype.embedding_dimensions;
+
+        let batches = lancedb_record_batches_cancellable(&index, dimensions, &mut || false)
+            .expect("Arrow conversion should succeed");
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(
+            batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            row_count
+        );
+        assert!(batches
+            .iter()
+            .all(|batch| batch.schema() == batches[0].schema()));
+    }
+
+    #[cfg(feature = "lancedb-store")]
+    #[test]
+    fn pending_lancedb_operation_observes_cancellation_on_the_next_poll() {
+        let mut cancellation_checks = 0usize;
+        let started_at = std::time::Instant::now();
+
+        let error = lancedb_runtime()
+            .expect("runtime should start")
+            .block_on(await_lancedb_operation_cancellable(
+                std::future::pending::<Result<(), RagError>>(),
+                &mut || {
+                    cancellation_checks += 1;
+                    cancellation_checks == 2
+                },
+            ))
+            .expect_err("pending LanceDB operation should be cancelled");
+
+        assert_eq!(error.message, RAG_INDEX_CANCELLED);
+        assert_eq!(cancellation_checks, 2);
+        assert!(started_at.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[cfg(feature = "lancedb-store")]

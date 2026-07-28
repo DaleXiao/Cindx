@@ -183,7 +183,10 @@ mod tests {
         let active = active_agent_events_for_session(&events, Some("session-a"));
         let (_, source_run_id, _, prompt_fingerprint, _) =
             agent_recovery_identity(&active, &context).expect("identity should resolve");
-        let latest_revision = active.last().map(|event| event.sequence).unwrap_or_default();
+        let latest_revision = active
+            .last()
+            .map(|event| event.sequence)
+            .unwrap_or_default();
         assert!(load_matching_agent_runtime_snapshot(
             &store,
             &context,
@@ -212,5 +215,4 @@ mod tests {
             .expect("read model lookup should succeed")
             .is_none());
     }
-
 }

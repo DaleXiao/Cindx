@@ -28,7 +28,7 @@ pub(crate) fn run_background_prompt_mutation_stage(
         &request_id,
         &Metadata::new(),
     )?;
-    let completion = complete_collaboration_model_for_stage_with_control(
+    let completion = complete_collaboration_model_for_stage_with_recovery_control(
         config.clone(),
         stage.to_string(),
         role.clone(),
@@ -36,6 +36,10 @@ pub(crate) fn run_background_prompt_mutation_stage(
         collaboration_system_prompt_for_run(&config.agent_system_prompt, run_context),
         prompt,
         Some(control.clone()),
+        CollaborationCallLimits {
+            objective_epoch: Some(run_context_steer_epoch(run_context)),
+            ..CollaborationCallLimits::default()
+        },
         |_| {},
     );
     record_collaboration_stage_finished(

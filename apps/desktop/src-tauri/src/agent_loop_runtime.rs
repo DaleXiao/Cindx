@@ -1,28 +1,28 @@
 use crate::desktop_prelude::*;
 use crate::{
-    agent_commands::{
-        add_attachment_metadata, prompt_with_attachments, validate_agent_attachments,
-    },
     agent_completion_runtime::{finalize_agent_completion, AgentCompletionOutcome},
     agent_model_turn_runtime::{
         execute_agent_model_turn, AgentModelTurnOutcome, AgentModelTurnResponse,
     },
     agent_query_commands::{
-        append_agent_progress_event, append_agent_queue_event, emit_agent_stream_delta,
+        append_agent_progress_event, emit_agent_stream_delta,
         finish_agent_run_for_control_stop_with_task_state,
     },
-    agent_read_model::agent_state_with_error_in_context,
+    agent_read_model::{agent_state_for_session, agent_state_with_error_in_context},
+    agent_run_engine::{prepare_agent_execution, AgentRunPreparationError, PreparedAgentExecution},
     agent_runtime_snapshot::{
         capture_persistable_agent_task_state, persist_agent_runtime_snapshot,
     },
+    agent_steer_runtime::{apply_pending_agent_steers, AgentSteerApplication},
     agent_tool_runtime::{execute_agent_tool_batch, AgentToolBatchOutcome},
     app_state::{AppState, SuspendedAgentRun},
-    configuration_models::{agent_model_for_run, ProviderConfig},
+    configuration_models::{agent_model_for_run, AgentEffort, ProviderConfig},
     event_persistence::persist_new_runtime_messages,
-    persistence_runtime::{open_app_read_store, tool_registry_for_state},
+    persistence_runtime::tool_registry_for_state,
     runtime_constants::{AGENT_MAX_OUTPUT_TOKENS, AGENT_MODEL_RECOVERY_WINDOW_SECONDS},
     runtime_values::{
-        add_image_generation_run_context, agent_runtime_context_for_run, current_time_millis,
+        agent_runtime_context_for_run, current_time_millis, effective_agent_objective,
+        run_context_steer_epoch,
     },
     suspended_run_runtime::{clear_suspended_agent_run_for_context, remember_suspended_agent_run},
     view_models::AgentState,
@@ -66,127 +66,18 @@ pub(crate) fn pause_agent_loop_for_control_stop(
     )
 }
 
-pub(crate) fn apply_pending_agent_steers(
-    state: &tauri::State<'_, AppState>,
-    workspace_root: &Path,
-    runtime: &mut agent_runtime::AgentLoopState,
-    run_context: &Metadata,
-    cancellation: &AgentRunControl,
-) -> Result<Option<String>, String> {
-    let pending_ids = cancellation.take_pending_steers();
-    if pending_ids.is_empty() {
-        return Ok(None);
-    }
-    let Some(session_id) = run_context.get("session_id") else {
-        return Ok(None);
-    };
-    let pending = {
-        let store = open_app_read_store()?;
-        let model = load_agent_session_read_model_snapshot(&store, session_id)
-            .map_err(|error| error.to_string())?;
-        pending_ids
-            .into_iter()
-            .filter_map(|pending| {
-                let view = model
-                    .state
-                    .queued_messages
-                    .iter()
-                    .find(|message| message.id == pending.queue_id)?
-                    .clone();
-                let payload = model.queued_payloads.get(&pending.queue_id)?.clone();
-                Some((view, payload))
-            })
-            .collect::<Vec<_>>()
-    };
+#[path = "agent_loop_contract_runtime.rs"]
+mod contract_runtime;
+pub(crate) use contract_runtime::apply_run_task_contract;
+use contract_runtime::{
+    record_retained_agent_decision_after_noop_steer, synchronize_noop_control_epoch_context,
+};
 
-    let mut latest_prompt = None;
-    for (view, payload) in pending {
-        let attachments = validate_agent_attachments(workspace_root, payload.attachments)?;
-        let model_prompt = prompt_with_attachments(&payload.prompt, &attachments);
-        let previous_message_count = runtime.messages.len();
-        let mut metadata = [
-            ("queue_id".to_string(), view.id.clone()),
-            ("queue_mode".to_string(), "steer".to_string()),
-            ("display_content".to_string(), payload.prompt.clone()),
-        ]
-        .into_iter()
-        .collect::<Metadata>();
-        add_attachment_metadata(&mut metadata, &attachments);
-        AgentKernel::new(runtime, &[]).apply_steer(model_prompt.clone(), metadata);
-
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|error| format!("store lock poisoned: {error}"))?;
-        append_agent_queue_event(
-            &mut store,
-            run_context,
-            "start",
-            &view.id,
-            "steer",
-            view.created_at_ms,
-            None,
-        )?;
-        persist_new_runtime_messages(
-            &mut store,
-            &runtime.task_id,
-            &runtime.messages,
-            previous_message_count,
-            run_context,
-        )
-        .map_err(|error| error.to_string())?;
-        persist_agent_runtime_snapshot(&mut store, runtime, run_context)?;
-        latest_prompt = Some(model_prompt);
-    }
-    if latest_prompt.is_some() {
-        cancellation.record_checkpoint(
-            "steering",
-            "User guidance applied",
-            latest_prompt.as_deref().unwrap_or_default(),
-        );
-    }
-    Ok(latest_prompt)
-}
-
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn workspace_verification_policy_for_run_context(
     run_context: &Metadata,
 ) -> Result<WorkspaceVerificationPolicy, String> {
-    if let Some(serialized) = run_context.get("conductor_contract") {
-        let contract = ConductorExecutionContract::from_json(serialized)?;
-        return Ok(if contract.verification_required {
-            WorkspaceVerificationPolicy::RequiredAfterMutation
-        } else {
-            WorkspaceVerificationPolicy::NotRequired
-        });
-    }
-
-    Ok(
-        if run_context
-            .get("verification_required")
-            .is_some_and(|value| value == "true")
-        {
-            WorkspaceVerificationPolicy::RequiredAfterMutation
-        } else {
-            WorkspaceVerificationPolicy::NotRequired
-        },
-    )
-}
-
-pub(crate) fn apply_run_task_contract(
-    runtime: &mut agent_runtime::AgentLoopState,
-    run_context: &Metadata,
-) -> Result<(), String> {
-    AgentKernel::new(runtime, &[]).merge_workspace_verification_policy(
-        workspace_verification_policy_for_run_context(run_context)?,
-    );
-    if run_context
-        .get("image_generation_required")
-        .map(String::as_str)
-        == Some("true")
-    {
-        AgentKernel::new(runtime, &[]).require_tool_success("image.generate");
-    }
-    Ok(())
+    contract_runtime::workspace_verification_policy_for_run_context(run_context)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -195,94 +86,178 @@ pub(crate) fn continue_agent_loop(
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,
     workspace_root: &Path,
-    runtime: agent_runtime::AgentLoopState,
-    prompt: String,
-    run_context: Metadata,
-    collaboration: Option<&AgentCollaboration>,
+    prepared: PreparedAgentExecution,
+    effort: AgentEffort,
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<AgentState, String> {
-    let agent_model = agent_model_for_run(config, &run_context);
-    let provider_timeout = if collaboration.is_some() {
-        cancellation
-            .stage_model_call_timeout_with_recovery(
-                RunStageClass::Finalizer,
-                1,
-                Duration::from_secs(AGENT_MODEL_RECOVERY_WINDOW_SECONDS),
-            )
-            .as_secs()
-            .max(1)
-    } else {
-        cancellation.model_call_timeout_seconds()
-    };
-    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
-        base_url: config.base_url.clone(),
-        api_key: config.api_key.clone(),
-        model: agent_model.clone(),
-        embedding_model: config.model_for_role(&ModelRole::Embedder),
-        timeout_seconds: provider_timeout,
-    });
-    continue_agent_loop_with_provider(
-        app,
-        state,
-        config,
-        workspace_root,
-        runtime,
-        prompt,
-        run_context,
-        collaboration,
-        cancellation,
-        &provider,
-        &agent_model,
-    )
+    let base_run_context = prepared.base_run_context;
+    let mut run_context = prepared.run_context;
+    let mut runtime = prepared.runtime;
+    let mut prompt = prepared.prompt;
+    let mut collaboration = prepared.collaboration;
+    loop {
+        let agent_model = agent_model_for_run(config, &run_context);
+        let provider_timeout = if collaboration.is_some() {
+            cancellation
+                .stage_model_call_timeout_with_recovery(
+                    RunStageClass::Finalizer,
+                    1,
+                    Duration::from_secs(AGENT_MODEL_RECOVERY_WINDOW_SECONDS),
+                )
+                .as_secs()
+                .max(1)
+        } else {
+            cancellation.model_call_timeout_seconds()
+        };
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url: config.base_url.clone(),
+            api_key: config.api_key.clone(),
+            model: agent_model.clone(),
+            embedding_model: config.model_for_role(&ModelRole::Embedder),
+            timeout_seconds: provider_timeout,
+        });
+        match continue_agent_loop_with_provider(
+            app,
+            state,
+            config,
+            workspace_root,
+            runtime,
+            prompt,
+            run_context,
+            collaboration.as_ref(),
+            cancellation,
+            &provider,
+            &agent_model,
+        )? {
+            AgentLoopExecutionOutcome::Finished(agent_state) => return Ok(agent_state),
+            AgentLoopExecutionOutcome::Reprepare {
+                runtime: steered_runtime,
+                prompt: steered_prompt,
+            } => {
+                let task_id = steered_runtime.task_id.clone();
+                let next = prepare_agent_execution(
+                    app,
+                    state,
+                    config,
+                    &task_id,
+                    workspace_root,
+                    base_run_context.clone(),
+                    steered_runtime,
+                    steered_prompt,
+                    None,
+                    effort,
+                    cancellation,
+                );
+                let next = match next {
+                    Ok(prepared) => prepared,
+                    Err(AgentRunPreparationError::ControlStop(run_context)) => {
+                        return finish_agent_run_for_control_stop_with_task_state(
+                            app,
+                            state,
+                            &run_context,
+                            cancellation,
+                            None,
+                        )
+                    }
+                    Err(AgentRunPreparationError::Collaboration { error, run_context }) => {
+                        return agent_state_with_error_in_context(
+                            state,
+                            &run_context,
+                            format!("Collaboration failed: {error}"),
+                        )
+                    }
+                    Err(AgentRunPreparationError::Runtime { error, run_context }) => {
+                        return agent_state_with_error_in_context(state, &run_context, error)
+                    }
+                };
+                run_context = next.run_context;
+                runtime = next.runtime;
+                prompt = next.prompt;
+                collaboration = next.collaboration;
+            }
+        }
+    }
+}
+
+enum AgentLoopExecutionOutcome {
+    Finished(AgentState),
+    Reprepare {
+        runtime: agent_runtime::AgentLoopState,
+        prompt: String,
+    },
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn continue_agent_loop_with_provider(
+fn continue_agent_loop_with_provider(
     app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,
     workspace_root: &Path,
     mut runtime: agent_runtime::AgentLoopState,
-    mut prompt: String,
+    prompt: String,
     mut run_context: Metadata,
     collaboration: Option<&AgentCollaboration>,
     cancellation: &Arc<AgentRunControl>,
     provider: &dyn StreamingModelProvider,
     agent_model: &str,
-) -> Result<AgentState, String> {
+) -> Result<AgentLoopExecutionOutcome, String> {
     let session_id_owned = run_context.get("session_id").cloned();
     let session_id = session_id_owned.as_deref();
     let registry = tool_registry_for_state(state, workspace_root)?;
-    let mut tools = registry
-        .exposure_plan(&prompt, config.context_window_tokens)
+    let tools = registry
+        .exposure_plan(
+            effective_agent_objective(&run_context, &prompt),
+            config.context_window_tokens,
+        )
         .inline;
     apply_run_task_contract(&mut runtime, &run_context)?;
     let mut runtime_context = agent_runtime_context_for_run(&run_context);
     let mut active_collaboration = collaboration;
 
     'agent_loop: loop {
-        if let Some(steer_prompt) = apply_pending_agent_steers(
+        match apply_pending_agent_steers(
             state,
             workspace_root,
             &mut runtime,
             &run_context,
             cancellation,
         )? {
-            active_collaboration = None;
-            prompt = steer_prompt;
-            add_image_generation_run_context(&mut run_context, config, &prompt);
-            tools = registry
-                .exposure_plan(&prompt, config.context_window_tokens)
-                .inline;
-            apply_run_task_contract(&mut runtime, &run_context)?;
-            runtime_context = agent_runtime_context_for_run(&run_context);
-            cancellation.mark_progress("steering", "User guidance applied");
-            append_agent_progress_event(
-                state,
-                &runtime.task_id,
-                &run_context,
-                "Applying user steering",
-            )?;
+            AgentSteerApplication::Applied(steer) => {
+                run_context.insert("steer_epoch".to_string(), steer.epoch.to_string());
+                cancellation.mark_progress_at(steer.epoch, "steering", "User guidance applied");
+                append_agent_progress_event(
+                    state,
+                    &runtime.task_id,
+                    &run_context,
+                    "Applying user steering",
+                )?;
+                return Ok(AgentLoopExecutionOutcome::Reprepare {
+                    runtime,
+                    prompt: steer.prompt,
+                });
+            }
+            AgentSteerApplication::ResolvedNoop { epoch } => {
+                runtime_context = synchronize_noop_control_epoch_context(&mut run_context, epoch);
+                record_retained_agent_decision_after_noop_steer(
+                    state,
+                    &runtime.task_id,
+                    &run_context,
+                )?;
+            }
+            AgentSteerApplication::Stopped(_) => {
+                return pause_agent_loop_for_control_stop(
+                    app,
+                    state,
+                    workspace_root,
+                    &runtime,
+                    &prompt,
+                    &run_context,
+                    active_collaboration,
+                    cancellation,
+                )
+                .map(AgentLoopExecutionOutcome::Finished)
+            }
+            AgentSteerApplication::NoPending => {}
         }
         let max_output_tokens =
             bounded_max_output_tokens(config.context_window_tokens, AGENT_MAX_OUTPUT_TOKENS);
@@ -318,7 +293,11 @@ pub(crate) fn continue_agent_loop_with_provider(
             Ok(prepared_turn) => prepared_turn,
             Err(AgentTurnPreparationError::Budget(exhausted)) => {
                 if let Some(partial_answer) = exhausted.partial_answer {
-                    cancellation.record_partial_output(&partial_answer);
+                    if let agent_runtime::RunEpochLeaseOutcome::Acquired(lease) =
+                        cancellation.execution_epoch_lease()
+                    {
+                        cancellation.record_partial_output_at(lease.epoch(), &partial_answer);
+                    }
                 }
                 cancellation.request_stop(RunStopReason::TurnBudgetExhausted);
                 return pause_agent_loop_for_control_stop(
@@ -330,7 +309,8 @@ pub(crate) fn continue_agent_loop_with_provider(
                     &run_context,
                     active_collaboration,
                     cancellation,
-                );
+                )
+                .map(AgentLoopExecutionOutcome::Finished);
             }
             Err(AgentTurnPreparationError::Context(violation)) => {
                 return Err(violation.to_string());
@@ -362,62 +342,106 @@ pub(crate) fn continue_agent_loop_with_provider(
             response,
             request_id,
             streamed_output,
+            epoch_lease,
         } = match model_turn {
             AgentModelTurnOutcome::Response(response) => response,
             AgentModelTurnOutcome::RestartAfterSteer => {
                 active_collaboration = None;
                 continue 'agent_loop;
             }
-            AgentModelTurnOutcome::Finished(agent_state) => return Ok(*agent_state),
+            AgentModelTurnOutcome::Finished(agent_state) => {
+                return Ok(AgentLoopExecutionOutcome::Finished(*agent_state))
+            }
         };
         let visible_stream = active_collaboration.is_none();
         let previous_message_count = runtime.messages.len();
-        let mut advance = AgentKernel::new(&mut runtime, &tools).advance_model_response(response);
-        if matches!(&advance, AgentAdvance::Completed { .. }) {
-            let verification_instruction =
-                AgentKernel::new(&mut runtime, &tools).completion_gate_for_task();
-            match verification_instruction {
-                Ok(Some(instruction)) => {
-                    runtime.messages.truncate(previous_message_count);
-                    AgentKernel::new(&mut runtime, &tools).apply_instruction(&instruction);
-                    let mut store = state
-                        .store
-                        .lock()
-                        .map_err(|error| format!("store lock poisoned: {error}"))?;
-                    persist_new_runtime_messages(
-                        &mut store,
-                        &runtime.task_id,
-                        &runtime.messages,
-                        previous_message_count,
-                        &run_context,
-                    )
-                    .map_err(|error| error.to_string())?;
-                    persist_agent_runtime_snapshot(&mut store, &runtime, &run_context)?;
-                    cancellation
-                        .mark_progress("verification", "Waiting for task-contract evidence");
-                    continue;
-                }
-                Ok(None) => {}
-                Err(failure) => {
-                    runtime.messages.truncate(previous_message_count);
-                    advance = AgentAdvance::Failed { failure };
+        let response_commit = cancellation.commit_execution_step_with(epoch_lease, || {
+            let mut next_runtime = runtime.clone();
+            let mut advance =
+                AgentKernel::new(&mut next_runtime, &tools).advance_model_response(response);
+            let mut verification_required = false;
+            if matches!(&advance, AgentAdvance::Completed { .. }) {
+                let verification_instruction =
+                    AgentKernel::new(&mut next_runtime, &tools).completion_gate_for_task();
+                match verification_instruction {
+                    Ok(Some(instruction)) => {
+                        next_runtime.messages.truncate(previous_message_count);
+                        AgentKernel::new(&mut next_runtime, &tools).apply_instruction(&instruction);
+                        verification_required = true;
+                    }
+                    Ok(None) => {}
+                    Err(failure) => {
+                        next_runtime.messages.truncate(previous_message_count);
+                        advance = AgentAdvance::Failed { failure };
+                    }
                 }
             }
-        }
-        {
+            if let AgentAdvance::Retry { instruction } = &advance {
+                AgentKernel::new(&mut next_runtime, &tools)
+                    .apply_model_response_retry(instruction.clone());
+            }
             let mut store = state
                 .store
                 .lock()
                 .map_err(|error| format!("store lock poisoned: {error}"))?;
-            persist_new_runtime_messages(
-                &mut store,
-                &runtime.task_id,
-                &runtime.messages,
-                previous_message_count,
-                &run_context,
-            )
-            .map_err(|error| error.to_string())?;
-            persist_agent_runtime_snapshot(&mut store, &runtime, &run_context)?;
+            store
+                .with_immediate_transaction(|store| {
+                    persist_new_runtime_messages(
+                        store,
+                        &next_runtime.task_id,
+                        &next_runtime.messages,
+                        previous_message_count,
+                        &run_context,
+                    )?;
+                    persist_agent_runtime_snapshot(store, &next_runtime, &run_context)
+                        .map_err(agent_storage::StorageError::new)
+                })
+                .map_err(|error| error.to_string())?;
+            drop(store);
+            runtime = next_runtime;
+            Ok::<_, String>((advance, verification_required))
+        })?;
+        let (advance, verification_required) = match response_commit {
+            agent_runtime::RunExecutionStepCommit::Committed(committed) => committed,
+            agent_runtime::RunExecutionStepCommit::RestartAfterSteer => {
+                runtime.messages.truncate(previous_message_count);
+                if visible_stream && streamed_output {
+                    emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
+                }
+                active_collaboration = None;
+                continue 'agent_loop;
+            }
+            agent_runtime::RunExecutionStepCommit::Stopped(_) => {
+                runtime.messages.truncate(previous_message_count);
+                return pause_agent_loop_for_control_stop(
+                    app,
+                    state,
+                    workspace_root,
+                    &runtime,
+                    &prompt,
+                    &run_context,
+                    active_collaboration,
+                    cancellation,
+                )
+                .map(AgentLoopExecutionOutcome::Finished);
+            }
+            agent_runtime::RunExecutionStepCommit::TerminalCommitted => {
+                let store = state
+                    .store
+                    .lock()
+                    .map_err(|error| format!("store lock poisoned: {error}"))?;
+                return agent_state_for_session(&store, None, session_id)
+                    .map(AgentLoopExecutionOutcome::Finished)
+                    .map_err(|error| error.to_string());
+            }
+        };
+        if verification_required {
+            cancellation.mark_progress_at(
+                run_context_steer_epoch(&run_context),
+                "verification",
+                "Waiting for task-contract evidence",
+            );
+            continue;
         }
 
         match advance {
@@ -436,18 +460,23 @@ pub(crate) fn continue_agent_loop_with_provider(
                     session_id,
                     streamed_output,
                     answer,
+                    epoch_lease,
                 )? {
-                    AgentCompletionOutcome::Completed(agent_state) => return Ok(agent_state),
+                    AgentCompletionOutcome::Completed(agent_state) => {
+                        return Ok(AgentLoopExecutionOutcome::Finished(agent_state))
+                    }
                     AgentCompletionOutcome::RestartAfterSteer => {
                         active_collaboration = None;
                         continue 'agent_loop;
                     }
-                    AgentCompletionOutcome::Paused(agent_state) => return Ok(agent_state),
+                    AgentCompletionOutcome::Paused(agent_state) => {
+                        return Ok(AgentLoopExecutionOutcome::Finished(agent_state))
+                    }
                 }
             }
             AgentAdvance::TurnBudgetExhausted(exhausted) => {
                 if let Some(partial_answer) = exhausted.partial_answer {
-                    cancellation.record_partial_output(&partial_answer);
+                    cancellation.record_partial_output_at(epoch_lease.epoch(), &partial_answer);
                 }
                 cancellation.request_stop(RunStopReason::TurnBudgetExhausted);
                 return pause_agent_loop_for_control_stop(
@@ -459,34 +488,25 @@ pub(crate) fn continue_agent_loop_with_provider(
                     &run_context,
                     active_collaboration,
                     cancellation,
-                );
+                )
+                .map(AgentLoopExecutionOutcome::Finished);
             }
             AgentAdvance::Retry { instruction } => {
                 if visible_stream && streamed_output {
                     emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
                 }
-                let previous_message_count = runtime.messages.len();
-                AgentKernel::new(&mut runtime, &tools).apply_model_response_retry(instruction);
-                let mut store = state
-                    .store
-                    .lock()
-                    .map_err(|error| format!("store lock poisoned: {error}"))?;
-                persist_new_runtime_messages(
-                    &mut store,
-                    &runtime.task_id,
-                    &runtime.messages,
-                    previous_message_count,
-                    &run_context,
-                )
-                .map_err(|error| error.to_string())?;
-                persist_agent_runtime_snapshot(&mut store, &runtime, &run_context)?;
-                drop(store);
-                cancellation.mark_progress("model_retry", "Recovering incomplete model response");
+                let _ = instruction;
+                cancellation.mark_progress_at(
+                    run_context_steer_epoch(&run_context),
+                    "model_retry",
+                    "Recovering incomplete model response",
+                );
                 continue;
             }
             AgentAdvance::Failed { failure } => {
                 clear_suspended_agent_run_for_context(state, &run_context)?;
-                return agent_state_with_error_in_context(state, &run_context, failure.message);
+                return agent_state_with_error_in_context(state, &run_context, failure.message)
+                    .map(AgentLoopExecutionOutcome::Finished);
             }
             AgentAdvance::ToolCalls { calls } => {
                 match execute_agent_tool_batch(
@@ -498,6 +518,7 @@ pub(crate) fn continue_agent_loop_with_provider(
                     &run_context,
                     active_collaboration,
                     cancellation,
+                    epoch_lease,
                     &registry,
                     &tools,
                     calls,
@@ -507,7 +528,9 @@ pub(crate) fn continue_agent_loop_with_provider(
                         active_collaboration = None;
                         continue 'agent_loop;
                     }
-                    AgentToolBatchOutcome::Paused(agent_state) => return Ok(*agent_state),
+                    AgentToolBatchOutcome::Paused(agent_state) => {
+                        return Ok(AgentLoopExecutionOutcome::Finished(*agent_state))
+                    }
                 }
             }
         }

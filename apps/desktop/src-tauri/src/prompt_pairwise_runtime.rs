@@ -40,7 +40,9 @@ fn prompt_evaluation_model_partition(
     ] {
         if !model.trim().is_empty()
             && model != conductor_model
-            && !reviewer_candidates.iter().any(|existing| existing == &model)
+            && !reviewer_candidates
+                .iter()
+                .any(|existing| existing == &model)
         {
             reviewer_candidates.push(model);
         }
@@ -99,9 +101,8 @@ fn prompt_pairwise_campaign_snapshot(
         orchestrator::latest_scientific_dataset_digest(&evaluation.observations);
     let is_active_scientific = |observation: &&PromptEvolutionObservation| {
         observation.is_scientific_evidence()
-            && active_dataset_sha256.is_some_and(|digest| {
-                observation.provenance.dataset_sha256 == digest
-            })
+            && active_dataset_sha256
+                .is_some_and(|digest| observation.provenance.dataset_sha256 == digest)
     };
     let paired_runs = evaluation
         .observations
@@ -407,13 +408,18 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
     };
     let objective = selected_case.objective.clone();
     let task_class = selected_case.task_class.clone();
-    let evaluation_id = scoped_prompt_evaluation_id(project_id, &unique_id(match mode {
-        PromptEvaluationMode::PairedShadow | PromptEvaluationMode::PairedExecution => "prompt-pair",
-        PromptEvaluationMode::ReplayHoldout | PromptEvaluationMode::ReplayExecution => {
-            "prompt-replay"
-        }
-        PromptEvaluationMode::Live => "prompt-live",
-    }));
+    let evaluation_id = scoped_prompt_evaluation_id(
+        project_id,
+        &unique_id(match mode {
+            PromptEvaluationMode::PairedShadow | PromptEvaluationMode::PairedExecution => {
+                "prompt-pair"
+            }
+            PromptEvaluationMode::ReplayHoldout | PromptEvaluationMode::ReplayExecution => {
+                "prompt-replay"
+            }
+            PromptEvaluationMode::Live => "prompt-live",
+        }),
+    );
     append_prompt_evaluation_status(
         state,
         task_id,
