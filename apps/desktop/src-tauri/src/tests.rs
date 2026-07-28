@@ -2387,7 +2387,7 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
             reflection_packet: None,
             provenance: test_prompt_evaluation_provenance(&candidate.id, &stable.id),
         };
-    for index in 0..3 {
+    for index in 0..6 {
         let candidate_observation = direct_observation(index, PromptEvaluationSplit::Train);
         let mut stable_observation = candidate_observation.clone();
         stable_observation.profile_id = stable.id.clone();
@@ -2402,8 +2402,8 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
             .observations
             .push(("auto".to_string(), stable_observation));
     }
-    for index in 0..4 {
-        let candidate_observation = direct_observation(index + 3, PromptEvaluationSplit::Holdout);
+    for index in 0..8 {
+        let candidate_observation = direct_observation(index + 6, PromptEvaluationSplit::Holdout);
         let mut stable_observation = candidate_observation.clone();
         stable_observation.profile_id = stable.id.clone();
         stable_observation.opponent_profile_id = Some(candidate.id.clone());
@@ -2418,7 +2418,7 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
             .push(("auto".to_string(), stable_observation));
     }
 
-    let started = reconcile_prompt_rollout(&mut model, "auto", &evaluation(4));
+    let started = reconcile_prompt_rollout(&mut model, "auto", &evaluation(8));
     assert_eq!(started.canary_profile_id.as_deref(), Some("candidate-auto"));
     assert_eq!(started.canary_percent, 10);
 
@@ -2446,7 +2446,7 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
         },
     ));
     for index in 0..2 {
-        let candidate_observation = direct_observation(index + 7, PromptEvaluationSplit::Holdout);
+        let candidate_observation = direct_observation(index + 14, PromptEvaluationSplit::Holdout);
         let mut stable_observation = candidate_observation.clone();
         stable_observation.profile_id = stable.id.clone();
         stable_observation.opponent_profile_id = Some(candidate.id.clone());
@@ -2460,7 +2460,7 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
             .observations
             .push(("auto".to_string(), stable_observation));
     }
-    let advanced = reconcile_prompt_rollout(&mut model, "auto", &evaluation(6));
+    let advanced = reconcile_prompt_rollout(&mut model, "auto", &evaluation(10));
     assert_eq!(advanced.canary_percent, 25);
 
     model.observations.push((
@@ -2486,7 +2486,7 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
             provenance: test_prompt_evaluation_provenance("candidate", "opponent"),
         },
     ));
-    let rolled_back = reconcile_prompt_rollout(&mut model, "auto", &evaluation(8));
+    let rolled_back = reconcile_prompt_rollout(&mut model, "auto", &evaluation(12));
     assert_eq!(rolled_back.status, "rolled_back");
     assert!(rolled_back.canary_profile_id.is_none());
     assert_eq!(rolled_back.rollback_count, 1);
@@ -2518,8 +2518,12 @@ fn completed_gepa_canary_persists_a_verified_frozen_profile() {
         rollouts: BTreeMap::from([("auto".to_string(), rollout)]),
         datasets: BTreeMap::new(),
     };
-    for index in 0..7 {
-        let split = if index < 3 {
+    let candidate_prompt_sha256 =
+        sha256_hex(&serde_json::to_vec(&candidate).expect("candidate should serialize"));
+    let stable_prompt_sha256 =
+        sha256_hex(&serde_json::to_vec(&stable).expect("stable profile should serialize"));
+    for index in 0..14 {
+        let split = if index < 6 {
             PromptEvaluationSplit::Train
         } else {
             PromptEvaluationSplit::Holdout
@@ -2529,7 +2533,7 @@ fn completed_gepa_canary_persists_a_verified_frozen_profile() {
             PromptEvaluationSplit::Holdout => PromptEvaluationMode::ReplayExecution,
         };
         let task_class = if index % 2 == 0 { "coding" } else { "research" };
-        let candidate_observation = PromptEvolutionObservation {
+        let mut candidate_observation = PromptEvolutionObservation {
             profile_id: candidate.id.clone(),
             evaluation_id: format!("promotion-{index}"),
             case_id: format!("case-{index}"),
@@ -2549,6 +2553,9 @@ fn completed_gepa_canary_persists_a_verified_frozen_profile() {
             reflection_packet: None,
             provenance: test_prompt_evaluation_provenance(&candidate.id, &stable.id),
         };
+        candidate_observation.provenance.candidate_prompt_sha256 =
+            candidate_prompt_sha256.clone();
+        candidate_observation.provenance.opponent_prompt_sha256 = stable_prompt_sha256.clone();
         let mut stable_observation = candidate_observation.clone();
         stable_observation.profile_id = stable.id.clone();
         stable_observation.opponent_profile_id = Some(candidate.id.clone());
@@ -2556,6 +2563,9 @@ fn completed_gepa_canary_persists_a_verified_frozen_profile() {
         stable_observation.relative_reward = Some(-0.5);
         stable_observation.provenance =
             test_prompt_evaluation_provenance(&stable.id, &candidate.id);
+        stable_observation.provenance.candidate_prompt_sha256 = stable_prompt_sha256.clone();
+        stable_observation.provenance.opponent_prompt_sha256 =
+            candidate_prompt_sha256.clone();
         model
             .observations
             .push(("auto".to_string(), candidate_observation));
@@ -4777,8 +4787,8 @@ fn prompt_evolution_uses_holdout_results_to_select_a_new_generation() {
     assert!(!live_only.frontier_ids.contains(&seed.id));
     assert!(live_only.champion_id.is_none());
 
-    for evaluation_index in 0..8u64 {
-        let mode = if evaluation_index < 4 {
+    for evaluation_index in 0..14u64 {
+        let mode = if evaluation_index < 6 {
             PromptEvaluationMode::PairedExecution
         } else {
             PromptEvaluationMode::ReplayExecution
@@ -4870,20 +4880,20 @@ fn prompt_evolution_uses_holdout_results_to_select_a_new_generation() {
         .filter(|observation| observation.profile_id == seed.id)
         .collect::<Vec<_>>();
 
-    assert_eq!(seed_observations.len(), 14);
+    assert_eq!(seed_observations.len(), 20);
     assert_eq!(
         seed_observations
             .iter()
             .filter(|observation| observation.mode == PromptEvaluationMode::PairedExecution)
             .count(),
-        4
+        6
     );
     assert_eq!(
         seed_observations
             .iter()
             .filter(|observation| observation.mode == PromptEvaluationMode::ReplayExecution)
             .count(),
-        4
+        8
     );
     assert!(evaluation.frontier_ids.contains(&seed.id));
     assert_eq!(evaluation.next_profile.generation, 1);
@@ -4895,7 +4905,7 @@ fn prompt_evolution_uses_holdout_results_to_select_a_new_generation() {
             .map(|genome| genome.id.as_str()),
         Some(seed.id.as_str())
     );
-    assert_eq!(evaluation.mutation_trajectories.len(), 4);
+    assert_eq!(evaluation.mutation_trajectories.len(), 6);
     assert!(evaluation
         .mutation_trajectories
         .iter()
@@ -5284,7 +5294,7 @@ fn offline_prompt_scheduler_prioritizes_underrepresented_task_class() {
         split: PromptEvaluationSplit::Train,
     })
     .collect::<Vec<_>>();
-    let observations = ["coding-a", "coding-b"]
+    let mut observations = ["coding-a", "coding-b"]
         .into_iter()
         .flat_map(|case_id| {
             [("stable", "candidate"), ("candidate", "stable")].map(
@@ -5311,6 +5321,10 @@ fn offline_prompt_scheduler_prioritizes_underrepresented_task_class() {
             )
         })
         .collect::<Vec<_>>();
+    let dataset_sha256 = prompt_offline_dataset_digest(&dataset);
+    for observation in &mut observations {
+        observation.provenance.dataset_sha256 = dataset_sha256.clone();
+    }
 
     let selected = select_prompt_offline_case(
         &dataset,
