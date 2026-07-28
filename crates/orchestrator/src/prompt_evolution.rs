@@ -707,7 +707,7 @@ mod tests {
         let mut observations = Vec::new();
         for split in [PromptEvaluationSplit::Train, PromptEvaluationSplit::Holdout] {
             let repeats = if split == PromptEvaluationSplit::Holdout {
-                4
+                6
             } else {
                 2
             };
@@ -743,7 +743,7 @@ mod tests {
         let mut observations = Vec::new();
         for split in [PromptEvaluationSplit::Train, PromptEvaluationSplit::Holdout] {
             let repeats = if split == PromptEvaluationSplit::Holdout {
-                4
+                6
             } else {
                 2
             };
@@ -773,7 +773,7 @@ mod tests {
         let mut observations = Vec::new();
         for split in [PromptEvaluationSplit::Train, PromptEvaluationSplit::Holdout] {
             let repeats = if split == PromptEvaluationSplit::Holdout {
-                4
+                6
             } else {
                 2
             };
@@ -936,7 +936,7 @@ mod tests {
         }
         let mut observations = Vec::new();
         for genome in &genomes {
-            for _ in 0..4 {
+            for _ in 0..6 {
                 observations.push(observation(
                     &genome.id,
                     PromptEvaluationSplit::Train,
