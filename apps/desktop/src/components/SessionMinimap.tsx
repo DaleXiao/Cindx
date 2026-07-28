@@ -10,7 +10,7 @@ type SessionMinimapProps = {
   available: boolean;
   hoveredIndex: number | null;
   markers: MinimapMarker[];
-  minimapRef: RefObject<HTMLDivElement | null>;
+  minimapRef: RefObject<HTMLDivElement>;
   onKeyDown: KeyboardEventHandler<HTMLDivElement>;
   onPointerCancel: PointerEventHandler<HTMLDivElement>;
   onPointerDown: PointerEventHandler<HTMLDivElement>;
