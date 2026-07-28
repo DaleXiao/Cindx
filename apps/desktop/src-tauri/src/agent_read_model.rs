@@ -322,7 +322,7 @@ pub(crate) fn agent_recovery_prompt_from_active_events(
 }
 
 pub(crate) fn primary_agent_user_turn_event(active_events: &[Event]) -> Option<&Event> {
-    active_events.iter().find(|event| {
+    active_events.iter().rev().find(|event| {
         event.kind == EventKind::MessageAdded
             && event.metadata.get("role").map(String::as_str) == Some("user")
             && event
