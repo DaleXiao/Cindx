@@ -42,6 +42,7 @@
       "performance-comparator-contract",
       "session-projection-scaling",
       "context-governor-scaling",
+      "conductor-health-scaling",
       "rag-search-scaling"
     ],
     "full": [
@@ -234,6 +235,21 @@
         "-p",
         "agent-runtime",
         "long_history_context_governor_scaling_diagnostic",
+        "--",
+        "--ignored",
+        "--nocapture"
+      ]
+    },
+    {
+      "id": "conductor-health-scaling",
+      "category": "performance",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--locked",
+        "conductor_health_scaling_diagnostic",
         "--",
         "--ignored",
         "--nocapture"

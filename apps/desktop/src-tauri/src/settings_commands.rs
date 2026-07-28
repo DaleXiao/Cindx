@@ -98,6 +98,11 @@ pub(crate) fn save_provider_config(
         invalidate_workspace_knowledge_cache(&state, &root)?;
     }
     invalidate_tool_registry_cache(&state)?;
+    state
+        .conductor_health
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
 
     let mut store = state
         .store

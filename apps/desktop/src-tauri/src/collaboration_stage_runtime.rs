@@ -6,6 +6,8 @@ pub(crate) enum CollaborationStageError {
     SteerInterrupted,
     AttemptDeadline,
     StageDeadline,
+    ModelFailure(AgentFailure),
+    DecisionRejected(String),
     Failed(String),
 }
 
@@ -18,6 +20,8 @@ impl CollaborationStageError {
                 "conductor response did not start before the failover deadline".to_string()
             }
             Self::StageDeadline => "collaboration stage deadline exhausted".to_string(),
+            Self::ModelFailure(failure) => failure.message,
+            Self::DecisionRejected(error) => error,
             Self::Failed(error) => error,
         }
     }
@@ -83,13 +87,17 @@ pub(crate) fn collaboration_stage_result(
     {
         return Err(CollaborationStageError::StageDeadline);
     }
-    completion.content.ok_or_else(|| {
-        CollaborationStageError::Failed(
-            completion
-                .error
-                .unwrap_or_else(|| "collaboration model returned no content".to_string()),
-        )
-    })
+    if let Some(content) = completion.content {
+        return Ok(content);
+    }
+    if let Some(failure) = completion.failure {
+        return Err(CollaborationStageError::ModelFailure(failure));
+    }
+    Err(CollaborationStageError::Failed(
+        completion
+            .error
+            .unwrap_or_else(|| "collaboration model returned no content".to_string()),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]

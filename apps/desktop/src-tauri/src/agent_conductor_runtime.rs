@@ -76,12 +76,12 @@ pub(crate) fn attempt_conductor_decision(
                 conductor_call_limits(has_alternate_model, true),
             )?;
             harness.parse(&repaired).map_err(|repair_error| {
-                CollaborationStageError::Failed(format!(
+                CollaborationStageError::DecisionRejected(format!(
                     "initial decision rejected ({initial_error}); repaired decision rejected ({repair_error})"
                 ))
             })
         }
-        Err(error) => Err(CollaborationStageError::Failed(format!(
+        Err(error) => Err(CollaborationStageError::DecisionRejected(format!(
             "conductor decision rejected: {error}"
         ))),
     }

@@ -1,4 +1,5 @@
 use crate::collaboration_stage_runtime::CollaborationStageError;
+use agent_runtime::AgentFailureClass;
 use orchestrator::AgentRunDecision;
 
 #[derive(Debug, Clone)]
@@ -56,8 +57,26 @@ pub(crate) fn schedule_conductor_decision(
                 ));
                 break;
             }
+            Err(CollaborationStageError::ModelFailure(failure)) => {
+                failure_reasons.push(format!("{conductor_model}: {}", failure.message));
+                if matches!(
+                    failure.class,
+                    AgentFailureClass::Cancelled
+                        | AgentFailureClass::Budget
+                        | AgentFailureClass::Contract
+                        | AgentFailureClass::Tool
+                        | AgentFailureClass::Internal
+                ) || failure.provider_status_code == Some(401)
+                {
+                    break;
+                }
+            }
+            Err(CollaborationStageError::DecisionRejected(error)) => {
+                failure_reasons.push(format!("{conductor_model}: {error}"));
+            }
             Err(CollaborationStageError::Failed(error)) => {
                 failure_reasons.push(format!("{conductor_model}: {error}"));
+                break;
             }
         }
     }

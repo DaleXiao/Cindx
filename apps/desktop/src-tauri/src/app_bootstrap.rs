@@ -1,4 +1,5 @@
 use super::*;
+use crate::conductor_health_runtime::ConductorHealthLedger;
 
 pub fn run() {
     install_startup_panic_log();
@@ -98,6 +99,7 @@ pub fn run() {
             session_title_refinement_sessions: Mutex::new(BTreeSet::new()),
             workspace_knowledge_cache: Mutex::new(BTreeMap::new()),
             tool_registry_cache: Mutex::new(ToolRegistryCache::default()),
+            conductor_health: Mutex::new(ConductorHealthLedger::default()),
             tool_registry_generation: AtomicU64::new(0),
             allow_exit: AtomicBool::new(false),
             quit_prompt_active: AtomicBool::new(false),

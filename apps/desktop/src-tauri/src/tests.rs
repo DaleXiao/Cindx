@@ -13,6 +13,9 @@ use crate::collaboration_execution::collaboration_model_failure;
 use crate::collaboration_stage_runtime::{
     collaboration_stage_result, collaboration_stage_terminal_presentation, CollaborationStageError,
 };
+use crate::conductor_health_runtime::{
+    conductor_health_outcome, ConductorHealthLedger, ConductorHealthOutcome,
+};
 use orchestrator::{
     AdaptiveWorkflow, AdaptiveWorkflowStep, AgentRunDecisionHarness, AgentRunDecisionRequest,
     AgentVerificationPolicy,
@@ -305,9 +308,12 @@ fn goal2_conductor_scheduler_fails_over_but_never_retries_after_steer_or_stage_d
             *attempts += 1;
             observed.push((model.to_string(), has_alternate));
             if index == 0 {
-                Err(CollaborationStageError::Failed(
-                    "provider timeout".to_string(),
-                ))
+                Err(CollaborationStageError::ModelFailure(AgentFailure::new(
+                    "provider_timeout",
+                    "provider timeout",
+                    AgentFailureClass::ProviderTransient,
+                    true,
+                )))
             } else {
                 Ok(AgentRunDecision::direct(model))
             }
@@ -329,6 +335,56 @@ fn goal2_conductor_scheduler_fails_over_but_never_retries_after_steer_or_stage_d
             ("alternate".to_string(), true)
         ]
     );
+
+    for terminal_error in [
+        CollaborationStageError::ModelFailure(AgentFailure::from_model_error(
+            &ModelError::with_status(401, "invalid credentials"),
+        )),
+        CollaborationStageError::ModelFailure(AgentFailure::internal(
+            "collaboration_internal",
+            "local persistence failed",
+        )),
+        CollaborationStageError::Failed("local persistence failed".to_string()),
+    ] {
+        let mut attempts = 0;
+        let mut invoked = Vec::new();
+        let exhausted =
+            schedule_conductor_decision(&models, &mut attempts, |_, model, _, attempts| {
+                *attempts += 1;
+                invoked.push(model.to_string());
+                Err(terminal_error.clone())
+            })
+            .expect("a deterministic failure should degrade without retrying another model");
+        assert!(matches!(
+            exhausted.outcome,
+            ConductorDecisionOutcome::Exhausted
+        ));
+        assert_eq!(invoked, vec!["primary"]);
+        assert_eq!(attempts, 1);
+    }
+
+    let mut attempts = 0;
+    let authorized =
+        schedule_conductor_decision(&models, &mut attempts, |index, model, _, attempts| {
+            *attempts += 1;
+            if index == 0 {
+                Err(CollaborationStageError::ModelFailure(
+                    AgentFailure::from_model_error(&ModelError::with_status(
+                        403,
+                        "primary model is not allowed",
+                    )),
+                ))
+            } else {
+                Ok(AgentRunDecision::direct(model))
+            }
+        })
+        .expect("model-scoped authorization should try an alternate model");
+    assert!(matches!(
+        authorized.outcome,
+        ConductorDecisionOutcome::Selected(_)
+    ));
+    assert_eq!(authorized.selected_model.as_deref(), Some("alternate"));
+    assert_eq!(attempts, 2);
 
     let mut attempts = 0;
     let mut invoked = Vec::new();
@@ -426,6 +482,119 @@ fn goal2_conductor_failover_limits_preserve_quality_after_response_start() {
     assert_eq!(repair.no_progress_timeout, Some(Duration::from_secs(45)));
     assert_eq!(conductor_call_limits(false, false), Default::default());
     assert_eq!(conductor_call_limits(false, true), Default::default());
+}
+
+#[test]
+fn goal3_conductor_health_classifies_only_attributable_failures() {
+    let valid = Ok(AgentRunDecision::direct("primary"));
+    assert_eq!(
+        conductor_health_outcome(&valid),
+        ConductorHealthOutcome::ValidDecision
+    );
+    assert_eq!(
+        conductor_health_outcome(&Err(CollaborationStageError::AttemptDeadline)),
+        ConductorHealthOutcome::RetryableFailure
+    );
+    assert_eq!(
+        conductor_health_outcome(&Err(CollaborationStageError::ModelFailure(
+            AgentFailure::new(
+                "provider_timeout",
+                "provider timed out",
+                AgentFailureClass::ProviderTransient,
+                true,
+            ),
+        ))),
+        ConductorHealthOutcome::RetryableFailure
+    );
+    assert_eq!(
+        conductor_health_outcome(&Err(CollaborationStageError::ModelFailure(
+            AgentFailure::new(
+                "provider_transient",
+                "non-retryable transport failure",
+                AgentFailureClass::ProviderTransient,
+                false,
+            ),
+        ))),
+        ConductorHealthOutcome::Censored
+    );
+    assert_eq!(
+        conductor_health_outcome(&Err(CollaborationStageError::ModelFailure(
+            AgentFailure::model_output("invalid_output", "invalid output"),
+        ))),
+        ConductorHealthOutcome::RejectedDecision
+    );
+    assert_eq!(
+        conductor_health_outcome(&Err(CollaborationStageError::DecisionRejected(
+            "invalid decision".to_string(),
+        ))),
+        ConductorHealthOutcome::RejectedDecision
+    );
+
+    for censored in [
+        CollaborationStageError::RunStopped,
+        CollaborationStageError::SteerInterrupted,
+        CollaborationStageError::StageDeadline,
+        CollaborationStageError::ModelFailure(AgentFailure::new(
+            "provider_authentication",
+            "invalid credentials",
+            AgentFailureClass::ProviderPermanent,
+            false,
+        )),
+        CollaborationStageError::ModelFailure(AgentFailure::internal(
+            "persistence_failed",
+            "could not persist event",
+        )),
+        CollaborationStageError::Failed("local configuration error".to_string()),
+    ] {
+        assert_eq!(
+            conductor_health_outcome(&Err(censored)),
+            ConductorHealthOutcome::Censored
+        );
+    }
+}
+
+#[test]
+fn goal3_conductor_health_never_reorders_without_complete_quality_evidence() {
+    let configured = vec![
+        "primary".to_string(),
+        "alternate".to_string(),
+        "reserve".to_string(),
+        "terminal".to_string(),
+    ];
+    let mut cold = ConductorHealthLedger::default();
+    assert_eq!(cold.route("scope", &configured).models, configured);
+
+    let mut learned = ConductorHealthLedger::default();
+    for _ in 0..5 {
+        learned.record(
+            "scope",
+            "alternate",
+            ConductorHealthOutcome::RetryableFailure,
+        );
+        learned.record("scope", "reserve", ConductorHealthOutcome::ValidDecision);
+    }
+    let routed = learned.route("scope", &configured);
+    assert_eq!(routed.models, configured);
+    assert_eq!(routed.source, "quality_evidence_required");
+    assert_eq!(routed.candidate_models, vec!["reserve"]);
+
+    let run = |models: &[String]| {
+        let mut attempts = 0;
+        let scheduled =
+            schedule_conductor_decision(models, &mut attempts, |_, model, _, attempts| {
+                *attempts += 1;
+                if model != "reserve" {
+                    Err(CollaborationStageError::AttemptDeadline)
+                } else {
+                    Ok(AgentRunDecision::direct(model))
+                }
+            })
+            .expect("the alternate should produce a valid decision");
+        (attempts, scheduled.selected_model)
+    };
+
+    assert_eq!(run(&configured), (3, Some("reserve".to_string())));
+    assert_eq!(run(&routed.models), (3, Some("reserve".to_string())));
 }
 
 #[test]

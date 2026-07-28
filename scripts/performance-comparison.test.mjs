@@ -41,6 +41,18 @@ function report(overrides = {}) {
         semantic_p95_micros: 50000,
         literal_p95_micros: 175000,
         ...overrides.rag
+      },
+      {
+        schema: "cindx.conductor-health-diagnostic.v1",
+        models: 6,
+        max_health_keys: 32,
+        max_observations_per_key: 32,
+        warmup_rounds: 20,
+        sample_count: 101,
+        hedge: false,
+        cold_path_p95_micros: 1,
+        warm_evidence_p95_micros: 10,
+        ...overrides.health
       }
     ]
   };
@@ -87,4 +99,16 @@ test("same-machine policy rejects a different workload", () => {
   const result = compare(report({ rag: { chunks: 10000 } }));
   assert.equal(result.status, 1);
   assert.match(result.output.comparisons[2].errors[0], /chunks differs/);
+});
+
+test("same-machine policy rejects a conductor health evidence regression", () => {
+  const result = compare(
+    report({ health: { cold_path_p95_micros: 60, warm_evidence_p95_micros: 70 } })
+  );
+  assert.equal(result.status, 1);
+  const health = result.output.comparisons.find(
+    (entry) => entry.schema === "cindx.conductor-health-diagnostic.v1"
+  );
+  assert.equal(health.passed, false);
+  assert.equal(health.metrics.every((metric) => !metric.passed), true);
 });
