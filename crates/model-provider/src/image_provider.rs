@@ -407,3 +407,35 @@ pub(crate) fn generated_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_url_accepts_a_base_url_or_explicit_endpoint() {
+        let base = OpenAiCompatibleImageConfig {
+            base_url: "https://example.test/v1/".to_string(),
+            api_key: "key".to_string(),
+            model: "image-a".to_string(),
+            timeout_seconds: 10,
+        };
+        let dashscope = OpenAiCompatibleImageConfig {
+            base_url: "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation".to_string(),
+            ..base.clone()
+        };
+
+        assert_eq!(
+            base.images_url(),
+            "https://example.test/v1/images/generations"
+        );
+        assert_eq!(
+            dashscope.images_url(),
+            "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+        );
+        assert_eq!(
+            dashscope.protocol(),
+            ImageGenerationProtocol::DashScopeMultimodal
+        );
+    }
+}
