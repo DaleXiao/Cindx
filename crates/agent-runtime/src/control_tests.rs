@@ -21,6 +21,10 @@ fn test_budget() -> RunBudget {
         max_repair_attempts: 2,
         terminal_model_call_reserve: 1,
         terminal_time_reserve: Duration::from_millis(5),
+        max_total_tokens: 1_000,
+        max_physical_model_attempts: 8,
+        terminal_token_reserve: 100,
+        terminal_physical_model_attempt_reserve: 1,
     }
 }
 
@@ -38,6 +42,24 @@ fn pro_budget_allows_a_long_running_segment() {
     assert_eq!(budget.max_agent_turns, 384);
     assert_eq!(budget.max_repair_attempts, 8);
     assert_eq!(budget.terminal_model_call_reserve, 8);
+    assert_eq!(
+        budget.max_physical_model_attempts,
+        budget
+            .max_model_calls
+            .saturating_mul(crate::PHYSICAL_MODEL_ATTEMPTS_PER_LOGICAL_CALL)
+    );
+    assert_eq!(
+        budget.max_total_tokens,
+        u64::try_from(budget.max_physical_model_attempts)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(crate::CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT)
+    );
+    assert_eq!(
+        budget.terminal_physical_model_attempt_reserve,
+        budget
+            .terminal_model_call_reserve
+            .saturating_mul(crate::PHYSICAL_MODEL_ATTEMPTS_PER_LOGICAL_CALL)
+    );
 }
 
 #[test]
@@ -388,6 +410,306 @@ fn permission_resume_preserves_consumed_budget() {
         resumed.begin_model_call("over-budget"),
         Err(RunStopReason::ModelCallBudgetExceeded)
     );
+}
+
+#[test]
+fn physical_attempt_usage_is_reserved_then_reconciled() {
+    let mut budget = test_budget();
+    budget.max_total_tokens = 100;
+    budget.max_physical_model_attempts = 4;
+    budget.terminal_token_reserve = 0;
+    budget.terminal_physical_model_attempt_reserve = 0;
+    let control = AgentRunControl::with_budget(budget);
+
+    let attempt = control
+        .begin_physical_model_attempt("model-a", 40, 20, RunStageClass::Worker)
+        .expect("attempt should reserve resources");
+    assert_eq!(attempt.model(), "model-a");
+    assert_eq!(attempt.reserved_tokens(), 60);
+    let reserved = control.resource_usage();
+    assert_eq!(reserved.segment.physical_attempts, 1);
+    assert_eq!(reserved.segment.reserved_tokens, 60);
+    assert_eq!(reserved.segment.total_tokens, 0);
+
+    assert!(control.finish_physical_model_attempt(
+        attempt,
+        Some(crate::ModelAttemptUsage::new(
+            30,
+            10,
+            40,
+            crate::ModelUsageSource::Provider,
+        )),
+    ));
+    let settled = control.resource_usage();
+    assert_eq!(settled.segment.reserved_tokens, 0);
+    assert_eq!(settled.segment.prompt_tokens, 30);
+    assert_eq!(settled.segment.completion_tokens, 10);
+    assert_eq!(settled.segment.total_tokens, 40);
+    assert_eq!(settled.segment.usage_sources.provider, 1);
+    assert_eq!(settled.segment, settled.lineage);
+}
+
+#[test]
+fn unknown_attempt_usage_commits_the_conservative_reservation() {
+    let mut budget = test_budget();
+    budget.max_total_tokens = 100;
+    budget.max_physical_model_attempts = 2;
+    budget.terminal_token_reserve = 0;
+    budget.terminal_physical_model_attempt_reserve = 0;
+    let control = AgentRunControl::with_budget(budget);
+    let attempt = control
+        .begin_physical_model_attempt("model-a", 15, 10, RunStageClass::Worker)
+        .expect("attempt should reserve resources");
+
+    assert!(control.finish_physical_model_attempt(attempt, None));
+    let usage = control.resource_usage().segment;
+    assert_eq!(usage.total_tokens, 25);
+    assert_eq!(usage.prompt_tokens, 0);
+    assert_eq!(usage.completion_tokens, 0);
+    assert_eq!(usage.usage_sources.unknown, 1);
+    assert_eq!(
+        usage.usage_sources.least_complete(),
+        Some(crate::ModelUsageSource::Unknown)
+    );
+}
+
+#[test]
+fn concurrent_physical_attempt_reservations_cannot_oversubscribe() {
+    let mut budget = test_budget();
+    budget.max_total_tokens = 10;
+    budget.max_physical_model_attempts = 2;
+    budget.terminal_token_reserve = 0;
+    budget.terminal_physical_model_attempt_reserve = 0;
+    let control = Arc::new(AgentRunControl::with_budget(budget));
+    let barrier = Arc::new(Barrier::new(2));
+    let handles = (0..2)
+        .map(|index| {
+            let control = Arc::clone(&control);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                control.begin_physical_model_attempt(
+                    &format!("model-{index}"),
+                    6,
+                    0,
+                    RunStageClass::Finalizer,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("reservation thread should join"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| { matches!(result, Err(RunStopReason::ModelResourceBudgetExceeded)) })
+            .count(),
+        1
+    );
+    assert_eq!(control.resource_usage().segment.reserved_tokens, 6);
+    for attempt in results.into_iter().flatten() {
+        assert!(control.finish_physical_model_attempt(attempt, None));
+    }
+}
+
+#[test]
+fn terminal_attempt_and_token_reserves_remain_available_to_finalizer() {
+    let mut budget = test_budget();
+    budget.max_total_tokens = 100;
+    budget.max_physical_model_attempts = 2;
+    budget.terminal_token_reserve = 30;
+    budget.terminal_physical_model_attempt_reserve = 1;
+    let control = AgentRunControl::with_budget(budget);
+
+    let worker = control
+        .begin_physical_model_attempt("worker", 70, 0, RunStageClass::Worker)
+        .expect("worker should use only the unprotected allocation");
+    assert_eq!(
+        control.begin_physical_model_attempt("worker", 31, 0, RunStageClass::Worker),
+        Err(RunStopReason::StageBudgetExhausted)
+    );
+    assert_eq!(control.stop_reason(), None);
+    let finalizer = control
+        .begin_physical_model_attempt("finalizer", 30, 0, RunStageClass::Finalizer)
+        .expect("finalizer should own the terminal reserve");
+    assert_eq!(control.resource_usage().segment.reserved_tokens, 100);
+
+    assert!(control.finish_physical_model_attempt(worker, None));
+    assert!(control.finish_physical_model_attempt(finalizer, None));
+    assert_eq!(control.resource_usage().segment.total_tokens, 100);
+    assert_eq!(
+        control.begin_physical_model_attempt("finalizer", 0, 0, RunStageClass::Finalizer),
+        Err(RunStopReason::ModelResourceBudgetExceeded)
+    );
+}
+
+#[test]
+fn normal_snapshot_preserves_segment_and_lineage_resources() {
+    let mut budget = test_budget();
+    budget.max_total_tokens = 100;
+    budget.max_physical_model_attempts = 4;
+    budget.terminal_token_reserve = 0;
+    budget.terminal_physical_model_attempt_reserve = 0;
+    let control = AgentRunControl::with_budget(budget);
+    let attempt = control
+        .begin_physical_model_attempt("model-a", 20, 10, RunStageClass::Worker)
+        .expect("attempt should start");
+    assert!(control.finish_physical_model_attempt(
+        attempt,
+        Some(crate::ModelAttemptUsage::new(
+            12,
+            4,
+            16,
+            crate::ModelUsageSource::Estimated,
+        )),
+    ));
+
+    let expected = control.resource_usage();
+    let resumed = AgentRunControl::from_snapshot(control.snapshot());
+    assert_eq!(resumed.resource_usage(), expected);
+}
+
+#[test]
+fn durable_resource_restore_conservatively_settles_inflight_attempts() {
+    let control = AgentRunControl::new("fast");
+    let _attempt = control
+        .begin_physical_model_attempt("model-a", 12, 8, RunStageClass::Worker)
+        .expect("attempt should reserve resources");
+
+    let restored = AgentRunControl::new_at_steer_epoch_with_resource_snapshot(
+        "fast",
+        7,
+        control.resource_usage(),
+    );
+    assert_eq!(restored.steer_epoch(), 7);
+    let resources = restored.resource_usage();
+    assert_eq!(resources.segment.reserved_tokens, 0);
+    assert_eq!(resources.segment.total_tokens, 20);
+    assert_eq!(resources.segment.usage_sources.unknown, 1);
+    assert_eq!(resources.segment, resources.lineage);
+}
+
+#[test]
+fn explicit_continuation_resets_segment_but_preserves_lineage_resources() {
+    let mut budget = test_budget();
+    budget.max_total_tokens = 100;
+    budget.max_physical_model_attempts = 4;
+    budget.terminal_token_reserve = 0;
+    budget.terminal_physical_model_attempt_reserve = 0;
+    let control = AgentRunControl::with_budget(budget);
+    let attempt = control
+        .begin_physical_model_attempt("model-a", 20, 0, RunStageClass::Worker)
+        .expect("attempt should start");
+    assert!(control.finish_physical_model_attempt(attempt, None));
+    control.request_stop(RunStopReason::ModelCallBudgetExceeded);
+
+    let continued = AgentRunControl::from_snapshot_for_continuation(control.snapshot())
+        .expect("explicit continuation should start a fresh segment");
+    let resources = continued.resource_usage();
+    assert_eq!(resources.segment, crate::RunResourceUsage::default());
+    assert_eq!(resources.lineage.physical_attempts, 1);
+    assert_eq!(resources.lineage.total_tokens, 20);
+    let next = continued
+        .begin_physical_model_attempt("model-b", 10, 0, RunStageClass::Worker)
+        .expect("new segment should have a fresh allocation");
+    assert!(continued.finish_physical_model_attempt(next, None));
+    let resources = continued.resource_usage();
+    assert_eq!(resources.segment.total_tokens, 10);
+    assert_eq!(resources.lineage.total_tokens, 30);
+    assert_eq!(resources.lineage.physical_attempts, 2);
+}
+
+#[test]
+fn durable_continuation_charges_inflight_attempt_to_lineage_before_resetting_segment() {
+    let control = AgentRunControl::new("fast");
+    let _attempt = control
+        .begin_physical_model_attempt("model-a", 12, 8, RunStageClass::Worker)
+        .expect("attempt should reserve resources");
+
+    let continued = AgentRunControl::new_for_continuation_at_steer_epoch_with_resource_snapshot(
+        "fast",
+        4,
+        control.resource_usage(),
+    );
+    let resources = continued.resource_usage();
+    assert_eq!(continued.steer_epoch(), 4);
+    assert_eq!(resources.segment, crate::RunResourceUsage::default());
+    assert_eq!(resources.lineage.reserved_tokens, 0);
+    assert_eq!(resources.lineage.total_tokens, 20);
+    assert_eq!(resources.lineage.usage_sources.unknown, 1);
+}
+
+#[test]
+fn resource_ledger_bounds_model_cardinality() {
+    let mut budget = test_budget();
+    budget.max_total_tokens = 1_000;
+    budget.max_physical_model_attempts = 64;
+    budget.terminal_token_reserve = 0;
+    budget.terminal_physical_model_attempt_reserve = 0;
+    let control = AgentRunControl::with_budget(budget);
+
+    for index in 0..40 {
+        let attempt = control
+            .begin_physical_model_attempt(&format!("model-{index}"), 1, 0, RunStageClass::Finalizer)
+            .expect("bounded model ledger should not reject valid attempts");
+        assert!(control.finish_physical_model_attempt(
+            attempt,
+            Some(crate::ModelAttemptUsage::new(
+                1,
+                0,
+                1,
+                crate::ModelUsageSource::ProviderPartial,
+            )),
+        ));
+    }
+
+    let usage = control.resource_usage();
+    assert_eq!(
+        usage.segment.models.len(),
+        crate::MAX_RESOURCE_LEDGER_MODELS
+    );
+    assert_eq!(
+        usage.lineage.models.len(),
+        crate::MAX_RESOURCE_LEDGER_MODELS
+    );
+    assert_eq!(usage.segment.physical_attempts, 40);
+    assert_eq!(usage.segment.usage_sources.provider_partial, 40);
+}
+
+#[test]
+fn resource_accounting_uses_saturating_arithmetic() {
+    let mut budget = test_budget();
+    budget.max_total_tokens = u64::MAX;
+    budget.max_physical_model_attempts = usize::MAX;
+    budget.terminal_token_reserve = 0;
+    budget.terminal_physical_model_attempt_reserve = 0;
+    let control = AgentRunControl::with_budget(budget);
+    let attempt = control
+        .begin_physical_model_attempt(
+            "model-a",
+            u64::MAX.saturating_sub(1),
+            10,
+            RunStageClass::Finalizer,
+        )
+        .expect("saturated exact-boundary reservation should be admitted");
+    assert_eq!(attempt.reserved_tokens(), u64::MAX);
+    assert!(control.finish_physical_model_attempt(
+        attempt,
+        Some(crate::ModelAttemptUsage::new(
+            u64::MAX,
+            u64::MAX,
+            0,
+            crate::ModelUsageSource::Estimated,
+        )),
+    ));
+    let usage = control.resource_usage().segment;
+    assert_eq!(usage.prompt_tokens, u64::MAX);
+    assert_eq!(usage.completion_tokens, u64::MAX);
+    assert_eq!(usage.total_tokens, u64::MAX);
 }
 
 #[test]

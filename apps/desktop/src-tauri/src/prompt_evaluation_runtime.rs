@@ -389,6 +389,44 @@ pub(crate) fn complete_prompt_evaluation_worker(
         model_request
             .metadata
             .insert("evaluation_sandbox".to_string(), "read_only_v2".to_string());
+        let model_attempt = match crate::model_resource_runtime::ControlledModelAttempt::reserve_at(
+            control,
+            objective_epoch,
+            &request.model,
+            &model_request,
+            stage_class,
+        ) {
+            Ok(Some(attempt)) => attempt,
+            Ok(None) => {
+                control.finish_model_call_at(objective_epoch);
+                return CollaborationCompletion::failed_worker(
+                    AgentFailure::cancelled(
+                        "user_steer",
+                        "evaluation provider dispatch superseded by user steering",
+                    ),
+                    None,
+                    prompt_evaluation_elapsed_ms(started_at),
+                    worker.completion_usage("read_only_evaluation_v3"),
+                    evidence,
+                );
+            }
+            Err(reason) => {
+                control.finish_model_call_at(objective_epoch);
+                return CollaborationCompletion::failed_worker(
+                    AgentFailure::from_stop_reason(
+                        reason,
+                        format!(
+                            "evaluation worker stopped before provider dispatch: {}",
+                            reason.code()
+                        ),
+                    ),
+                    None,
+                    prompt_evaluation_elapsed_ms(started_at),
+                    worker.completion_usage("read_only_evaluation_v3"),
+                    evidence,
+                );
+            }
+        };
         let mut streamed = String::new();
         let response = provider.complete_streaming_cancellable(
             model_request,
@@ -404,6 +442,14 @@ pub(crate) fn complete_prompt_evaluation_worker(
                     || control.stage_should_stop(stage_class)
             },
         );
+        match &response {
+            Ok(response) => {
+                let _ = model_attempt.settle_response(response);
+            }
+            Err(_) => {
+                let _ = model_attempt.settle_unknown();
+            }
+        }
         control.finish_model_call_at(objective_epoch);
         let mut response = match response {
             Ok(response) => response,

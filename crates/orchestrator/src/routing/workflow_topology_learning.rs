@@ -1,6 +1,6 @@
 use super::{
-    wilson_lower_bound, TaskClass, LEARNED_ROUTER_MIN_EXAMPLES,
-    LEARNED_ROUTER_MIN_SUCCESS_CONFIDENCE,
+    wilson_lower_bound, LearningDisposition, LearningEvidenceV1, LearningUsageCompleteness,
+    TaskClass, LEARNED_ROUTER_MIN_EXAMPLES, LEARNED_ROUTER_MIN_SUCCESS_CONFIDENCE,
 };
 use crate::{WorkflowPlanIr, WorkflowToolPolicy};
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,8 @@ pub struct WorkflowExecutionTelemetry {
     pub plan: WorkflowPlanIr,
     pub succeeded: bool,
     pub quality_score: Option<f32>,
+    #[serde(default)]
+    pub learning_evidence: LearningEvidenceV1,
     pub latency_ms: u64,
     pub total_tokens: u64,
     pub tool_calls: u64,
@@ -117,7 +119,10 @@ impl WorkflowSearchTeacher {
             (TaskClass, String, usize, String),
             BTreeMap<String, WorkflowPriorAccumulator>,
         >::new();
-        for entry in telemetry.iter().filter(|entry| !entry.fallback_used) {
+        for entry in telemetry
+            .iter()
+            .filter(|entry| !entry.fallback_used && entry.learning_evidence.is_learnable())
+        {
             let scopes = if entry.routing_signature.trim().is_empty() {
                 vec![String::new()]
             } else {
@@ -291,6 +296,7 @@ struct WorkflowPriorAccumulator {
     quality_examples: usize,
     latency_ms: u64,
     total_tokens: u64,
+    token_examples: usize,
     tool_calls: u64,
     successful_tools_by_step: BTreeMap<String, BTreeMap<String, usize>>,
 }
@@ -305,24 +311,28 @@ impl WorkflowPriorAccumulator {
             quality_examples: 0,
             latency_ms: 0,
             total_tokens: 0,
+            token_examples: 0,
             tool_calls: 0,
             successful_tools_by_step: BTreeMap::new(),
         }
     }
 
     fn record(&mut self, telemetry: &WorkflowExecutionTelemetry) {
+        let evidence = &telemetry.learning_evidence;
         self.examples += 1;
-        self.successes += usize::from(telemetry.succeeded);
-        if let Some(score) = telemetry.quality_score {
+        self.successes += usize::from(evidence.disposition == LearningDisposition::Positive);
+        if let Some(score) = evidence.quality_score() {
             self.quality_total += score.clamp(0.0, 1.0);
             self.quality_examples += 1;
         }
         self.latency_ms = self.latency_ms.saturating_add(telemetry.latency_ms);
-        self.total_tokens = self.total_tokens.saturating_add(telemetry.total_tokens);
+        if evidence.usage_completeness == LearningUsageCompleteness::Complete {
+            self.total_tokens = self.total_tokens.saturating_add(telemetry.total_tokens);
+            self.token_examples += 1;
+        }
         self.tool_calls = self.tool_calls.saturating_add(telemetry.tool_calls);
-        if telemetry.succeeded
-            && telemetry.quality_score.unwrap_or_default().clamp(0.0, 1.0)
-                >= ADAPTIVE_WORKFLOW_PRIOR_MIN_QUALITY
+        if evidence.disposition == LearningDisposition::Positive
+            && evidence.quality_score().unwrap_or_default() >= ADAPTIVE_WORKFLOW_PRIOR_MIN_QUALITY
         {
             for (step_id, tools) in &telemetry.successful_tools_by_step {
                 let counts = self
@@ -351,7 +361,7 @@ impl WorkflowPriorAccumulator {
         let average_quality =
             (self.quality_examples > 0).then(|| self.quality_total / self.quality_examples as f32);
         let average_latency_ms = self.latency_ms / divisor;
-        let average_total_tokens = self.total_tokens / divisor;
+        let average_total_tokens = self.total_tokens / self.token_examples.max(1) as u64;
         let average_tool_calls = self.tool_calls as f32 / self.examples.max(1) as f32;
         let quality = average_quality.unwrap_or(success_rate);
         let score = (success_rate * 10_000.0) as i64 + (quality * 5_000.0) as i64

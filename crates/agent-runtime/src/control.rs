@@ -4,6 +4,10 @@ pub use crate::control_steer::{
     RunPreparationCommit, RunProgressSnapshot, RunStageUsageSnapshot, RunSteer,
     RunSteerBatchCommit, RunSteerRequestCommit, RunTerminalCommit, RunToolCallStart,
 };
+use crate::resource_ledger::{
+    ModelAttemptUsage, PhysicalModelAttempt, ResourceAdmissionError, RunResourceLedger,
+    RunResourceSnapshot,
+};
 use crate::result_frontier::{BestKnownResult, ResultFrontier, ResultQuality};
 use crate::run_budget::{RunBudget, RunStageClass};
 use crate::{AgentLoopState, AgentRuntimeConfig};
@@ -12,6 +16,11 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+#[path = "control_construction.rs"]
+mod construction;
+#[path = "control_resources.rs"]
+mod resources;
 
 const PARTIAL_OUTPUT_MAX_CHARS: usize = 24_000;
 
@@ -27,6 +36,7 @@ pub enum RunStopReason {
     RepeatedAction,
     StageBudgetExhausted,
     RepairBudgetExhausted,
+    ModelResourceBudgetExceeded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +59,7 @@ impl RunStopReason {
             Self::RepeatedAction => "repeated_action",
             Self::StageBudgetExhausted => "stage_budget_exhausted",
             Self::RepairBudgetExhausted => "repair_budget_exhausted",
+            Self::ModelResourceBudgetExceeded => "model_resource_budget_exceeded",
         }
     }
 
@@ -85,6 +96,7 @@ struct RunMutableState {
     phase: RunPhase,
     stage_usage: BTreeMap<RunStageClass, RunStageUsage>,
     results: ResultFrontier,
+    resources: RunResourceLedger,
 }
 
 #[derive(Debug)]
@@ -100,65 +112,6 @@ pub struct AgentRunControl {
 }
 
 impl AgentRunControl {
-    pub fn new(effort: &str) -> Self {
-        Self::new_at_steer_epoch(effort, 0)
-    }
-
-    pub fn new_at_steer_epoch(effort: &str, applied_epoch: u64) -> Self {
-        Self::with_budget_at_steer_epoch(RunBudget::for_effort(effort), applied_epoch)
-    }
-
-    pub fn with_budget(budget: RunBudget) -> Self {
-        Self::with_budget_at_steer_epoch(budget, 0)
-    }
-
-    fn with_budget_at_steer_epoch(budget: RunBudget, applied_epoch: u64) -> Self {
-        let now = Instant::now();
-        Self {
-            budget,
-            user_cancelled: AtomicBool::new(false),
-            model_calls: AtomicUsize::new(0),
-            tool_calls: AtomicUsize::new(0),
-            agent_turns: AtomicUsize::new(0),
-            repair_attempts: AtomicUsize::new(0),
-            steer_epoch: AtomicU64::new(applied_epoch),
-            state: Mutex::new(RunMutableState {
-                started_at: now,
-                last_progress_at: now,
-                stage: "starting".to_string(),
-                detail: String::new(),
-                partial_output: String::new(),
-                action_history: BTreeMap::new(),
-                recent_actions: BTreeMap::new(),
-                observation_fingerprints: BTreeSet::new(),
-                observation_count: 0,
-                checkpoint_fingerprints: BTreeSet::new(),
-                checkpoint_count: 0,
-                model_extension_checkpoint: 0,
-                tool_extension_checkpoint: 0,
-                agent_turn_extension_checkpoint: 0,
-                model_call_limit: budget
-                    .initial_model_calls
-                    .min(budget.max_model_calls)
-                    .max(1),
-                tool_call_limit: budget.initial_tool_calls.min(budget.max_tool_calls).max(1),
-                agent_turn_limit: budget
-                    .initial_agent_turns
-                    .min(budget.max_agent_turns)
-                    .max(1),
-                budget_extensions: 0,
-                stop_reason: None,
-                active_model_calls: 0,
-                active_tool_calls: 0,
-                pending_steers: VecDeque::new(),
-                applied_steer_epoch: applied_epoch,
-                phase: RunPhase::Executing,
-                stage_usage: BTreeMap::new(),
-                results: ResultFrontier::default(),
-            }),
-        }
-    }
-
     pub fn from_snapshot(snapshot: RunControlSnapshot) -> Self {
         let now = Instant::now();
         let started_at = now.checked_sub(snapshot.elapsed_active).unwrap_or(now);
@@ -200,6 +153,7 @@ impl AgentRunControl {
                     snapshot.best_known_result,
                     snapshot.result_frontier,
                 ),
+                resources: RunResourceLedger::from_snapshot(snapshot.resources),
             }),
         }
     }
@@ -213,6 +167,8 @@ impl AgentRunControl {
             Some(_) => {
                 let now = Instant::now();
                 let budget = snapshot.budget;
+                let mut resources = RunResourceLedger::from_snapshot(snapshot.resources);
+                resources.start_new_segment();
                 Ok(Self {
                     budget,
                     user_cancelled: AtomicBool::new(false),
@@ -260,6 +216,7 @@ impl AgentRunControl {
                             snapshot.best_known_result,
                             snapshot.result_frontier,
                         ),
+                        resources,
                     }),
                 })
             }
@@ -297,6 +254,7 @@ impl AgentRunControl {
             stage_usage: snapshot_stage_usage(&state.stage_usage),
             best_known_result: state.results.best_known(),
             result_frontier: state.results.candidates(),
+            resources: state.resources.snapshot(),
         }
     }
 
@@ -1301,6 +1259,7 @@ impl AgentRunControl {
             budget_extensions: state.budget_extensions,
             stage_usage: snapshot_stage_usage(&state.stage_usage),
             best_known_result: state.results.best_known(),
+            resources: state.resources.snapshot(),
         }
     }
 

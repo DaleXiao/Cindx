@@ -20,6 +20,7 @@ mod execution;
 mod failure;
 mod kernel;
 mod parallel;
+mod resource_ledger;
 mod result_frontier;
 mod run_budget;
 mod task_contract;
@@ -59,8 +60,17 @@ pub use parallel::{
     InterruptibleQuorumPolicy, ParallelJob, ParallelJobCompletion, ParallelJobSupervisor,
     ParallelTaskError, QuorumExecution,
 };
+pub use resource_ledger::{
+    ModelAttemptUsage, ModelResourceUsage, ModelUsageSource, ModelUsageSourceCounts,
+    PhysicalModelAttempt, RunResourceSnapshot, RunResourceUsage, MAX_PENDING_RESOURCE_ATTEMPTS,
+    MAX_PERSISTED_RESOURCE_SNAPSHOT_BYTES, MAX_RESOURCE_LEDGER_MODELS,
+    MAX_RESOURCE_MODEL_KEY_BYTES,
+};
 pub use result_frontier::{BestKnownResult, ResultQuality};
-pub use run_budget::{RunBudget, RunStageBudget, RunStageClass};
+pub use run_budget::{
+    RunBudget, RunStageBudget, RunStageClass, CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT,
+    PHYSICAL_MODEL_ATTEMPTS_PER_LOGICAL_CALL,
+};
 pub use task_contract::{
     AgentTaskContract, ContractEvidence, ContractEvidenceKind, WorkspaceVerificationPolicy,
 };

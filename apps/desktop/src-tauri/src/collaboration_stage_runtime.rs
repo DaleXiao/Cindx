@@ -319,6 +319,9 @@ fn run_collaboration_stage_typed(
         &Metadata::new(),
     )
     .map_err(CollaborationStageError::Failed)?;
+    let resource_checkpoint = |control: &AgentRunControl| {
+        crate::agent_resource_snapshot::checkpoint_agent_run_resources(state, run_context, control)
+    };
     let completion = complete_collaboration_model_for_stage_with_recovery_control(
         config.clone(),
         stage.to_string(),
@@ -328,6 +331,7 @@ fn run_collaboration_stage_typed(
         prompt,
         cancellation.clone(),
         limits,
+        Some(&resource_checkpoint),
         on_delta,
     );
     record_collaboration_stage_finished(

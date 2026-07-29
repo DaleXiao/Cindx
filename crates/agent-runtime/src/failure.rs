@@ -103,7 +103,8 @@ impl AgentFailure {
             | RunStopReason::ToolCallBudgetExceeded
             | RunStopReason::TurnBudgetExhausted
             | RunStopReason::StageBudgetExhausted
-            | RunStopReason::RepairBudgetExhausted => Self::budget(reason.code(), message),
+            | RunStopReason::RepairBudgetExhausted
+            | RunStopReason::ModelResourceBudgetExceeded => Self::budget(reason.code(), message),
         }
     }
 
@@ -231,6 +232,14 @@ mod tests {
         );
         assert_eq!(
             AgentFailure::from_stop_reason(RunStopReason::StageBudgetExhausted, "spent").class,
+            AgentFailureClass::Budget
+        );
+        assert_eq!(
+            AgentFailure::from_stop_reason(
+                RunStopReason::ModelResourceBudgetExceeded,
+                "tokens spent"
+            )
+            .class,
             AgentFailureClass::Budget
         );
         assert_eq!(

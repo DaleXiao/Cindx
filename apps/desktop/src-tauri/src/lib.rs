@@ -25,6 +25,8 @@ mod agent_preparation_runtime;
 mod agent_query_commands;
 mod agent_read_model;
 mod agent_recovery_service;
+mod agent_resource_snapshot;
+mod agent_result_evidence;
 mod agent_run_engine;
 mod agent_runtime_snapshot;
 mod agent_steer_runtime;
@@ -48,10 +50,14 @@ mod event_projection;
 mod event_security;
 mod integration_commands;
 mod knowledge_commands;
+mod knowledge_embedding_runtime;
 mod knowledge_generation_runtime;
 mod knowledge_runtime;
+mod learning_evidence_runtime;
+mod memory_measurement_runtime;
 mod memory_runtime;
 mod memory_vector_generation_runtime;
+mod model_resource_runtime;
 mod native_commands;
 mod orchestration_commands;
 mod parallel_execution;
@@ -164,6 +170,8 @@ use workflow_checkpoint_runtime::*;
 use workflow_routing_runtime::*;
 
 use agent_recovery_service::*;
+#[cfg(test)]
+use agent_resource_snapshot::*;
 use agent_runtime_snapshot::*;
 use session_context_service::*;
 use session_output_cache::*;
@@ -173,5 +181,7 @@ use session_title_service::*;
 mod external_effect_eval_tests;
 #[cfg(test)]
 mod prompt_workflow_execution_tests;
+#[cfg(test)]
+mod routing_learning_runtime_tests;
 #[cfg(test)]
 mod tests;

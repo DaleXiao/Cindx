@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 mod checkpoint;
 mod extraction;
+mod learning_evidence;
 mod ledger;
 mod memory_text;
 mod recall;
@@ -312,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn user_requirements_survive_incomplete_runs_but_outcomes_require_completion() {
+    fn user_requirements_survive_but_outcomes_require_trusted_completion_evidence() {
         let mut events = vec![
             event(
                 1,
@@ -355,6 +356,35 @@ mod tests {
             [],
         ));
 
+        let legacy_records = extract_durable_memories(&events, "project-a", "session-a");
+        assert!(legacy_records.iter().any(|record| {
+            record.kind == MemoryKind::Requirement && record.trust == MemoryTrust::UserStated
+        }));
+        assert!(legacy_records
+            .iter()
+            .all(|record| record.kind != MemoryKind::Outcome));
+
+        events.pop();
+        let terminal_evidence = serde_json::json!({
+            "schema": "cindx.learning-evidence.v1",
+            "termination": "completed",
+            "disposition": "positive",
+            "verification": "passed",
+            "attribution": "tool",
+            "usage_completeness": "complete",
+            "steer_epoch": 1,
+            "budget_fingerprint": "a".repeat(64),
+            "independent_quality_source": null,
+            "quality_bps": null,
+        })
+        .to_string();
+        events.push(event(
+            4,
+            EventKind::TaskStatusChanged,
+            "Agent task completed",
+            [("learning_evidence_v1", terminal_evidence.as_str())],
+        ));
+
         let records = extract_durable_memories(&events, "project-a", "session-a");
         assert_eq!(records.len(), 3);
         assert!(records.iter().any(|record| {
@@ -370,7 +400,12 @@ mod tests {
         assert!(records.iter().any(|record| {
             record.kind == MemoryKind::Outcome
                 && record.trust == MemoryTrust::AssistantReported
-                && record.source_event_ids == vec!["event-2".to_string()]
+                && record.source_event_ids
+                    == vec![
+                        "event-2".to_string(),
+                        "event-3".to_string(),
+                        "event-4".to_string(),
+                    ]
         }));
     }
 
@@ -439,6 +474,19 @@ mod tests {
 
     #[test]
     fn evidence_from_an_older_user_turn_does_not_back_a_new_outcome() {
+        let terminal_evidence = serde_json::json!({
+            "schema": "cindx.learning-evidence.v1",
+            "termination": "completed",
+            "disposition": "positive",
+            "verification": "passed",
+            "attribution": "tool",
+            "usage_completeness": "complete",
+            "steer_epoch": 1,
+            "budget_fingerprint": "a".repeat(64),
+            "independent_quality_source": null,
+            "quality_bps": null,
+        })
+        .to_string();
         let events = vec![
             event(
                 1,
@@ -474,7 +522,12 @@ mod tests {
                     ("content", "Implemented the requested database update."),
                 ],
             ),
-            event(5, EventKind::TaskStatusChanged, "Agent task completed", []),
+            event(
+                5,
+                EventKind::TaskStatusChanged,
+                "Agent task completed",
+                [("learning_evidence_v1", terminal_evidence.as_str())],
+            ),
         ];
 
         let records = extract_durable_memories(&events, "project-a", "session-a");

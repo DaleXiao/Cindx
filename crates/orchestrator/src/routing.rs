@@ -1,10 +1,11 @@
 use super::*;
 
 mod evaluation;
+mod learning_evidence;
 mod workflow_topology_learning;
 
 pub use evaluation::*;
-use workflow_topology_learning::ADAPTIVE_WORKFLOW_PRIOR_MIN_QUALITY;
+pub use learning_evidence::*;
 pub use workflow_topology_learning::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -409,6 +410,8 @@ pub struct RoutingTelemetry {
     pub quality_score: Option<f32>,
     #[serde(default)]
     pub verification_passed: Option<bool>,
+    #[serde(default)]
+    pub learning_evidence: LearningEvidenceV1,
     pub cost_proxy: u64,
     pub tool_count: u64,
     pub retrieval_count: u64,
@@ -672,7 +675,10 @@ impl LearnedModelRouter {
     pub fn train(telemetry: &[RoutingTelemetry]) -> Self {
         let mut grouped: BTreeMap<String, BTreeMap<(String, String), RouteAccumulator>> =
             BTreeMap::new();
-        for entry in telemetry.iter().filter(|entry| !entry.user_override) {
+        for entry in telemetry
+            .iter()
+            .filter(|entry| !entry.user_override && entry.learning_evidence.is_learnable())
+        {
             let key = (
                 entry.selected_policy.label().to_string(),
                 entry.selected_model.clone(),
@@ -853,30 +859,30 @@ struct RouteAccumulator {
     verification_examples: usize,
     latency_ms: u64,
     cost_proxy: u64,
+    cost_examples: usize,
 }
 
 impl RouteAccumulator {
     fn record(&mut self, telemetry: &RoutingTelemetry) {
+        let evidence = &telemetry.learning_evidence;
         self.task_class = Some(telemetry.task_class.clone());
         self.examples += 1;
-        if telemetry.outcome.is_success()
-            && telemetry
-                .quality_score
-                .is_none_or(|score| score >= ADAPTIVE_WORKFLOW_PRIOR_MIN_QUALITY)
-            && telemetry.verification_passed != Some(false)
-        {
+        if evidence.disposition == LearningDisposition::Positive {
             self.successes += 1;
         }
-        if let Some(score) = telemetry.quality_score {
+        if let Some(score) = evidence.quality_score() {
             self.quality_total += score.clamp(0.0, 1.0);
             self.quality_examples += 1;
         }
-        if let Some(verified) = telemetry.verification_passed {
+        if let Some(verified) = evidence.verification_passed() {
             self.verified += usize::from(verified);
             self.verification_examples += 1;
         }
         self.latency_ms = self.latency_ms.saturating_add(telemetry.latency_ms);
-        self.cost_proxy = self.cost_proxy.saturating_add(telemetry.cost_proxy);
+        if evidence.usage_completeness == LearningUsageCompleteness::Complete {
+            self.cost_proxy = self.cost_proxy.saturating_add(telemetry.cost_proxy);
+            self.cost_examples += 1;
+        }
     }
 
     fn success_rate(&self) -> f32 {
@@ -909,10 +915,10 @@ impl RouteAccumulator {
     }
 
     fn average_cost_proxy(&self) -> u64 {
-        if self.examples == 0 {
+        if self.cost_examples == 0 {
             0
         } else {
-            self.cost_proxy / self.examples as u64
+            self.cost_proxy / self.cost_examples as u64
         }
     }
 

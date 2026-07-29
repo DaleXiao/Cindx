@@ -1,4 +1,5 @@
 use crate::{
+    agent_resource_snapshot::delete_persisted_agent_resource_snapshot,
     event_security::{redact_metadata, redact_sensitive_text},
     runtime_constants::AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE,
     runtime_values::{current_time_millis, phase16_task_id},
@@ -87,9 +88,11 @@ pub(super) fn delete_persisted_agent_runtime_snapshot(
     let Some(session_id) = session_id else {
         return Ok(());
     };
-    store
+    let runtime = store
         .delete_read_model(AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE, session_id)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string());
+    let resources = delete_persisted_agent_resource_snapshot(store, session_id);
+    runtime.and(resources)
 }
 
 pub(super) fn load_matching_agent_runtime_snapshot(
@@ -123,96 +126,5 @@ pub(super) fn load_matching_agent_runtime_snapshot(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        agent_read_model::{active_agent_events_for_session, agent_events_for_session},
-        agent_recovery_service::agent_recovery_identity,
-        event_persistence::{append_event, append_message_event_with_metadata},
-        project_session_persistence::metadata_with_context,
-    };
-    use agent_core::{EventKind, MessageRole};
-    use agent_runtime::{start_agent_loop, AgentRuntimeConfig};
-
-    fn run_context(session_id: &str, run_id: &str) -> Metadata {
-        [
-            ("session_id".to_string(), session_id.to_string()),
-            ("project_id".to_string(), "project-a".to_string()),
-            ("agent_run_id".to_string(), run_id.to_string()),
-            ("agent_effort".to_string(), "auto".to_string()),
-        ]
-        .into_iter()
-        .collect()
-    }
-
-    #[test]
-    fn runtime_snapshot_is_overwritten_and_bound_to_the_active_run() {
-        let mut store = SqliteStore::in_memory().expect("store should open");
-        let context = run_context("session-a", "run-a");
-        append_event(
-            &mut store,
-            &phase16_task_id(),
-            EventKind::TaskStatusChanged,
-            "Agent task started",
-            metadata_with_context(
-                [("prompt".to_string(), "inspect workspace".to_string())]
-                    .into_iter()
-                    .collect(),
-                &context,
-            ),
-        )
-        .expect("run start should persist");
-        append_message_event_with_metadata(
-            &mut store,
-            &phase16_task_id(),
-            MessageRole::User,
-            "inspect workspace",
-            context.clone(),
-        )
-        .expect("user message should persist");
-        let runtime = start_agent_loop(
-            phase16_task_id(),
-            "inspect workspace".to_string(),
-            AgentRuntimeConfig::default(),
-        );
-
-        persist_agent_runtime_snapshot(&mut store, &runtime, &context)
-            .expect("runtime snapshot should persist");
-        let events = agent_events_for_session(&store, &phase16_task_id(), Some("session-a"))
-            .expect("events should load");
-        let active = active_agent_events_for_session(&events, Some("session-a"));
-        let (_, source_run_id, _, prompt_fingerprint, _) =
-            agent_recovery_identity(&active, &context).expect("identity should resolve");
-        let latest_revision = active
-            .last()
-            .map(|event| event.sequence)
-            .unwrap_or_default();
-        assert!(load_matching_agent_runtime_snapshot(
-            &store,
-            &context,
-            &source_run_id,
-            &prompt_fingerprint,
-            latest_revision,
-        )
-        .expect("snapshot should load")
-        .is_some());
-
-        let stale_context = run_context("session-a", "run-b");
-        assert!(load_matching_agent_runtime_snapshot(
-            &store,
-            &stale_context,
-            "run-b",
-            &prompt_fingerprint,
-            latest_revision,
-        )
-        .expect("stale snapshot lookup should succeed")
-        .is_none());
-
-        delete_persisted_agent_runtime_snapshot(&mut store, Some("session-a"))
-            .expect("snapshot should delete");
-        assert!(store
-            .load_read_model(AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE, "session-a")
-            .expect("read model lookup should succeed")
-            .is_none());
-    }
-}
+#[path = "agent_runtime_snapshot_tests.rs"]
+mod tests;

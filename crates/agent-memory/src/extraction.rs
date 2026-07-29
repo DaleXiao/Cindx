@@ -1,3 +1,4 @@
+use crate::learning_evidence::{trusted_outcome_evidence, TrustedOutcomeEvidence};
 use crate::memory_text::{first_metadata_value, normalize_memory_text, sanitize_line, truncate};
 use crate::semantic::{parse_semantic_memory_batch, validate_semantic_memory_batch};
 use crate::{MemoryKind, MemoryProvenance, MemoryRecord, MemoryTrust};
@@ -69,6 +70,17 @@ pub fn extract_durable_memories(
                 .get("content")
                 .is_some_and(|content| !content.trim().is_empty())
     }) {
+        let Some((terminal, terminal_evidence)) = events[outcome_index + 1..]
+            .iter()
+            .take_while(|event| {
+                !(matches!(event.kind, EventKind::MessageAdded)
+                    && event.metadata.get("role").map(String::as_str) == Some("user")
+                    && event.metadata.get("internal").map(String::as_str) != Some("true"))
+            })
+            .find_map(|event| trusted_outcome_evidence(event).map(|evidence| (event, evidence)))
+        else {
+            return records;
+        };
         let turn_start = events[..outcome_index]
             .iter()
             .rposition(|event| {
@@ -79,9 +91,9 @@ pub fn extract_durable_memories(
             .unwrap_or_default();
         let evidence_ids = events[turn_start..outcome_index]
             .iter()
-            .filter(|event| durable_tool_memory(event).is_some())
+            .filter(|event| is_successful_tool_event(event))
             .map(|event| event.id.0.clone())
-            .take(8)
+            .take(6)
             .collect::<Vec<_>>();
         let outcome = truncate(
             &sanitize_line(
@@ -94,22 +106,21 @@ pub fn extract_durable_memories(
             900,
         );
         let content = format!("Assistant outcome: {outcome}");
-        if !is_durable_outcome_content(&outcome, !evidence_ids.is_empty()) {
+        if !is_durable_outcome_content(&outcome, terminal_evidence, !evidence_ids.is_empty()) {
             return records;
         }
+        let mut source_event_ids = evidence_ids;
+        source_event_ids.push(event.id.0.clone());
+        source_event_ids.push(terminal.id.0.clone());
         records.push(memory_record(
             MemoryKind::Outcome,
             MemoryTrust::AssistantReported,
             content,
-            if evidence_ids.is_empty() { 58 } else { 68 },
-            event,
+            68,
+            terminal,
             project_id,
             session_id,
-            if evidence_ids.is_empty() {
-                vec![event.id.0.clone()]
-            } else {
-                evidence_ids
-            },
+            source_event_ids,
         ));
     }
 
@@ -171,9 +182,7 @@ pub(crate) fn memory_record(
 }
 
 fn durable_tool_memory(event: &Event) -> Option<String> {
-    if !matches!(event.kind, EventKind::ToolCallFinished)
-        || event.metadata.get("status").map(String::as_str) != Some("succeeded")
-    {
+    if !is_successful_tool_event(event) {
         return None;
     }
     let tool = event.metadata.get("tool")?.as_str();
@@ -190,6 +199,11 @@ fn durable_tool_memory(event: &Event) -> Option<String> {
         .map(|path| format!("image.generate succeeded: {path}")),
         _ => None,
     }
+}
+
+fn is_successful_tool_event(event: &Event) -> bool {
+    matches!(event.kind, EventKind::ToolCallFinished)
+        && event.metadata.get("status").map(String::as_str) == Some("succeeded")
 }
 
 fn is_durable_requirement_content(content: &str) -> bool {
@@ -253,11 +267,19 @@ fn is_durable_requirement_content(content: &str) -> bool {
     .any(|marker| lower.contains(marker))
 }
 
-fn is_durable_outcome_content(content: &str, has_tool_evidence: bool) -> bool {
-    // Assistant prose is not durable project truth by itself. Persist an
-    // outcome only when the same user turn produced concrete tool evidence;
-    // user-stated requirements are handled separately above.
-    if !has_tool_evidence || contains_instruction_override(content) {
+fn is_durable_outcome_content(
+    content: &str,
+    terminal_evidence: TrustedOutcomeEvidence,
+    has_tool_evidence: bool,
+) -> bool {
+    // Assistant prose and a successful tool call are not durable project truth
+    // by themselves. A tool-attributed postcondition must also match a tool
+    // success from the same user turn; independent quality evidence can stand
+    // on its own. User-stated requirements are handled separately above.
+    if contains_instruction_override(content)
+        || (terminal_evidence == TrustedOutcomeEvidence::VerifiedPostcondition
+            && !has_tool_evidence)
+    {
         return false;
     }
     !normalize_memory_text(content).is_empty()

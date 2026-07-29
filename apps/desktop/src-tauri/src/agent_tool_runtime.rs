@@ -27,11 +27,23 @@ fn commit_agent_tool_observation(
     cancellation.commit_execution_step_with(epoch_lease, || {
         let mut next_runtime = runtime.clone();
         let previous_message_count = next_runtime.messages.len();
+        let verified_interactions_before = next_runtime.verified_interactions;
         AgentKernel::new(&mut next_runtime, tools).apply_tool_observation(
             call,
             status,
             risk,
             observation,
+        );
+        let postcondition_verified =
+            next_runtime.verified_interactions > verified_interactions_before;
+        crate::agent_result_evidence::annotate_latest_tool_observation(
+            &mut next_runtime,
+            tools,
+            call,
+            status,
+            risk,
+            epoch_lease.epoch(),
+            postcondition_verified,
         );
         append_visual_reference_message(&mut next_runtime, &call.tool_name, image_paths);
         let mut store = state
@@ -405,6 +417,7 @@ pub(crate) fn execute_agent_tool_batch(
             run_control: cancellation.snapshot(),
             last_touched_at_ms: current_time_millis(),
         };
+        let resource_snapshot = cancellation.resource_usage();
         let waiting_commit = cancellation.commit_execution_step_with(epoch_lease, || {
             let mut store = state
                 .store
@@ -420,6 +433,7 @@ pub(crate) fn execute_agent_tool_batch(
                 "waiting_for_permission",
                 Metadata::new(),
                 Some(&task_state),
+                Some(&resource_snapshot),
             )?;
             append_event(
                 &mut store,

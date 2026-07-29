@@ -88,6 +88,7 @@ pub(crate) fn index_workspace_rag_blocking(
                     config: config.clone(),
                     cancellation: None,
                     expected_steer_epoch: None,
+                    resource_checkpoint: None,
                 };
                 index_workspace_with_cloud_fallback(
                     &root,
@@ -216,6 +217,7 @@ pub(crate) fn search_rag(
         "four_way_parallel",
         graph_store.as_ref(),
         &cancellation,
+        None,
     )?;
     retrieval.trace.index_cache_hit = index_cache_hit;
     let focus_paths = retrieval
@@ -280,6 +282,7 @@ pub(crate) fn answer_with_rag(
         "four_way_parallel",
         graph_store.as_ref(),
         &cancellation,
+        None,
     )?;
     retrieval.trace.index_cache_hit = index_cache_hit;
     let selected_results = retrieval.results.clone();
@@ -374,34 +377,87 @@ pub(crate) fn answer_with_rag(
         mode: ModelCallMode::Streaming,
         metadata: Metadata::new(),
     };
+    if let Err(reason) = cancellation.begin_stage_model_call("rag_answer", RunStageClass::Finalizer)
+    {
+        return phase7_state_with_error(
+            &state,
+            format!("RAG answer budget unavailable: {}", reason.code()),
+            sources,
+            None,
+        );
+    }
+    let model_attempt = match crate::model_resource_runtime::ControlledModelAttempt::reserve_at(
+        &cancellation,
+        cancellation.steer_epoch(),
+        &model,
+        &request,
+        RunStageClass::Finalizer,
+    ) {
+        Ok(Some(attempt)) => attempt,
+        Ok(None) => {
+            cancellation.finish_model_call();
+            return phase7_state_with_error(
+                &state,
+                "RAG answer request was superseded".to_string(),
+                sources,
+                None,
+            );
+        }
+        Err(reason) => {
+            cancellation.finish_model_call();
+            return phase7_state_with_error(
+                &state,
+                format!("RAG answer budget unavailable: {}", reason.code()),
+                sources,
+                None,
+            );
+        }
+    };
 
     match provider.complete_streaming(request, |_| {}) {
         Ok(response) => {
+            let _ = model_attempt.settle_response(&response);
+            cancellation.finish_model_call();
             let answer = response.message.content;
             let latency_ms = current_time_millis().saturating_sub(started_at_ms);
             let mut store = state
                 .store
                 .lock()
                 .map_err(|error| format!("store lock poisoned: {error}"))?;
+            let mut metadata = [
+                ("request_id".to_string(), request_id),
+                ("provider".to_string(), "openai-compatible".to_string()),
+                ("model".to_string(), model.clone()),
+                ("latency_ms".to_string(), latency_ms.to_string()),
+                (
+                    "source_count".to_string(),
+                    selected_results.len().to_string(),
+                ),
+                ("answer".to_string(), answer.clone()),
+                ("output_length".to_string(), answer.len().to_string()),
+            ]
+            .into_iter()
+            .collect::<Metadata>();
+            for key in [
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+                "usage_source",
+            ] {
+                if let Some(value) = response.metadata.get(key) {
+                    metadata.insert(key.to_string(), value.clone());
+                }
+            }
+            crate::model_resource_runtime::add_model_resource_metadata(
+                &mut metadata,
+                &cancellation,
+            );
             append_event(
                 &mut store,
                 &task_id,
                 EventKind::ModelRequestFinished,
                 format!("RAG answer received from {model}"),
-                [
-                    ("request_id".to_string(), request_id),
-                    ("provider".to_string(), "openai-compatible".to_string()),
-                    ("model".to_string(), model),
-                    ("latency_ms".to_string(), latency_ms.to_string()),
-                    (
-                        "source_count".to_string(),
-                        selected_results.len().to_string(),
-                    ),
-                    ("answer".to_string(), answer.clone()),
-                    ("output_length".to_string(), answer.len().to_string()),
-                ]
-                .into_iter()
-                .collect(),
+                metadata,
             )
             .map_err(|error| error.to_string())?;
             let memory = project_memory_stats(&mut store, project_id.as_deref())
@@ -420,6 +476,8 @@ pub(crate) fn answer_with_rag(
             .map_err(|error| error.to_string())
         }
         Err(error) => {
+            let _ = model_attempt.settle_unknown();
+            cancellation.finish_model_call();
             let message = error.to_string();
             phase7_state_with_error(&state, message, sources, None)
         }
