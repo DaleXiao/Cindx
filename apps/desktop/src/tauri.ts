@@ -76,7 +76,7 @@ import type {
   AgentTraceRoleSummary,
   AgentTraceState,
   AgentOutputArtifactView,
-  ModelStreamDelta
+  ModelStreamDelta, VoiceSessionAnswer
 } from "./tauriTypes";
 
 let browserPhase3State: Phase3State = {
@@ -180,6 +180,7 @@ let browserPhase4State: Phase4State = {
     embeddingModel: "text-embedding-3-small",
     imageModel: "",
     imageEndpoint: "",
+    voiceModel: "",
     collaborationPolicy: "auto_router",
     promptEvolutionEnabled: true,
     contextWindowTokens: 128000,
@@ -1579,6 +1580,9 @@ export async function getPhase4State(): Promise<Phase4State> {
   }
 }
 
+export const negotiateVoiceSession = (offerSdp: string): Promise<VoiceSessionAnswer> =>
+  invoke<VoiceSessionAnswer>("negotiate_voice_session", { input: { offerSdp } });
+
 export async function saveProviderConfig(input: ProviderConfigInput): Promise<Phase4State> {
   try {
     return await invoke<Phase4State>("save_provider_config", { input });
@@ -1597,6 +1601,7 @@ export async function saveProviderConfig(input: ProviderConfigInput): Promise<Ph
         embeddingModel: input.embeddingModel || "text-embedding-3-small",
         imageModel: input.imageModel,
         imageEndpoint: input.imageEndpoint,
+        voiceModel: input.voiceModel,
         collaborationPolicy: input.collaborationPolicy || "auto_router",
         promptEvolutionEnabled: input.promptEvolutionEnabled,
         contextWindowTokens: Math.max(4096, input.contextWindowTokens || 128000),
@@ -2299,6 +2304,10 @@ export async function getPhase7State(): Promise<Phase7State> {
   }
 }
 
+export const ensureWorkspaceKnowledge = (): Promise<Phase7State> =>
+  invoke<Phase7State>("ensure_workspace_knowledge").catch((error) => {
+    requireBrowserPreviewFallback(error); return browserPhase7State;
+  });
 export async function indexWorkspaceRag(): Promise<Phase7State> {
   try {
     return await invoke<Phase7State>("index_workspace_rag");

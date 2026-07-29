@@ -327,6 +327,7 @@ export type ProviderConfigState = {
   embeddingModel: string;
   imageModel: string;
   imageEndpoint: string;
+  voiceModel: string;
   collaborationPolicy: string;
   promptEvolutionEnabled: boolean;
   contextWindowTokens: number;
@@ -346,6 +347,7 @@ export type ProviderConfigInput = {
   embeddingModel: string;
   imageModel: string;
   imageEndpoint: string;
+  voiceModel: string;
   collaborationPolicy: string;
   promptEvolutionEnabled: boolean;
   contextWindowTokens: number;
@@ -356,6 +358,10 @@ export type ProviderModelsState = {
   models: string[];
   fetchedAtMs: number;
   lastError: string | null;
+};
+
+export type VoiceSessionAnswer = {
+  answerSdp: string;
 };
 
 export type ImageEndpointValidationState = {

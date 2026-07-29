@@ -225,7 +225,8 @@ export function App() {
     providerModelsBusy,
     providerModelsError,
     providerModelsRefreshTurn,
-    setProviderDraft
+    setProviderDraft,
+    voiceConfigured
   } = useProviderSettingsController({
     reportError: reportComposerError,
     showSaved: showSettingsSaved
@@ -787,6 +788,7 @@ export function App() {
     value: composerDraft,
     focusRequest: composerFocusRequest,
     setActiveDraft: setActiveComposerDraft,
+    appendDraftForSession: appendComposerDraftForSession,
     editActiveDraft: handleThreadMessageEdit,
     restoreDraftIfEmpty,
     forgetDrafts
@@ -2147,8 +2149,12 @@ export function App() {
                 attachments={composerAttachments}
                 attachmentBusy={attachmentBusy}
                 effort={agentEffort}
+                sessionId={activeSession?.id ?? null}
+                voiceConfigured={voiceConfigured}
                 onChange={setActiveComposerDraft}
                 onEffortChange={(effort) => void handleSessionEffortChange(effort)}
+                onVoiceTranscript={appendComposerDraftForSession}
+                onVoiceError={(message) => setComposerError(message)}
                 onSend={(value) => void handleSendPrompt(value)}
                 onPickAttachments={(files) => void handlePickAttachments(files)}
                 onRemoveAttachment={handleRemoveAttachment}

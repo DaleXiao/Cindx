@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  activeAgentActionRowId,
   associateOutputArtifacts,
   buildSessionThreadProjection,
   sessionMinimapMarkers,
@@ -73,6 +74,35 @@ test("projects messages and visible events into stable rows and minimap markers"
     projection.minimapMarkers.map((marker) => marker.id),
     ["message-1", "message-6"]
   );
+});
+
+test("selects only the current running Agent actions row", () => {
+  const projection = buildSessionThreadProjection(
+    [
+      message(1, "user", "First run", 100),
+      message(3, "assistant", "First answer", 300),
+      message(4, "user", "Second run", 1_000)
+    ],
+    [
+      event(2, "Tool started", "tool", 200),
+      event(5, "Tool proposed", "tool", 1_100)
+    ],
+    32
+  );
+  const currentRow = projection.rows.findLast(
+    (row) => row.type === "tool-chain"
+  );
+
+  assert.equal(
+    activeAgentActionRowId(projection.rows, "running", 900),
+    currentRow?.type === "tool-chain" ? currentRow.id : null
+  );
+  assert.equal(activeAgentActionRowId(projection.rows, "paused", 900), null);
+  assert.equal(activeAgentActionRowId(projection.rows, "waiting_for_permission", 900), null);
+  assert.equal(activeAgentActionRowId(projection.rows, "completed", 900), null);
+  assert.equal(activeAgentActionRowId(projection.rows, "failed", 900), null);
+  assert.equal(activeAgentActionRowId(projection.rows, "cancelled", 900), null);
+  assert.equal(activeAgentActionRowId(projection.rows, "running", 1_200), null);
 });
 
 test("associates artifacts without rescanning assistants for every artifact", () => {

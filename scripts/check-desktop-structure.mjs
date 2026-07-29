@@ -132,6 +132,9 @@ const sidebarResizeSource = read(
   "apps/desktop/src/controllers/useSidebarResize.ts"
 );
 const sessionThreadFileSource = read("apps/desktop/src/components/SessionThread.tsx");
+const sessionThreadViewCacheSource = read(
+  "apps/desktop/src/components/sessionThreadViewCache.ts"
+);
 const sessionThreadNavigationSource = read(
   "apps/desktop/src/components/SessionThreadNavigation.tsx"
 );
@@ -179,6 +182,15 @@ const markdownDiagramModelSource = read(
   "apps/desktop/src/components/markdownDiagramModel.ts"
 );
 const composerSource = read("apps/desktop/src/components/Composer.tsx");
+const voiceInputButtonSource = read(
+  "apps/desktop/src/components/VoiceInputButton.tsx"
+);
+const voiceInputHookSource = read("apps/desktop/src/voice/useVoiceInput.ts");
+const voiceInputModelSource = read("apps/desktop/src/voice/voiceInputModel.ts");
+const voiceWebRtcRuntimeSource = read(
+  "apps/desktop/src/voice/voiceWebRtcRuntime.ts"
+);
+const microphoneInfoPlist = read("apps/desktop/src-tauri/Info.plist");
 const queuedMessagesSource = read("apps/desktop/src/components/QueuedMessages.tsx");
 const scheduleViewSource = read("apps/desktop/src/components/ScheduleView.tsx");
 const inspectorSource = read("apps/desktop/src/components/Inspector.tsx");
@@ -447,16 +459,21 @@ const extractedDesktopBoundaryBudgets = [
   ["useAppWorkspaceProjection.ts", appWorkspaceProjectionSource, 200],
   ["useComposerAttachments.ts", composerAttachmentsSource, 140],
   ["useComposerDrafts.ts", composerDraftsSource, 90],
+  ["useVoiceInput.ts", voiceInputHookSource, 280],
+  ["voiceInputModel.ts", voiceInputModelSource, 120],
+  ["voiceWebRtcRuntime.ts", voiceWebRtcRuntimeSource, 100],
   ["useLatestAsyncSelection.ts", latestAsyncSelectionSource, 80],
   ["usePermissionReviewController.ts", permissionReviewControllerSource, 130],
   ["useSidebarResize.ts", sidebarResizeSource, 80],
   ["AgentMarkdown.tsx", agentMarkdownSource, 340],
   ["PromptEvolutionPanel.tsx", promptEvolutionPanelSource, 280],
   ["SettingsModelsPanel.tsx", settingsModelsPanelSource, 320],
+  ["VoiceInputButton.tsx", voiceInputButtonSource, 80],
   ["SettingsPermissionsPanel.tsx", settingsPermissionsPanelSource, 220],
   ["SettingsToolsPanel.tsx", settingsToolsPanelSource, 420],
   ["SessionThreadArtifacts.tsx", sessionThreadArtifactsSource, 260],
   ["SessionThreadNavigation.tsx", sessionThreadNavigationSource, 260],
+  ["sessionThreadViewCache.ts", sessionThreadViewCacheSource, 160],
   ["SessionToolChain.tsx", sessionToolChainSource, 180],
   ["SessionMinimap.tsx", sessionMinimapSource, 130],
   ["useSessionMinimapInteraction.ts", sessionMinimapInteractionSource, 150],
@@ -590,6 +607,7 @@ const modelProviderModuleBudgets = new Map([
   ["image_provider.rs", 430],
   ["json_wire.rs", 320],
   ["lib.rs", 900],
+  ["realtime_provider.rs", 190],
   ["request_builder.rs", 340],
   ["response_parser.rs", 380],
   ["streaming_response.rs", 380],
@@ -1113,19 +1131,39 @@ assert(
     diagramFullscreenSource.includes("<ZoomOut") &&
     diagramFullscreenSource.includes("<ZoomIn") &&
     diagramFullscreenSource.includes("<Download") &&
-    sessionThreadSource.includes('role={!isUser && !isAssistant ? "button" : undefined}') &&
+    diagramFullscreenSource.includes("diagramViewportCenter(viewport)") &&
+    diagramFullscreenSource.includes("diagramViewportCanPan(viewport)") &&
+    diagramFullscreenSource.includes("diagramPanActivationReached") &&
+    diagramFullscreenSource.includes("onPointerDown={startPan}") &&
+    diagramFullscreenSource.includes("onPointerLeave={leavePan}") &&
+    diagramFullscreenSource.includes("onPointerMove={movePan}") &&
+    diagramFullscreenSource.includes("onPointerCancel={finishPan}") &&
+    diagramFullscreenSource.includes('aria-label={pannable ? "Scrollable Mermaid diagram"') &&
+    diagramFullscreenSource.includes("tabIndex={pannable ? 0 : undefined}") &&
+    sessionThreadSource.includes("const messageSelectable = !isUser && !isAssistant") &&
+    sessionThreadSource.includes('role={messageSelectable ? "button" : undefined}') &&
+    sessionThreadSource.includes(
+      "onClick={messageSelectable ? () => onSelect(item) : undefined}"
+    ) &&
     sessionThreadSource.includes('showClipboardToast("Copied to clipboard")') &&
     sessionThreadSource.includes("navigator.clipboard.writeText(content)") &&
+    sessionThreadSource.includes("component: MarkdownTable") &&
     styles.includes(".thread-markdown pre code") &&
     styles.includes(".thread-code-block-header") &&
     styles.includes(".thread-diagram-fullscreen") &&
     styles.includes(".thread-diagram-zoom-controls") &&
+    styles.includes('.thread-diagram-fullscreen-viewport[data-pannable="true"]') &&
     styles.includes('.thread-mermaid-diagram[data-theme="dark"] svg text') &&
     styles.includes('.thread-mermaid-diagram[data-theme="dark"] svg foreignObject *') &&
     mermaidDiagramSource.includes("applyDarkDiagramLabelContrast") &&
     mermaidDiagramSource.includes('luminance > 0.179 ? "#171717" : "#f3f3f3"') &&
     styles.includes(".clipboard-toast") &&
-    styles.includes(".thread-markdown table"),
+    styles.includes(".thread-markdown-table-shell") &&
+    styles.includes("border-collapse: separate") &&
+    !/\.thread-markdown table\s*\{[^}]*min-width:\s*max-content/s.test(styles) &&
+    agentMarkdownSource.includes('role="region"') &&
+    agentMarkdownSource.includes('aria-label="Scrollable table"') &&
+    agentMarkdownSource.includes("tabIndex={0}"),
   "Assistant messages must render safe Markdown, lazy Mermaid and Markmap mind maps, copyable code, and clipboard feedback"
 );
 assert(
@@ -1143,7 +1181,9 @@ assert(
     modelProviderSource.includes("pool_idle_timeout") &&
     modelProviderSource.includes("consume_streaming_body") &&
     modelProviderSource.includes("tokio::time::timeout(HTTP_POLL_INTERVAL") &&
-    modelProviderCargo.includes('reqwest = { version = "0.13.4", features = ["stream"] }') &&
+    modelProviderCargo.includes(
+      'reqwest = { version = "0.13.4", features = ["multipart", "stream"] }'
+    ) &&
     !modelProviderSource.includes('Command::new("/usr/bin/curl")') &&
     modelProviderSource.includes("streamed_tool_calls") &&
     modelProviderSource.includes("MODEL_REQUEST_CANCELLED") &&
@@ -1350,6 +1390,16 @@ assert(
     sessionThreadSource.includes("{open && (") &&
     sessionThreadSource.includes("threadContentRef") &&
     sessionThreadSource.includes("resizeObserver.observe(threadContentRef.current)") &&
+    sessionThreadFileSource.includes("SessionThreadViewCache") &&
+    sessionThreadFileSource.includes("viewCache.rowHeight") &&
+    sessionThreadFileSource.includes(".loadArtifacts(sessionId") &&
+    sessionThreadFileSource.includes("measureElement: (element, entry, instance)") &&
+    sessionThreadFileSource.includes('data-session-id={sessionId ?? ""}') &&
+    sessionThreadViewCacheSource.includes("while (sessionRows.size > this.rowLimit)") &&
+    sessionThreadViewCacheSource.includes("while (this.rowHeights.size > this.sessionLimit)") &&
+    sessionThreadViewCacheSource.includes("artifactReloads") &&
+    !sessionThreadFileSource.includes("sessionTransitionRef") &&
+    !sessionThreadFileSource.includes('status === "running" ? 180 : 0') &&
     !sessionThreadSource.includes('querySelectorAll<HTMLElement>("[data-minimap-kind]")') &&
     styles.includes(".thread-content") &&
     styles.includes("content-visibility: auto") &&
@@ -1373,7 +1423,9 @@ assert(
     sessionThreadSource.includes('window.matchMedia("(prefers-reduced-motion: reduce)")') &&
     sessionThreadSource.includes("const requestOlderHistoryIfNeeded = () =>") &&
     (sessionThreadSource.match(/requestOlderHistoryIfNeeded\(\);/g)?.length ?? 0) >= 3 &&
-    sessionThreadSource.includes("if (followLatestRef.current) pinLatestOutput()") &&
+    sessionThreadSource.includes(
+      "if (followLatestRef.current && viewportResized) pinLatestOutput()"
+    ) &&
     sessionThreadSource.includes('className="thread-jump-latest"') &&
     sessionThreadSource.includes('aria-label="Jump to latest output"') &&
     styles.includes("backdrop-filter: saturate(150%) blur(18px)") &&
@@ -1619,13 +1671,59 @@ assert(
 assert(
   composerSource.includes("const restoreKeyboardFocus = event.detail === 0") &&
     composerSource.includes("focus({ preventScroll: true })") &&
-    /\.composer-toolbar-actions \{[\s\S]*?display: grid;[\s\S]*?width: 148px;[\s\S]*?grid-template-columns: 104px 36px;/.test(
+    /\.composer-toolbar-actions \{[\s\S]*?display: grid;[\s\S]*?width: 192px;[\s\S]*?grid-template-columns: 104px 36px 36px;/.test(
       styles
     ) &&
     /\.composer-primary-button \{[\s\S]*?width: 36px;[\s\S]*?min-width: 36px;[\s\S]*?max-width: 36px;/.test(
       styles
     ),
   "Effort selection must preserve keyboard focus without shifting the fixed primary action"
+);
+const voiceButtonPosition = composerSource.indexOf("<VoiceInputButton");
+assert(
+  voiceButtonPosition > composerSource.indexOf('className="composer-effort-control"') &&
+    voiceButtonPosition < composerSource.indexOf('className="send-button composer-primary-button"') &&
+    settingsModelsPanelSource.includes('label="Full-duplex voice"') &&
+    settingsModelsPanelSource.includes("value={providerDraft.voiceModel}") &&
+    voiceInputButtonSource.includes("disabled={disabled}") &&
+    voiceInputButtonSource.includes('data-status={status}') &&
+    voiceInputButtonSource.includes('status === "finishing"') &&
+    voiceInputHookSource.includes("navigator.mediaDevices.getUserMedia") &&
+    voiceWebRtcRuntimeSource.includes("getByteTimeDomainData") &&
+    voiceWebRtcRuntimeSource.includes("track.enabled = false") &&
+    voiceInputHookSource.includes("activeRunRef.current === run") &&
+    voiceInputHookSource.includes("run.sessionId !== sessionId") &&
+    voiceInputHookSource.includes("run.sessionId, transcript") &&
+    voiceInputHookSource.includes('type: "input_audio_buffer.clear"') &&
+    voiceInputHookSource.includes('type: "input_audio_buffer.commit"') &&
+    !voiceInputHookSource.includes('type: "response.create"') &&
+    voiceInputHookSource.includes("const VOICE_CONNECT_TIMEOUT_MS = 30_000") &&
+    voiceInputHookSource.includes("VOICE_FINISH_TIMEOUT_MS") &&
+    voiceInputHookSource.includes("VOICE_COMMIT_DRAIN_MS") &&
+    voiceInputHookSource.includes("updateVoiceDisconnectGrace") &&
+    voiceInputHookSource.includes("forceDispose(false)") &&
+    voiceWebRtcRuntimeSource.includes("window.clearTimeout(run.commitDelay)") &&
+    voiceWebRtcRuntimeSource.includes("window.clearTimeout(run.disconnectTimeout)") &&
+    voiceInputHookSource.includes("Voice connection did not produce an SDP offer") &&
+    voiceInputModelSource.includes("conversation.item.input_audio_transcription.completed") &&
+    !voiceInputModelSource.includes("conversation.item.input_audio_transcription.delta") &&
+    voiceInputModelSource.includes("state.seenItemIds.includes(event.itemId)") &&
+    composerSource.includes("composingRef.current || voiceBusy") &&
+    composerSource.includes('if (pendingApproval) setVoiceStatus("idle")') &&
+    composerDraftsSource.includes("appendDraftForSession") &&
+    tauriBridgeImplementation.includes('invoke<VoiceSessionAnswer>("negotiate_voice_session"') &&
+    rustLib.includes("OpenAiCompatibleRealtimeProvider") &&
+    rustLib.includes("config.api_key") &&
+    modelProviderSource.includes('format!("{endpoint}/realtime/calls")') &&
+    modelProviderSource.includes('"type": "realtime"') &&
+    modelProviderSource.includes('"model": model') &&
+    modelProviderSource.includes('"transcription": { "model": "gpt-4o-mini-transcribe" }') &&
+    modelProviderSource.includes('"turn_detection": null') &&
+    microphoneInfoPlist.includes("NSMicrophoneUsageDescription") &&
+    /\.composer-voice-button:hover:not\(:disabled\)[\s\S]*?background: #2563eb;/.test(styles) &&
+    /\.composer-voice-button:hover:not\(:disabled\),[\s\S]*?filter: brightness\(0\.9\);/.test(styles) &&
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.composer-voice-loading,[\s\S]*?animation: none;/.test(styles),
+  "Voice input must stay provider-configured, backend-authenticated, session-safe, and visibly live"
 );
 assert(
   tauriBridge.includes("attachments?: AgentAttachment[]") &&
@@ -1688,7 +1786,9 @@ assert(
 );
 assert(
     packageJson.dependencies["@tanstack/react-virtual"] &&
-    sessionThreadSource.includes('import { useVirtualizer } from "@tanstack/react-virtual"') &&
+    sessionThreadFileSource.includes('from "@tanstack/react-virtual"') &&
+    sessionThreadFileSource.includes("measureElement as measureVirtualElement") &&
+    sessionThreadFileSource.includes("useVirtualizer") &&
     sessionThreadSource.includes("const rowVirtualizer = useVirtualizer") &&
     sessionThreadSource.includes("const virtualRows = rowVirtualizer.getVirtualItems()") &&
     sessionThreadSource.includes("rowVirtualizer.measureElement(element)") &&
@@ -2454,7 +2554,9 @@ assert(
     settingsPageSource.includes("Knowledge sources") &&
     settingsPageSource.includes("knowledge-results") &&
     desktopControllerSource.includes("ensureKnowledgeIndex") &&
-    desktopControllerSource.includes("phase7.stats.chunksIndexed > 0") &&
+    desktopControllerSource.includes("ensureWorkspaceKnowledge()") &&
+    tauriBridge.includes('invoke<Phase7State>("ensure_workspace_knowledge")') &&
+    rustLib.includes("fn ensure_workspace_knowledge") &&
     !settingsPageSource.includes("Test retrieval") &&
     tauriBridge.includes("if (isTauriRuntime()) throw error"),
   "Knowledge search must auto-index, expose results inline, and surface real Tauri errors"

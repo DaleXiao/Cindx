@@ -27,6 +27,8 @@ type MarkdownCodeBlockProps = ComponentPropsWithoutRef<"pre"> & {
   renderDiagrams?: boolean;
 };
 
+type MarkdownTableProps = ComponentPropsWithoutRef<"table">;
+
 function externalLinkTarget(href: string) {
   if (/^(https?:|mailto:)/i.test(href)) return href;
   if (/^www\./i.test(href)) return `https://${href}`;
@@ -102,6 +104,19 @@ function markdownNodeText(node: ReactNode): string {
     return markdownNodeText(node.props.children);
   }
   return "";
+}
+
+function MarkdownTable({ children, ...props }: MarkdownTableProps) {
+  return (
+    <div
+      className="thread-markdown-table-shell"
+      role="region"
+      aria-label="Scrollable table"
+      tabIndex={0}
+    >
+      <table {...props}>{children}</table>
+    </div>
+  );
 }
 
 function MarkdownCodeBlock({
@@ -243,6 +258,9 @@ const MarkdownChunk = memo(function MarkdownChunk({
           a: {
             component: MarkdownLink,
             props: { onOpenError }
+          },
+          table: {
+            component: MarkdownTable
           },
           pre: {
             component: MarkdownCodeBlock,

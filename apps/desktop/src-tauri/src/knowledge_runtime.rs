@@ -888,6 +888,7 @@ pub(crate) fn provider_config_state(config: &ProviderConfig) -> ProviderConfigSt
         embedding_model: config.model_for_role(&ModelRole::Embedder),
         image_model: config.image_model.clone(),
         image_endpoint: config.image_endpoint.clone(),
+        voice_model: config.voice_model.clone(),
         collaboration_policy: config.collaboration_policy.clone(),
         prompt_evolution_enabled: config.prompt_evolution_enabled,
         context_window_tokens: config.context_window_tokens,

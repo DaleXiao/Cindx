@@ -393,6 +393,7 @@ pub(crate) struct ProviderConfigState {
     pub(crate) embedding_model: String,
     pub(crate) image_model: String,
     pub(crate) image_endpoint: String,
+    pub(crate) voice_model: String,
     pub(crate) collaboration_policy: String,
     pub(crate) prompt_evolution_enabled: bool,
     pub(crate) context_window_tokens: u64,
@@ -990,6 +991,8 @@ pub(crate) struct ProviderConfigInput {
     pub(crate) image_model: String,
     #[serde(default)]
     pub(crate) image_endpoint: String,
+    #[serde(default)]
+    pub(crate) voice_model: String,
     pub(crate) collaboration_policy: String,
     #[serde(default = "default_prompt_evolution_enabled")]
     pub(crate) prompt_evolution_enabled: bool,

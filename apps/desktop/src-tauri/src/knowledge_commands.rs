@@ -33,6 +33,63 @@ pub(crate) fn get_phase7_state(state: tauri::State<'_, AppState>) -> Result<Phas
     .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+pub(crate) async fn ensure_workspace_knowledge(
+    app: tauri::AppHandle,
+) -> Result<Phase7State, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_workspace_knowledge_blocking(app.state::<AppState>())
+    })
+    .await
+    .map_err(|error| format!("workspace knowledge refresh failed to join: {error}"))?
+}
+
+pub(crate) fn ensure_workspace_knowledge_blocking(
+    state: tauri::State<'_, AppState>,
+) -> Result<Phase7State, String> {
+    let root = active_workspace_root(&state)?;
+    let project_id = active_project_id_for_memory(&state)?;
+    let config = clone_provider_config(&state)?;
+    let (mut adapter, cache_hit) = cached_rag_adapter_for(&state, &root)?;
+    let cancellation = Arc::new(AgentRunControl::new("auto"));
+    let expected_epoch = cancellation.steer_epoch();
+    let indexed = ensure_workspace_knowledge_index(
+        &root,
+        &mut adapter,
+        cache_hit,
+        &config,
+        &cancellation,
+        expected_epoch,
+        None,
+    )?;
+    if workspace_knowledge_cache_needs_refresh(cache_hit, indexed.is_some()) {
+        cache_rag_adapter(&state, &root, &adapter)?;
+    }
+
+    let graph = graph_state_at_path(
+        &knowledge_paths_for_rag_index(adapter.path()).graph_store,
+        &[],
+    )?;
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let memory = project_memory_stats(&mut store, project_id.as_deref())
+        .map_err(|error| error.to_string())?;
+
+    phase7_state(
+        &store,
+        &adapter,
+        memory,
+        Vec::new(),
+        None,
+        graph,
+        None,
+        None,
+    )
+    .map_err(|error| error.to_string())
+}
+
 pub(crate) fn index_workspace_with_cloud_fallback(
     root: &Path,
     options: IndexOptions,

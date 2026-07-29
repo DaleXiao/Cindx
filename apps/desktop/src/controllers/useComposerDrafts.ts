@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { appendVoiceTranscript } from "../voice/voiceInputModel";
 
 type ComposerDrafts = Record<string, string>;
 type SessionIdRef = { readonly current: string | null };
@@ -38,6 +39,19 @@ export function useComposerDrafts(
     [activeSessionIdRef]
   );
 
+  const appendDraftForSession = useCallback(
+    (sessionId: string, text: string) => {
+      setDrafts((current) =>
+        updateDraft(
+          current,
+          sessionId,
+          appendVoiceTranscript(current[sessionId] ?? "", text)
+        )
+      );
+    },
+    []
+  );
+
   const restoreDraftIfEmpty = useCallback((sessionId: string, value: string) => {
     setDrafts((current) =>
       updateDraft(current, sessionId, current[sessionId]?.trim() ? current[sessionId] : value)
@@ -59,6 +73,7 @@ export function useComposerDrafts(
     value: activeSessionId ? drafts[activeSessionId] ?? "" : "",
     focusRequest,
     setActiveDraft,
+    appendDraftForSession,
     editActiveDraft,
     restoreDraftIfEmpty,
     forgetDrafts

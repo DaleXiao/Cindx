@@ -267,6 +267,24 @@ function itemTimestamp(item: SessionThreadSelection) {
   return item.type === "message" ? item.message.timestampMs : item.event.timestampMs;
 }
 
+export function activeAgentActionRowId(
+  rows: ThreadRow[],
+  status: string,
+  runStartedAtMs: number
+) {
+  if (status !== "running" || runStartedAtMs <= 0) return null;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (
+      row.type === "tool-chain" &&
+      row.items.some((item) => itemTimestamp(item) >= runStartedAtMs)
+    ) {
+      return row.id;
+    }
+  }
+  return null;
+}
+
 export function updateSessionThreadProjection(
   previous: SessionThreadProjection | null,
   messages: ChatMessageView[],

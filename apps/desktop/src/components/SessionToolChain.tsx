@@ -5,7 +5,8 @@ import {
   ShieldCheck,
   TerminalSquare
 } from "lucide-react";
-import { memo, useState } from "react";
+import { memo, useEffect, useState } from "react";
+import { ThinkingOrb } from "thinking-orbs";
 import type { TimelineEntry } from "../tauri";
 import { TraceStatusIcon } from "./TraceStatusIcon";
 import {
@@ -13,6 +14,39 @@ import {
   type SessionThreadSelection,
   type ThreadRow
 } from "./sessionThreadProjection";
+
+function usePrefersReducedMotion() {
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const handleChange = (event: MediaQueryListEvent) => setPrefersReducedMotion(event.matches);
+    setPrefersReducedMotion(query.matches);
+    query.addEventListener("change", handleChange);
+    return () => query.removeEventListener("change", handleChange);
+  }, []);
+
+  return prefersReducedMotion;
+}
+
+function AgentActionOrb() {
+  const prefersReducedMotion = usePrefersReducedMotion();
+  return (
+    <ThinkingOrb
+      className="thread-agent-action-orb"
+      state="shaping"
+      size={20}
+      paused={prefersReducedMotion}
+      aria-hidden="true"
+    />
+  );
+}
 
 export function EventIcon({ event }: { event: TimelineEntry }) {
   if (event.kind === "tool") return <TerminalSquare aria-hidden="true" />;
@@ -93,11 +127,13 @@ function ToolChainItem({
 export const ToolChainDisclosure = memo(function ToolChainDisclosure({
   row,
   selectedId,
-  onSelect
+  onSelect,
+  active = false
 }: {
   row: Extract<ThreadRow, { type: "tool-chain" }>;
   selectedId: string | null;
   onSelect: (selection: SessionThreadSelection) => void;
+  active?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const selected = row.items.some((item) => item.id === selectedId);
@@ -108,9 +144,11 @@ export const ToolChainDisclosure = memo(function ToolChainDisclosure({
       data-minimap-id={row.id}
       data-minimap-index={row.itemIndex}
       data-minimap-kind="tool-chain"
+      data-active={active || undefined}
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <summary>
+        {active ? <AgentActionOrb /> : null}
         <strong>Agent actions</strong>
         <ChevronRight className="thread-tool-chain-chevron" aria-hidden="true" />
       </summary>

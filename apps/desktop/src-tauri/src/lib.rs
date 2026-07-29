@@ -101,6 +101,7 @@ mod tool_commands;
 mod tool_execution;
 mod tool_runtime_service;
 mod view_models;
+mod voice_commands;
 mod workflow_checkpoint_runtime;
 mod workflow_routing_runtime;
 
@@ -169,6 +170,7 @@ use suspended_run_runtime::*;
 use tool_commands::*;
 use tool_execution::*;
 use view_models::*;
+use voice_commands::*;
 use workflow_checkpoint_runtime::*;
 use workflow_routing_runtime::*;
 

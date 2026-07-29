@@ -180,7 +180,7 @@ export type SettingsPageProps = {
   setBrowserText: Dispatch<SetStateAction<string>>;
   setBrowserUrl: Dispatch<SetStateAction<string>>;
   setDebugAlwaysVisible: Dispatch<SetStateAction<boolean>>;
-  setKnowledgeGraphOpen: Dispatch<SetStateAction<boolean>>;
+  setKnowledgeGraphOpen: (open: boolean) => void;
   setMcpDraft: Dispatch<SetStateAction<McpDraft>>;
   setProviderDraft: Dispatch<SetStateAction<ProviderConfigInput | null>>;
   setRagQuery: Dispatch<SetStateAction<string>>;
@@ -783,16 +783,21 @@ export function SettingsPage(props: SettingsPageProps) {
                           <div className="knowledge-graph-empty">Loading graph...</div>
                         }
                       >
-                        <KnowledgeGraph
-                          graph={
-                            phase7?.graph ?? {
-                              totalNodes: 0,
-                              totalEdges: 0,
-                              nodes: [],
-                              edges: []
+                        {ragBusy && (phase7?.graph.totalNodes ?? 0) === 0 ? (
+                          <div className="knowledge-graph-empty">Indexing workspace text...</div>
+                        ) : (
+                          <KnowledgeGraph
+                            indexedAtMs={ragStats.indexedAtMs}
+                            graph={
+                              phase7?.graph ?? {
+                                totalNodes: 0,
+                                totalEdges: 0,
+                                nodes: [],
+                                edges: []
+                              }
                             }
-                          }
-                        />
+                          />
+                        )}
                       </Suspense>
                     ) : null}
                   </details>

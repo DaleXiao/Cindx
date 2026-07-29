@@ -9,6 +9,7 @@ use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 mod error;
 mod image_provider;
 mod json_wire;
+mod realtime_provider;
 mod request_builder;
 mod response_parser;
 mod streaming_response;
@@ -33,6 +34,10 @@ pub use image_provider::{
 pub use request_builder::{
     build_chat_request_json, build_chat_request_json_with_tools, build_embedding_request_json,
     parse_embedding_response,
+};
+pub use realtime_provider::{
+    build_realtime_session_json, OpenAiCompatibleRealtimeConfig,
+    OpenAiCompatibleRealtimeProvider,
 };
 pub use response_parser::{
     parse_chat_response, parse_model_response, parse_provider_error, parse_tool_calls,

@@ -17,7 +17,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent
 } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { measureElement as measureVirtualElement, useVirtualizer } from "@tanstack/react-virtual";
 import { getAgentSessionOutputs, subscribeToModelStream } from "../tauri";
 import type {
   AgentOutputArtifactView,
@@ -47,6 +47,7 @@ import {
 } from "./SessionToolChain";
 import { TraceStatusIcon } from "./TraceStatusIcon";
 import {
+  activeAgentActionRowId,
   associateOutputArtifacts,
   isToolRequestPlaceholder,
   sessionMinimapMarkers,
@@ -57,6 +58,7 @@ import {
   type SessionThreadSelection
 } from "./sessionThreadProjection";
 import { useSessionMinimapInteraction } from "./useSessionMinimapInteraction";
+import { SessionThreadViewCache } from "./sessionThreadViewCache";
 
 export type { SessionThreadSelection } from "./sessionThreadProjection";
 
@@ -89,6 +91,9 @@ type ThreadScrollMetrics = {
   clientHeight: number;
 };
 const SESSION_THREAD_PROJECTION_CACHE_LIMIT = 4;
+const SESSION_THREAD_VIEW_CACHE_LIMIT = 4;
+const SESSION_THREAD_ROW_HEIGHT_CACHE_LIMIT = 512;
+const EMPTY_OUTPUT_ARTIFACTS: AgentOutputArtifactView[] = [];
 
 function MessageIcon({ role }: { role: ChatMessageView["role"] }) {
   if (role === "tool") return <TerminalSquare aria-hidden="true" />;
@@ -157,6 +162,13 @@ export const SessionThread = memo(function SessionThread({
     clientHeight: 1
   });
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [viewCache] = useState(
+    () =>
+      new SessionThreadViewCache(
+        SESSION_THREAD_VIEW_CACHE_LIMIT,
+        SESSION_THREAD_ROW_HEIGHT_CACHE_LIMIT
+      )
+  );
   const [artifactState, setArtifactState] = useState<{
     sessionId: string | null;
     artifacts: AgentOutputArtifactView[];
@@ -223,39 +235,28 @@ export const SessionThread = memo(function SessionThread({
       return;
     }
     let active = true;
-    const timeout = window.setTimeout(
-      () => {
-        void getAgentSessionOutputs(sessionId)
-          .then((artifacts) => {
-            if (!active) return;
-            setArtifactState((current) => {
-              const unchanged =
-                current.sessionId === sessionId &&
-                current.artifacts.length === artifacts.length &&
-                current.artifacts.every((artifact, index) => {
-                  const next = artifacts[index];
-                  return (
-                    artifact.id === next?.id &&
-                    artifact.path === next.path &&
-                    artifact.version === next.version &&
-                    artifact.kind === next.kind
-                  );
-                });
-              return unchanged ? current : { sessionId, artifacts };
-            });
-          })
-          .catch(() => undefined);
-      },
-      status === "running" ? 180 : 0
-    );
+    void viewCache
+      .loadArtifacts(sessionId, () => getAgentSessionOutputs(sessionId))
+      .then((artifacts) => {
+        if (!active) return;
+        setArtifactState((current) =>
+          current.sessionId === sessionId && current.artifacts === artifacts
+            ? current
+            : { sessionId, artifacts }
+        );
+      })
+      .catch(() => undefined);
     return () => {
       active = false;
-      window.clearTimeout(timeout);
     };
-  }, [messages.length, sessionId, status, timeline.length]);
+  }, [messages.length, sessionId, status, timeline.length, viewCache]);
 
   const outputArtifacts =
-    artifactState.sessionId === sessionId ? artifactState.artifacts : [];
+    artifactState.sessionId === sessionId
+      ? artifactState.artifacts
+      : sessionId
+        ? viewCache.artifactsFor(sessionId) ?? EMPTY_OUTPUT_ARTIFACTS
+        : EMPTY_OUTPUT_ARTIFACTS;
 
   const projection = useMemo(() => {
     const previous = sessionId
@@ -311,8 +312,27 @@ export const SessionThread = memo(function SessionThread({
   const rowVirtualizer = useVirtualizer<HTMLElement, HTMLDivElement>({
     count: threadRows.length,
     getScrollElement: () => threadRef.current,
-    estimateSize: (index) => estimateThreadRowSize(threadRows[index]),
+    estimateSize: (index) => {
+      const row = threadRows[index];
+      const cachedHeight =
+        sessionId && row ? viewCache.rowHeight(sessionId, threadRowKey(row)) : undefined;
+      return cachedHeight ?? estimateThreadRowSize(row);
+    },
     getItemKey: (index) => `${sessionId ?? "none"}:${threadRowKey(threadRows[index])}`,
+    measureElement: (element, entry, instance) => {
+      const height = measureVirtualElement(element, entry, instance);
+      const index = instance.indexFromElement(element);
+      const row = threadRows[index];
+      if (!sessionId || !row || height <= 0 || element.dataset.sessionId !== sessionId) {
+        return height;
+      }
+      viewCache.rememberRowHeight(sessionId, threadRowKey(row), height).forEach(
+        ({ sessionId: evictedSessionId, rowKey }) => {
+          instance.itemSizeCache.delete(`${evictedSessionId}:${rowKey}`);
+        }
+      );
+      return height;
+    },
     gap: 10,
     overscan: 6,
     anchorTo: "end",
@@ -329,6 +349,10 @@ export const SessionThread = memo(function SessionThread({
   const runProgress = useMemo(
     () => activeRunProgress(timeline, runStartedAtMs),
     [runStartedAtMs, timeline]
+  );
+  const activeActionRowId = useMemo(
+    () => activeAgentActionRowId(threadRows, status, runStartedAtMs),
+    [runStartedAtMs, status, threadRows]
   );
   const hasStreamAnswer = Boolean(streamAnswer);
   const minimapMarkers = useMemo(
@@ -532,8 +556,12 @@ export const SessionThread = memo(function SessionThread({
     thread.addEventListener("scroll", handleScroll, { passive: true });
     thread.addEventListener("wheel", handleWheel, { passive: true });
 
-    const resizeObserver = new ResizeObserver(() => {
-      if (followLatestRef.current) pinLatestOutput();
+    const resizeObserver = new ResizeObserver((entries) => {
+      const viewportEntry = entries.find((entry) => entry.target === thread);
+      const viewportResized = Boolean(viewportEntry);
+      if (viewportEntry && viewCache.updateViewportWidth(viewportEntry.contentRect.width))
+        rowVirtualizer.measure();
+      if (followLatestRef.current && viewportResized) pinLatestOutput();
       else syncScrollMetrics();
       requestOlderHistoryIfNeeded();
     });
@@ -567,7 +595,9 @@ export const SessionThread = memo(function SessionThread({
     loadingOlderHistory,
     onLoadOlderHistory,
     pinLatestOutput,
-    syncScrollMetrics
+    rowVirtualizer,
+    syncScrollMetrics,
+    viewCache
   ]);
 
   useEffect(() => {
@@ -605,7 +635,15 @@ export const SessionThread = memo(function SessionThread({
     }
     previousThreadRef.current = { sessionId, firstId, status };
     syncScrollMetrics();
-  }, [items, pinLatestOutput, sessionId, status, streamAnswer, syncScrollMetrics]);
+  }, [
+    items,
+    outputArtifacts,
+    pinLatestOutput,
+    sessionId,
+    status,
+    streamAnswer,
+    syncScrollMetrics
+  ]);
 
   const scrollThreadToMarker = useCallback(
     (index: number) => {
@@ -756,6 +794,7 @@ export const SessionThread = memo(function SessionThread({
             <div
               className="thread-virtual-row"
               data-index={virtualRow.index}
+              data-session-id={sessionId ?? ""}
               key={virtualRow.key}
               ref={measureThreadRow}
               style={{ transform: `translateY(${virtualRow.start}px)` }}
@@ -766,6 +805,7 @@ export const SessionThread = memo(function SessionThread({
               <ToolChainDisclosure
                 key={row.id}
                 row={row}
+                active={row.id === activeActionRowId}
                 selectedId={selectedId}
                 onSelect={onSelect}
               />
@@ -807,6 +847,7 @@ export const SessionThread = memo(function SessionThread({
 
           const isUser = item.message.role === "user";
           const isAssistant = item.message.role === "assistant";
+          const messageSelectable = !isUser && !isAssistant;
           const messageAttachments = isUser ? item.message.attachments ?? [] : [];
           if (item.message.role === "tool") {
             const summary = toolMessageSummary(item.message.content);
@@ -852,15 +893,19 @@ export const SessionThread = memo(function SessionThread({
               data-minimap-index={itemIndex}
               data-minimap-kind={item.message.role}
               data-thread-search-id={item.id}
-              role={!isUser && !isAssistant ? "button" : undefined}
-              tabIndex={isUser ? undefined : 0}
-              onClick={() => onSelect(item)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  onSelect(item);
-                }
-              }}
+              role={messageSelectable ? "button" : undefined}
+              tabIndex={messageSelectable ? 0 : undefined}
+              onClick={messageSelectable ? () => onSelect(item) : undefined}
+              onKeyDown={
+                messageSelectable
+                  ? (event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        onSelect(item);
+                      }
+                    }
+                  : undefined
+              }
             >
               {!isUser && !isAssistant && (
                 <header>

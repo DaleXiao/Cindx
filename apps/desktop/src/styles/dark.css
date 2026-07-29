@@ -55,6 +55,7 @@
   background: var(--surface-active);
 }
 
+:root[data-theme="dark"] .thread-markdown-table-shell,
 :root[data-theme="dark"] .thread-markdown th,
 :root[data-theme="dark"] .thread-markdown td {
   border-color: var(--border-strong);
@@ -258,6 +259,7 @@
 }
 
 :root[data-theme="dark"] .composer-attach-button,
+:root[data-theme="dark"] .composer-voice-button,
 :root[data-theme="dark"] .composer-effort-trigger,
 :root[data-theme="dark"] .composer-attachment,
 :root[data-theme="dark"] .composer-permission {
@@ -328,6 +330,15 @@
 :root[data-theme="dark"] .composer-attach-button:hover:not(:disabled),
 :root[data-theme="dark"] .composer-effort-trigger:hover:not(:disabled) {
   background: var(--surface-active);
+}
+
+:root[data-theme="dark"] .composer-voice-button:hover:not(:disabled),
+:root[data-theme="dark"] .composer-voice-button:focus-visible,
+:root[data-theme="dark"] .composer-voice-button[data-status="connecting"],
+:root[data-theme="dark"] .composer-voice-button[data-status="recording"],
+:root[data-theme="dark"] .composer-voice-button[data-status="finishing"] {
+  color: #ffffff;
+  background: #2563eb;
 }
 
 :root[data-theme="dark"] .prompt-evolution-table caption,

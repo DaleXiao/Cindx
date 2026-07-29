@@ -1,6 +1,21 @@
 import { Download, RotateCcw, X, ZoomIn, ZoomOut } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent
+} from "react";
 import { createPortal } from "react-dom";
+import {
+  diagramPanActivationReached,
+  diagramScrollForCenter,
+  diagramScrollForDrag,
+  diagramViewportCenter,
+  diagramViewportCanPan,
+  type DiagramViewportCenter
+} from "./diagramFullscreenModel";
 import type { MarkdownDiagram } from "./markdownDiagramModel";
 import { MarkmapDiagram } from "./MarkmapDiagram";
 import { MermaidDiagram } from "./MermaidDiagram";
@@ -143,9 +158,21 @@ async function downloadDiagramPng(
 
 export function DiagramFullscreen({ diagram, onClose, onError }: DiagramFullscreenProps) {
   const theme = useResolvedTheme();
+  const viewportRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const panGestureRef = useRef<{
+    active: boolean;
+    pointerId: number;
+    left: number;
+    top: number;
+    x: number;
+    y: number;
+  } | null>(null);
+  const pendingZoomCenterRef = useRef<DiagramViewportCenter | null>(null);
   const [zoom, setZoom] = useState(1);
+  const [pannable, setPannable] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
@@ -164,11 +191,106 @@ export function DiagramFullscreen({ diagram, onClose, onError }: DiagramFullscre
     };
   }, [onClose]);
 
+  const updatePannable = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const nextPannable =
+      diagram.kind === "mermaid" && diagramViewportCanPan(viewport);
+    setPannable(nextPannable);
+    if (nextPannable || !panGestureRef.current) return;
+    const { pointerId } = panGestureRef.current;
+    panGestureRef.current = null;
+    if (viewport.hasPointerCapture(pointerId)) {
+      viewport.releasePointerCapture(pointerId);
+    }
+    setDragging(false);
+  }, [diagram.kind]);
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const center = pendingZoomCenterRef.current;
+    if (viewport && center) {
+      pendingZoomCenterRef.current = null;
+      const next = diagramScrollForCenter(center, viewport);
+      viewport.scrollLeft = next.left;
+      viewport.scrollTop = next.top;
+    }
+    updatePannable();
+  }, [updatePannable, zoom]);
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const surface = surfaceRef.current;
+    if (!viewport) return;
+    const resizeObserver = new ResizeObserver(updatePannable);
+    resizeObserver.observe(viewport);
+    if (surface) resizeObserver.observe(surface);
+    updatePannable();
+    return () => resizeObserver.disconnect();
+  }, [updatePannable]);
+
   const adjustZoom = useCallback((delta: number) => {
+    const viewport = viewportRef.current;
+    if (viewport) pendingZoomCenterRef.current = diagramViewportCenter(viewport);
     setZoom((current) =>
       Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number((current + delta).toFixed(1))))
     );
   }, []);
+
+  const resetZoom = useCallback(() => {
+    pendingZoomCenterRef.current = { x: 0.5, y: 0.5 };
+    setZoom(1);
+  }, []);
+
+  function startPan(event: ReactPointerEvent<HTMLDivElement>) {
+    if (diagram.kind !== "mermaid" || event.button !== 0 || !event.isPrimary) return;
+    const viewport = event.currentTarget;
+    if (!diagramViewportCanPan(viewport)) return;
+    panGestureRef.current = {
+      active: false,
+      pointerId: event.pointerId,
+      left: viewport.scrollLeft,
+      top: viewport.scrollTop,
+      x: event.clientX,
+      y: event.clientY
+    };
+  }
+
+  function movePan(event: ReactPointerEvent<HTMLDivElement>) {
+    const gesture = panGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    if (!gesture.active) {
+      if (
+        !diagramViewportCanPan(event.currentTarget) ||
+        !diagramPanActivationReached(gesture, { x: event.clientX, y: event.clientY })
+      ) {
+        return;
+      }
+      gesture.active = true;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      setDragging(true);
+    }
+    event.preventDefault();
+    const next = diagramScrollForDrag(gesture, { x: event.clientX, y: event.clientY });
+    event.currentTarget.scrollLeft = next.left;
+    event.currentTarget.scrollTop = next.top;
+  }
+
+  function finishPan(event: ReactPointerEvent<HTMLDivElement>) {
+    const gesture = panGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    panGestureRef.current = null;
+    if (gesture.active && event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (gesture.active) setDragging(false);
+  }
+
+  function leavePan(event: ReactPointerEvent<HTMLDivElement>) {
+    const gesture = panGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId || gesture.active) return;
+    panGestureRef.current = null;
+  }
 
   const download = useCallback(async () => {
     const surface = surfaceRef.current;
@@ -214,7 +336,24 @@ export function DiagramFullscreen({ diagram, onClose, onError }: DiagramFullscre
           <X aria-hidden="true" />
         </button>
       </div>
-      <div className="thread-diagram-fullscreen-viewport">
+      <div
+        className="thread-diagram-fullscreen-viewport"
+        ref={viewportRef}
+        role={pannable ? "region" : undefined}
+        aria-label={pannable ? "Scrollable Mermaid diagram" : undefined}
+        tabIndex={pannable ? 0 : undefined}
+        data-pannable={pannable}
+        data-dragging={dragging}
+        onPointerDown={startPan}
+        onPointerLeave={leavePan}
+        onPointerMove={movePan}
+        onPointerUp={finishPan}
+        onPointerCancel={finishPan}
+        onLostPointerCapture={() => {
+          panGestureRef.current = null;
+          setDragging(false);
+        }}
+      >
         <div
           className="thread-diagram-fullscreen-surface"
           ref={surfaceRef}
@@ -246,7 +385,7 @@ export function DiagramFullscreen({ diagram, onClose, onError }: DiagramFullscre
           aria-label="Reset zoom"
           title="Reset zoom"
           disabled={zoom === 1}
-          onClick={() => setZoom(1)}
+          onClick={resetZoom}
         >
           <RotateCcw aria-hidden="true" />
         </button>
