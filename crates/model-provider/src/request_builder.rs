@@ -3,12 +3,17 @@ use crate::json_wire::{
     extract_json_array_after, extract_json_number_field, extract_json_string_field, json_escape,
     parse_number_array, split_top_level_objects,
 };
+use crate::request_tool_calls::{assistant_tool_calls_json, tool_call_ids_from_json};
 use crate::response_parser::{parse_provider_error, tool_function_name};
 use agent_core::{Message, MessageRole, Metadata, ToolSpec};
 use base64::Engine;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
+
+const PROVIDER_CATALOG_JSON: &str = include_str!("../providerCatalog.json");
+static CATALOG_MODEL_MODALITIES: OnceLock<(HashSet<String>, HashSet<String>)> = OnceLock::new();
 
 pub fn build_embedding_request_json(
     model: &str,
@@ -211,8 +216,11 @@ fn message_content_json(supports_vision: bool, message: &Message) -> String {
     format!("[{}]", parts.join(","))
 }
 
-pub(super) fn model_supports_vision_content(model: &str) -> bool {
+pub fn model_supports_vision_content(model: &str) -> bool {
     let model = model.trim().to_ascii_lowercase().replace('_', "-");
+    if let Some(supports_vision) = catalog_model_supports_vision(&model) {
+        return supports_vision;
+    }
     model.contains("vision")
         || model.contains("-vl")
         || model.contains("omni")
@@ -225,6 +233,43 @@ pub(super) fn model_supports_vision_content(model: &str) -> bool {
         || model.starts_with("gemini")
         || model.starts_with("claude-3")
         || model.starts_with("claude-4")
+}
+
+fn catalog_model_supports_vision(model: &str) -> Option<bool> {
+    let (chat, multimodal) = CATALOG_MODEL_MODALITIES.get_or_init(|| {
+        let catalog: serde_json::Value = serde_json::from_str(PROVIDER_CATALOG_JSON)
+            .expect("embedded provider catalog must be valid JSON");
+        let mut chat = HashSet::new();
+        let mut multimodal = HashSet::new();
+        for provider in catalog["providers"].as_array().into_iter().flatten() {
+            for candidate in provider["models"].as_array().into_iter().flatten() {
+                let Some(id) = candidate["id"].as_str() else {
+                    continue;
+                };
+                let id = id.trim().to_ascii_lowercase().replace('_', "-");
+                let modalities = candidate["modalities"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>();
+                if modalities.contains(&"chat") {
+                    chat.insert(id.clone());
+                }
+                if modalities.contains(&"imageInput") {
+                    multimodal.insert(id);
+                }
+            }
+        }
+        (chat, multimodal)
+    });
+    if multimodal.contains(model) {
+        Some(true)
+    } else if chat.contains(model) {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn image_data_url(value: &str) -> Option<String> {
@@ -288,48 +333,4 @@ fn tool_spec_json(tool: &ToolSpec) -> String {
         json_escape(&description),
         parameters
     )
-}
-
-fn assistant_tool_calls_json(message: &Message) -> Option<String> {
-    let raw = message
-        .metadata
-        .get("raw_tool_calls_json")
-        .map(String::as_str)?
-        .trim();
-    let parsed = serde_json::from_str::<serde_json::Value>(raw).ok()?;
-    let calls = parsed.as_array()?;
-    (!calls.is_empty() && calls.iter().all(valid_tool_call_value))
-        .then(|| serde_json::to_string(&parsed).ok())
-        .flatten()
-}
-
-fn valid_tool_call_value(value: &serde_json::Value) -> bool {
-    value
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|id| !id.trim().is_empty())
-        && value
-            .get("function")
-            .and_then(|function| function.get("name"))
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|name| !name.trim().is_empty())
-        && value
-            .get("function")
-            .and_then(|function| function.get("arguments"))
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|arguments| serde_json::from_str::<serde_json::Value>(arguments).is_ok())
-}
-
-fn tool_call_ids_from_json(raw: &str) -> Vec<String> {
-    serde_json::from_str::<serde_json::Value>(raw)
-        .ok()
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|call| {
-            call.get("id")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .collect()
 }

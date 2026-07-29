@@ -896,5 +896,7 @@ pub(crate) fn provider_config_state(config: &ProviderConfig) -> ProviderConfigSt
         context_window_tokens: config.context_window_tokens,
         agent_system_prompt: config.agent_system_prompt.clone(),
         api_key_set: !config.api_key.trim().is_empty(),
+        auth_verified: !config.api_key.trim().is_empty() && config.auth_verified_at_ms.is_some(),
+        auth_verified_at_ms: config.auth_verified_at_ms,
     }
 }

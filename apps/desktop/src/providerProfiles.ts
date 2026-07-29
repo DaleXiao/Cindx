@@ -1,19 +1,27 @@
+import providerCatalog from "../../../crates/model-provider/providerCatalog.json" with { type: "json" };
+
 export type ProviderId = "openai" | "azure_openai" | "alibaba_cn" | "custom";
 
-export const PROVIDER_OPTIONS: ReadonlyArray<{ id: ProviderId; label: string }> = [
-  { id: "openai", label: "OpenAI" },
-  { id: "azure_openai", label: "Azure OpenAI" },
-  { id: "alibaba_cn", label: "阿里云（中国）" },
-  { id: "custom", label: "自定义 URL" }
-];
+type ProviderPreset = (typeof providerCatalog.providers)[number];
 
-export const OPENAI_BASE_URL = "https://api.openai.com/v1";
-export const ALIBABA_CN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+const PROVIDER_PRESETS = new Map(
+  providerCatalog.providers.map((provider) => [provider.id as ProviderId, provider])
+);
+
+export const PROVIDER_OPTIONS: ReadonlyArray<{ id: ProviderId; label: string }> =
+  providerCatalog.providers.map((provider) => ({
+    id: provider.id as ProviderId,
+    label: provider.label
+  }));
+
+export const OPENAI_BASE_URL = PROVIDER_PRESETS.get("openai")?.baseUrl ?? "";
+export const ALIBABA_CN_BASE_URL = PROVIDER_PRESETS.get("alibaba_cn")?.baseUrl ?? "";
 export const ALIBABA_CN_IMAGE_ENDPOINT =
-  "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
+  PROVIDER_PRESETS.get("alibaba_cn")?.imageEndpoint ?? "";
 
 export type ProviderModelGroups = {
   chat: string[];
+  multimodal: string[];
   embedding: string[];
   image: string[];
   voice: string[];
@@ -37,6 +45,42 @@ type ProviderCredentialDraft = ProviderDraftIdentity & {
 type SavedProviderCredential = ProviderDraftIdentity & {
   apiKeySet: boolean;
 };
+
+type ProviderModelDraft = {
+  model: string;
+  conductorModel: string;
+  plannerModel: string;
+  executorModel: string;
+  reviewerModel: string;
+  summarizerModel: string;
+  embeddingModel: string;
+  imageModel: string;
+  voiceModel: string;
+  contextWindowTokens: number;
+};
+
+export function providerPreset(providerId: ProviderId): ProviderPreset | null {
+  return PROVIDER_PRESETS.get(providerId) ?? null;
+}
+
+export function providerPresetModelGroups(providerId: ProviderId): ProviderModelGroups {
+  const models = providerPreset(providerId)?.models ?? [];
+  const withModality = (modality: string) =>
+    models.filter((model) => model.modalities.includes(modality)).map((model) => model.id);
+  return {
+    chat: withModality("chat"),
+    multimodal: withModality("imageInput"),
+    embedding: withModality("embedding"),
+    image: withModality("imageGeneration"),
+    voice: withModality("realtime")
+  };
+}
+
+export function providerModelContextWindow(providerId: ProviderId, modelId: string) {
+  return providerPreset(providerId)?.models.find(
+    (model) => model.id.toLowerCase() === modelId.trim().toLowerCase()
+  )?.contextWindowTokens;
+}
 
 function endpointOrigin(value: string) {
   try {
@@ -68,20 +112,39 @@ export function providerBaseUrl(
   customBaseUrl: string
 ) {
   if (providerId === "openai") return OPENAI_BASE_URL;
-  if (providerId === "alibaba_cn" || providerId === "azure_openai") {
+  if (providerId === "alibaba_cn") return ALIBABA_CN_BASE_URL;
+  if (providerId === "azure_openai") {
     const resource = providerResource.trim().toLowerCase();
-    if (providerId === "alibaba_cn" && !resource) return ALIBABA_CN_BASE_URL;
     if (!validResourceLabel(resource)) return "";
-    return providerId === "azure_openai"
-      ? `https://${resource}.openai.azure.com/openai/v1`
-      : `https://${resource}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`;
+    const configuredHost = endpointHost(customBaseUrl);
+    if (
+      configuredHost === `${resource}.openai.azure.com` ||
+      configuredHost === `${resource}.services.ai.azure.com`
+    ) {
+      try {
+        const configured = new URL(customBaseUrl.trim());
+        if (configured.protocol === "https:") return customBaseUrl.trim().replace(/\/+$/, "");
+      } catch {
+        // Fall through to the canonical Azure OpenAI host.
+      }
+    }
+    return `https://${resource}.openai.azure.com/openai/v1`;
   }
   return customBaseUrl.trim();
 }
 
+export function isValidProviderBaseUrl(value: string) {
+  try {
+    const url = new URL(value.trim());
+    return (url.protocol === "http:" || url.protocol === "https:") && Boolean(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
 export function providerIdentity(draft: ProviderDraftIdentity) {
   const baseUrl = providerBaseUrl(draft.providerId, draft.providerResource, draft.baseUrl);
-  if (draft.providerId === "azure_openai" || draft.providerId === "alibaba_cn") {
+  if (draft.providerId === "azure_openai") {
     return `${draft.providerId}:${draft.providerResource.trim().toLowerCase()}`;
   }
   if (draft.providerId !== "custom") return draft.providerId;
@@ -91,17 +154,13 @@ export function providerIdentity(draft: ProviderDraftIdentity) {
 
 export function resolveProviderProfile(draft: ProviderDraftIdentity) {
   const providerResource =
-    draft.providerId === "azure_openai" || draft.providerId === "alibaba_cn"
-      ? draft.providerResource.trim().toLowerCase()
-      : "";
+    draft.providerId === "azure_openai" ? draft.providerResource.trim().toLowerCase() : "";
   const baseUrl = providerBaseUrl(draft.providerId, providerResource, draft.baseUrl);
   let imageEndpoint = "";
   if (draft.providerId === "custom") {
     imageEndpoint = draft.imageEndpoint?.trim() ?? "";
-  } else if (draft.providerId === "alibaba_cn" && baseUrl) {
-    imageEndpoint = providerResource
-      ? `https://${providerResource}.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation`
-      : ALIBABA_CN_IMAGE_ENDPOINT;
+  } else {
+    imageEndpoint = providerPreset(draft.providerId)?.imageEndpoint ?? "";
   }
   return {
     providerId: draft.providerId,
@@ -149,16 +208,32 @@ export function selectProviderDraft<T extends ProviderCredentialDraft>(
   current: T,
   providerId: ProviderId
 ): T {
-  return bindProviderDraftApiKey(current, {
+  const next = {
     ...current,
     providerId,
     providerResource: ""
-  });
+  } as T;
+  const preset = providerPreset(providerId);
+  if (preset && "model" in current) {
+    const defaults = preset.defaults;
+    Object.assign(next, {
+      model: defaults.chat,
+      conductorModel: defaults.conductor,
+      plannerModel: defaults.planner,
+      executorModel: defaults.executor,
+      reviewerModel: defaults.reviewer,
+      summarizerModel: defaults.summarizer,
+      embeddingModel: defaults.embedding,
+      imageModel: defaults.image,
+      voiceModel: defaults.voice,
+      contextWindowTokens: defaults.contextWindowTokens
+    } satisfies ProviderModelDraft);
+  }
+  return bindProviderDraftApiKey(current, next);
 }
 
 export function providerSupportsWebRtcVoice(providerId: ProviderId, baseUrl: string) {
-  if (providerId === "openai") return true;
-  if (providerId !== "custom") return false;
+  if (providerId !== "custom") return Boolean(providerPreset(providerId)?.webRtcVoice);
   const host = endpointHost(baseUrl);
   if (host === "dashscope.aliyuncs.com") return false;
   if (hostHasResourceSuffix(host, ALIBABA_CN_WORKSPACE_HOST_SUFFIX)) return false;
@@ -202,7 +277,26 @@ function modelKind(model: string): "chat" | "embedding" | "image" | "voice" | "o
   return "chat";
 }
 
+function modelLooksMultimodal(model: string) {
+  const id = model.trim().toLowerCase().replace(/_/g, "-");
+  return (
+    id.includes("vision") ||
+    id.includes("-vl") ||
+    id.includes("omni") ||
+    id.includes("pixtral") ||
+    id.includes("llava") ||
+    id.includes("glm-4v") ||
+    id.startsWith("gpt-4o") ||
+    id.startsWith("gpt-4.1") ||
+    id.startsWith("gpt-5") ||
+    id.startsWith("gemini") ||
+    id.startsWith("claude-3") ||
+    id.startsWith("claude-4")
+  );
+}
+
 export function groupProviderModels(
+  providerId: ProviderId,
   models: string[],
   configured: {
     chat: string[];
@@ -211,18 +305,29 @@ export function groupProviderModels(
     voice: string;
   }
 ): ProviderModelGroups {
+  const preset = providerPresetModelGroups(providerId);
   const groups: ProviderModelGroups = {
-    chat: [...configured.chat],
-    embedding: [configured.embedding],
-    image: [configured.image],
-    voice: [configured.voice]
+    chat: [...preset.chat, ...configured.chat],
+    multimodal: [...preset.multimodal],
+    embedding: [...preset.embedding, configured.embedding],
+    image: [...preset.image, configured.image],
+    voice: [...preset.voice, configured.voice]
   };
   for (const model of models) {
     const kind = modelKind(model);
     if (kind !== "other") groups[kind].push(model);
+    if (providerId === "custom" && kind === "chat" && modelLooksMultimodal(model)) {
+      groups.multimodal.push(model);
+    }
+  }
+  if (providerId === "custom") {
+    for (const model of configured.chat) {
+      if (modelLooksMultimodal(model)) groups.multimodal.push(model);
+    }
   }
   return {
     chat: uniqueSorted(groups.chat),
+    multimodal: uniqueSorted(groups.multimodal),
     embedding: uniqueSorted(groups.embedding),
     image: uniqueSorted(groups.image),
     voice: uniqueSorted(groups.voice)

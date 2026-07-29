@@ -88,6 +88,7 @@ pub(crate) struct ProviderConfig {
     pub(crate) image_model: String,
     pub(crate) image_endpoint: String,
     pub(crate) voice_model: String,
+    pub(crate) auth_verified_at_ms: Option<u64>,
     pub(crate) collaboration_policy: String,
     pub(crate) prompt_evolution_enabled: bool,
     pub(crate) context_window_tokens: u64,
@@ -150,25 +151,28 @@ pub(crate) fn default_agent_effort() -> String {
 
 impl Default for ProviderConfig {
     fn default() -> Self {
-        let model = "gpt-4.1-mini".to_string();
+        let defaults = provider_model_defaults(PROVIDER_OPENAI)
+            .expect("OpenAI defaults must exist in the embedded provider catalog");
+        let profile = resolve_provider_profile(PROVIDER_OPENAI, "", "", "");
         Self {
             provider_id: PROVIDER_OPENAI.to_string(),
             provider_resource: String::new(),
-            base_url: "https://api.openai.com/v1".to_string(),
+            base_url: profile.base_url,
             api_key: String::new(),
-            model: model.clone(),
-            conductor_model: model.clone(),
-            planner_model: model.clone(),
-            executor_model: model.clone(),
-            reviewer_model: model.clone(),
-            summarizer_model: model,
-            embedding_model: OPENAI_DEFAULT_EMBEDDING_MODEL.to_string(),
-            image_model: String::new(),
-            image_endpoint: String::new(),
-            voice_model: String::new(),
+            model: defaults.chat.clone(),
+            conductor_model: defaults.conductor.clone(),
+            planner_model: defaults.planner.clone(),
+            executor_model: defaults.executor.clone(),
+            reviewer_model: defaults.reviewer.clone(),
+            summarizer_model: defaults.summarizer.clone(),
+            embedding_model: defaults.embedding.clone(),
+            image_model: defaults.image.clone(),
+            image_endpoint: profile.image_endpoint,
+            voice_model: defaults.voice.clone(),
+            auth_verified_at_ms: None,
             collaboration_policy: "auto_router".to_string(),
             prompt_evolution_enabled: true,
-            context_window_tokens: 128_000,
+            context_window_tokens: defaults.context_window_tokens,
             agent_system_prompt: String::new(),
         }
     }
@@ -239,15 +243,13 @@ impl ProviderConfig {
 
 pub(crate) fn embedding_model_for_provider(base_url: &str, configured_model: &str) -> String {
     let configured_model = configured_model.trim();
+    if configured_model.is_empty() {
+        return String::new();
+    }
     let is_alibaba_cn =
         resolve_provider_profile("", "", base_url, "").provider_id == PROVIDER_ALIBABA_CN;
-    if is_alibaba_cn
-        && (configured_model.is_empty()
-            || configured_model.eq_ignore_ascii_case(OPENAI_DEFAULT_EMBEDDING_MODEL))
-    {
+    if is_alibaba_cn && configured_model.eq_ignore_ascii_case(OPENAI_DEFAULT_EMBEDDING_MODEL) {
         DASHSCOPE_DEFAULT_EMBEDDING_MODEL.to_string()
-    } else if configured_model.is_empty() {
-        OPENAI_DEFAULT_EMBEDDING_MODEL.to_string()
     } else {
         configured_model.to_string()
     }

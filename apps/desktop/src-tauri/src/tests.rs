@@ -4094,6 +4094,17 @@ fn provider_profiles_resolve_fixed_and_resource_scoped_endpoints() {
     );
     assert!(azure.image_endpoint.is_empty());
 
+    let azure_services = resolve_provider_profile(
+        PROVIDER_AZURE_OPENAI,
+        "Team-East",
+        "https://team-east.services.ai.azure.com/openai/v1",
+        "",
+    );
+    assert_eq!(
+        azure_services.base_url,
+        "https://team-east.services.ai.azure.com/openai/v1"
+    );
+
     let alibaba_shared = resolve_provider_profile(
         PROVIDER_ALIBABA_CN,
         "",
@@ -4110,14 +4121,14 @@ fn provider_profiles_resolve_fixed_and_resource_scoped_endpoints() {
     );
 
     let alibaba_workspace = resolve_provider_profile(PROVIDER_ALIBABA_CN, "WS-123", "", "");
-    assert_eq!(alibaba_workspace.provider_resource, "ws-123");
+    assert!(alibaba_workspace.provider_resource.is_empty());
     assert_eq!(
         alibaba_workspace.base_url,
-        "https://ws-123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+        "https://dashscope.aliyuncs.com/compatible-mode/v1"
     );
     assert_eq!(
         alibaba_workspace.image_endpoint,
-        "https://ws-123.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+        "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
     );
 
     let max_resource = "a".repeat(63);
@@ -4150,9 +4161,25 @@ fn legacy_provider_inference_uses_exact_hosts_and_preserves_custom_urls() {
     let alibaba = provider_config_from_text(
         "base_url=https://workspace-9.cn-beijing.maas.aliyuncs.com/compatible-mode/v1\n",
     );
-    assert_eq!(alibaba.provider_id, PROVIDER_ALIBABA_CN);
-    assert_eq!(alibaba.provider_resource, "workspace-9");
+    assert_eq!(alibaba.provider_id, PROVIDER_CUSTOM);
+    assert!(alibaba.provider_resource.is_empty());
+    assert_eq!(
+        alibaba.base_url,
+        "https://workspace-9.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    );
     assert!(!alibaba.supports_webrtc_voice());
+
+    let explicit_legacy_workspace = provider_config_from_text(
+        "provider_id=alibaba_cn\n\
+         provider_resource=workspace-id\n\
+         base_url=https://workspace-9.cn-beijing.maas.aliyuncs.com/compatible-mode/v1\n",
+    );
+    assert_eq!(explicit_legacy_workspace.provider_id, PROVIDER_CUSTOM);
+    assert!(explicit_legacy_workspace.provider_resource.is_empty());
+    assert_eq!(
+        explicit_legacy_workspace.base_url,
+        "https://workspace-9.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    );
 
     let alibaba_shared =
         provider_config_from_text("base_url=https://dashscope.aliyuncs.com/compatible-mode/v1\n");
@@ -4273,13 +4300,13 @@ fn model_list_reuses_saved_key_only_for_the_same_draft_identity() {
 }
 
 #[test]
-fn voice_model_is_optional_and_migrates_without_changing_agent_readiness() {
+fn openai_voice_model_is_built_in_and_can_still_be_overridden() {
     let mut config = provider_config_from_text(
         "base_url=https://api.openai.com/v1\napi_key=secret\nexecutor_model=model-a\n",
     );
     assert!(config.is_ready());
-    assert!(!config.voice_is_ready());
-    assert!(config.voice_model.is_empty());
+    assert!(config.voice_is_ready());
+    assert_eq!(config.voice_model, "gpt-realtime-2.1");
 
     config = provider_config_from_text(
         "base_url=https://api.openai.com/v1\napi_key=secret\nexecutor_model=model-a\nvoice_model=gpt-realtime\n",
@@ -4367,14 +4394,144 @@ fn dashscope_provider_migrates_the_openai_embedding_default() {
     );
     assert_eq!(
         workspace.model_for_role(&ModelRole::Embedder),
-        DASHSCOPE_DEFAULT_EMBEDDING_MODEL
+        "text-embedding-3-small"
     );
 
     let openai = ProviderConfig::default();
     assert_eq!(
         openai.model_for_role(&ModelRole::Embedder),
-        OPENAI_DEFAULT_EMBEDDING_MODEL
+        "text-embedding-3-large"
     );
+}
+
+#[test]
+fn provider_catalog_supplies_complete_defaults_and_explicit_vision_capabilities() {
+    let openai = provider_model_defaults(PROVIDER_OPENAI).expect("OpenAI preset");
+    assert_eq!(openai.chat, "gpt-4.1");
+    assert_eq!(openai.embedding, "text-embedding-3-large");
+    assert_eq!(openai.image, "gpt-image-2");
+    assert_eq!(openai.voice, "gpt-realtime-2.1");
+    assert_eq!(openai.context_window_tokens, 1_047_576);
+    assert!(provider_supports_model_discovery(PROVIDER_OPENAI));
+    assert!(provider_model_supports_tools(PROVIDER_OPENAI, "gpt-4.1").unwrap());
+    assert_eq!(
+        provider_model_supports_vision(PROVIDER_OPENAI, "gpt-4.1"),
+        Some(true)
+    );
+
+    let alibaba = provider_model_defaults(PROVIDER_ALIBABA_CN).expect("Alibaba preset");
+    assert_eq!(alibaba.chat, "qwen3.7-plus");
+    assert_eq!(alibaba.embedding, "text-embedding-v4");
+    assert_eq!(alibaba.image, "qwen-image-3.0-pro");
+    assert!(alibaba.voice.is_empty());
+    assert_eq!(alibaba.context_window_tokens, 1_000_000);
+    assert!(!provider_supports_model_discovery(PROVIDER_AZURE_OPENAI));
+    assert!(provider_discovers_modality(
+        PROVIDER_ALIBABA_CN,
+        "embedding"
+    ));
+    assert!(!provider_discovers_modality(
+        PROVIDER_ALIBABA_CN,
+        "imageGeneration"
+    ));
+    assert_eq!(
+        provider_models_for_modality(PROVIDER_ALIBABA_CN, "embedding"),
+        vec!["text-embedding-v4"]
+    );
+    assert_eq!(
+        provider_model_supports_vision(PROVIDER_ALIBABA_CN, "qwen3.7-plus"),
+        Some(true)
+    );
+    assert_eq!(
+        provider_model_supports_vision(PROVIDER_ALIBABA_CN, "qwen3.7-max"),
+        Some(false)
+    );
+}
+
+#[test]
+fn switching_provider_replaces_stale_models_with_builtin_modality_defaults() {
+    let mut config = ProviderConfig {
+        api_key: "openai-key".to_string(),
+        ..ProviderConfig::default()
+    };
+    let mut input = provider_input_from_config(&config);
+    input.provider_id = PROVIDER_ALIBABA_CN.to_string();
+    input.provider_resource = "obsolete-workspace".to_string();
+    input.base_url.clear();
+    apply_provider_config_input(&mut config, input);
+
+    assert_eq!(config.provider_id, PROVIDER_ALIBABA_CN);
+    assert!(config.provider_resource.is_empty());
+    assert_eq!(config.model, "qwen3.7-plus");
+    assert_eq!(config.summarizer_model, "qwen3.7-flash");
+    assert_eq!(config.embedding_model, "text-embedding-v4");
+    assert_eq!(config.image_model, "qwen-image-3.0-pro");
+    assert!(config.voice_model.is_empty());
+    assert!(config.api_key.is_empty());
+    assert!(config.auth_verified_at_ms.is_none());
+}
+
+#[test]
+fn authenticated_catalog_reconciles_each_modality_without_inventing_access() {
+    let mut config = ProviderConfig::default();
+    reconcile_provider_models(
+        &mut config,
+        &[
+            "gpt-4.1-mini".to_string(),
+            "text-embedding-3-small".to_string(),
+        ],
+    )
+    .expect("an available Chat preset should reconcile");
+
+    assert_eq!(config.model, "gpt-4.1-mini");
+    assert_eq!(config.executor_model, "gpt-4.1-mini");
+    assert_eq!(config.embedding_model, "text-embedding-3-small");
+    assert!(config.image_model.is_empty());
+    assert!(config.voice_model.is_empty());
+}
+
+#[test]
+fn unavailable_modalities_remain_disabled_after_config_round_trip() {
+    let mut config = ProviderConfig::default();
+    reconcile_provider_models(&mut config, &["gpt-4.1-mini".to_string()])
+        .expect("the available Chat model should reconcile");
+
+    let reloaded = provider_config_from_text(&provider_config_text(&config));
+    assert_eq!(reloaded.model, "gpt-4.1-mini");
+    assert!(reloaded.embedding_model.is_empty());
+    assert!(reloaded.model_for_role(&ModelRole::Embedder).is_empty());
+    assert!(reloaded.image_model.is_empty());
+    assert!(reloaded.voice_model.is_empty());
+}
+
+#[test]
+fn discovery_does_not_disable_modalities_served_by_a_separate_api() {
+    let mut config = provider_config_from_text(
+        "provider_id=alibaba_cn\n\
+         base_url=https://dashscope.aliyuncs.com/compatible-mode/v1\n",
+    );
+    reconcile_provider_models(
+        &mut config,
+        &["qwen3.7-plus".to_string(), "text-embedding-v4".to_string()],
+    )
+    .expect("the standard Alibaba catalog should reconcile");
+
+    assert_eq!(config.image_model, "qwen-image-3.0-pro");
+}
+
+#[test]
+fn custom_catalog_must_include_the_configured_chat_model() {
+    let mut config = ProviderConfig {
+        provider_id: PROVIDER_CUSTOM.to_string(),
+        base_url: "https://gateway.example/v1".to_string(),
+        model: "private-chat".to_string(),
+        executor_model: "private-chat".to_string(),
+        ..ProviderConfig::default()
+    };
+
+    let error = reconcile_provider_models(&mut config, &["other-chat".to_string()])
+        .expect_err("a different model must not validate the configured custom model");
+    assert!(error.contains("configured Chat model is unavailable"));
 }
 
 #[test]

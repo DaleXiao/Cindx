@@ -9,21 +9,20 @@ use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 mod error;
 mod image_provider;
 mod json_wire;
+mod provider_validation;
 mod realtime_provider;
 mod redirect_policy;
 mod request_builder;
+mod request_tool_calls;
 mod response_parser;
 mod streaming_response;
 mod streaming_wire;
 mod usage;
 
-use json_wire::{extract_json_array_after, extract_json_string_field, split_top_level_objects};
 use redirect_policy::api_key_safe_redirect_policy;
 #[cfg(test)]
 use request_builder::build_chat_request_json_with_tools_and_output_limit;
-use request_builder::{
-    build_chat_request_json_with_tools_output_limit_and_vision, model_supports_vision_content,
-};
+use request_builder::build_chat_request_json_with_tools_output_limit_and_vision;
 use streaming_response::consume_streaming_response;
 #[cfg(test)]
 use streaming_response::{consume_streaming_body, finish_streaming_response};
@@ -32,12 +31,13 @@ pub use error::{classify_provider_failure, ProviderFailureClass};
 pub use image_provider::{
     build_image_generation_request_json, OpenAiCompatibleImageConfig, OpenAiCompatibleImageProvider,
 };
+pub use provider_validation::parse_model_list_response;
 pub use realtime_provider::{
     build_realtime_session_json, OpenAiCompatibleRealtimeConfig, OpenAiCompatibleRealtimeProvider,
 };
 pub use request_builder::{
     build_chat_request_json, build_chat_request_json_with_tools, build_embedding_request_json,
-    parse_embedding_response,
+    model_supports_vision_content, parse_embedding_response,
 };
 pub use response_parser::{
     parse_chat_response, parse_model_response, parse_provider_error, parse_tool_calls,
@@ -310,7 +310,7 @@ impl OpenAiCompatibleConfig {
     }
 
     fn supports_vision_content(&self) -> bool {
-        model_supports_vision_content(&self.model) || is_azure_openai_url(&self.base_url)
+        model_supports_vision_content(&self.model)
     }
 }
 
@@ -627,37 +627,6 @@ impl OpenAiCompatibleProvider {
         Self { config }
     }
 
-    pub fn list_models(&self) -> Result<Vec<String>, ModelError> {
-        if self.config.base_url.trim().is_empty() || self.config.api_key.trim().is_empty() {
-            return Err(ModelError::new(
-                "provider base URL and API key are required",
-            ));
-        }
-
-        let output = execute_http(
-            &self.config.models_url(),
-            &self.config.api_key,
-            None,
-            self.config.timeout_seconds,
-            MAX_MODEL_RESPONSE_BYTES,
-        )?;
-
-        let stdout = String::from_utf8_lossy(&output.body).to_string();
-        if !output.status.is_success() {
-            let provider_error = parse_provider_error(&stdout).unwrap_or_default();
-            return Err(ModelError::with_status(
-                output.status.as_u16(),
-                if provider_error.is_empty() {
-                    format!("model list request failed with status {}", output.status)
-                } else {
-                    provider_error
-                },
-            ));
-        }
-
-        parse_model_list_response(&stdout)
-    }
-
     pub fn complete_streaming(
         &self,
         request: ModelRequest,
@@ -831,27 +800,6 @@ impl OpenAiCompatibleProvider {
     }
 }
 
-pub fn parse_model_list_response(text: &str) -> Result<Vec<String>, ModelError> {
-    if let Some(message) = parse_provider_error(text) {
-        return Err(ModelError::new(message));
-    }
-
-    let data = extract_json_array_after(text, "\"data\"")
-        .ok_or_else(|| ModelError::new("model list response did not include data"))?;
-    let mut models = split_top_level_objects(&data)
-        .into_iter()
-        .filter_map(|object| extract_json_string_field(&object, "id"))
-        .filter(|model| !model.trim().is_empty())
-        .collect::<Vec<_>>();
-    models.sort();
-    models.dedup();
-
-    if models.is_empty() {
-        return Err(ModelError::new("provider returned an empty model list"));
-    }
-    Ok(models)
-}
-
 impl StreamingModelProvider for OpenAiCompatibleProvider {
     fn complete_streaming_cancellable(
         &self,
@@ -904,7 +852,65 @@ mod tests {
     use futures_util::{stream, Stream};
     use std::collections::BTreeMap;
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
     use std::time::Instant;
+
+    fn serve_credential_probe(status: &str, body: &str) -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("probe listener should bind");
+        let address = listener.local_addr().expect("probe address");
+        let status = status.to_string();
+        let body = body.to_string();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("probe request should connect");
+            let mut request = vec![0_u8; 8192];
+            let size = stream
+                .read(&mut request)
+                .expect("probe request should read");
+            let request = String::from_utf8_lossy(&request[..size]).to_string();
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("probe response should write");
+            request
+        });
+        (format!("http://{address}/v1"), handle)
+    }
+
+    fn serve_credential_probe_sequence(
+        responses: Vec<(&str, &str)>,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("probe listener should bind");
+        let address = listener.local_addr().expect("probe address");
+        let responses = responses
+            .into_iter()
+            .map(|(status, body)| (status.to_string(), body.to_string()))
+            .collect::<Vec<_>>();
+        let handle = thread::spawn(move || {
+            responses
+                .into_iter()
+                .map(|(status, body)| {
+                    let (mut stream, _) = listener.accept().expect("probe request should connect");
+                    let mut request = vec![0_u8; 8192];
+                    let size = stream
+                        .read(&mut request)
+                        .expect("probe request should read");
+                    let request = String::from_utf8_lossy(&request[..size]).to_string();
+                    write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .expect("probe response should write");
+                    request
+                })
+                .collect()
+        });
+        (format!("http://{address}/v1"), handle)
+    }
 
     struct ScriptedStreamingProvider;
 
@@ -1153,7 +1159,7 @@ mod tests {
     }
 
     #[test]
-    fn azure_deployment_names_keep_multimodal_content_enabled() {
+    fn azure_deployment_names_do_not_invent_multimodal_capabilities() {
         let azure = OpenAiCompatibleConfig {
             base_url: "https://cindx.openai.azure.com/openai/v1".to_string(),
             api_key: "key".to_string(),
@@ -1165,9 +1171,14 @@ mod tests {
             base_url: "https://example.test/v1".to_string(),
             ..azure.clone()
         };
+        let known_multimodal = OpenAiCompatibleConfig {
+            model: "gpt-4.1".to_string(),
+            ..azure.clone()
+        };
 
-        assert!(azure.supports_vision_content());
+        assert!(!azure.supports_vision_content());
         assert!(!custom.supports_vision_content());
+        assert!(known_multimodal.supports_vision_content());
     }
 
     #[test]
@@ -1915,5 +1926,138 @@ mod tests {
             timeout_seconds: 10,
         });
         assert!(vision_provider.capabilities().supports_vision);
+
+        assert!(model_supports_vision_content("qwen3.7-plus"));
+        assert!(!model_supports_vision_content("qwen3.7-max"));
+    }
+
+    #[test]
+    fn credential_validation_returns_authenticated_model_catalog() {
+        let (base_url, request) = serve_credential_probe(
+            "200 OK",
+            r#"{"data":[{"id":"gpt-4.1"},{"id":"gpt-image-2"}]}"#,
+        );
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url,
+            api_key: "verified-key".to_string(),
+            model: "gpt-4.1".to_string(),
+            embedding_model: "text-embedding-3-large".to_string(),
+            timeout_seconds: 5,
+        });
+
+        assert_eq!(
+            provider.validate_credentials().expect("key should verify"),
+            vec!["gpt-4.1".to_string(), "gpt-image-2".to_string()]
+        );
+        let request = request.join().expect("probe server should finish");
+        assert!(request.starts_with("GET /v1/models HTTP/1.1"));
+        assert!(request.contains("authorization: Bearer verified-key"));
+    }
+
+    #[test]
+    fn credential_validation_rejects_unauthorized_keys() {
+        let (base_url, request) = serve_credential_probe(
+            "401 Unauthorized",
+            r#"{"error":{"message":"invalid API key"}}"#,
+        );
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url,
+            api_key: "bad-key".to_string(),
+            model: "gpt-4.1".to_string(),
+            embedding_model: "text-embedding-3-large".to_string(),
+            timeout_seconds: 5,
+        });
+
+        let error = provider
+            .validate_credentials()
+            .expect_err("unauthorized key must fail");
+        assert_eq!(error.status_code, Some(401));
+        assert!(error.message.contains("invalid API key"));
+        request.join().expect("probe server should finish");
+    }
+
+    #[test]
+    fn credential_validation_rejects_unparseable_success_and_rate_limits() {
+        for (status, body) in [
+            ("200 OK", r#"{"ok":true}"#),
+            (
+                "429 Too Many Requests",
+                r#"{"error":{"message":"retry later"}}"#,
+            ),
+        ] {
+            let (base_url, request) = serve_credential_probe(status, body);
+            let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+                base_url,
+                api_key: "uncertain-key".to_string(),
+                model: "gpt-4.1".to_string(),
+                embedding_model: "text-embedding-3-large".to_string(),
+                timeout_seconds: 5,
+            });
+
+            provider
+                .validate_credentials()
+                .expect_err("an ambiguous response must not mark credentials verified");
+            request.join().expect("probe server should finish");
+        }
+    }
+
+    #[test]
+    fn credential_validation_fallback_requires_a_real_chat_completion() {
+        let (base_url, requests) = serve_credential_probe_sequence(vec![
+            (
+                "404 Not Found",
+                r#"{"error":{"message":"no model catalog"}}"#,
+            ),
+            (
+                "200 OK",
+                r#"{"choices":[{"message":{"role":"assistant","content":"OK"}}]}"#,
+            ),
+        ]);
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url,
+            api_key: "verified-key".to_string(),
+            model: "private-chat".to_string(),
+            embedding_model: "private-embedding".to_string(),
+            timeout_seconds: 5,
+        });
+
+        assert!(provider
+            .validate_credentials()
+            .expect("chat completion should verify")
+            .is_empty());
+        let requests = requests.join().expect("probe server should finish");
+        assert!(requests[0].starts_with("GET /v1/models HTTP/1.1"));
+        assert!(requests[1].starts_with("POST /v1/chat/completions HTTP/1.1"));
+        assert!(requests[1].contains("\"model\":\"private-chat\""));
+    }
+
+    #[test]
+    fn chat_verification_retries_modern_completion_limit_parameter() {
+        let (base_url, requests) = serve_credential_probe_sequence(vec![
+            (
+                "400 Bad Request",
+                r#"{"error":{"message":"max_tokens is unsupported; use max_completion_tokens"}}"#,
+            ),
+            (
+                "200 OK",
+                r#"{"choices":[{"message":{"role":"assistant","content":"OK"}}]}"#,
+            ),
+        ]);
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url,
+            api_key: "verified-key".to_string(),
+            model: "reasoning-deployment".to_string(),
+            embedding_model: "embedding-deployment".to_string(),
+            timeout_seconds: 5,
+        });
+
+        provider
+            .validate_chat_access()
+            .expect("the modern completion limit retry should verify");
+        let requests = requests.join().expect("probe server should finish");
+        assert!(requests[0].contains("\"max_tokens\":1"));
+        assert!(!requests[0].contains("\"max_completion_tokens\""));
+        assert!(requests[1].contains("\"max_completion_tokens\":1"));
+        assert!(!requests[1].contains("\"max_tokens\""));
     }
 }

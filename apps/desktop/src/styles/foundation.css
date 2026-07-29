@@ -282,7 +282,7 @@ pre {
   --sidebar-layout-width: 0px;
   --inspector-layout-width: 0px;
   grid-template-columns: 0 minmax(0, 1fr) 0;
-  transition: none;
+  transition: grid-template-columns 220ms var(--ease-out-quart);
 }
 
 .app-shell[data-active-view="settings"]::before,
@@ -474,5 +474,4 @@ pre {
 .sidebar-resize-handle:focus-visible {
   outline: 0;
 }
-
 

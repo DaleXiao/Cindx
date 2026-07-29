@@ -1,10 +1,13 @@
 import {
-  Activity,
+  Camera,
   ChevronDown,
   ChevronRight,
   FileText,
   Globe2,
+  Keyboard,
   LayoutDashboard,
+  MousePointerClick,
+  MoveVertical,
   PanelRightOpen,
   Save,
   Search,
@@ -258,7 +261,7 @@ export function SettingsToolsPanel({
                 disabled={browserBusy || !browserUrl.trim()}
                 onClick={() => onRunBrowserTool("browser.capture")}
               >
-                <Activity size={17} aria-hidden="true" />
+                <Camera size={17} aria-hidden="true" />
                 <span>Capture</span>
               </button>
               <button
@@ -267,7 +270,7 @@ export function SettingsToolsPanel({
                 disabled={browserBusy || !browserUrl.trim()}
                 onClick={() => onRunBrowserTool("browser.click")}
               >
-                <Activity size={17} aria-hidden="true" />
+                <MousePointerClick size={17} aria-hidden="true" />
                 <span>Click</span>
               </button>
               <button
@@ -276,7 +279,7 @@ export function SettingsToolsPanel({
                 disabled={browserBusy || !browserUrl.trim()}
                 onClick={() => onRunBrowserTool("browser.type")}
               >
-                <FileText size={17} aria-hidden="true" />
+                <Keyboard size={17} aria-hidden="true" />
                 <span>Type</span>
               </button>
               <button
@@ -285,7 +288,7 @@ export function SettingsToolsPanel({
                 disabled={browserBusy || !browserUrl.trim()}
                 onClick={() => onRunBrowserTool("browser.scroll")}
               >
-                <Activity size={17} aria-hidden="true" />
+                <MoveVertical size={17} aria-hidden="true" />
                 <span>Scroll</span>
               </button>
               <button

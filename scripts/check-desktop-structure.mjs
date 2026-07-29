@@ -607,9 +607,11 @@ const modelProviderModuleBudgets = new Map([
   ["image_provider.rs", 430],
   ["json_wire.rs", 320],
   ["lib.rs", 900],
+  ["provider_validation.rs", 220],
   ["realtime_provider.rs", 190],
   ["redirect_policy.rs", 100],
   ["request_builder.rs", 340],
+  ["request_tool_calls.rs", 80],
   ["response_parser.rs", 380],
   ["streaming_response.rs", 380],
   ["streaming_wire.rs", 160],
@@ -1586,7 +1588,7 @@ assert(
   "Timeline content must scroll beneath the translucent titlebar glass surface"
 );
 assert(
-  /\.app-shell\[data-active-view="settings"\] \{[\s\S]*?--sidebar-layout-width: 0px;[\s\S]*?grid-template-columns: 0 minmax\(0, 1fr\) 0;[\s\S]*?transition: none;/.test(styles) &&
+  /\.app-shell\[data-active-view="settings"\] \{[\s\S]*?--sidebar-layout-width: 0px;[\s\S]*?grid-template-columns: 0 minmax\(0, 1fr\) 0;[\s\S]*?transition: grid-template-columns 220ms var\(--ease-out-quart\);/.test(styles) &&
     /\.app-shell\[data-active-view="settings"\] \.window-toolbar,\s*\.app-shell\[data-active-view="schedule"\] \.window-toolbar \{[\s\S]*?background: transparent;/.test(styles) &&
     /\.app-shell\[data-active-view="settings"\] \.window-workspace-header,\s*\.app-shell\[data-active-view="schedule"\] \.window-workspace-header \{[\s\S]*?background: var\(--bg\);/.test(styles) &&
     /\.settings-view \{[\s\S]*?overflow-y: auto;[\s\S]*?scrollbar-gutter: stable;/.test(
@@ -2075,11 +2077,14 @@ assert(
   "Settings must remain the only sidebar footer destination"
 );
 assert(
-  sidebarSource.includes("settingsButtonRef") &&
-    sidebarSource.includes('icon.getAnimations().forEach((animation) => animation.cancel())') &&
-    sidebarSource.includes('{ transform: "rotate(360deg)" }') &&
-    sidebarSource.includes('window.matchMedia("(prefers-reduced-motion: reduce)")'),
-  "Settings must rotate once per click and respect reduced-motion preferences"
+  !sidebarSource.includes("settingsButtonRef") &&
+    !sidebarSource.includes("getAnimations()") &&
+    !sidebarSource.includes('transform: "rotate(360deg)"') &&
+    sidebarSource.includes('onClick={() => onViewChange("settings")}') &&
+    !styles.includes(".sidebar-settings svg") &&
+    styles.includes("transition: grid-template-columns 220ms var(--ease-out-quart)") &&
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.app-shell,/.test(styles),
+  "Settings must open with a reduced-motion-safe full-page expansion and no gear spin"
 );
 assert(
   sidebarSource.includes('if (!state || (active && unseenResult)) return null;') &&
@@ -2204,8 +2209,19 @@ assert(
 );
 assert(
   traceStatusIconSource.includes("CheckCircle2") &&
+    traceStatusIconSource.includes("BadgeCheck") &&
+    traceStatusIconSource.includes("OctagonX") &&
+    traceStatusIconSource.includes("ShieldX") &&
+    traceStatusIconSource.includes("Ban") &&
+    traceStatusIconSource.includes("CirclePause") &&
+    traceStatusIconSource.includes("LoaderCircle") &&
     traceStatusIconSource.includes("ShieldQuestion") &&
-    traceStatusIconSource.includes("XCircle") &&
+    inspectorSource.includes("ToolActivityIcon") &&
+    inspectorSource.includes("BrainCircuit") &&
+    inspectorSource.includes("DatabaseZap") &&
+    inspectorSource.includes("MessageSquareText") &&
+    inspectorSource.includes("Route") &&
+    sessionToolChainSource.includes("ToolActivityIcon") &&
     inspectorSource.includes('export type InspectorTab = "trace"') &&
     inspectorSource.includes('(["trace", "details", "artifacts", "context"]') &&
     inspectorSource.includes("sessionTraceSteps.map((step, index)") &&
@@ -2217,7 +2233,7 @@ assert(
     inspectorSource.includes("<TraceStatusIcon status={traceStep.status}") &&
     !appSource.includes('className="trace-view"') &&
     !sidebarSource.includes('aria-label="Agent trace"'),
-  "Agent trace must live inside the Inspector Debug drawer and use accessible status icons"
+  "Agent trace must live inside the Inspector Debug drawer and use distinct accessible semantic icons"
 );
 assert(
   sidebarSource.includes('aria-label="Create project"') &&
@@ -2321,7 +2337,8 @@ assert(
   appSource.includes('className="settings-saved-toast"') &&
     appSource.includes("showSettingsSaved();") &&
     desktopControllerSource.includes('showSettingsSaved("Personalization saved")') &&
-    (desktopControllerSource.match(/showSaved\(\);/g)?.length ?? 0) === 3 &&
+    desktopControllerSource.includes('showSaved("Provider verified and configured")') &&
+    (desktopControllerSource.match(/showSaved\(/g)?.length ?? 0) === 5 &&
     appSource.includes("<CheckCircle2 aria-hidden=\"true\" />") &&
     styles.includes(".settings-saved-toast") &&
     styles.includes("color: #2f9e64;"),
@@ -3066,7 +3083,10 @@ assert(
     styles.includes(".nav-heading-with-icon"),
   "Projects heading must render an aligned SVG icon"
 );
-assert(settingsPageSource.includes("Save provider"), "App must render provider save action");
+assert(
+  settingsPageSource.includes("Connect provider"),
+  "App must render provider verification and connect action"
+);
 assert(settingsPageSource.includes("Run tool"), "App must render the Phase 5 tool runner");
 assert(settingsPageSource.includes("Index workspace"), "App must render the Phase 7 RAG index action");
 assert(desktopUiSource.includes("answerWithRag"), "App must render the Phase 7 RAG answer flow");

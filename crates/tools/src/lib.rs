@@ -39,11 +39,11 @@ pub use web_search::WebSearchTool;
 use meta_tools::{ToolInspectMeta, ToolInvokeMeta, ToolSearchMeta};
 
 #[cfg(test)]
+use agent_core::ToolEffectSemantics;
+#[cfg(test)]
 use image_generation::image_output_path;
 #[cfg(test)]
 use web_search::html_to_text;
-#[cfg(test)]
-use agent_core::ToolEffectSemantics;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolError {

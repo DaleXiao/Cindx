@@ -325,6 +325,8 @@ pub(crate) struct TimelineEntry {
     pub(crate) label: String,
     pub(crate) detail: String,
     pub(crate) kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_name: Option<String>,
     pub(crate) state: String,
     pub(crate) timestamp_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -408,6 +410,8 @@ pub(crate) struct ProviderConfigState {
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
     pub(crate) api_key_set: bool,
+    pub(crate) auth_verified: bool,
+    pub(crate) auth_verified_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,13 +1,13 @@
 import {
-  Activity,
+  BrainCircuit,
   ChevronRight,
-  FileText,
-  ShieldCheck,
-  TerminalSquare
+  MessageSquareText,
+  ShieldQuestion
 } from "lucide-react";
 import { memo, useEffect, useState } from "react";
 import { ThinkingOrb } from "thinking-orbs";
 import type { TimelineEntry } from "../tauri";
+import { ToolActivityIcon } from "./ToolActivityIcon";
 import { TraceStatusIcon } from "./TraceStatusIcon";
 import {
   isToolRequestPlaceholder,
@@ -49,10 +49,16 @@ function AgentActionOrb() {
 }
 
 export function EventIcon({ event }: { event: TimelineEntry }) {
-  if (event.kind === "tool") return <TerminalSquare aria-hidden="true" />;
-  if (event.kind === "permission") return <ShieldCheck aria-hidden="true" />;
-  if (event.kind === "model") return <Activity aria-hidden="true" />;
-  return <FileText aria-hidden="true" />;
+  if (event.kind === "tool") {
+    return (
+      <ToolActivityIcon
+        toolName={event.toolName ?? (event.label === "Retrieval" ? "semantic_rag" : null)}
+      />
+    );
+  }
+  if (event.kind === "permission") return <ShieldQuestion aria-hidden="true" />;
+  if (event.kind === "model") return <BrainCircuit aria-hidden="true" />;
+  return <MessageSquareText aria-hidden="true" />;
 }
 
 export function toolMessageSummary(content: string) {
@@ -112,7 +118,7 @@ function ToolChainItem({
       type="button"
       onClick={() => onSelect(item)}
     >
-      <TerminalSquare aria-hidden="true" />
+      <ToolActivityIcon toolName={summary.label} />
       <span className="thread-tool-chain-copy">
         <strong>{summary.label}</strong>
         <small>{toolMessageDetail(item.message.content)}</small>

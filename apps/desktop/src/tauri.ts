@@ -174,22 +174,22 @@ let browserPhase4State: Phase4State = {
     providerId: "openai",
     providerResource: "",
     baseUrl: "https://api.openai.com/v1",
-    model: "gpt-4.1-mini",
-    conductorModel: "gpt-4.1-mini",
-    plannerModel: "gpt-4.1-mini",
-    executorModel: "gpt-4.1-mini",
-    reviewerModel: "gpt-4.1-mini",
+    model: "gpt-4.1",
+    conductorModel: "gpt-4.1",
+    plannerModel: "gpt-4.1",
+    executorModel: "gpt-4.1",
+    reviewerModel: "gpt-4.1",
     summarizerModel: "gpt-4.1-mini",
-    embeddingModel: "text-embedding-3-small",
-    imageModel: "",
+    embeddingModel: "text-embedding-3-large",
+    imageModel: "gpt-image-2",
     imageEndpoint: "",
-    voiceModel: "",
+    voiceModel: "gpt-realtime-2.1",
     collaborationPolicy: "auto_router",
     promptEvolutionEnabled: true,
-    contextWindowTokens: 128000,
+    contextWindowTokens: 1047576,
     agentSystemPrompt:
       "You are Cindx, a desktop-first assistant. Work carefully, be direct, and ask for clarification when the task is ambiguous.",
-    apiKeySet: false
+    apiKeySet: false, authVerified: false, authVerifiedAtMs: null
   },
   promptEvolution: {
     enabled: true,
@@ -1612,7 +1612,8 @@ export async function saveProviderConfig(input: ProviderConfigInput): Promise<Ph
         promptEvolutionEnabled: input.promptEvolutionEnabled,
         contextWindowTokens: Math.max(4096, input.contextWindowTokens || 128000),
         agentSystemPrompt: input.agentSystemPrompt,
-        apiKeySet: providerApiKeySetAfterSave({ ...input, ...profile }, previousProvider)
+        apiKeySet: providerApiKeySetAfterSave({ ...input, ...profile }, previousProvider),
+        authVerified: false, authVerifiedAtMs: null
       },
       timeline: [
         ...browserPhase4State.timeline,

@@ -1,5 +1,5 @@
 import {
-  Activity,
+  BrainCircuit,
   Bug,
   Check,
   CheckCircle2,
@@ -8,17 +8,22 @@ import {
   Clock3,
   Copy,
   Database,
+  DatabaseZap,
   ExternalLink,
   File,
   FileText,
   FolderOpen,
+  Gauge,
   Globe2,
   Image,
+  MessageSquareText,
   Maximize2,
   Minimize2,
   PackageOpen,
+  Route,
   Save,
   ShieldCheck,
+  ShieldQuestion,
   TerminalSquare,
   TriangleAlert,
   X
@@ -50,6 +55,8 @@ import type {
   ToolRunView
 } from "../tauri";
 import type { SessionThreadSelection } from "./SessionThread";
+import { EventIcon, toolMessageSummary } from "./SessionToolChain";
+import { ToolActivityIcon } from "./ToolActivityIcon";
 import { TraceStatusIcon } from "./TraceStatusIcon";
 
 export type InspectorTab = "trace" | "details" | "artifacts" | "context";
@@ -289,11 +296,13 @@ function ArtifactTypeIcon({ path }: { path: string }) {
 }
 
 function TraceIcon({ step }: { step: AgentTraceStepView }) {
-  if (step.kind === "tool") return <TerminalSquare aria-hidden="true" />;
-  if (step.kind === "permission") return <ShieldCheck aria-hidden="true" />;
-  if (step.kind === "model") return <Activity aria-hidden="true" />;
+  if (step.kind === "tool") return <ToolActivityIcon toolName={step.toolName} />;
+  if (step.kind === "permission") return <ShieldQuestion aria-hidden="true" />;
+  if (step.kind === "model") return <BrainCircuit aria-hidden="true" />;
+  if (step.kind === "message") return <MessageSquareText aria-hidden="true" />;
+  if (step.kind === "retrieval") return <DatabaseZap aria-hidden="true" />;
   if (step.kind === "error") return <TriangleAlert aria-hidden="true" />;
-  return <FileText aria-hidden="true" />;
+  return <Gauge aria-hidden="true" />;
 }
 
 function ArtifactPreviewPane({ path }: { path: string }) {
@@ -1003,7 +1012,7 @@ export function Inspector({
             {traceStep ? (
               <section className="inspector-section">
                 <div className="section-title">
-                  <Activity aria-hidden="true" />
+                  <TraceIcon step={traceStep} />
                   <h2>{traceStep.label}</h2>
                 </div>
                 <dl className="detail-list">
@@ -1090,9 +1099,13 @@ export function Inspector({
               <section className="inspector-section">
                 <div className="section-title">
                   {threadSelection.type === "event" ? (
-                    <Activity aria-hidden="true" />
+                    <EventIcon event={threadSelection.event} />
+                  ) : threadSelection.message.role === "tool" ? (
+                    <ToolActivityIcon
+                      toolName={toolMessageSummary(threadSelection.message.content).label}
+                    />
                   ) : (
-                    <FileText aria-hidden="true" />
+                    <MessageSquareText aria-hidden="true" />
                   )}
                   <h2>
                     {threadSelection.type === "event"
@@ -1129,7 +1142,7 @@ export function Inspector({
             ) : (
               <section className="inspector-section">
                 <div className="section-title">
-                  <Activity aria-hidden="true" />
+                  <Route aria-hidden="true" />
                   <h2>Run</h2>
                 </div>
                 <dl className="detail-list">

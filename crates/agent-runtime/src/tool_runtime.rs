@@ -71,9 +71,9 @@ pub fn tool_effect_recovery_policy(invocation: &ToolInvocation) -> ToolEffectRec
         }
         Some("verifiable" | "non_idempotent") => ToolEffectRecoveryPolicy::NeverRetryUnknown,
         _ => match invocation
-        .metadata
-        .get(TOOL_RISK_METADATA_KEY)
-        .map(String::as_str)
+            .metadata
+            .get(TOOL_RISK_METADATA_KEY)
+            .map(String::as_str)
         {
             Some("read_only") => ToolEffectRecoveryPolicy::SafeToRetry,
             Some("writes_workspace") if invocation.tool_name == "file.write" => {
@@ -359,13 +359,7 @@ mod tests {
             Some("workspace_file_content_v1")
         );
 
-        let read_spec = ToolSpec::builtin(
-            "file.read",
-            "file",
-            "read",
-            ToolRisk::ReadOnly,
-            "{}",
-        );
+        let read_spec = ToolSpec::builtin("file.read", "file", "read", ToolRisk::ReadOnly, "{}");
         apply_tool_spec_runtime_metadata(&mut write, &read_spec);
         assert_eq!(
             write

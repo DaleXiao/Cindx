@@ -198,8 +198,7 @@ impl AgentTaskStateSnapshot {
             return None;
         }
         if self.durable_message_count == 0 {
-            return (self.transcript_fingerprint == transcript_fingerprint(&[]))
-                .then(Vec::new);
+            return (self.transcript_fingerprint == transcript_fingerprint(&[])).then(Vec::new);
         }
 
         // Context compaction replaces an older durable prefix with a transient
@@ -253,7 +252,10 @@ impl AgentTaskStateSnapshot {
 }
 
 fn durable_messages(messages: &[Message]) -> Vec<&Message> {
-    messages.iter().filter(|message| is_durable_message(message)).collect()
+    messages
+        .iter()
+        .filter(|message| is_durable_message(message))
+        .collect()
 }
 
 fn is_durable_message(message: &Message) -> bool {

@@ -271,6 +271,7 @@ export type TimelineEntry = {
   label: string;
   detail: string;
   kind: "message" | "tool" | "permission" | "model";
+  toolName?: string;
   state: "done" | "pending" | "idle";
   timestampMs: number;
   workflowProgress?: {
@@ -339,6 +340,8 @@ export type ProviderConfigState = {
   contextWindowTokens: number;
   agentSystemPrompt: string;
   apiKeySet: boolean;
+  authVerified: boolean;
+  authVerifiedAtMs: number | null;
 };
 
 export type ProviderConfigInput = {

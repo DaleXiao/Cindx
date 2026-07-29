@@ -590,9 +590,7 @@ fn repair_context_projection(
         if maximum_budget < 8 {
             return None;
         }
-        let fair_budget = (remaining / (slots_after + 1))
-            .max(64)
-            .min(maximum_budget);
+        let fair_budget = (remaining / (slots_after + 1)).max(64).min(maximum_budget);
         let message = state_messages.get(index)?;
         let fitted = if Some(index) == current_user_index {
             fit_required_user_message_to_budget(message, fair_budget)
@@ -778,9 +776,9 @@ fn append_selected_messages(
     system_messages: bool,
 ) {
     for index in selected.iter().filter(|index| {
-        state_messages.get(**index).is_some_and(|message| {
-            matches!(message.role, MessageRole::System) == system_messages
-        })
+        state_messages
+            .get(**index)
+            .is_some_and(|message| matches!(message.role, MessageRole::System) == system_messages)
     }) {
         if let Some(message) = replacements
             .get(index)
@@ -812,7 +810,10 @@ fn complete_tool_rounds_newest_first(messages: &[Message]) -> Vec<Vec<usize>> {
                 }
             }
         }
-        if call_ids.iter().all(|call_id| observed.contains_key(call_id)) {
+        if call_ids
+            .iter()
+            .all(|call_id| observed.contains_key(call_id))
+        {
             let mut round = vec![assistant_index];
             round.extend(
                 call_ids

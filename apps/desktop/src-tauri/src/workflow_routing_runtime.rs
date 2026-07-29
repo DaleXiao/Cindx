@@ -125,13 +125,19 @@ pub(crate) fn model_candidates_for_config(config: &ProviderConfig) -> Vec<ModelC
         ),
     ]
     .into_iter()
-    .map(|(role, name, cost_tier, latency_tier)| ModelCandidate {
-        name,
-        role,
-        supports_tools: true,
-        supports_vision: true,
-        cost_tier,
-        latency_tier,
+    .map(|(role, name, cost_tier, latency_tier)| {
+        let supports_vision = provider_model_supports_vision(&config.provider_id, &name)
+            .unwrap_or_else(|| model_supports_vision_content(&name));
+        let supports_tools =
+            provider_model_supports_tools(&config.provider_id, &name).unwrap_or(true);
+        ModelCandidate {
+            name,
+            role,
+            supports_tools,
+            supports_vision,
+            cost_tier,
+            latency_tier,
+        }
     })
     .collect()
 }
