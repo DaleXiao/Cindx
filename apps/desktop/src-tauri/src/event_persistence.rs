@@ -1,4 +1,5 @@
 use crate::event_security::{redact_metadata, redact_sensitive_text};
+use crate::persisted_event_contract::tag_persisted_event_v1;
 use crate::project_session_persistence::metadata_with_context;
 use crate::runtime_values::{current_time_millis, message_role_label, unique_id};
 use agent_core::{EventId, EventKind, Message, MessageRole, Metadata, TaskId};
@@ -95,14 +96,16 @@ pub(crate) fn append_event(
     summary: impl Into<String>,
     metadata: Metadata,
 ) -> Result<(), StorageError> {
-    let metadata = redact_metadata(&metadata);
+    let summary = summary.into();
+    let mut metadata = redact_metadata(&metadata);
+    tag_persisted_event_v1(&kind, &summary, &mut metadata);
 
     store.append_next_event(
         EventId(unique_id("event")),
         task_id.clone(),
         current_time_millis(),
         kind,
-        redact_sensitive_text(&summary.into()),
+        redact_sensitive_text(&summary),
         metadata,
     )
 }

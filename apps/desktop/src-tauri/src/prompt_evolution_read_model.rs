@@ -37,6 +37,14 @@ pub(crate) fn initial_prompt_population(effort: &str) -> Vec<ConductorPromptGeno
     population
 }
 
+fn is_agent_run_terminal(event: &Event) -> bool {
+    AgentRunEvent::from_event(event).is_some_and(|event| event.status().is_terminal())
+}
+
+fn is_agent_run_completed(event: &Event) -> bool {
+    AgentRunEvent::from_event(event).map(AgentRunEvent::status) == Some(AgentRunStatus::Completed)
+}
+
 pub(crate) fn prompt_genomes_from_events(
     events: &[Event],
     effort: &str,
@@ -141,11 +149,9 @@ pub(crate) fn prompt_evolution_observations_from_events(
                 .and_then(|run_id| agent_runs.get(run_id));
             let terminal = if let Some(run_events) = run_events {
                 run_events.iter().rev().find(|event| {
-                    matches!(
-                        event.summary.as_str(),
-                        "Agent task completed" | "Agent task cancelled" | "Agent task failed"
-                    ) && event.metadata.get("collaboration_id").map(String::as_str)
-                        == Some(workflow_id.as_str())
+                    is_agent_run_terminal(event)
+                        && event.metadata.get("collaboration_id").map(String::as_str)
+                            == Some(workflow_id.as_str())
                         && event.sequence > workflow_terminal.sequence
                         && event
                             .metadata
@@ -156,10 +162,12 @@ pub(crate) fn prompt_evolution_observations_from_events(
             } else {
                 Some(workflow_terminal)
             }?;
-            if !matches!(
-                terminal.summary.as_str(),
-                "Agent task completed" | "Collaboration workflow completed"
-            ) {
+            let completed = if run_events.is_some() {
+                is_agent_run_completed(terminal)
+            } else {
+                terminal.summary == "Collaboration workflow completed"
+            };
+            if !completed {
                 return None;
             }
             let learning_evidence =
@@ -685,10 +693,7 @@ pub(crate) fn load_prompt_evolution_read_model(
         let terminal_scopes = delta
             .iter()
             .filter_map(|event| {
-                if matches!(
-                    event.summary.as_str(),
-                    "Agent task completed" | "Agent task cancelled" | "Agent task failed"
-                ) {
+                if is_agent_run_terminal(event) {
                     event
                         .metadata
                         .get("agent_run_id")

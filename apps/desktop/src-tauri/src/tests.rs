@@ -16,6 +16,8 @@ use crate::collaboration_stage_runtime::{
 use crate::conductor_health_runtime::{
     conductor_health_outcome, ConductorHealthLedger, ConductorHealthOutcome,
 };
+use crate::semantic_memory_runtime::contains_completed_agent_run;
+use agent_core::{EventTypeV1, EVENT_TYPE_METADATA_KEY};
 use orchestrator::{
     AdaptiveWorkflow, AdaptiveWorkflowStep, AgentRunDecisionHarness, AgentRunDecisionRequest,
     AgentVerificationPolicy,
@@ -5317,6 +5319,62 @@ fn goal2_semantic_memory_preserves_legacy_runs_without_epochs() {
 }
 
 #[test]
+fn memory_checkpoints_reject_future_and_kind_mismatched_event_tags() {
+    let event = |kind: EventKind, summary: &str, event_type: Option<&str>| Event {
+        id: EventId(format!("memory-contract-{summary}")),
+        task_id: phase16_task_id(),
+        sequence: 1,
+        timestamp_ms: 10,
+        kind,
+        summary: summary.to_string(),
+        metadata: event_type
+            .map(|event_type| {
+                [(EVENT_TYPE_METADATA_KEY.to_string(), event_type.to_string())]
+                    .into_iter()
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+
+    assert!(is_memory_checkpoint_event(&event(
+        EventKind::TaskStatusChanged,
+        "Agent task completed",
+        None,
+    )));
+    assert!(!is_memory_checkpoint_event(&event(
+        EventKind::TaskStatusChanged,
+        "Agent task completed",
+        Some("cindx.event.v2/agent.run.completed"),
+    )));
+    assert!(!is_memory_checkpoint_event(&event(
+        EventKind::MessageAdded,
+        "Agent task completed",
+        Some(EventTypeV1::AgentRunCompleted.id()),
+    )));
+    assert!(!is_memory_checkpoint_event(&event(
+        EventKind::TaskStatusChanged,
+        "Semantic memory candidates accepted",
+        Some("cindx.event.v2/memory.candidates.accepted"),
+    )));
+
+    assert!(contains_completed_agent_run(&[event(
+        EventKind::TaskStatusChanged,
+        "Agent task completed",
+        None,
+    )]));
+    assert!(!contains_completed_agent_run(&[event(
+        EventKind::TaskStatusChanged,
+        "Agent task completed",
+        Some("cindx.event.v2/agent.run.completed"),
+    )]));
+    assert!(!contains_completed_agent_run(&[event(
+        EventKind::MessageAdded,
+        "Agent task completed",
+        Some(EventTypeV1::AgentRunCompleted.id()),
+    )]));
+}
+
+#[test]
 fn routing_telemetry_excludes_unverified_workspace_completions() {
     let run_context = [
         ("agent_run_id".to_string(), "run-unverified".to_string()),
@@ -6152,6 +6210,114 @@ fn replay_holdout_uses_only_a_different_completed_workflow() {
 
     assert_eq!(replay.objective, "Older completed task");
     assert_eq!(replay.task_class, "coding");
+}
+
+#[test]
+fn offline_prompt_evidence_rejects_invalid_agent_boundaries() {
+    let run_events = |run_id: &str, start_tag: Option<&str>, terminal_tag: Option<&str>| {
+        let metadata = [
+            ("agent_run_id".to_string(), run_id.to_string()),
+            ("project_id".to_string(), "project-a".to_string()),
+            ("prompt".to_string(), "Audit the agent loop".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        let mut started_metadata = metadata.clone();
+        if let Some(start_tag) = start_tag {
+            started_metadata.insert(EVENT_TYPE_METADATA_KEY.to_string(), start_tag.to_string());
+        }
+        let mut terminal_metadata = metadata;
+        if let Some(terminal_tag) = terminal_tag {
+            terminal_metadata.insert(
+                EVENT_TYPE_METADATA_KEY.to_string(),
+                terminal_tag.to_string(),
+            );
+        }
+        vec![
+            Event {
+                id: EventId(format!("started-{run_id}")),
+                task_id: phase16_task_id(),
+                sequence: 1,
+                timestamp_ms: 10,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Agent task started".to_string(),
+                metadata: started_metadata,
+            },
+            Event {
+                id: EventId(format!("completed-{run_id}")),
+                task_id: phase16_task_id(),
+                sequence: 2,
+                timestamp_ms: 20,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Agent task completed".to_string(),
+                metadata: terminal_metadata,
+            },
+        ]
+    };
+
+    for events in [
+        run_events(
+            "future-start",
+            Some("cindx.event.v2/agent.run.started"),
+            None,
+        ),
+        run_events(
+            "future-terminal",
+            None,
+            Some("cindx.event.v2/agent.run.completed"),
+        ),
+        run_events(
+            "mismatched-terminal",
+            None,
+            Some(EventTypeV1::AgentRunFailed.id()),
+        ),
+    ] {
+        assert!(prompt_offline_dataset(&events, "project-a").is_empty());
+    }
+}
+
+#[test]
+fn replay_prompt_evidence_rejects_invalid_agent_completion_tags() {
+    let profile = Event {
+        id: EventId("bounded-profile-invalid-terminal".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 1,
+        timestamp_ms: 10,
+        kind: EventKind::TaskStatusChanged,
+        summary: "Conductor prompt profile selected".to_string(),
+        metadata: [
+            ("agent_run_id".to_string(), "run-invalid".to_string()),
+            ("collaboration_profile".to_string(), "bounded".to_string()),
+            (
+                "prompt_objective".to_string(),
+                "Completed bounded task".to_string(),
+            ),
+            ("task_class".to_string(), "coding".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    for invalid_tag in [
+        "cindx.event.v2/agent.run.completed",
+        EventTypeV1::AgentRunFailed.id(),
+    ] {
+        let terminal = Event {
+            id: EventId(format!("invalid-terminal-{invalid_tag}")),
+            task_id: phase16_task_id(),
+            sequence: 2,
+            timestamp_ms: 20,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Agent task completed".to_string(),
+            metadata: [
+                ("agent_run_id".to_string(), "run-invalid".to_string()),
+                (EVENT_TYPE_METADATA_KEY.to_string(), invalid_tag.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        assert!(prompt_replay_case(&[profile.clone(), terminal], "Current task", 0).is_none());
+    }
 }
 
 #[test]

@@ -26,6 +26,7 @@ pub(crate) fn agent_state_from_events(
 ) -> Result<AgentState, StorageError> {
     let task_id = phase16_task_id();
     let active_events = active_agent_events_for_session(&events, session_id);
+    let force_failed_status = last_error.is_some();
     let last_error = last_error.or_else(|| {
         active_events.iter().rev().find_map(|event| {
             matches!(event.kind, EventKind::Error)
@@ -121,7 +122,7 @@ pub(crate) fn agent_state_from_events(
     let run_status = AgentRunStatus::from_events(
         &active_events,
         !pending_approvals.is_empty(),
-        last_error.is_some(),
+        force_failed_status,
     );
     let status = run_status.label().to_string();
     if run_status.is_terminal() {
@@ -159,10 +160,7 @@ pub(crate) fn agent_state_from_events(
         .clamp(0.0, 100.0);
     let turn_count = active_events
         .iter()
-        .filter(|event| {
-            matches!(event.kind, EventKind::ModelRequestFinished)
-                && event.summary == "Agent model turn finished"
-        })
+        .filter(|event| crate::run_lifecycle::is_agent_model_turn_finished(event))
         .count();
     let run_start = active_events
         .iter()

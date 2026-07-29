@@ -20,6 +20,7 @@ use crate::{
     runtime_values::{current_time_millis, phase16_task_id},
     view_models::MemoryStatsView,
 };
+use agent_core::EVENT_TYPE_METADATA_KEY;
 
 pub(crate) fn load_project_memory_ledger(
     store: &mut SqliteStore,
@@ -130,33 +131,26 @@ fn load_project_memory_ledger_inner(
     Ok(ledger)
 }
 
-fn is_memory_checkpoint_event(event: &Event) -> bool {
-    matches!(
-        event.summary.as_str(),
-        "Agent task completed"
-            | "Agent task paused"
-            | "Agent task failed"
-            | "Agent task cancelled"
-            | "Semantic memory candidates accepted"
-    )
+pub(crate) fn is_memory_checkpoint_event(event: &Event) -> bool {
+    AgentRunEvent::from_event(event)
+        .is_some_and(|event| event.status().is_terminal() || event == AgentRunEvent::Paused)
+        || (event.summary == "Semantic memory candidates accepted"
+            && !event.metadata.contains_key(EVENT_TYPE_METADATA_KEY))
 }
 
 pub(crate) fn memory_events_for_terminal_steer_epoch(mut events: Vec<Event>) -> Vec<Event> {
     let terminal_epoch = events.iter().rev().find_map(|event| {
-        matches!(
-            event.summary.as_str(),
-            "Agent task completed"
-                | "Agent task paused"
-                | "Agent task failed"
-                | "Agent task cancelled"
-        )
-        .then(|| {
-            event
-                .metadata
-                .get("steer_epoch")
-                .and_then(|value| value.parse::<u64>().ok())
-        })
-        .flatten()
+        AgentRunEvent::from_event(event)
+            .is_some_and(|run_event| {
+                run_event.status().is_terminal() || run_event == AgentRunEvent::Paused
+            })
+            .then(|| {
+                event
+                    .metadata
+                    .get("steer_epoch")
+                    .and_then(|value| value.parse::<u64>().ok())
+            })
+            .flatten()
     });
     let Some(terminal_epoch) = terminal_epoch else {
         return events;

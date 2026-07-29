@@ -1,5 +1,12 @@
 use std::collections::BTreeMap;
 
+mod event_contract;
+
+pub use event_contract::{
+    decode_event_type, insert_event_type_v1, DecodedEventType, EventTypeBuildError, EventTypeV1,
+    TypedEventRef, EVENT_TYPE_METADATA_KEY,
+};
+
 pub type Metadata = BTreeMap<String, String>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

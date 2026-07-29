@@ -1,4 +1,5 @@
 use super::*;
+use crate::desktop_event_sink::DesktopEventSink;
 
 #[tauri::command]
 pub(crate) fn get_phase3_state(state: tauri::State<'_, AppState>) -> Result<Phase3State, String> {
@@ -305,35 +306,29 @@ pub(crate) fn send_model_prompt(
     let stream_request_id = request_id.clone();
     let stream_app = app.clone();
     let result = provider.complete_streaming(request, |delta| {
-        let _ = stream_app.emit(
-            "model-stream-delta",
-            ModelStreamDelta {
-                task_id: stream_task_id.clone(),
-                request_id: stream_request_id.clone(),
-                session_id: None,
-                delta: delta.to_string(),
-                done: false,
-                reset: false,
-                error: None,
-            },
-        );
+        stream_app.emit_model_stream_delta(ModelStreamDelta {
+            task_id: stream_task_id.clone(),
+            request_id: stream_request_id.clone(),
+            session_id: None,
+            delta: delta.to_string(),
+            done: false,
+            reset: false,
+            error: None,
+        });
     });
 
     match result {
         Ok(response) => {
             let latency_ms = current_time_millis().saturating_sub(started_at_ms);
-            let _ = app.emit(
-                "model-stream-delta",
-                ModelStreamDelta {
-                    task_id: task_id.0.clone(),
-                    request_id: request_id.clone(),
-                    session_id: None,
-                    delta: String::new(),
-                    done: true,
-                    reset: false,
-                    error: None,
-                },
-            );
+            app.emit_model_stream_delta(ModelStreamDelta {
+                task_id: task_id.0.clone(),
+                request_id: request_id.clone(),
+                session_id: None,
+                delta: String::new(),
+                done: true,
+                reset: false,
+                error: None,
+            });
 
             let mut store = state
                 .store
@@ -370,18 +365,15 @@ pub(crate) fn send_model_prompt(
         }
         Err(error) => {
             let message = error.to_string();
-            let _ = app.emit(
-                "model-stream-delta",
-                ModelStreamDelta {
-                    task_id: task_id.0.clone(),
-                    request_id,
-                    session_id: None,
-                    delta: String::new(),
-                    done: true,
-                    reset: false,
-                    error: Some(message.clone()),
-                },
-            );
+            app.emit_model_stream_delta(ModelStreamDelta {
+                task_id: task_id.0.clone(),
+                request_id,
+                session_id: None,
+                delta: String::new(),
+                done: true,
+                reset: false,
+                error: Some(message.clone()),
+            });
             record_phase4_error(&state, &message)?;
             phase4_state_with_error(&state, &config, &message)
         }

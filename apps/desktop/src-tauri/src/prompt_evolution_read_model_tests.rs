@@ -1,4 +1,5 @@
 use super::*;
+use agent_core::{EventTypeV1, EVENT_TYPE_METADATA_KEY};
 use orchestrator::{LearningAttribution, LearningTermination};
 
 fn context_metadata() -> Metadata {
@@ -190,6 +191,34 @@ fn live_observations_map_only_trusted_positive_and_negative_evidence() {
     assert!((negative[0].1.quality_score - 0.35).abs() < 0.000_001);
     assert_eq!(negative[0].1.relative_reward, None);
     assert_eq!(negative[0].1.total_tokens, 17);
+}
+
+#[test]
+fn live_observations_reject_invalid_agent_terminal_tags() {
+    let evidence = quality_evidence(
+        IndependentQualitySource::CollaborationQualityGate,
+        8_200,
+        true,
+    );
+    for invalid_tag in [
+        "cindx.event.v2/agent.run.completed",
+        EventTypeV1::AgentRunFailed.id(),
+    ] {
+        let mut events = live_events(
+            "Agent task completed",
+            Some(evidence.clone()),
+            Some("42"),
+            false,
+            Some("1200"),
+        );
+        events
+            .last_mut()
+            .expect("terminal event")
+            .metadata
+            .insert(EVENT_TYPE_METADATA_KEY.to_string(), invalid_tag.to_string());
+
+        assert!(prompt_evolution_observations_from_events(&events).is_empty());
+    }
 }
 
 #[test]

@@ -6,6 +6,10 @@ use crate::learning_evidence_runtime::{
     learning_lineage_usage_from_metadata, routing_learning_evidence, workflow_learning_evidence,
 };
 
+fn is_agent_run_terminal(event: &Event) -> bool {
+    AgentRunEvent::from_event(event).is_some_and(|event| event.status().is_terminal())
+}
+
 pub(crate) fn load_routing_telemetry_read_model(
     store: &mut SqliteStore,
 ) -> Result<Vec<RoutingTelemetry>, StorageError> {
@@ -59,12 +63,7 @@ fn load_routing_telemetry_read_model_inner(
 
     let completed_run_ids = delta
         .iter()
-        .filter(|event| {
-            matches!(
-                event.summary.as_str(),
-                "Agent task completed" | "Agent task cancelled" | "Agent task failed"
-            )
-        })
+        .filter(|event| is_agent_run_terminal(event))
         .filter_map(|event| event.metadata.get("agent_run_id"))
         .cloned()
         .collect::<BTreeSet<_>>();
@@ -117,10 +116,7 @@ pub(crate) fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTele
         .filter_map(|mut run_events| {
             run_events.sort_by_key(|event| event.sequence);
             let started = run_events.iter().find(|event| {
-                matches!(
-                    event.summary.as_str(),
-                    "Agent task started" | "Agent task retry started"
-                )
+                AgentRunEvent::from_event(event).is_some_and(AgentRunEvent::is_start)
             })?;
             let decision = run_events
                 .iter()
@@ -128,12 +124,10 @@ pub(crate) fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTele
                 .find(|event| event.summary == "Agent run decision selected")
                 .copied()
                 .unwrap_or(started);
-            let terminal = run_events.iter().rev().find(|event| {
-                matches!(
-                    event.summary.as_str(),
-                    "Agent task completed" | "Agent task cancelled" | "Agent task failed"
-                )
-            })?;
+            let terminal = run_events
+                .iter()
+                .rev()
+                .find(|event| is_agent_run_terminal(event))?;
             let event_epoch = |event: &Event| {
                 event
                     .metadata
@@ -410,10 +404,10 @@ pub(crate) fn routing_outcome_for_run(
     run_events: &[&Event],
     terminal: &Event,
 ) -> Option<RoutingOutcome> {
-    match terminal.summary.as_str() {
-        "Agent task cancelled" => return Some(RoutingOutcome::UserRejected),
-        "Agent task failed" => return Some(RoutingOutcome::Failed),
-        "Agent task completed" => {}
+    match AgentRunEvent::from_event(terminal).map(AgentRunEvent::status) {
+        Some(AgentRunStatus::Cancelled) => return Some(RoutingOutcome::UserRejected),
+        Some(AgentRunStatus::Failed) => return Some(RoutingOutcome::Failed),
+        Some(AgentRunStatus::Completed) => {}
         _ => return None,
     }
 

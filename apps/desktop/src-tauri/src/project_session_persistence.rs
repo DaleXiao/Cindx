@@ -16,7 +16,7 @@ use crate::{
     view_models::{ProjectSessionState, ProjectView, SessionView},
 };
 use agent_application::{project_session_lifecycle, SessionLifecycleInput, SessionTitleState};
-use agent_core::{Event, Metadata};
+use agent_core::{Event, Metadata, EVENT_TYPE_METADATA_KEY};
 use agent_storage::{SqliteStore, StorageError};
 use std::{fs, io::Write, path::Path};
 
@@ -494,6 +494,9 @@ pub(crate) fn project_session_metadata(config: &ProjectSessionConfig) -> Metadat
 
 pub(crate) fn metadata_with_context(mut metadata: Metadata, context: &Metadata) -> Metadata {
     for (key, value) in context {
+        if key == EVENT_TYPE_METADATA_KEY {
+            continue;
+        }
         metadata.entry(key.clone()).or_insert_with(|| value.clone());
     }
     metadata

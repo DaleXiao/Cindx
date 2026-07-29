@@ -1,4 +1,5 @@
 use super::*;
+use crate::desktop_event_sink::DesktopEventSink;
 
 #[derive(Debug, Clone)]
 pub(super) struct SessionTitleTurn {
@@ -161,7 +162,7 @@ pub(super) fn spawn_semantic_session_title_refinement(
         }
         match result {
             Ok(true) => {
-                let _ = app.emit("session-title-updated", refinement.session_id);
+                app.emit_session_title_updated(refinement.session_id);
             }
             Ok(false) => {}
             Err(error) => eprintln!(
