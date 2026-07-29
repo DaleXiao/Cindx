@@ -5,7 +5,9 @@ import {
   appendVoiceTranscript,
   parseVoiceServerEvent,
   reduceVoiceTurnEvent,
+  voiceInputButtonDisabled,
   voiceStopAction,
+  voiceWatchdogAction,
   type VoiceTurnState
 } from "../src/voice/voiceInputModel.ts";
 
@@ -52,6 +54,23 @@ test("voice stop cancels connection setup but gives recorded audio a finishing p
   assert.equal(voiceStopAction("recording"), "finish");
   assert.equal(voiceStopAction("finishing"), "none");
   assert.equal(voiceStopAction("idle"), "none");
+});
+
+test("voice watchdogs act only on their active lifecycle phase", () => {
+  assert.equal(voiceWatchdogAction("recording", "recording_limit"), "finish");
+  assert.equal(voiceWatchdogAction("finishing", "transcription"), "fail");
+  assert.equal(voiceWatchdogAction("finishing", "recording_limit"), "ignore");
+  assert.equal(voiceWatchdogAction("idle", "transcription"), "ignore");
+});
+
+test("voice button enables supported OpenAI and Alibaba transports after configuration", () => {
+  assert.equal(voiceInputButtonDisabled(true, "openai_webrtc", "session-1", "idle"), false);
+  assert.equal(voiceInputButtonDisabled(true, "dashscope_websocket", "session-1", "idle"), false);
+  assert.equal(voiceInputButtonDisabled(true, "none", "session-1", "idle"), true);
+  assert.equal(voiceInputButtonDisabled(false, "dashscope_websocket", "session-1", "idle"), true);
+  assert.equal(voiceInputButtonDisabled(true, "dashscope_websocket", null, "idle"), true);
+  assert.equal(voiceInputButtonDisabled(true, "dashscope_websocket", "session-1", "recording"), false);
+  assert.equal(voiceInputButtonDisabled(true, "dashscope_websocket", "session-1", "finishing"), true);
 });
 
 test("finishing accepts this commit once and ignores mismatched or late transcripts", () => {

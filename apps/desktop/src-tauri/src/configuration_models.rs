@@ -195,12 +195,17 @@ impl ProviderConfig {
     }
 
     pub(crate) fn voice_is_ready(&self) -> bool {
-        self.supports_webrtc_voice()
+        self.voice_transport() != ProviderVoiceTransport::Unavailable
             && !self.base_url.trim().is_empty()
             && !self.api_key.trim().is_empty()
             && !self.voice_model.trim().is_empty()
     }
 
+    pub(crate) fn voice_transport(&self) -> ProviderVoiceTransport {
+        provider_voice_transport(&self.provider_id, &self.base_url)
+    }
+
+    #[cfg(test)]
     pub(crate) fn supports_webrtc_voice(&self) -> bool {
         provider_supports_webrtc_voice(&self.provider_id, &self.base_url)
     }

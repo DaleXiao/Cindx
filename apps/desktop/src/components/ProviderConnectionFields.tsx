@@ -5,6 +5,7 @@ import {
   PROVIDER_OPTIONS,
   providerBaseUrl,
   providerPresetModelGroups,
+  providerSupportsModelDiscovery,
   selectProviderDraft,
   type ProviderId
 } from "../providerProfiles";
@@ -41,7 +42,7 @@ export function ProviderConnectionFields({
   );
   const presetModels = providerPresetModelGroups(providerDraft.providerId);
   const presetModelCount = new Set(Object.values(presetModels).flat()).size;
-  const showManualCatalogRefresh = providerDraft.providerId === "custom";
+  const modelDiscoverySupported = providerSupportsModelDiscovery(providerDraft.providerId);
 
   return (
     <>
@@ -126,34 +127,44 @@ export function ProviderConnectionFields({
         />
       </label>
       <div className="model-catalog-row">
-        {showManualCatalogRefresh && (
-          <button
-            className="secondary-button"
-            type="button"
-            disabled={
-              providerModelsBusy ||
-              providerBusy ||
-              !resolvedBaseUrl ||
-              (!providerDraft.apiKey.trim() && !canUseConfiguredKey)
-            }
-            onClick={() => void handleLoadProviderModels()}
-          >
-            <RefreshCw
-              aria-hidden="true"
-              className={refreshAnimationClass}
-              key={providerModelsRefreshTurn}
-            />
-            <span>{providerModelsBusy ? "Loading models" : "Load models"}</span>
-          </button>
-        )}
+        <button
+          className="secondary-button"
+          type="button"
+          disabled={
+            !modelDiscoverySupported ||
+            providerModelsBusy ||
+            providerBusy ||
+            !resolvedBaseUrl ||
+            (!providerDraft.apiKey.trim() && !canUseConfiguredKey)
+          }
+          title={
+            modelDiscoverySupported
+              ? "Refresh the models available to this credential"
+              : "Azure deployment names cannot be enumerated by this API"
+          }
+          onClick={() => void handleLoadProviderModels()}
+        >
+          <RefreshCw
+            aria-hidden="true"
+            className={refreshAnimationClass}
+            key={providerModelsRefreshTurn}
+          />
+          <span>
+            {!modelDiscoverySupported
+              ? "Refresh unavailable"
+              : providerModelsBusy
+                ? "Refreshing models"
+                : "Refresh models"}
+          </span>
+        </button>
         <span>
           {providerDraft.providerId === "azure_openai"
-            ? "Enter Azure deployment names below"
-            : providerDraft.providerId !== "custom"
-              ? "Connecting verifies the key and selected Chat model; modality presets are applied automatically"
+            ? "Enter Azure deployment names below; Azure does not expose them through the model API"
             : providerModels.length > 0
-              ? `${providerModels.length} available`
-              : "You can also enter model IDs manually"}
+              ? `${providerModels.length} models available from the provider`
+              : providerDraft.providerId !== "custom"
+                ? `${presetModelCount} built-in model presets; refresh after connecting`
+                : "Refresh the provider catalog or enter model IDs manually"}
         </span>
       </div>
       {providerModelsError && (

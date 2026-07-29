@@ -8,6 +8,7 @@ import type {
   ContextState,
   ProjectSessionState,
   QueuedAgentMessage,
+  QueuedAgentMessageActionReceipt,
   SessionView
 } from "./tauri";
 
@@ -198,6 +199,39 @@ export function messagesWithOptimisticUserMessages(
   return [...messages, ...pending].sort(
     (left, right) => left.timestampMs - right.timestampMs
   );
+}
+
+export function committedSteerUserMessage(
+  queued: QueuedAgentMessage,
+  receipt: QueuedAgentMessageActionReceipt
+): ChatMessageView | null {
+  if (!receipt.steerCommitted) return null;
+  return {
+    role: "user",
+    content: queued.prompt,
+    timestampMs: receipt.latestTimestampMs,
+    queueId: queued.id,
+    attachments: queued.attachments
+  };
+}
+
+export function committedSteerReconciliation(
+  state: Pick<AgentState, "status" | "canCancel" | "messages" | "queuedMessages">,
+  queueId: string
+): "applied" | "restored" | "discarded" | "pending" {
+  if (
+    state.messages.some(
+      (message) => message.role === "user" && message.queueId === queueId
+    )
+  ) {
+    return "applied";
+  }
+  const runInFlight =
+    state.canCancel || ["running", "waiting_for_permission"].includes(state.status);
+  if (!runInFlight && state.queuedMessages.some((message) => message.id === queueId)) {
+    return "restored";
+  }
+  return runInFlight ? "pending" : "discarded";
 }
 
 export function latestTraceStep(turns: { steps: AgentTraceStepView[] }[]) {

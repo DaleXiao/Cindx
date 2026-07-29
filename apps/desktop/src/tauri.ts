@@ -1582,8 +1582,8 @@ export async function getPhase4State(): Promise<Phase4State> {
   }
 }
 
-export const negotiateVoiceSession = (offerSdp: string): Promise<VoiceSessionAnswer> =>
-  invoke<VoiceSessionAnswer>("negotiate_voice_session", { input: { offerSdp } });
+export const negotiateVoiceSession = (offerSdp: string): Promise<VoiceSessionAnswer> => invoke<VoiceSessionAnswer>("negotiate_voice_session", { input: { offerSdp } });
+export const transcribeVoiceAudio = (pcmBase64: string) => invoke<{ transcript: string }>("transcribe_voice_audio", { input: { pcmBase64 } });
 
 export async function saveProviderConfig(input: ProviderConfigInput): Promise<Phase4State> {
   try {
@@ -1945,7 +1945,7 @@ export async function editQueuedAgentMessage(
       eventCount: browserAgentState.eventCount,
       latestSequence: browserAgentState.latestSequence,
       latestTimestampMs: now,
-      cancelledActiveRun: false
+      cancelledActiveRun: false, steerCommitted: false
     };
   }
 }
@@ -1973,7 +1973,7 @@ export async function deleteQueuedAgentMessage(
       eventCount: browserAgentState.eventCount,
       latestSequence: browserAgentState.latestSequence,
       latestTimestampMs: now,
-      cancelledActiveRun: false
+      cancelledActiveRun: false, steerCommitted: false
     };
   }
 }
@@ -1989,23 +1989,10 @@ export async function steerQueuedAgentMessage(
   } catch (error) {
     if (isTauriRuntime()) throw error;
     const now = Date.now();
-    const cancelledActiveRun = browserAgentState.canCancel;
     browserAgentState = {
       ...browserAgentState,
-      status: browserAgentState.canCancel ? "cancelled" : browserAgentState.status,
-      canCancel: false,
       eventCount: browserAgentState.eventCount + 1,
-      latestSequence: browserAgentState.latestSequence + 1,
-      queuedMessages: browserAgentState.queuedMessages
-        .map((message) =>
-          message.id === queueId
-            ? { ...message, mode: "steer" as const, updatedAtMs: now }
-            : message
-        )
-        .sort((left, right) => {
-          if (left.mode !== right.mode) return left.mode === "steer" ? -1 : 1;
-          return left.createdAtMs - right.createdAtMs;
-        })
+      latestSequence: browserAgentState.latestSequence + 1
     };
     return {
       queueId,
@@ -2013,7 +2000,8 @@ export async function steerQueuedAgentMessage(
       eventCount: browserAgentState.eventCount,
       latestSequence: browserAgentState.latestSequence,
       latestTimestampMs: now,
-      cancelledActiveRun
+      cancelledActiveRun: false,
+      steerCommitted: false
     };
   }
 }

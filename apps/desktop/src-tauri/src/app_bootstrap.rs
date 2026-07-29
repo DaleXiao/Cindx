@@ -189,6 +189,7 @@ pub fn run() {
             list_provider_models,
             validate_image_endpoint,
             negotiate_voice_session,
+            transcribe_voice_audio,
             send_model_prompt,
             get_agent_state,
             get_agent_state_revision,

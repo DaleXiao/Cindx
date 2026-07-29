@@ -7,6 +7,13 @@ pub(crate) const PROVIDER_AZURE_OPENAI: &str = "azure_openai";
 pub(crate) const PROVIDER_ALIBABA_CN: &str = "alibaba_cn";
 pub(crate) const PROVIDER_CUSTOM: &str = "custom";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderVoiceTransport {
+    OpenAiWebRtc,
+    DashScopeWebSocket,
+    Unavailable,
+}
+
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const ALIBABA_CN_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 const ALIBABA_CN_IMAGE_ENDPOINT: &str =
@@ -253,6 +260,20 @@ pub(crate) fn provider_supports_webrtc_voice(provider_id: &str, base_url: &str) 
         }
         PROVIDER_CUSTOM => !uses_known_incompatible_voice_host(base_url),
         _ => false,
+    }
+}
+
+pub(crate) fn provider_voice_transport(
+    provider_id: &str,
+    base_url: &str,
+) -> ProviderVoiceTransport {
+    if provider_id.trim().eq_ignore_ascii_case(PROVIDER_ALIBABA_CN) {
+        return ProviderVoiceTransport::DashScopeWebSocket;
+    }
+    if provider_supports_webrtc_voice(provider_id, base_url) {
+        ProviderVoiceTransport::OpenAiWebRtc
+    } else {
+        ProviderVoiceTransport::Unavailable
     }
 }
 

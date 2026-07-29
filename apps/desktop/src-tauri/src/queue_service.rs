@@ -34,6 +34,7 @@ pub(crate) struct QueuedAgentMessageActionReceipt {
     pub(crate) latest_sequence: u64,
     pub(crate) latest_timestamp_ms: u64,
     pub(crate) cancelled_active_run: bool,
+    pub(crate) steer_committed: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

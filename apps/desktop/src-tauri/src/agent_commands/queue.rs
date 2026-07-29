@@ -133,6 +133,7 @@ pub(crate) fn queued_agent_message_action_receipt(
     queue_id: &str,
     mut message: Option<QueuedAgentMessageView>,
     cancelled_active_run: bool,
+    steer_committed: bool,
 ) -> Result<QueuedAgentMessageActionReceipt, String> {
     let revision = store
         .event_revision_by_metadata(&phase16_task_id(), "session_id", session_id)
@@ -147,6 +148,7 @@ pub(crate) fn queued_agent_message_action_receipt(
         latest_sequence: revision.latest_sequence,
         latest_timestamp_ms: revision.latest_timestamp_ms,
         cancelled_active_run,
+        steer_committed,
     })
 }
 
@@ -216,6 +218,7 @@ pub(crate) fn edit_queued_agent_message_blocking(
         &input.queue_id,
         Some(queued),
         false,
+        false,
     )
 }
 
@@ -250,6 +253,7 @@ pub(crate) fn delete_queued_agent_message_blocking(
             &input.queue_id,
             None,
             false,
+            false,
         );
     };
     append_agent_queue_event(
@@ -261,7 +265,14 @@ pub(crate) fn delete_queued_agent_message_blocking(
         queued.created_at_ms,
         None,
     )?;
-    queued_agent_message_action_receipt(&store, &input.session_id, &input.queue_id, None, false)
+    queued_agent_message_action_receipt(
+        &store,
+        &input.session_id,
+        &input.queue_id,
+        None,
+        false,
+        false,
+    )
 }
 
 #[tauri::command]
@@ -283,43 +294,31 @@ pub(crate) fn steer_queued_agent_message_blocking(
     input: QueuedAgentMessageActionInput,
 ) -> Result<QueuedAgentMessageActionReceipt, String> {
     let run_context = project_session_metadata_for_session(state, Some(&input.session_id))?;
-    let mut queued = {
+    let control = active_agent_run_control(state, Some(&input.session_id))?;
+    let load_current = || {
         let mut store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        let (queued, can_cancel) =
-            queued_agent_message_from_read_model(&mut store, &input.session_id, &input.queue_id)?;
-        let _ = can_cancel;
-        queued.ok_or_else(|| "queued message not found".to_string())?
+        require_queued_agent_message(&mut store, &input.session_id, &input.queue_id)
     };
-    let steer_committed =
-        if let Some(control) = active_agent_run_control(state, Some(&input.session_id))? {
-            matches!(
-                control.commit_steer_request_with(queued.id.clone(), || {
-                    let mut store = state
-                        .store
-                        .lock()
-                        .map_err(|error| format!("store lock poisoned: {error}"))?;
-                    append_agent_queue_event(
-                        &mut store,
-                        &run_context,
-                        "steer",
-                        &queued.id,
-                        "steer",
-                        queued.created_at_ms,
-                        None,
-                    )?;
-                    Ok::<(), String>(())
-                })?,
-                agent_runtime::RunSteerRequestCommit::Committed { .. }
-            )
-        } else {
-            false
-        };
-    if steer_committed {
-        queued.mode = "steer".to_string();
-    }
+    let (queued, steer_committed) = if let Some(control) = control {
+        match control.commit_steer_request_with(input.queue_id.clone(), || {
+            let mut store = state
+                .store
+                .lock()
+                .map_err(|error| format!("store lock poisoned: {error}"))?;
+            commit_queued_agent_steer(&mut store, &run_context, &input.session_id, &input.queue_id)
+        })? {
+            agent_runtime::RunSteerRequestCommit::Committed { value, .. } => (value, true),
+            agent_runtime::RunSteerRequestCommit::Duplicate => (load_current()?, true),
+            agent_runtime::RunSteerRequestCommit::CapacityReached
+            | agent_runtime::RunSteerRequestCommit::Stopped(_)
+            | agent_runtime::RunSteerRequestCommit::TerminalCommitted => (load_current()?, false),
+        }
+    } else {
+        (load_current()?, false)
+    };
     let store = state
         .store
         .lock()
@@ -330,7 +329,37 @@ pub(crate) fn steer_queued_agent_message_blocking(
         &input.queue_id,
         Some(queued),
         false,
+        steer_committed,
     )
+}
+
+fn require_queued_agent_message(
+    store: &mut SqliteStore,
+    session_id: &str,
+    queue_id: &str,
+) -> Result<QueuedAgentMessageView, String> {
+    let (queued, _) = queued_agent_message_from_read_model(store, session_id, queue_id)?;
+    queued.ok_or_else(|| "queued message not found".to_string())
+}
+
+pub(crate) fn commit_queued_agent_steer(
+    store: &mut SqliteStore,
+    run_context: &Metadata,
+    session_id: &str,
+    queue_id: &str,
+) -> Result<QueuedAgentMessageView, String> {
+    let mut queued = require_queued_agent_message(store, session_id, queue_id)?;
+    append_agent_queue_event(
+        store,
+        run_context,
+        "steer",
+        &queued.id,
+        "steer",
+        queued.created_at_ms,
+        None,
+    )?;
+    queued.mode = "steer".to_string();
+    Ok(queued)
 }
 
 #[tauri::command]
@@ -409,23 +438,15 @@ pub(crate) fn run_next_queued_agent_message_blocking_inner(
                 .store
                 .lock()
                 .map_err(|lock_error| format!("store lock poisoned: {lock_error}"))?;
-            let started = load_agent_session_read_model(&mut store, &input.session_id)
-                .map_err(|event_error| event_error.to_string())?
-                .latest_run_queue_id
-                .as_deref()
-                == Some(queued.view.id.as_str());
-            if started {
-                return Ok(Some(next));
-            }
-            append_agent_queue_event(
+            let restored = restore_queued_agent_message_before_run_start(
                 &mut store,
                 &run_context,
-                "restore",
-                &queued.view.id,
-                &queued.view.mode,
-                queued.view.created_at_ms,
-                Some(&queued.payload),
+                &input.session_id,
+                &queued,
             )?;
+            if !restored {
+                return Ok(Some(next));
+            }
             agent_state_for_session(&store, None, Some(&input.session_id))
                 .map(Some)
                 .map_err(|state_error| state_error.to_string())
@@ -435,18 +456,41 @@ pub(crate) fn run_next_queued_agent_message_blocking_inner(
                 .store
                 .lock()
                 .map_err(|lock_error| format!("store lock poisoned: {lock_error}"))?;
-            append_agent_queue_event(
+            restore_queued_agent_message_before_run_start(
                 &mut store,
                 &run_context,
-                "restore",
-                &queued.view.id,
-                &queued.view.mode,
-                queued.view.created_at_ms,
-                Some(&queued.payload),
+                &input.session_id,
+                &queued,
             )?;
             Err(error)
         }
     }
+}
+
+pub(crate) fn restore_queued_agent_message_before_run_start(
+    store: &mut SqliteStore,
+    run_context: &Metadata,
+    session_id: &str,
+    queued: &PendingQueuedAgentMessage,
+) -> Result<bool, String> {
+    let started = load_agent_session_read_model(store, session_id)
+        .map_err(|error| error.to_string())?
+        .latest_run_queue_id
+        .as_deref()
+        == Some(queued.view.id.as_str());
+    if started {
+        return Ok(false);
+    }
+    append_agent_queue_event(
+        store,
+        run_context,
+        "restore",
+        &queued.view.id,
+        &queued.view.mode,
+        queued.view.created_at_ms,
+        Some(&queued.payload),
+    )?;
+    Ok(true)
 }
 
 pub(crate) fn validate_agent_attachments(

@@ -91,6 +91,8 @@ import {
   SessionRuntimeCache,
   agentStateUnchanged,
   agentTraceUnchanged,
+  committedSteerReconciliation,
+  committedSteerUserMessage,
   containsOptimisticUserMessage,
   latestTraceStep,
   mergeAcknowledgedSessionActivity,
@@ -229,7 +231,8 @@ export function App() {
     providerModelsError,
     providerModelsRefreshTurn,
     setProviderDraft,
-    voiceConfigured
+    voiceConfigured,
+    voiceTransport
   } = useProviderSettingsController({
     reportError: reportComposerError,
     showSaved: showSettingsSaved
@@ -558,6 +561,21 @@ export function App() {
   });
 
   function preserveOptimisticQueuedMessages(sessionId: string, state: AgentState) {
+    steeredQueuedMessageIdsRef.current.forEach((queueId) => {
+      if (optimisticallyDeletedQueuedMessagesRef.current.get(queueId) !== sessionId) return;
+      const resolution = committedSteerReconciliation(state, queueId);
+      if (resolution === "pending") return;
+      steeredQueuedMessageIdsRef.current.delete(queueId);
+      optimisticallyDeletedQueuedMessagesRef.current.delete(queueId);
+      const optimistic = optimisticUserMessagesRef.current.get(sessionId);
+      if (!optimistic) return;
+      const next = optimistic.filter((message) => message.queueId !== queueId);
+      if (next.length > 0) {
+        optimisticUserMessagesRef.current.set(sessionId, next);
+      } else {
+        optimisticUserMessagesRef.current.delete(sessionId);
+      }
+    });
     let queuedMessages = state.queuedMessages;
     optimisticallyDeletedQueuedMessagesRef.current.forEach((targetSessionId, queueId) => {
       if (targetSessionId === sessionId) {
@@ -869,19 +887,6 @@ export function App() {
   function addOptimisticUserMessage(sessionId: string, message: ChatMessageView) {
     const current = optimisticUserMessagesRef.current.get(sessionId) ?? [];
     optimisticUserMessagesRef.current.set(sessionId, [...current, message]);
-    setOptimisticUserMessageRevision((revision) => revision + 1);
-  }
-
-  function removeOptimisticUserMessage(sessionId: string, target: ChatMessageView) {
-    const current = optimisticUserMessagesRef.current.get(sessionId);
-    if (!current) return;
-    const next = current.filter((message) => message !== target);
-    if (next.length === current.length) return;
-    if (next.length > 0) {
-      optimisticUserMessagesRef.current.set(sessionId, next);
-    } else {
-      optimisticUserMessagesRef.current.delete(sessionId);
-    }
     setOptimisticUserMessageRevision((revision) => revision + 1);
   }
 
@@ -1494,14 +1499,6 @@ export function App() {
     return state?.queuedMessages.find((message) => message.id === queueId) ?? null;
   }
 
-  function releaseSteeredQueuedMessagesForSession(sessionId: string) {
-    steeredQueuedMessageIdsRef.current.forEach((queueId) => {
-      if (optimisticallyDeletedQueuedMessagesRef.current.get(queueId) !== sessionId) return;
-      steeredQueuedMessageIdsRef.current.delete(queueId);
-      optimisticallyDeletedQueuedMessagesRef.current.delete(queueId);
-    });
-  }
-
   function applyQueuedMessageReceiptForSession(
     sessionId: string,
     receipt: QueuedAgentMessageReceipt
@@ -1584,7 +1581,6 @@ export function App() {
     try {
       while (!suppressQueueDrainSessionIdsRef.current.has(sessionId)) {
         const next = await runNextQueuedAgentMessage(sessionId);
-        releaseSteeredQueuedMessagesForSession(sessionId);
         if (!next) {
           break;
         }
@@ -1606,7 +1602,6 @@ export function App() {
       setProjectSessionState(await getProjectSessionState());
       await refreshAgentTrace(true, sessionId);
     } catch (error) {
-      releaseSteeredQueuedMessagesForSession(sessionId);
       updateSessionStatus(sessionId, "failed");
       const message = error instanceof Error ? error.message : String(error);
       try {
@@ -1686,34 +1681,23 @@ export function App() {
     if (!sessionId) return;
     const previous = queuedMessageForSession(sessionId, queueId);
     if (!previous) return;
-    const optimisticSteerMessage: ChatMessageView = {
-      role: "user",
-      content: previous.prompt,
-      timestampMs: Date.now(),
-      queueId,
-      attachments: previous.attachments
-    };
-    addOptimisticUserMessage(sessionId, optimisticSteerMessage);
-    optimisticallyDeletedQueuedMessagesRef.current.set(queueId, sessionId);
-    steeredQueuedMessageIdsRef.current.add(queueId);
-    updateQueuedMessagesForSession(sessionId, (messages) =>
-      messages.filter((message) => message.id !== queueId)
-    );
     const runCommandActive = busySessionIds.has(sessionId);
     suppressQueueDrainSessionIdsRef.current.delete(sessionId);
     setQueuedMessageBusyId(queueId);
     setComposerError(null);
     try {
       const receipt = await steerQueuedAgentMessage(sessionId, queueId);
-      applyQueuedMessageActionReceiptForSession(sessionId, { ...receipt, message: null });
-      if (!runCommandActive) void drainQueuedMessages(sessionId);
+      const optimisticSteerMessage = committedSteerUserMessage(previous, receipt);
+      if (optimisticSteerMessage) {
+        addOptimisticUserMessage(sessionId, optimisticSteerMessage);
+        optimisticallyDeletedQueuedMessagesRef.current.set(queueId, sessionId);
+        steeredQueuedMessageIdsRef.current.add(queueId);
+        applyQueuedMessageActionReceiptForSession(sessionId, { ...receipt, message: null });
+      } else {
+        applyQueuedMessageActionReceiptForSession(sessionId, receipt);
+      }
+      if (!runCommandActive && !receipt.steerCommitted) void drainQueuedMessages(sessionId);
     } catch (error) {
-      removeOptimisticUserMessage(sessionId, optimisticSteerMessage);
-      steeredQueuedMessageIdsRef.current.delete(queueId);
-      optimisticallyDeletedQueuedMessagesRef.current.delete(queueId);
-      updateQueuedMessagesForSession(sessionId, (messages) =>
-        mergeQueuedAgentMessage(messages, previous)
-      );
       setComposerError(error instanceof Error ? error.message : String(error));
     } finally {
       setQueuedMessageBusyId(null);
@@ -2179,6 +2163,7 @@ export function App() {
                 effort={agentEffort}
                 sessionId={activeSession?.id ?? null}
                 voiceConfigured={voiceConfigured}
+                voiceTransport={voiceTransport}
                 onChange={setActiveComposerDraft}
                 onEffortChange={(effort) => void handleSessionEffortChange(effort)}
                 onVoiceTranscript={appendComposerDraftForSession}

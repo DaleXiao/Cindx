@@ -6,6 +6,8 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
+mod dashscope_realtime_guard;
+mod dashscope_realtime_provider;
 mod error;
 mod image_provider;
 mod json_wire;
@@ -27,6 +29,9 @@ use streaming_response::consume_streaming_response;
 #[cfg(test)]
 use streaming_response::{consume_streaming_body, finish_streaming_response};
 
+pub use dashscope_realtime_provider::{
+    DashScopeRealtimeTranscriptionConfig, DashScopeRealtimeTranscriptionProvider,
+};
 pub use error::{classify_provider_failure, ProviderFailureClass};
 pub use image_provider::{
     build_image_generation_request_json, OpenAiCompatibleImageConfig, OpenAiCompatibleImageProvider,

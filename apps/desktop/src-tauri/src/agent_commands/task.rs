@@ -138,25 +138,27 @@ pub(crate) fn run_agent_task_blocking_inner(
             "context_window_tokens".to_string(),
             config.context_window_tokens.to_string(),
         );
-        append_event(
-            &mut store,
-            &task_id,
-            EventKind::TaskStatusChanged,
-            "Agent task started",
-            start_metadata,
-        )
-        .map_err(|error| error.to_string())?;
         let mut message_metadata = run_context.clone();
         message_metadata.insert("model_content".to_string(), prompt.clone());
         add_attachment_metadata(&mut message_metadata, &attachments);
-        append_message_event_with_metadata(
-            &mut store,
-            &task_id,
-            MessageRole::User,
-            &display_prompt,
-            message_metadata,
-        )
-        .map_err(|error| error.to_string())?;
+        store
+            .with_immediate_transaction(|store| {
+                append_event(
+                    store,
+                    &task_id,
+                    EventKind::TaskStatusChanged,
+                    "Agent task started",
+                    start_metadata,
+                )?;
+                append_message_event_with_metadata(
+                    store,
+                    &task_id,
+                    MessageRole::User,
+                    &display_prompt,
+                    message_metadata,
+                )
+            })
+            .map_err(|error| error.to_string())?;
         (history, artifact_manifest)
     };
 
