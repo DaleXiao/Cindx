@@ -6,6 +6,7 @@ use crate::{
     event_persistence::append_event,
     event_projection::write_private_file_atomically,
     knowledge_runtime::{prepare_agent_knowledge_context, CloudRagEmbedder},
+    memory_measurement_runtime::replay_project_memory_measurement,
     memory_vector_generation_runtime::{
         memory_vector_manifest_matches, memory_vector_project_key, memory_vector_projection_sha256,
         open_memory_vector_snapshot, MemoryVectorManifest, PendingMemoryVectorGeneration,
@@ -71,7 +72,7 @@ fn load_project_memory_ledger_inner(
         delta = store.list_by_task_and_metadata_after(&task_id, "project_id", project_id, 0)?;
     }
 
-    let checkpointed_runs = if rebuilding {
+    let rebuilding_runs = if rebuilding {
         let mut runs = BTreeMap::<String, Vec<Event>>::new();
         for event in &delta {
             if event.metadata.get("project_id").map(String::as_str) != Some(project_id) {
@@ -81,43 +82,45 @@ fn load_project_memory_ledger_inner(
                 runs.entry(run_id.clone()).or_default().push(event.clone());
             }
         }
-        runs.into_iter()
-            .filter(|(_, events)| events.iter().any(is_memory_checkpoint_event))
-            .map(|(run_id, events)| (run_id, Some(events)))
-            .collect::<Vec<_>>()
+        Some(runs)
     } else {
-        delta
-            .iter()
-            .filter(|event| is_memory_checkpoint_event(event))
-            .filter(|event| {
-                event.metadata.get("project_id").map(String::as_str) == Some(project_id)
-            })
-            .filter_map(|event| {
-                event
-                    .metadata
-                    .get("agent_run_id")
-                    .cloned()
-                    .map(|run_id| (run_id, None))
-            })
-            .collect::<Vec<_>>()
+        None
     };
-    for (run_id, cached_events) in checkpointed_runs {
-        let events = match cached_events {
-            Some(events) => events,
-            None => store.list_by_task_and_metadata(&task_id, "agent_run_id", &run_id)?,
-        };
-        let events = memory_events_for_terminal_steer_epoch(events);
-        let Some(session_id) = events
-            .iter()
-            .find_map(|event| event.metadata.get("session_id"))
-        else {
+    for event in &delta {
+        if event.metadata.get("project_id").map(String::as_str) != Some(project_id) {
             continue;
-        };
-        merge_memory_records(
-            &mut ledger,
-            extract_durable_memories(&events, project_id, session_id),
-            AGENT_MEMORY_MAX_RECORDS,
-        );
+        }
+        if is_memory_checkpoint_event(event) {
+            let Some(run_id) = event
+                .metadata
+                .get("agent_run_id")
+                .filter(|run_id| !run_id.is_empty())
+            else {
+                continue;
+            };
+            let events = match rebuilding_runs.as_ref() {
+                Some(runs) => runs.get(run_id).cloned().unwrap_or_default(),
+                None => store.list_by_task_and_metadata(&task_id, "agent_run_id", run_id)?,
+            }
+            .into_iter()
+            .filter(|candidate| candidate.sequence <= event.sequence)
+            .filter(|candidate| {
+                candidate.metadata.get("project_id").map(String::as_str) == Some(project_id)
+            })
+            .collect::<Vec<_>>();
+            let events = memory_events_for_terminal_steer_epoch(events);
+            if let Some(session_id) = events
+                .iter()
+                .find_map(|candidate| candidate.metadata.get("session_id"))
+            {
+                merge_memory_records(
+                    &mut ledger,
+                    extract_durable_memories(&events, project_id, session_id),
+                    AGENT_MEMORY_MAX_RECORDS,
+                );
+            }
+        }
+        replay_project_memory_measurement(&mut ledger, event, project_id);
     }
     ledger.revision = revision.latest_sequence;
     ledger.event_count = revision.event_count;
@@ -507,6 +510,7 @@ fn refresh_project_memory_vector_index_inner(
             config: config.clone(),
             cancellation: None,
             expected_steer_epoch: None,
+            resource_checkpoint: None,
         };
         match apply_embeddings_to_index_cancellable(&mut index, &mut embedder, || false) {
             Ok(()) => embedding_backend = "cloud".to_string(),
@@ -585,6 +589,7 @@ pub(crate) fn project_memory_semantic_scores(
     prompt: &str,
     cancellation: &Arc<AgentRunControl>,
     expected_epoch: u64,
+    resource_checkpoint: Option<&(dyn Fn(&AgentRunControl) -> Result<(), String> + Sync)>,
 ) -> Result<(BTreeMap<String, f64>, MemoryVectorManifest), String> {
     let snapshot = open_memory_vector_snapshot(workspace_root, project_id)?;
     let manifest = snapshot
@@ -610,6 +615,7 @@ pub(crate) fn project_memory_semantic_scores(
             config: config.clone(),
             cancellation: Some(cancellation.clone()),
             expected_steer_epoch: Some(expected_epoch),
+            resource_checkpoint,
         };
         embedder
             .embed_texts(&[prompt.to_string()])
@@ -645,7 +651,7 @@ pub(crate) fn project_memory_semantic_scores(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn recall_project_memory_for_prompt(
-    _state: &tauri::State<'_, AppState>,
+    state: &tauri::State<'_, AppState>,
     _task_id: &TaskId,
     run_context: &Metadata,
     workspace_root: &Path,
@@ -686,6 +692,9 @@ pub(crate) fn recall_project_memory_for_prompt(
         config.clone(),
         ledger.clone(),
     );
+    let resource_checkpoint = |control: &AgentRunControl| {
+        crate::agent_resource_snapshot::checkpoint_agent_run_resources(state, run_context, control)
+    };
     let (semantic_scores, vector_manifest, vector_error) = match project_memory_semantic_scores(
         workspace_root,
         project_id,
@@ -694,6 +703,7 @@ pub(crate) fn recall_project_memory_for_prompt(
         prompt,
         cancellation,
         expected_epoch,
+        Some(&resource_checkpoint),
     ) {
         Ok((scores, manifest)) => (scores, Some(manifest), None),
         Err(error) => (BTreeMap::new(), None, Some(error)),
@@ -844,6 +854,10 @@ pub(crate) fn commit_prepared_memory_recall(
     let mut metadata = prepared.event_metadata.clone();
     metadata.insert("selected_count".to_string(), recalls.len().to_string());
     metadata.insert(
+        "recalled_at_ms".to_string(),
+        prepared.recalled_at_ms.to_string(),
+    );
+    metadata.insert(
         "memory_ids".to_string(),
         recalls
             .iter()
@@ -913,6 +927,7 @@ pub(crate) fn record_project_memory_observed_use(
                 ("selected_count".to_string(), memory_ids.len().to_string()),
                 ("used_count".to_string(), used_ids.len().to_string()),
                 ("used_memory_ids".to_string(), used_ids.join(",")),
+                ("observed_at_ms".to_string(), observed_at_ms.to_string()),
             ]
             .into_iter()
             .collect(),

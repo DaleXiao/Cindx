@@ -1,5 +1,96 @@
 use super::*;
 
+fn test_verified_learning_evidence() -> LearningEvidenceV1 {
+    LearningEvidenceV1::verified_postcondition(
+        LearningUsageCompleteness::Complete,
+        0,
+        "0".repeat(64),
+    )
+}
+
+fn test_quality_learning_evidence(
+    score: f32,
+    passed: bool,
+    attribution: LearningAttribution,
+) -> LearningEvidenceV1 {
+    LearningEvidenceV1::independent_quality(
+        LearningTermination::Completed,
+        attribution,
+        LearningUsageCompleteness::Complete,
+        0,
+        "0".repeat(64),
+        IndependentQualitySource::CollaborationQualityGate,
+        (score.clamp(0.0, 1.0) * 10_000.0).round() as u16,
+        passed,
+    )
+}
+
+#[test]
+fn learning_evidence_contract_is_bounded_and_fails_closed() {
+    let evidence = test_quality_learning_evidence(0.91, true, LearningAttribution::Model);
+    let encoded = evidence
+        .to_metadata_value()
+        .expect("valid evidence should serialize");
+    assert!(encoded.len() <= LEARNING_EVIDENCE_MAX_BYTES);
+    let metadata = [(LEARNING_EVIDENCE_METADATA_KEY.to_string(), encoded)]
+        .into_iter()
+        .collect::<Metadata>();
+    assert_eq!(LearningEvidenceV1::from_metadata(&metadata), Some(evidence));
+
+    let tool_encoded = test_verified_learning_evidence()
+        .to_metadata_value()
+        .expect("valid tool evidence should serialize");
+    for missing_field in ["independent_quality_source", "quality_bps"] {
+        let mut partial = serde_json::from_str::<serde_json::Value>(&tool_encoded)
+            .expect("serialized evidence should remain valid JSON");
+        assert_eq!(partial.get(missing_field), Some(&serde_json::Value::Null));
+        partial
+            .as_object_mut()
+            .expect("evidence should serialize as an object")
+            .remove(missing_field);
+        let metadata = [(
+            LEARNING_EVIDENCE_METADATA_KEY.to_string(),
+            partial.to_string(),
+        )]
+        .into_iter()
+        .collect::<Metadata>();
+        assert!(LearningEvidenceV1::from_metadata(&metadata).is_none());
+    }
+
+    let invalid = LearningEvidenceV1 {
+        disposition: LearningDisposition::Positive,
+        verification: LearningVerification::Passed,
+        attribution: LearningAttribution::Model,
+        usage_completeness: LearningUsageCompleteness::Complete,
+        steer_epoch: Some(0),
+        budget_fingerprint: Some("not-a-fingerprint".to_string()),
+        independent_quality_source: Some(IndependentQualitySource::CollaborationQualityGate),
+        quality_bps: Some(9_100),
+        ..LearningEvidenceV1::default()
+    };
+    assert!(!invalid.is_learnable());
+    assert!(invalid.to_metadata_value().is_none());
+    assert!(!LearningEvidenceV1::default().is_learnable());
+
+    let legacy = serde_json::json!({
+        "task_class": "general",
+        "context_signature": "general",
+        "selected_policy": "single",
+        "selected_model": "fast-mini",
+        "latency_ms": 10,
+        "outcome": "succeeded",
+        "quality_score": 0.99,
+        "verification_passed": true,
+        "cost_proxy": 10,
+        "tool_count": 0,
+        "retrieval_count": 0,
+        "user_override": false
+    });
+    let legacy: RoutingTelemetry =
+        serde_json::from_value(legacy).expect("legacy telemetry should remain readable");
+    assert!(!legacy.learning_evidence.is_learnable());
+}
+
 fn candidates() -> Vec<ModelCandidate> {
     vec![
         ModelCandidate {
@@ -396,6 +487,11 @@ fn search_teacher_prefers_reliable_efficient_topology() {
             plan: fast_plan.clone(),
             succeeded: true,
             quality_score: Some(0.92),
+            learning_evidence: test_quality_learning_evidence(
+                0.92,
+                true,
+                LearningAttribution::Workflow,
+            ),
             latency_ms: 4_000,
             total_tokens: 4_000,
             tool_calls: 2,
@@ -410,6 +506,11 @@ fn search_teacher_prefers_reliable_efficient_topology() {
             plan: fast_plan.clone(),
             succeeded: true,
             quality_score: Some(0.88),
+            learning_evidence: test_quality_learning_evidence(
+                0.88,
+                true,
+                LearningAttribution::Workflow,
+            ),
             latency_ms: 5_000,
             total_tokens: 5_000,
             tool_calls: 2,
@@ -424,6 +525,11 @@ fn search_teacher_prefers_reliable_efficient_topology() {
             plan: fast_plan.clone(),
             succeeded: true,
             quality_score: Some(0.90),
+            learning_evidence: test_quality_learning_evidence(
+                0.90,
+                true,
+                LearningAttribution::Workflow,
+            ),
             latency_ms: 4_500,
             total_tokens: 4_500,
             tool_calls: 2,
@@ -438,6 +544,11 @@ fn search_teacher_prefers_reliable_efficient_topology() {
             plan: fast_plan,
             succeeded: true,
             quality_score: Some(0.91),
+            learning_evidence: test_quality_learning_evidence(
+                0.91,
+                true,
+                LearningAttribution::Workflow,
+            ),
             latency_ms: 4_250,
             total_tokens: 4_250,
             tool_calls: 2,
@@ -452,6 +563,11 @@ fn search_teacher_prefers_reliable_efficient_topology() {
             plan: slow_plan.clone(),
             succeeded: false,
             quality_score: Some(0.30),
+            learning_evidence: test_quality_learning_evidence(
+                0.30,
+                false,
+                LearningAttribution::Workflow,
+            ),
             latency_ms: 80_000,
             total_tokens: 20_000,
             tool_calls: 8,
@@ -464,6 +580,11 @@ fn search_teacher_prefers_reliable_efficient_topology() {
             plan: slow_plan,
             succeeded: true,
             quality_score: Some(0.45),
+            learning_evidence: test_quality_learning_evidence(
+                0.45,
+                false,
+                LearningAttribution::Workflow,
+            ),
             latency_ms: 70_000,
             total_tokens: 18_000,
             tool_calls: 7,
@@ -498,9 +619,40 @@ fn search_teacher_withholds_under_evidenced_topology() {
             plan: plan.clone(),
             succeeded: true,
             quality_score: Some(0.95),
+            learning_evidence: test_quality_learning_evidence(
+                0.95,
+                true,
+                LearningAttribution::Workflow,
+            ),
             latency_ms: 4_000,
             total_tokens: 4_000,
             tool_calls: 2,
+            successful_tools_by_step: BTreeMap::new(),
+            fallback_used: false,
+        })
+        .collect::<Vec<_>>();
+
+    let teacher = WorkflowSearchTeacher::train(&telemetry);
+    assert!(teacher
+        .best_prior(&TaskClass::Research, "pro", &allowed_models, 2)
+        .is_none());
+}
+
+#[test]
+fn search_teacher_ignores_unmeasured_workflow_completions() {
+    let allowed_models = vec!["planner".to_string(), "reviewer".to_string()];
+    let plan = workflow_plan("unmeasured", false);
+    let telemetry = (0..8)
+        .map(|_| WorkflowExecutionTelemetry {
+            task_class: TaskClass::Research,
+            routing_signature: String::new(),
+            plan: plan.clone(),
+            succeeded: true,
+            quality_score: None,
+            learning_evidence: LearningEvidenceV1::default(),
+            latency_ms: 2_000,
+            total_tokens: 2_000,
+            tool_calls: 1,
             successful_tools_by_step: BTreeMap::new(),
             fallback_used: false,
         })
@@ -1263,6 +1415,7 @@ fn learned_router_uses_successful_trace_table() {
             outcome: RoutingOutcome::Succeeded,
             quality_score: None,
             verification_passed: None,
+            learning_evidence: test_verified_learning_evidence(),
             cost_proxy: 120,
             tool_count: 0,
             retrieval_count: 2,
@@ -1278,6 +1431,7 @@ fn learned_router_uses_successful_trace_table() {
         outcome: RoutingOutcome::Failed,
         quality_score: None,
         verification_passed: None,
+        learning_evidence: test_quality_learning_evidence(0.0, false, LearningAttribution::Model),
         cost_proxy: 20,
         tool_count: 0,
         retrieval_count: 0,
@@ -1314,6 +1468,7 @@ fn learned_router_can_downshift_a_matching_context_without_tools() {
             outcome: RoutingOutcome::Succeeded,
             quality_score: None,
             verification_passed: None,
+            learning_evidence: test_verified_learning_evidence(),
             cost_proxy: 80,
             tool_count: 0,
             retrieval_count: 0,
@@ -1341,6 +1496,7 @@ fn learned_router_does_not_overfit_three_successful_traces() {
             outcome: RoutingOutcome::Succeeded,
             quality_score: None,
             verification_passed: None,
+            learning_evidence: test_verified_learning_evidence(),
             cost_proxy: 80,
             tool_count: 0,
             retrieval_count: 0,
@@ -1353,6 +1509,37 @@ fn learned_router_does_not_overfit_three_successful_traces() {
         .learned_route_for_context(&context)
         .expect("route evidence should remain observable");
     assert!(!route.evidence_ready());
+    assert_eq!(router.route(&context), RuleBasedRouter.route(&context));
+}
+
+#[test]
+fn learned_router_ignores_censored_lifecycle_outcomes() {
+    let prompt = "Discuss this topic clearly and summarize the important distinctions. ".repeat(10);
+    let context = RoutingContext::from_prompt(&prompt, candidates());
+    let telemetry = (0..8)
+        .map(|index| RoutingTelemetry {
+            task_class: TaskClass::General,
+            context_signature: context.learning_signature(),
+            selected_policy: OrchestrationPolicy::Single,
+            selected_model: "fast-mini".to_string(),
+            latency_ms: 250,
+            outcome: if index % 2 == 0 {
+                RoutingOutcome::Succeeded
+            } else {
+                RoutingOutcome::Failed
+            },
+            quality_score: None,
+            verification_passed: None,
+            learning_evidence: LearningEvidenceV1::default(),
+            cost_proxy: 80,
+            tool_count: 0,
+            retrieval_count: 0,
+            user_override: false,
+        })
+        .collect::<Vec<_>>();
+
+    let router = LearnedModelRouter::train(&telemetry);
+    assert!(router.learned_route_for_context(&context).is_none());
     assert_eq!(router.route(&context), RuleBasedRouter.route(&context));
 }
 
@@ -1370,6 +1557,7 @@ fn learned_router_does_not_transfer_coarse_task_class_evidence() {
             outcome: RoutingOutcome::Succeeded,
             quality_score: None,
             verification_passed: None,
+            learning_evidence: test_verified_learning_evidence(),
             cost_proxy: 80,
             tool_count: 0,
             retrieval_count: 0,
@@ -1397,6 +1585,7 @@ fn learned_router_prefers_reliable_route_over_more_raw_successes() {
             outcome: RoutingOutcome::Succeeded,
             quality_score: None,
             verification_passed: None,
+            learning_evidence: test_verified_learning_evidence(),
             cost_proxy: 80,
             tool_count: 0,
             retrieval_count: 0,
@@ -1416,6 +1605,11 @@ fn learned_router_prefers_reliable_route_over_more_raw_successes() {
         },
         quality_score: None,
         verification_passed: None,
+        learning_evidence: if index < 5 {
+            test_verified_learning_evidence()
+        } else {
+            test_quality_learning_evidence(0.0, false, LearningAttribution::Model)
+        },
         cost_proxy: 120,
         tool_count: 0,
         retrieval_count: 0,
@@ -1442,6 +1636,11 @@ fn learned_router_rejects_nominal_success_without_quality() {
             outcome: RoutingOutcome::Succeeded,
             quality_score: Some(0.42),
             verification_passed: Some(true),
+            learning_evidence: test_quality_learning_evidence(
+                0.42,
+                false,
+                LearningAttribution::Model,
+            ),
             cost_proxy: 20,
             tool_count: 0,
             retrieval_count: 0,
@@ -1457,6 +1656,7 @@ fn learned_router_rejects_nominal_success_without_quality() {
         outcome: RoutingOutcome::Succeeded,
         quality_score: Some(0.91),
         verification_passed: Some(true),
+        learning_evidence: test_quality_learning_evidence(0.91, true, LearningAttribution::Model),
         cost_proxy: 240,
         tool_count: 0,
         retrieval_count: 0,
@@ -1557,6 +1757,7 @@ fn learned_router_cannot_upgrade_a_lightweight_coding_question() {
         outcome: RoutingOutcome::Succeeded,
         quality_score: None,
         verification_passed: None,
+        learning_evidence: test_verified_learning_evidence(),
         cost_proxy: 1_000,
         tool_count: 4,
         retrieval_count: 4,
@@ -1580,6 +1781,7 @@ fn learned_router_cannot_upgrade_ordinary_research_to_ultra() {
         outcome: RoutingOutcome::Succeeded,
         quality_score: None,
         verification_passed: None,
+        learning_evidence: test_verified_learning_evidence(),
         cost_proxy: 4_000,
         tool_count: 0,
         retrieval_count: 4,
@@ -1678,6 +1880,7 @@ fn operational_evaluation_aggregates_trace_cost_and_outcomes() {
             outcome: RoutingOutcome::Succeeded,
             quality_score: None,
             verification_passed: None,
+            learning_evidence: LearningEvidenceV1::default(),
             cost_proxy: 20,
             tool_count: 1,
             retrieval_count: 0,
@@ -1692,6 +1895,7 @@ fn operational_evaluation_aggregates_trace_cost_and_outcomes() {
             outcome: RoutingOutcome::Failed,
             quality_score: None,
             verification_passed: None,
+            learning_evidence: LearningEvidenceV1::default(),
             cost_proxy: 180,
             tool_count: 3,
             retrieval_count: 4,

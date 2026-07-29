@@ -276,7 +276,8 @@ pub(crate) fn retry_agent_task_blocking(
     input: SessionActionInput,
 ) -> Result<AgentState, String> {
     let session_id = input.session_id.clone();
-    let (effort, applied_steer_epoch) = {
+    let recovery_context = project_session_metadata_for_session(&state, Some(&session_id))?;
+    let (effort, applied_steer_epoch, durable_recovery) = {
         let store = state
             .store
             .lock()
@@ -285,14 +286,31 @@ pub(crate) fn retry_agent_task_blocking(
             .list_by_task_and_metadata_or_unscoped(&phase16_task_id(), "session_id", &session_id)
             .map_err(|error| error.to_string())?;
         let active_events = active_agent_events_for_session(&events, Some(&session_id));
+        let recovery = peek_agent_recovery_envelope(&store, &recovery_context, &["paused"])?;
         (
             agent_effort_from_active_events(&active_events),
             latest_applied_agent_steer_epoch(&active_events),
+            recovery,
         )
     };
     let suspended_snapshot = suspended_agent_run_control_snapshot(&state, &session_id)?;
     let run_control_lease = if let Some(snapshot) = suspended_snapshot {
         begin_agent_run_control_for_continuation(&state, &session_id, snapshot)?
+    } else if let Some(recovery) = durable_recovery
+        .as_ref()
+        .filter(|recovery| recovery.resource_snapshot.is_some())
+    {
+        begin_agent_run_control_from_persisted_resources(
+            &state,
+            &session_id,
+            effort.label(),
+            applied_steer_epoch,
+            recovery
+                .resource_snapshot
+                .clone()
+                .expect("filtered durable resource snapshot"),
+            recovery.reason != "app_restarted",
+        )?
     } else {
         begin_agent_run_control_at_steer_epoch(
             &state,

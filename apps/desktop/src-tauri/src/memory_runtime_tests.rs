@@ -227,3 +227,282 @@ fn preparation_rejects_a_memory_snapshot_that_changed_before_handoff() {
         .iter()
         .any(|message| { message.content == "A newer requirement replaced this memory" }));
 }
+
+fn append_durable_memory_event_at(
+    store: &mut SqliteStore,
+    event_id: &str,
+    timestamp_ms: u64,
+    kind: EventKind,
+    summary: &str,
+    metadata: Metadata,
+) {
+    store
+        .append_next_event(
+            EventId(event_id.to_string()),
+            phase16_task_id(),
+            timestamp_ms,
+            kind,
+            summary.to_string(),
+            metadata,
+        )
+        .expect("durable memory event should append");
+}
+
+fn durable_requirement_metadata(
+    project_id: &str,
+    session_id: &str,
+    run_id: &str,
+    content: &str,
+) -> Metadata {
+    [
+        ("project_id".to_string(), project_id.to_string()),
+        ("session_id".to_string(), session_id.to_string()),
+        ("agent_run_id".to_string(), run_id.to_string()),
+        ("steer_epoch".to_string(), "0".to_string()),
+        ("role".to_string(), "user".to_string()),
+        ("content".to_string(), content.to_string()),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn durable_requirement_id(
+    project_id: &str,
+    session_id: &str,
+    run_id: &str,
+    content: &str,
+) -> String {
+    extract_durable_memories(
+        &[Event {
+            id: EventId("event-memory-id-projection".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 1,
+            timestamp_ms: 100,
+            kind: EventKind::MessageAdded,
+            summary: "user message".to_string(),
+            metadata: durable_requirement_metadata(project_id, session_id, run_id, content),
+        }],
+        project_id,
+        session_id,
+    )[0]
+    .id
+    .clone()
+}
+
+fn append_durable_requirement_run(
+    store: &mut SqliteStore,
+    project_id: &str,
+    session_id: &str,
+    run_id: &str,
+    content: &str,
+) {
+    append_durable_memory_event_at(
+        store,
+        "event-memory-requirement",
+        100,
+        EventKind::MessageAdded,
+        "user message",
+        durable_requirement_metadata(project_id, session_id, run_id, content),
+    );
+    append_durable_memory_event_at(
+        store,
+        "event-memory-completed",
+        200,
+        EventKind::TaskStatusChanged,
+        "Agent task completed",
+        [
+            ("project_id".to_string(), project_id.to_string()),
+            ("session_id".to_string(), session_id.to_string()),
+            ("agent_run_id".to_string(), run_id.to_string()),
+            ("steer_epoch".to_string(), "0".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+}
+
+#[test]
+fn v2_rebuild_replays_only_well_formed_measurements_in_durable_order() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let project_id = "project-memory-v2-migration";
+    let session_id = "session-memory-v2-migration";
+    let run_id = "run-memory-v2-migration";
+    let content = "Always preserve project memory feedback during projection rebuilds";
+    let memory_id = durable_requirement_id(project_id, session_id, run_id, content);
+
+    append_durable_memory_event_at(
+        &mut store,
+        "event-memory-recall-before-record",
+        50,
+        EventKind::RetrievalPerformed,
+        "Project memory recalled",
+        [
+            ("project_id".to_string(), project_id.to_string()),
+            ("action".to_string(), "memory_recall".to_string()),
+            ("selected_count".to_string(), "1".to_string()),
+            ("memory_ids".to_string(), memory_id.clone()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    append_durable_requirement_run(&mut store, project_id, session_id, run_id, content);
+    append_durable_memory_event_at(
+        &mut store,
+        "event-memory-recall-missing-count",
+        250,
+        EventKind::RetrievalPerformed,
+        "Project memory recalled",
+        [
+            ("project_id".to_string(), project_id.to_string()),
+            ("action".to_string(), "memory_recall".to_string()),
+            ("memory_ids".to_string(), memory_id.clone()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    append_durable_memory_event_at(
+        &mut store,
+        "event-memory-use-invalid-count",
+        275,
+        EventKind::RetrievalPerformed,
+        "Project memory utilization measured",
+        [
+            ("project_id".to_string(), project_id.to_string()),
+            ("action".to_string(), "memory_use".to_string()),
+            ("selected_count".to_string(), "1".to_string()),
+            ("used_count".to_string(), "invalid".to_string()),
+            ("memory_ids".to_string(), memory_id.clone()),
+            ("used_memory_ids".to_string(), memory_id.clone()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    append_durable_memory_event_at(
+        &mut store,
+        "event-memory-recall-legacy",
+        300,
+        EventKind::RetrievalPerformed,
+        "Project memory recalled",
+        [
+            ("project_id".to_string(), project_id.to_string()),
+            ("action".to_string(), "memory_recall".to_string()),
+            ("selected_count".to_string(), "1".to_string()),
+            ("memory_ids".to_string(), memory_id.clone()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    append_durable_memory_event_at(
+        &mut store,
+        "event-memory-use-legacy",
+        400,
+        EventKind::RetrievalPerformed,
+        "Project memory utilization measured",
+        [
+            ("project_id".to_string(), project_id.to_string()),
+            ("action".to_string(), "memory_use".to_string()),
+            ("selected_count".to_string(), "1".to_string()),
+            ("used_count".to_string(), "1".to_string()),
+            ("memory_ids".to_string(), memory_id.clone()),
+            ("used_memory_ids".to_string(), memory_id.clone()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+
+    let ledger = load_project_memory_ledger(&mut store, project_id)
+        .expect("v2 memory projection should rebuild");
+    let record = ledger
+        .records
+        .iter()
+        .find(|record| record.id == memory_id)
+        .expect("durable requirement should rebuild");
+    assert_eq!(record.recall_count, 1);
+    assert_eq!(record.last_recalled_at_ms, Some(300));
+    assert_eq!(record.observed_use_count, 1);
+    assert_eq!(record.last_observed_use_at_ms, Some(400));
+}
+
+#[test]
+fn rebuild_preserves_runtime_measurement_counts_and_exact_timestamps() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let project_id = "project-memory-runtime-rebuild";
+    let session_id = "session-memory-runtime-rebuild";
+    let run_id = "run-memory-runtime-rebuild";
+    let content = "Always keep project memory rebuilds lossless";
+    append_durable_requirement_run(&mut store, project_id, session_id, run_id, content);
+    let ledger = load_project_memory_ledger(&mut store, project_id)
+        .expect("initial memory projection should build");
+    let record = ledger.records[0].clone();
+    let run_context = [
+        ("project_id".to_string(), project_id.to_string()),
+        ("session_id".to_string(), session_id.to_string()),
+        ("agent_run_id".to_string(), run_id.to_string()),
+        ("memory_ids".to_string(), record.id.clone()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    let prepared = PreparedMemoryRecall {
+        project_id: project_id.to_string(),
+        ledger_projection_sha256: memory_vector_projection_sha256(&ledger),
+        recalled_at_ms: 225,
+        recalls: vec![agent_memory::MemoryRecall {
+            record: record.clone(),
+            score: 1.0,
+            reasons: vec!["test".to_string()],
+        }],
+        event_metadata: [("action".to_string(), "memory_recall".to_string())]
+            .into_iter()
+            .collect(),
+        message: Message {
+            role: MessageRole::System,
+            content: content.to_string(),
+            metadata: Metadata::new(),
+        },
+    };
+    commit_prepared_memory_recall(
+        &mut store,
+        &phase16_task_id(),
+        &run_context,
+        Some(&prepared),
+    )
+    .expect("runtime recall should persist");
+    assert_eq!(
+        record_project_memory_observed_use(&mut store, &phase16_task_id(), &run_context, content,)
+            .expect("runtime memory use should persist"),
+        1
+    );
+    let before = load_project_memory_ledger(&mut store, project_id)
+        .expect("runtime-updated projection should load");
+    let before_record = before
+        .records
+        .iter()
+        .find(|candidate| candidate.id == record.id)
+        .expect("updated requirement should exist")
+        .clone();
+    assert_eq!(before_record.last_recalled_at_ms, Some(225));
+
+    store
+        .delete_read_model(AGENT_MEMORY_READ_MODEL_NAMESPACE, project_id)
+        .expect("v2 projection should delete");
+    let rebuilt = load_project_memory_ledger(&mut store, project_id)
+        .expect("v2 memory projection should rebuild from durable events");
+    let rebuilt_record = rebuilt
+        .records
+        .iter()
+        .find(|candidate| candidate.id == record.id)
+        .expect("rebuilt requirement should exist");
+    assert_eq!(rebuilt_record.recall_count, before_record.recall_count);
+    assert_eq!(
+        rebuilt_record.last_recalled_at_ms,
+        before_record.last_recalled_at_ms
+    );
+    assert_eq!(
+        rebuilt_record.observed_use_count,
+        before_record.observed_use_count
+    );
+    assert_eq!(
+        rebuilt_record.last_observed_use_at_ms,
+        before_record.last_observed_use_at_ms
+    );
+}

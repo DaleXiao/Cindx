@@ -432,6 +432,7 @@ pub(crate) fn complete_collaboration_model_for_stage_with_control(
         prompt,
         cancellation,
         CollaborationCallLimits::default(),
+        None,
         on_delta,
     )
 }
@@ -446,6 +447,7 @@ pub(crate) fn complete_collaboration_model_for_stage_with_recovery_control(
     prompt: String,
     cancellation: Option<Arc<AgentRunControl>>,
     limits: CollaborationCallLimits,
+    resource_checkpoint: Option<&(dyn Fn(&AgentRunControl) -> Result<(), String> + Sync)>,
     mut on_delta: impl FnMut(&str),
 ) -> CollaborationCompletion {
     let started_at_ms = current_time_millis();
@@ -507,7 +509,7 @@ pub(crate) fn complete_collaboration_model_for_stage_with_recovery_control(
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
         base_url: config.base_url.clone(),
         api_key: config.api_key.clone(),
-        model,
+        model: model.clone(),
         embedding_model: config.model_for_role(&ModelRole::Embedder),
         timeout_seconds,
     });
@@ -517,30 +519,91 @@ pub(crate) fn complete_collaboration_model_for_stage_with_recovery_control(
     let response_started = AtomicBool::new(false);
     let attempt_deadline_reached = AtomicBool::new(false);
     let attempt_started_at = Instant::now();
+    let model_request = ModelRequest {
+        role,
+        messages: vec![
+            Message {
+                role: MessageRole::System,
+                content: system_prompt,
+                metadata: Metadata::new(),
+            },
+            Message {
+                role: MessageRole::User,
+                content: prompt,
+                metadata: Metadata::new(),
+            },
+        ],
+        tools: Vec::new(),
+        mode: ModelCallMode::Streaming,
+        metadata: [(
+            "max_output_tokens".to_string(),
+            COLLABORATION_MAX_OUTPUT_TOKENS.to_string(),
+        )]
+        .into_iter()
+        .collect(),
+    };
+    let model_attempt = if let Some(control) = cancellation.as_ref() {
+        let expected_epoch = objective_epoch.unwrap_or_else(|| control.steer_epoch());
+        match crate::model_resource_runtime::ControlledModelAttempt::reserve_at(
+            control,
+            expected_epoch,
+            &model,
+            &model_request,
+            stage_class,
+        ) {
+            Ok(Some(attempt)) => Some(attempt),
+            Ok(None) => {
+                control.finish_model_call_at(expected_epoch);
+                let mut completion = CollaborationCompletion::failed_with(AgentFailure::cancelled(
+                    "user_steer",
+                    "collaboration model call superseded by user steering",
+                ));
+                completion.usage.insert(
+                    COLLABORATION_TERMINATION_SCOPE_KEY.to_string(),
+                    COLLABORATION_TERMINATION_STEER.to_string(),
+                );
+                return completion;
+            }
+            Err(reason) => {
+                control.finish_model_call_at(expected_epoch);
+                let scope = if reason == RunStopReason::StageBudgetExhausted {
+                    COLLABORATION_TERMINATION_STAGE
+                } else {
+                    COLLABORATION_TERMINATION_RUN
+                };
+                let mut completion =
+                    CollaborationCompletion::failed_with(AgentFailure::from_stop_reason(
+                        reason,
+                        format!("Run stopped before provider dispatch: {}", reason.code()),
+                    ));
+                completion.usage.insert(
+                    COLLABORATION_TERMINATION_SCOPE_KEY.to_string(),
+                    scope.to_string(),
+                );
+                return completion;
+            }
+        }
+    } else {
+        None
+    };
+    if let (Some(control), Some(checkpoint)) = (cancellation.as_ref(), resource_checkpoint) {
+        if let Err(error) = checkpoint(control) {
+            if let Some(attempt) = model_attempt {
+                let _ = attempt.settle_unknown();
+            }
+            control.finish_model_call_at(
+                objective_epoch.expect("controlled collaboration call should capture its epoch"),
+            );
+            return CollaborationCompletion::failed_with(AgentFailure::internal(
+                "resource_checkpoint_failed",
+                format!(
+                    "collaboration resource checkpoint failed before provider dispatch: {error}"
+                ),
+            ));
+        }
+    }
     let response = provider.complete_streaming_cancellable(
-        ModelRequest {
-            role,
-            messages: vec![
-                Message {
-                    role: MessageRole::System,
-                    content: system_prompt,
-                    metadata: Metadata::new(),
-                },
-                Message {
-                    role: MessageRole::User,
-                    content: prompt,
-                    metadata: Metadata::new(),
-                },
-            ],
-            tools: Vec::new(),
-            mode: ModelCallMode::Streaming,
-            metadata: [(
-                "max_output_tokens".to_string(),
-                COLLABORATION_MAX_OUTPUT_TOKENS.to_string(),
-            )]
-            .into_iter()
-            .collect(),
-        },
+        model_request,
         |delta| {
             if !delta.is_empty() {
                 response_started.store(true, Ordering::Release);
@@ -578,7 +641,22 @@ pub(crate) fn complete_collaboration_model_for_stage_with_recovery_control(
             false
         },
     );
+    if let Some(attempt) = model_attempt {
+        match &response {
+            Ok(response) => {
+                let _ = attempt.settle_response(response);
+            }
+            Err(_) => {
+                let _ = attempt.settle_unknown();
+            }
+        }
+    }
     if let Some(control) = cancellation.as_ref() {
+        if let Some(checkpoint) = resource_checkpoint {
+            if let Err(error) = checkpoint(control) {
+                eprintln!("collaboration resource settlement checkpoint unavailable: {error}");
+            }
+        }
         control.finish_model_call_at(
             objective_epoch.expect("controlled collaboration call should capture its epoch"),
         );

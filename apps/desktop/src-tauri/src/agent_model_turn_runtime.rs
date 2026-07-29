@@ -171,10 +171,52 @@ pub(crate) fn execute_agent_model_turn(
     let mut stream_progress = ModelStreamProgress::new();
     let mut first_delta_at_ms = None;
     let mut transport_attempt = 0usize;
+    let resource_stage = if collaboration.is_some() || terminal_commit {
+        RunStageClass::Finalizer
+    } else {
+        RunStageClass::Other
+    };
     let mut response = loop {
         transport_attempt += 1;
         partial_stream.clear();
         stream_progress.reset();
+        let model_attempt = match crate::model_resource_runtime::ControlledModelAttempt::reserve_at(
+            cancellation,
+            epoch_lease.epoch(),
+            agent_model,
+            &request,
+            resource_stage,
+        ) {
+            Ok(Some(attempt)) => attempt,
+            Ok(None) => {
+                cancellation.finish_model_call_at(epoch_lease.epoch());
+                return Ok(AgentModelTurnOutcome::RestartAfterSteer);
+            }
+            Err(_) => {
+                cancellation.finish_model_call_at(epoch_lease.epoch());
+                return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
+                    app,
+                    state,
+                    workspace_root,
+                    runtime,
+                    prompt,
+                    run_context,
+                    collaboration,
+                    cancellation,
+                )?));
+            }
+        };
+        if let Err(error) = crate::agent_resource_snapshot::checkpoint_agent_run_resources(
+            state,
+            run_context,
+            cancellation,
+        ) {
+            let _ = model_attempt.settle_unknown();
+            cancellation.finish_model_call_at(epoch_lease.epoch());
+            return Err(format!(
+                "agent resource checkpoint failed before provider dispatch: {error}"
+            ));
+        }
         let mut on_delta = |delta: &str| {
             if !delta.is_empty() {
                 first_delta_at_ms.get_or_insert_with(current_time_millis);
@@ -202,8 +244,30 @@ pub(crate) fn execute_agent_model_turn(
             &mut should_cancel,
         );
         match result {
-            Ok(response) => break response,
+            Ok(response) => {
+                let _ = model_attempt.settle_response(&response);
+                if let Err(error) = crate::agent_resource_snapshot::checkpoint_agent_run_resources(
+                    state,
+                    run_context,
+                    cancellation,
+                ) {
+                    eprintln!("agent resource settlement checkpoint unavailable: {error}");
+                }
+                break response;
+            }
             Err(error) => {
+                let _ = model_attempt.settle_unknown();
+                if let Err(checkpoint_error) =
+                    crate::agent_resource_snapshot::checkpoint_agent_run_resources(
+                        state,
+                        run_context,
+                        cancellation,
+                    )
+                {
+                    eprintln!(
+                        "agent resource settlement checkpoint unavailable: {checkpoint_error}"
+                    );
+                }
                 if !cancellation.execution_epoch_lease_is_current(epoch_lease)
                     && !agent_run_should_stop(cancellation)
                 {

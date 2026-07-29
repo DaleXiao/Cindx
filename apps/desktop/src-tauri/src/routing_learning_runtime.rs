@@ -1,4 +1,10 @@
 use super::*;
+pub(crate) use crate::learning_evidence_runtime::learning_budget_fingerprint;
+#[cfg(test)]
+pub(crate) use crate::learning_evidence_runtime::LEARNING_BUDGET_KEYS;
+use crate::learning_evidence_runtime::{
+    learning_lineage_usage_from_metadata, routing_learning_evidence, workflow_learning_evidence,
+};
 
 pub(crate) fn load_routing_telemetry_read_model(
     store: &mut SqliteStore,
@@ -154,12 +160,25 @@ pub(crate) fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTele
             let outcome = routing_outcome_for_run(&stable_events, terminal)?;
             let (quality_score, verification_passed) =
                 routing_quality_signals(&stable_events, terminal);
-            let cost_proxy = stable_events
+            let learning_evidence = routing_learning_evidence(
+                &stable_events,
+                decision,
+                terminal,
+                stable_epoch.parse::<u64>().ok(),
+            );
+            let logical_cost_proxy = stable_events
                 .iter()
                 .filter(|event| event.kind == EventKind::ModelRequestFinished)
                 .filter_map(|event| event.metadata.get("total_tokens"))
                 .filter_map(|value| value.parse::<u64>().ok())
                 .sum();
+            let cost_proxy = learning_evidence
+                .is_learnable()
+                .then(|| learning_lineage_usage_from_metadata(&terminal.metadata))
+                .flatten()
+                .filter(|usage| usage.completeness == learning_evidence.usage_completeness)
+                .map(|usage| usage.total_tokens)
+                .unwrap_or(logical_cost_proxy);
             let tool_count = stable_events
                 .iter()
                 .filter(|event| event.kind == EventKind::ToolCallFinished)
@@ -186,6 +205,7 @@ pub(crate) fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTele
                 outcome,
                 quality_score,
                 verification_passed,
+                learning_evidence,
                 cost_proxy,
                 tool_count,
                 retrieval_count,
@@ -378,7 +398,7 @@ pub(crate) fn completion_learning_signal(
     runtime: &agent_runtime::AgentLoopState,
 ) -> (&'static str, bool) {
     if runtime.successful_mutations == 0 {
-        ("non_mutating", true)
+        ("non_mutating", false)
     } else if runtime.verified_after_last_mutation {
         ("verified_mutation", true)
     } else {
@@ -505,13 +525,6 @@ pub(crate) fn workflow_execution_telemetry_from_events(
                     "Collaboration workflow completed" | "Collaboration workflow failed"
                 )
             })?;
-            if terminal
-                .metadata
-                .get("anytime_prompt_learning_eligible")
-                .is_some_and(|eligible| eligible == "false")
-            {
-                return None;
-            }
             let task_class = parse_task_class_label(planned.metadata.get("task_class")?)?;
             let quality_score = terminal
                 .metadata
@@ -559,6 +572,7 @@ pub(crate) fn workflow_execution_telemetry_from_events(
                         tools
                     },
                 );
+            let learning_evidence = workflow_learning_evidence(&workflow_events, planned, terminal);
             Some(WorkflowExecutionTelemetry {
                 task_class,
                 routing_signature: planned
@@ -569,6 +583,7 @@ pub(crate) fn workflow_execution_telemetry_from_events(
                 plan,
                 succeeded: terminal.summary == "Collaboration workflow completed",
                 quality_score,
+                learning_evidence,
                 latency_ms: terminal.timestamp_ms.saturating_sub(planned.timestamp_ms),
                 total_tokens,
                 tool_calls,

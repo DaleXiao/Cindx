@@ -1,4 +1,5 @@
 use crate::control::RunStopReason;
+use crate::resource_ledger::RunResourceSnapshot;
 use crate::result_frontier::BestKnownResult;
 use crate::run_budget::{RunBudget, RunStageClass};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -119,6 +120,7 @@ pub struct RunControlSnapshot {
     pub(super) stage_usage: BTreeMap<RunStageClass, RunStageUsageSnapshot>,
     pub(super) best_known_result: Option<BestKnownResult>,
     pub(super) result_frontier: Vec<BestKnownResult>,
+    pub(super) resources: RunResourceSnapshot,
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +141,7 @@ pub struct RunProgressSnapshot {
     pub budget_extensions: usize,
     pub stage_usage: BTreeMap<RunStageClass, RunStageUsageSnapshot>,
     pub best_known_result: Option<BestKnownResult>,
+    pub resources: RunResourceSnapshot,
 }
 
 #[derive(Debug, Clone)]

@@ -1,4 +1,8 @@
 use super::*;
+use orchestrator::{
+    IndependentQualitySource, LearningAttribution, LearningDisposition, LearningEvidenceV1,
+    LearningUsageCompleteness,
+};
 
 pub(crate) fn initial_prompt_population(effort: &str) -> Vec<ConductorPromptGenome> {
     let seed = ConductorPromptGenome::seed_for_effort(effort);
@@ -72,15 +76,32 @@ pub(crate) fn prompt_evolution_observations_from_events(
             workflow_events.sort_by_key(|event| event.sequence);
             let profile_event = workflow_events
                 .iter()
+                .rev()
                 .find(|event| event.summary == "Conductor prompt profile selected")
                 .copied()
                 .or_else(|| {
                     workflow_events
                         .iter()
+                        .rev()
                         .find(|event| event.summary == "Collaboration workflow planned")
                         .copied()
                 })?;
-            let plan = workflow_events
+            let steer_epoch = profile_event
+                .metadata
+                .get("steer_epoch")
+                .and_then(|value| value.parse::<u64>().ok())?;
+            let stable_workflow_events = workflow_events
+                .iter()
+                .copied()
+                .filter(|event| {
+                    event
+                        .metadata
+                        .get("steer_epoch")
+                        .and_then(|value| value.parse::<u64>().ok())
+                        == Some(steer_epoch)
+                })
+                .collect::<Vec<_>>();
+            let plan = stable_workflow_events
                 .iter()
                 .find(|event| event.summary == "Collaboration workflow planned")
                 .and_then(|event| event.metadata.get("workflow_ir"))
@@ -105,12 +126,15 @@ pub(crate) fn prompt_evolution_observations_from_events(
                 .get("collaboration_profile")
                 .map(String::as_str)
                 == Some("bounded");
-            let workflow_terminal = workflow_events.iter().rev().find(|event| {
+            let workflow_terminal = stable_workflow_events.iter().rev().find(|event| {
                 matches!(
                     event.summary.as_str(),
                     "Collaboration workflow completed" | "Collaboration workflow failed"
-                )
-            });
+                ) && event.sequence > profile_event.sequence
+            })?;
+            if workflow_terminal.summary != "Collaboration workflow completed" {
+                return None;
+            }
             let run_events = profile_event
                 .metadata
                 .get("agent_run_id")
@@ -120,49 +144,64 @@ pub(crate) fn prompt_evolution_observations_from_events(
                     matches!(
                         event.summary.as_str(),
                         "Agent task completed" | "Agent task cancelled" | "Agent task failed"
-                    )
+                    ) && event.metadata.get("collaboration_id").map(String::as_str)
+                        == Some(workflow_id.as_str())
+                        && event.sequence > workflow_terminal.sequence
+                        && event
+                            .metadata
+                            .get("steer_epoch")
+                            .and_then(|value| value.parse::<u64>().ok())
+                            == Some(steer_epoch)
                 })
             } else {
-                workflow_terminal
+                Some(workflow_terminal)
             }?;
-            let agent_completed = matches!(
+            if !matches!(
                 terminal.summary.as_str(),
                 "Agent task completed" | "Collaboration workflow completed"
-            );
-            let native_effort_success = workflow_terminal
-                .and_then(|event| event.metadata.get("anytime_native_effort_success"))
-                .and_then(|value| value.parse::<bool>().ok())
-                .or_else(|| {
-                    workflow_terminal.map(|event| {
-                        event.summary == "Collaboration workflow completed"
-                            && !event
-                                .metadata
-                                .get("anytime_prompt_learning_eligible")
-                                .is_some_and(|eligible| eligible == "false")
-                    })
-                })
-                .unwrap_or(agent_completed);
-            let succeeded = agent_completed && native_effort_success;
-            let quality_event = workflow_events
+            ) {
+                return None;
+            }
+            let learning_evidence =
+                LearningEvidenceV1::from_metadata(&terminal.metadata).filter(|evidence| {
+                    evidence.is_learnable()
+                        && evidence.steer_epoch == Some(steer_epoch)
+                        && evidence.attribution == LearningAttribution::Workflow
+                        && evidence.independent_quality_source.is_some()
+                        && evidence.usage_completeness != LearningUsageCompleteness::Missing
+                })?;
+            let succeeded = match learning_evidence.disposition {
+                LearningDisposition::Positive => true,
+                LearningDisposition::Negative => false,
+                LearningDisposition::Censored => return None,
+            };
+            let measured_quality = learning_evidence
+                .quality_score()
+                .map(f64::from)
+                .unwrap_or(if succeeded { 1.0 } else { 0.0 });
+            let quality_event = stable_workflow_events
                 .iter()
                 .rev()
                 .find(|event| event.summary == "Collaboration quality gate evaluated");
-            let measured_quality = workflow_terminal
-                .and_then(|event| event.metadata.get("anytime_selected_quality_bps"))
-                .and_then(|score| score.parse::<f64>().ok())
-                .map(|score| (score / 10_000.0).clamp(0.0, 1.0))
-                .or_else(|| {
-                    quality_event
-                        .and_then(|event| event.metadata.get("quality_score"))
-                        .and_then(|score| score.parse::<f64>().ok())
-                });
             let measured_safety_violations = quality_event
                 .and_then(|event| event.metadata.get("safety_violations"))
                 .and_then(|count| count.parse::<u64>().ok())
                 .unwrap_or_default();
             let evaluation_events = run_events
-                .map(Vec::as_slice)
-                .unwrap_or(workflow_events.as_slice());
+                .map(|events| events.as_slice())
+                .unwrap_or(workflow_events.as_slice())
+                .iter()
+                .copied()
+                .filter(|event| {
+                    event.metadata.get("collaboration_id").map(String::as_str)
+                        == Some(workflow_id.as_str())
+                        && event
+                            .metadata
+                            .get("steer_epoch")
+                            .and_then(|value| value.parse::<u64>().ok())
+                            == Some(steer_epoch)
+                })
+                .collect::<Vec<_>>();
             let permission_denials = evaluation_events
                 .iter()
                 .filter(|event| {
@@ -172,37 +211,27 @@ pub(crate) fn prompt_evolution_observations_from_events(
                         })
                 })
                 .count() as u64;
-            let total_tokens = evaluation_events
-                .iter()
-                .filter(|event| event.kind == EventKind::ModelRequestFinished)
-                .filter_map(|event| event.metadata.get("total_tokens"))
-                .filter_map(|tokens| tokens.parse::<u64>().ok())
-                .sum();
-            let step_credits = workflow_events
+            if permission_denials > 0 {
+                return None;
+            }
+            let total_tokens = trusted_run_lineage_total_tokens(terminal, &learning_evidence)?;
+            let step_credits = stable_workflow_events
                 .iter()
                 .rev()
                 .find_map(|event| event.metadata.get("step_credits"))
                 .and_then(|encoded| serde_json::from_str::<Vec<PromptStepCredit>>(encoded).ok())
                 .unwrap_or_default();
-            let measured_uplift = workflow_terminal
-                .and_then(|event| event.metadata.get("anytime_team_uplift_bps"))
-                .and_then(|uplift| uplift.parse::<i16>().ok())
-                .map(|uplift| (f64::from(uplift) / 10_000.0).clamp(-1.0, 1.0));
-            let relative_reward = if succeeded {
-                measured_uplift
-            } else {
-                let failure_floor = match terminal.summary.as_str() {
-                    "Agent task cancelled"
-                        if terminal.metadata.get("reason").map(String::as_str)
-                            == Some("user_cancelled") =>
-                    {
-                        -0.25
-                    }
-                    "Agent task failed" | "Collaboration workflow failed" => -1.0,
-                    _ => -0.5,
-                };
-                Some(measured_uplift.unwrap_or(failure_floor).min(-0.05))
-            };
+            let relative_reward = (learning_evidence.independent_quality_source
+                == Some(IndependentQualitySource::AnytimeSelector))
+            .then(|| {
+                workflow_terminal
+                    .metadata
+                    .get("anytime_team_uplift_bps")
+                    .and_then(|uplift| uplift.parse::<i16>().ok())
+                    .filter(|uplift| (-10_000..=10_000).contains(uplift))
+                    .map(|uplift| f64::from(uplift) / 10_000.0)
+            })
+            .flatten();
             Some((
                 profile_event.sequence,
                 effort,
@@ -220,7 +249,7 @@ pub(crate) fn prompt_evolution_observations_from_events(
                     mode: PromptEvaluationMode::Live,
                     format_valid: plan.is_some() || bounded_profile,
                     succeeded,
-                    quality_score: measured_quality.unwrap_or(0.0),
+                    quality_score: measured_quality,
                     latency_ms: terminal
                         .timestamp_ms
                         .saturating_sub(profile_event.timestamp_ms),
@@ -245,6 +274,17 @@ pub(crate) fn prompt_evolution_observations_from_events(
     runs.into_iter()
         .map(|(_, effort, observation)| (effort, observation))
         .collect()
+}
+
+fn trusted_run_lineage_total_tokens(
+    terminal: &Event,
+    evidence: &LearningEvidenceV1,
+) -> Option<u64> {
+    let usage =
+        crate::learning_evidence_runtime::learning_lineage_usage_from_metadata(&terminal.metadata)?;
+    (usage.completeness == evidence.usage_completeness
+        && usage.completeness != LearningUsageCompleteness::Missing)
+        .then_some(usage.total_tokens)
 }
 
 pub(crate) fn prompt_genome_records_from_event(event: &Event) -> Vec<PromptGenomeRecord> {
@@ -723,3 +763,7 @@ pub(crate) fn prompt_evolution_profile_events(model: &PromptEvolutionReadModel) 
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "prompt_evolution_read_model_tests.rs"]
+mod tests;

@@ -40,6 +40,7 @@ pub(crate) fn run_background_prompt_mutation_stage(
             objective_epoch: Some(run_context_steer_epoch(run_context)),
             ..CollaborationCallLimits::default()
         },
+        None,
         |_| {},
     );
     record_collaboration_stage_finished(

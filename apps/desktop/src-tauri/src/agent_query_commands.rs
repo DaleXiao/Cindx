@@ -309,6 +309,33 @@ pub(crate) fn begin_agent_run_control_at_steer_epoch<'a>(
     )
 }
 
+pub(crate) fn begin_agent_run_control_from_persisted_resources<'a>(
+    state: &'a tauri::State<'_, AppState>,
+    session_id: &str,
+    effort: &str,
+    applied_epoch: u64,
+    resources: RunResourceSnapshot,
+    start_new_segment: bool,
+) -> Result<RegisteredRunControl<'a>, String> {
+    cancel_background_prompt_evaluations(state)?;
+    let control = if start_new_segment {
+        AgentRunControl::new_for_continuation_at_steer_epoch_with_resource_snapshot(
+            effort,
+            applied_epoch,
+            resources,
+        )
+    } else {
+        AgentRunControl::new_at_steer_epoch_with_resource_snapshot(effort, applied_epoch, resources)
+    };
+    RegisteredRunControl::register(
+        &state.agent_run_controls,
+        session_id,
+        Arc::new(control),
+        "agent run control",
+        "agent run is already active for this session",
+    )
+}
+
 pub(crate) fn cancel_background_prompt_evaluations(
     state: &tauri::State<'_, AppState>,
 ) -> Result<(), String> {
@@ -384,6 +411,22 @@ pub(crate) fn add_agent_run_budget_metadata(metadata: &mut Metadata, control: &A
     metadata.insert(
         "run_no_progress_ms".to_string(),
         budget.no_progress_timeout.as_millis().to_string(),
+    );
+    metadata.insert(
+        "run_total_token_budget".to_string(),
+        budget.max_total_tokens.to_string(),
+    );
+    metadata.insert(
+        "run_physical_model_attempt_budget".to_string(),
+        budget.max_physical_model_attempts.to_string(),
+    );
+    metadata.insert(
+        "run_terminal_token_reserve".to_string(),
+        budget.terminal_token_reserve.to_string(),
+    );
+    metadata.insert(
+        "run_terminal_physical_model_attempt_reserve".to_string(),
+        budget.terminal_physical_model_attempt_reserve.to_string(),
     );
 }
 
@@ -506,6 +549,7 @@ pub(crate) fn finish_agent_run_for_control_stop_with_task_state(
         )
     };
     let progress = control.progress();
+    let resource_snapshot = control.resource_usage();
     let mut metadata = metadata_with_context(
         [
             ("partial".to_string(), "true".to_string()),
@@ -561,6 +605,10 @@ pub(crate) fn finish_agent_run_for_control_stop_with_task_state(
             result.verified.to_string(),
         );
     }
+    crate::model_resource_runtime::add_model_resource_snapshot_metadata(
+        &mut metadata,
+        &resource_snapshot,
+    );
     metadata.insert("model".to_string(), "run-control".to_string());
     let mut store = state
         .store
@@ -607,6 +655,7 @@ pub(crate) fn finish_agent_run_for_control_stop_with_task_state(
         .into_iter()
         .collect(),
         task_state,
+        Some(&resource_snapshot),
     )?;
     append_event(
         &mut store,

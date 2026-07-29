@@ -5529,7 +5529,10 @@ fn completion_learning_signal_requires_post_mutation_verification() {
         "update the workspace",
         AgentRuntimeConfig::default(),
     );
-    assert_eq!(completion_learning_signal(&runtime), ("non_mutating", true));
+    assert_eq!(
+        completion_learning_signal(&runtime),
+        ("non_mutating", false)
+    );
 
     runtime.successful_mutations = 1;
     assert_eq!(
@@ -5718,7 +5721,9 @@ fn workflow_telemetry_restores_versioned_plan_and_quality() {
         "anytime_prompt_learning_eligible".to_string(),
         "false".to_string(),
     );
-    assert!(workflow_execution_telemetry_from_events(&events, &models).is_empty());
+    let censored = workflow_execution_telemetry_from_events(&events, &models);
+    assert_eq!(censored.len(), 1);
+    assert!(!censored[0].learning_evidence.is_learnable());
 }
 
 #[test]
@@ -6046,7 +6051,7 @@ fn prompt_evolution_uses_holdout_results_to_select_a_new_generation() {
         .filter(|observation| observation.profile_id == seed.id)
         .collect::<Vec<_>>();
 
-    assert_eq!(seed_observations.len(), 20);
+    assert_eq!(seed_observations.len(), 14);
     assert_eq!(
         seed_observations
             .iter()
@@ -6723,8 +6728,7 @@ fn replay_holdout_accepts_a_completed_bounded_collaboration() {
     assert_eq!(replay.objective, "Completed bounded task");
     assert_eq!(replay.task_class, "coding");
     assert_eq!(model.genomes.len(), 1);
-    assert_eq!(model.observations.len(), 1);
-    assert!(model.observations[0].1.format_valid);
+    assert!(model.observations.is_empty());
 }
 
 #[test]
@@ -8024,13 +8028,11 @@ fn prompt_evolution_waits_for_the_final_agent_outcome() {
         summary: "Agent task failed".to_string(),
         metadata: context,
     });
-    let observations = prompt_evolution_observations_from_events(&events);
-    assert_eq!(observations.len(), 1);
-    assert!(!observations[0].1.succeeded);
+    assert!(prompt_evolution_observations_from_events(&events).is_empty());
 }
 
 #[test]
-fn prompt_evolution_penalizes_a_profile_when_anchor_was_delivered() {
+fn prompt_evolution_censors_an_untrusted_anchor_delivery() {
     let seed = ConductorPromptGenome::seed_for_effort("pro");
     let context = [
         ("collaboration_id".to_string(), "collab-anchor".to_string()),
@@ -8095,14 +8097,11 @@ fn prompt_evolution_penalizes_a_profile_when_anchor_was_delivered() {
         },
     ];
 
-    let observations = prompt_evolution_observations_from_events(&events);
-    assert_eq!(observations.len(), 1);
-    assert!(!observations[0].1.succeeded);
-    assert_eq!(observations[0].1.relative_reward, Some(-0.08));
+    assert!(prompt_evolution_observations_from_events(&events).is_empty());
 }
 
 #[test]
-fn prompt_evolution_treats_user_cancellation_as_a_mild_negative_signal() {
+fn prompt_evolution_censors_user_cancellation() {
     let seed = ConductorPromptGenome::seed_for_effort("pro");
     let context = [
         (
@@ -8163,10 +8162,7 @@ fn prompt_evolution_treats_user_cancellation_as_a_mild_negative_signal() {
         },
     ];
 
-    let observations = prompt_evolution_observations_from_events(&events);
-    assert_eq!(observations.len(), 1);
-    assert!(!observations[0].1.succeeded);
-    assert_eq!(observations[0].1.relative_reward, Some(-0.25));
+    assert!(prompt_evolution_observations_from_events(&events).is_empty());
 }
 
 #[test]
@@ -8293,6 +8289,7 @@ fn coding_retrieval_mode_skips_graph_channels() {
         "semantic_literal_parallel",
         None,
         &cancellation,
+        None,
     )
     .expect("retrieval should run");
 
@@ -8335,6 +8332,7 @@ fn retrieval_keeps_file_evidence_when_semantic_channel_is_unavailable() {
         "semantic_literal_parallel",
         None,
         &cancellation,
+        None,
     )
     .expect("independent channels should degrade without failing the retrieval");
 
@@ -8454,6 +8452,7 @@ fn complex_retrieval_runs_parallel_seed_channels_before_graph_walk() {
         "four_way_parallel",
         None,
         &cancellation,
+        None,
     )
     .expect("retrieval should run");
 
@@ -9071,6 +9070,21 @@ fn startup_recovery_preserves_unfinished_agent_runs_as_continuations() {
         )
         .expect("run start should append");
     }
+    let recovery_control = AgentRunControl::new("fast");
+    let _attempt = recovery_control
+        .begin_physical_model_attempt("model-a", 12, 8, RunStageClass::Worker)
+        .expect("resource attempt should reserve");
+    persist_agent_resource_snapshot(
+        &mut store,
+        &[
+            ("session_id".to_string(), "session-b".to_string()),
+            ("agent_run_id".to_string(), "run-b".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+        &recovery_control.resource_usage(),
+    )
+    .expect("resource checkpoint should persist");
     append_event(
         &mut store,
         &phase16_task_id(),
@@ -9109,6 +9123,11 @@ fn startup_recovery_preserves_unfinished_agent_runs_as_continuations() {
     assert_eq!(envelope.state, "paused");
     assert_eq!(envelope.reason, "app_restarted");
     assert_eq!(envelope.source_run_id, "run-b");
+    let resources = envelope
+        .resource_snapshot
+        .expect("resource checkpoint should transfer to recovery envelope");
+    assert_eq!(resources.segment.physical_attempts, 1);
+    assert_eq!(resources.segment.reserved_tokens, 20);
     assert_eq!(
         reconcile_interrupted_agent_runs(&mut store).expect("recovery should be idempotent"),
         0
@@ -9379,9 +9398,16 @@ fn recovery_envelope_is_bound_to_the_latest_external_user_turn() {
             ),
         },
     ];
-    let envelope =
-        build_agent_recovery_envelope(&events, &context, "paused", "deadline_exceeded", 30)
-            .expect("envelope should build");
+    let envelope = build_agent_recovery_envelope_with_task_state(
+        &events,
+        &context,
+        "paused",
+        "deadline_exceeded",
+        30,
+        None,
+        None,
+    )
+    .expect("envelope should build");
     assert!(recovery_envelope_matches_active_turn(
         &envelope, &events, &context
     ));
@@ -9487,6 +9513,7 @@ fn recovery_envelope_round_trips_the_kernel_task_checkpoint() {
         "deadline_exceeded",
         30,
         Some(&checkpoint),
+        None,
     )
     .expect("envelope should build");
     let encoded = serde_json::to_string(&envelope).expect("envelope encodes");
@@ -9537,7 +9564,7 @@ fn recovery_claim_is_single_use_and_recovered_if_restart_interrupts_claim() {
     let events = store
         .list_by_task_and_metadata_or_unscoped(&phase16_task_id(), "session_id", "session-a")
         .expect("events should load");
-    let recovery_metadata = agent_recovery_metadata(
+    let recovery_metadata = agent_recovery_metadata_with_task_state(
         &events,
         &context,
         "paused",
@@ -9545,6 +9572,8 @@ fn recovery_claim_is_single_use_and_recovered_if_restart_interrupts_claim() {
         [("completion".to_string(), "partial".to_string())]
             .into_iter()
             .collect(),
+        None,
+        None,
     )
     .expect("recovery metadata should build");
     append_event(

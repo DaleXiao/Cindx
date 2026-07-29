@@ -2575,7 +2575,7 @@ assert(
   "Long agent runs must recover durably without replaying unknown tool outcomes"
 );
 assert(
-  /let task_state = match agent_recovery_identity[\s\S]*?load_matching_agent_runtime_snapshot[\s\S]*?agent_recovery_metadata_with_task_state[\s\S]*?append_event\([\s\S]*?delete_persisted_agent_runtime_snapshot/.test(
+  /let \(task_state, resource_snapshot\)\s*=\s*match agent_recovery_identity[\s\S]*?load_matching_agent_runtime_snapshot[\s\S]*?load_matching_agent_resource_snapshot[\s\S]*?agent_recovery_metadata_with_task_state[\s\S]*?append_event\([\s\S]*?delete_persisted_agent_runtime_snapshot/.test(
     agentRecoveryServiceSource
   ) &&
     agentRecoveryServiceSource.includes("already_recovered_wait") &&
@@ -2615,7 +2615,7 @@ assert(
     agentMemorySource.includes("record_memory_observed_uses") &&
     agentMemorySource.includes("observed_use_count") &&
     agentMemorySource.includes("Memory does not override the current user request") &&
-    rustLib.includes('AGENT_MEMORY_READ_MODEL_NAMESPACE: &str = "agent-memory-v1"') &&
+    rustLib.includes('AGENT_MEMORY_READ_MODEL_NAMESPACE: &str = "agent-memory-v2"') &&
     rustLib.includes("load_project_memory_ledger") &&
     rustLib.includes("recall_project_memory_for_prompt") &&
     rustLib.includes("schedule_project_memory_vector_refresh") &&

@@ -1,4 +1,5 @@
 use crate::desktop_prelude::*;
+pub(crate) use crate::knowledge_embedding_runtime::CloudRagEmbedder;
 use crate::{
     agent_query_commands::agent_run_should_stop,
     app_state::AppState,
@@ -43,6 +44,9 @@ pub(crate) fn prepare_agent_knowledge_context(
 ) -> Result<Option<Message>, String> {
     let query = retrieval_plan.query.as_str();
     let retrieval_mode = retrieval_plan.mode_label();
+    let resource_checkpoint = |control: &AgentRunControl| {
+        crate::agent_resource_snapshot::checkpoint_agent_run_resources(state, run_context, control)
+    };
     let index_started_at = Instant::now();
     let (mut adapter, index_cache_hit) = cached_rag_adapter_for(state, workspace_root)?;
     let auto_indexed = ensure_workspace_knowledge_index(
@@ -52,6 +56,7 @@ pub(crate) fn prepare_agent_knowledge_context(
         config,
         cancellation,
         expected_epoch,
+        Some(&resource_checkpoint),
     )?;
     if workspace_knowledge_cache_needs_refresh(index_cache_hit, auto_indexed.is_some()) {
         cache_rag_adapter(state, workspace_root, &adapter)?;
@@ -79,6 +84,7 @@ pub(crate) fn prepare_agent_knowledge_context(
         graph_store.as_ref(),
         cancellation,
         expected_epoch,
+        Some(&resource_checkpoint),
     )?;
     retrieval.trace.index_cache_hit = index_cache_hit;
     retrieval.trace.index_duration_ms = index_duration_ms;
@@ -207,6 +213,7 @@ pub(crate) fn ensure_workspace_knowledge_index(
     config: &ProviderConfig,
     cancellation: &Arc<AgentRunControl>,
     expected_epoch: u64,
+    resource_checkpoint: Option<&(dyn Fn(&AgentRunControl) -> Result<(), String> + Sync)>,
 ) -> Result<Option<AutomaticKnowledgeIndexResult>, String> {
     if knowledge_preparation_should_interrupt(cancellation, expected_epoch) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
@@ -258,6 +265,7 @@ pub(crate) fn ensure_workspace_knowledge_index(
                 config: config.clone(),
                 cancellation: Some(cancellation.clone()),
                 expected_steer_epoch: Some(expected_epoch),
+                resource_checkpoint,
             };
             index_workspace_with_cloud_fallback_cancellable(
                 workspace_root,
@@ -356,6 +364,7 @@ pub(crate) fn run_parallel_retrieval(
     retrieval_mode: &str,
     cached_graph_store: Option<&FileGraphStore>,
     cancellation: &Arc<AgentRunControl>,
+    resource_checkpoint: Option<&(dyn Fn(&AgentRunControl) -> Result<(), String> + Sync)>,
 ) -> Result<ParallelRetrievalResult, String> {
     let expected_epoch = cancellation.steer_epoch();
     let channels = match retrieval_mode {
@@ -389,6 +398,7 @@ pub(crate) fn run_parallel_retrieval(
         cached_graph_store,
         cancellation,
         expected_epoch,
+        resource_checkpoint,
     )
 }
 
@@ -402,6 +412,7 @@ pub(crate) fn run_planned_retrieval(
     cached_graph_store: Option<&FileGraphStore>,
     cancellation: &Arc<AgentRunControl>,
     expected_epoch: u64,
+    resource_checkpoint: Option<&(dyn Fn(&AgentRunControl) -> Result<(), String> + Sync)>,
 ) -> Result<ParallelRetrievalResult, String> {
     if knowledge_preparation_should_interrupt(cancellation, expected_epoch) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
@@ -440,6 +451,7 @@ pub(crate) fn run_planned_retrieval(
                             query,
                             cancellation,
                             expected_epoch,
+                            resource_checkpoint,
                         )?;
                         search_lancedb_index(
                             &snapshot_paths.lancedb_database,
@@ -633,6 +645,7 @@ pub(crate) fn query_embedding_for_chunks(
     query: &str,
     cancellation: &Arc<AgentRunControl>,
     expected_epoch: u64,
+    resource_checkpoint: Option<&(dyn Fn(&AgentRunControl) -> Result<(), String> + Sync)>,
 ) -> Result<Vec<f32>, String> {
     let Some(profile) = chunks.first() else {
         return Ok(local_query_embedding(query));
@@ -656,6 +669,7 @@ pub(crate) fn query_embedding_for_chunks(
         config: config.clone(),
         cancellation: Some(cancellation.clone()),
         expected_steer_epoch: Some(expected_epoch),
+        resource_checkpoint,
     };
     let mut batch = embedder
         .embed_texts(&[query.to_string()])
@@ -816,96 +830,6 @@ pub(crate) fn append_retrieval_event_for_task(
         format!("RAG {action} completed"),
         metadata,
     )
-}
-
-pub(crate) struct CloudRagEmbedder {
-    pub(crate) config: ProviderConfig,
-    pub(crate) cancellation: Option<Arc<AgentRunControl>>,
-    pub(crate) expected_steer_epoch: Option<u64>,
-}
-
-impl RagEmbedder for CloudRagEmbedder {
-    fn embed_texts(&mut self, texts: &[String]) -> Result<EmbeddingBatch, agent_rag::RagError> {
-        if self.cancellation.as_ref().is_some_and(|control| {
-            self.expected_steer_epoch
-                .is_some_and(|expected| !control.preparation_epoch_is_current(expected))
-        }) {
-            return Err(agent_rag::RagError::new(MODEL_REQUEST_CANCELLED));
-        }
-        if let Some(control) = self.cancellation.as_ref() {
-            let model_call = match self.expected_steer_epoch {
-                Some(expected_epoch) => control.begin_model_call_at(expected_epoch, "embedding"),
-                None => control.begin_model_call("embedding").map(Some),
-            };
-            match model_call {
-                Ok(Some(_)) => {}
-                Ok(None) => return Err(agent_rag::RagError::new(MODEL_REQUEST_CANCELLED)),
-                Err(reason) => {
-                    return Err(agent_rag::RagError::new(format!(
-                        "Run stopped before embedding call: {}",
-                        reason.code()
-                    )))
-                }
-            }
-        }
-        let model = self.config.model_for_role(&ModelRole::Embedder);
-        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
-            base_url: self.config.base_url.clone(),
-            api_key: self.config.api_key.clone(),
-            model: self.config.model_for_role(&ModelRole::Executor),
-            embedding_model: model.clone(),
-            timeout_seconds: self
-                .cancellation
-                .as_ref()
-                .map(|control| control.model_call_timeout_seconds())
-                .unwrap_or(180),
-        });
-        let response = provider.embed_cancellable(
-            EmbeddingRequest {
-                input: texts.to_vec(),
-                dimensions: None,
-                metadata: Metadata::new(),
-            },
-            || {
-                self.cancellation.as_ref().is_some_and(|control| {
-                    agent_run_should_stop(control)
-                        || self
-                            .expected_steer_epoch
-                            .is_some_and(|expected| !control.preparation_epoch_is_current(expected))
-                })
-            },
-        );
-        if let Some(control) = self.cancellation.as_ref() {
-            if let Some(expected_epoch) = self.expected_steer_epoch {
-                control.finish_model_call_at(expected_epoch);
-            } else {
-                control.finish_model_call();
-            }
-        }
-        let response = response.map_err(|error| agent_rag::RagError::new(error.to_string()))?;
-        if let Some(control) = self.cancellation.as_ref() {
-            let detail = format!("Embedded {} items", texts.len());
-            if let Some(expected_epoch) = self.expected_steer_epoch {
-                control.mark_progress_at(expected_epoch, "embedding", &detail);
-            } else {
-                control.mark_progress("embedding", &detail);
-            }
-        }
-
-        Ok(EmbeddingBatch {
-            provider: response
-                .metadata
-                .get("provider")
-                .cloned()
-                .unwrap_or_else(|| "openai-compatible".to_string()),
-            model: response.model,
-            vectors: response
-                .vectors
-                .into_iter()
-                .map(|vector| vector.embedding)
-                .collect(),
-        })
-    }
 }
 
 pub(crate) fn browser_observation_from_event(event: &Event) -> Option<BrowserObservationView> {

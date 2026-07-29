@@ -51,22 +51,45 @@ pub(crate) fn resolve_agent_permission_blocking(
     session_id: String,
 ) -> Result<AgentState, String> {
     let snapshot = suspended_agent_run_control_snapshot(&state, &session_id)?;
-    let effort = if snapshot.is_some() {
-        AgentEffort::Auto
+    let recovery_context = project_session_metadata_for_session(&state, Some(&session_id))?;
+    let (effort, durable_recovery, applied_steer_epoch) = if snapshot.is_some() {
+        (AgentEffort::Auto, None, 0)
     } else {
         let store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        store
+        let effort = store
             .get_permission_request(&PermissionRequestId(request_id.clone()))
             .map_err(|error| error.to_string())?
             .and_then(|request| request.metadata.get("agent_effort").cloned())
             .map(|effort| AgentEffort::parse(&effort))
-            .unwrap_or(AgentEffort::Auto)
+            .unwrap_or(AgentEffort::Auto);
+        let recovery = peek_agent_recovery_envelope(&store, &recovery_context, &["blocked"])?;
+        let events = agent_events_for_session(&store, &phase16_task_id(), Some(&session_id))
+            .map_err(|error| error.to_string())?;
+        let active_events = active_agent_events_for_session(&events, Some(&session_id));
+        (
+            effort,
+            recovery,
+            latest_applied_agent_steer_epoch(&active_events),
+        )
     };
-    let run_control_lease =
-        begin_agent_run_control_for_effort(&state, &session_id, effort.label(), snapshot)?;
+    let run_control_lease = if let Some(snapshot) = snapshot {
+        begin_agent_run_control_for_effort(&state, &session_id, effort.label(), Some(snapshot))?
+    } else if let Some(resources) = durable_recovery.and_then(|recovery| recovery.resource_snapshot)
+    {
+        begin_agent_run_control_from_persisted_resources(
+            &state,
+            &session_id,
+            effort.label(),
+            applied_steer_epoch,
+            resources,
+            false,
+        )?
+    } else {
+        begin_agent_run_control_for_effort(&state, &session_id, effort.label(), None)?
+    };
     let cancellation = run_control_lease.control();
     resolve_agent_permission_blocking_inner(
         app,

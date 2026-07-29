@@ -5,6 +5,7 @@ use crate::{
         agent_recovery_prompt_from_active_events, is_agent_run_start_event,
         primary_agent_user_turn_event,
     },
+    agent_resource_snapshot::load_matching_agent_resource_snapshot,
     agent_runtime_snapshot::{
         delete_persisted_agent_runtime_snapshot, load_matching_agent_runtime_snapshot,
     },
@@ -111,17 +112,6 @@ pub(super) fn agent_recovery_identity(
     ))
 }
 
-#[cfg(test)]
-pub(super) fn build_agent_recovery_envelope(
-    events: &[Event],
-    run_context: &Metadata,
-    state: &str,
-    reason: &str,
-    now_ms: u64,
-) -> Option<AgentRecoveryEnvelope> {
-    build_agent_recovery_envelope_with_task_state(events, run_context, state, reason, now_ms, None)
-}
-
 pub(super) fn build_agent_recovery_envelope_with_task_state(
     events: &[Event],
     run_context: &Metadata,
@@ -129,6 +119,7 @@ pub(super) fn build_agent_recovery_envelope_with_task_state(
     reason: &str,
     now_ms: u64,
     task_state: Option<&AgentTaskStateSnapshot>,
+    resource_snapshot: Option<&RunResourceSnapshot>,
 ) -> Option<AgentRecoveryEnvelope> {
     let (resume_key, source_run_id, user_turn_sequence, prompt_fingerprint, _) =
         agent_recovery_identity(events, run_context)?;
@@ -198,23 +189,17 @@ pub(super) fn build_agent_recovery_envelope_with_task_state(
                 .as_ref()
                 .and_then(|envelope| envelope.task_state.clone())
         }),
+        resource_snapshot: resource_snapshot.cloned().or_else(|| {
+            prior
+                .as_ref()
+                .and_then(|envelope| envelope.resource_snapshot.clone())
+        }),
         created_at_ms: prior
             .as_ref()
             .map(|envelope| envelope.created_at_ms)
             .unwrap_or(now_ms),
         updated_at_ms: now_ms,
     })
-}
-
-#[cfg(test)]
-pub(super) fn agent_recovery_metadata(
-    events: &[Event],
-    run_context: &Metadata,
-    state: &str,
-    reason: &str,
-    metadata: Metadata,
-) -> Result<Metadata, String> {
-    agent_recovery_metadata_with_task_state(events, run_context, state, reason, metadata, None)
 }
 
 pub(super) fn agent_recovery_metadata_with_task_state(
@@ -224,6 +209,7 @@ pub(super) fn agent_recovery_metadata_with_task_state(
     reason: &str,
     mut metadata: Metadata,
     task_state: Option<&AgentTaskStateSnapshot>,
+    resource_snapshot: Option<&RunResourceSnapshot>,
 ) -> Result<Metadata, String> {
     let envelope = build_agent_recovery_envelope_with_task_state(
         events,
@@ -232,6 +218,7 @@ pub(super) fn agent_recovery_metadata_with_task_state(
         reason,
         current_time_millis(),
         task_state,
+        resource_snapshot,
     )
     .ok_or_else(|| "agent recovery checkpoint is missing a durable session prompt".to_string())?;
     metadata.insert(
@@ -299,11 +286,10 @@ pub(super) fn recovery_envelope_matches_active_turn(
         && run_context.get("project_id") == envelope.project_id.as_ref()
 }
 
-pub(super) fn claim_agent_recovery_envelope(
-    store: &mut SqliteStore,
+pub(super) fn peek_agent_recovery_envelope(
+    store: &SqliteStore,
     run_context: &Metadata,
     allowed_states: &[&str],
-    reason: &str,
 ) -> Result<Option<AgentRecoveryEnvelope>, String> {
     let session_id = run_context
         .get("session_id")
@@ -311,7 +297,7 @@ pub(super) fn claim_agent_recovery_envelope(
     let events = agent_events_for_session(store, &phase16_task_id(), Some(session_id))
         .map_err(|error| error.to_string())?;
     let active_events = active_agent_events_for_session(&events, Some(session_id));
-    let Some(mut envelope) = latest_agent_recovery_envelope(&active_events) else {
+    let Some(envelope) = latest_agent_recovery_envelope(&active_events) else {
         return Ok(None);
     };
     let latest_status = active_events
@@ -339,6 +325,26 @@ pub(super) fn claim_agent_recovery_envelope(
     if !recovery_envelope_matches_active_turn(&envelope, &active_events, run_context) {
         return Err("agent recovery checkpoint is stale for the latest user turn".to_string());
     }
+    if envelope
+        .resource_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| !snapshot.is_within_persistence_bounds())
+    {
+        return Err("agent recovery resource checkpoint is invalid".to_string());
+    }
+    Ok(Some(envelope))
+}
+
+pub(super) fn claim_agent_recovery_envelope(
+    store: &mut SqliteStore,
+    run_context: &Metadata,
+    allowed_states: &[&str],
+    reason: &str,
+) -> Result<Option<AgentRecoveryEnvelope>, String> {
+    let Some(mut envelope) = peek_agent_recovery_envelope(store, run_context, allowed_states)?
+    else {
+        return Ok(None);
+    };
     envelope.state = "resuming".to_string();
     envelope.reason = reason.to_string();
     envelope.attempts = envelope.attempts.saturating_add(1);
@@ -460,21 +466,31 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
                 "app_restarted_waiting_for_permission",
             )
         };
-        let task_state = match agent_recovery_identity(&active_events, &run_context) {
-            Some((_, source_run_id, _, prompt_fingerprint, _)) => {
-                load_matching_agent_runtime_snapshot(
-                    store,
-                    &run_context,
-                    &source_run_id,
-                    &prompt_fingerprint,
-                    active_events
+        let (task_state, resource_snapshot) =
+            match agent_recovery_identity(&active_events, &run_context) {
+                Some((_, source_run_id, _, prompt_fingerprint, _)) => {
+                    let latest_revision = active_events
                         .last()
                         .map(|event| event.sequence)
-                        .unwrap_or_default(),
-                )?
-            }
-            None => None,
-        };
+                        .unwrap_or_default();
+                    (
+                        load_matching_agent_runtime_snapshot(
+                            store,
+                            &run_context,
+                            &source_run_id,
+                            &prompt_fingerprint,
+                            latest_revision,
+                        )?,
+                        load_matching_agent_resource_snapshot(
+                            store,
+                            &run_context,
+                            &source_run_id,
+                            latest_revision,
+                        )?,
+                    )
+                }
+                None => (None, None),
+            };
         let metadata = agent_recovery_metadata_with_task_state(
             &active_events,
             &run_context,
@@ -488,6 +504,7 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
             .into_iter()
             .collect(),
             task_state.as_ref(),
+            resource_snapshot.as_ref(),
         )?;
         append_event(
             store,

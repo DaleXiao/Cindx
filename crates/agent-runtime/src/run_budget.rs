@@ -1,5 +1,8 @@
 use std::time::Duration;
 
+pub const CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT: u64 = 1_048_576;
+pub const PHYSICAL_MODEL_ATTEMPTS_PER_LOGICAL_CALL: usize = 4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RunStageClass {
     Conductor,
@@ -76,6 +79,10 @@ pub struct RunBudget {
     pub max_repair_attempts: usize,
     pub terminal_model_call_reserve: usize,
     pub terminal_time_reserve: Duration,
+    pub max_total_tokens: u64,
+    pub max_physical_model_attempts: usize,
+    pub terminal_token_reserve: u64,
+    pub terminal_physical_model_attempt_reserve: usize,
 }
 
 impl RunBudget {
@@ -99,6 +106,12 @@ impl RunBudget {
                 max_repair_attempts: 2,
                 terminal_model_call_reserve: 2,
                 terminal_time_reserve: Duration::from_secs(3 * 60),
+                max_total_tokens: default_total_token_budget(12),
+                max_physical_model_attempts: default_physical_attempt_budget(12),
+                terminal_token_reserve: default_terminal_token_reserve(2),
+                terminal_physical_model_attempt_reserve: default_terminal_physical_attempt_reserve(
+                    2,
+                ),
             },
             "pro" => Self {
                 max_duration: Duration::from_secs(4 * 60 * 60),
@@ -118,6 +131,12 @@ impl RunBudget {
                 max_repair_attempts: 8,
                 terminal_model_call_reserve: 8,
                 terminal_time_reserve: Duration::from_secs(15 * 60),
+                max_total_tokens: default_total_token_budget(384),
+                max_physical_model_attempts: default_physical_attempt_budget(384),
+                terminal_token_reserve: default_terminal_token_reserve(8),
+                terminal_physical_model_attempt_reserve: default_terminal_physical_attempt_reserve(
+                    8,
+                ),
             },
             _ => Self {
                 max_duration: Duration::from_secs(45 * 60),
@@ -137,6 +156,12 @@ impl RunBudget {
                 max_repair_attempts: 4,
                 terminal_model_call_reserve: 4,
                 terminal_time_reserve: Duration::from_secs(5 * 60),
+                max_total_tokens: default_total_token_budget(72),
+                max_physical_model_attempts: default_physical_attempt_budget(72),
+                terminal_token_reserve: default_terminal_token_reserve(4),
+                terminal_physical_model_attempt_reserve: default_terminal_physical_attempt_reserve(
+                    4,
+                ),
             },
         }
     }
@@ -172,6 +197,22 @@ impl RunBudget {
         }
     }
 
+    pub fn protected_token_reserve(self, class: RunStageClass) -> u64 {
+        if class.is_finalizer() {
+            0
+        } else {
+            self.terminal_token_reserve
+        }
+    }
+
+    pub fn protected_physical_model_attempt_reserve(self, class: RunStageClass) -> usize {
+        if class.is_finalizer() {
+            0
+        } else {
+            self.terminal_physical_model_attempt_reserve
+        }
+    }
+
     pub fn stage_budget(self, class: RunStageClass) -> RunStageBudget {
         let (max_model_calls, duration_divisor) = match class {
             RunStageClass::Conductor => (self.max_repair_attempts.saturating_add(1), 5),
@@ -193,6 +234,28 @@ impl RunBudget {
             terminal: class.is_terminal(),
         }
     }
+}
+
+fn default_physical_attempt_budget(max_model_calls: usize) -> usize {
+    max_model_calls.saturating_mul(PHYSICAL_MODEL_ATTEMPTS_PER_LOGICAL_CALL)
+}
+
+fn default_total_token_budget(max_model_calls: usize) -> u64 {
+    u64::try_from(default_physical_attempt_budget(max_model_calls))
+        .unwrap_or(u64::MAX)
+        .saturating_mul(CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT)
+}
+
+fn default_terminal_physical_attempt_reserve(terminal_model_calls: usize) -> usize {
+    terminal_model_calls.saturating_mul(PHYSICAL_MODEL_ATTEMPTS_PER_LOGICAL_CALL)
+}
+
+fn default_terminal_token_reserve(terminal_model_calls: usize) -> u64 {
+    u64::try_from(default_terminal_physical_attempt_reserve(
+        terminal_model_calls,
+    ))
+    .unwrap_or(u64::MAX)
+    .saturating_mul(CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT)
 }
 
 #[cfg(test)]

@@ -192,6 +192,69 @@ pub(crate) fn complete_collaboration_worker_with_tools(
             "max_output_tokens".to_string(),
             max_output_tokens.to_string(),
         );
+        let model_attempt = if let Some(control) = cancellation.as_ref() {
+            match crate::model_resource_runtime::ControlledModelAttempt::reserve_at(
+                control,
+                objective_epoch,
+                &model,
+                &request,
+                stage_class,
+            ) {
+                Ok(Some(attempt)) => Some(attempt),
+                Ok(None) => {
+                    control.finish_model_call_at(objective_epoch);
+                    return CollaborationCompletion::failed_worker(
+                        AgentFailure::cancelled(
+                            "user_steer",
+                            "worker provider dispatch superseded by user steering",
+                        ),
+                        None,
+                        current_time_millis().saturating_sub(started_at_ms),
+                        worker.completion_usage("isolated_evidence_v2"),
+                        evidence,
+                    );
+                }
+                Err(reason) => {
+                    control.finish_model_call_at(objective_epoch);
+                    return CollaborationCompletion::failed_worker(
+                        AgentFailure::from_stop_reason(
+                            reason,
+                            format!("worker stopped before provider dispatch: {}", reason.code()),
+                        ),
+                        None,
+                        current_time_millis().saturating_sub(started_at_ms),
+                        worker.completion_usage("isolated_evidence_v2"),
+                        evidence,
+                    );
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(control) = cancellation.as_ref() {
+            if let Err(error) = crate::agent_resource_snapshot::checkpoint_agent_run_resources(
+                &state,
+                &worker_context,
+                control,
+            ) {
+                if let Some(attempt) = model_attempt {
+                    let _ = attempt.settle_unknown();
+                }
+                control.finish_model_call_at(objective_epoch);
+                return CollaborationCompletion::failed_worker(
+                    AgentFailure::internal(
+                        "resource_checkpoint_failed",
+                        format!(
+                            "worker resource checkpoint failed before provider dispatch: {error}"
+                        ),
+                    ),
+                    None,
+                    current_time_millis().saturating_sub(started_at_ms),
+                    worker.completion_usage("isolated_evidence_v2"),
+                    evidence,
+                );
+            }
+        }
         let mut partial_output = String::new();
         let mut stream_progress = ModelStreamProgress::new();
         let response = provider.complete_streaming_cancellable(
@@ -220,7 +283,24 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                     .is_some_and(|cancelled| cancelled.load(Ordering::SeqCst))
             },
         );
+        if let Some(attempt) = model_attempt {
+            match &response {
+                Ok(response) => {
+                    let _ = attempt.settle_response(response);
+                }
+                Err(_) => {
+                    let _ = attempt.settle_unknown();
+                }
+            }
+        }
         if let Some(control) = cancellation.as_ref() {
+            if let Err(error) = crate::agent_resource_snapshot::checkpoint_agent_run_resources(
+                &state,
+                &worker_context,
+                control,
+            ) {
+                eprintln!("worker resource settlement checkpoint unavailable: {error}");
+            }
             control.finish_model_call_at(objective_epoch);
         }
         let response = match response {

@@ -43,8 +43,8 @@ pub(crate) use agent_runtime::{
     start_agent_loop, start_agent_loop_with_history, AgentAdvance, AgentFailure, AgentFailureClass,
     AgentKernel, AgentRecoveryAction, AgentRunControl, AgentTaskStateSnapshot, AgentToolRequest,
     AgentTurnPreparationError, ContextGovernorReport, IsolatedWorkerRuntime, ResultQuality,
-    RunBudget, RunContinuationDirective, RunControlSnapshot, RunStageClass, RunStopReason,
-    WorkerAdvance, WorkerToolAdmission, WorkspaceVerificationPolicy,
+    RunBudget, RunContinuationDirective, RunControlSnapshot, RunResourceSnapshot, RunStageClass,
+    RunStopReason, WorkerAdvance, WorkerToolAdmission, WorkspaceVerificationPolicy,
     DEFAULT_COLLABORATION_WORKER_TURNS, MAX_COLLABORATION_WORKER_TOOL_CALLS,
     MAX_IDENTICAL_TOOL_FAILURES,
 };
