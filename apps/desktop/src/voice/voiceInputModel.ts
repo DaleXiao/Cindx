@@ -1,3 +1,5 @@
+import type { ProviderVoiceTransport } from "../providerProfiles";
+
 const MAX_VOICE_EVENT_CHARS = 256 * 1024;
 export const MAX_VOICE_TRANSCRIPT_CHARS = 16_000;
 
@@ -25,6 +27,24 @@ export function voiceStopAction(status: VoiceInputStatus): "discard" | "finish" 
   if (status === "connecting") return "discard";
   if (status === "recording") return "finish";
   return "none";
+}
+
+export function voiceWatchdogAction(
+  status: VoiceInputStatus,
+  watchdog: "recording_limit" | "transcription"
+): "finish" | "fail" | "ignore" {
+  if (watchdog === "recording_limit" && status === "recording") return "finish";
+  if (watchdog === "transcription" && status === "finishing") return "fail";
+  return "ignore";
+}
+export function voiceInputButtonDisabled(
+  configured: boolean,
+  transport: ProviderVoiceTransport,
+  sessionId: string | null,
+  status: VoiceInputStatus
+): boolean {
+  const active = status !== "idle";
+  return status === "finishing" || (!active && (!configured || transport === "none" || !sessionId));
 }
 
 export function reduceVoiceTurnEvent(

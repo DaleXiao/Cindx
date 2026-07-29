@@ -89,6 +89,13 @@ const settingsPageFileSource = read("apps/desktop/src/components/SettingsPage.ts
 const settingsModelsPanelSource = read(
   "apps/desktop/src/components/SettingsModelsPanel.tsx"
 );
+const providerModalityFieldsSource = read(
+  "apps/desktop/src/components/ProviderModalityFields.tsx"
+);
+const settingsModelsImplementationSource = [
+  settingsModelsPanelSource,
+  providerModalityFieldsSource,
+].join("\n");
 const settingsPermissionsPanelSource = read(
   "apps/desktop/src/components/SettingsPermissionsPanel.tsx"
 );
@@ -100,7 +107,7 @@ const promptEvolutionPanelSource = read(
 );
 const settingsPageSource = [
   settingsPageFileSource,
-  settingsModelsPanelSource,
+  settingsModelsImplementationSource,
   settingsPermissionsPanelSource,
   settingsToolsPanelSource,
   promptEvolutionPanelSource,
@@ -186,6 +193,25 @@ const voiceInputButtonSource = read(
   "apps/desktop/src/components/VoiceInputButton.tsx"
 );
 const voiceInputHookSource = read("apps/desktop/src/voice/useVoiceInput.ts");
+const openAiVoiceInputHookSource = read(
+  "apps/desktop/src/voice/useOpenAiVoiceInput.ts"
+);
+const alibabaVoiceInputHookSource = read(
+  "apps/desktop/src/voice/useAlibabaVoiceInput.ts"
+);
+const voicePcmRuntimeSource = read(
+  "apps/desktop/src/voice/voicePcmRuntime.ts"
+);
+const voicePcmSupportSource = read(
+  "apps/desktop/src/voice/voicePcmSupport.ts"
+);
+const voiceInputImplementationSource = [
+  voiceInputHookSource,
+  openAiVoiceInputHookSource,
+  alibabaVoiceInputHookSource,
+  voicePcmRuntimeSource,
+  voicePcmSupportSource,
+].join("\n");
 const voiceInputModelSource = read("apps/desktop/src/voice/voiceInputModel.ts");
 const voiceWebRtcRuntimeSource = read(
   "apps/desktop/src/voice/voiceWebRtcRuntime.ts"
@@ -272,6 +298,9 @@ const rustLib = readRustSourceTree(desktopRustSourceDirectory);
 const appBootstrapSource = read(
   "apps/desktop/src-tauri/src/app_bootstrap.rs"
 );
+const voiceCommandsSource = read(
+  "apps/desktop/src-tauri/src/voice_commands.rs"
+);
 const desktopEventSinkSource = read(
   "apps/desktop/src-tauri/src/desktop_event_sink.rs"
 );
@@ -357,6 +386,12 @@ const agentStorageSource = read("crates/agent-storage/src/lib.rs");
 const agentSkillsSource = read("crates/agent-skills/src/lib.rs");
 const builtinSkillCreator = read("crates/agent-skills/builtins/skill-creator/SKILL.md");
 const modelProviderSource = readRustCrateSource("model-provider");
+const dashScopeRealtimeProviderSource = read(
+  "crates/model-provider/src/dashscope_realtime_provider.rs"
+);
+const dashScopeRealtimeGuardSource = read(
+  "crates/model-provider/src/dashscope_realtime_guard.rs"
+);
 const modelProviderCargo = read("crates/model-provider/Cargo.toml");
 const ragSource = read("crates/agent-rag/src/lib.rs");
 const graphSource = read("crates/agent-graph/src/lib.rs");
@@ -460,6 +495,10 @@ const extractedDesktopBoundaryBudgets = [
   ["useComposerAttachments.ts", composerAttachmentsSource, 140],
   ["useComposerDrafts.ts", composerDraftsSource, 90],
   ["useVoiceInput.ts", voiceInputHookSource, 280],
+  ["useOpenAiVoiceInput.ts", openAiVoiceInputHookSource, 290],
+  ["useAlibabaVoiceInput.ts", alibabaVoiceInputHookSource, 190],
+  ["voicePcmRuntime.ts", voicePcmRuntimeSource, 200],
+  ["voicePcmSupport.ts", voicePcmSupportSource, 100],
   ["voiceInputModel.ts", voiceInputModelSource, 120],
   ["voiceWebRtcRuntime.ts", voiceWebRtcRuntimeSource, 100],
   ["useLatestAsyncSelection.ts", latestAsyncSelectionSource, 80],
@@ -468,6 +507,7 @@ const extractedDesktopBoundaryBudgets = [
   ["AgentMarkdown.tsx", agentMarkdownSource, 340],
   ["PromptEvolutionPanel.tsx", promptEvolutionPanelSource, 280],
   ["SettingsModelsPanel.tsx", settingsModelsPanelSource, 320],
+  ["ProviderModalityFields.tsx", providerModalityFieldsSource, 140],
   ["VoiceInputButton.tsx", voiceInputButtonSource, 80],
   ["SettingsPermissionsPanel.tsx", settingsPermissionsPanelSource, 220],
   ["SettingsToolsPanel.tsx", settingsToolsPanelSource, 420],
@@ -603,6 +643,8 @@ const oversizedAgentCoreModules = ["agent-runtime", "agent-memory", "orchestrato
   )
   .filter(({ lines }) => lines > 1_450);
 const modelProviderModuleBudgets = new Map([
+  ["dashscope_realtime_guard.rs", 80],
+  ["dashscope_realtime_provider.rs", 300],
   ["error.rs", 160],
   ["image_provider.rs", 430],
   ["json_wire.rs", 320],
@@ -1686,28 +1728,28 @@ const voiceButtonPosition = composerSource.indexOf("<VoiceInputButton");
 assert(
   voiceButtonPosition > composerSource.indexOf('className="composer-effort-control"') &&
     voiceButtonPosition < composerSource.indexOf('className="send-button composer-primary-button"') &&
-    settingsModelsPanelSource.includes('label="Full-duplex voice"') &&
-    settingsModelsPanelSource.includes("value={providerDraft.voiceModel}") &&
+    settingsModelsImplementationSource.includes('label="Full-duplex voice"') &&
+    settingsModelsImplementationSource.includes("value={providerDraft.voiceModel}") &&
     voiceInputButtonSource.includes("disabled={disabled}") &&
     voiceInputButtonSource.includes('data-status={status}') &&
     voiceInputButtonSource.includes('status === "finishing"') &&
-    voiceInputHookSource.includes("navigator.mediaDevices.getUserMedia") &&
+    voiceInputImplementationSource.includes("navigator.mediaDevices.getUserMedia") &&
     voiceWebRtcRuntimeSource.includes("getByteTimeDomainData") &&
     voiceWebRtcRuntimeSource.includes("track.enabled = false") &&
-    voiceInputHookSource.includes("activeRunRef.current === run") &&
-    voiceInputHookSource.includes("run.sessionId !== sessionId") &&
-    voiceInputHookSource.includes("run.sessionId, transcript") &&
-    voiceInputHookSource.includes('type: "input_audio_buffer.clear"') &&
-    voiceInputHookSource.includes('type: "input_audio_buffer.commit"') &&
-    !voiceInputHookSource.includes('type: "response.create"') &&
-    voiceInputHookSource.includes("const VOICE_CONNECT_TIMEOUT_MS = 30_000") &&
-    voiceInputHookSource.includes("VOICE_FINISH_TIMEOUT_MS") &&
-    voiceInputHookSource.includes("VOICE_COMMIT_DRAIN_MS") &&
-    voiceInputHookSource.includes("updateVoiceDisconnectGrace") &&
-    voiceInputHookSource.includes("forceDispose(false)") &&
+    voiceInputImplementationSource.includes("activeRunRef.current === run") &&
+    voiceInputImplementationSource.includes("run.sessionId !== sessionId") &&
+    voiceInputImplementationSource.includes("run.sessionId, transcript") &&
+    voiceInputImplementationSource.includes('type: "input_audio_buffer.clear"') &&
+    voiceInputImplementationSource.includes('type: "input_audio_buffer.commit"') &&
+    !voiceInputImplementationSource.includes('type: "response.create"') &&
+    voiceInputImplementationSource.includes("const VOICE_CONNECT_TIMEOUT_MS = 30_000") &&
+    voiceInputImplementationSource.includes("VOICE_FINISH_TIMEOUT_MS") &&
+    voiceInputImplementationSource.includes("VOICE_COMMIT_DRAIN_MS") &&
+    voiceInputImplementationSource.includes("updateVoiceDisconnectGrace") &&
+    voiceInputImplementationSource.includes("forceDispose(false)") &&
     voiceWebRtcRuntimeSource.includes("window.clearTimeout(run.commitDelay)") &&
     voiceWebRtcRuntimeSource.includes("window.clearTimeout(run.disconnectTimeout)") &&
-    voiceInputHookSource.includes("Voice connection did not produce an SDP offer") &&
+    voiceInputImplementationSource.includes("Voice connection did not produce an SDP offer") &&
     voiceInputModelSource.includes("conversation.item.input_audio_transcription.completed") &&
     !voiceInputModelSource.includes("conversation.item.input_audio_transcription.delta") &&
     voiceInputModelSource.includes("state.seenItemIds.includes(event.itemId)") &&
@@ -1715,6 +1757,21 @@ assert(
     composerSource.includes('if (pendingApproval) setVoiceStatus("idle")') &&
     composerDraftsSource.includes("appendDraftForSession") &&
     tauriBridgeImplementation.includes('invoke<VoiceSessionAnswer>("negotiate_voice_session"') &&
+    tauriBridgeImplementation.includes('invoke<{ transcript: string }>("transcribe_voice_audio"') &&
+    voiceInputImplementationSource.includes("transcribeVoiceAudio(pcmBase64)") &&
+    voiceInputImplementationSource.includes("const MAX_RECORDING_SECONDS = 30") &&
+    voiceInputImplementationSource.includes("stream.getTracks().forEach((track) => {") &&
+    voiceInputImplementationSource.includes("node?.disconnect()") &&
+    voiceInputImplementationSource.includes("await audioContext.close().catch") &&
+    appBootstrapSource.includes("transcribe_voice_audio,") &&
+    voiceCommandsSource.includes("pub(crate) async fn transcribe_voice_audio(") &&
+    voiceCommandsSource.includes("MAX_PCM_BASE64_BYTES") &&
+    voiceCommandsSource.includes("api_key: config.api_key") &&
+    dashScopeRealtimeGuardSource.includes("const MAX_PCM_BYTES") &&
+    dashScopeRealtimeProviderSource.includes("header::AUTHORIZATION") &&
+    dashScopeRealtimeProviderSource.includes('format!("Bearer {}", config.api_key.trim())') &&
+    dashScopeRealtimeProviderSource.includes('"type": "input_audio_buffer.commit"') &&
+    !dashScopeRealtimeProviderSource.includes('"type": "response.create"') &&
     rustLib.includes("OpenAiCompatibleRealtimeProvider") &&
     rustLib.includes("config.api_key") &&
     modelProviderSource.includes('format!("{endpoint}/realtime/calls")') &&
@@ -2012,8 +2069,27 @@ assert(
     rustLib.includes("queue_events_do_not_change_a_terminal_agent_status") &&
     rustLib.includes("queued_messages_preserve_a_permission_waiting_run") &&
     appSource.includes("steeredQueuedMessageIdsRef") &&
-    appSource.includes("releaseSteeredQueuedMessagesForSession") &&
-    appSource.includes("{ ...receipt, message: null }") &&
+    sessionRuntimeModelSource.includes("function committedSteerReconciliation(") &&
+    appSource.includes("const resolution = committedSteerReconciliation(state, queueId)") &&
+    appSource.includes('if (resolution === "pending") return;') &&
+    appSource.includes("receipt.steerCommitted") &&
+    queueServiceSource.includes("steer_committed: bool") &&
+    tauriBridge.includes("steerCommitted: boolean") &&
+    rustLib.includes("fn commit_queued_agent_steer(") &&
+    rustLib.includes("require_queued_agent_message(store, session_id, queue_id)?") &&
+    rustLib.includes("queued_steer_commit_revalidates_the_current_queue_item") &&
+    rustLib
+      .slice(
+        rustLib.indexOf("fn run_agent_task_blocking_inner("),
+        rustLib.indexOf("fn cancel_agent_task(")
+      )
+      .includes("with_immediate_transaction(|store|") &&
+    tauriBridge
+      .slice(
+        tauriBridge.indexOf("export async function steerQueuedAgentMessage("),
+        tauriBridge.indexOf("export async function runNextQueuedAgentMessage(")
+      )
+      .includes("steerCommitted: false") &&
     tauriBridge.includes("export type QueuedAgentMessage") &&
     tauriBridge.includes("export type QueuedAgentMessageReceipt") &&
     tauriBridge.includes("export type QueuedAgentMessageActionReceipt") &&

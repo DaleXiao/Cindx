@@ -1,9 +1,14 @@
 import { LoaderCircle, Mic } from "lucide-react";
 import { useVoiceInput } from "../voice/useVoiceInput";
-import type { VoiceInputStatus } from "../voice/voiceInputModel";
+import {
+  voiceInputButtonDisabled,
+  type VoiceInputStatus
+} from "../voice/voiceInputModel";
+import type { ProviderVoiceTransport } from "../providerProfiles";
 
 type VoiceInputButtonProps = {
   configured: boolean;
+  transport: ProviderVoiceTransport;
   sessionId: string | null;
   onTranscript: (sessionId: string, text: string) => void;
   onError: (message: string) => void;
@@ -12,6 +17,7 @@ type VoiceInputButtonProps = {
 
 export function VoiceInputButton({
   configured,
+  transport,
   sessionId,
   onTranscript,
   onError,
@@ -19,13 +25,14 @@ export function VoiceInputButton({
 }: VoiceInputButtonProps) {
   const { canvasRef, status, toggle } = useVoiceInput({
     enabled: configured,
+    transport,
     sessionId,
     onTranscript,
     onError,
     onStatusChange
   });
   const active = status !== "idle";
-  const disabled = status === "finishing" || (!active && (!configured || !sessionId));
+  const disabled = voiceInputButtonDisabled(configured, transport, sessionId, status);
   const title = !configured
     ? "Configure a full-duplex voice model in Settings"
     : !sessionId

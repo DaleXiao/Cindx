@@ -4316,7 +4316,13 @@ fn openai_voice_model_is_built_in_and_can_still_be_overridden() {
     assert_eq!(config.voice_model, "gpt-realtime");
 
     config.provider_id = PROVIDER_ALIBABA_CN.to_string();
-    assert!(!config.voice_is_ready());
+    config.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string();
+    config.voice_model = "qwen3.5-omni-flash-realtime".to_string();
+    assert!(config.voice_is_ready());
+    assert_eq!(
+        config.voice_transport(),
+        ProviderVoiceTransport::DashScopeWebSocket
+    );
 }
 
 #[test]
@@ -4423,7 +4429,7 @@ fn provider_catalog_supplies_complete_defaults_and_explicit_vision_capabilities(
     assert_eq!(alibaba.chat, "qwen3.7-plus");
     assert_eq!(alibaba.embedding, "text-embedding-v4");
     assert_eq!(alibaba.image, "qwen-image-3.0-pro");
-    assert!(alibaba.voice.is_empty());
+    assert_eq!(alibaba.voice, "qwen3.5-omni-flash-realtime");
     assert_eq!(alibaba.context_window_tokens, 1_000_000);
     assert!(!provider_supports_model_discovery(PROVIDER_AZURE_OPENAI));
     assert!(provider_discovers_modality(
@@ -4466,7 +4472,7 @@ fn switching_provider_replaces_stale_models_with_builtin_modality_defaults() {
     assert_eq!(config.summarizer_model, "qwen3.7-flash");
     assert_eq!(config.embedding_model, "text-embedding-v4");
     assert_eq!(config.image_model, "qwen-image-3.0-pro");
-    assert!(config.voice_model.is_empty());
+    assert_eq!(config.voice_model, "qwen3.5-omni-flash-realtime");
     assert!(config.api_key.is_empty());
     assert!(config.auth_verified_at_ms.is_none());
 }
@@ -4517,6 +4523,7 @@ fn discovery_does_not_disable_modalities_served_by_a_separate_api() {
     .expect("the standard Alibaba catalog should reconcile");
 
     assert_eq!(config.image_model, "qwen-image-3.0-pro");
+    assert_eq!(config.voice_model, "qwen3.5-omni-flash-realtime");
 }
 
 #[test]
@@ -10619,6 +10626,198 @@ fn queued_agent_message_start_and_restore_are_replay_safe() {
 }
 
 #[test]
+fn queued_run_failure_restores_only_before_agent_start() {
+    let session_id = "session-queue-failure";
+    let context = [("session_id".to_string(), session_id.to_string())]
+        .into_iter()
+        .collect::<Metadata>();
+    let payload = QueuedAgentMessagePayload {
+        prompt: "continue safely".to_string(),
+        attachments: Vec::new(),
+        effort: "pro".to_string(),
+        current_time: "now".to_string(),
+    };
+    let pending = PendingQueuedAgentMessage {
+        view: QueuedAgentMessageView {
+            id: "queue-a".to_string(),
+            session_id: session_id.to_string(),
+            prompt: payload.prompt.clone(),
+            attachments: Vec::new(),
+            effort: payload.effort.clone(),
+            mode: "queue".to_string(),
+            created_at_ms: 10,
+            updated_at_ms: 10,
+        },
+        payload: payload.clone(),
+        priority_sequence: 1,
+    };
+
+    let mut pre_start_store = SqliteStore::in_memory().expect("store should open");
+    append_agent_queue_event(
+        &mut pre_start_store,
+        &context,
+        "enqueue",
+        "queue-a",
+        "queue",
+        10,
+        Some(&payload),
+    )
+    .expect("message should queue");
+    append_agent_queue_event(
+        &mut pre_start_store,
+        &context,
+        "start",
+        "queue-a",
+        "queue",
+        10,
+        None,
+    )
+    .expect("dispatch should reserve the message");
+    assert!(restore_queued_agent_message_before_run_start(
+        &mut pre_start_store,
+        &context,
+        session_id,
+        &pending,
+    )
+    .expect("a pre-start failure should restore"));
+    let pre_start_events = pre_start_store
+        .list_by_task(&phase16_task_id())
+        .expect("queue events should load");
+    assert_eq!(
+        pending_queued_agent_messages(&pre_start_events, session_id).len(),
+        1
+    );
+
+    let mut post_start_store = SqliteStore::in_memory().expect("store should open");
+    append_agent_queue_event(
+        &mut post_start_store,
+        &context,
+        "enqueue",
+        "queue-a",
+        "queue",
+        10,
+        Some(&payload),
+    )
+    .expect("message should queue");
+    append_agent_queue_event(
+        &mut post_start_store,
+        &context,
+        "start",
+        "queue-a",
+        "queue",
+        10,
+        None,
+    )
+    .expect("dispatch should reserve the message");
+    let run_context = [
+        ("session_id".to_string(), session_id.to_string()),
+        ("agent_run_id".to_string(), "run-a".to_string()),
+        ("queue_id".to_string(), "queue-a".to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    append_event(
+        &mut post_start_store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task started",
+        run_context.clone(),
+    )
+    .expect("agent start should persist");
+    append_message_event_with_metadata(
+        &mut post_start_store,
+        &phase16_task_id(),
+        MessageRole::User,
+        &payload.prompt,
+        run_context,
+    )
+    .expect("user message should persist");
+
+    assert!(!restore_queued_agent_message_before_run_start(
+        &mut post_start_store,
+        &context,
+        session_id,
+        &pending,
+    )
+    .expect("a post-start failure should not restore"));
+    let post_start_events = post_start_store
+        .list_by_task(&phase16_task_id())
+        .expect("run events should load");
+    assert!(pending_queued_agent_messages(&post_start_events, session_id).is_empty());
+    assert!(!post_start_events.iter().any(|event| {
+        event.metadata.get("queue_action").map(String::as_str) == Some("restore")
+    }));
+}
+
+#[test]
+fn queued_steer_commit_revalidates_the_current_queue_item() {
+    let session_id = "session-steer-commit";
+    let context = [("session_id".to_string(), session_id.to_string())]
+        .into_iter()
+        .collect::<Metadata>();
+    let payload = QueuedAgentMessagePayload {
+        prompt: "apply this guidance".to_string(),
+        attachments: Vec::new(),
+        effort: "pro".to_string(),
+        current_time: "now".to_string(),
+    };
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    append_agent_queue_event(
+        &mut store,
+        &context,
+        "enqueue",
+        "queue-live",
+        "queue",
+        10,
+        Some(&payload),
+    )
+    .expect("live message should queue");
+
+    let committed = commit_queued_agent_steer(&mut store, &context, session_id, "queue-live")
+        .expect("a current queue item should commit");
+    assert_eq!(committed.mode, "steer");
+
+    append_agent_queue_event(
+        &mut store,
+        &context,
+        "enqueue",
+        "queue-deleted",
+        "queue",
+        20,
+        Some(&payload),
+    )
+    .expect("second message should queue");
+    append_agent_queue_event(
+        &mut store,
+        &context,
+        "delete",
+        "queue-deleted",
+        "queue",
+        20,
+        None,
+    )
+    .expect("second message should delete");
+
+    assert_eq!(
+        commit_queued_agent_steer(&mut store, &context, session_id, "queue-deleted")
+            .expect_err("a stale queue item must not commit"),
+        "queued message not found"
+    );
+    let events = store
+        .list_by_task(&phase16_task_id())
+        .expect("queue events should load");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event.metadata.get("queue_action").map(String::as_str) == Some("steer")
+            })
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn queued_agent_messages_update_the_incremental_session_read_model() {
     let mut store = SqliteStore::in_memory().expect("store should open");
     let session_id = "session-queue-read-model";
@@ -10673,9 +10872,10 @@ fn queued_agent_messages_update_the_incremental_session_read_model() {
     let (queued, can_cancel) =
         queued_agent_message_from_read_model(&mut store, session_id, "queue-a")
             .expect("queue action lookup should use the read model");
-    let receipt =
-        queued_agent_message_action_receipt(&store, session_id, "queue-a", queued, can_cancel)
-            .expect("queue action receipt should use the compact revision");
+    let receipt = queued_agent_message_action_receipt(
+        &store, session_id, "queue-a", queued, can_cancel, false,
+    )
+    .expect("queue action receipt should use the compact revision");
     assert_eq!(
         receipt
             .message
@@ -10684,6 +10884,14 @@ fn queued_agent_messages_update_the_incremental_session_read_model() {
         Some("edited version")
     );
     assert!(!receipt.cancelled_active_run);
+    assert!(!receipt.steer_committed);
+    assert_eq!(
+        serde_json::to_value(&receipt)
+            .expect("receipt should serialize")
+            .get("steerCommitted")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
 
     append_agent_queue_event(&mut store, &context, "start", "queue-a", "queue", 10, None)
         .expect("message should start");

@@ -17,6 +17,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { readArtifactPreview } from "../tauri";
 import type { AgentAttachment, AgentEffort, ToolApprovalView } from "../tauri";
 import type { VoiceInputStatus } from "../voice/voiceInputModel";
+import type { ProviderVoiceTransport } from "../providerProfiles";
 import { VoiceInputButton } from "./VoiceInputButton";
 
 const COMPOSER_TEXTAREA_MIN_HEIGHT = 58;
@@ -95,6 +96,7 @@ type ComposerProps = {
   effort: AgentEffort;
   sessionId: string | null;
   voiceConfigured: boolean;
+  voiceTransport: ProviderVoiceTransport;
   onChange: (value: string) => void;
   onEffortChange: (effort: AgentEffort) => void;
   onVoiceTranscript: (sessionId: string, text: string) => void;
@@ -126,6 +128,7 @@ export function Composer({
   effort,
   sessionId,
   voiceConfigured,
+  voiceTransport,
   onChange,
   onEffortChange,
   onVoiceTranscript,
@@ -435,6 +438,7 @@ export function Composer({
                 </div>
                 <VoiceInputButton
                   configured={voiceConfigured}
+                  transport={voiceTransport}
                   sessionId={sessionId}
                   onTranscript={onVoiceTranscript}
                   onError={onVoiceError}

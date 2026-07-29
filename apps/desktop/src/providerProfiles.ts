@@ -1,6 +1,7 @@
 import providerCatalog from "../../../crates/model-provider/providerCatalog.json" with { type: "json" };
 
 export type ProviderId = "openai" | "azure_openai" | "alibaba_cn" | "custom";
+export type ProviderVoiceTransport = "openai_webrtc" | "dashscope_websocket" | "none";
 
 type ProviderPreset = (typeof providerCatalog.providers)[number];
 
@@ -61,6 +62,10 @@ type ProviderModelDraft = {
 
 export function providerPreset(providerId: ProviderId): ProviderPreset | null {
   return PROVIDER_PRESETS.get(providerId) ?? null;
+}
+
+export function providerSupportsModelDiscovery(providerId: ProviderId) {
+  return Boolean(providerPreset(providerId)?.modelDiscovery);
 }
 
 export function providerPresetModelGroups(providerId: ProviderId): ProviderModelGroups {
@@ -170,15 +175,13 @@ export function resolveProviderProfile(draft: ProviderDraftIdentity) {
   };
 }
 
-export function providerModelCatalogIdentity(
-  draft: ProviderDraftIdentity & { apiKey?: string }
-) {
+export function providerModelCatalogIdentity(draft: ProviderDraftIdentity) {
   const profile = resolveProviderProfile(draft);
   return JSON.stringify([
     profile.providerId,
     profile.providerResource,
     profile.baseUrl,
-    draft.apiKey ?? ""
+    profile.imageEndpoint
   ]);
 }
 
@@ -187,6 +190,24 @@ export function providerCanUseConfiguredKey(
   saved: ProviderDraftIdentity | null
 ) {
   return saved !== null && providerIdentity(draft) === providerIdentity(saved);
+}
+
+export function providerModelCatalogMatchesDraft(
+  catalogIdentity: string | null,
+  catalogApiKey: string | null,
+  draft: ProviderCredentialDraft
+) {
+  return (
+    catalogIdentity === providerModelCatalogIdentity(draft) &&
+    catalogApiKey === draft.apiKey
+  );
+}
+
+export function providerModelCatalogApiKeyAfterSave(
+  catalogApiKey: string | null,
+  submittedApiKey: string
+) {
+  return catalogApiKey === submittedApiKey ? "" : null;
 }
 
 export function providerApiKeySetAfterSave(
@@ -238,6 +259,14 @@ export function providerSupportsWebRtcVoice(providerId: ProviderId, baseUrl: str
   if (host === "dashscope.aliyuncs.com") return false;
   if (hostHasResourceSuffix(host, ALIBABA_CN_WORKSPACE_HOST_SUFFIX)) return false;
   return !AZURE_OPENAI_HOST_SUFFIXES.some((suffix) => hostHasResourceSuffix(host, suffix));
+}
+
+export function providerVoiceTransport(
+  providerId: ProviderId,
+  baseUrl: string
+): ProviderVoiceTransport {
+  if (providerId === "alibaba_cn") return "dashscope_websocket";
+  return providerSupportsWebRtcVoice(providerId, baseUrl) ? "openai_webrtc" : "none";
 }
 
 function uniqueSorted(values: string[]) {
@@ -332,4 +361,28 @@ export function groupProviderModels(
     image: uniqueSorted(groups.image),
     voice: uniqueSorted(groups.voice)
   };
+}
+
+export function providerModelCatalogHasCapability(
+  providerId: ProviderId,
+  models: string[],
+  capability: "image" | "voice",
+  selectedModel: string
+) {
+  const normalizedModel = selectedModel.trim().toLocaleLowerCase();
+  if (
+    !normalizedModel ||
+    !models.some((model) => model.trim().toLocaleLowerCase() === normalizedModel)
+  ) {
+    return false;
+  }
+  const groups = groupProviderModels(providerId, models, {
+    chat: [],
+    embedding: "",
+    image: "",
+    voice: ""
+  });
+  return groups[capability].some(
+    (model) => model.trim().toLocaleLowerCase() === normalizedModel
+  );
 }

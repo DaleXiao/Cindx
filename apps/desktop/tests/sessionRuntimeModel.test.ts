@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  committedSteerReconciliation,
+  committedSteerUserMessage,
   latestTraceStep,
   mergeAcknowledgedSessionActivity,
   messagesWithOptimisticUserMessages,
@@ -106,6 +108,73 @@ test("optimistic steers render immediately and reconcile by queue id", () => {
   assert.deepEqual(
     messagesWithOptimisticUserMessages([persisted], [optimistic]),
     [persisted]
+  );
+});
+
+test("steer messages project into chat only after the backend commits them", () => {
+  const queued = {
+    id: "steer-a",
+    sessionId: "session-a",
+    prompt: "Use the existing output",
+    attachments: [],
+    effort: "auto",
+    mode: "queue",
+    createdAtMs: 10,
+    updatedAtMs: 10
+  } as any;
+  const receipt = {
+    queueId: queued.id,
+    message: queued,
+    eventCount: 2,
+    latestSequence: 2,
+    latestTimestampMs: 20,
+    cancelledActiveRun: false,
+    steerCommitted: false
+  } as any;
+
+  assert.equal(committedSteerUserMessage(queued, receipt), null);
+  assert.deepEqual(committedSteerUserMessage(queued, { ...receipt, steerCommitted: true }), {
+    role: "user",
+    content: queued.prompt,
+    timestampMs: receipt.latestTimestampMs,
+    queueId: queued.id,
+    attachments: queued.attachments
+  });
+});
+
+test("committed steers reconcile only after durable application or terminal restoration", () => {
+  const queued = { id: "steer-a" } as any;
+  const running = {
+    status: "running",
+    canCancel: true,
+    messages: [],
+    queuedMessages: [queued]
+  } as any;
+  assert.equal(committedSteerReconciliation(running, queued.id), "pending");
+  assert.equal(
+    committedSteerReconciliation(
+      { ...running, status: "failed", canCancel: false },
+      queued.id
+    ),
+    "restored"
+  );
+  assert.equal(
+    committedSteerReconciliation(
+      {
+        ...running,
+        messages: [{ role: "user", queueId: queued.id }],
+        queuedMessages: []
+      },
+      queued.id
+    ),
+    "applied"
+  );
+  assert.equal(
+    committedSteerReconciliation(
+      { ...running, status: "completed", canCancel: false, queuedMessages: [] },
+      queued.id
+    ),
+    "discarded"
   );
 });
 

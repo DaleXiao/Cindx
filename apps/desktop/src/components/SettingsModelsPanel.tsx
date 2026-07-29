@@ -1,4 +1,4 @@
-import { CheckCircle2, KeyRound, Save } from "lucide-react";
+import { KeyRound, Save } from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
 import type { Phase4State, ProviderConfigInput } from "../tauri";
 import {
@@ -6,11 +6,11 @@ import {
   providerBaseUrl,
   providerCanUseConfiguredKey,
   providerModelContextWindow,
-  providerSupportsWebRtcVoice,
   type ProviderModelGroups
 } from "../providerProfiles";
 import { PromptEvolutionPanel } from "./PromptEvolutionPanel";
 import { ProviderConnectionFields } from "./ProviderConnectionFields";
+import { ProviderModalityFields } from "./ProviderModalityFields";
 import { ProviderModelInput as ModelSelect } from "./ProviderModelInput";
 
 type SettingsModelsPanelProps = {
@@ -48,9 +48,6 @@ export function SettingsModelsPanel({
   providerModelsRefreshTurn,
   setProviderDraft
 }: SettingsModelsPanelProps) {
-  const voiceSupported = providerDraft
-    ? providerSupportsWebRtcVoice(providerDraft.providerId, providerDraft.baseUrl)
-    : false;
   const refreshAnimationClass =
     providerModelsRefreshTurn > 0 ? "settings-refresh-turn" : undefined;
   const resolvedBaseUrl = providerDraft
@@ -91,7 +88,6 @@ export function SettingsModelsPanel({
       phase4?.provider.apiKeySet &&
       phase4.provider.authVerifiedAtMs === null
   );
-
   return (
     <>
       <section className="settings-section" data-settings-group="models">
@@ -215,63 +211,15 @@ export function SettingsModelsPanel({
                   setProviderDraft({ ...providerDraft, summarizerModel })
                 }
               />
-              <ModelSelect
-                label="Embedding"
-                value={providerDraft.embeddingModel}
-                options={providerModelOptions.embedding}
-                disabled={providerBusy}
-                onChange={(embeddingModel) =>
-                  setProviderDraft({ ...providerDraft, embeddingModel })
-                }
-              />
-              <ModelSelect
-                label="Full-duplex voice"
-                value={providerDraft.voiceModel}
-                options={providerModelOptions.voice}
-                emptyLabel={voiceSupported ? "Not configured" : "Not supported by this adapter"}
-                disabled={providerBusy || !voiceSupported}
-                onChange={(voiceModel) => setProviderDraft({ ...providerDraft, voiceModel })}
-              />
-              <ModelSelect
-                label="Image generation"
-                value={providerDraft.imageModel}
-                options={providerModelOptions.image}
-                disabled={providerBusy}
-                emptyLabel="Not configured"
-                onChange={(imageModel) => setProviderDraft({ ...providerDraft, imageModel })}
-              />
-              {providerDraft.providerId === "custom" && (
-                <label>
-                  <span>Image API endpoint (optional)</span>
-                  <div className="provider-endpoint-input" data-validation={imageEndpointValidation}>
-                    <input
-                      disabled={providerBusy}
-                      value={providerDraft.imageEndpoint}
-                      spellCheck={false}
-                      placeholder="Uses the custom Base URL when empty"
-                      onChange={(event) => {
-                        const imageEndpoint = event.target.value;
-                        setProviderDraft((current) =>
-                          current ? { ...current, imageEndpoint } : current
-                        );
-                      }}
-                    />
-                    {imageEndpointValidation === "valid" && (
-                      <CheckCircle2
-                        className="provider-endpoint-check"
-                        aria-label="Image endpoint reachable"
-                      />
-                    )}
-                  </div>
-                </label>
-              )}
             </div>
-            {!voiceSupported && (
-              <p className="provider-auto-note">
-                Full-duplex voice is disabled because this provider needs a different realtime
-                transport adapter.
-              </p>
-            )}
+            <ProviderModalityFields
+              imageEndpointValidation={imageEndpointValidation}
+              providerBusy={providerBusy}
+              providerDraft={providerDraft}
+              providerModelOptions={providerModelOptions}
+              providerModels={providerModels}
+              setProviderDraft={setProviderDraft}
+            />
             <dl className="settings-facts">
               <div>
                 <dt>Connection</dt>

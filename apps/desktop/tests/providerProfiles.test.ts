@@ -11,10 +11,15 @@ import {
   providerApiKeySetAfterSave,
   providerBaseUrl,
   providerCanUseConfiguredKey,
+  providerModelCatalogApiKeyAfterSave,
+  providerModelCatalogHasCapability,
   providerModelCatalogIdentity,
+  providerModelCatalogMatchesDraft,
   providerModelContextWindow,
   providerPresetModelGroups,
+  providerSupportsModelDiscovery,
   providerSupportsWebRtcVoice,
+  providerVoiceTransport,
   resolveProviderProfile,
   selectProviderDraft
 } from "../src/providerProfiles.ts";
@@ -51,6 +56,13 @@ test("provider presets resolve fixed and resource-scoped endpoints", () => {
   assert.equal(isValidProviderBaseUrl("https://gateway.test/v1"), true);
   assert.equal(isValidProviderBaseUrl("not-a-url"), false);
   assert.equal(PROVIDER_OPTIONS.at(-1)?.id, "custom");
+});
+
+test("model refresh visibility follows each provider discovery capability", () => {
+  assert.equal(providerSupportsModelDiscovery("openai"), true);
+  assert.equal(providerSupportsModelDiscovery("alibaba_cn"), true);
+  assert.equal(providerSupportsModelDiscovery("custom"), true);
+  assert.equal(providerSupportsModelDiscovery("azure_openai"), false);
 });
 
 test("saved API keys are reusable only for the same provider identity", () => {
@@ -176,7 +188,7 @@ test("selecting a provider atomically applies every built-in modality default", 
   assert.equal(alibaba.summarizerModel, "qwen3.7-flash");
   assert.equal(alibaba.embeddingModel, "text-embedding-v4");
   assert.equal(alibaba.imageModel, "qwen-image-3.0-pro");
-  assert.equal(alibaba.voiceModel, "");
+  assert.equal(alibaba.voiceModel, "qwen3.5-omni-flash-realtime");
   assert.equal(alibaba.contextWindowTokens, 1000000);
 });
 
@@ -222,7 +234,7 @@ test("browser fallback saves canonical provider endpoints and isolates saved key
   assert.equal(alibaba.providerResource, "");
 });
 
-test("model catalog identity invalidates same-origin path and API key changes", () => {
+test("model catalog identity survives saved-key masking but invalidates endpoint changes", () => {
   const first = {
     providerId: "custom" as const,
     providerResource: "",
@@ -231,11 +243,62 @@ test("model catalog identity invalidates same-origin path and API key changes", 
     apiKey: "catalog-key-one"
   };
   const nextPath = { ...first, baseUrl: "https://gateway.test/compatible/v1" };
+  const nextImageEndpoint = {
+    ...first,
+    imageEndpoint: "https://gateway.test/images/generations"
+  };
   const nextKey = { ...first, apiKey: "catalog-key-two" };
+  const maskedAfterConnect = { ...first, apiKey: "" };
 
   assert.equal(providerCanUseConfiguredKey(first, nextPath), true);
   assert.notEqual(providerModelCatalogIdentity(first), providerModelCatalogIdentity(nextPath));
-  assert.notEqual(providerModelCatalogIdentity(first), providerModelCatalogIdentity(nextKey));
+  assert.notEqual(
+    providerModelCatalogIdentity(first),
+    providerModelCatalogIdentity(nextImageEndpoint)
+  );
+  assert.equal(providerModelCatalogIdentity(first), providerModelCatalogIdentity(nextKey));
+  assert.equal(providerModelCatalogIdentity(first), providerModelCatalogIdentity(maskedAfterConnect));
+  assert.equal(
+    providerModelCatalogMatchesDraft(
+      providerModelCatalogIdentity(first),
+      first.apiKey,
+      first
+    ),
+    true
+  );
+  assert.equal(
+    providerModelCatalogMatchesDraft(
+      providerModelCatalogIdentity(first),
+      first.apiKey,
+      nextKey
+    ),
+    false
+  );
+  assert.equal(
+    providerModelCatalogApiKeyAfterSave(first.apiKey, first.apiKey),
+    maskedAfterConnect.apiKey
+  );
+  assert.equal(providerModelCatalogApiKeyAfterSave("old-key", first.apiKey), null);
+});
+
+test("modality availability requires the selected model in the refreshed capability catalog", () => {
+  const models = ["gpt-4.1", "gpt-image-2", "gpt-realtime-2.1"];
+  assert.equal(
+    providerModelCatalogHasCapability("openai", models, "image", "gpt-image-2"),
+    true
+  );
+  assert.equal(
+    providerModelCatalogHasCapability("openai", models, "voice", "gpt-realtime-2.1"),
+    true
+  );
+  assert.equal(
+    providerModelCatalogHasCapability("openai", models, "voice", "gpt-image-2"),
+    false
+  );
+  assert.equal(
+    providerModelCatalogHasCapability("openai", models, "image", "gpt-image-1"),
+    false
+  );
 });
 
 test("model catalogs are separated by capability without dropping configured values", () => {
@@ -264,6 +327,8 @@ test("model catalogs are separated by capability without dropping configured val
   assert.deepEqual(groups.voice, ["gpt-realtime", "private-voice-deployment"]);
   assert.equal(providerSupportsWebRtcVoice("alibaba_cn", ALIBABA_CN_BASE_URL), false);
   assert.equal(providerSupportsWebRtcVoice("openai", OPENAI_BASE_URL), true);
+  assert.equal(providerVoiceTransport("alibaba_cn", ALIBABA_CN_BASE_URL), "dashscope_websocket");
+  assert.equal(providerVoiceTransport("openai", OPENAI_BASE_URL), "openai_webrtc");
 });
 
 test("built-in catalogs explicitly separate multimodal and generation capabilities", () => {
@@ -276,7 +341,7 @@ test("built-in catalogs explicitly separate multimodal and generation capabiliti
   assert.equal(alibaba.multimodal.includes("qwen3.7-plus"), true);
   assert.deepEqual(alibaba.embedding, ["text-embedding-v4"]);
   assert.deepEqual(alibaba.image, ["qwen-image-3.0-pro"]);
-  assert.deepEqual(alibaba.voice, []);
+  assert.deepEqual(alibaba.voice, ["qwen3.5-omni-flash-realtime"]);
   assert.equal(providerModelContextWindow("openai", "gpt-4.1"), 1047576);
   assert.equal(providerModelContextWindow("alibaba_cn", "qwen3.7-plus"), 1000000);
 });

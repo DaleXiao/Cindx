@@ -14,8 +14,11 @@ import {
   groupProviderModels,
   providerBaseUrl,
   providerCanUseConfiguredKey,
+  providerModelCatalogApiKeyAfterSave,
   providerModelCatalogIdentity,
-  providerSupportsWebRtcVoice
+  providerModelCatalogMatchesDraft,
+  providerSupportsModelDiscovery,
+  providerVoiceTransport
 } from "../providerProfiles";
 
 function normalizedEffortPolicy(policy: string) {
@@ -69,6 +72,12 @@ export function useProviderSettingsController({
   );
   const [providerBusy, setProviderBusy] = useState(false);
   const [providerModels, setProviderModels] = useState<string[]>([]);
+  const [providerModelsCatalogIdentity, setProviderModelsCatalogIdentity] = useState<
+    string | null
+  >(null);
+  const [providerModelsCatalogApiKey, setProviderModelsCatalogApiKey] = useState<
+    string | null
+  >(null);
   const [providerModelsBusy, setProviderModelsBusy] = useState(false);
   const [providerModelsRefreshTurn, setProviderModelsRefreshTurn] = useState(0);
   const [providerModelsError, setProviderModelsError] = useState<string | null>(null);
@@ -77,6 +86,8 @@ export function useProviderSettingsController({
   >("idle");
   const imageEndpointValidationRequestRef = useRef(0);
   const modelCatalogRequestRef = useRef(0);
+  const previousProviderApiKeyRef = useRef("");
+  const preserveNextApiKeyMaskRef = useRef(false);
   const providerConnectInFlightRef = useRef(false);
 
   const loadProviderState = useCallback(async () => {
@@ -137,11 +148,24 @@ export function useProviderSettingsController({
     providerDraft?.imageModel
   ]);
 
+  const providerCatalogIdentity = providerDraft
+    ? providerModelCatalogIdentity(providerDraft)
+    : "";
+  const providerModelsForDraft =
+    providerDraft &&
+    providerModelCatalogMatchesDraft(
+      providerModelsCatalogIdentity,
+      providerModelsCatalogApiKey,
+      providerDraft
+    )
+      ? providerModels
+      : [];
+
   const providerModelOptions = useMemo(() => {
     if (!providerDraft) {
       return { chat: [], multimodal: [], embedding: [], image: [], voice: [] };
     }
-    return groupProviderModels(providerDraft.providerId, providerModels, {
+    return groupProviderModels(providerDraft.providerId, providerModelsForDraft, {
       chat: [
         providerDraft.model,
         providerDraft.conductorModel,
@@ -154,18 +178,38 @@ export function useProviderSettingsController({
       image: providerDraft.imageModel,
       voice: providerDraft.voiceModel
     });
-  }, [providerDraft, providerModels]);
-
-  const providerCatalogIdentity = providerDraft
-    ? providerModelCatalogIdentity(providerDraft)
-    : "";
+  }, [providerDraft, providerModelsForDraft]);
 
   useEffect(() => {
     modelCatalogRequestRef.current += 1;
     setProviderModels([]);
+    setProviderModelsCatalogIdentity(null);
+    setProviderModelsCatalogApiKey(null);
     setProviderModelsBusy(false);
     setProviderModelsError(null);
   }, [providerCatalogIdentity]);
+
+  const providerApiKey = providerDraft?.apiKey ?? "";
+  useEffect(() => {
+    const previousApiKey = previousProviderApiKeyRef.current;
+    previousProviderApiKeyRef.current = providerApiKey;
+    if (previousApiKey === providerApiKey) return;
+    if (
+      preserveNextApiKeyMaskRef.current &&
+      previousApiKey.trim() &&
+      !providerApiKey.trim()
+    ) {
+      preserveNextApiKeyMaskRef.current = false;
+      return;
+    }
+    preserveNextApiKeyMaskRef.current = false;
+    modelCatalogRequestRef.current += 1;
+    setProviderModels([]);
+    setProviderModelsCatalogIdentity(null);
+    setProviderModelsCatalogApiKey(null);
+    setProviderModelsBusy(false);
+    setProviderModelsError(null);
+  }, [providerApiKey]);
 
   const collaborationModelCount = providerDraft
     ? new Set([
@@ -176,6 +220,47 @@ export function useProviderSettingsController({
       ]).size
     : 0;
 
+  const refreshProviderModels = useCallback(
+    async (draft: ProviderConfigInput, reportFailure: boolean) => {
+      const requestId = modelCatalogRequestRef.current + 1;
+      modelCatalogRequestRef.current = requestId;
+      setProviderModelsRefreshTurn((current) => current + 1);
+      setProviderModelsBusy(true);
+      setProviderModelsError(null);
+      const catalogIdentity = providerModelCatalogIdentity(draft);
+      try {
+        const next = await listProviderModels({
+          providerId: draft.providerId,
+          providerResource: draft.providerResource,
+          baseUrl: providerBaseUrl(draft.providerId, draft.providerResource, draft.baseUrl),
+          apiKey: draft.apiKey
+        });
+        if (modelCatalogRequestRef.current !== requestId) return;
+        if (next.lastError) {
+          setProviderModels([]);
+          setProviderModelsCatalogIdentity(null);
+          setProviderModelsCatalogApiKey(null);
+        } else {
+          setProviderModels(next.models);
+          setProviderModelsCatalogIdentity(catalogIdentity);
+          setProviderModelsCatalogApiKey(draft.apiKey);
+        }
+        setProviderModelsError(next.lastError);
+      } catch (error) {
+        if (modelCatalogRequestRef.current !== requestId) return;
+        const message = error instanceof Error ? error.message : String(error);
+        setProviderModels([]);
+        setProviderModelsCatalogIdentity(null);
+        setProviderModelsCatalogApiKey(null);
+        setProviderModelsError(message);
+        if (reportFailure) reportError(message);
+      } finally {
+        if (modelCatalogRequestRef.current === requestId) setProviderModelsBusy(false);
+      }
+    },
+    [reportError]
+  );
+
   const handleSaveProviderConfig = useCallback(async () => {
     if (!providerDraft || providerConnectInFlightRef.current) return;
     providerConnectInFlightRef.current = true;
@@ -183,16 +268,26 @@ export function useProviderSettingsController({
     reportError(null);
     try {
       const next = await saveProviderConfig(providerDraft);
+      const savedDraft = providerDraftFromState(next.provider);
+      if (providerDraft.apiKey !== savedDraft.apiKey) {
+        preserveNextApiKeyMaskRef.current = true;
+        setProviderModelsCatalogApiKey((catalogApiKey) =>
+          providerModelCatalogApiKeyAfterSave(catalogApiKey, providerDraft.apiKey)
+        );
+      }
       setPhase4(next);
-      setProviderDraft(providerDraftFromState(next.provider));
+      setProviderDraft(savedDraft);
       showSaved("Provider verified and configured");
+      if (providerSupportsModelDiscovery(savedDraft.providerId)) {
+        void refreshProviderModels(savedDraft, false);
+      }
     } catch (error) {
       reportError(error instanceof Error ? error.message : String(error));
     } finally {
       providerConnectInFlightRef.current = false;
       setProviderBusy(false);
     }
-  }, [providerDraft, reportError, showSaved]);
+  }, [providerDraft, refreshProviderModels, reportError, showSaved]);
 
   const handlePromptEvolutionToggle = useCallback(
     async (enabled: boolean) => {
@@ -216,35 +311,15 @@ export function useProviderSettingsController({
   );
 
   const handleLoadProviderModels = useCallback(async () => {
-    if (!providerDraft || providerModelsBusy) return;
-    const requestId = modelCatalogRequestRef.current + 1;
-    modelCatalogRequestRef.current = requestId;
-    setProviderModelsRefreshTurn((current) => current + 1);
-    setProviderModelsBusy(true);
-    setProviderModelsError(null);
-    try {
-      const next = await listProviderModels({
-        providerId: providerDraft.providerId,
-        providerResource: providerDraft.providerResource,
-        baseUrl: providerBaseUrl(
-          providerDraft.providerId,
-          providerDraft.providerResource,
-          providerDraft.baseUrl
-        ),
-        apiKey: providerDraft.apiKey
-      });
-      if (modelCatalogRequestRef.current !== requestId) return;
-      setProviderModels(next.models);
-      setProviderModelsError(next.lastError);
-    } catch (error) {
-      if (modelCatalogRequestRef.current !== requestId) return;
-      const message = error instanceof Error ? error.message : String(error);
-      setProviderModelsError(message);
-      reportError(message);
-    } finally {
-      if (modelCatalogRequestRef.current === requestId) setProviderModelsBusy(false);
+    if (
+      !providerDraft ||
+      providerModelsBusy ||
+      !providerSupportsModelDiscovery(providerDraft.providerId)
+    ) {
+      return;
     }
-  }, [providerDraft, providerModelsBusy, reportError]);
+    await refreshProviderModels(providerDraft, true);
+  }, [providerDraft, providerModelsBusy, refreshProviderModels]);
 
   const savedProvider = phase4?.provider ?? null;
   const canUseConfiguredKey = Boolean(
@@ -252,6 +327,9 @@ export function useProviderSettingsController({
       providerDraft &&
       providerCanUseConfiguredKey(providerDraft, savedProvider)
   );
+  const voiceTransport = phase4
+    ? providerVoiceTransport(phase4.provider.providerId, phase4.provider.baseUrl)
+    : "none";
 
   return {
     collaborationModelCount,
@@ -264,19 +342,20 @@ export function useProviderSettingsController({
     providerBusy,
     providerDraft,
     providerModelOptions,
-    providerModels,
+    providerModels: providerModelsForDraft,
     providerModelsBusy,
     providerModelsError,
     providerModelsRefreshTurn,
     canUseConfiguredKey,
     setProviderDraft,
+    voiceTransport,
     voiceConfigured: Boolean(
       phase4 &&
         (phase4.provider.authVerified ||
           (phase4.provider.apiKeySet && phase4.provider.authVerifiedAtMs === null)) &&
         phase4.provider.baseUrl.trim() &&
         phase4.provider.voiceModel.trim() &&
-        providerSupportsWebRtcVoice(phase4.provider.providerId, phase4.provider.baseUrl)
+        voiceTransport !== "none"
     )
   };
 }

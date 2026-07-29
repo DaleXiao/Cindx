@@ -250,6 +250,7 @@ export type QueuedAgentMessageActionReceipt = {
   latestSequence: number;
   latestTimestampMs: number;
   cancelledActiveRun: boolean;
+  steerCommitted: boolean;
 };
 
 export type AttachmentUpload = {

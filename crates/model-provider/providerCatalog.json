@@ -183,6 +183,13 @@
           "modalities": ["imageGeneration"],
           "toolCalling": false,
           "contextWindowTokens": 0
+        },
+        {
+          "id": "qwen3.5-omni-flash-realtime",
+          "protocol": "dashscope-realtime-websocket",
+          "modalities": ["realtime"],
+          "toolCalling": false,
+          "contextWindowTokens": 0
         }
       ],
       "defaults": {
@@ -194,7 +201,7 @@
         "summarizer": "qwen3.7-flash",
         "embedding": "text-embedding-v4",
         "image": "qwen-image-3.0-pro",
-        "voice": "",
+        "voice": "qwen3.5-omni-flash-realtime",
         "contextWindowTokens": 1000000
       }
     },
