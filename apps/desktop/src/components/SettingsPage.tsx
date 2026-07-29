@@ -58,6 +58,7 @@ import {
   type WebSearchConfigState
 } from "../tauri";
 import { DEBUG_ALWAYS_VISIBLE_STORAGE_KEY } from "../appShellModel";
+import type { ProviderModelGroups } from "../providerProfiles";
 import { SettingsModelsPanel } from "./SettingsModelsPanel";
 import { SettingsPermissionsPanel } from "./SettingsPermissionsPanel";
 import { SettingsToolsPanel, type WebSearchDraft } from "./SettingsToolsPanel";
@@ -103,6 +104,7 @@ type SidecarDraft = {
 };
 
 export type SettingsPageProps = {
+  canUseConfiguredKey: boolean;
   activePermissionReviews: PermissionReviewItem[];
   appearanceMode: AppearanceMode;
   archivedSessions: SessionView[];
@@ -164,7 +166,7 @@ export type SettingsPageProps = {
   projectSessionState: ProjectSessionState | null;
   providerBusy: boolean;
   providerDraft: ProviderConfigInput | null;
-  providerModelOptions: string[];
+  providerModelOptions: ProviderModelGroups;
   providerModels: string[];
   providerModelsBusy: boolean;
   providerModelsError: string | null;
@@ -250,6 +252,7 @@ function SettingsChevron({ action = false }: { action?: boolean }) {
 
 export function SettingsPage(props: SettingsPageProps) {
   const {
+    canUseConfiguredKey,
     activePermissionReviews,
     appearanceMode,
     archivedSessions,
@@ -639,6 +642,7 @@ export function SettingsPage(props: SettingsPageProps) {
     
                 {settingsCategory === "models" && (
                   <SettingsModelsPanel
+                    canUseConfiguredKey={canUseConfiguredKey}
                     collaborationModelCount={collaborationModelCount}
                     handleLoadProviderModels={handleLoadProviderModels}
                     handlePromptEvolutionToggle={handlePromptEvolutionToggle}

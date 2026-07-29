@@ -531,6 +531,13 @@
   gap: 10px;
 }
 
+.provider-auto-note {
+  margin: -1px 0 1px;
+  color: var(--subtle);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .advanced-settings {
   padding-top: 2px;
 }
@@ -1788,4 +1795,3 @@ details[open] > summary .settings-disclosure-chevron > svg {
 .settings-view .prompt-evolution-table tbody td:last-child {
   border-radius: 0 var(--settings-element-radius) var(--settings-element-radius) 0;
 }
-

@@ -608,6 +608,7 @@ const modelProviderModuleBudgets = new Map([
   ["json_wire.rs", 320],
   ["lib.rs", 900],
   ["realtime_provider.rs", 190],
+  ["redirect_policy.rs", 100],
   ["request_builder.rs", 340],
   ["response_parser.rs", 380],
   ["streaming_response.rs", 380],
@@ -1275,7 +1276,7 @@ assert(
     latestAsyncSelectionSource.includes("pending.operation = operation") &&
     appSource.includes("sessionRefreshRequestRef") &&
     appSource.includes("enqueueProjectSessionSelection") &&
-    appSource.includes("if (sessionId === activeSessionIdRef.current) return") &&
+    appSource.includes("if (sessionId === activeSessionIdRef.current) {") &&
     appSource.includes("getContextState(sessionId)") &&
     appSource.includes("if (workspaceChanged) refreshWorkspaceScopedState()") &&
     !sessionRefreshBlock.includes("setPhase7(await getPhase7State())") &&
@@ -1539,9 +1540,9 @@ assert(
   "Settings must toggle back to the previous workspace view"
 );
 assert(
-  /function handleSelectSession\(sessionId: string\) \{\s*showTimelineView\(\);\s*if \(sessionId === activeSessionIdRef\.current\) return;/.test(
+  /function handleSelectSession\(sessionId: string\) \{\s*const leavingTimeline = activeView === "timeline";\s*showTimelineView\(\);\s*if \(sessionId === activeSessionIdRef\.current\) \{/.test(
     appSource
-  ),
+  ) && appSource.includes("if (!leavingTimeline) void acknowledgeSessionResult(sessionId);"),
   "Selecting any sidebar session must leave Settings, including the active session"
 );
 assert(
@@ -1883,7 +1884,13 @@ assert(
     sessionThreadSource.includes("<ToolChainItem") &&
     styles.includes(".thread-tool-chain-items") &&
     styles.includes(".thread-tool-chain[open] > summary .thread-tool-chain-chevron") &&
-    /\.thread-tool-chain,\s*\.thread-tool-chain:hover,[\s\S]*?border: 0;[\s\S]*?box-shadow: none;/.test(
+    /\.thread-tool-chain > summary \{[\s\S]*?padding-inline: 2px;[\s\S]*?\}/.test(
+      styles
+    ) &&
+    /\.thread-tool-chain,\s*\.thread-tool-chain:hover,[\s\S]*?background: transparent;[\s\S]*?border: 0;[\s\S]*?box-shadow: none;/.test(
+      styles
+    ) &&
+    /\.thread-tool-chain > summary:focus-visible \{[\s\S]*?outline: 1px solid var\(--border-strong\);[\s\S]*?box-shadow: none;[\s\S]*?\}/.test(
       styles
     ),
   "All contiguous agent reasoning, collaboration, and tool activity must default to one parent disclosure"
@@ -2075,7 +2082,8 @@ assert(
   "Settings must rotate once per click and respect reduced-motion preferences"
 );
 assert(
-  sidebarSource.includes('if (!state || (active && state === "complete")) return null;') &&
+  sidebarSource.includes('if (!state || (active && unseenResult)) return null;') &&
+    sidebarSource.includes('unseenResult={session.unseenResult}') &&
     sidebarSource.includes('activity === "idle" ? null : activity') &&
     sidebarSource.includes('state === "working"') &&
     sidebarSource.includes('"Session needs attention"') &&
@@ -2139,9 +2147,12 @@ assert(
     styles.includes(".session-status-complete") &&
     styles.includes(".session-status-attention") &&
     styles.includes(".session-status-complete > span") &&
-    styles.includes(".session-status-complete > span,\n  .session-status-attention > span") &&
-    sidebarSource.includes('if (!state || (active && state === "complete")) return null;') &&
+    styles.includes(".session-status-unseen.session-status-complete > span") &&
+    styles.includes(".session-status-unseen.session-status-attention > span") &&
+    sidebarSource.includes('if (!state || (active && unseenResult)) return null;') &&
+    sidebarSource.includes("session-status-unseen") &&
     sidebarSource.includes("active={session.active}") &&
+    sidebarSource.includes("unseenResult={session.unseenResult}") &&
     sidebarSource.includes('className="session-name"') &&
     !sidebarSource.includes("<strong>{session.name}</strong>") &&
     styles.includes(".session-name") &&

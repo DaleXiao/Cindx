@@ -95,6 +95,24 @@ pub(super) fn build_chat_request_json_with_tools_and_output_limit(
     tools: &[ToolSpec],
     max_output_tokens: Option<u64>,
 ) -> Result<String, ModelError> {
+    build_chat_request_json_with_tools_output_limit_and_vision(
+        model,
+        messages,
+        stream,
+        tools,
+        max_output_tokens,
+        model_supports_vision_content(model),
+    )
+}
+
+pub(super) fn build_chat_request_json_with_tools_output_limit_and_vision(
+    model: &str,
+    messages: &[Message],
+    stream: bool,
+    tools: &[ToolSpec],
+    max_output_tokens: Option<u64>,
+    supports_vision: bool,
+) -> Result<String, ModelError> {
     let mut declared_tool_calls = BTreeSet::new();
     let messages_json = messages
         .iter()
@@ -132,7 +150,7 @@ pub(super) fn build_chat_request_json_with_tools_and_output_limit(
             _ => Some(format!(
                 "{{\"role\":\"{}\",\"content\":{}}}",
                 json_escape(message_role_to_str(&message.role)),
-                message_content_json(model, message)
+                message_content_json(supports_vision, message)
             )),
         })
         .collect::<Vec<_>>();
@@ -163,11 +181,11 @@ pub(super) fn build_chat_request_json_with_tools_and_output_limit(
     ))
 }
 
-fn message_content_json(model: &str, message: &Message) -> String {
+fn message_content_json(supports_vision: bool, message: &Message) -> String {
     let Some(paths) = message.metadata.get("image_paths") else {
         return format!("\"{}\"", json_escape(&message.content));
     };
-    if !model_supports_vision_content(model) {
+    if !supports_vision {
         return format!(
             "\"{}\"",
             json_escape(&format!(

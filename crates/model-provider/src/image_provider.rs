@@ -1,6 +1,6 @@
 use super::{
-    execute_http, execute_http_cancellable, GeneratedImage, ImageGenerationRequest,
-    ImageGenerationResponse, ModelError, MODEL_REQUEST_CANCELLED,
+    execute_http, execute_http_cancellable, is_azure_openai_url, GeneratedImage,
+    ImageGenerationRequest, ImageGenerationResponse, ModelError, MODEL_REQUEST_CANCELLED,
 };
 use crate::response_parser::parse_provider_error;
 use base64::Engine;
@@ -26,10 +26,15 @@ enum ImageGenerationProtocol {
 impl OpenAiCompatibleImageConfig {
     pub fn images_url(&self) -> String {
         let endpoint = self.base_url.trim_end_matches('/');
-        if endpoint.ends_with("/images/generations")
-            || endpoint.ends_with("/api/v1/services/aigc/multimodal-generation/generation")
+        if endpoint_path_ends_with(endpoint, "/images/generations")
+            || endpoint_path_ends_with(
+                endpoint,
+                "/api/v1/services/aigc/multimodal-generation/generation",
+            )
         {
             endpoint.to_string()
+        } else if is_azure_openai_v1_root(endpoint) {
+            format!("{endpoint}/images/generations?api-version=preview")
         } else {
             format!("{endpoint}/images/generations")
         }
@@ -51,6 +56,19 @@ impl OpenAiCompatibleImageConfig {
             ImageGenerationProtocol::OpenAiImages
         }
     }
+}
+
+fn endpoint_path_ends_with(endpoint: &str, suffix: &str) -> bool {
+    reqwest::Url::parse(endpoint)
+        .ok()
+        .is_some_and(|url| url.path().trim_end_matches('/').ends_with(suffix))
+}
+
+fn is_azure_openai_v1_root(endpoint: &str) -> bool {
+    is_azure_openai_url(endpoint)
+        && reqwest::Url::parse(endpoint).ok().is_some_and(|url| {
+            url.path().trim_end_matches('/') == "/openai/v1" && url.query().is_none()
+        })
 }
 
 pub struct OpenAiCompatibleImageProvider {
@@ -437,5 +455,27 @@ mod tests {
             dashscope.protocol(),
             ImageGenerationProtocol::DashScopeMultimodal
         );
+    }
+
+    #[test]
+    fn azure_v1_image_url_adds_preview_api_version_once() {
+        let base = OpenAiCompatibleImageConfig {
+            base_url: "https://cindx.openai.azure.com/openai/v1/".to_string(),
+            api_key: "key".to_string(),
+            model: "image-deployment".to_string(),
+            timeout_seconds: 10,
+        };
+        let explicit = OpenAiCompatibleImageConfig {
+            base_url:
+                "https://cindx.openai.azure.com/openai/v1/images/generations?api-version=preview"
+                    .to_string(),
+            ..base.clone()
+        };
+
+        assert_eq!(
+            base.images_url(),
+            "https://cindx.openai.azure.com/openai/v1/images/generations?api-version=preview"
+        );
+        assert_eq!(explicit.images_url(), explicit.base_url);
     }
 }

@@ -115,7 +115,7 @@ pub(crate) fn save_provider_config(
         EventKind::TaskStatusChanged,
         "Provider config saved",
         [
-            ("provider".to_string(), "openai-compatible".to_string()),
+            ("provider".to_string(), config.provider_id.clone()),
             ("base_url".to_string(), config.base_url.clone()),
             (
                 "executor_model".to_string(),
@@ -176,23 +176,9 @@ pub(crate) async fn list_provider_models(
 ) -> Result<ProviderModelsState, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        let mut config = clone_provider_config(&state)?;
-        let base_url = normalized_config_value(&input.base_url);
-        let api_key = normalized_config_value(&input.api_key);
-        if !base_url.is_empty() {
-            config.base_url = base_url;
-        }
-        if !api_key.is_empty() {
-            config.api_key = api_key;
-        }
-
-        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
-            base_url: config.base_url,
-            api_key: config.api_key,
-            model: config.model,
-            embedding_model: config.embedding_model,
-            timeout_seconds: 30,
-        });
+        let config = clone_provider_config(&state)?;
+        let provider =
+            OpenAiCompatibleProvider::new(provider_config_for_model_list(&config, &input));
         let models = provider.list_models().map_err(|error| error.to_string())?;
         Ok(ProviderModelsState {
             models,
@@ -204,15 +190,52 @@ pub(crate) async fn list_provider_models(
     .map_err(|error| format!("model list task failed: {error}"))?
 }
 
+pub(crate) fn provider_config_for_model_list(
+    saved: &ProviderConfig,
+    input: &ProviderModelsInput,
+) -> OpenAiCompatibleConfig {
+    let provider_id = normalized_config_value(&input.provider_id);
+    let provider_resource = normalized_config_value(&input.provider_resource);
+    let base_url = normalized_config_value(&input.base_url);
+    let saved_profile = saved.provider_profile();
+    let draft_profile =
+        if provider_id.is_empty() && provider_resource.is_empty() && base_url.is_empty() {
+            saved_profile.clone()
+        } else {
+            resolve_provider_profile(&provider_id, &provider_resource, &base_url, "")
+        };
+    let input_api_key = normalized_config_value(&input.api_key);
+    let api_key = if !input_api_key.is_empty() {
+        input_api_key
+    } else if same_provider_model_identity(&saved_profile, &draft_profile) {
+        saved.api_key.clone()
+    } else {
+        String::new()
+    };
+    OpenAiCompatibleConfig {
+        base_url: draft_profile.base_url,
+        api_key,
+        model: saved.model.clone(),
+        embedding_model: saved.embedding_model.clone(),
+        timeout_seconds: 30,
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn validate_image_endpoint(
     input: ImageEndpointValidationInput,
 ) -> Result<ImageEndpointValidationState, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let base_url = if input.image_endpoint.trim().is_empty() {
-            normalized_config_value(&input.base_url)
+        let profile = resolve_provider_profile(
+            &normalized_config_value(&input.provider_id),
+            &normalized_config_value(&input.provider_resource),
+            &normalized_config_value(&input.base_url),
+            &normalized_config_value(&input.image_endpoint),
+        );
+        let base_url = if profile.image_endpoint.trim().is_empty() {
+            profile.base_url
         } else {
-            normalized_config_value(&input.image_endpoint)
+            profile.image_endpoint
         };
         let config = OpenAiCompatibleImageConfig {
             base_url,
@@ -270,7 +293,7 @@ pub(crate) fn send_model_prompt(
             format!("Model request started for {model}"),
             [
                 ("request_id".to_string(), request_id.clone()),
-                ("provider".to_string(), "openai-compatible".to_string()),
+                ("provider".to_string(), config.provider_id.clone()),
                 ("base_url".to_string(), config.base_url.clone()),
                 ("model".to_string(), model.clone()),
                 ("role".to_string(), "executor".to_string()),
@@ -341,7 +364,7 @@ pub(crate) fn send_model_prompt(
                 format!("Model response received from {model}"),
                 [
                     ("request_id".to_string(), request_id),
-                    ("provider".to_string(), "openai-compatible".to_string()),
+                    ("provider".to_string(), config.provider_id.clone()),
                     ("model".to_string(), model),
                     ("latency_ms".to_string(), latency_ms.to_string()),
                     (

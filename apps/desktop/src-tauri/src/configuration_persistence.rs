@@ -3,6 +3,9 @@ use crate::configuration_models::{
     embedding_model_for_provider, PersonalizationConfig, ProviderConfig,
 };
 use crate::persistence_runtime::{personalization_config_path, provider_config_path};
+use crate::provider_profiles::{
+    resolve_provider_profile, same_provider_credential_identity, ProviderProfile, PROVIDER_CUSTOM,
+};
 use crate::runtime_constants::PERSONALIZATION_MAX_NAME_CHARS;
 use crate::runtime_values::{
     config_hex_decode, config_hex_encode, normalized_agent_instructions, normalized_config_value,
@@ -27,7 +30,16 @@ pub(crate) fn clone_provider_config(
 }
 
 pub(crate) fn apply_provider_config_input(config: &mut ProviderConfig, input: ProviderConfigInput) {
-    config.base_url = normalized_config_value(&input.base_url);
+    let previous_profile = config.provider_profile();
+    let next_profile = resolve_provider_profile(
+        &normalized_config_value(&input.provider_id),
+        &normalized_config_value(&input.provider_resource),
+        &normalized_config_value(&input.base_url),
+        &normalized_config_value(&input.image_endpoint),
+    );
+    config.provider_id = next_profile.provider_id.clone();
+    config.provider_resource = next_profile.provider_resource.clone();
+    config.base_url = next_profile.base_url.clone();
     config.model = normalized_config_value(&input.model);
     config.conductor_model = normalized_config_value(&input.conductor_model);
     config.planner_model = normalized_config_value(&input.planner_model);
@@ -36,7 +48,7 @@ pub(crate) fn apply_provider_config_input(config: &mut ProviderConfig, input: Pr
     config.summarizer_model = normalized_config_value(&input.summarizer_model);
     config.embedding_model = normalized_config_value(&input.embedding_model);
     config.image_model = normalized_config_value(&input.image_model);
-    config.image_endpoint = normalized_config_value(&input.image_endpoint);
+    config.image_endpoint = next_profile.image_endpoint.clone();
     config.voice_model = normalized_config_value(&input.voice_model);
     config.collaboration_policy = match input.collaboration_policy.as_str() {
         "single" | "plan_execute_review" | "best_of_n" | "auto_router" => {
@@ -50,6 +62,8 @@ pub(crate) fn apply_provider_config_input(config: &mut ProviderConfig, input: Pr
     let api_key = normalized_config_value(&input.api_key);
     if !api_key.is_empty() {
         config.api_key = api_key;
+    } else if !same_provider_credential_identity(&previous_profile, &next_profile) {
+        config.api_key.clear();
     }
     if config.planner_model.is_empty() {
         config.planner_model = config.model.clone();
@@ -80,11 +94,17 @@ pub(crate) fn load_provider_config() -> ProviderConfig {
 pub(crate) fn provider_config_from_text(text: &str) -> ProviderConfig {
     let mut config = ProviderConfig::default();
     let mut conductor_model_loaded = false;
+    let mut provider_id_loaded = false;
     for line in text.lines() {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
         match key {
+            "provider_id" => {
+                config.provider_id = value.to_string();
+                provider_id_loaded = true;
+            }
+            "provider_resource" => config.provider_resource = value.to_string(),
             "base_url" => config.base_url = value.to_string(),
             "api_key" => config.api_key = value.to_string(),
             "model" => config.model = value.to_string(),
@@ -113,12 +133,46 @@ pub(crate) fn provider_config_from_text(text: &str) -> ProviderConfig {
             _ => {}
         }
     }
+    let mut profile = resolve_provider_profile(
+        if provider_id_loaded {
+            &config.provider_id
+        } else {
+            ""
+        },
+        &config.provider_resource,
+        &config.base_url,
+        &config.image_endpoint,
+    );
+    if !provider_id_loaded && legacy_image_endpoint_is_custom(&profile, &config.image_endpoint) {
+        profile = resolve_provider_profile(
+            PROVIDER_CUSTOM,
+            "",
+            &config.base_url,
+            &config.image_endpoint,
+        );
+    }
+    config.provider_id = profile.provider_id;
+    config.provider_resource = profile.provider_resource;
+    config.base_url = profile.base_url;
+    config.image_endpoint = profile.image_endpoint;
     if !conductor_model_loaded || config.conductor_model.trim().is_empty() {
         config.conductor_model = config.model_for_role(&ModelRole::Planner);
     }
     config.embedding_model =
         embedding_model_for_provider(&config.base_url, &config.embedding_model);
     config
+}
+
+fn legacy_image_endpoint_is_custom(profile: &ProviderProfile, image_endpoint: &str) -> bool {
+    let endpoint = image_endpoint.trim().trim_end_matches('/');
+    if endpoint.is_empty() || profile.provider_id == PROVIDER_CUSTOM {
+        return false;
+    }
+    let base_url = profile.base_url.trim_end_matches('/');
+    let automatic_image_endpoint = profile.image_endpoint.trim().trim_end_matches('/');
+    endpoint != base_url
+        && endpoint != format!("{base_url}/images/generations")
+        && (automatic_image_endpoint.is_empty() || endpoint != automatic_image_endpoint)
 }
 
 pub(crate) fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<(), std::io::Error> {
@@ -133,7 +187,9 @@ pub(crate) fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<()
     let mut file = options.open(&path)?;
     file.write_all(
         format!(
-            "base_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\nvoice_model={}\ncollaboration_policy={}\nprompt_evolution_enabled={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\n",
+            "provider_id={}\nprovider_resource={}\nbase_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\nvoice_model={}\ncollaboration_policy={}\nprompt_evolution_enabled={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\n",
+            sanitize_config_value(&config.provider_id),
+            sanitize_config_value(&config.provider_resource),
             sanitize_config_value(&config.base_url),
             sanitize_config_value(&config.api_key),
             sanitize_config_value(&config.model),

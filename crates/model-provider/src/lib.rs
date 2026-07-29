@@ -1,6 +1,6 @@
 use agent_core::{Message, Metadata, ModelRole, ToolSpec};
 use futures_util::StreamExt;
-use reqwest::{header, Client, RequestBuilder, Response, StatusCode};
+use reqwest::{header, redirect, Client, RequestBuilder, Response, StatusCode};
 use std::future::Future;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -10,34 +10,34 @@ mod error;
 mod image_provider;
 mod json_wire;
 mod realtime_provider;
+mod redirect_policy;
 mod request_builder;
 mod response_parser;
 mod streaming_response;
 mod streaming_wire;
 mod usage;
 
-use json_wire::{
-    extract_json_array_after, extract_json_string_field, split_top_level_objects,
-};
+use json_wire::{extract_json_array_after, extract_json_string_field, split_top_level_objects};
+use redirect_policy::api_key_safe_redirect_policy;
+#[cfg(test)]
+use request_builder::build_chat_request_json_with_tools_and_output_limit;
 use request_builder::{
-    build_chat_request_json_with_tools_and_output_limit, model_supports_vision_content,
+    build_chat_request_json_with_tools_output_limit_and_vision, model_supports_vision_content,
 };
-use streaming_response::{
-    consume_streaming_body, consume_streaming_response, finish_streaming_response,
-};
+use streaming_response::consume_streaming_response;
+#[cfg(test)]
+use streaming_response::{consume_streaming_body, finish_streaming_response};
 
 pub use error::{classify_provider_failure, ProviderFailureClass};
 pub use image_provider::{
-    build_image_generation_request_json, OpenAiCompatibleImageConfig,
-    OpenAiCompatibleImageProvider,
+    build_image_generation_request_json, OpenAiCompatibleImageConfig, OpenAiCompatibleImageProvider,
+};
+pub use realtime_provider::{
+    build_realtime_session_json, OpenAiCompatibleRealtimeConfig, OpenAiCompatibleRealtimeProvider,
 };
 pub use request_builder::{
     build_chat_request_json, build_chat_request_json_with_tools, build_embedding_request_json,
     parse_embedding_response,
-};
-pub use realtime_provider::{
-    build_realtime_session_json, OpenAiCompatibleRealtimeConfig,
-    OpenAiCompatibleRealtimeProvider,
 };
 pub use response_parser::{
     parse_chat_response, parse_model_response, parse_provider_error, parse_tool_calls,
@@ -60,6 +60,7 @@ const DSML_INVOKE_CLOSE: &str = "</｜DSML｜invoke>";
 const DSML_PARAMETER_OPEN: &str = "<｜DSML｜parameter";
 const DSML_PARAMETER_CLOSE: &str = "</｜DSML｜parameter>";
 static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
+static AZURE_API_KEY_HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 static HTTP_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,6 +308,10 @@ impl OpenAiCompatibleConfig {
             && !self.embedding_model.trim().is_empty()
             && !self.base_url.trim().is_empty()
     }
+
+    fn supports_vision_content(&self) -> bool {
+        model_supports_vision_content(&self.model) || is_azure_openai_url(&self.base_url)
+    }
 }
 
 pub struct OpenAiCompatibleProvider {
@@ -319,21 +324,38 @@ fn streaming_hard_timeout_seconds(idle_timeout_seconds: u64) -> u64 {
         .saturating_mul(STREAMING_HARD_TIMEOUT_MULTIPLIER)
 }
 
-fn http_client() -> Result<&'static Client, ModelError> {
-    if let Some(client) = HTTP_CLIENT.get() {
+fn initialize_http_client(
+    cell: &'static OnceLock<Client>,
+    redirect_policy: Option<redirect::Policy>,
+) -> Result<&'static Client, ModelError> {
+    if let Some(client) = cell.get() {
         return Ok(client);
     }
-    let client = Client::builder()
+    let mut builder = Client::builder()
         .connect_timeout(Duration::from_secs(20))
         .pool_idle_timeout(Duration::from_secs(90))
         .pool_max_idle_per_host(8)
-        .tcp_keepalive(Duration::from_secs(30))
+        .tcp_keepalive(Duration::from_secs(30));
+    if let Some(redirect_policy) = redirect_policy {
+        builder = builder.redirect(redirect_policy);
+    }
+    let client = builder
         .build()
         .map_err(|error| ModelError::new(format!("failed to initialize HTTP client: {error}")))?;
-    let _ = HTTP_CLIENT.set(client);
-    HTTP_CLIENT
-        .get()
+    let _ = cell.set(client);
+    cell.get()
         .ok_or_else(|| ModelError::new("HTTP client did not initialize"))
+}
+
+fn http_client() -> Result<&'static Client, ModelError> {
+    initialize_http_client(&HTTP_CLIENT, None)
+}
+
+fn azure_api_key_http_client() -> Result<&'static Client, ModelError> {
+    initialize_http_client(
+        &AZURE_API_KEY_HTTP_CLIENT,
+        Some(api_key_safe_redirect_policy()),
+    )
 }
 
 fn http_runtime() -> Result<&'static Runtime, ModelError> {
@@ -363,7 +385,12 @@ fn http_request(
     hard_timeout: Duration,
     streaming: bool,
 ) -> Result<RequestBuilder, ModelError> {
-    let client = http_client()?;
+    let azure_api_key_request = !api_key.trim().is_empty() && is_azure_openai_url(url);
+    let client = if azure_api_key_request {
+        azure_api_key_http_client()?
+    } else {
+        http_client()?
+    };
     let mut request = if let Some(request_body) = request_body {
         client
             .post(url)
@@ -373,7 +400,7 @@ fn http_request(
         client.get(url)
     };
     if !api_key.trim().is_empty() {
-        request = request.bearer_auth(api_key);
+        request = apply_api_key_auth(request, url, api_key);
     }
     request = request.header(
         header::ACCEPT,
@@ -384,6 +411,30 @@ fn http_request(
         },
     );
     Ok(request.timeout(hard_timeout))
+}
+
+fn apply_api_key_auth(request: RequestBuilder, url: &str, api_key: &str) -> RequestBuilder {
+    if is_azure_openai_url(url) {
+        request.header("api-key", api_key)
+    } else {
+        request.bearer_auth(api_key)
+    }
+}
+
+pub(crate) fn is_azure_openai_url(url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_end_matches('.');
+    [".openai.azure.com", ".services.ai.azure.com"]
+        .into_iter()
+        .any(|suffix| {
+            host.strip_suffix(suffix)
+                .is_some_and(|subdomain| !subdomain.is_empty())
+        })
 }
 
 async fn await_http<T, E>(
@@ -631,12 +682,13 @@ impl OpenAiCompatibleProvider {
             .get("max_output_tokens")
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| *value > 0);
-        let request_body = build_chat_request_json_with_tools_and_output_limit(
+        let request_body = build_chat_request_json_with_tools_output_limit_and_vision(
             &self.config.model,
             &request.messages,
             true,
             &request.tools,
             max_output_tokens,
+            self.config.supports_vision_content(),
         )?;
         let idle_timeout = Duration::from_secs(self.config.timeout_seconds.max(1));
         let hard_timeout =
@@ -685,12 +737,13 @@ impl OpenAiCompatibleProvider {
             .get("max_output_tokens")
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| *value > 0);
-        let request_body = build_chat_request_json_with_tools_and_output_limit(
+        let request_body = build_chat_request_json_with_tools_output_limit_and_vision(
             &self.config.model,
             &request.messages,
             false,
             &request.tools,
             max_output_tokens,
+            self.config.supports_vision_content(),
         )?;
         let output = execute_http(
             &self.config.chat_completions_url(),
@@ -824,7 +877,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         ProviderCapabilities {
             supports_streaming: true,
             supports_tools: true,
-            supports_vision: model_supports_vision_content(&self.config.model),
+            supports_vision: self.config.supports_vision_content(),
             supports_embeddings: true,
         }
     }
@@ -840,17 +893,17 @@ impl ModelProvider for OpenAiCompatibleProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{MessageRole, ToolRisk};
-    use base64::Engine;
     use crate::image_provider::{
         build_dashscope_image_generation_request_json, decode_generated_image,
-        generated_image_mime_type, image_endpoint_probe_succeeded,
-        parse_image_generation_payloads, ImagePayload,
+        generated_image_mime_type, image_endpoint_probe_succeeded, parse_image_generation_payloads,
+        ImagePayload,
     };
     use crate::streaming_wire::{parse_stream_event, StreamingToolCall};
-    use std::fs;
+    use agent_core::{MessageRole, ToolRisk};
+    use base64::Engine;
     use futures_util::{stream, Stream};
     use std::collections::BTreeMap;
+    use std::fs;
     use std::time::Instant;
 
     struct ScriptedStreamingProvider;
@@ -960,12 +1013,17 @@ mod tests {
 
         assert_eq!(visible, "done");
         assert_eq!(response.message.content, "done");
+        assert_eq!(response.metadata["provider"], "openai-compatible");
+        assert_eq!(response.metadata["provider_protocol"], "openai-compatible");
         assert_eq!(
             response.metadata.get("prompt_tokens").map(String::as_str),
             Some("21")
         );
         assert_eq!(
-            response.metadata.get("completion_tokens").map(String::as_str),
+            response
+                .metadata
+                .get("completion_tokens")
+                .map(String::as_str),
             Some("4")
         );
         assert_eq!(
@@ -1046,6 +1104,70 @@ mod tests {
             http_client().expect("shared client should exist"),
             http_client().expect("shared client should be reused")
         ));
+    }
+
+    #[test]
+    fn azure_openai_requests_use_api_key_header() {
+        for url in [
+            "https://cindx.openai.azure.com/openai/v1/chat/completions",
+            "https://cindx.services.ai.azure.com/openai/v1/models",
+        ] {
+            let request = http_request(url, "test-secret", None, Duration::from_secs(10), false)
+                .expect("request should build")
+                .build()
+                .expect("request should be valid");
+
+            assert_eq!(
+                request
+                    .headers()
+                    .get("api-key")
+                    .expect("Azure API key header should exist"),
+                "test-secret"
+            );
+            assert!(request.headers().get(header::AUTHORIZATION).is_none());
+        }
+    }
+
+    #[test]
+    fn azure_openai_auth_requires_an_exact_host_with_a_resource_subdomain() {
+        for url in [
+            "https://openai.azure.com/openai/v1",
+            "https://services.ai.azure.com/openai/v1",
+            "https://cindx.openai.azure.com.example.test/openai/v1",
+            "https://example.test/openai/v1",
+        ] {
+            let request = http_request(url, "test-secret", None, Duration::from_secs(10), false)
+                .expect("request should build")
+                .build()
+                .expect("request should be valid");
+
+            assert!(request.headers().get("api-key").is_none());
+            assert_eq!(
+                request
+                    .headers()
+                    .get(header::AUTHORIZATION)
+                    .expect("bearer authorization should exist"),
+                "Bearer test-secret"
+            );
+        }
+    }
+
+    #[test]
+    fn azure_deployment_names_keep_multimodal_content_enabled() {
+        let azure = OpenAiCompatibleConfig {
+            base_url: "https://cindx.openai.azure.com/openai/v1".to_string(),
+            api_key: "key".to_string(),
+            model: "production-deployment".to_string(),
+            embedding_model: "embedding-deployment".to_string(),
+            timeout_seconds: 30,
+        };
+        let custom = OpenAiCompatibleConfig {
+            base_url: "https://example.test/v1".to_string(),
+            ..azure.clone()
+        };
+
+        assert!(azure.supports_vision_content());
+        assert!(!custom.supports_vision_content());
     }
 
     #[test]

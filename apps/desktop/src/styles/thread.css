@@ -1394,7 +1394,7 @@ details[open] > summary .disclosure-triangle {
 .thread-tool-chain > summary {
   display: flex;
   gap: 6px;
-  padding-inline: 10px;
+  padding-inline: 2px;
 }
 
 .thread-agent-action-orb {
@@ -1450,13 +1450,15 @@ details[open] > summary .disclosure-triangle {
 .thread-tool-chain[open],
 .thread-tool-chain[open]:hover,
 .thread-tool-chain[open].selected {
+  background: transparent;
   border: 0;
   box-shadow: none;
 }
 
-.thread-tool-chain[open] {
-  background: color-mix(in srgb, var(--surface-hover) 52%, transparent);
-  border-radius: var(--radius-lg);
+.thread-tool-chain > summary:focus-visible {
+  outline: 1px solid var(--border-strong);
+  outline-offset: 2px;
+  box-shadow: none;
 }
 
 .thread-tool-chain-items {
@@ -1473,7 +1475,7 @@ details[open] > summary .disclosure-triangle {
   align-items: center;
   gap: 7px;
   padding: 6px;
-  color: #555555;
+  color: var(--muted);
   text-align: left;
   background: transparent;
   border: 0;
@@ -1488,7 +1490,11 @@ details[open] > summary .disclosure-triangle {
 .thread-tool-chain-item > svg {
   width: 12px;
   height: 12px;
-  color: #666666;
+  color: var(--subtle);
+}
+
+.thread-tool-chain-item .thread-event-icon {
+  color: var(--subtle);
 }
 
 .thread-tool-chain-copy {
@@ -1505,8 +1511,9 @@ details[open] > summary .disclosure-triangle {
 }
 
 .thread-tool-chain-copy strong {
+  color: var(--muted);
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 550;
 }
 
 .thread-tool-chain-copy small {

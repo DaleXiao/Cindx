@@ -74,6 +74,8 @@ pub(crate) struct SkillUrlInstallInput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProviderConfig {
+    pub(crate) provider_id: String,
+    pub(crate) provider_resource: String,
     pub(crate) base_url: String,
     pub(crate) api_key: String,
     pub(crate) model: String,
@@ -150,6 +152,8 @@ impl Default for ProviderConfig {
     fn default() -> Self {
         let model = "gpt-4.1-mini".to_string();
         Self {
+            provider_id: PROVIDER_OPENAI.to_string(),
+            provider_resource: String::new(),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: String::new(),
             model: model.clone(),
@@ -171,6 +175,15 @@ impl Default for ProviderConfig {
 }
 
 impl ProviderConfig {
+    pub(crate) fn provider_profile(&self) -> ProviderProfile {
+        resolve_provider_profile(
+            &self.provider_id,
+            &self.provider_resource,
+            &self.base_url,
+            &self.image_endpoint,
+        )
+    }
+
     pub(crate) fn is_ready(&self) -> bool {
         !self.base_url.trim().is_empty()
             && !self.api_key.trim().is_empty()
@@ -178,9 +191,14 @@ impl ProviderConfig {
     }
 
     pub(crate) fn voice_is_ready(&self) -> bool {
-        !self.base_url.trim().is_empty()
+        self.supports_webrtc_voice()
+            && !self.base_url.trim().is_empty()
             && !self.api_key.trim().is_empty()
             && !self.voice_model.trim().is_empty()
+    }
+
+    pub(crate) fn supports_webrtc_voice(&self) -> bool {
+        provider_supports_webrtc_voice(&self.provider_id, &self.base_url)
     }
 
     pub(crate) fn model_for_role(&self, role: &ModelRole) -> String {
@@ -221,10 +239,9 @@ impl ProviderConfig {
 
 pub(crate) fn embedding_model_for_provider(base_url: &str, configured_model: &str) -> String {
     let configured_model = configured_model.trim();
-    let normalized_url = base_url.trim().to_ascii_lowercase();
-    let is_dashscope =
-        normalized_url.contains("dashscope") && normalized_url.contains("aliyuncs.com");
-    if is_dashscope
+    let is_alibaba_cn =
+        resolve_provider_profile("", "", base_url, "").provider_id == PROVIDER_ALIBABA_CN;
+    if is_alibaba_cn
         && (configured_model.is_empty()
             || configured_model.eq_ignore_ascii_case(OPENAI_DEFAULT_EMBEDDING_MODEL))
     {
