@@ -15,10 +15,7 @@ mod tests {
     use crate::{AgentEvaluationCaseScore, AgentEvaluationReflectionPacket, AgentEvaluationSplit};
     use std::collections::{BTreeMap, BTreeSet};
 
-    fn scientific_provenance(
-        candidate_id: &str,
-        opponent_id: &str,
-    ) -> PromptEvaluationProvenance {
+    fn scientific_provenance(candidate_id: &str, opponent_id: &str) -> PromptEvaluationProvenance {
         PromptEvaluationProvenance::blind_pairwise_swap(
             vec!["independent-judge".to_string()],
             vec!["candidate-worker".to_string()],
@@ -99,13 +96,7 @@ mod tests {
 
     #[test]
     fn non_independent_evaluation_cannot_train_prompt_evolution() {
-        let mut evidence = observation(
-            "candidate",
-            PromptEvaluationSplit::Train,
-            0.9,
-            100,
-            100,
-        );
+        let mut evidence = observation("candidate", PromptEvaluationSplit::Train, 0.9, 100, 100);
         evidence.provenance.evaluator_independent = false;
 
         assert!(!evidence.is_scientific_evidence());

@@ -114,9 +114,8 @@ pub fn evaluate_prompt_promotion_gate(
         .iter()
         .filter(|observation| observation.is_scientific_evidence())
         .filter(|observation| {
-            active_dataset_sha256.is_some_and(|digest| {
-                observation.provenance.dataset_sha256 == digest
-            })
+            active_dataset_sha256
+                .is_some_and(|digest| observation.provenance.dataset_sha256 == digest)
         })
     {
         let is_candidate = observation.profile_id == candidate_id
@@ -166,10 +165,10 @@ pub fn evaluate_prompt_promotion_gate(
                 == stable.provenance.opponent_prompt_sha256
                 && candidate.provenance.opponent_prompt_sha256
                     == stable.provenance.candidate_prompt_sha256;
-            let same_evaluator_protocol = candidate.provenance.protocol == stable.provenance.protocol
+            let same_evaluator_protocol = candidate.provenance.protocol
+                == stable.provenance.protocol
                 && candidate.provenance.evaluator_models == stable.provenance.evaluator_models
-                && candidate.provenance.participant_models
-                    == stable.provenance.participant_models;
+                && candidate.provenance.participant_models == stable.provenance.participant_models;
             if !mirrored_prompt_lineage || !same_evaluator_protocol {
                 blockers.insert(PromptPromotionBlocker::InvalidEvidenceShape);
                 return None;

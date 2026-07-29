@@ -1,0 +1,225 @@
+{
+  "version": 2,
+  "providers": [
+    {
+      "id": "openai",
+      "label": "OpenAI",
+      "baseUrl": "https://api.openai.com/v1",
+      "imageEndpoint": "",
+      "resourceRequired": false,
+      "modelDiscovery": true,
+      "modelDiscoveryModalities": ["chat", "embedding", "imageGeneration", "realtime"],
+      "webRtcVoice": true,
+      "models": [
+        {
+          "id": "gpt-4.1",
+          "protocol": "openai-chat-completions",
+          "modalities": ["chat", "imageInput"],
+          "toolCalling": true,
+          "contextWindowTokens": 1047576
+        },
+        {
+          "id": "gpt-4.1-mini",
+          "protocol": "openai-chat-completions",
+          "modalities": ["chat", "imageInput"],
+          "toolCalling": true,
+          "contextWindowTokens": 1047576
+        },
+        {
+          "id": "gpt-4o",
+          "protocol": "openai-chat-completions",
+          "modalities": ["chat", "imageInput"],
+          "toolCalling": true,
+          "contextWindowTokens": 128000
+        },
+        {
+          "id": "text-embedding-3-large",
+          "protocol": "openai-embeddings",
+          "modalities": ["embedding"],
+          "toolCalling": false,
+          "contextWindowTokens": 8191
+        },
+        {
+          "id": "text-embedding-3-small",
+          "protocol": "openai-embeddings",
+          "modalities": ["embedding"],
+          "toolCalling": false,
+          "contextWindowTokens": 8191
+        },
+        {
+          "id": "gpt-image-2",
+          "protocol": "openai-images",
+          "modalities": ["imageGeneration"],
+          "toolCalling": false,
+          "contextWindowTokens": 0
+        },
+        {
+          "id": "gpt-image-1.5",
+          "protocol": "openai-images",
+          "modalities": ["imageGeneration"],
+          "toolCalling": false,
+          "contextWindowTokens": 0
+        },
+        {
+          "id": "gpt-image-1",
+          "protocol": "openai-images",
+          "modalities": ["imageGeneration"],
+          "toolCalling": false,
+          "contextWindowTokens": 0
+        },
+        {
+          "id": "gpt-realtime-2.1",
+          "protocol": "openai-realtime-webrtc",
+          "modalities": ["realtime"],
+          "toolCalling": false,
+          "contextWindowTokens": 0
+        },
+        {
+          "id": "gpt-realtime-2.1-mini",
+          "protocol": "openai-realtime-webrtc",
+          "modalities": ["realtime"],
+          "toolCalling": false,
+          "contextWindowTokens": 0
+        },
+        {
+          "id": "gpt-realtime",
+          "protocol": "openai-realtime-webrtc",
+          "modalities": ["realtime"],
+          "toolCalling": false,
+          "contextWindowTokens": 0
+        }
+      ],
+      "defaults": {
+        "chat": "gpt-4.1",
+        "conductor": "gpt-4.1",
+        "planner": "gpt-4.1",
+        "executor": "gpt-4.1",
+        "reviewer": "gpt-4.1",
+        "summarizer": "gpt-4.1-mini",
+        "embedding": "text-embedding-3-large",
+        "image": "gpt-image-2",
+        "voice": "gpt-realtime-2.1",
+        "contextWindowTokens": 1047576
+      }
+    },
+    {
+      "id": "azure_openai",
+      "label": "Azure OpenAI",
+      "baseUrl": "",
+      "imageEndpoint": "",
+      "resourceRequired": true,
+      "modelDiscovery": false,
+      "modelDiscoveryModalities": [],
+      "webRtcVoice": false,
+      "models": [],
+      "defaults": {
+        "chat": "",
+        "conductor": "",
+        "planner": "",
+        "executor": "",
+        "reviewer": "",
+        "summarizer": "",
+        "embedding": "",
+        "image": "",
+        "voice": "",
+        "contextWindowTokens": 128000
+      }
+    },
+    {
+      "id": "alibaba_cn",
+      "label": "阿里云百炼（中国）",
+      "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "imageEndpoint": "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+      "resourceRequired": false,
+      "modelDiscovery": true,
+      "modelDiscoveryModalities": ["chat", "embedding"],
+      "webRtcVoice": false,
+      "models": [
+        {
+          "id": "qwen3.7-plus",
+          "protocol": "openai-chat-completions",
+          "modalities": ["chat", "imageInput"],
+          "toolCalling": true,
+          "contextWindowTokens": 1000000
+        },
+        {
+          "id": "qwen3.7-flash",
+          "protocol": "openai-chat-completions",
+          "modalities": ["chat", "imageInput"],
+          "toolCalling": true,
+          "contextWindowTokens": 1000000
+        },
+        {
+          "id": "qwen3.7-max",
+          "protocol": "openai-chat-completions",
+          "modalities": ["chat"],
+          "toolCalling": true,
+          "contextWindowTokens": 1000000
+        },
+        {
+          "id": "qwen3.6-plus",
+          "protocol": "openai-chat-completions",
+          "modalities": ["chat", "imageInput"],
+          "toolCalling": true,
+          "contextWindowTokens": 1000000
+        },
+        {
+          "id": "qwen3.6-flash",
+          "protocol": "openai-chat-completions",
+          "modalities": ["chat", "imageInput"],
+          "toolCalling": true,
+          "contextWindowTokens": 1000000
+        },
+        {
+          "id": "text-embedding-v4",
+          "protocol": "openai-embeddings",
+          "modalities": ["embedding"],
+          "toolCalling": false,
+          "contextWindowTokens": 8192
+        },
+        {
+          "id": "qwen-image-3.0-pro",
+          "protocol": "dashscope-image-generation",
+          "modalities": ["imageGeneration"],
+          "toolCalling": false,
+          "contextWindowTokens": 0
+        }
+      ],
+      "defaults": {
+        "chat": "qwen3.7-plus",
+        "conductor": "qwen3.7-plus",
+        "planner": "qwen3.7-plus",
+        "executor": "qwen3.7-plus",
+        "reviewer": "qwen3.7-plus",
+        "summarizer": "qwen3.7-flash",
+        "embedding": "text-embedding-v4",
+        "image": "qwen-image-3.0-pro",
+        "voice": "",
+        "contextWindowTokens": 1000000
+      }
+    },
+    {
+      "id": "custom",
+      "label": "自定义 URL",
+      "baseUrl": "",
+      "imageEndpoint": "",
+      "resourceRequired": false,
+      "modelDiscovery": true,
+      "modelDiscoveryModalities": [],
+      "webRtcVoice": true,
+      "models": [],
+      "defaults": {
+        "chat": "",
+        "conductor": "",
+        "planner": "",
+        "executor": "",
+        "reviewer": "",
+        "summarizer": "",
+        "embedding": "",
+        "image": "",
+        "voice": "",
+        "contextWindowTokens": 128000
+      }
+    }
+  ]
+}

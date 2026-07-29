@@ -1,9 +1,15 @@
 import {
-  Activity,
+  BadgeCheck,
+  Ban,
   CheckCircle2,
+  CircleDotDashed,
+  CircleHelp,
+  CirclePause,
   Clock3,
+  LoaderCircle,
+  OctagonX,
   ShieldQuestion,
-  XCircle
+  ShieldX
 } from "lucide-react";
 
 type TraceStatusIconProps = {
@@ -15,17 +21,26 @@ export function TraceStatusIcon({ status, className }: TraceStatusIconProps) {
   const normalized = status.trim().toLowerCase();
   const label = (normalized || "unknown").replace(/_/g, " ");
   let state = "idle";
-  let icon = <Clock3 aria-hidden="true" />;
+  let icon = <CircleHelp aria-hidden="true" />;
 
   if (["done", "completed", "success", "succeeded", "resolved"].includes(normalized)) {
     state = "done";
     icon = <CheckCircle2 aria-hidden="true" />;
-  } else if (["failed", "error", "denied"].includes(normalized)) {
+  } else if (["allow_once", "allow_for_session", "allowed", "approved"].includes(normalized)) {
+    state = "done";
+    icon = <BadgeCheck aria-hidden="true" />;
+  } else if (["denied", "deny"].includes(normalized)) {
     state = "failed";
-    icon = <XCircle aria-hidden="true" />;
+    icon = <ShieldX aria-hidden="true" />;
+  } else if (["failed", "error"].includes(normalized)) {
+    state = "failed";
+    icon = <OctagonX aria-hidden="true" />;
   } else if (["cancelled", "canceled"].includes(normalized)) {
     state = "cancelled";
-    icon = <XCircle aria-hidden="true" />;
+    icon = <Ban aria-hidden="true" />;
+  } else if (normalized === "paused") {
+    state = "waiting";
+    icon = <CirclePause aria-hidden="true" />;
   } else if (normalized === "waiting_for_permission") {
     state = "waiting";
     icon = <ShieldQuestion aria-hidden="true" />;
@@ -34,7 +49,9 @@ export function TraceStatusIcon({ status, className }: TraceStatusIconProps) {
     icon = <Clock3 aria-hidden="true" />;
   } else if (["running", "in_progress"].includes(normalized)) {
     state = "running";
-    icon = <Activity aria-hidden="true" />;
+    icon = <LoaderCircle aria-hidden="true" />;
+  } else if (normalized === "idle") {
+    icon = <CircleDotDashed aria-hidden="true" />;
   }
 
   return (

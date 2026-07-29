@@ -40,18 +40,16 @@ impl PromptParetoArchive {
                     && observation.split == PromptEvaluationSplit::Train
                     && observation.mode == PromptEvaluationMode::PairedExecution
                     && observation.is_scientific_evidence()
-                    && active_dataset_sha256.is_some_and(|digest| {
-                        observation.provenance.dataset_sha256 == digest
-                    })
+                    && active_dataset_sha256
+                        .is_some_and(|digest| observation.provenance.dataset_sha256 == digest)
             }));
             let holdout = summarize(observations.iter().filter(|observation| {
                 observation.profile_id == genome.id
                     && observation.split == PromptEvaluationSplit::Holdout
                     && observation.mode == PromptEvaluationMode::ReplayExecution
                     && observation.is_scientific_evidence()
-                    && active_dataset_sha256.is_some_and(|digest| {
-                        observation.provenance.dataset_sha256 == digest
-                    })
+                    && active_dataset_sha256
+                        .is_some_and(|digest| observation.provenance.dataset_sha256 == digest)
             }));
             if train.paired_runs < minimum_train_runs
                 || holdout.replay_runs < minimum_holdout_runs
@@ -72,9 +70,8 @@ impl PromptParetoArchive {
                         && observation.split == PromptEvaluationSplit::Holdout
                         && observation.mode == PromptEvaluationMode::ReplayExecution
                         && observation.is_scientific_evidence()
-                        && active_dataset_sha256.is_some_and(|digest| {
-                            observation.provenance.dataset_sha256 == digest
-                        })
+                        && active_dataset_sha256
+                            .is_some_and(|digest| observation.provenance.dataset_sha256 == digest)
                 }));
             if confidence.wilson_lower_bound < PROMOTION_MIN_LOWER_BOUND {
                 rejected_profiles.push(genome.id.clone());
@@ -513,9 +510,8 @@ pub fn prompt_proposal_minibatch_decision(
             && observation.split == PromptEvaluationSplit::Train
             && observation.mode == PromptEvaluationMode::PairedExecution
             && observation.is_scientific_evidence()
-            && active_dataset_sha256.is_some_and(|digest| {
-                observation.provenance.dataset_sha256 == digest
-            })
+            && active_dataset_sha256
+                .is_some_and(|digest| observation.provenance.dataset_sha256 == digest)
     }) {
         parent_pairs.insert((
             observation.evaluation_id.as_str(),
@@ -536,9 +532,8 @@ pub fn prompt_proposal_minibatch_decision(
                 && observation.split == PromptEvaluationSplit::Train
                 && observation.mode == PromptEvaluationMode::PairedExecution
                 && observation.is_scientific_evidence()
-                && active_dataset_sha256.is_some_and(|digest| {
-                    observation.provenance.dataset_sha256 == digest
-                })
+                && active_dataset_sha256
+                    .is_some_and(|digest| observation.provenance.dataset_sha256 == digest)
         })
         .filter(|observation| {
             let Some(parent_id) = observation.opponent_profile_id.as_deref() else {

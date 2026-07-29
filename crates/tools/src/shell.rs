@@ -637,16 +637,15 @@ fn opaque_interpreter_execution(segment: &[String], executable: &str) -> bool {
                 || argument.starts_with("--command=")
                 || !argument.starts_with('-')
         }),
-        "python" | "python3" | "node" | "ruby" | "perl" | "php" => arguments
-            .iter()
-            .any(|argument| {
+        "python" | "python3" | "node" | "ruby" | "perl" | "php" => {
+            arguments.iter().any(|argument| {
                 short_option_enables(argument, 'c')
                     || short_option_enables(argument, 'e')
                     || argument == "--eval"
                     || argument.starts_with("--eval=")
-                    || (!argument.starts_with('-')
-                        && !matches!(argument.as_str(), "-" | "--"))
-            }),
+                    || (!argument.starts_with('-') && !matches!(argument.as_str(), "-" | "--"))
+            })
+        }
         _ => false,
     }
 }

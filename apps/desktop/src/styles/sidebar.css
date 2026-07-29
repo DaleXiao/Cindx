@@ -768,11 +768,6 @@
   flex: 0 0 auto;
 }
 
-.sidebar-settings svg {
-  transform-box: fill-box;
-  transform-origin: center;
-}
-
 .delete-confirmation-backdrop {
   position: fixed;
   z-index: 200;

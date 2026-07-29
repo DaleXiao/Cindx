@@ -1008,6 +1008,7 @@ pub(crate) fn timeline_entry(event: Event, audits: &[PermissionAuditRecord]) -> 
         label: timeline_event_label(&event),
         detail: redact_sensitive_text(&detail),
         kind: event_kind_ui_kind(&event.kind).to_string(),
+        tool_name: event.metadata.get("tool").cloned(),
         state: event_state(&event.kind, permission_is_pending).to_string(),
         timestamp_ms: event.timestamp_ms,
         workflow_progress,

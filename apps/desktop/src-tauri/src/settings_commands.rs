@@ -82,56 +82,257 @@ pub(crate) fn save_personalization_config(
 }
 
 #[tauri::command]
-pub(crate) fn save_provider_config(
-    state: tauri::State<'_, AppState>,
+pub(crate) async fn save_provider_config(
+    app: tauri::AppHandle,
     input: ProviderConfigInput,
 ) -> Result<Phase4State, String> {
-    let config = {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _update = state
+            .provider_config_update
+            .lock()
+            .map_err(|error| format!("provider config update lock poisoned: {error}"))?;
         let mut config = state
             .provider_config
             .lock()
-            .map_err(|error| format!("provider config lock poisoned: {error}"))?;
+            .map_err(|error| format!("provider config lock poisoned: {error}"))?
+            .clone();
         apply_provider_config_input(&mut config, input);
+        if !config.is_ready() {
+            return Err("Provider endpoint, API key, and Chat model are required".to_string());
+        }
+        if config.provider_id == PROVIDER_ALIBABA_CN
+            && config.api_key.trim().starts_with("sk-sp-")
+        {
+            return Err(
+                "Alibaba Coding Plan and Token Plan keys use dedicated endpoints and protocols; the built-in Alibaba profile currently supports standard Pay-as-you-go DashScope API keys"
+                    .to_string(),
+            );
+        }
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url: config.base_url.clone(),
+            api_key: config.api_key.clone(),
+            model: config.model_for_role(&ModelRole::Executor),
+            embedding_model: config.model_for_role(&ModelRole::Embedder),
+            timeout_seconds: 30,
+        });
+        let (available_models, chat_verified) = if config.provider_id == PROVIDER_AZURE_OPENAI {
+            (verify_azure_provider(&mut config)?, true)
+        } else {
+            let models = provider
+                .validate_credentials()
+                .map_err(|error| format!("API key verification failed: {error}"))?;
+            let chat_verified = models.is_empty();
+            (models, chat_verified)
+        };
+        if provider_supports_model_discovery(&config.provider_id) {
+            reconcile_provider_models(&mut config, &available_models)?;
+        }
+        if !chat_verified {
+            OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+                base_url: config.base_url.clone(),
+                api_key: config.api_key.clone(),
+                model: config.model_for_role(&ModelRole::Executor),
+                embedding_model: config.model_for_role(&ModelRole::Embedder),
+                timeout_seconds: 30,
+            })
+            .validate_chat_access()
+            .map_err(|error| format!("Chat model verification failed: {error}"))?;
+        }
+        config.auth_verified_at_ms = Some(current_time_millis());
         save_provider_config_to_disk(&config).map_err(|error| error.to_string())?;
-        config.clone()
-    };
-    if let Ok(root) = active_workspace_root(&state) {
-        invalidate_workspace_knowledge_cache(&state, &root)?;
+        *state
+            .provider_config
+            .lock()
+            .map_err(|error| format!("provider config lock poisoned: {error}"))? = config.clone();
+        state
+            .workspace_knowledge_cache
+            .lock()
+            .map_err(|error| format!("workspace knowledge cache lock poisoned: {error}"))?
+            .clear();
+        invalidate_tool_registry_cache(&state)?;
+        state
+            .conductor_health
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        append_event(
+            &mut store,
+            &phase4_task_id(),
+            EventKind::TaskStatusChanged,
+            "Provider verified and configured",
+            [
+                ("provider".to_string(), config.provider_id.clone()),
+                ("base_url".to_string(), config.base_url.clone()),
+                (
+                    "executor_model".to_string(),
+                    config.model_for_role(&ModelRole::Executor),
+                ),
+                (
+                    "available_models".to_string(),
+                    available_models.len().to_string(),
+                ),
+                (
+                    "agent_system_prompt_length".to_string(),
+                    config.agent_system_prompt.chars().count().to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        )
+        .map_err(|error| error.to_string())?;
+
+        phase4_state(&mut store, &config, None).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("provider verification task failed to join: {error}"))?
+}
+
+fn verify_azure_provider(config: &mut ProviderConfig) -> Result<Vec<String>, String> {
+    let resource = config.provider_resource.trim();
+    let candidates = [
+        config.base_url.clone(),
+        format!("https://{resource}.openai.azure.com/openai/v1"),
+        format!("https://{resource}.services.ai.azure.com/openai/v1"),
+    ];
+    let mut attempted = Vec::new();
+    let mut errors = Vec::new();
+    for base_url in candidates {
+        if base_url.trim().is_empty()
+            || attempted
+                .iter()
+                .any(|candidate: &String| candidate.eq_ignore_ascii_case(&base_url))
+        {
+            continue;
+        }
+        attempted.push(base_url.clone());
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url: base_url.clone(),
+            api_key: config.api_key.clone(),
+            model: config.model_for_role(&ModelRole::Executor),
+            embedding_model: config.model_for_role(&ModelRole::Embedder),
+            timeout_seconds: 30,
+        });
+        match provider.validate_credentials() {
+            Ok(_) => {
+                config.base_url = base_url;
+                return Ok(Vec::new());
+            }
+            Err(error) => errors.push(error.to_string()),
+        }
     }
-    invalidate_tool_registry_cache(&state)?;
-    state
-        .conductor_health
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clear();
+    Err(format!(
+        "Azure API key or deployment verification failed: {}",
+        errors
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "no valid Azure v1 endpoint was available".to_string())
+    ))
+}
 
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    append_event(
-        &mut store,
-        &phase4_task_id(),
-        EventKind::TaskStatusChanged,
-        "Provider config saved",
-        [
-            ("provider".to_string(), config.provider_id.clone()),
-            ("base_url".to_string(), config.base_url.clone()),
-            (
-                "executor_model".to_string(),
-                config.model_for_role(&ModelRole::Executor),
-            ),
-            (
-                "agent_system_prompt_length".to_string(),
-                config.agent_system_prompt.chars().count().to_string(),
-            ),
+pub(crate) fn reconcile_provider_models(
+    config: &mut ProviderConfig,
+    available_models: &[String],
+) -> Result<(), String> {
+    if available_models.is_empty() {
+        return Ok(());
+    }
+    let available = |model: &str| {
+        available_models
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(model.trim()))
+    };
+    let first_available = |models: &[&str]| {
+        models
+            .iter()
+            .find(|model| available(model))
+            .map(|model| (*model).to_string())
+    };
+    let chat_models = provider_models_for_modality(&config.provider_id, "chat");
+    if chat_models.is_empty() {
+        if !available(&config.model_for_role(&ModelRole::Executor)) {
+            return Err(
+                "API key is valid, but the configured Chat model is unavailable".to_string(),
+            );
+        }
+        return Ok(());
+    }
+    let multimodal_models = provider_models_for_modality(&config.provider_id, "imageInput");
+    let chat_fallback = first_available(&multimodal_models)
+        .or_else(|| first_available(&chat_models))
+        .or_else(|| {
+            available_models
+                .iter()
+                .find(|model| looks_like_chat_model(model))
+                .cloned()
+        })
+        .ok_or_else(|| "API key is valid, but no compatible Chat model is available".to_string())?;
+    let resolve_chat = |model: &str| {
+        if available(model) {
+            model.to_string()
+        } else {
+            chat_fallback.clone()
+        }
+    };
+    config.model = resolve_chat(&config.model);
+    config.conductor_model = resolve_chat(&config.conductor_model);
+    config.planner_model = resolve_chat(&config.planner_model);
+    config.executor_model = resolve_chat(&config.executor_model);
+    config.reviewer_model = resolve_chat(&config.reviewer_model);
+    config.summarizer_model = resolve_chat(&config.summarizer_model);
+    if provider_discovers_modality(&config.provider_id, "embedding")
+        && !available(&config.embedding_model)
+    {
+        config.embedding_model = first_available(&provider_models_for_modality(
+            &config.provider_id,
+            "embedding",
+        ))
+        .unwrap_or_default();
+    }
+    if provider_discovers_modality(&config.provider_id, "imageGeneration")
+        && !config.image_model.is_empty()
+        && !available(&config.image_model)
+    {
+        config.image_model = first_available(&provider_models_for_modality(
+            &config.provider_id,
+            "imageGeneration",
+        ))
+        .unwrap_or_default();
+    }
+    if provider_discovers_modality(&config.provider_id, "realtime")
+        && !config.voice_model.is_empty()
+        && !available(&config.voice_model)
+    {
+        config.voice_model = first_available(&provider_models_for_modality(
+            &config.provider_id,
+            "realtime",
+        ))
+        .unwrap_or_default();
+    }
+    Ok(())
+}
+
+fn looks_like_chat_model(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    !model.is_empty()
+        && ![
+            "embedding",
+            "rerank",
+            "image",
+            "dall-e",
+            "realtime",
+            "transcribe",
+            "whisper",
+            "speech",
+            "tts",
         ]
-        .into_iter()
-        .collect(),
-    )
-    .map_err(|error| error.to_string())?;
-
-    phase4_state(&mut store, &config, None).map_err(|error| error.to_string())
+        .iter()
+        .any(|marker| model.contains(marker))
 }
 
 #[tauri::command]
@@ -139,6 +340,10 @@ pub(crate) fn set_prompt_evolution_enabled(
     state: tauri::State<'_, AppState>,
     enabled: bool,
 ) -> Result<Phase4State, String> {
+    let _update = state
+        .provider_config_update
+        .lock()
+        .map_err(|error| format!("provider config update lock poisoned: {error}"))?;
     let config = {
         let mut config = state
             .provider_config

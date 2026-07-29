@@ -1,3 +1,5 @@
+use serde::Deserialize;
+use std::sync::OnceLock;
 use tauri::Url;
 
 pub(crate) const PROVIDER_OPENAI: &str = "openai";
@@ -12,6 +14,130 @@ const ALIBABA_CN_IMAGE_ENDPOINT: &str =
 const AZURE_OPENAI_HOST_SUFFIX: &str = ".openai.azure.com";
 const AZURE_AI_SERVICES_HOST_SUFFIX: &str = ".services.ai.azure.com";
 const ALIBABA_CN_WORKSPACE_HOST_SUFFIX: &str = ".cn-beijing.maas.aliyuncs.com";
+const PROVIDER_CATALOG_JSON: &str =
+    include_str!("../../../../crates/model-provider/providerCatalog.json");
+
+#[derive(Debug, Deserialize)]
+struct ProviderCatalogDocument {
+    version: u32,
+    providers: Vec<ProviderPreset>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderPreset {
+    id: String,
+    base_url: String,
+    image_endpoint: String,
+    model_discovery: bool,
+    model_discovery_modalities: Vec<String>,
+    web_rtc_voice: bool,
+    models: Vec<ProviderCatalogModel>,
+    defaults: ProviderModelDefaults,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProviderCatalogModel {
+    pub(crate) id: String,
+    pub(crate) protocol: String,
+    pub(crate) modalities: Vec<String>,
+    pub(crate) tool_calling: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProviderModelDefaults {
+    pub(crate) chat: String,
+    pub(crate) conductor: String,
+    pub(crate) planner: String,
+    pub(crate) executor: String,
+    pub(crate) reviewer: String,
+    pub(crate) summarizer: String,
+    pub(crate) embedding: String,
+    pub(crate) image: String,
+    pub(crate) voice: String,
+    pub(crate) context_window_tokens: u64,
+}
+
+static PROVIDER_CATALOG: OnceLock<ProviderCatalogDocument> = OnceLock::new();
+
+fn provider_catalog() -> &'static ProviderCatalogDocument {
+    PROVIDER_CATALOG.get_or_init(|| {
+        let catalog: ProviderCatalogDocument = serde_json::from_str(PROVIDER_CATALOG_JSON)
+            .expect("embedded provider catalog must be valid JSON");
+        assert_eq!(
+            catalog.version, 2,
+            "unsupported embedded provider catalog version"
+        );
+        catalog
+    })
+}
+
+fn provider_preset(provider_id: &str) -> Option<&'static ProviderPreset> {
+    provider_catalog()
+        .providers
+        .iter()
+        .find(|provider| provider.id == provider_id)
+}
+
+pub(crate) fn provider_model_catalog(provider_id: &str) -> Option<&'static [ProviderCatalogModel]> {
+    provider_preset(provider_id).map(|provider| provider.models.as_slice())
+}
+
+pub(crate) fn provider_supports_model_discovery(provider_id: &str) -> bool {
+    provider_preset(provider_id).is_some_and(|provider| provider.model_discovery)
+}
+
+pub(crate) fn provider_discovers_modality(provider_id: &str, modality: &str) -> bool {
+    provider_preset(provider_id).is_some_and(|provider| {
+        provider
+            .model_discovery_modalities
+            .iter()
+            .any(|value| value == modality)
+    })
+}
+
+pub(crate) fn provider_models_for_modality(provider_id: &str, modality: &str) -> Vec<&'static str> {
+    provider_model_catalog(provider_id)
+        .into_iter()
+        .flatten()
+        .filter(|model| {
+            model.modalities.iter().any(|value| value == modality)
+                && (modality != "chat" || model.protocol == "openai-chat-completions")
+        })
+        .map(|model| model.id.as_str())
+        .collect()
+}
+
+pub(crate) fn provider_model_defaults(provider_id: &str) -> Option<&'static ProviderModelDefaults> {
+    provider_preset(provider_id).map(|provider| &provider.defaults)
+}
+
+pub(crate) fn provider_model_supports_vision(provider_id: &str, model: &str) -> Option<bool> {
+    let model = provider_preset(provider_id)?
+        .models
+        .iter()
+        .find(|candidate| candidate.id.eq_ignore_ascii_case(model.trim()))?;
+    model
+        .modalities
+        .iter()
+        .any(|modality| modality == "chat")
+        .then(|| {
+            model
+                .modalities
+                .iter()
+                .any(|modality| modality == "imageInput")
+        })
+}
+
+pub(crate) fn provider_model_supports_tools(provider_id: &str, model: &str) -> Option<bool> {
+    provider_preset(provider_id)?
+        .models
+        .iter()
+        .find(|candidate| candidate.id.eq_ignore_ascii_case(model.trim()))
+        .map(|candidate| candidate.tool_calling)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProviderProfile {
@@ -36,6 +162,17 @@ pub(crate) fn resolve_provider_profile(
     image_endpoint: &str,
 ) -> ProviderProfile {
     let explicit_provider_id = provider_id.trim().to_ascii_lowercase();
+    if explicit_provider_id == PROVIDER_ALIBABA_CN
+        && !provider_resource.trim().is_empty()
+        && is_alibaba_workspace_url(base_url)
+    {
+        return ProviderProfile {
+            provider_id: PROVIDER_CUSTOM.to_string(),
+            provider_resource: String::new(),
+            base_url: base_url.to_string(),
+            image_endpoint: image_endpoint.to_string(),
+        };
+    }
     let (provider_id, inferred_resource) = if explicit_provider_id.is_empty() {
         infer_provider(base_url)
     } else {
@@ -51,14 +188,21 @@ pub(crate) fn resolve_provider_profile(
         PROVIDER_OPENAI => ProviderProfile {
             provider_id,
             provider_resource: String::new(),
-            base_url: OPENAI_BASE_URL.to_string(),
-            image_endpoint: String::new(),
+            base_url: provider_preset(PROVIDER_OPENAI)
+                .map(|provider| provider.base_url.clone())
+                .unwrap_or_else(|| OPENAI_BASE_URL.to_string()),
+            image_endpoint: provider_preset(PROVIDER_OPENAI)
+                .map(|provider| provider.image_endpoint.clone())
+                .unwrap_or_default(),
         },
         PROVIDER_AZURE_OPENAI => {
             let resource = resolved_resource(provider_resource, &inferred_resource);
-            let base_url = valid_resource_label(&resource)
-                .then(|| format!("https://{resource}.openai.azure.com/openai/v1"))
-                .unwrap_or_default();
+            let base_url = if valid_resource_label(&resource) {
+                configured_azure_v1_base_url(&resource, base_url)
+                    .unwrap_or_else(|| format!("https://{resource}.openai.azure.com/openai/v1"))
+            } else {
+                String::new()
+            };
             ProviderProfile {
                 provider_id,
                 provider_resource: resource,
@@ -67,31 +211,16 @@ pub(crate) fn resolve_provider_profile(
             }
         }
         PROVIDER_ALIBABA_CN => {
-            let resource = resolved_resource(provider_resource, &inferred_resource);
-            if resource.is_empty() {
-                ProviderProfile {
-                    provider_id,
-                    provider_resource: resource,
-                    base_url: ALIBABA_CN_BASE_URL.to_string(),
-                    image_endpoint: ALIBABA_CN_IMAGE_ENDPOINT.to_string(),
-                }
-            } else if valid_resource_label(&resource) {
-                let host = format!("{resource}.cn-beijing.maas.aliyuncs.com");
-                ProviderProfile {
-                    provider_id,
-                    provider_resource: resource,
-                    base_url: format!("https://{host}/compatible-mode/v1"),
-                    image_endpoint: format!(
-                        "https://{host}/api/v1/services/aigc/multimodal-generation/generation"
-                    ),
-                }
-            } else {
-                ProviderProfile {
-                    provider_id,
-                    provider_resource: resource,
-                    base_url: String::new(),
-                    image_endpoint: String::new(),
-                }
+            let preset = provider_preset(PROVIDER_ALIBABA_CN);
+            ProviderProfile {
+                provider_id,
+                provider_resource: String::new(),
+                base_url: preset
+                    .map(|provider| provider.base_url.clone())
+                    .unwrap_or_else(|| ALIBABA_CN_BASE_URL.to_string()),
+                image_endpoint: preset
+                    .map(|provider| provider.image_endpoint.clone())
+                    .unwrap_or_else(|| ALIBABA_CN_IMAGE_ENDPOINT.to_string()),
             }
         }
         _ => ProviderProfile {
@@ -119,7 +248,9 @@ pub(crate) fn same_provider_model_identity(
 
 pub(crate) fn provider_supports_webrtc_voice(provider_id: &str, base_url: &str) -> bool {
     match provider_id.trim().to_ascii_lowercase().as_str() {
-        PROVIDER_OPENAI => true,
+        known @ (PROVIDER_OPENAI | PROVIDER_AZURE_OPENAI | PROVIDER_ALIBABA_CN) => {
+            provider_preset(known).is_some_and(|provider| provider.web_rtc_voice)
+        }
         PROVIDER_CUSTOM => !uses_known_incompatible_voice_host(base_url),
         _ => false,
     }
@@ -141,10 +272,33 @@ fn infer_provider(base_url: &str) -> (String, String) {
     if let Some(resource) = resource_from_normalized_host(&host, AZURE_OPENAI_HOST_SUFFIX) {
         return (PROVIDER_AZURE_OPENAI.to_string(), resource);
     }
-    if let Some(resource) = resource_from_normalized_host(&host, ALIBABA_CN_WORKSPACE_HOST_SUFFIX) {
-        return (PROVIDER_ALIBABA_CN.to_string(), resource);
+    if resource_from_normalized_host(&host, ALIBABA_CN_WORKSPACE_HOST_SUFFIX).is_some() {
+        return (PROVIDER_CUSTOM.to_string(), String::new());
     }
     (PROVIDER_CUSTOM.to_string(), String::new())
+}
+
+fn configured_azure_v1_base_url(resource: &str, value: &str) -> Option<String> {
+    let url = parsed_http_url(value)?;
+    if url.scheme() != "https" {
+        return None;
+    }
+    let host = normalized_host(&url)?;
+    let expected_openai = format!("{resource}{AZURE_OPENAI_HOST_SUFFIX}");
+    let expected_services = format!("{resource}{AZURE_AI_SERVICES_HOST_SUFFIX}");
+    if host != expected_openai && host != expected_services {
+        return None;
+    }
+    let path = url.path().trim_end_matches('/');
+    (path == "/openai/v1").then(|| value.trim().trim_end_matches('/').to_string())
+}
+
+fn is_alibaba_workspace_url(value: &str) -> bool {
+    parsed_http_url(value)
+        .as_ref()
+        .and_then(normalized_host)
+        .and_then(|host| resource_from_normalized_host(&host, ALIBABA_CN_WORKSPACE_HOST_SUFFIX))
+        .is_some()
 }
 
 fn resolved_resource(configured: &str, inferred: &str) -> String {

@@ -4,6 +4,7 @@ import type { ProviderConfigInput } from "../tauri";
 import {
   PROVIDER_OPTIONS,
   providerBaseUrl,
+  providerPresetModelGroups,
   selectProviderDraft,
   type ProviderId
 } from "../providerProfiles";
@@ -12,6 +13,7 @@ type ProviderConnectionFieldsProps = {
   canUseConfiguredKey: boolean;
   handleLoadProviderModels: () => Promise<void>;
   providerDraft: ProviderConfigInput;
+  providerBusy: boolean;
   providerModels: string[];
   providerModelsBusy: boolean;
   providerModelsError: string | null;
@@ -24,6 +26,7 @@ export function ProviderConnectionFields({
   canUseConfiguredKey,
   handleLoadProviderModels,
   providerDraft,
+  providerBusy,
   providerModels,
   providerModelsBusy,
   providerModelsError,
@@ -36,13 +39,16 @@ export function ProviderConnectionFields({
     providerDraft.providerResource,
     providerDraft.baseUrl
   );
-  const providerCatalogSupported = providerDraft.providerId !== "azure_openai";
+  const presetModels = providerPresetModelGroups(providerDraft.providerId);
+  const presetModelCount = new Set(Object.values(presetModels).flat()).size;
+  const showManualCatalogRefresh = providerDraft.providerId === "custom";
 
   return (
     <>
       <label>
         <span>Model provider</span>
         <select
+          disabled={providerBusy}
           value={providerDraft.providerId}
           onChange={(event) =>
             setProviderDraft((current) => {
@@ -63,24 +69,9 @@ export function ProviderConnectionFields({
         <label>
           <span>Azure resource name</span>
           <input
+            disabled={providerBusy}
             value={providerDraft.providerResource}
             placeholder="my-openai-resource"
-            spellCheck={false}
-            onChange={(event) => {
-              const providerResource = event.target.value;
-              setProviderDraft((current) =>
-                current ? { ...current, providerResource } : current
-              );
-            }}
-          />
-        </label>
-      )}
-      {providerDraft.providerId === "alibaba_cn" && (
-        <label>
-          <span>Workspace ID (optional)</span>
-          <input
-            value={providerDraft.providerResource}
-            placeholder="Uses the shared China endpoint when empty"
             spellCheck={false}
             onChange={(event) => {
               const providerResource = event.target.value;
@@ -95,6 +86,7 @@ export function ProviderConnectionFields({
         <label>
           <span>Base URL</span>
           <input
+            disabled={providerBusy}
             value={providerDraft.baseUrl}
             placeholder="https://provider.example/v1"
             spellCheck={false}
@@ -107,12 +99,21 @@ export function ProviderConnectionFields({
       )}
       {providerDraft.providerId !== "custom" && (
         <p className="provider-auto-note">
-          Chat, multimodal, embedding, and image endpoints are configured automatically.
+          {providerDraft.providerId === "azure_openai"
+            ? "Azure exception: its API key does not contain the resource or deployment names, so those two values are required; service endpoints are derived automatically."
+            : providerDraft.providerId === "alibaba_cn"
+              ? `The standard DashScope Pay-as-you-go endpoint and ${presetModelCount} model presets are built in; no Workspace is required.`
+              : `Endpoints and ${presetModelCount} model presets across supported modalities are built in.`}
         </p>
       )}
       <label>
-        <span>API key</span>
+        <span>
+          {providerDraft.providerId === "alibaba_cn"
+            ? "DashScope API key (Pay-as-you-go)"
+            : "API key"}
+        </span>
         <input
+          disabled={providerBusy}
           type="password"
           value={providerDraft.apiKey}
           autoComplete="off"
@@ -125,12 +126,13 @@ export function ProviderConnectionFields({
         />
       </label>
       <div className="model-catalog-row">
-        {providerCatalogSupported && (
+        {showManualCatalogRefresh && (
           <button
             className="secondary-button"
             type="button"
             disabled={
               providerModelsBusy ||
+              providerBusy ||
               !resolvedBaseUrl ||
               (!providerDraft.apiKey.trim() && !canUseConfiguredKey)
             }
@@ -145,8 +147,10 @@ export function ProviderConnectionFields({
           </button>
         )}
         <span>
-          {!providerCatalogSupported
+          {providerDraft.providerId === "azure_openai"
             ? "Enter Azure deployment names below"
+            : providerDraft.providerId !== "custom"
+              ? "Connecting verifies the key and selected Chat model; modality presets are applied automatically"
             : providerModels.length > 0
               ? `${providerModels.length} available`
               : "You can also enter model IDs manually"}

@@ -46,8 +46,7 @@ fn default_evaluation_mode() -> PromptEvaluationMode {
     PromptEvaluationMode::Live
 }
 
-pub const PROMPT_EVALUATION_PROTOCOL_BLIND_PAIRWISE_SWAP_V1: &str =
-    "blind_pairwise_swap_v1";
+pub const PROMPT_EVALUATION_PROTOCOL_BLIND_PAIRWISE_SWAP_V1: &str = "blind_pairwise_swap_v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PromptEvaluationProvenance {

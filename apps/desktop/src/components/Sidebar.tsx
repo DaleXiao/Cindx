@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { Menu } from "@tauri-apps/api/menu";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   confirmDeleteAction,
   getScheduleState,
@@ -130,7 +130,6 @@ export function Sidebar({
   const [projectRenameDraft, setProjectRenameDraft] = useState("");
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
-  const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const searchActive = searchOpen && Boolean(searchQuery.trim());
 
   useEffect(() => {
@@ -156,21 +155,6 @@ export function Sidebar({
     if (!searchOpen) return;
     onSearchQueryChange("");
     onSearchToggle();
-  }
-
-  function handleSettingsClick() {
-    const icon = settingsButtonRef.current?.querySelector("svg");
-    if (icon && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      icon.getAnimations().forEach((animation) => animation.cancel());
-      icon.animate(
-        [{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }],
-        {
-          duration: 420,
-          easing: "cubic-bezier(0.22, 1, 0.36, 1)"
-        }
-      );
-    }
-    onViewChange("settings");
   }
 
   function selectProjectResult(projectId: string) {
@@ -708,14 +692,13 @@ export function Sidebar({
 
       <div className="sidebar-footer">
         <button
-          ref={settingsButtonRef}
           className={`icon-button sidebar-settings ${
             activeView === "settings" ? "active" : ""
           }`}
           aria-label="Settings"
           aria-pressed={activeView === "settings"}
           title="Settings"
-          onClick={handleSettingsClick}
+          onClick={() => onViewChange("settings")}
           type="button"
         >
           <Settings aria-hidden="true" />

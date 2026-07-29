@@ -84,6 +84,7 @@ pub fn run() {
         .manage(AppState {
             store: Mutex::new(store),
             provider_config: Mutex::new(provider_config),
+            provider_config_update: Mutex::new(()),
             workspace_config: Mutex::new(workspace_config),
             sidecar_config: Mutex::new(sidecar_config),
             web_search_config: Mutex::new(web_search_config),

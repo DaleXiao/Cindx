@@ -4,7 +4,6 @@ import {
   ChevronDown,
   Copy,
   Pencil,
-  TerminalSquare,
   X
 } from "lucide-react";
 import {
@@ -45,6 +44,7 @@ import {
   ToolChainDisclosure,
   toolMessageSummary
 } from "./SessionToolChain";
+import { ToolActivityIcon } from "./ToolActivityIcon";
 import { TraceStatusIcon } from "./TraceStatusIcon";
 import {
   activeAgentActionRowId,
@@ -96,7 +96,7 @@ const SESSION_THREAD_ROW_HEIGHT_CACHE_LIMIT = 512;
 const EMPTY_OUTPUT_ARTIFACTS: AgentOutputArtifactView[] = [];
 
 function MessageIcon({ role }: { role: ChatMessageView["role"] }) {
-  if (role === "tool") return <TerminalSquare aria-hidden="true" />;
+  if (role === "tool") return <ToolActivityIcon />;
   return <Bot aria-hidden="true" />;
 }
 
@@ -861,7 +861,7 @@ export const SessionThread = memo(function SessionThread({
               >
                 <summary onClick={() => onSelect(item)}>
                   <DisclosureTriangle />
-                  <TerminalSquare aria-hidden="true" />
+                  <ToolActivityIcon toolName={summary.label} />
                   <strong>{summary.label}</strong>
                   <TraceStatusIcon status={summary.status} />
                 </summary>

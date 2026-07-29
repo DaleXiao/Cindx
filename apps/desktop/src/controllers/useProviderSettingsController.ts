@@ -77,6 +77,7 @@ export function useProviderSettingsController({
   >("idle");
   const imageEndpointValidationRequestRef = useRef(0);
   const modelCatalogRequestRef = useRef(0);
+  const providerConnectInFlightRef = useRef(false);
 
   const loadProviderState = useCallback(async () => {
     const state = await getPhase4State();
@@ -138,9 +139,9 @@ export function useProviderSettingsController({
 
   const providerModelOptions = useMemo(() => {
     if (!providerDraft) {
-      return { chat: [], embedding: [], image: [], voice: [] };
+      return { chat: [], multimodal: [], embedding: [], image: [], voice: [] };
     }
-    return groupProviderModels(providerModels, {
+    return groupProviderModels(providerDraft.providerId, providerModels, {
       chat: [
         providerDraft.model,
         providerDraft.conductorModel,
@@ -176,15 +177,19 @@ export function useProviderSettingsController({
     : 0;
 
   const handleSaveProviderConfig = useCallback(async () => {
-    if (!providerDraft) return;
+    if (!providerDraft || providerConnectInFlightRef.current) return;
+    providerConnectInFlightRef.current = true;
     setProviderBusy(true);
     reportError(null);
     try {
       const next = await saveProviderConfig(providerDraft);
       setPhase4(next);
       setProviderDraft(providerDraftFromState(next.provider));
-      showSaved();
+      showSaved("Provider verified and configured");
+    } catch (error) {
+      reportError(error instanceof Error ? error.message : String(error));
     } finally {
+      providerConnectInFlightRef.current = false;
       setProviderBusy(false);
     }
   }, [providerDraft, reportError, showSaved]);
@@ -266,7 +271,9 @@ export function useProviderSettingsController({
     canUseConfiguredKey,
     setProviderDraft,
     voiceConfigured: Boolean(
-      phase4?.provider.apiKeySet &&
+      phase4 &&
+        (phase4.provider.authVerified ||
+          (phase4.provider.apiKeySet && phase4.provider.authVerifiedAtMs === null)) &&
         phase4.provider.baseUrl.trim() &&
         phase4.provider.voiceModel.trim() &&
         providerSupportsWebRtcVoice(phase4.provider.providerId, phase4.provider.baseUrl)

@@ -59,9 +59,9 @@ pub(crate) use base64::Engine;
 #[cfg(test)]
 pub(crate) use model_provider::ModelError;
 pub(crate) use model_provider::{
-    EmbeddingRequest, ModelCallMode, ModelRequest, ModelResponse, OpenAiCompatibleConfig,
-    OpenAiCompatibleImageConfig, OpenAiCompatibleImageProvider, OpenAiCompatibleProvider,
-    StreamingModelProvider, MODEL_REQUEST_CANCELLED,
+    model_supports_vision_content, EmbeddingRequest, ModelCallMode, ModelRequest, ModelResponse,
+    OpenAiCompatibleConfig, OpenAiCompatibleImageConfig, OpenAiCompatibleImageProvider,
+    OpenAiCompatibleProvider, StreamingModelProvider, MODEL_REQUEST_CANCELLED,
 };
 #[cfg(target_os = "macos")]
 pub(crate) use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindow, NSWindowButton};

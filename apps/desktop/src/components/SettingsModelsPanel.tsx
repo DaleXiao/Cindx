@@ -2,6 +2,10 @@ import { CheckCircle2, KeyRound, Save } from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
 import type { Phase4State, ProviderConfigInput } from "../tauri";
 import {
+  isValidProviderBaseUrl,
+  providerBaseUrl,
+  providerCanUseConfiguredKey,
+  providerModelContextWindow,
   providerSupportsWebRtcVoice,
   type ProviderModelGroups
 } from "../providerProfiles";
@@ -49,6 +53,44 @@ export function SettingsModelsPanel({
     : false;
   const refreshAnimationClass =
     providerModelsRefreshTurn > 0 ? "settings-refresh-turn" : undefined;
+  const resolvedBaseUrl = providerDraft
+    ? providerBaseUrl(
+        providerDraft.providerId,
+        providerDraft.providerResource,
+        providerDraft.baseUrl
+      )
+    : "";
+  const providerBaseUrlReady = isValidProviderBaseUrl(resolvedBaseUrl);
+  const credentialReady = Boolean(providerDraft?.apiKey.trim() || canUseConfiguredKey);
+  const chatModelReady = Boolean(providerDraft?.executorModel.trim());
+  const providerCanConnect = providerBaseUrlReady && credentialReady && chatModelReady;
+  const configuredChatModels = providerDraft
+    ? [
+        providerDraft.model,
+        providerDraft.conductorModel,
+        providerDraft.plannerModel,
+        providerDraft.executorModel,
+        providerDraft.reviewerModel,
+        providerDraft.summarizerModel
+      ]
+    : [];
+  const multimodalModel =
+    configuredChatModels.find((model) => providerModelOptions.multimodal.includes(model)) ??
+    "Not active";
+  const draftUsesSavedCredential = Boolean(
+    providerDraft &&
+      phase4?.provider &&
+      providerCanUseConfiguredKey(providerDraft, phase4.provider) &&
+      !providerDraft.apiKey.trim()
+  );
+  const credentialVerified = Boolean(
+    draftUsesSavedCredential && phase4?.provider.authVerified
+  );
+  const legacyCredential = Boolean(
+    draftUsesSavedCredential &&
+      phase4?.provider.apiKeySet &&
+      phase4.provider.authVerifiedAtMs === null
+  );
 
   return (
     <>
@@ -63,6 +105,7 @@ export function SettingsModelsPanel({
               canUseConfiguredKey={canUseConfiguredKey}
               handleLoadProviderModels={handleLoadProviderModels}
               providerDraft={providerDraft}
+              providerBusy={providerBusy}
               providerModels={providerModels}
               providerModelsBusy={providerModelsBusy}
               providerModelsError={providerModelsError}
@@ -74,6 +117,7 @@ export function SettingsModelsPanel({
               <label>
                 <span>Default effort</span>
                 <select
+                  disabled={providerBusy}
                   value={providerDraft.collaborationPolicy}
                   onChange={(event) =>
                     setProviderDraft({
@@ -90,6 +134,7 @@ export function SettingsModelsPanel({
               <label>
                 <span>Context window</span>
                 <select
+                  disabled={providerBusy}
                   value={providerDraft.contextWindowTokens}
                   onChange={(event) =>
                     setProviderDraft({
@@ -98,9 +143,13 @@ export function SettingsModelsPanel({
                     })
                   }
                 >
-                  {[32768, 65536, 128000, 200000, 262144, 1000000].map((tokens) => (
+                  {[32768, 65536, 128000, 200000, 262144, 1000000, 1047576].map((tokens) => (
                     <option value={tokens} key={tokens}>
-                      {tokens >= 1000000 ? "1M" : `${Math.round(tokens / 1000)}k`}
+                      {tokens === 1047576
+                        ? "1.05M"
+                        : tokens >= 1000000
+                          ? "1M"
+                          : `${Math.round(tokens / 1000)}k`}
                     </option>
                   ))}
                 </select>
@@ -110,6 +159,7 @@ export function SettingsModelsPanel({
               label={providerDraft.providerId === "azure_openai" ? "Default deployment" : "Default model"}
               value={providerDraft.model}
               options={providerModelOptions.chat}
+              disabled={providerBusy}
               onChange={(model) =>
                 setProviderDraft({
                   ...providerDraft,
@@ -118,7 +168,10 @@ export function SettingsModelsPanel({
                   plannerModel: model,
                   executorModel: model,
                   reviewerModel: model,
-                  summarizerModel: model
+                  summarizerModel: model,
+                  contextWindowTokens:
+                    providerModelContextWindow(providerDraft.providerId, model) ??
+                    providerDraft.contextWindowTokens
                 })
               }
             />
@@ -127,6 +180,7 @@ export function SettingsModelsPanel({
                 label="Conductor"
                 value={providerDraft.conductorModel}
                 options={providerModelOptions.chat}
+                disabled={providerBusy}
                 onChange={(conductorModel) =>
                   setProviderDraft({ ...providerDraft, conductorModel })
                 }
@@ -135,24 +189,28 @@ export function SettingsModelsPanel({
                 label="Planner"
                 value={providerDraft.plannerModel}
                 options={providerModelOptions.chat}
+                disabled={providerBusy}
                 onChange={(plannerModel) => setProviderDraft({ ...providerDraft, plannerModel })}
               />
               <ModelSelect
                 label="Executor"
                 value={providerDraft.executorModel}
                 options={providerModelOptions.chat}
+                disabled={providerBusy}
                 onChange={(executorModel) => setProviderDraft({ ...providerDraft, executorModel })}
               />
               <ModelSelect
                 label="Reviewer"
                 value={providerDraft.reviewerModel}
                 options={providerModelOptions.chat}
+                disabled={providerBusy}
                 onChange={(reviewerModel) => setProviderDraft({ ...providerDraft, reviewerModel })}
               />
               <ModelSelect
                 label="Summary"
                 value={providerDraft.summarizerModel}
                 options={providerModelOptions.chat}
+                disabled={providerBusy}
                 onChange={(summarizerModel) =>
                   setProviderDraft({ ...providerDraft, summarizerModel })
                 }
@@ -161,6 +219,7 @@ export function SettingsModelsPanel({
                 label="Embedding"
                 value={providerDraft.embeddingModel}
                 options={providerModelOptions.embedding}
+                disabled={providerBusy}
                 onChange={(embeddingModel) =>
                   setProviderDraft({ ...providerDraft, embeddingModel })
                 }
@@ -170,13 +229,14 @@ export function SettingsModelsPanel({
                 value={providerDraft.voiceModel}
                 options={providerModelOptions.voice}
                 emptyLabel={voiceSupported ? "Not configured" : "Not supported by this adapter"}
-                disabled={!voiceSupported}
+                disabled={providerBusy || !voiceSupported}
                 onChange={(voiceModel) => setProviderDraft({ ...providerDraft, voiceModel })}
               />
               <ModelSelect
                 label="Image generation"
                 value={providerDraft.imageModel}
                 options={providerModelOptions.image}
+                disabled={providerBusy}
                 emptyLabel="Not configured"
                 onChange={(imageModel) => setProviderDraft({ ...providerDraft, imageModel })}
               />
@@ -185,6 +245,7 @@ export function SettingsModelsPanel({
                   <span>Image API endpoint (optional)</span>
                   <div className="provider-endpoint-input" data-validation={imageEndpointValidation}>
                     <input
+                      disabled={providerBusy}
                       value={providerDraft.imageEndpoint}
                       spellCheck={false}
                       placeholder="Uses the custom Base URL when empty"
@@ -198,7 +259,7 @@ export function SettingsModelsPanel({
                     {imageEndpointValidation === "valid" && (
                       <CheckCircle2
                         className="provider-endpoint-check"
-                        aria-label="Image endpoint verified"
+                        aria-label="Image endpoint reachable"
                       />
                     )}
                   </div>
@@ -213,6 +274,20 @@ export function SettingsModelsPanel({
             )}
             <dl className="settings-facts">
               <div>
+                <dt>Connection</dt>
+                <dd>
+                  {credentialVerified
+                    ? "Credential + Chat verified"
+                    : legacyCredential
+                      ? "Legacy key — reconnect to verify"
+                      : "Not verified"}
+                </dd>
+              </div>
+              <div>
+                <dt>Multimodal</dt>
+                <dd>{multimodalModel}</dd>
+              </div>
+              <div>
                 <dt>Team</dt>
                 <dd>{collaborationModelCount} unique models across 4 worker roles</dd>
               </div>
@@ -220,11 +295,11 @@ export function SettingsModelsPanel({
             <button
               className="secondary-button"
               type="button"
-              disabled={providerBusy}
+              disabled={providerBusy || !providerCanConnect}
               onClick={handleSaveProviderConfig}
             >
               <Save size={17} aria-hidden="true" />
-              <span>{providerBusy ? "Saving" : "Save provider"}</span>
+              <span>{providerBusy ? "Verifying" : "Connect provider"}</span>
             </button>
           </div>
         )}
