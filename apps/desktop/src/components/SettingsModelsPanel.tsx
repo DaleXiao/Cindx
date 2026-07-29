@@ -1,9 +1,16 @@
-import { CheckCircle2, KeyRound, RefreshCw, Save } from "lucide-react";
+import { CheckCircle2, KeyRound, Save } from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
 import type { Phase4State, ProviderConfigInput } from "../tauri";
+import {
+  providerSupportsWebRtcVoice,
+  type ProviderModelGroups
+} from "../providerProfiles";
 import { PromptEvolutionPanel } from "./PromptEvolutionPanel";
+import { ProviderConnectionFields } from "./ProviderConnectionFields";
+import { ProviderModelInput as ModelSelect } from "./ProviderModelInput";
 
 type SettingsModelsPanelProps = {
+  canUseConfiguredKey: boolean;
   collaborationModelCount: number;
   handleLoadProviderModels: () => Promise<void>;
   handlePromptEvolutionToggle: (enabled: boolean) => Promise<void>;
@@ -12,7 +19,7 @@ type SettingsModelsPanelProps = {
   phase4: Phase4State | null;
   providerBusy: boolean;
   providerDraft: ProviderConfigInput | null;
-  providerModelOptions: string[];
+  providerModelOptions: ProviderModelGroups;
   providerModels: string[];
   providerModelsBusy: boolean;
   providerModelsError: string | null;
@@ -20,35 +27,8 @@ type SettingsModelsPanelProps = {
   setProviderDraft: Dispatch<SetStateAction<ProviderConfigInput | null>>;
 };
 
-function ModelSelect({
-  label,
-  value,
-  options,
-  emptyLabel,
-  onChange
-}: {
-  label: string;
-  value: string;
-  options: string[];
-  emptyLabel?: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <label>
-      <span>{label}</span>
-      <select value={value} onChange={(event) => onChange(event.target.value)}>
-        {emptyLabel && <option value="">{emptyLabel}</option>}
-        {options.map((model) => (
-          <option value={model} key={model}>
-            {model}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
 export function SettingsModelsPanel({
+  canUseConfiguredKey,
   collaborationModelCount,
   handleLoadProviderModels,
   handlePromptEvolutionToggle,
@@ -64,6 +44,12 @@ export function SettingsModelsPanel({
   providerModelsRefreshTurn,
   setProviderDraft
 }: SettingsModelsPanelProps) {
+  const voiceSupported = providerDraft
+    ? providerSupportsWebRtcVoice(providerDraft.providerId, providerDraft.baseUrl)
+    : false;
+  const refreshAnimationClass =
+    providerModelsRefreshTurn > 0 ? "settings-refresh-turn" : undefined;
+
   return (
     <>
       <section className="settings-section" data-settings-group="models">
@@ -73,55 +59,17 @@ export function SettingsModelsPanel({
         </div>
         {providerDraft && (
           <div className="provider-form">
-            <label>
-              <span>Base URL</span>
-              <input
-                value={providerDraft.baseUrl}
-                onChange={(event) =>
-                  setProviderDraft({ ...providerDraft, baseUrl: event.target.value })
-                }
-              />
-            </label>
-            <label>
-              <span>API key</span>
-              <input
-                type="password"
-                value={providerDraft.apiKey}
-                autoComplete="off"
-                spellCheck={false}
-                placeholder={phase4?.provider.apiKeySet ? "Configured key" : "Enter API key"}
-                onChange={(event) =>
-                  setProviderDraft({ ...providerDraft, apiKey: event.target.value })
-                }
-              />
-            </label>
-            <div className="model-catalog-row">
-              <button
-                className="secondary-button"
-                type="button"
-                disabled={
-                  providerModelsBusy ||
-                  !providerDraft.baseUrl.trim() ||
-                  (!providerDraft.apiKey.trim() && !phase4?.provider.apiKeySet)
-                }
-                onClick={() => void handleLoadProviderModels()}
-              >
-                <RefreshCw
-                  aria-hidden="true"
-                  className={providerModelsRefreshTurn > 0 ? "settings-refresh-turn" : undefined}
-                  key={providerModelsRefreshTurn}
-                />
-                <span>{providerModelsBusy ? "Loading models" : "Load models"}</span>
-              </button>
-              <span>
-                {providerModels.length > 0
-                  ? `${providerModels.length} available`
-                  : "Uses the provider model catalog"}
-              </span>
-            </div>
-            {providerModelsError && (
-              <div className="settings-inline-error">{providerModelsError}</div>
-            )}
+            <ProviderConnectionFields
+              canUseConfiguredKey={canUseConfiguredKey}
+              handleLoadProviderModels={handleLoadProviderModels}
+              providerDraft={providerDraft}
+              providerModels={providerModels}
+              providerModelsBusy={providerModelsBusy}
+              providerModelsError={providerModelsError}
+              providerModelsRefreshTurn={providerModelsRefreshTurn}
+              refreshAnimationClass={refreshAnimationClass}
+              setProviderDraft={setProviderDraft}
+            />
             <div className="role-grid provider-meta-grid">
               <label>
                 <span>Default effort</span>
@@ -159,9 +107,9 @@ export function SettingsModelsPanel({
               </label>
             </div>
             <ModelSelect
-              label="Default model"
+              label={providerDraft.providerId === "azure_openai" ? "Default deployment" : "Default model"}
               value={providerDraft.model}
-              options={providerModelOptions}
+              options={providerModelOptions.chat}
               onChange={(model) =>
                 setProviderDraft({
                   ...providerDraft,
@@ -170,8 +118,7 @@ export function SettingsModelsPanel({
                   plannerModel: model,
                   executorModel: model,
                   reviewerModel: model,
-                  summarizerModel: model,
-                  embeddingModel: providerDraft.embeddingModel
+                  summarizerModel: model
                 })
               }
             />
@@ -179,7 +126,7 @@ export function SettingsModelsPanel({
               <ModelSelect
                 label="Conductor"
                 value={providerDraft.conductorModel}
-                options={providerModelOptions}
+                options={providerModelOptions.chat}
                 onChange={(conductorModel) =>
                   setProviderDraft({ ...providerDraft, conductorModel })
                 }
@@ -187,25 +134,25 @@ export function SettingsModelsPanel({
               <ModelSelect
                 label="Planner"
                 value={providerDraft.plannerModel}
-                options={providerModelOptions}
+                options={providerModelOptions.chat}
                 onChange={(plannerModel) => setProviderDraft({ ...providerDraft, plannerModel })}
               />
               <ModelSelect
                 label="Executor"
                 value={providerDraft.executorModel}
-                options={providerModelOptions}
+                options={providerModelOptions.chat}
                 onChange={(executorModel) => setProviderDraft({ ...providerDraft, executorModel })}
               />
               <ModelSelect
                 label="Reviewer"
                 value={providerDraft.reviewerModel}
-                options={providerModelOptions}
+                options={providerModelOptions.chat}
                 onChange={(reviewerModel) => setProviderDraft({ ...providerDraft, reviewerModel })}
               />
               <ModelSelect
                 label="Summary"
                 value={providerDraft.summarizerModel}
-                options={providerModelOptions}
+                options={providerModelOptions.chat}
                 onChange={(summarizerModel) =>
                   setProviderDraft({ ...providerDraft, summarizerModel })
                 }
@@ -213,7 +160,7 @@ export function SettingsModelsPanel({
               <ModelSelect
                 label="Embedding"
                 value={providerDraft.embeddingModel}
-                options={providerModelOptions}
+                options={providerModelOptions.embedding}
                 onChange={(embeddingModel) =>
                   setProviderDraft({ ...providerDraft, embeddingModel })
                 }
@@ -221,40 +168,49 @@ export function SettingsModelsPanel({
               <ModelSelect
                 label="Full-duplex voice"
                 value={providerDraft.voiceModel}
-                options={providerModelOptions}
-                emptyLabel="Not configured"
+                options={providerModelOptions.voice}
+                emptyLabel={voiceSupported ? "Not configured" : "Not supported by this adapter"}
+                disabled={!voiceSupported}
                 onChange={(voiceModel) => setProviderDraft({ ...providerDraft, voiceModel })}
               />
               <ModelSelect
                 label="Image generation"
                 value={providerDraft.imageModel}
-                options={providerModelOptions}
+                options={providerModelOptions.image}
                 emptyLabel="Not configured"
                 onChange={(imageModel) => setProviderDraft({ ...providerDraft, imageModel })}
               />
-              <label>
-                <span>Image API endpoint</span>
-                <div className="provider-endpoint-input" data-validation={imageEndpointValidation}>
-                  <input
-                    value={providerDraft.imageEndpoint}
-                    spellCheck={false}
-                    placeholder="Uses provider Base URL when empty"
-                    onChange={(event) =>
-                      setProviderDraft({
-                        ...providerDraft,
-                        imageEndpoint: event.target.value
-                      })
-                    }
-                  />
-                  {imageEndpointValidation === "valid" && (
-                    <CheckCircle2
-                      className="provider-endpoint-check"
-                      aria-label="Image endpoint verified"
+              {providerDraft.providerId === "custom" && (
+                <label>
+                  <span>Image API endpoint (optional)</span>
+                  <div className="provider-endpoint-input" data-validation={imageEndpointValidation}>
+                    <input
+                      value={providerDraft.imageEndpoint}
+                      spellCheck={false}
+                      placeholder="Uses the custom Base URL when empty"
+                      onChange={(event) => {
+                        const imageEndpoint = event.target.value;
+                        setProviderDraft((current) =>
+                          current ? { ...current, imageEndpoint } : current
+                        );
+                      }}
                     />
-                  )}
-                </div>
-              </label>
+                    {imageEndpointValidation === "valid" && (
+                      <CheckCircle2
+                        className="provider-endpoint-check"
+                        aria-label="Image endpoint verified"
+                      />
+                    )}
+                  </div>
+                </label>
+              )}
             </div>
+            {!voiceSupported && (
+              <p className="provider-auto-note">
+                Full-duplex voice is disabled because this provider needs a different realtime
+                transport adapter.
+              </p>
+            )}
             <dl className="settings-facts">
               <div>
                 <dt>Team</dt>

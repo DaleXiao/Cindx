@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import {
   getPhase4State,
   listProviderModels,
@@ -9,6 +9,14 @@ import {
   type ProviderConfigInput,
   type ProviderConfigState
 } from "../tauri";
+import {
+  bindProviderDraftApiKey,
+  groupProviderModels,
+  providerBaseUrl,
+  providerCanUseConfiguredKey,
+  providerModelCatalogIdentity,
+  providerSupportsWebRtcVoice
+} from "../providerProfiles";
 
 function normalizedEffortPolicy(policy: string) {
   if (policy === "single" || policy === "best_of_n") return policy;
@@ -17,6 +25,8 @@ function normalizedEffortPolicy(policy: string) {
 
 function providerDraftFromState(provider: ProviderConfigState): ProviderConfigInput {
   return {
+    providerId: provider.providerId,
+    providerResource: provider.providerResource,
     baseUrl: provider.baseUrl,
     apiKey: "",
     model: provider.model,
@@ -46,7 +56,17 @@ export function useProviderSettingsController({
   showSaved
 }: ProviderSettingsControllerOptions) {
   const [phase4, setPhase4] = useState<Phase4State | null>(null);
-  const [providerDraft, setProviderDraft] = useState<ProviderConfigInput | null>(null);
+  const [providerDraft, setProviderDraftState] = useState<ProviderConfigInput | null>(null);
+  const setProviderDraft = useCallback(
+    (update: SetStateAction<ProviderConfigInput | null>) => {
+      setProviderDraftState((current) => {
+        const next = typeof update === "function" ? update(current) : update;
+        if (!current || !next) return next;
+        return bindProviderDraftApiKey(current, next);
+      });
+    },
+    []
+  );
   const [providerBusy, setProviderBusy] = useState(false);
   const [providerModels, setProviderModels] = useState<string[]>([]);
   const [providerModelsBusy, setProviderModelsBusy] = useState(false);
@@ -56,6 +76,7 @@ export function useProviderSettingsController({
     "idle" | "checking" | "valid" | "invalid"
   >("idle");
   const imageEndpointValidationRequestRef = useRef(0);
+  const modelCatalogRequestRef = useRef(0);
 
   const loadProviderState = useCallback(async () => {
     const state = await getPhase4State();
@@ -70,7 +91,12 @@ export function useProviderSettingsController({
     imageEndpointValidationRequestRef.current = requestId;
     const imageEndpoint = providerDraft?.imageEndpoint.trim() ?? "";
     const imageModel = providerDraft?.imageModel.trim() ?? "";
-    if (!providerDraft || !imageEndpoint || !imageModel) {
+    if (
+      !providerDraft ||
+      providerDraft.providerId !== "custom" ||
+      !imageEndpoint ||
+      !imageModel
+    ) {
       setImageEndpointValidation("idle");
       return;
     }
@@ -85,6 +111,8 @@ export function useProviderSettingsController({
     setImageEndpointValidation("checking");
     const timer = window.setTimeout(() => {
       void validateImageEndpoint({
+        providerId: providerDraft.providerId,
+        providerResource: providerDraft.providerResource,
         baseUrl: providerDraft.baseUrl,
         imageModel: providerDraft.imageModel,
         imageEndpoint: providerDraft.imageEndpoint
@@ -100,24 +128,43 @@ export function useProviderSettingsController({
         });
     }, 600);
     return () => window.clearTimeout(timer);
-  }, [providerDraft?.baseUrl, providerDraft?.imageEndpoint, providerDraft?.imageModel]);
+  }, [
+    providerDraft?.providerId,
+    providerDraft?.providerResource,
+    providerDraft?.baseUrl,
+    providerDraft?.imageEndpoint,
+    providerDraft?.imageModel
+  ]);
 
   const providerModelOptions = useMemo(() => {
-    const configured = providerDraft
-      ? [
-          providerDraft.model,
-          providerDraft.conductorModel,
-          providerDraft.plannerModel,
-          providerDraft.executorModel,
-          providerDraft.reviewerModel,
-          providerDraft.summarizerModel,
-          providerDraft.embeddingModel,
-          providerDraft.imageModel,
-          providerDraft.voiceModel
-        ]
-      : [];
-    return [...new Set([...providerModels, ...configured].filter(Boolean))].sort();
+    if (!providerDraft) {
+      return { chat: [], embedding: [], image: [], voice: [] };
+    }
+    return groupProviderModels(providerModels, {
+      chat: [
+        providerDraft.model,
+        providerDraft.conductorModel,
+        providerDraft.plannerModel,
+        providerDraft.executorModel,
+        providerDraft.reviewerModel,
+        providerDraft.summarizerModel
+      ],
+      embedding: providerDraft.embeddingModel,
+      image: providerDraft.imageModel,
+      voice: providerDraft.voiceModel
+    });
   }, [providerDraft, providerModels]);
+
+  const providerCatalogIdentity = providerDraft
+    ? providerModelCatalogIdentity(providerDraft)
+    : "";
+
+  useEffect(() => {
+    modelCatalogRequestRef.current += 1;
+    setProviderModels([]);
+    setProviderModelsBusy(false);
+    setProviderModelsError(null);
+  }, [providerCatalogIdentity]);
 
   const collaborationModelCount = providerDraft
     ? new Set([
@@ -165,20 +212,41 @@ export function useProviderSettingsController({
 
   const handleLoadProviderModels = useCallback(async () => {
     if (!providerDraft || providerModelsBusy) return;
+    const requestId = modelCatalogRequestRef.current + 1;
+    modelCatalogRequestRef.current = requestId;
     setProviderModelsRefreshTurn((current) => current + 1);
     setProviderModelsBusy(true);
     setProviderModelsError(null);
     try {
       const next = await listProviderModels({
-        baseUrl: providerDraft.baseUrl,
+        providerId: providerDraft.providerId,
+        providerResource: providerDraft.providerResource,
+        baseUrl: providerBaseUrl(
+          providerDraft.providerId,
+          providerDraft.providerResource,
+          providerDraft.baseUrl
+        ),
         apiKey: providerDraft.apiKey
       });
+      if (modelCatalogRequestRef.current !== requestId) return;
       setProviderModels(next.models);
       setProviderModelsError(next.lastError);
+    } catch (error) {
+      if (modelCatalogRequestRef.current !== requestId) return;
+      const message = error instanceof Error ? error.message : String(error);
+      setProviderModelsError(message);
+      reportError(message);
     } finally {
-      setProviderModelsBusy(false);
+      if (modelCatalogRequestRef.current === requestId) setProviderModelsBusy(false);
     }
-  }, [providerDraft, providerModelsBusy]);
+  }, [providerDraft, providerModelsBusy, reportError]);
+
+  const savedProvider = phase4?.provider ?? null;
+  const canUseConfiguredKey = Boolean(
+    savedProvider?.apiKeySet &&
+      providerDraft &&
+      providerCanUseConfiguredKey(providerDraft, savedProvider)
+  );
 
   return {
     collaborationModelCount,
@@ -195,11 +263,13 @@ export function useProviderSettingsController({
     providerModelsBusy,
     providerModelsError,
     providerModelsRefreshTurn,
+    canUseConfiguredKey,
     setProviderDraft,
     voiceConfigured: Boolean(
       phase4?.provider.apiKeySet &&
         phase4.provider.baseUrl.trim() &&
-        phase4.provider.voiceModel.trim()
+        phase4.provider.voiceModel.trim() &&
+        providerSupportsWebRtcVoice(phase4.provider.providerId, phase4.provider.baseUrl)
     )
   };
 }

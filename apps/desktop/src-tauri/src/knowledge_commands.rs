@@ -400,7 +400,7 @@ pub(crate) fn answer_with_rag(
             format!("RAG answer request started for {model}"),
             [
                 ("request_id".to_string(), request_id.clone()),
-                ("provider".to_string(), "openai-compatible".to_string()),
+                ("provider".to_string(), config.provider_id.clone()),
                 ("base_url".to_string(), config.base_url.clone()),
                 ("model".to_string(), model.clone()),
                 ("role".to_string(), "executor".to_string()),
@@ -483,7 +483,7 @@ pub(crate) fn answer_with_rag(
                 .map_err(|error| format!("store lock poisoned: {error}"))?;
             let mut metadata = [
                 ("request_id".to_string(), request_id),
-                ("provider".to_string(), "openai-compatible".to_string()),
+                ("provider".to_string(), config.provider_id.clone()),
                 ("model".to_string(), model.clone()),
                 ("latency_ms".to_string(), latency_ms.to_string()),
                 (

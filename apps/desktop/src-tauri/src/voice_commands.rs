@@ -24,6 +24,12 @@ pub(crate) async fn negotiate_voice_session(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let config = clone_provider_config(&state)?;
+        if !config.supports_webrtc_voice() {
+            return Err(format!(
+                "Full-duplex voice is not available for provider '{}' because it requires a different realtime transport adapter",
+                config.provider_id
+            ));
+        }
         if !config.voice_is_ready() {
             return Err("Configure a full-duplex voice model before using voice input".to_string());
         }

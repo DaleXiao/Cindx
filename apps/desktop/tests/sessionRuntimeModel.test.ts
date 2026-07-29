@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   latestTraceStep,
+  mergeAcknowledgedSessionActivity,
   messagesWithOptimisticUserMessages,
   mergeAgentStateSnapshot,
   mergeQueuedAgentMessage,
   mergeSequencedItems,
+  projectSessionResultAsRead,
   readSessionState,
   rememberSessionState
 } from "../src/sessionRuntimeModel.ts";
@@ -120,5 +122,69 @@ test("equal steer prompts reconcile independently", () => {
   assert.deepEqual(
     messagesWithOptimisticUserMessages([persistedFirst], [first, second]),
     [second, persistedFirst]
+  );
+});
+
+test("leaving a read session clears only unread terminal output", () => {
+  const completed = {
+    id: "session-a",
+    status: "Completed",
+    activity: "complete",
+    attentionReason: null,
+    unseenResult: true,
+    latestSequence: 12,
+    active: true
+  } as any;
+  const permission = {
+    ...completed,
+    status: "Approval required",
+    activity: "attention",
+    attentionReason: "permission",
+    unseenResult: false
+  } as any;
+
+  assert.deepEqual(projectSessionResultAsRead(completed), {
+    ...completed,
+    status: "Ready",
+    activity: "idle",
+    unseenResult: false
+  });
+  assert.equal(projectSessionResultAsRead(permission), permission);
+  assert.equal(
+    projectSessionResultAsRead({ ...completed, latestSequence: 13 }, 12).unseenResult,
+    true
+  );
+});
+
+test("late acknowledgements update read state without restoring stale selection", () => {
+  const current = {
+    id: "session-a",
+    status: "Completed",
+    activity: "complete",
+    attentionReason: null,
+    unseenResult: true,
+    latestSequence: 12,
+    active: false
+  } as any;
+  const acknowledged = {
+    ...current,
+    status: "Ready",
+    activity: "idle",
+    unseenResult: false,
+    active: true
+  } as any;
+
+  assert.deepEqual(mergeAcknowledgedSessionActivity(current, acknowledged), {
+    ...current,
+    status: "Ready",
+    activity: "idle",
+    unseenResult: false
+  });
+  assert.equal(
+    mergeAcknowledgedSessionActivity(
+      { ...current, latestSequence: 13 },
+      acknowledged
+    ).unseenResult,
+    true
   );
 });

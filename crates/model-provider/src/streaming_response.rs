@@ -85,6 +85,10 @@ pub(super) fn finish_streaming_response(
 ) -> Result<ModelResponse, ModelError> {
     let mut metadata = Metadata::new();
     metadata.insert("provider".to_string(), "openai-compatible".to_string());
+    metadata.insert(
+        "provider_protocol".to_string(),
+        "openai-compatible".to_string(),
+    );
     metadata.insert("model".to_string(), model.to_string());
     metadata.insert("base_url".to_string(), base_url.to_string());
     metadata.insert("streamed".to_string(), "true".to_string());
@@ -195,8 +199,8 @@ where
                     return Err(ModelError::new("model stream exceeded 64 MB"));
                 }
                 if !stream_protocol_seen {
-                    let remaining = MAX_STREAMING_FALLBACK_BYTES
-                        .saturating_sub(fallback_response.len());
+                    let remaining =
+                        MAX_STREAMING_FALLBACK_BYTES.saturating_sub(fallback_response.len());
                     fallback_response.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
                     fallback_truncated |= chunk.len() > remaining;
                 }

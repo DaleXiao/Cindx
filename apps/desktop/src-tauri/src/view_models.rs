@@ -254,6 +254,13 @@ pub(crate) struct SessionActionInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct AcknowledgeSessionActivityInput {
+    pub(crate) session_id: String,
+    pub(crate) through_sequence: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ConfirmDeleteInput {
     pub(crate) kind: String,
     pub(crate) name: String,
@@ -383,6 +390,8 @@ pub(crate) struct PermissionReviewState {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProviderConfigState {
+    pub(crate) provider_id: String,
+    pub(crate) provider_resource: String,
     pub(crate) base_url: String,
     pub(crate) model: String,
     pub(crate) conductor_model: String,
@@ -978,6 +987,10 @@ pub(crate) struct BrowserToolInput {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProviderConfigInput {
+    #[serde(default)]
+    pub(crate) provider_id: String,
+    #[serde(default)]
+    pub(crate) provider_resource: String,
     pub(crate) base_url: String,
     pub(crate) api_key: String,
     pub(crate) model: String,
@@ -1007,6 +1020,10 @@ pub(crate) fn default_prompt_evolution_enabled() -> bool {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProviderModelsInput {
+    #[serde(default)]
+    pub(crate) provider_id: String,
+    #[serde(default)]
+    pub(crate) provider_resource: String,
     pub(crate) base_url: String,
     pub(crate) api_key: String,
 }
@@ -1022,6 +1039,10 @@ pub(crate) struct ProviderModelsState {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ImageEndpointValidationInput {
+    #[serde(default)]
+    pub(crate) provider_id: String,
+    #[serde(default)]
+    pub(crate) provider_resource: String,
     pub(crate) base_url: String,
     pub(crate) image_model: String,
     pub(crate) image_endpoint: String,

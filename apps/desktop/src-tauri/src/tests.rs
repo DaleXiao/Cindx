@@ -4000,13 +4000,18 @@ fn persisted_tool_event_compaction_rewrites_legacy_payloads() {
 #[test]
 fn provider_config_input_preserves_existing_key_when_blank() {
     let mut config = ProviderConfig {
+        provider_id: PROVIDER_CUSTOM.to_string(),
+        base_url: "https://example.test/v1".to_string(),
         api_key: "existing".to_string(),
+        image_endpoint: "https://images.example.test/v1".to_string(),
         ..ProviderConfig::default()
     };
 
     apply_provider_config_input(
         &mut config,
         ProviderConfigInput {
+            provider_id: "custom".to_string(),
+            provider_resource: "".to_string(),
             base_url: "https://example.test/v1".to_string(),
             api_key: "".to_string(),
             model: "model-a".to_string(),
@@ -4040,6 +4045,233 @@ fn provider_config_input_preserves_existing_key_when_blank() {
     assert_eq!(config.voice_model, "gpt-realtime");
 }
 
+fn provider_input_from_config(config: &ProviderConfig) -> ProviderConfigInput {
+    ProviderConfigInput {
+        provider_id: config.provider_id.clone(),
+        provider_resource: config.provider_resource.clone(),
+        base_url: config.base_url.clone(),
+        api_key: String::new(),
+        model: config.model.clone(),
+        conductor_model: config.conductor_model.clone(),
+        planner_model: config.planner_model.clone(),
+        executor_model: config.executor_model.clone(),
+        reviewer_model: config.reviewer_model.clone(),
+        summarizer_model: config.summarizer_model.clone(),
+        embedding_model: config.embedding_model.clone(),
+        image_model: config.image_model.clone(),
+        image_endpoint: config.image_endpoint.clone(),
+        voice_model: config.voice_model.clone(),
+        collaboration_policy: config.collaboration_policy.clone(),
+        prompt_evolution_enabled: config.prompt_evolution_enabled,
+        context_window_tokens: config.context_window_tokens,
+        agent_system_prompt: config.agent_system_prompt.clone(),
+    }
+}
+
+#[test]
+fn provider_profiles_resolve_fixed_and_resource_scoped_endpoints() {
+    let openai = resolve_provider_profile(
+        PROVIDER_OPENAI,
+        "ignored",
+        "https://ignored.example/v1",
+        "https://ignored.example/images",
+    );
+    assert_eq!(openai.provider_id, PROVIDER_OPENAI);
+    assert!(openai.provider_resource.is_empty());
+    assert_eq!(openai.base_url, "https://api.openai.com/v1");
+    assert!(openai.image_endpoint.is_empty());
+
+    let azure = resolve_provider_profile(
+        PROVIDER_AZURE_OPENAI,
+        "Team-East",
+        "",
+        "https://ignored.example/images",
+    );
+    assert_eq!(azure.provider_resource, "team-east");
+    assert_eq!(
+        azure.base_url,
+        "https://team-east.openai.azure.com/openai/v1"
+    );
+    assert!(azure.image_endpoint.is_empty());
+
+    let alibaba_shared = resolve_provider_profile(
+        PROVIDER_ALIBABA_CN,
+        "",
+        "https://old-workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        "",
+    );
+    assert_eq!(
+        alibaba_shared.base_url,
+        "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    );
+    assert_eq!(
+        alibaba_shared.image_endpoint,
+        "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+    );
+
+    let alibaba_workspace = resolve_provider_profile(PROVIDER_ALIBABA_CN, "WS-123", "", "");
+    assert_eq!(alibaba_workspace.provider_resource, "ws-123");
+    assert_eq!(
+        alibaba_workspace.base_url,
+        "https://ws-123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    );
+    assert_eq!(
+        alibaba_workspace.image_endpoint,
+        "https://ws-123.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+    );
+
+    let max_resource = "a".repeat(63);
+    let valid_boundary = resolve_provider_profile(PROVIDER_AZURE_OPENAI, &max_resource, "", "");
+    assert_eq!(
+        valid_boundary.base_url,
+        format!("https://{max_resource}.openai.azure.com/openai/v1")
+    );
+    let invalid_boundary = resolve_provider_profile(PROVIDER_AZURE_OPENAI, &"a".repeat(64), "", "");
+    assert!(invalid_boundary.base_url.is_empty());
+}
+
+#[test]
+fn legacy_provider_inference_uses_exact_hosts_and_preserves_custom_urls() {
+    let openai = provider_config_from_text("base_url=https://api.openai.com/v1\n");
+    assert_eq!(openai.provider_id, PROVIDER_OPENAI);
+    assert_eq!(openai.base_url, "https://api.openai.com/v1");
+
+    let azure = provider_config_from_text(
+        "base_url=https://legacy-east.openai.azure.com/openai/v1\napi_key=secret\n",
+    );
+    assert_eq!(azure.provider_id, PROVIDER_AZURE_OPENAI);
+    assert_eq!(azure.provider_resource, "legacy-east");
+    assert_eq!(
+        azure.base_url,
+        "https://legacy-east.openai.azure.com/openai/v1"
+    );
+    assert!(!azure.supports_webrtc_voice());
+
+    let alibaba = provider_config_from_text(
+        "base_url=https://workspace-9.cn-beijing.maas.aliyuncs.com/compatible-mode/v1\n",
+    );
+    assert_eq!(alibaba.provider_id, PROVIDER_ALIBABA_CN);
+    assert_eq!(alibaba.provider_resource, "workspace-9");
+    assert!(!alibaba.supports_webrtc_voice());
+
+    let alibaba_shared =
+        provider_config_from_text("base_url=https://dashscope.aliyuncs.com/compatible-mode/v1\n");
+    assert_eq!(alibaba_shared.provider_id, PROVIDER_ALIBABA_CN);
+    assert!(alibaba_shared.provider_resource.is_empty());
+
+    let malicious = "https://api.openai.com.evil.test/custom/path?mode=1";
+    let custom_image = "https://images.evil.test/private/generate";
+    let custom = provider_config_from_text(&format!(
+        "base_url={malicious}\nimage_endpoint={custom_image}\n"
+    ));
+    assert_eq!(custom.provider_id, PROVIDER_CUSTOM);
+    assert_eq!(custom.base_url, malicious);
+    assert_eq!(custom.image_endpoint, custom_image);
+    assert!(custom.supports_webrtc_voice());
+}
+
+#[test]
+fn legacy_provider_inference_preserves_independent_image_overrides() {
+    let custom_image = "https://images.example.test/private/generate";
+    let migrated = provider_config_from_text(&format!(
+        "base_url=https://api.openai.com/v1\nimage_endpoint={custom_image}\n"
+    ));
+    assert_eq!(migrated.provider_id, PROVIDER_CUSTOM);
+    assert_eq!(migrated.base_url, "https://api.openai.com/v1");
+    assert_eq!(migrated.image_endpoint, custom_image);
+
+    let automatic = provider_config_from_text(
+        "base_url=https://dashscope.aliyuncs.com/compatible-mode/v1\n\
+         image_endpoint=https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation\n",
+    );
+    assert_eq!(automatic.provider_id, PROVIDER_ALIBABA_CN);
+}
+
+#[test]
+fn blank_api_keys_are_reused_only_for_the_same_provider_identity() {
+    let mut config = ProviderConfig {
+        provider_id: PROVIDER_CUSTOM.to_string(),
+        base_url: "https://gateway.example/v1".to_string(),
+        api_key: "existing".to_string(),
+        ..ProviderConfig::default()
+    };
+    let mut same_origin = provider_input_from_config(&config);
+    same_origin.base_url = "https://gateway.example/openai/v1".to_string();
+    apply_provider_config_input(&mut config, same_origin);
+    assert_eq!(config.api_key, "existing");
+
+    let mut other_origin = provider_input_from_config(&config);
+    other_origin.base_url = "https://other.example/v1".to_string();
+    apply_provider_config_input(&mut config, other_origin);
+    assert!(config.api_key.is_empty());
+
+    config.provider_id = PROVIDER_AZURE_OPENAI.to_string();
+    config.provider_resource = "resource-a".to_string();
+    config.base_url = "https://resource-a.openai.azure.com/openai/v1".to_string();
+    config.api_key = "azure-key".to_string();
+    let mut other_resource = provider_input_from_config(&config);
+    other_resource.provider_resource = "resource-b".to_string();
+    apply_provider_config_input(&mut config, other_resource);
+    assert!(config.api_key.is_empty());
+
+    let mut openai = ProviderConfig {
+        api_key: "openai-key".to_string(),
+        ..ProviderConfig::default()
+    };
+    let mut alibaba = provider_input_from_config(&openai);
+    alibaba.provider_id = PROVIDER_ALIBABA_CN.to_string();
+    alibaba.base_url.clear();
+    apply_provider_config_input(&mut openai, alibaba);
+    assert_eq!(openai.provider_id, PROVIDER_ALIBABA_CN);
+    assert!(openai.api_key.is_empty());
+}
+
+#[test]
+fn model_list_reuses_saved_key_only_for_the_same_draft_identity() {
+    let saved = ProviderConfig {
+        provider_id: PROVIDER_CUSTOM.to_string(),
+        base_url: "https://gateway.example/v1".to_string(),
+        api_key: "saved-key".to_string(),
+        ..ProviderConfig::default()
+    };
+    let same_origin = provider_config_for_model_list(
+        &saved,
+        &ProviderModelsInput {
+            provider_id: PROVIDER_CUSTOM.to_string(),
+            provider_resource: String::new(),
+            base_url: "https://gateway.example/openai/v1".to_string(),
+            api_key: String::new(),
+        },
+    );
+    assert_eq!(same_origin.api_key, "saved-key");
+
+    let other_origin = provider_config_for_model_list(
+        &saved,
+        &ProviderModelsInput {
+            provider_id: PROVIDER_CUSTOM.to_string(),
+            provider_resource: String::new(),
+            base_url: "https://other.example/v1".to_string(),
+            api_key: String::new(),
+        },
+    );
+    assert!(other_origin.api_key.is_empty());
+
+    let malicious = provider_config_for_model_list(
+        &ProviderConfig {
+            api_key: "openai-key".to_string(),
+            ..ProviderConfig::default()
+        },
+        &ProviderModelsInput {
+            provider_id: String::new(),
+            provider_resource: String::new(),
+            base_url: "https://api.openai.com.evil.test/v1".to_string(),
+            api_key: String::new(),
+        },
+    );
+    assert_eq!(malicious.base_url, "https://api.openai.com.evil.test/v1");
+    assert!(malicious.api_key.is_empty());
+}
+
 #[test]
 fn voice_model_is_optional_and_migrates_without_changing_agent_readiness() {
     let mut config = provider_config_from_text(
@@ -4055,6 +4287,44 @@ fn voice_model_is_optional_and_migrates_without_changing_agent_readiness() {
     assert!(config.is_ready());
     assert!(config.voice_is_ready());
     assert_eq!(config.voice_model, "gpt-realtime");
+
+    config.provider_id = PROVIDER_ALIBABA_CN.to_string();
+    assert!(!config.voice_is_ready());
+}
+
+#[test]
+fn custom_provider_voice_gating_uses_exact_known_hosts() {
+    for base_url in [
+        "https://team.openai.azure.com/openai/v1",
+        "https://team.services.ai.azure.com/openai/v1",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    ] {
+        let config = provider_config_from_text(&format!(
+            "provider_id=custom\nbase_url={base_url}\nvoice_model=realtime-model\n"
+        ));
+        assert_eq!(config.provider_id, PROVIDER_CUSTOM);
+        assert!(!config.supports_webrtc_voice(), "{base_url}");
+    }
+
+    for base_url in [
+        "https://gateway.example.test/v1",
+        "https://team.openai.azure.com.evil.test/v1",
+        "https://team.services.ai.azure.com.evil.test/v1",
+        "https://dashscope.aliyuncs.com.evil.test/v1",
+        "https://workspace.cn-beijing.maas.aliyuncs.com.evil.test/v1",
+    ] {
+        let config = provider_config_from_text(&format!(
+            "provider_id=custom\nbase_url={base_url}\nvoice_model=realtime-model\n"
+        ));
+        assert!(config.supports_webrtc_voice(), "{base_url}");
+    }
+
+    let legacy_azure_services = provider_config_from_text(
+        "base_url=https://legacy.services.ai.azure.com/openai/v1\nvoice_model=realtime-model\n",
+    );
+    assert_eq!(legacy_azure_services.provider_id, PROVIDER_CUSTOM);
+    assert!(!legacy_azure_services.supports_webrtc_voice());
 }
 
 #[test]
@@ -4089,6 +4359,15 @@ fn dashscope_provider_migrates_the_openai_embedding_default() {
     assert_eq!(
         explicit.model_for_role(&ModelRole::Embedder),
         "custom-embedding-model"
+    );
+
+    let workspace = provider_config_from_text(
+        "base_url=https://workspace-9.cn-beijing.maas.aliyuncs.com/compatible-mode/v1\n\
+             embedding_model=text-embedding-3-small\n",
+    );
+    assert_eq!(
+        workspace.model_for_role(&ModelRole::Embedder),
+        DASHSCOPE_DEFAULT_EMBEDDING_MODEL
     );
 
     let openai = ProviderConfig::default();
@@ -11187,6 +11466,13 @@ fn archived_active_session_gets_a_visible_replacement_and_can_be_listed() {
     assert_eq!(archived.archived_at_ms, Some(42));
     assert_ne!(archived.id, active.id);
     assert!(!active.archived);
+}
+
+#[test]
+fn session_activity_acknowledgement_stops_at_the_last_visible_sequence() {
+    assert_eq!(acknowledged_event_sequence(12, None), 12);
+    assert_eq!(acknowledged_event_sequence(12, Some(8)), 8);
+    assert_eq!(acknowledged_event_sequence(12, Some(20)), 12);
 }
 
 #[test]

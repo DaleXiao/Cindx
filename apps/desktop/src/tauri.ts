@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import desktopPackage from "../package.json";
+import { providerApiKeySetAfterSave, resolveProviderProfile } from "./providerProfiles";
 
 export const DESKTOP_VERSION = desktopPackage.version;
 
@@ -170,6 +171,8 @@ let browserScheduleState: ScheduleState = {
 
 let browserPhase4State: Phase4State = {
   provider: {
+    providerId: "openai",
+    providerResource: "",
     baseUrl: "https://api.openai.com/v1",
     model: "gpt-4.1-mini",
     conductorModel: "gpt-4.1-mini",
@@ -783,19 +786,18 @@ export async function getProjectSessionState(): Promise<ProjectSessionState> {
   }
 }
 
-export async function acknowledgeSessionActivity(
-  sessionId: string
-): Promise<ProjectSessionState> {
+export async function acknowledgeSessionActivity(sessionId: string, throughSequence?: number) {
   try {
     return await invoke<ProjectSessionState>("acknowledge_session_activity", {
-      input: { sessionId }
+      input: { sessionId, throughSequence }
     });
   } catch (error) {
     requireBrowserPreviewFallback(error);
     browserProjectSessionState = {
       ...browserProjectSessionState,
       sessions: browserProjectSessionState.sessions.map((session) =>
-        session.id === sessionId
+        session.id === sessionId &&
+        (throughSequence === undefined || session.latestSequence <= throughSequence)
           ? {
               ...session,
               activity: session.activity === "complete" ? "idle" : session.activity,
@@ -1588,10 +1590,14 @@ export async function saveProviderConfig(input: ProviderConfigInput): Promise<Ph
     return await invoke<Phase4State>("save_provider_config", { input });
   } catch (error) {
     requireBrowserPreviewFallback(error);
+    const previousProvider = browserPhase4State.provider;
+    const profile = resolveProviderProfile(input);
     browserPhase4State = {
       ...browserPhase4State,
       provider: {
-        baseUrl: input.baseUrl,
+        providerId: profile.providerId,
+        providerResource: profile.providerResource,
+        baseUrl: profile.baseUrl,
         model: input.model,
         conductorModel: input.conductorModel || input.plannerModel || input.model,
         plannerModel: input.plannerModel || input.model,
@@ -1600,13 +1606,13 @@ export async function saveProviderConfig(input: ProviderConfigInput): Promise<Ph
         summarizerModel: input.summarizerModel || input.model,
         embeddingModel: input.embeddingModel || "text-embedding-3-small",
         imageModel: input.imageModel,
-        imageEndpoint: input.imageEndpoint,
+        imageEndpoint: profile.imageEndpoint,
         voiceModel: input.voiceModel,
         collaborationPolicy: input.collaborationPolicy || "auto_router",
         promptEvolutionEnabled: input.promptEvolutionEnabled,
         contextWindowTokens: Math.max(4096, input.contextWindowTokens || 128000),
         agentSystemPrompt: input.agentSystemPrompt,
-        apiKeySet: Boolean(input.apiKey) || browserPhase4State.provider.apiKeySet
+        apiKeySet: providerApiKeySetAfterSave({ ...input, ...profile }, previousProvider)
       },
       timeline: [
         ...browserPhase4State.timeline,
@@ -1644,9 +1650,7 @@ export async function setPromptEvolutionEnabled(enabled: boolean): Promise<Phase
   }
 }
 
-export async function listProviderModels(
-  input: Pick<ProviderConfigInput, "baseUrl" | "apiKey">
-): Promise<ProviderModelsState> {
+export async function listProviderModels(input: Pick<ProviderConfigInput, "providerId" | "providerResource" | "baseUrl" | "apiKey">): Promise<ProviderModelsState> {
   try {
     return await invoke<ProviderModelsState>("list_provider_models", { input });
   } catch (error) {
@@ -1659,12 +1663,7 @@ export async function listProviderModels(
   }
 }
 
-export async function validateImageEndpoint(
-  input: Pick<
-    ProviderConfigInput,
-    "baseUrl" | "imageModel" | "imageEndpoint"
-  >
-): Promise<ImageEndpointValidationState> {
+export async function validateImageEndpoint(input: Pick<ProviderConfigInput, "providerId" | "providerResource" | "baseUrl" | "imageModel" | "imageEndpoint">): Promise<ImageEndpointValidationState> {
   try {
     return await invoke<ImageEndpointValidationState>("validate_image_endpoint", { input });
   } catch (error) {

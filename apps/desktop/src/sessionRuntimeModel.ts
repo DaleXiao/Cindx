@@ -6,7 +6,9 @@ import type {
   AgentTraceStepView,
   ChatMessageView,
   ContextState,
-  QueuedAgentMessage
+  ProjectSessionState,
+  QueuedAgentMessage,
+  SessionView
 } from "./tauri";
 
 export const SESSION_STATE_CACHE_LIMIT = 24;
@@ -109,6 +111,62 @@ export function readSessionState<Value>(cache: Map<string, Value>, sessionId: st
   cache.delete(sessionId);
   cache.set(sessionId, value);
   return value;
+}
+
+export function projectSessionResultAsRead(
+  session: SessionView,
+  throughSequence = session.latestSequence
+): SessionView {
+  const isUnreadResult =
+    session.unseenResult &&
+    session.latestSequence <= throughSequence &&
+    (session.activity === "complete" ||
+      (session.activity === "attention" && session.attentionReason === "failed"));
+  if (!isUnreadResult) return session;
+  return {
+    ...session,
+    status: "Ready",
+    activity: "idle",
+    attentionReason: null,
+    unseenResult: false
+  };
+}
+
+export function projectReadSessionResult(
+  state: ProjectSessionState,
+  sessionId: string | null,
+  throughSequence?: number
+): ProjectSessionState {
+  if (!sessionId) return state;
+  let changed = false;
+  const sessions = state.sessions.map((session) => {
+    if (session.id !== sessionId) return session;
+    const next = projectSessionResultAsRead(session, throughSequence);
+    changed ||= next !== session;
+    return next;
+  });
+  return changed ? { ...state, sessions } : state;
+}
+
+export function mergeAcknowledgedSessionActivity(
+  current: SessionView,
+  acknowledged: SessionView
+): SessionView {
+  if (
+    current.id !== acknowledged.id ||
+    acknowledged.latestSequence < current.latestSequence ||
+    (current.activity === "working" && acknowledged.activity !== "working")
+  ) {
+    return current;
+  }
+  return {
+    ...current,
+    status: acknowledged.status,
+    activity: acknowledged.activity,
+    attentionReason: acknowledged.attentionReason,
+    unseenResult: acknowledged.unseenResult,
+    latestSequence: acknowledged.latestSequence
+  };
 }
 
 export function containsOptimisticUserMessage(

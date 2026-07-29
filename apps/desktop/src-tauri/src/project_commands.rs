@@ -1,6 +1,15 @@
 use super::*;
 use crate::desktop_event_sink::DesktopEventSink;
 
+pub(crate) fn acknowledged_event_sequence(
+    latest_sequence: u64,
+    through_sequence: Option<u64>,
+) -> u64 {
+    through_sequence
+        .unwrap_or(latest_sequence)
+        .min(latest_sequence)
+}
+
 #[tauri::command]
 pub(crate) fn create_project(
     state: tauri::State<'_, AppState>,
@@ -969,12 +978,14 @@ pub(crate) fn select_session(
 #[tauri::command]
 pub(crate) fn acknowledge_session_activity(
     state: tauri::State<'_, AppState>,
-    input: SessionActionInput,
+    input: AcknowledgeSessionActivityInput,
 ) -> Result<ProjectSessionState, String> {
     let store = open_app_read_store()?;
     let latest_sequence = load_agent_session_read_model_snapshot(&store, &input.session_id)
         .map_err(|error| error.to_string())?
         .revision;
+    let acknowledged_sequence =
+        acknowledged_event_sequence(latest_sequence, input.through_sequence);
     let mut config = state
         .project_session_config
         .lock()
@@ -989,8 +1000,8 @@ pub(crate) fn acknowledge_session_activity(
             Some("session not found".to_string()),
         ));
     };
-    if latest_sequence > session.seen_event_sequence {
-        session.seen_event_sequence = latest_sequence;
+    if acknowledged_sequence > session.seen_event_sequence {
+        session.seen_event_sequence = acknowledged_sequence;
         save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
     }
     project_session_state_from_store(&config, &store, None).map_err(|error| error.to_string())

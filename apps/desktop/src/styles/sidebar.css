@@ -693,7 +693,6 @@
   box-shadow:
     0 0 0 2px rgb(57 185 107 / 14%),
     0 0 8px rgb(57 185 107 / 65%);
-  animation: session-status-breathe 1800ms ease-in-out infinite;
 }
 
 .session-status-attention > span {
@@ -701,6 +700,10 @@
   box-shadow:
     0 0 0 2px rgb(224 91 91 / 14%),
     0 0 8px rgb(224 91 91 / 65%);
+}
+
+.session-status-unseen.session-status-complete > span,
+.session-status-unseen.session-status-attention > span {
   animation: session-status-breathe 1800ms ease-in-out infinite;
 }
 
@@ -855,4 +858,3 @@
     transform: translateY(0) scale(1);
   }
 }
-

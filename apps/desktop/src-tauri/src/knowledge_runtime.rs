@@ -878,6 +878,8 @@ pub(crate) fn is_phase8_tool(tool_name: &str) -> bool {
 
 pub(crate) fn provider_config_state(config: &ProviderConfig) -> ProviderConfigState {
     ProviderConfigState {
+        provider_id: config.provider_id.clone(),
+        provider_resource: config.provider_resource.clone(),
         base_url: config.base_url.clone(),
         model: config.model.clone(),
         conductor_model: config.model_for_conductor(),

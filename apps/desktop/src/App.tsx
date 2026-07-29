@@ -93,10 +93,12 @@ import {
   agentTraceUnchanged,
   containsOptimisticUserMessage,
   latestTraceStep,
+  mergeAcknowledgedSessionActivity,
   mergeAgentStateDelta,
   mergeAgentStateSnapshot,
   mergeQueuedAgentMessage,
-  mergeSequencedItems
+  mergeSequencedItems,
+  projectReadSessionResult
 } from "./sessionRuntimeModel";
 
 const ScheduleView = lazy(() =>
@@ -211,6 +213,7 @@ export function App() {
     setInspectorOpen(true);
   }, []);
   const {
+    canUseConfiguredKey,
     collaborationModelCount,
     handleLoadProviderModels,
     handlePromptEvolutionToggle,
@@ -808,8 +811,8 @@ export function App() {
     });
   }
 
-  function acknowledgeSessionResult(sessionId: string) {
-    void acknowledgeSessionActivity(sessionId)
+  function acknowledgeSessionResult(sessionId: string, throughSequence?: number) {
+    return acknowledgeSessionActivity(sessionId, throughSequence)
       .then((nextState) => {
         const acknowledged = nextState.sessions.find((session) => session.id === sessionId);
         if (!acknowledged) return;
@@ -818,7 +821,9 @@ export function App() {
             ? {
                 ...current,
                 sessions: current.sessions.map((session) =>
-                  session.id === sessionId ? acknowledged : session
+                  session.id === sessionId
+                    ? mergeAcknowledgedSessionActivity(session, acknowledged)
+                    : session
                 )
               }
             : current
@@ -1191,11 +1196,30 @@ export function App() {
   }
 
   async function handleSelectSession(sessionId: string) {
+    const leavingTimeline = activeView === "timeline";
     showTimelineView();
-    if (sessionId === activeSessionIdRef.current) return;
+    if (sessionId === activeSessionIdRef.current) {
+      if (!leavingTimeline) void acknowledgeSessionResult(sessionId);
+      return;
+    }
     const selectionRequest = ++sessionSelectionRequestRef.current;
+    const previousSessionId = activeSessionIdRef.current;
+    const previousReadSequence =
+      activeAgentState?.sessionId === previousSessionId
+        ? activeAgentState.latestSequence
+        : projectSessionState?.sessions.find((session) => session.id === previousSessionId)
+            ?.latestSequence;
+    if (leavingTimeline && previousSessionId) {
+      sessionLifecycleRefreshRef.current += 1;
+      setProjectSessionState((current) =>
+        current
+          ? projectReadSessionResult(current, previousSessionId, previousReadSequence)
+          : current
+      );
+      void acknowledgeSessionResult(previousSessionId, previousReadSequence);
+    }
     activeSessionIdRef.current = sessionId;
-    acknowledgeSessionResult(sessionId);
+    void acknowledgeSessionResult(sessionId);
     setComposerError(null);
     setProjectSessionState((current) => {
       if (!current) return current;
@@ -1224,7 +1248,11 @@ export function App() {
     try {
       const next = await enqueueProjectSessionSelection(() => selectSession(sessionId));
       if (selectionRequest !== sessionSelectionRequestRef.current) return;
-      await refreshWorkspaceAfterProjectSession(next, {
+      const nextWithReadSession =
+        leavingTimeline && previousSessionId
+          ? projectReadSessionResult(next, previousSessionId, previousReadSequence)
+          : next;
+      await refreshWorkspaceAfterProjectSession(nextWithReadSession, {
         sessionId,
         request: agentStateRequest
       });
@@ -2245,6 +2273,7 @@ export function App() {
               providerModelsBusy,
               providerModelsError,
               providerModelsRefreshTurn,
+              canUseConfiguredKey,
               ragBusy,
               ragQuery,
               ragSources,

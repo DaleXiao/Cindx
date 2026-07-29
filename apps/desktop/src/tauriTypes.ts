@@ -1,3 +1,7 @@
+import type { ProviderId } from "./providerProfiles";
+
+export type { ProviderId } from "./providerProfiles";
+
 export type AgentEffort = "fast" | "auto" | "pro";
 
 export type RuntimeStatus = {
@@ -317,6 +321,8 @@ export type PermissionReviewState = {
 };
 
 export type ProviderConfigState = {
+  providerId: ProviderId;
+  providerResource: string;
   baseUrl: string;
   model: string;
   conductorModel: string;
@@ -336,6 +342,8 @@ export type ProviderConfigState = {
 };
 
 export type ProviderConfigInput = {
+  providerId: ProviderId;
+  providerResource: string;
   baseUrl: string;
   apiKey: string;
   model: string;

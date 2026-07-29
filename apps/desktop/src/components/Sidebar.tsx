@@ -28,13 +28,15 @@ type SessionVisualState = Exclude<SessionView["activity"], "idle"> | null;
 
 function SessionStatusIndicator({
   activity,
-  active
+  active,
+  unseenResult
 }: {
   activity: SessionView["activity"];
   active: boolean;
+  unseenResult: boolean;
 }) {
   const state: SessionVisualState = activity === "idle" ? null : activity;
-  if (!state || (active && state === "complete")) return null;
+  if (!state || (active && unseenResult)) return null;
 
   const label =
     state === "working"
@@ -45,7 +47,9 @@ function SessionStatusIndicator({
 
   return (
     <span
-      className={`session-status session-status-${state}`}
+      className={`session-status session-status-${state}${
+        unseenResult ? " session-status-unseen" : ""
+      }`}
       role="status"
       aria-label={label}
       title={label}
@@ -671,6 +675,7 @@ export function Sidebar({
                                 <SessionStatusIndicator
                                   activity={session.activity}
                                   active={session.active}
+                                  unseenResult={session.unseenResult}
                                 />
                                 <button
                                   className="session-more"
