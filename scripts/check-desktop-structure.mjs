@@ -18,6 +18,18 @@ const readRustSourceTree = (sourceDirectory) =>
     })
     .join("\n");
 
+const readFrontendSourceTree = (sourceDirectory) =>
+  fs
+    .readdirSync(sourceDirectory, { withFileTypes: true })
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .flatMap((entry) => {
+      const entryPath = path.join(sourceDirectory, entry.name);
+      if (entry.isDirectory()) return [readFrontendSourceTree(entryPath)];
+      if (!entry.name.endsWith(".ts") && !entry.name.endsWith(".tsx")) return [];
+      return [`// ${entryPath}\n${fs.readFileSync(entryPath, "utf8")}`];
+    })
+    .join("\n");
+
 const readRustCrateSource = (crateName) =>
   readRustSourceTree(path.join(root, "crates", crateName, "src"));
 
@@ -32,11 +44,32 @@ const listRustSourceFiles = (sourceDirectory) =>
       return [entryPath];
     });
 
+const listFrontendSourceFiles = (sourceDirectory) =>
+  fs
+    .readdirSync(sourceDirectory, { withFileTypes: true })
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .flatMap((entry) => {
+      const entryPath = path.join(sourceDirectory, entry.name);
+      if (entry.isDirectory()) return listFrontendSourceFiles(entryPath);
+      if (!entry.name.endsWith(".ts") && !entry.name.endsWith(".tsx")) return [];
+      return [entryPath];
+    });
+
 const productionRustLineCount = (source) => {
   const testModuleIndex = source.search(/\n#\[cfg\(test\)\]\s*\nmod tests\s*\{/);
   const productionSource =
     testModuleIndex >= 0 ? source.slice(0, testModuleIndex) : source;
   return productionSource.split("\n").length;
+};
+
+const capturedNames = (source, pattern) =>
+  [...source.matchAll(pattern)].map((match) => match[1]);
+
+const uniqueSortedNames = (names) => [...new Set(names)].sort();
+
+const namesMissingFrom = (expected, actual) => {
+  const actualNames = new Set(actual);
+  return expected.filter((name) => !actualNames.has(name));
 };
 
 const parseJson = (relativePath) => JSON.parse(read(relativePath));
@@ -210,6 +243,10 @@ const desktopRustSourceDirectory = path.join(
   root,
   "apps/desktop/src-tauri/src"
 );
+const desktopFrontendSourceDirectory = path.join(root, "apps/desktop/src");
+const desktopFrontendSource = readFrontendSourceTree(
+  desktopFrontendSourceDirectory
+);
 const desktopRustModules = fs
   .readdirSync(desktopRustSourceDirectory)
   .filter((entry) => entry.endsWith(".rs"))
@@ -220,6 +257,12 @@ const desktopRustModules = fs
   }));
 const rustCompositionRoot = read("apps/desktop/src-tauri/src/lib.rs");
 const rustLib = readRustSourceTree(desktopRustSourceDirectory);
+const appBootstrapSource = read(
+  "apps/desktop/src-tauri/src/app_bootstrap.rs"
+);
+const desktopEventSinkSource = read(
+  "apps/desktop/src-tauri/src/desktop_event_sink.rs"
+);
 const collaborationServiceSource = read(
   "apps/desktop/src-tauri/src/collaboration_service.rs"
 );
@@ -252,6 +295,9 @@ const sessionOutputCacheSource = read(
 );
 const promptEvolutionWorkerSource = read(
   "apps/desktop/src-tauri/src/prompt_evolution_worker.rs"
+);
+const promptEvolutionReadModelSource = read(
+  "apps/desktop/src-tauri/src/prompt_evolution_read_model.rs"
 );
 const promptPairwiseRuntimeSource = read(
   "apps/desktop/src-tauri/src/prompt_pairwise_runtime.rs"
@@ -340,6 +386,55 @@ const sessionRefreshEnd = appSource.indexOf(
   sessionRefreshStart
 );
 const sessionRefreshBlock = appSource.slice(sessionRefreshStart, sessionRefreshEnd);
+
+const frontendInvokeCommandNames = uniqueSortedNames(
+  capturedNames(
+    desktopFrontendSource,
+    /\binvoke(?:<[^>]*>)?\(\s*["']([A-Za-z_][A-Za-z0-9_]*)["']/g
+  )
+);
+const frontendInvokeOwnershipViolations = listFrontendSourceFiles(
+  desktopFrontendSourceDirectory
+)
+  .filter((file) => file !== path.join(desktopFrontendSourceDirectory, "tauri.ts"))
+  .filter((file) => /\binvoke(?:<|\()/.test(fs.readFileSync(file, "utf8")))
+  .map((file) => path.relative(desktopFrontendSourceDirectory, file));
+const rustCommandDefinitionNames = uniqueSortedNames(
+  capturedNames(
+    rustLib,
+    /#\[tauri::command(?:\([^\]]*\))?\]\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)/g
+  )
+);
+const tauriHandlerBlocks = capturedNames(
+  appBootstrapSource,
+  /tauri::generate_handler!\s*\[([\s\S]*?)\]/g
+);
+const registeredTauriCommandNames = uniqueSortedNames(
+  tauriHandlerBlocks.flatMap((block) =>
+    block
+      .replace(/\/\/.*$/gm, "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((entry) => entry.split("::").at(-1))
+  )
+);
+const frontendCommandsMissingDefinitions = namesMissingFrom(
+  frontendInvokeCommandNames,
+  rustCommandDefinitionNames
+);
+const rustCommandsMissingFrontendInvokes = namesMissingFrom(
+  rustCommandDefinitionNames,
+  frontendInvokeCommandNames
+);
+const definedCommandsMissingRegistration = namesMissingFrom(
+  rustCommandDefinitionNames,
+  registeredTauriCommandNames
+);
+const registeredCommandsMissingDefinitions = namesMissingFrom(
+  registeredTauriCommandNames,
+  rustCommandDefinitionNames
+);
 
 const rustCompositionRootLineCount = rustCompositionRoot.split("\n").length;
 const appLineCount = appSource.split("\n").length;
@@ -451,6 +546,29 @@ const oversizedCriticalDesktopAgentModules = criticalDesktopAgentModules
     budget: criticalDesktopAgentModuleBudgets.get(entry),
   }))
   .filter(({ lines, budget }) => lines > budget);
+const desktopAdapterModuleBudgets = new Map([
+  ["desktop_event_sink.rs", 220],
+]);
+const desktopAdapterModules = desktopRustModules.filter(({ entry }) =>
+  desktopAdapterModuleBudgets.has(entry)
+);
+const oversizedDesktopAdapterModules = desktopAdapterModules
+  .map(({ entry, source }) => ({
+    entry,
+    lines: source.split("\n").length,
+    budget: desktopAdapterModuleBudgets.get(entry),
+  }))
+  .filter(({ lines, budget }) => lines > budget);
+const desktopEventOwnershipViolations = desktopRustModules
+  .filter(
+    ({ entry, source }) =>
+      entry !== "desktop_event_sink.rs" &&
+      (source.includes('"model-stream-delta"') ||
+        source.includes('"session-title-updated"') ||
+        source.includes("tauri::Emitter") ||
+        source.includes(".emit("))
+  )
+  .map(({ entry }) => entry);
 const oversizedAgentCoreModules = ["agent-runtime", "agent-memory", "orchestrator"]
   .flatMap((crateName) =>
     listRustSourceFiles(path.join(root, "crates", crateName, "src"))
@@ -521,6 +639,18 @@ assert(
   `Desktop Rust composition root must remain declarative (found ${rustCompositionRootLineCount} lines)`
 );
 assert(
+  tauriHandlerBlocks.length === 1 &&
+    frontendInvokeOwnershipViolations.length === 0 &&
+    frontendInvokeCommandNames.length > 0 &&
+    rustCommandDefinitionNames.length > 0 &&
+    registeredTauriCommandNames.length > 0 &&
+    frontendCommandsMissingDefinitions.length === 0 &&
+    rustCommandsMissingFrontendInvokes.length === 0 &&
+    definedCommandsMissingRegistration.length === 0 &&
+    registeredCommandsMissingDefinitions.length === 0,
+  `Tauri command parity regressed: frontend=${frontendInvokeCommandNames.length}, definitions=${rustCommandDefinitionNames.length}, registered=${registeredTauriCommandNames.length}, handler_blocks=${tauriHandlerBlocks.length}, invoke_owners=${frontendInvokeOwnershipViolations.join(",")}, frontend_without_definition=${frontendCommandsMissingDefinitions.join(",")}, definitions_without_frontend=${rustCommandsMissingFrontendInvokes.join(",")}, definitions_without_registration=${definedCommandsMissingRegistration.join(",")}, registrations_without_definition=${registeredCommandsMissingDefinitions.join(",")}`
+);
+assert(
   oversizedProductionRustModules.length === 0,
   `Desktop Rust production modules exceeded the 1,200-line cohesion budget: ${oversizedProductionRustModules
     .map(({ entry, lines }) => `${entry} (${lines})`)
@@ -554,6 +684,21 @@ assert(
     .join(",")}, oversized=${oversizedCriticalDesktopAgentModules
     .map(({ entry, lines, budget }) => `${entry} (${lines}/${budget})`)
     .join(",")}`
+);
+assert(
+  desktopAdapterModules.length === desktopAdapterModuleBudgets.size &&
+    oversizedDesktopAdapterModules.length === 0 &&
+    desktopEventOwnershipViolations.length === 0 &&
+    rustCompositionRoot.includes("mod desktop_event_sink;") &&
+    desktopEventSinkSource.includes("trait DesktopEventSink") &&
+    desktopEventSinkSource.includes(
+      "impl DesktopEventSink for tauri::AppHandle"
+    ) &&
+    desktopEventSinkSource.includes('"model-stream-delta"') &&
+    desktopEventSinkSource.includes('"session-title-updated"'),
+  `Desktop event adapter boundary regressed: oversized=${oversizedDesktopAdapterModules
+    .map(({ entry, lines, budget }) => `${entry} (${lines}/${budget})`)
+    .join(",")}, event_owners=${desktopEventOwnershipViolations.join(",")}`
 );
 assert(
   oversizedAgentCoreModules.length === 0,
@@ -2403,7 +2548,7 @@ assert(
       "session.title_state = SessionTitleState::Automatic"
     ) &&
     !sessionTitleServiceSource.includes("automatic_conversation_title") &&
-    sessionTitleServiceSource.includes('app.emit("session-title-updated"') &&
+    sessionTitleServiceSource.includes("app.emit_session_title_updated(") &&
     (rustLib.match(/persist_completed_conversation_title/g) || []).length >= 2 &&
     appSource.includes("subscribeToSessionTitleUpdates") &&
     tauriBridge.includes('listen<string>("session-title-updated"'),
@@ -2685,7 +2830,8 @@ assert(
     rustLib.includes('"prompt_evolution_mutation"') &&
     rustLib.includes("PROMPT_EVOLUTION_STAGNATION_PATIENCE") &&
     rustLib.includes("PROMPT_EVOLUTION_SHADOW_INTERVAL") &&
-    rustLib.includes('"Agent task completed" | "Agent task cancelled" | "Agent task failed"') &&
+    promptEvolutionReadModelSource.includes("is_agent_run_terminal") &&
+    promptEvolutionReadModelSource.includes("AgentRunEvent::from_event") &&
     rustLib.includes("evaluate_prompt_evolution") &&
     rustLib.includes("Conductor prompt profile selected") &&
     rustLib.includes("PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS") &&

@@ -15,6 +15,26 @@ use crate::{
     runtime_constants::AGENT_RECOVERY_SCHEMA,
     runtime_values::{current_time_millis, phase16_task_id},
 };
+use agent_core::EVENT_TYPE_METADATA_KEY;
+
+fn recovery_run_context(event: &Event) -> Metadata {
+    let mut context = event.metadata.clone();
+    context.remove(EVENT_TYPE_METADATA_KEY);
+    context
+}
+
+fn latest_agent_run_event(events: &[Event]) -> Result<Option<AgentRunEvent>, ()> {
+    for event in events.iter().rev() {
+        if is_agent_queue_event(event) {
+            continue;
+        }
+        match AgentRunEvent::try_from_event(event)? {
+            Some(run_event) => return Ok(Some(run_event)),
+            None => continue,
+        }
+    }
+    Ok(None)
+}
 
 pub(super) fn agent_task_is_cancelled(
     store: &mut SqliteStore,
@@ -27,12 +47,11 @@ pub(super) fn agent_task_is_cancelled(
         return Ok(AgentRunStatus::parse(&status) == AgentRunStatus::Cancelled);
     }
     let events = agent_events_for_session(store, &phase16_task_id(), session_id)?;
-    Ok(active_agent_events_for_session(&events, session_id)
-        .iter()
-        .rev()
-        .find(|event| matches!(event.kind, EventKind::TaskStatusChanged))
-        .map(|event| event.summary == "Agent task cancelled")
-        .unwrap_or(false))
+    let active_events = active_agent_events_for_session(&events, session_id);
+    Ok(matches!(
+        latest_agent_run_event(&active_events),
+        Ok(Some(AgentRunEvent::Cancelled))
+    ))
 }
 
 pub(super) fn latest_agent_recovery_envelope(events: &[Event]) -> Option<AgentRecoveryEnvelope> {
@@ -300,20 +319,19 @@ pub(super) fn peek_agent_recovery_envelope(
     let Some(envelope) = latest_agent_recovery_envelope(&active_events) else {
         return Ok(None);
     };
-    let latest_status = active_events
-        .iter()
-        .rev()
-        .find(|event| event.kind == EventKind::TaskStatusChanged && !is_agent_queue_event(event));
-    let recoverable_status = latest_status.is_some_and(|event| {
-        matches!(
-            event.summary.as_str(),
-            "Agent task paused" | "Agent task waiting for permission"
-        )
-    });
+    if envelope.state == "resuming" {
+        return Err("agent recovery checkpoint is already claimed".to_string());
+    }
+    let recoverable_status = latest_agent_run_event(&active_events)
+        .ok()
+        .flatten()
+        .is_some_and(|event| {
+            matches!(
+                event,
+                AgentRunEvent::Paused | AgentRunEvent::WaitingForPermission
+            )
+        });
     if !recoverable_status {
-        if envelope.state == "resuming" {
-            return Err("agent recovery checkpoint is already claimed".to_string());
-        }
         return Ok(None);
     }
     if !allowed_states.contains(&envelope.state.as_str()) {
@@ -405,23 +423,22 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
             .cloned()
             .unwrap_or_else(|| "__default__".to_string());
         if is_agent_run_start_event(event) {
-            active_runs.insert(session_key, event.metadata.clone());
+            active_runs.insert(session_key, recovery_run_context(event));
             continue;
         }
         if event.summary == "Recovery resume claimed"
             && event.metadata.get("recovery_state").map(String::as_str) == Some("resuming")
         {
-            active_runs.insert(session_key, event.metadata.clone());
+            active_runs.insert(session_key, recovery_run_context(event));
             continue;
         }
-        let terminal = matches!(event.kind, EventKind::Error)
-            || matches!(
-                event.summary.as_str(),
-                "Agent task completed"
-                    | "Agent task cancelled"
-                    | "Agent task failed"
-                    | "Agent task paused"
-            );
+        let terminal = match AgentRunEvent::try_from_event(event) {
+            Err(()) => true,
+            Ok(Some(run_event)) => {
+                run_event.status().is_terminal() || matches!(run_event, AgentRunEvent::Paused)
+            }
+            Ok(None) => false,
+        };
         if terminal {
             active_runs.remove(&session_key);
         }
@@ -441,7 +458,7 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
             run_context.insert("initial_prompt_objective".to_string(), initial_objective);
         }
         let already_recovered_wait = active_events.last().is_some_and(|event| {
-            event.summary == "Agent task waiting for permission"
+            AgentRunEvent::from_event(event) == Some(AgentRunEvent::WaitingForPermission)
                 && event.metadata.get("recovery_state").map(String::as_str) == Some("blocked")
         });
         if already_recovered_wait {
@@ -524,3 +541,7 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
     }
     Ok(recovered)
 }
+
+#[cfg(test)]
+#[path = "agent_recovery_service_tests.rs"]
+mod tests;

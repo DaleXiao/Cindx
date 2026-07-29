@@ -1,4 +1,5 @@
 use super::*;
+use crate::desktop_event_sink::DesktopEventSink;
 
 #[tauri::command]
 pub(crate) async fn get_agent_state(
@@ -687,7 +688,7 @@ pub(crate) fn finish_agent_run_for_control_stop_with_task_state(
 }
 
 pub(crate) fn emit_agent_stream_delta(
-    app: &tauri::AppHandle,
+    events: &impl DesktopEventSink,
     request_id: &str,
     session_id: Option<&str>,
     delta: &str,
@@ -695,16 +696,13 @@ pub(crate) fn emit_agent_stream_delta(
     reset: bool,
     error: Option<String>,
 ) {
-    let _ = app.emit(
-        "model-stream-delta",
-        ModelStreamDelta {
-            task_id: PHASE16_TASK_ID.to_string(),
-            request_id: request_id.to_string(),
-            session_id: session_id.map(str::to_string),
-            delta: delta.to_string(),
-            done,
-            reset,
-            error,
-        },
-    );
+    events.emit_model_stream_delta(ModelStreamDelta {
+        task_id: PHASE16_TASK_ID.to_string(),
+        request_id: request_id.to_string(),
+        session_id: session_id.map(str::to_string),
+        delta: delta.to_string(),
+        done,
+        reset,
+        error,
+    });
 }

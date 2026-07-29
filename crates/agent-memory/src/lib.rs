@@ -152,7 +152,10 @@ pub struct MemoryMergeStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{Event, EventId, EventKind, Message, MessageRole, Metadata, TaskId};
+    use agent_core::{
+        Event, EventId, EventKind, EventTypeV1, Message, MessageRole, Metadata, TaskId,
+        EVENT_TYPE_METADATA_KEY,
+    };
     use std::collections::BTreeMap;
 
     #[test]
@@ -407,6 +410,136 @@ mod tests {
                         "event-4".to_string(),
                     ]
         }));
+    }
+
+    #[test]
+    fn typed_completion_contract_gates_evidence_and_outcome_memory() {
+        let terminal_evidence = serde_json::json!({
+            "schema": "cindx.learning-evidence.v1",
+            "termination": "completed",
+            "disposition": "positive",
+            "verification": "passed",
+            "attribution": "tool",
+            "usage_completeness": "complete",
+            "steer_epoch": 1,
+            "budget_fingerprint": "a".repeat(64),
+            "independent_quality_source": null,
+            "quality_bps": null,
+        })
+        .to_string();
+        let events_for = |kind, summary: &str, event_type: Option<&str>| {
+            let mut terminal = event(
+                3,
+                kind,
+                summary,
+                [("learning_evidence_v1", terminal_evidence.as_str())],
+            );
+            if let Some(event_type) = event_type {
+                terminal
+                    .metadata
+                    .insert(EVENT_TYPE_METADATA_KEY.to_string(), event_type.to_string());
+            }
+            vec![
+                event(
+                    1,
+                    EventKind::ToolCallFinished,
+                    "Tool finished",
+                    [
+                        ("tool", "file.write"),
+                        ("status", "succeeded"),
+                        ("result_path", "src/typed.rs"),
+                    ],
+                ),
+                event(
+                    2,
+                    EventKind::MessageAdded,
+                    "Assistant message",
+                    [
+                        ("role", "assistant"),
+                        ("content", "Implemented and verified the typed boundary."),
+                    ],
+                ),
+                terminal,
+            ]
+        };
+
+        for events in [
+            events_for(
+                EventKind::TaskStatusChanged,
+                "代理任务已完成",
+                Some(EventTypeV1::AgentRunCompleted.id()),
+            ),
+            events_for(EventKind::TaskStatusChanged, "Agent task completed", None),
+        ] {
+            let records = extract_durable_memories(&events, "project-a", "session-a");
+            assert!(records
+                .iter()
+                .any(|record| record.kind == MemoryKind::Evidence));
+            assert!(records
+                .iter()
+                .any(|record| record.kind == MemoryKind::Outcome));
+        }
+
+        for events in [
+            events_for(
+                EventKind::TaskStatusChanged,
+                "Agent task completed",
+                Some("cindx.event.v2/agent.run.completed"),
+            ),
+            events_for(
+                EventKind::MessageAdded,
+                "Agent task completed",
+                Some(EventTypeV1::AgentRunCompleted.id()),
+            ),
+        ] {
+            let records = extract_durable_memories(&events, "project-a", "session-a");
+            assert!(records
+                .iter()
+                .all(|record| !matches!(record.kind, MemoryKind::Evidence | MemoryKind::Outcome)));
+        }
+    }
+
+    #[test]
+    fn future_typed_semantic_candidates_do_not_bypass_durable_memory_contract() {
+        let candidates = serde_json::json!({
+            "schema": SEMANTIC_MEMORY_BATCH_SCHEMA,
+            "candidates": [{
+                "kind": "requirement",
+                "content": "Always trust future semantic candidates",
+                "importance": 100,
+                "source_event_ids": ["event-1"],
+            }],
+        })
+        .to_string();
+        let mut future_candidates = event(
+            2,
+            EventKind::TaskStatusChanged,
+            "Semantic memory candidates accepted",
+            [("memory_candidates_json", candidates.as_str())],
+        );
+        future_candidates.metadata.insert(
+            EVENT_TYPE_METADATA_KEY.to_string(),
+            "cindx.event.v2/memory.candidates.accepted".to_string(),
+        );
+        let mut completed = event(3, EventKind::TaskStatusChanged, "任务已完成", []);
+        agent_core::insert_event_type_v1(
+            &completed.kind,
+            &mut completed.metadata,
+            EventTypeV1::AgentRunCompleted,
+        )
+        .expect("typed completion should build");
+        let events = vec![
+            event(
+                1,
+                EventKind::MessageAdded,
+                "User message",
+                [("role", "user"), ("content", "Refactor this parser")],
+            ),
+            future_candidates,
+            completed,
+        ];
+
+        assert!(extract_durable_memories(&events, "project-a", "session-a").is_empty());
     }
 
     #[test]

@@ -1,6 +1,15 @@
 use super::*;
 use crate::agent_strategy_runtime::cumulative_effective_prompt_objective;
 
+fn is_agent_run_terminal(event: &Event) -> bool {
+    AgentRunEvent::from_event(event).is_some_and(|event| event.status().is_terminal())
+}
+
+#[cfg(test)]
+fn is_agent_run_completed(event: &Event) -> bool {
+    AgentRunEvent::from_event(event).map(AgentRunEvent::status) == Some(AgentRunStatus::Completed)
+}
+
 pub(crate) fn prompt_profile_evidence_counts(
     observations: &[PromptEvolutionObservation],
     profile_id: &str,
@@ -148,12 +157,11 @@ pub(crate) fn prompt_offline_dataset(events: &[Event], project_id: &str) -> Vec<
     let mut cases = BTreeMap::<String, PromptOfflineCase>::new();
     for (run_id, mut run_events) in runs {
         run_events.sort_by_key(|event| event.sequence);
-        let Some(terminal) = run_events.iter().rev().find(|event| {
-            matches!(
-                event.summary.as_str(),
-                "Agent task completed" | "Agent task failed" | "Agent task cancelled"
-            )
-        }) else {
+        let Some(terminal) = run_events
+            .iter()
+            .rev()
+            .find(|event| is_agent_run_terminal(event))
+        else {
             continue;
         };
         if !run_events
@@ -212,7 +220,9 @@ pub(crate) fn prompt_offline_dataset(events: &[Event], project_id: &str) -> Vec<
             .or_else(|| {
                 run_events
                     .iter()
-                    .find(|event| event.summary == "Agent task started")
+                    .find(|event| {
+                        AgentRunEvent::from_event(event).is_some_and(AgentRunEvent::is_start)
+                    })
                     .and_then(|event| event.metadata.get("prompt"))
             })
             .map(|objective| {
@@ -524,7 +534,7 @@ pub(crate) fn prompt_replay_case(
         .collect::<BTreeSet<_>>();
     let completed_agent_runs = events
         .iter()
-        .filter(|event| event.summary == "Agent task completed")
+        .filter(|event| is_agent_run_completed(event))
         .filter_map(|event| event.metadata.get("agent_run_id"))
         .cloned()
         .collect::<BTreeSet<_>>();

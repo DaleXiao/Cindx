@@ -107,7 +107,7 @@ pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 pub(crate) use std::sync::{Arc, Mutex};
 pub(crate) use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-pub(crate) use tauri::{Emitter, Manager};
+pub(crate) use tauri::Manager;
 pub(crate) use tools::{
     ImageGenerationConfig, ToolExecutionControl, ToolRegistry, WebSearchConfig,
 };

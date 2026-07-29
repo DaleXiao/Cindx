@@ -136,10 +136,10 @@ pub(crate) fn routing_learning_evidence(
         .map(|usage| usage.completeness)
         .unwrap_or_else(|| learning_usage_completeness(run_events));
     let budget_fingerprint = learning_budget_fingerprint(&decision.metadata);
-    let termination = match terminal.summary.as_str() {
-        "Agent task completed" => LearningTermination::Completed,
-        "Agent task failed" => LearningTermination::Failed,
-        "Agent task cancelled" => LearningTermination::Cancelled,
+    let termination = match AgentRunEvent::from_event(terminal).map(AgentRunEvent::status) {
+        Some(AgentRunStatus::Completed) => LearningTermination::Completed,
+        Some(AgentRunStatus::Failed) => LearningTermination::Failed,
+        Some(AgentRunStatus::Cancelled) => LearningTermination::Cancelled,
         _ => LearningTermination::Unknown,
     };
     let censored_attribution = match termination {
@@ -228,11 +228,10 @@ pub(crate) fn workflow_learning_evidence(
     {
         return censored();
     }
-    let Some(run_terminal) = stable_events
-        .iter()
-        .rev()
-        .find(|event| event.summary == "Agent task completed")
-    else {
+    let Some(run_terminal) = stable_events.iter().rev().find(|event| {
+        AgentRunEvent::from_event(event).map(AgentRunEvent::status)
+            == Some(AgentRunStatus::Completed)
+    }) else {
         return censored();
     };
     let Some(persisted) = LearningEvidenceV1::from_metadata(&run_terminal.metadata) else {

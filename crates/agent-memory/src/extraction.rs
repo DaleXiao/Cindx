@@ -1,8 +1,10 @@
-use crate::learning_evidence::{trusted_outcome_evidence, TrustedOutcomeEvidence};
+use crate::learning_evidence::{
+    is_completed_agent_event, trusted_outcome_evidence, TrustedOutcomeEvidence,
+};
 use crate::memory_text::{first_metadata_value, normalize_memory_text, sanitize_line, truncate};
 use crate::semantic::{parse_semantic_memory_batch, validate_semantic_memory_batch};
 use crate::{MemoryKind, MemoryProvenance, MemoryRecord, MemoryTrust};
-use agent_core::{Event, EventKind};
+use agent_core::{Event, EventKind, EVENT_TYPE_METADATA_KEY};
 
 pub fn extract_durable_memories(
     events: &[Event],
@@ -12,9 +14,7 @@ pub fn extract_durable_memories(
     if let Some(records) = semantic_memory_records(events, project_id, session_id) {
         return records;
     }
-    let completed = events
-        .iter()
-        .any(|event| event.summary == "Agent task completed");
+    let completed = events.iter().any(is_completed_agent_event);
     let mut records = Vec::new();
 
     for event in events {
@@ -132,10 +132,10 @@ fn semantic_memory_records(
     project_id: &str,
     session_id: &str,
 ) -> Option<Vec<MemoryRecord>> {
-    let event = events
-        .iter()
-        .rev()
-        .find(|event| event.summary == "Semantic memory candidates accepted")?;
+    let event = events.iter().rev().find(|event| {
+        event.summary == "Semantic memory candidates accepted"
+            && !event.metadata.contains_key(EVENT_TYPE_METADATA_KEY)
+    })?;
     let payload = event.metadata.get("memory_candidates_json")?;
     let batch = parse_semantic_memory_batch(payload).ok()?;
     Some(validate_semantic_memory_batch(batch, events, project_id, session_id).accepted)

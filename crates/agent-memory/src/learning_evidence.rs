@@ -1,4 +1,4 @@
-use agent_core::{Event, EventKind};
+use agent_core::{decode_event_type, DecodedEventType, Event, EventKind, EventTypeV1};
 use serde::Deserialize;
 
 const LEARNING_EVIDENCE_METADATA_KEY: &str = "learning_evidence_v1";
@@ -99,9 +99,7 @@ enum IndependentQualitySource {
 }
 
 pub(crate) fn trusted_outcome_evidence(event: &Event) -> Option<TrustedOutcomeEvidence> {
-    if !matches!(event.kind, EventKind::TaskStatusChanged)
-        || event.summary != "Agent task completed"
-    {
+    if !is_completed_agent_event(event) {
         return None;
     }
     let encoded = event.metadata.get(LEARNING_EVIDENCE_METADATA_KEY)?;
@@ -157,6 +155,17 @@ pub(crate) fn trusted_outcome_evidence(event: &Event) -> Option<TrustedOutcomeEv
     }
 }
 
+pub(crate) fn is_completed_agent_event(event: &Event) -> bool {
+    match decode_event_type(event) {
+        DecodedEventType::V1(event) => event.event_type() == EventTypeV1::AgentRunCompleted,
+        DecodedEventType::Legacy => {
+            matches!(event.kind, EventKind::TaskStatusChanged)
+                && event.summary == "Agent task completed"
+        }
+        DecodedEventType::Invalid(_) => false,
+    }
+}
+
 fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64
         && value
@@ -167,7 +176,7 @@ fn is_sha256_hex(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{EventId, Metadata, TaskId};
+    use agent_core::{EventId, Metadata, TaskId, EVENT_TYPE_METADATA_KEY};
 
     fn terminal(evidence: &str) -> Event {
         Event {
@@ -202,6 +211,31 @@ mod tests {
         .to_string()
     }
 
+    fn terminal_with_event_type(
+        kind: EventKind,
+        summary: &str,
+        event_type: &str,
+        evidence: &str,
+    ) -> Event {
+        Event {
+            id: EventId("terminal".to_string()),
+            task_id: TaskId("task".to_string()),
+            sequence: 1,
+            timestamp_ms: 1,
+            kind,
+            summary: summary.to_string(),
+            metadata: [
+                (
+                    LEARNING_EVIDENCE_METADATA_KEY.to_string(),
+                    evidence.to_string(),
+                ),
+                (EVENT_TYPE_METADATA_KEY.to_string(), event_type.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        }
+    }
+
     #[test]
     fn accepts_only_complete_positive_v1_contracts() {
         assert_eq!(
@@ -225,6 +259,47 @@ mod tests {
         assert_eq!(
             trusted_outcome_evidence(&terminal(&quality)),
             Some(TrustedOutcomeEvidence::IndependentQuality)
+        );
+    }
+
+    #[test]
+    fn completion_contract_is_typed_first_with_exact_legacy_fallback() {
+        let evidence = postcondition_evidence();
+        let localized = terminal_with_event_type(
+            EventKind::TaskStatusChanged,
+            "Agent-Aufgabe abgeschlossen",
+            EventTypeV1::AgentRunCompleted.id(),
+            &evidence,
+        );
+        assert!(is_completed_agent_event(&localized));
+        assert_eq!(
+            trusted_outcome_evidence(&localized),
+            Some(TrustedOutcomeEvidence::VerifiedPostcondition)
+        );
+
+        let future = terminal_with_event_type(
+            EventKind::TaskStatusChanged,
+            "Agent task completed",
+            "cindx.event.v2/agent.run.completed",
+            &evidence,
+        );
+        assert!(!is_completed_agent_event(&future));
+        assert_eq!(trusted_outcome_evidence(&future), None);
+
+        let kind_mismatch = terminal_with_event_type(
+            EventKind::MessageAdded,
+            "Agent task completed",
+            EventTypeV1::AgentRunCompleted.id(),
+            &evidence,
+        );
+        assert!(!is_completed_agent_event(&kind_mismatch));
+        assert_eq!(trusted_outcome_evidence(&kind_mismatch), None);
+
+        let legacy = terminal(&evidence);
+        assert!(is_completed_agent_event(&legacy));
+        assert_eq!(
+            trusted_outcome_evidence(&legacy),
+            Some(TrustedOutcomeEvidence::VerifiedPostcondition)
         );
     }
 

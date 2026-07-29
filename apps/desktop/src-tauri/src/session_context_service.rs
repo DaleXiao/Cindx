@@ -181,13 +181,15 @@ pub(super) fn effective_context_usage_from_event(event: &Event) -> Option<(u64, 
         return Some((tokens, estimated));
     }
 
-    match (&event.kind, event.summary.as_str()) {
-        (EventKind::ModelRequestStarted, "Agent model turn started") => event
+    if crate::run_lifecycle::is_agent_model_turn_started(event) {
+        return event
             .metadata
             .get("context_projected_tokens")
             .and_then(|value| value.parse().ok())
-            .map(|tokens| (tokens, true)),
-        (EventKind::ModelRequestFinished, "Agent model turn finished") => event
+            .map(|tokens| (tokens, true));
+    }
+    if crate::run_lifecycle::is_agent_model_turn_finished(event) {
+        return event
             .metadata
             .get("prompt_tokens")
             .and_then(|value| value.parse().ok())
@@ -198,9 +200,9 @@ pub(super) fn effective_context_usage_from_event(event: &Event) -> Option<(u64, 
                     .get("context_projected_tokens")
                     .and_then(|value| value.parse().ok())
                     .map(|tokens| (tokens, true))
-            }),
-        _ => None,
+            });
     }
+    None
 }
 
 #[cfg(test)]

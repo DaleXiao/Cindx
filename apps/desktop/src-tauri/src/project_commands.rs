@@ -1,4 +1,5 @@
 use super::*;
+use crate::desktop_event_sink::DesktopEventSink;
 
 #[tauri::command]
 pub(crate) fn create_project(
@@ -409,7 +410,7 @@ pub(crate) async fn generate_session_title(
         save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
         let next_state = project_session_state(&config, None);
         drop(config);
-        let _ = app.emit("session-title-updated", input.session_id);
+        app.emit_session_title_updated(input.session_id);
         Ok(next_state)
     })
     .await

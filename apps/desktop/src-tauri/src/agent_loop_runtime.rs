@@ -9,17 +9,16 @@ use crate::{
         finish_agent_run_for_control_stop_with_task_state,
     },
     agent_read_model::{agent_state_for_session, agent_state_with_error_in_context},
-    agent_run_engine::{prepare_agent_execution, AgentRunPreparationError, PreparedAgentExecution},
     agent_runtime_snapshot::{
         capture_persistable_agent_task_state, persist_agent_runtime_snapshot,
     },
     agent_steer_runtime::{apply_pending_agent_steers, AgentSteerApplication},
     agent_tool_runtime::{execute_agent_tool_batch, AgentToolBatchOutcome},
     app_state::{AppState, SuspendedAgentRun},
-    configuration_models::{agent_model_for_run, AgentEffort, ProviderConfig},
+    configuration_models::ProviderConfig,
     event_persistence::persist_new_runtime_messages,
     persistence_runtime::tool_registry_for_state,
-    runtime_constants::{AGENT_MAX_OUTPUT_TOKENS, AGENT_MODEL_RECOVERY_WINDOW_SECONDS},
+    runtime_constants::AGENT_MAX_OUTPUT_TOKENS,
     runtime_values::{
         agent_runtime_context_for_run, current_time_millis, effective_agent_objective,
         run_context_steer_epoch,
@@ -80,106 +79,7 @@ pub(crate) fn workspace_verification_policy_for_run_context(
     contract_runtime::workspace_verification_policy_for_run_context(run_context)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn continue_agent_loop(
-    app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
-    config: &ProviderConfig,
-    workspace_root: &Path,
-    prepared: PreparedAgentExecution,
-    effort: AgentEffort,
-    cancellation: &Arc<AgentRunControl>,
-) -> Result<AgentState, String> {
-    let base_run_context = prepared.base_run_context;
-    let mut run_context = prepared.run_context;
-    let mut runtime = prepared.runtime;
-    let mut prompt = prepared.prompt;
-    let mut collaboration = prepared.collaboration;
-    loop {
-        let agent_model = agent_model_for_run(config, &run_context);
-        let provider_timeout = if collaboration.is_some() {
-            cancellation
-                .stage_model_call_timeout_with_recovery(
-                    RunStageClass::Finalizer,
-                    1,
-                    Duration::from_secs(AGENT_MODEL_RECOVERY_WINDOW_SECONDS),
-                )
-                .as_secs()
-                .max(1)
-        } else {
-            cancellation.model_call_timeout_seconds()
-        };
-        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
-            base_url: config.base_url.clone(),
-            api_key: config.api_key.clone(),
-            model: agent_model.clone(),
-            embedding_model: config.model_for_role(&ModelRole::Embedder),
-            timeout_seconds: provider_timeout,
-        });
-        match continue_agent_loop_with_provider(
-            app,
-            state,
-            config,
-            workspace_root,
-            runtime,
-            prompt,
-            run_context,
-            collaboration.as_ref(),
-            cancellation,
-            &provider,
-            &agent_model,
-        )? {
-            AgentLoopExecutionOutcome::Finished(agent_state) => return Ok(agent_state),
-            AgentLoopExecutionOutcome::Reprepare {
-                runtime: steered_runtime,
-                prompt: steered_prompt,
-            } => {
-                let task_id = steered_runtime.task_id.clone();
-                let next = prepare_agent_execution(
-                    app,
-                    state,
-                    config,
-                    &task_id,
-                    workspace_root,
-                    base_run_context.clone(),
-                    steered_runtime,
-                    steered_prompt,
-                    None,
-                    effort,
-                    cancellation,
-                );
-                let next = match next {
-                    Ok(prepared) => prepared,
-                    Err(AgentRunPreparationError::ControlStop(run_context)) => {
-                        return finish_agent_run_for_control_stop_with_task_state(
-                            app,
-                            state,
-                            &run_context,
-                            cancellation,
-                            None,
-                        )
-                    }
-                    Err(AgentRunPreparationError::Collaboration { error, run_context }) => {
-                        return agent_state_with_error_in_context(
-                            state,
-                            &run_context,
-                            format!("Collaboration failed: {error}"),
-                        )
-                    }
-                    Err(AgentRunPreparationError::Runtime { error, run_context }) => {
-                        return agent_state_with_error_in_context(state, &run_context, error)
-                    }
-                };
-                run_context = next.run_context;
-                runtime = next.runtime;
-                prompt = next.prompt;
-                collaboration = next.collaboration;
-            }
-        }
-    }
-}
-
-enum AgentLoopExecutionOutcome {
+pub(crate) enum AgentLoopExecutionOutcome {
     Finished(AgentState),
     Reprepare {
         runtime: agent_runtime::AgentLoopState,
@@ -188,7 +88,7 @@ enum AgentLoopExecutionOutcome {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn continue_agent_loop_with_provider(
+pub(crate) fn execute_agent_loop_epoch_with_provider(
     app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,

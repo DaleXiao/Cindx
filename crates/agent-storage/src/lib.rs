@@ -1742,17 +1742,24 @@ fn sqlite_error_message(connection: *mut sqlite3) -> String {
 }
 
 fn metadata_to_text(metadata: &Metadata) -> String {
-    metadata
-        .iter()
-        .map(|(key, value)| {
-            format!(
-                "{}\t{}",
-                hex_encode(key.as_bytes()),
-                hex_encode(value.as_bytes())
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let capacity = metadata.iter().fold(
+        metadata.len().saturating_sub(1),
+        |capacity, (key, value)| {
+            capacity
+                .saturating_add(key.len().saturating_add(value.len()).saturating_mul(2))
+                .saturating_add(1)
+        },
+    );
+    let mut encoded = String::with_capacity(capacity);
+    for (index, (key, value)) in metadata.iter().enumerate() {
+        if index > 0 {
+            encoded.push('\n');
+        }
+        hex_encode_into(&mut encoded, key.as_bytes());
+        encoded.push('\t');
+        hex_encode_into(&mut encoded, value.as_bytes());
+    }
+    encoded
 }
 
 fn metadata_from_text(text: &str) -> Result<Metadata, StorageError> {
@@ -1777,13 +1784,17 @@ fn metadata_from_text(text: &str) -> Result<Metadata, StorageError> {
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(bytes.len() * 2);
+    hex_encode_into(&mut encoded, bytes);
+    encoded
+}
+
+fn hex_encode_into(encoded: &mut String, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     for byte in bytes {
         encoded.push(HEX[(byte >> 4) as usize] as char);
         encoded.push(HEX[(byte & 0x0f) as usize] as char);
     }
-    encoded
 }
 
 fn hex_decode(value: &str) -> Result<Vec<u8>, StorageError> {
@@ -1792,7 +1803,7 @@ fn hex_decode(value: &str) -> Result<Vec<u8>, StorageError> {
     }
 
     let mut bytes = Vec::with_capacity(value.len() / 2);
-    let chars: Vec<u8> = value.as_bytes().to_vec();
+    let chars = value.as_bytes();
     for chunk in chars.chunks_exact(2) {
         let high = hex_value(chunk[0])?;
         let low = hex_value(chunk[1])?;
@@ -1895,6 +1906,46 @@ mod tests {
     use agent_core::{PermissionRisk, TaskId};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn metadata_codec_keeps_the_existing_wire_format() {
+        let metadata = [
+            ("alpha".to_string(), "one\nline".to_string()),
+            ("空".to_string(), "值🙂".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+
+        let encoded = metadata_to_text(&metadata);
+        assert_eq!(
+            encoded,
+            "616c706861\t6f6e650a6c696e65\ne7a9ba\te580bcf09f9982"
+        );
+        assert_eq!(
+            metadata_from_text(&encoded).expect("metadata should decode"),
+            metadata
+        );
+    }
+
+    #[test]
+    fn metadata_codec_round_trips_empty_keys_and_values() {
+        assert_eq!(metadata_to_text(&Metadata::new()), "");
+        assert_eq!(
+            metadata_from_text("").expect("empty metadata should decode"),
+            Metadata::new()
+        );
+
+        let metadata = [
+            (String::new(), String::new()),
+            ("line\nbreak".to_string(), "tab\tvalue".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        assert_eq!(
+            metadata_from_text(&metadata_to_text(&metadata)).expect("metadata should round trip"),
+            metadata
+        );
+    }
 
     #[test]
     fn appends_and_lists_events_by_task() {

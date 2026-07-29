@@ -206,8 +206,7 @@ fn apply_event_to_agent_session_read_model(model: &mut AgentSessionReadModel, ev
         }
     }
 
-    if event.kind == EventKind::ModelRequestFinished && event.summary == "Agent model turn finished"
-    {
+    if crate::run_lifecycle::is_agent_model_turn_finished(event) {
         model.state.turn_count = model.state.turn_count.saturating_add(1);
     }
 
@@ -227,7 +226,7 @@ fn apply_event_to_agent_session_read_model(model: &mut AgentSessionReadModel, ev
             .cloned()
             .or_else(|| Some(event.summary.clone()));
     }
-    if event.kind == EventKind::Error || model.state.last_error.is_none() {
+    if AgentRunStatus::parse(&model.state.status) != AgentRunStatus::Failed {
         if let Some(run_event) = AgentRunEvent::from_event(event) {
             let run_status = run_event.status();
             let partial_completion =
@@ -445,6 +444,7 @@ pub(crate) fn agent_state_from_read_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_core::{insert_event_type_v1, EventTypeV1, EVENT_TYPE_METADATA_KEY};
 
     fn session_context(session_id: &str) -> Metadata {
         [("session_id".to_string(), session_id.to_string())]
@@ -589,6 +589,168 @@ mod tests {
             .expect("stored projection should load")
             .expect("stored projection should exist");
         assert_eq!(stored.revision, 1);
+    }
+
+    #[test]
+    fn recorded_error_does_not_block_incremental_completion() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let session_id = "session-recorded-error";
+        let context = session_context(session_id);
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task started",
+            context.clone(),
+        )
+        .expect("start should append");
+        load_agent_session_read_model(&mut store, session_id)
+            .expect("initial projection should persist");
+
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::Error,
+            "Background extraction unavailable",
+            metadata_with_context(
+                [("error".to_string(), "recoverable warning".to_string())]
+                    .into_iter()
+                    .collect(),
+                &context,
+            ),
+        )
+        .expect("recorded error should append");
+        let (with_error, error_stats) =
+            load_agent_session_read_model_with_stats(&mut store, session_id)
+                .expect("error delta should project");
+        assert!(!error_stats.rebuilt);
+        assert_eq!(with_error.state.status, "running");
+        assert_eq!(
+            with_error.state.last_error.as_deref(),
+            Some("recoverable warning")
+        );
+
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task completed",
+            context,
+        )
+        .expect("completion should append");
+        let (incremental, completion_stats) =
+            load_agent_session_read_model_with_stats(&mut store, session_id)
+                .expect("completion delta should project");
+        assert!(!completion_stats.rebuilt);
+        assert_eq!(incremental.state.status, "completed");
+        assert_eq!(
+            incremental.state.last_error.as_deref(),
+            Some("recoverable warning")
+        );
+
+        let events = store
+            .list_by_task_and_metadata(&phase16_task_id(), "session_id", session_id)
+            .expect("session events should load");
+        let rebuilt = build_agent_session_read_model(&store, session_id, events)
+            .expect("full projection should rebuild");
+        assert_eq!(incremental.state.status, rebuilt.state.status);
+        assert_eq!(incremental.state.last_error, rebuilt.state.last_error);
+    }
+
+    #[test]
+    fn typed_model_turn_count_matches_rebuild_and_invalid_tags_fail_closed() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let session_id = "session-typed-turn";
+        let context = session_context(session_id);
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task started",
+            context.clone(),
+        )
+        .expect("start should append");
+        load_agent_session_read_model(&mut store, session_id)
+            .expect("initial projection should persist");
+
+        let mut typed_start = context.clone();
+        typed_start.insert("context_projected_tokens".to_string(), "222".to_string());
+        insert_event_type_v1(
+            &EventKind::ModelRequestStarted,
+            &mut typed_start,
+            EventTypeV1::AgentModelTurnStarted,
+        )
+        .expect("model turn start tag should build");
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::ModelRequestStarted,
+            "模型回合开始",
+            typed_start,
+        )
+        .expect("typed model turn start should append");
+        let projected = load_agent_session_read_model(&mut store, session_id)
+            .expect("typed turn start should project");
+        assert_eq!(projected.state.turn_count, 0);
+        assert_eq!(projected.state.context_tokens_used, 222);
+        assert!(projected.state.context_usage_estimated);
+
+        let mut typed_turn = context.clone();
+        typed_turn.insert("prompt_tokens".to_string(), "321".to_string());
+        insert_event_type_v1(
+            &EventKind::ModelRequestFinished,
+            &mut typed_turn,
+            EventTypeV1::AgentModelTurnFinished,
+        )
+        .expect("model turn tag should build");
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::ModelRequestFinished,
+            "模型回合结束",
+            typed_turn,
+        )
+        .expect("typed model turn should append");
+        let typed = load_agent_session_read_model(&mut store, session_id)
+            .expect("typed turn should project");
+        assert_eq!(typed.state.turn_count, 1);
+        assert_eq!(typed.state.context_tokens_used, 321);
+        assert!(!typed.state.context_usage_estimated);
+
+        let mut invalid_turn = context;
+        invalid_turn.insert("prompt_tokens".to_string(), "999".to_string());
+        invalid_turn.insert(
+            EVENT_TYPE_METADATA_KEY.to_string(),
+            "cindx.event.v2/agent.model_turn.finished".to_string(),
+        );
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::ModelRequestFinished,
+            "Agent model turn finished",
+            invalid_turn,
+        )
+        .expect("future model event should append");
+        let incremental = load_agent_session_read_model(&mut store, session_id)
+            .expect("invalid turn should project safely");
+        assert_eq!(incremental.state.turn_count, 1);
+        assert_eq!(incremental.state.context_tokens_used, 321);
+        assert!(!incremental.state.context_usage_estimated);
+
+        let events = store
+            .list_by_task_and_metadata(&phase16_task_id(), "session_id", session_id)
+            .expect("session events should load");
+        let rebuilt = build_agent_session_read_model(&store, session_id, events)
+            .expect("full projection should rebuild");
+        assert_eq!(incremental.state.turn_count, rebuilt.state.turn_count);
+        assert_eq!(
+            incremental.state.context_tokens_used,
+            rebuilt.state.context_tokens_used
+        );
+        assert_eq!(
+            incremental.state.context_usage_estimated,
+            rebuilt.state.context_usage_estimated
+        );
     }
 
     #[test]

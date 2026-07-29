@@ -1,4 +1,5 @@
 use super::*;
+use agent_core::{EventTypeV1, EVENT_TYPE_METADATA_KEY};
 use orchestrator::{
     IndependentQualitySource, LearningAttribution, LearningDisposition, LearningEvidenceV1,
     LearningTermination, LearningUsageCompleteness, LearningVerification,
@@ -105,6 +106,31 @@ fn routing_events(run_id: &str, terminal_summary: &str, terminal_extra: Metadata
         ),
         event(4, EventKind::TaskStatusChanged, terminal_summary, terminal),
     ]
+}
+
+#[test]
+fn invalid_lifecycle_tags_do_not_create_routing_telemetry() {
+    let mut future_start = routing_events("future-start", "Agent task completed", Metadata::new());
+    future_start[0].metadata.insert(
+        EVENT_TYPE_METADATA_KEY.to_string(),
+        "cindx.event.v2/agent.run.started".to_string(),
+    );
+    assert!(routing_telemetry_from_events(&future_start).is_empty());
+
+    let mut mismatched_terminal = routing_events(
+        "mismatched-terminal",
+        "Agent task completed",
+        Metadata::new(),
+    );
+    mismatched_terminal
+        .last_mut()
+        .expect("terminal event")
+        .metadata
+        .insert(
+            EVENT_TYPE_METADATA_KEY.to_string(),
+            EventTypeV1::AgentRunFailed.id().to_string(),
+        );
+    assert!(routing_telemetry_from_events(&mismatched_terminal).is_empty());
 }
 
 #[test]

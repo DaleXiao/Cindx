@@ -7,8 +7,9 @@ use crate::memory_runtime::{
     schedule_project_memory_vector_refresh,
 };
 use crate::project_session_persistence::metadata_with_context;
+use crate::run_lifecycle::{AgentRunEvent, AgentRunStatus};
 use crate::runtime_values::phase16_task_id;
-use agent_core::{EventKind, Message, MessageRole, Metadata, ModelRole};
+use agent_core::{Event, EventKind, Message, MessageRole, Metadata, ModelRole};
 use agent_memory::{
     parse_semantic_memory_batch, semantic_memory_extraction_prompt, validate_semantic_memory_batch,
 };
@@ -17,6 +18,13 @@ use model_provider::{
     MODEL_REQUEST_CANCELLED,
 };
 use std::path::PathBuf;
+
+pub(crate) fn contains_completed_agent_run(events: &[Event]) -> bool {
+    events.iter().any(|event| {
+        AgentRunEvent::from_event(event).map(AgentRunEvent::status)
+            == Some(AgentRunStatus::Completed)
+    })
+}
 
 pub(crate) fn generate_semantic_memory(
     state: &tauri::State<'_, AppState>,
@@ -43,10 +51,7 @@ pub(crate) fn generate_semantic_memory(
             .list_by_task_and_metadata(&task_id, "agent_run_id", run_id)
             .map_err(|error| error.to_string())?
     });
-    if !events
-        .iter()
-        .any(|event| event.summary == "Agent task completed")
-    {
+    if !contains_completed_agent_run(&events) {
         return Err("semantic memory skipped because the run is not complete".to_string());
     }
 
