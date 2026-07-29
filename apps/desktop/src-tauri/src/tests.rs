@@ -4018,6 +4018,7 @@ fn provider_config_input_preserves_existing_key_when_blank() {
             embedding_model: "".to_string(),
             image_model: "image-model-a".to_string(),
             image_endpoint: "https://images.example.test/v1".to_string(),
+            voice_model: "gpt-realtime".to_string(),
             collaboration_policy: "auto_router".to_string(),
             prompt_evolution_enabled: true,
             context_window_tokens: 128_000,
@@ -4036,6 +4037,24 @@ fn provider_config_input_preserves_existing_key_when_blank() {
     );
     assert_eq!(config.image_model, "image-model-a");
     assert_eq!(config.image_endpoint, "https://images.example.test/v1");
+    assert_eq!(config.voice_model, "gpt-realtime");
+}
+
+#[test]
+fn voice_model_is_optional_and_migrates_without_changing_agent_readiness() {
+    let mut config = provider_config_from_text(
+        "base_url=https://api.openai.com/v1\napi_key=secret\nexecutor_model=model-a\n",
+    );
+    assert!(config.is_ready());
+    assert!(!config.voice_is_ready());
+    assert!(config.voice_model.is_empty());
+
+    config = provider_config_from_text(
+        "base_url=https://api.openai.com/v1\napi_key=secret\nexecutor_model=model-a\nvoice_model=gpt-realtime\n",
+    );
+    assert!(config.is_ready());
+    assert!(config.voice_is_ready());
+    assert_eq!(config.voice_model, "gpt-realtime");
 }
 
 #[test]
@@ -8525,6 +8544,51 @@ fn workspace_cache_ttl_advances_only_after_validation_or_index_change() {
     assert!(!workspace_knowledge_cache_needs_refresh(true, false));
     assert!(workspace_knowledge_cache_needs_refresh(false, false));
     assert!(workspace_knowledge_cache_needs_refresh(true, true));
+}
+
+#[test]
+fn empty_workspace_knowledge_generation_is_reused() {
+    let root = temp_test_root("phase7-empty-generation");
+    fs::create_dir_all(&root).expect("temp root should exist");
+    fs::write(root.join("reference.png"), b"not indexable text").expect("fixture should write");
+    let mut adapter = open_rag_adapter_for(&root).expect("adapter should open");
+    let initial_index_path = adapter.path().to_path_buf();
+    let cancellation = Arc::new(AgentRunControl::new("auto"));
+    let expected_epoch = cancellation.steer_epoch();
+
+    let first = ensure_workspace_knowledge_index(
+        &root,
+        &mut adapter,
+        false,
+        &ProviderConfig::default(),
+        &cancellation,
+        expected_epoch,
+        None,
+    )
+    .expect("empty generation should publish");
+    assert_eq!(
+        first
+            .expect("first ensure should index")
+            .stats
+            .chunks_indexed,
+        0
+    );
+    let first_index_path = adapter.path().to_path_buf();
+    assert_ne!(first_index_path, initial_index_path);
+
+    let second = ensure_workspace_knowledge_index(
+        &root,
+        &mut adapter,
+        true,
+        &ProviderConfig::default(),
+        &cancellation,
+        expected_epoch,
+        None,
+    )
+    .expect("fresh empty generation should validate");
+    assert!(second.is_none());
+    assert_eq!(adapter.path(), first_index_path);
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]

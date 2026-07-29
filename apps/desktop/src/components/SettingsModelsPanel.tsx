@@ -219,6 +219,13 @@ export function SettingsModelsPanel({
                 }
               />
               <ModelSelect
+                label="Full-duplex voice"
+                value={providerDraft.voiceModel}
+                options={providerModelOptions}
+                emptyLabel="Not configured"
+                onChange={(voiceModel) => setProviderDraft({ ...providerDraft, voiceModel })}
+              />
+              <ModelSelect
                 label="Image generation"
                 value={providerDraft.imageModel}
                 options={providerModelOptions}

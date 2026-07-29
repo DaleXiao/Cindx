@@ -28,6 +28,7 @@ function providerDraftFromState(provider: ProviderConfigState): ProviderConfigIn
     embeddingModel: provider.embeddingModel,
     imageModel: provider.imageModel,
     imageEndpoint: provider.imageEndpoint,
+    voiceModel: provider.voiceModel,
     collaborationPolicy: normalizedEffortPolicy(provider.collaborationPolicy),
     promptEvolutionEnabled: provider.promptEvolutionEnabled,
     contextWindowTokens: provider.contextWindowTokens,
@@ -111,7 +112,8 @@ export function useProviderSettingsController({
           providerDraft.reviewerModel,
           providerDraft.summarizerModel,
           providerDraft.embeddingModel,
-          providerDraft.imageModel
+          providerDraft.imageModel,
+          providerDraft.voiceModel
         ]
       : [];
     return [...new Set([...providerModels, ...configured].filter(Boolean))].sort();
@@ -193,6 +195,11 @@ export function useProviderSettingsController({
     providerModelsBusy,
     providerModelsError,
     providerModelsRefreshTurn,
-    setProviderDraft
+    setProviderDraft,
+    voiceConfigured: Boolean(
+      phase4?.provider.apiKeySet &&
+        phase4.provider.baseUrl.trim() &&
+        phase4.provider.voiceModel.trim()
+    )
   };
 }

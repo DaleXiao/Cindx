@@ -85,6 +85,7 @@ pub(crate) struct ProviderConfig {
     pub(crate) embedding_model: String,
     pub(crate) image_model: String,
     pub(crate) image_endpoint: String,
+    pub(crate) voice_model: String,
     pub(crate) collaboration_policy: String,
     pub(crate) prompt_evolution_enabled: bool,
     pub(crate) context_window_tokens: u64,
@@ -160,6 +161,7 @@ impl Default for ProviderConfig {
             embedding_model: OPENAI_DEFAULT_EMBEDDING_MODEL.to_string(),
             image_model: String::new(),
             image_endpoint: String::new(),
+            voice_model: String::new(),
             collaboration_policy: "auto_router".to_string(),
             prompt_evolution_enabled: true,
             context_window_tokens: 128_000,
@@ -173,6 +175,12 @@ impl ProviderConfig {
         !self.base_url.trim().is_empty()
             && !self.api_key.trim().is_empty()
             && !self.executor_model.trim().is_empty()
+    }
+
+    pub(crate) fn voice_is_ready(&self) -> bool {
+        !self.base_url.trim().is_empty()
+            && !self.api_key.trim().is_empty()
+            && !self.voice_model.trim().is_empty()
     }
 
     pub(crate) fn model_for_role(&self, role: &ModelRole) -> String {

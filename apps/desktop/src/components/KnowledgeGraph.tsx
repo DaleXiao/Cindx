@@ -14,6 +14,7 @@ import type { GraphEdgeView, GraphNodeView, GraphStateView } from "../tauri";
 
 type KnowledgeGraphProps = {
   graph: GraphStateView;
+  indexedAtMs: number;
 };
 
 type PositionedNode = GraphNodeView &
@@ -160,7 +161,7 @@ function layoutGraph(nodes: GraphNodeView[], edges: GraphEdgeView[]) {
   return { nodes: positioned, edges: positionedEdges };
 }
 
-export function KnowledgeGraph({ graph }: KnowledgeGraphProps) {
+export function KnowledgeGraph({ graph, indexedAtMs }: KnowledgeGraphProps) {
   const sceneRef = useRef<SVGGElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const layout = useMemo(
@@ -295,7 +296,13 @@ export function KnowledgeGraph({ graph }: KnowledgeGraphProps) {
   }, [layout]);
 
   if (layout.nodes.length === 0) {
-    return <div className="knowledge-graph-empty">Index the workspace to build the graph.</div>;
+    return (
+      <div className="knowledge-graph-empty">
+        {indexedAtMs > 0
+          ? "No indexable workspace text was found. Images and other binary files are not included in this graph."
+          : "Workspace text knowledge has not been indexed yet."}
+      </div>
+    );
   }
 
   return (

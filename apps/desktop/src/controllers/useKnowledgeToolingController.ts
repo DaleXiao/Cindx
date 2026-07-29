@@ -3,6 +3,7 @@ import type { InspectorTab } from "../components/Inspector";
 import {
   answerWithRag,
   compactContext,
+  ensureWorkspaceKnowledge,
   getContextState,
   getPhase5State,
   getPhase7State,
@@ -35,7 +36,7 @@ export function useKnowledgeToolingController({
   const [selectedTool, setSelectedTool] = useState("file.list");
   const [toolInput, setToolInput] = useState("path=.");
   const [ragQuery, setRagQuery] = useState("What is the Cindx MVP scope?");
-  const [knowledgeGraphOpen, setKnowledgeGraphOpen] = useState(false);
+  const [knowledgeGraphOpen, setKnowledgeGraphOpenState] = useState(false);
   const [browserUrl, setBrowserUrl] = useState("https://example.com");
   const [browserTarget, setBrowserTarget] = useState("body");
   const [browserText, setBrowserText] = useState("hello");
@@ -110,13 +111,45 @@ export function useKnowledgeToolingController({
   );
 
   const ensureKnowledgeIndex = useCallback(async () => {
-    if (phase7 && phase7.stats.chunksIndexed > 0) return true;
-    const indexed = await indexWorkspaceRag();
+    const indexed = await ensureWorkspaceKnowledge();
     setPhase7(indexed);
-    if (!indexed.lastError) return true;
-    reportError(indexed.lastError);
+    if (indexed.lastError) {
+      reportError(indexed.lastError);
+      return false;
+    }
+    if (indexed.stats.chunksIndexed > 0) return true;
+    const message =
+      indexed.stats.indexedAtMs > 0
+        ? "No indexable workspace text was found."
+        : "Workspace text knowledge has not been indexed yet.";
+    setKnowledgeError(message);
+    reportError(message);
     return false;
-  }, [phase7, reportError]);
+  }, [reportError]);
+
+  const setKnowledgeGraphOpen = useCallback(
+    (open: boolean) => {
+      setKnowledgeGraphOpenState(open);
+      if (!open) return;
+      setRagBusy(true);
+      setKnowledgeError(null);
+      void ensureWorkspaceKnowledge()
+        .then((state) => {
+          setPhase7(state);
+          if (state.lastError) {
+            setKnowledgeError(state.lastError);
+            reportError(state.lastError);
+          }
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          setKnowledgeError(message);
+          reportError(message);
+        })
+        .finally(() => setRagBusy(false));
+    },
+    [reportError]
+  );
 
   const handleIndexRag = useCallback(async () => {
     setRagBusy(true);

@@ -1,5 +1,6 @@
 @media (prefers-reduced-motion: reduce) {
   .composer-working-ring,
+  .composer-voice-loading,
   .session-status-working svg,
   .session-status-complete > span,
   .session-status-attention > span,
@@ -260,10 +261,10 @@
 
 .composer-toolbar-actions {
   display: grid;
-  width: 148px;
-  min-width: 148px;
-  flex: 0 0 148px;
-  grid-template-columns: 104px 36px;
+  width: 192px;
+  min-width: 192px;
+  flex: 0 0 192px;
+  grid-template-columns: 104px 36px 36px;
   align-items: flex-end;
   gap: 8px;
   margin-left: auto;
@@ -298,6 +299,52 @@
 }
 
 .composer-attach-loading {
+  animation: spin 0.9s linear infinite;
+}
+
+.composer-voice-button {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  overflow: hidden;
+  color: #555555;
+  background: #f3f3f3;
+  border: 0;
+  border-radius: var(--radius-round);
+  place-items: center;
+}
+
+.composer-voice-button:hover:not(:disabled),
+.composer-voice-button:focus-visible,
+.composer-voice-button[data-status="connecting"],
+.composer-voice-button[data-status="recording"],
+.composer-voice-button[data-status="finishing"] {
+  color: #ffffff;
+  background: #2563eb;
+}
+
+.composer-voice-button:hover:not(:disabled),
+.composer-voice-button:focus-visible {
+  filter: brightness(0.9);
+}
+
+.composer-voice-button > canvas {
+  display: none;
+  width: 25px;
+  height: 25px;
+}
+
+.composer-voice-button[data-status="recording"] > canvas {
+  display: block;
+}
+
+.composer-voice-button > svg {
+  width: 17px;
+  height: 17px;
+}
+
+.composer-voice-loading {
   animation: spin 0.9s linear infinite;
 }
 
@@ -834,5 +881,3 @@ textarea::placeholder {
   width: 11px;
   height: 11px;
 }
-
-

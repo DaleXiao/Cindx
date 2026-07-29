@@ -16,6 +16,8 @@ import {
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { readArtifactPreview } from "../tauri";
 import type { AgentAttachment, AgentEffort, ToolApprovalView } from "../tauri";
+import type { VoiceInputStatus } from "../voice/voiceInputModel";
+import { VoiceInputButton } from "./VoiceInputButton";
 
 const COMPOSER_TEXTAREA_MIN_HEIGHT = 58;
 const COMPOSER_TEXTAREA_MAX_HEIGHT = 180;
@@ -91,8 +93,12 @@ type ComposerProps = {
   attachments: AgentAttachment[];
   attachmentBusy: boolean;
   effort: AgentEffort;
+  sessionId: string | null;
+  voiceConfigured: boolean;
   onChange: (value: string) => void;
   onEffortChange: (effort: AgentEffort) => void;
+  onVoiceTranscript: (sessionId: string, text: string) => void;
+  onVoiceError: (message: string) => void;
   onSend: (prompt: string) => void;
   onPickAttachments: (files: File[]) => void;
   onRemoveAttachment: (attachment: AgentAttachment) => void;
@@ -118,8 +124,12 @@ export function Composer({
   attachments,
   attachmentBusy,
   effort,
+  sessionId,
+  voiceConfigured,
   onChange,
   onEffortChange,
+  onVoiceTranscript,
+  onVoiceError,
   onSend,
   onPickAttachments,
   onRemoveAttachment,
@@ -136,13 +146,19 @@ export function Composer({
   const imeEnterSeenDuringCompositionRef = useRef(false);
   const suppressImeEnterUntilRef = useRef(0);
   const [effortMenuOpen, setEffortMenuOpen] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState<VoiceInputStatus>("idle");
   const hasInput = Boolean(value.trim() || attachments.length);
   const agentActive = working || canStop;
   const showStop = agentActive && !hasInput;
-  const canSend = !pendingApproval && !attachmentBusy && hasInput;
+  const voiceBusy = voiceStatus !== "idle";
+  const canSend = !pendingApproval && !attachmentBusy && !voiceBusy && hasInput;
   const canRetryError = canRetry && Boolean(error) && !working && !canStop && !pendingApproval;
   const canContinueRun = canContinue && !working && !canStop && !pendingApproval;
   const activeEffort = EFFORT_OPTIONS.find((option) => option.value === effort)!;
+
+  useEffect(() => {
+    if (pendingApproval) setVoiceStatus("idle");
+  }, [pendingApproval]);
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
@@ -188,7 +204,7 @@ export function Composer({
   }, [focusRequest, pendingApproval, value.length]);
 
   function submit() {
-    if (composingRef.current) return;
+    if (composingRef.current || voiceBusy) return;
     const prompt = (textareaRef.current?.value ?? value).trim();
     if (pendingApproval || attachmentBusy || (!prompt && attachments.length === 0)) return;
     onSend(prompt);
@@ -417,6 +433,13 @@ export function Composer({
                     </div>
                   )}
                 </div>
+                <VoiceInputButton
+                  configured={voiceConfigured}
+                  sessionId={sessionId}
+                  onTranscript={onVoiceTranscript}
+                  onError={onVoiceError}
+                  onStatusChange={setVoiceStatus}
+                />
                 <button
                   type={showStop ? "button" : "submit"}
                   className="send-button composer-primary-button"

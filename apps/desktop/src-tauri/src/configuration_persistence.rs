@@ -37,6 +37,7 @@ pub(crate) fn apply_provider_config_input(config: &mut ProviderConfig, input: Pr
     config.embedding_model = normalized_config_value(&input.embedding_model);
     config.image_model = normalized_config_value(&input.image_model);
     config.image_endpoint = normalized_config_value(&input.image_endpoint);
+    config.voice_model = normalized_config_value(&input.voice_model);
     config.collaboration_policy = match input.collaboration_policy.as_str() {
         "single" | "plan_execute_review" | "best_of_n" | "auto_router" => {
             input.collaboration_policy
@@ -98,6 +99,7 @@ pub(crate) fn provider_config_from_text(text: &str) -> ProviderConfig {
             "embedding_model" => config.embedding_model = value.to_string(),
             "image_model" => config.image_model = value.to_string(),
             "image_endpoint" => config.image_endpoint = value.to_string(),
+            "voice_model" => config.voice_model = value.to_string(),
             "collaboration_policy" => config.collaboration_policy = value.to_string(),
             "prompt_evolution_enabled" => config.prompt_evolution_enabled = config_bool(value),
             "context_window_tokens" => {
@@ -131,7 +133,7 @@ pub(crate) fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<()
     let mut file = options.open(&path)?;
     file.write_all(
         format!(
-            "base_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\ncollaboration_policy={}\nprompt_evolution_enabled={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\n",
+            "base_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\nvoice_model={}\ncollaboration_policy={}\nprompt_evolution_enabled={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\n",
             sanitize_config_value(&config.base_url),
             sanitize_config_value(&config.api_key),
             sanitize_config_value(&config.model),
@@ -143,6 +145,7 @@ pub(crate) fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<()
             sanitize_config_value(&config.model_for_role(&ModelRole::Embedder)),
             sanitize_config_value(&config.image_model),
             sanitize_config_value(&config.image_endpoint),
+            sanitize_config_value(&config.voice_model),
             sanitize_config_value(&config.collaboration_policy),
             config.prompt_evolution_enabled,
             config.context_window_tokens,
