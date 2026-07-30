@@ -2,6 +2,7 @@ use agent_core::{
     Event, EventId, EventKind, Metadata, PermissionDecision, PermissionRequest,
     PermissionRequestId, PermissionResolution, PermissionRisk, TaskId,
 };
+use sha2::{Digest, Sha256};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uchar, c_void};
 use std::path::Path;
@@ -11,6 +12,8 @@ const SQLITE_OK: c_int = 0;
 const SQLITE_ROW: c_int = 100;
 const SQLITE_DONE: c_int = 101;
 const SQLITE_OPEN_READONLY: c_int = 0x0000_0001;
+const SHELL_PERMISSION_CAPABILITY_KEY_VERSION: &str = "shell-command-v1";
+const SHELL_PERMISSION_CAPABILITY_MIGRATION: &str = "permission_capability_key_shell_sha256_v1";
 
 #[allow(non_camel_case_types)]
 enum sqlite3 {}
@@ -835,39 +838,46 @@ impl SqliteStore {
         session_id: &str,
         request: &PermissionRequest,
         exact_scope: bool,
+        require_capability_key: bool,
     ) -> Result<bool, StorageError> {
-        let mut statement = if exact_scope {
-            self.prepare(
-                "select 1
-                 from permission_requests pr
-                 inner join permission_resolutions rr on rr.request_id = pr.id
-                 where pr.task_id = ?1
-                   and pr.session_id = ?2
-                   and pr.risk = ?3
-                   and pr.action = ?4
-                   and pr.scope = ?5
-                   and rr.decision = 'allow_for_session'
-                 limit 1",
-            )?
-        } else {
-            self.prepare(
-                "select 1
-                 from permission_requests pr
-                 inner join permission_resolutions rr on rr.request_id = pr.id
-                 where pr.task_id = ?1
-                   and pr.session_id = ?2
-                   and pr.risk = ?3
-                   and pr.action = ?4
-                   and rr.decision = 'allow_for_session'
-                 limit 1",
-            )?
-        };
+        let capability_key = require_capability_key
+            .then(|| permission_capability_key(request))
+            .flatten();
+        if require_capability_key && capability_key.is_none() {
+            return Ok(false);
+        }
+        let mut query = String::from(
+            "select 1
+             from permission_requests pr
+             inner join permission_resolutions rr on rr.request_id = pr.id
+             where pr.task_id = ?1
+               and pr.session_id = ?2
+               and pr.risk = ?3
+               and pr.action = ?4",
+        );
+        if exact_scope {
+            query.push_str("\n               and pr.scope = ?5");
+        }
+        if capability_key.is_some() {
+            let binding = if exact_scope { 6 } else { 5 };
+            query.push_str(&format!(
+                "\n               and pr.capability_key = ?{binding}"
+            ));
+        }
+        query.push_str(
+            "\n               and rr.decision = 'allow_for_session'\n             limit 1",
+        );
+
+        let mut statement = self.prepare(&query)?;
         statement.bind_text(1, &task_id.0)?;
         statement.bind_text(2, session_id)?;
         statement.bind_text(3, permission_risk_to_str(&request.risk))?;
         statement.bind_text(4, &request.action)?;
         if exact_scope {
             statement.bind_text(5, &request.scope)?;
+        }
+        if let Some(capability_key) = capability_key.as_deref() {
+            statement.bind_text(if exact_scope { 6 } else { 5 }, capability_key)?;
         }
         Ok(statement.step()? == StepResult::Row)
     }
@@ -1063,7 +1073,8 @@ impl SqliteStore {
               requested_at_ms integer not null,
               status text not null,
               session_id text,
-              agent_run_id text
+              agent_run_id text,
+              capability_key text
             );
 
             create table if not exists permission_resolutions (
@@ -1093,6 +1104,9 @@ impl SqliteStore {
             self.exec_batch("alter table events add column tool_call_id text")?;
         }
         self.ensure_permission_scope_columns()?;
+        if !self.table_has_column("permission_requests", "capability_key")? {
+            self.exec_batch("alter table permission_requests add column capability_key text")?;
+        }
         self.exec_batch(
             "
             create index if not exists idx_events_task_session_sequence
@@ -1117,11 +1131,14 @@ impl SqliteStore {
               on permission_requests(task_id, session_id, agent_run_id, requested_at_ms desc);
             create index if not exists idx_permission_requests_session_capability
               on permission_requests(task_id, session_id, risk, action, scope);
+            create index if not exists idx_permission_requests_session_capability_key
+              on permission_requests(task_id, session_id, risk, action, scope, capability_key);
             ",
         )?;
         self.backfill_event_scope_columns()?;
         self.backfill_event_queue_scope_column()?;
-        self.backfill_permission_scope_columns()
+        self.backfill_permission_scope_columns()?;
+        self.backfill_permission_capability_keys()
     }
 
     fn ensure_event_scope_columns(&self) -> Result<(), StorageError> {
@@ -1320,6 +1337,59 @@ impl SqliteStore {
         }
     }
 
+    fn backfill_permission_capability_keys(&self) -> Result<(), StorageError> {
+        if self
+            .storage_meta_value(SHELL_PERMISSION_CAPABILITY_MIGRATION)?
+            .as_deref()
+            == Some("complete")
+        {
+            return Ok(());
+        }
+        let mut statement = self.prepare(
+            "select id, task_id, risk, action, reason, scope, metadata_text
+             from permission_requests
+             where action = 'shell.run'
+               and (capability_key is null or capability_key not like 'shell-command-v1:%')",
+        )?;
+        let mut rows = Vec::new();
+        while statement.step()? == StepResult::Row {
+            rows.push(PermissionRequest {
+                id: PermissionRequestId(statement.column_text(0)?),
+                task_id: TaskId(statement.column_text(1)?),
+                risk: str_to_permission_risk(&statement.column_text(2)?)?,
+                action: statement.column_text(3)?,
+                reason: statement.column_text(4)?,
+                scope: statement.column_text(5)?,
+                metadata: metadata_from_text(&statement.column_text(6)?)?,
+            });
+        }
+        drop(statement);
+
+        self.exec_batch("begin immediate transaction")?;
+        let result = (|| {
+            for request in rows {
+                let capability_key = permission_capability_key(&request);
+                let mut update = self
+                    .prepare("update permission_requests set capability_key = ?1 where id = ?2")?;
+                update.bind_optional_text(1, capability_key.as_deref())?;
+                update.bind_text(2, &request.id.0)?;
+                update.expect_done()?;
+            }
+            let mut marker =
+                self.prepare("insert or replace into storage_meta(key, value) values (?1, ?2)")?;
+            marker.bind_text(1, SHELL_PERMISSION_CAPABILITY_MIGRATION)?;
+            marker.bind_text(2, "complete")?;
+            marker.expect_done()
+        })();
+        match result {
+            Ok(()) => self.exec_batch("commit"),
+            Err(error) => {
+                let _ = self.exec_batch("rollback");
+                Err(error)
+            }
+        }
+    }
+
     fn exec_batch(&self, sql: &str) -> Result<(), StorageError> {
         let c_sql = CString::new(sql).map_err(|error| StorageError::new(error.to_string()))?;
         let mut error_message = ptr::null_mut();
@@ -1476,13 +1546,14 @@ impl PermissionStore for SqliteStore {
         request: PermissionRequest,
         requested_at_ms: u64,
     ) -> Result<(), StorageError> {
+        let capability_key = permission_capability_key(&request);
         let mut statement = self.prepare(
             "
             insert or replace into permission_requests(
               id, task_id, risk, action, reason, scope, metadata_text, requested_at_ms, status,
-              session_id, agent_run_id
+              session_id, agent_run_id, capability_key
             )
-            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10)
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10, ?11)
             ",
         )?;
 
@@ -1497,6 +1568,7 @@ impl PermissionStore for SqliteStore {
         statement.bind_optional_text(9, request.metadata.get("session_id").map(String::as_str))?;
         statement
             .bind_optional_text(10, request.metadata.get("agent_run_id").map(String::as_str))?;
+        statement.bind_optional_text(11, capability_key.as_deref())?;
         statement.expect_done()
     }
 
@@ -1781,6 +1853,33 @@ fn metadata_from_text(text: &str) -> Result<Metadata, StorageError> {
     }
 
     Ok(metadata)
+}
+
+fn permission_capability_key(request: &PermissionRequest) -> Option<String> {
+    if request.action != "shell.run" {
+        return None;
+    }
+    let command = request.metadata.get("command")?;
+    let environment_policy = request
+        .metadata
+        .get("environment_policy")
+        .map(String::as_str)
+        .unwrap_or_default();
+    let mut hasher = Sha256::new();
+    for field in [
+        SHELL_PERMISSION_CAPABILITY_KEY_VERSION,
+        request.action.as_str(),
+        permission_risk_to_str(&request.risk),
+        environment_policy,
+        command.as_str(),
+    ] {
+        hasher.update((field.len() as u64).to_be_bytes());
+        hasher.update(field.as_bytes());
+    }
+    Some(format!(
+        "{SHELL_PERMISSION_CAPABILITY_KEY_VERSION}:{}",
+        hex_encode(&hasher.finalize())
+    ))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -2288,10 +2387,166 @@ mod tests {
     }
 
     #[test]
-    fn checks_session_capabilities_with_risk_action_and_optional_scope() {
+    fn checks_session_capabilities_with_risk_action_scope_and_key() {
         let mut store = SqliteStore::in_memory().expect("store should open");
         let task_id = TaskId("task-agent".to_string());
         let request_id = PermissionRequestId("perm-shell".to_string());
+        let request = PermissionRequest {
+            id: request_id.clone(),
+            task_id: task_id.clone(),
+            risk: PermissionRisk::Execute,
+            action: "shell.run".to_string(),
+            reason: "test".to_string(),
+            scope: "/workspace".to_string(),
+            metadata: [
+                ("session_id".to_string(), "session-a".to_string()),
+                ("command".to_string(), "cargo test".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        store
+            .save_permission_request(request.clone(), 100)
+            .expect("permission should save");
+        store
+            .resolve_permission(PermissionResolution {
+                request_id,
+                decision: PermissionDecision::AllowForSession,
+                resolved_at_ms: 110,
+                resolved_by: "user".to_string(),
+            })
+            .expect("permission should resolve");
+
+        assert!(store
+            .has_session_permission_capability(&task_id, "session-a", &request, true, true,)
+            .expect("capability query should succeed"));
+        let mut another_scope = request.clone();
+        another_scope.scope = "/other".to_string();
+        assert!(!store
+            .has_session_permission_capability(&task_id, "session-a", &another_scope, true, true,)
+            .expect("scope query should succeed"));
+        assert!(store
+            .has_session_permission_capability(&task_id, "session-a", &another_scope, false, true,)
+            .expect("unscoped query should succeed"));
+        let mut another_command = request.clone();
+        another_command
+            .metadata
+            .insert("command".to_string(), "cargo build".to_string());
+        assert!(!store
+            .has_session_permission_capability(&task_id, "session-a", &another_command, true, true,)
+            .expect("capability-key query should succeed"));
+        let mut another_risk = request;
+        another_risk.risk = PermissionRisk::Write;
+        assert!(!store
+            .has_session_permission_capability(&task_id, "session-a", &another_risk, false, true,)
+            .expect("risk query should succeed"));
+    }
+
+    #[test]
+    fn shell_capability_keys_are_versioned_digests_without_raw_commands() {
+        let request = PermissionRequest {
+            id: PermissionRequestId("perm-shell-key".to_string()),
+            task_id: TaskId("task-agent".to_string()),
+            risk: PermissionRisk::Execute,
+            action: "shell.run".to_string(),
+            reason: "test".to_string(),
+            scope: "/workspace".to_string(),
+            metadata: [
+                ("command".to_string(), "cargo test --workspace".to_string()),
+                (
+                    "environment_policy".to_string(),
+                    "developer_safe_v1".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let key = permission_capability_key(&request).expect("shell command should hash");
+        assert!(key.starts_with("shell-command-v1:"));
+        assert_eq!(key.len(), "shell-command-v1:".len() + 64);
+        assert!(!key.contains("cargo"));
+        assert_eq!(permission_capability_key(&request), Some(key.clone()));
+
+        let mut changed = request.clone();
+        changed
+            .metadata
+            .insert("command".to_string(), "cargo build".to_string());
+        assert_ne!(permission_capability_key(&changed), Some(key.clone()));
+        changed.metadata.remove("command");
+        assert_eq!(permission_capability_key(&changed), None);
+
+        let mut other_policy = request;
+        other_policy
+            .metadata
+            .insert("environment_policy".to_string(), "future_v2".to_string());
+        assert_ne!(permission_capability_key(&other_policy), Some(key));
+    }
+
+    #[test]
+    fn migration_backfills_legacy_shell_keys_as_digests() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("task-agent".to_string());
+        let request_id = PermissionRequestId("legacy-shell".to_string());
+        let request = PermissionRequest {
+            id: request_id.clone(),
+            task_id: task_id.clone(),
+            risk: PermissionRisk::Execute,
+            action: "shell.run".to_string(),
+            reason: "legacy".to_string(),
+            scope: "/workspace".to_string(),
+            metadata: [
+                ("session_id".to_string(), "session-a".to_string()),
+                ("command".to_string(), "cargo test".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        store
+            .save_permission_request(request.clone(), 100)
+            .expect("permission should save");
+        store
+            .resolve_permission(PermissionResolution {
+                request_id,
+                decision: PermissionDecision::AllowForSession,
+                resolved_at_ms: 110,
+                resolved_by: "user".to_string(),
+            })
+            .expect("permission should resolve");
+        store
+            .exec_batch(
+                "update permission_requests set capability_key = null where id = 'legacy-shell';
+                 delete from storage_meta where key = 'permission_capability_key_shell_sha256_v1';",
+            )
+            .expect("legacy row should be staged");
+
+        store
+            .backfill_permission_capability_keys()
+            .expect("legacy capability should backfill");
+
+        let mut statement = store
+            .prepare("select capability_key from permission_requests where id = ?1")
+            .expect("capability query should prepare");
+        statement
+            .bind_text(1, "legacy-shell")
+            .expect("request id should bind");
+        assert_eq!(
+            statement.step().expect("capability query should run"),
+            StepResult::Row
+        );
+        let stored_key = statement.column_text(0).expect("key should load");
+        assert!(stored_key.starts_with("shell-command-v1:"));
+        assert!(!stored_key.contains("cargo test"));
+        drop(statement);
+        assert!(store
+            .has_session_permission_capability(&task_id, "session-a", &request, true, true)
+            .expect("backfilled grant should match"));
+    }
+
+    #[test]
+    fn indexed_shell_capability_lookup_fails_closed_without_a_command() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("task-agent".to_string());
+        let request_id = PermissionRequestId("missing-command".to_string());
         let request = PermissionRequest {
             id: request_id.clone(),
             task_id: task_id.clone(),
@@ -2315,22 +2570,55 @@ mod tests {
             })
             .expect("permission should resolve");
 
-        assert!(store
-            .has_session_permission_capability(&task_id, "session-a", &request, true)
-            .expect("capability query should succeed"));
-        let mut another_scope = request.clone();
-        another_scope.scope = "/other".to_string();
         assert!(!store
-            .has_session_permission_capability(&task_id, "session-a", &another_scope, true)
-            .expect("scope query should succeed"));
-        assert!(store
-            .has_session_permission_capability(&task_id, "session-a", &another_scope, false)
-            .expect("unscoped query should succeed"));
-        let mut another_risk = request;
-        another_risk.risk = PermissionRisk::Write;
-        assert!(!store
-            .has_session_permission_capability(&task_id, "session-a", &another_risk, false)
-            .expect("risk query should succeed"));
+            .has_session_permission_capability(&task_id, "session-a", &request, true, true)
+            .expect("missing command should fail closed"));
+    }
+
+    #[test]
+    fn shell_capability_lookup_uses_the_composite_key_index() {
+        let store = SqliteStore::in_memory().expect("store should open");
+        let mut statement = store
+            .prepare(
+                "explain query plan
+                 select 1
+                 from permission_requests pr
+                 inner join permission_resolutions rr on rr.request_id = pr.id
+                 where pr.task_id = ?1
+                   and pr.session_id = ?2
+                   and pr.risk = ?3
+                   and pr.action = ?4
+                   and pr.scope = ?5
+                   and pr.capability_key = ?6
+                   and rr.decision = 'allow_for_session'
+                 limit 1",
+            )
+            .expect("query plan should prepare");
+        for (index, value) in [
+            "task-agent",
+            "session-a",
+            "execute",
+            "shell.run",
+            "/workspace",
+            "shell-command-v1:digest",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            statement
+                .bind_text((index + 1) as c_int, value)
+                .expect("query parameter should bind");
+        }
+        let mut details = Vec::new();
+        while statement.step().expect("query plan should run") == StepResult::Row {
+            details.push(statement.column_text(3).expect("plan detail should load"));
+        }
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("idx_permission_requests_session_capability_key")),
+            "query plan should use the composite capability-key index: {details:?}"
+        );
     }
 
     #[test]

@@ -3792,6 +3792,7 @@ fn pending_review_state_identifies_the_related_session() {
             ("project_id".to_string(), project.id.clone()),
             ("project_name".to_string(), project.name.clone()),
             ("tool_input".to_string(), "command=cargo test".to_string()),
+            ("session_reusable".to_string(), "true".to_string()),
         ]
         .into_iter()
         .collect(),
@@ -10975,6 +10976,8 @@ fn session_permission_grant_only_covers_the_same_capability() {
         metadata: [
             ("session_id".to_string(), "session-a".to_string()),
             ("agent_run_id".to_string(), "run-a".to_string()),
+            ("command".to_string(), "cargo test".to_string()),
+            ("session_reusable".to_string(), "true".to_string()),
         ]
         .into_iter()
         .collect(),
@@ -11028,6 +11031,25 @@ fn session_permission_grant_only_covers_the_same_capability() {
         agent_session_permission_granted(&store, &phase16_task_id(), &next, Some("session-a"),)
             .expect("the exact shell capability should reuse the session grant")
     );
+    next.metadata
+        .insert("command".to_string(), "cargo build".to_string());
+    assert!(!agent_session_permission_granted(
+        &store,
+        &phase16_task_id(),
+        &next,
+        Some("session-a"),
+    )
+    .expect("another shell command should not reuse the grant"));
+    next.metadata.remove("command");
+    assert!(!agent_session_permission_granted(
+        &store,
+        &phase16_task_id(),
+        &next,
+        Some("session-a"),
+    )
+    .expect("legacy shell grants without a command should fail closed"));
+    next.metadata
+        .insert("command".to_string(), "cargo test".to_string());
     next.risk = PermissionRisk::Destructive;
     assert!(!agent_session_permission_granted(
         &store,

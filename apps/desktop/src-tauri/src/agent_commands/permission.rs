@@ -133,11 +133,11 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "permission request not found".to_string())?;
     if matches!(&decision, PermissionDecision::AllowForSession)
-        && matches!(&request.risk, PermissionRisk::Destructive)
+        && !permission_can_allow_session(&request)
     {
         return agent_state_for_session(
             &store,
-            Some("destructive permissions can only be allowed once".to_string()),
+            Some("this permission can only be allowed once".to_string()),
             Some(&session_id),
         )
         .map_err(|error| error.to_string());
@@ -194,7 +194,7 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
             )
             .map_err(|error| error.to_string())?
             .into_iter()
-            .filter(|pending| !matches!(&pending.risk, PermissionRisk::Destructive))
+            .filter(|pending| permission_capability_matches(&request, pending))
             .collect::<Vec<_>>()
         };
         for pending_request in pending {

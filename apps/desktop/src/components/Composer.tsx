@@ -23,6 +23,21 @@ import { VoiceInputButton } from "./VoiceInputButton";
 const COMPOSER_TEXTAREA_MIN_HEIGHT = 58;
 const COMPOSER_TEXTAREA_MAX_HEIGHT = 180;
 const IME_POST_COMPOSITION_ENTER_GUARD_MS = 120;
+const SHELL_PERMISSION_PREVIEW_CHARS = 2_000;
+
+function approvalInputSummary(approval: ToolApprovalView | null) {
+  if (approval?.toolName !== "shell.run" || !approval.input.trim()) return null;
+  let command = approval.input;
+  try {
+    const input = JSON.parse(approval.input) as { command?: unknown };
+    if (typeof input.command === "string") command = input.command;
+  } catch {}
+  if (command.length <= SHELL_PERMISSION_PREVIEW_CHARS) return command;
+  const tailLength = Math.floor(SHELL_PERMISSION_PREVIEW_CHARS / 4);
+  return `${command.slice(0, SHELL_PERMISSION_PREVIEW_CHARS - tailLength)}…${command.slice(
+    -tailLength
+  )}`;
+}
 
 const EFFORT_OPTIONS: Array<{
   value: AgentEffort;
@@ -158,6 +173,7 @@ export function Composer({
   const canRetryError = canRetry && Boolean(error) && !working && !canStop && !pendingApproval;
   const canContinueRun = canContinue && !working && !canStop && !pendingApproval;
   const activeEffort = EFFORT_OPTIONS.find((option) => option.value === effort)!;
+  const approvalInput = approvalInputSummary(pendingApproval);
 
   useEffect(() => {
     if (pendingApproval) setVoiceStatus("idle");
@@ -231,6 +247,11 @@ export function Composer({
             <div className="composer-permission-copy">
               <strong>{pendingApproval.toolName}</strong>
               <p>{pendingApproval.reason}</p>
+              {approvalInput && (
+                <code className="composer-permission-input" title={approvalInput}>
+                  {approvalInput}
+                </code>
+              )}
               {pendingApproval.scope.trim() && pendingApproval.scope.trim() !== "." && (
                 <span title={pendingApproval.scope}>{pendingApproval.scope}</span>
               )}
@@ -245,7 +266,7 @@ export function Composer({
                 <CircleCheck aria-hidden="true" />
                 <span>Once</span>
               </button>
-              {pendingApproval.risk !== "destructive" && (
+              {pendingApproval.canAllowSession && (
                 <button
                   className="permission-session"
                   type="button"
@@ -253,9 +274,18 @@ export function Composer({
                   onClick={() =>
                     onResolvePermission(pendingApproval.requestId, "allow_for_session")
                   }
+                  title={
+                    pendingApproval.toolName === "shell.run"
+                      ? "Reuse only this exact command in this session"
+                      : "Allow this capability for the session"
+                  }
                 >
                   <CheckCheck aria-hidden="true" />
-                  <span>Allow session</span>
+                  <span>
+                    {pendingApproval.toolName === "shell.run"
+                      ? "Allow command"
+                      : "Allow session"}
+                  </span>
                 </button>
               )}
               <button

@@ -126,9 +126,16 @@ export function SettingsPermissionsPanel({
                       type="button"
                       disabled={busy || sessionBusy}
                       onClick={() => void onResolve(review, "allow_for_session")}
+                      title={
+                        review.action === "shell.run"
+                          ? "Reuse only this exact command in this session"
+                          : "Allow this capability for the session"
+                      }
                     >
                       <ShieldCheck aria-hidden="true" />
-                      <span>Allow session</span>
+                      <span>
+                        {review.action === "shell.run" ? "Allow command" : "Allow session"}
+                      </span>
                     </button>
                   )}
                   <button
