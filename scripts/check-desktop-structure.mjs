@@ -1031,6 +1031,10 @@ assert(
   ),
   "The macOS titlebar must hide its title and host the pane controls"
 );
+const titlebarHeight = 46;
+const macOSTrafficLightButtonHeight = 14;
+const macOSTrafficLightReplayInsetY =
+  titlebarHeight - macOSTrafficLightButtonHeight;
 assert(
   tauriConfig.app.windows.every((window) => window.visible === false) &&
     !rustLib.includes(".on_page_load(|webview, payload|") &&
@@ -1044,7 +1048,15 @@ assert(
       "MACOS_TRAFFIC_LIGHT_REPAIR_DELAYS_MS: [u64; 3] = [96, 320, 900]"
     ) &&
     rustLib.includes("for delay_ms in MACOS_TRAFFIC_LIGHT_REPAIR_DELAYS_MS") &&
-    rustLib.includes("tauri::WindowEvent::Focused(true)") &&
+    rustLib.includes("tauri::WindowEvent::Focused(_)") &&
+    !rustLib.includes("tauri::WindowEvent::Focused(true)") &&
+    tauriConfig.app.windows.every(
+      (window) =>
+        window.trafficLightPosition?.x === 14 &&
+        window.trafficLightPosition?.y === macOSTrafficLightReplayInsetY &&
+        macOSTrafficLightButtonHeight + window.trafficLightPosition.y ===
+          titlebarHeight
+    ) &&
     rustLib.includes("MACOS_TITLEBAR_HEIGHT: f64 = 46.0") &&
     rustLib.includes("fn centered_macos_traffic_light_origin_y(button_height: f64)") &&
     rustLib.includes(
@@ -1065,15 +1077,13 @@ assert(
     appSource.includes("!sessionRuntimeCache.hasAgent(state.activeSessionId)") &&
     !appSource.includes("agentState?.sessionId !== projectSessionState.activeSessionId") &&
     !appSource.includes("revealAfterStableFrame"),
-  "The native window must reveal a stable loading frame and repair native controls after size, scale, or focus relayouts"
+  "The native window must keep framework and custom traffic-light geometry aligned across size, scale, focus, and background redraws"
 );
-const titlebarHeight = 46;
-// This is the user-confirmed macOS alignment; do not retune it indirectly.
-const confirmedMacOSTrafficLightY = 25;
 
 assert(
   tauriConfig.app.windows.every(
-    (window) => window.trafficLightPosition?.y === confirmedMacOSTrafficLightY
+    (window) =>
+      window.trafficLightPosition?.y === macOSTrafficLightReplayInsetY
   ) &&
     styles.includes(`--titlebar-height: ${titlebarHeight}px`) &&
     styles.includes("--titlebar-control-size: 28px") &&
@@ -2899,6 +2909,17 @@ assert(
   ) &&
     rustLib.includes("persistent state unavailable; using in-memory state") &&
     rustLib.includes("install_startup_panic_log") &&
+    cargoToml.includes(
+      'rustls = { version = "0.23.42", default-features = false, features = ["aws_lc_rs"] }'
+    ) &&
+    appBootstrapSource.includes("fn install_rustls_crypto_provider()") &&
+    appBootstrapSource.indexOf("install_startup_panic_log();") <
+      appBootstrapSource.indexOf("install_rustls_crypto_provider();") &&
+    appBootstrapSource.indexOf("install_rustls_crypto_provider();") <
+      appBootstrapSource.indexOf("migrate_legacy_app_data()") &&
+    appBootstrapSource.includes(
+      "rustls_crypto_provider_installation_is_idempotent"
+    ) &&
     rustLib.includes('std::env::var("CINDX_STARTUP_PROBE")') &&
     ciWorkflow.includes("Probe clean-machine startup") &&
     !rustLib.includes('workspace_root().join(".cindx").join("state.sqlite3")'),
