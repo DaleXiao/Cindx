@@ -410,20 +410,21 @@ pub(crate) fn ensure_schedule_execution_session(
         .project_session_config
         .lock()
         .map_err(|error| format!("project session config lock poisoned: {error}"))?;
+    let mut candidate = config.clone();
     let execution_project_id = project_id
         .map(str::to_string)
         .or_else(|| {
-            config
+            candidate
                 .projects
                 .iter()
-                .any(|project| project.id == config.active_project_id)
-                .then(|| config.active_project_id.clone())
+                .any(|project| project.id == candidate.active_project_id)
+                .then(|| candidate.active_project_id.clone())
         })
-        .or_else(|| config.projects.first().map(|project| project.id.clone()))
+        .or_else(|| candidate.projects.first().map(|project| project.id.clone()))
         .ok_or_else(|| "create a project before enabling a standalone schedule".to_string())?;
 
     if let Some(session) = existing_execution_session_id.and_then(|session_id| {
-        config.sessions.iter_mut().find(|session| {
+        candidate.sessions.iter_mut().find(|session| {
             session.id == session_id
                 && session.archived_at_ms.is_none()
                 && is_schedule_execution_session(session)
@@ -444,14 +445,15 @@ pub(crate) fn ensure_schedule_execution_session(
             changed = true;
         }
         if changed {
-            save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+            commit_project_session_config(&mut config, candidate)
+                .map_err(|error| error.to_string())?;
         }
         return Ok(execution_session_id);
     }
 
     let execution_session_id = new_session_id();
     let now = current_time_millis();
-    config.sessions.push(SessionRecord {
+    candidate.sessions.push(SessionRecord {
         id: execution_session_id.clone(),
         project_id: execution_project_id,
         name: format!("{} · Schedule", schedule_name.trim()),
@@ -463,7 +465,7 @@ pub(crate) fn ensure_schedule_execution_session(
         updated_at_ms: now,
         archived_at_ms: None,
     });
-    save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+    commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
     Ok(execution_session_id)
 }
 

@@ -28,10 +28,11 @@ pub(crate) fn create_project(
         .project_session_config
         .lock()
         .map_err(|error| format!("project session config lock poisoned: {error}"))?;
+    let mut candidate = config.clone();
     let project_id = unique_config_id(
         "project",
         &name,
-        &config
+        &candidate
             .projects
             .iter()
             .map(|project| project.id.clone())
@@ -39,7 +40,7 @@ pub(crate) fn create_project(
     );
     let session_id = new_session_id();
     let now = current_time_millis();
-    config.projects.push(ProjectRecord {
+    candidate.projects.push(ProjectRecord {
         id: project_id.clone(),
         name: name.clone(),
         root: root.display().to_string(),
@@ -47,7 +48,7 @@ pub(crate) fn create_project(
         created_at_ms: now,
         updated_at_ms: now,
     });
-    config.sessions.push(SessionRecord {
+    candidate.sessions.push(SessionRecord {
         id: session_id.clone(),
         project_id: project_id.clone(),
         name: "New Session".to_string(),
@@ -59,11 +60,10 @@ pub(crate) fn create_project(
         updated_at_ms: now,
         archived_at_ms: None,
     });
-    config.active_project_id = project_id;
-    config.active_session_id = session_id;
-    workspace_config.root = root;
-    save_workspace_config_to_disk(&workspace_config).map_err(|error| error.to_string())?;
-    save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+    candidate.active_project_id = project_id;
+    candidate.active_session_id = session_id;
+    commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
+    publish_workspace_config_cache(&mut workspace_config, WorkspaceConfig { root });
 
     Ok(project_session_state(&config, None))
 }
@@ -95,9 +95,10 @@ pub(crate) fn create_session(
             Some("project not found for session".to_string()),
         ));
     }
+    let mut candidate = config.clone();
     let session_id = new_session_id();
     let now = current_time_millis();
-    config.sessions.push(SessionRecord {
+    candidate.sessions.push(SessionRecord {
         id: session_id.clone(),
         project_id: project_id.clone(),
         title_state: SessionTitleState::parse(None, is_automatic_session_name(&name)),
@@ -109,9 +110,9 @@ pub(crate) fn create_session(
         updated_at_ms: now,
         archived_at_ms: None,
     });
-    config.active_project_id = project_id;
-    config.active_session_id = session_id;
-    save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+    candidate.active_project_id = project_id;
+    candidate.active_session_id = session_id;
+    commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
 
     Ok(project_session_state(&config, None))
 }
@@ -129,7 +130,8 @@ pub(crate) fn rename_project(
         .project_session_config
         .lock()
         .map_err(|error| format!("project session config lock poisoned: {error}"))?;
-    let Some(project) = config
+    let mut candidate = config.clone();
+    let Some(project) = candidate
         .projects
         .iter_mut()
         .find(|project| project.id == input.project_id)
@@ -141,7 +143,7 @@ pub(crate) fn rename_project(
     };
     project.name = name;
     project.updated_at_ms = current_time_millis();
-    save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+    commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
     Ok(project_session_state(&config, None))
 }
 
@@ -159,8 +161,9 @@ pub(crate) fn delete_project(
             .project_session_config
             .lock()
             .map_err(|error| format!("project session config lock poisoned: {error}"))?;
+        let mut candidate = config.clone();
         let Some((project, deleted_session_ids)) =
-            remove_project_from_config(&mut config, &input.project_id)
+            remove_project_from_config(&mut candidate, &input.project_id)
         else {
             return Ok(project_session_state(
                 &config,
@@ -186,12 +189,13 @@ pub(crate) fn delete_project(
             })
             .collect::<Vec<_>>();
 
-        if let Some(active_project) = config.active_project() {
-            workspace_config.root = PathBuf::from(&active_project.root);
-            save_workspace_config_to_disk(&workspace_config).map_err(|error| error.to_string())?;
+        let next_workspace_root = candidate
+            .active_project()
+            .map(|active_project| PathBuf::from(&active_project.root));
+        commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
+        if let Some(root) = next_workspace_root {
+            publish_workspace_config_cache(&mut workspace_config, WorkspaceConfig { root });
         }
-
-        save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
         (
             deleted_session_ids,
             attachment_dirs,
@@ -239,9 +243,10 @@ pub(crate) fn rename_session(
         .project_session_config
         .lock()
         .map_err(|error| format!("project session config lock poisoned: {error}"))?;
+    let mut candidate = config.clone();
     let now = current_time_millis();
     let project_id = {
-        let Some(session) = config
+        let Some(session) = candidate
             .sessions
             .iter_mut()
             .find(|session| session.id == input.session_id)
@@ -256,14 +261,14 @@ pub(crate) fn rename_session(
         session.updated_at_ms = now;
         session.project_id.clone()
     };
-    if let Some(project) = config
+    if let Some(project) = candidate
         .projects
         .iter_mut()
         .find(|project| project.id == project_id)
     {
         project.updated_at_ms = now;
     }
-    save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+    commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
     Ok(project_session_state(&config, None))
 }
 
@@ -277,13 +282,14 @@ pub(crate) fn set_session_effort(
         .project_session_config
         .lock()
         .map_err(|error| format!("project session config lock poisoned: {error}"))?;
-    if !update_session_effort(&mut config, &input.session_id, &effort) {
+    let mut candidate = config.clone();
+    if !update_session_effort(&mut candidate, &input.session_id, &effort) {
         return Ok(project_session_state(
             &config,
             Some("session not found".to_string()),
         ));
     }
-    save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+    commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
     Ok(project_session_state(&config, None))
 }
 
@@ -327,8 +333,9 @@ pub(crate) async fn generate_session_title(
                 .project_session_config
                 .lock()
                 .map_err(|error| format!("project session config lock poisoned: {error}"))?;
+            let mut candidate = config.clone();
             let (project_id, expected_title, expected_title_state, expected_updated_at_ms) = {
-                let Some(session) = config.sessions.iter_mut().find(|session| {
+                let Some(session) = candidate.sessions.iter_mut().find(|session| {
                     session.id == input.session_id && session.archived_at_ms.is_none()
                 }) else {
                     return Ok(project_session_state(
@@ -352,14 +359,15 @@ pub(crate) async fn generate_session_title(
                     now,
                 )
             };
-            if let Some(project) = config
+            if let Some(project) = candidate
                 .projects
                 .iter_mut()
                 .find(|project| project.id == project_id)
             {
                 project.updated_at_ms = expected_updated_at_ms;
             }
-            save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+            commit_project_session_config(&mut config, candidate)
+                .map_err(|error| error.to_string())?;
             (expected_title, expected_title_state, expected_updated_at_ms)
         };
         let provider_config = clone_provider_config(&state)?;
@@ -390,9 +398,10 @@ pub(crate) async fn generate_session_title(
             .project_session_config
             .lock()
             .map_err(|error| format!("project session config lock poisoned: {error}"))?;
+        let mut candidate = config.clone();
         let project_id =
             {
-                let Some(session) = config.sessions.iter_mut().find(|session| {
+                let Some(session) = candidate.sessions.iter_mut().find(|session| {
                     session.id == input.session_id && session.archived_at_ms.is_none()
                 }) else {
                     return Ok(project_session_state(&config, None));
@@ -409,14 +418,14 @@ pub(crate) async fn generate_session_title(
                 session.updated_at_ms = now;
                 session.project_id.clone()
             };
-        if let Some(project) = config
+        if let Some(project) = candidate
             .projects
             .iter_mut()
             .find(|project| project.id == project_id)
         {
             project.updated_at_ms = now;
         }
-        save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+        commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
         let next_state = project_session_state(&config, None);
         drop(config);
         app.emit_session_title_updated(input.session_id);
@@ -507,7 +516,8 @@ pub(crate) fn fork_session(
             .project_session_config
             .lock()
             .map_err(|error| format!("project session config lock poisoned: {error}"))?;
-        let Some(source) = config
+        let mut candidate = config.clone();
+        let Some(source) = candidate
             .sessions
             .iter()
             .find(|session| session.id == input.session_id)
@@ -518,7 +528,7 @@ pub(crate) fn fork_session(
                 Some("session not found".to_string()),
             ));
         };
-        let Some(project) = config
+        let Some(project) = candidate
             .projects
             .iter()
             .find(|project| project.id == source.project_id)
@@ -529,7 +539,7 @@ pub(crate) fn fork_session(
                 Some("session project not found".to_string()),
             ));
         };
-        let name = unique_fork_name(&config, &source);
+        let name = unique_fork_name(&candidate, &source);
         let id = new_session_id();
         let now = current_time_millis();
         let fork = SessionRecord {
@@ -544,10 +554,10 @@ pub(crate) fn fork_session(
             updated_at_ms: now,
             archived_at_ms: None,
         };
-        config.sessions.push(fork.clone());
-        config.active_project_id = source.project_id.clone();
-        config.active_session_id = id;
-        save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+        candidate.sessions.push(fork.clone());
+        candidate.active_project_id = source.project_id.clone();
+        candidate.active_session_id = id;
+        commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
         (source, project, fork)
     };
 
@@ -598,7 +608,8 @@ pub(crate) fn archive_session(
         .project_session_config
         .lock()
         .map_err(|error| format!("project session config lock poisoned: {error}"))?;
-    let Some(index) = config
+    let mut candidate = config.clone();
+    let Some(index) = candidate
         .sessions
         .iter()
         .position(|session| session.id == input.session_id)
@@ -608,17 +619,17 @@ pub(crate) fn archive_session(
             Some("session not found".to_string()),
         ));
     };
-    let project_id = config.sessions[index].project_id.clone();
+    let project_id = candidate.sessions[index].project_id.clone();
     let now = current_time_millis();
-    config.sessions[index].archived_at_ms = Some(now);
-    config.sessions[index].updated_at_ms = now;
+    candidate.sessions[index].archived_at_ms = Some(now);
+    candidate.sessions[index].updated_at_ms = now;
     if let Some(latest_sequence) = latest_sequence {
-        config.sessions[index].seen_event_sequence = latest_sequence;
+        candidate.sessions[index].seen_event_sequence = latest_sequence;
     }
-    if config.active_session_id == input.session_id {
-        config.active_session_id = ensure_open_session_for_project(&mut config, &project_id);
+    if candidate.active_session_id == input.session_id {
+        candidate.active_session_id = ensure_open_session_for_project(&mut candidate, &project_id);
     }
-    save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+    commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
     Ok(project_session_state(&config, None))
 }
 
@@ -631,7 +642,8 @@ pub(crate) fn restore_session(
         .project_session_config
         .lock()
         .map_err(|error| format!("project session config lock poisoned: {error}"))?;
-    let Some(session) = config
+    let mut candidate = config.clone();
+    let Some(session) = candidate
         .sessions
         .iter_mut()
         .find(|session| session.id == input.session_id)
@@ -643,7 +655,7 @@ pub(crate) fn restore_session(
     };
     session.archived_at_ms = None;
     session.updated_at_ms = current_time_millis();
-    save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+    commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
     Ok(project_session_state(&config, None))
 }
 
@@ -658,7 +670,8 @@ pub(crate) fn delete_session(
             .project_session_config
             .lock()
             .map_err(|error| format!("project session config lock poisoned: {error}"))?;
-        let Some(index) = config
+        let mut candidate = config.clone();
+        let Some(index) = candidate
             .sessions
             .iter()
             .position(|session| session.id == session_id)
@@ -668,8 +681,8 @@ pub(crate) fn delete_session(
                 Some("session not found".to_string()),
             ));
         };
-        let project_id = config.sessions[index].project_id.clone();
-        let attachment_dir = config
+        let project_id = candidate.sessions[index].project_id.clone();
+        let attachment_dir = candidate
             .projects
             .iter()
             .find(|project| project.id == project_id)
@@ -679,7 +692,7 @@ pub(crate) fn delete_session(
                     .join("attachments")
                     .join(slug_label(&session_id))
             });
-        let context_file = config
+        let context_file = candidate
             .projects
             .iter()
             .find(|project| project.id == project_id)
@@ -689,11 +702,12 @@ pub(crate) fn delete_session(
                     Some(session_id.as_str()),
                 )
             });
-        config.sessions.remove(index);
-        if config.active_session_id == session_id {
-            config.active_session_id = ensure_open_session_for_project(&mut config, &project_id);
+        candidate.sessions.remove(index);
+        if candidate.active_session_id == session_id {
+            candidate.active_session_id =
+                ensure_open_session_for_project(&mut candidate, &project_id);
         }
-        save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+        commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
         (
             attachment_dir,
             context_file,
@@ -877,7 +891,8 @@ pub(crate) fn select_project(
         .project_session_config
         .lock()
         .map_err(|error| format!("project session config lock poisoned: {error}"))?;
-    let Some(project) = config
+    let mut candidate = config.clone();
+    let Some(project) = candidate
         .projects
         .iter()
         .find(|project| project.id == input.project_id)
@@ -889,14 +904,14 @@ pub(crate) fn select_project(
         ));
     };
     let root = validate_workspace_root(&project.root)?;
-    config.active_project_id = project.id.clone();
-    if !config.sessions.iter().any(|session| {
-        session.id == config.active_session_id
+    candidate.active_project_id = project.id.clone();
+    if !candidate.sessions.iter().any(|session| {
+        session.id == candidate.active_session_id
             && session.project_id == project.id
             && session.archived_at_ms.is_none()
             && !is_schedule_execution_session(session)
     }) {
-        config.active_session_id = config
+        candidate.active_session_id = candidate
             .sessions
             .iter()
             .find(|session| {
@@ -908,7 +923,7 @@ pub(crate) fn select_project(
             .unwrap_or_else(|| {
                 let session_id = new_session_id();
                 let now = current_time_millis();
-                config.sessions.push(SessionRecord {
+                candidate.sessions.push(SessionRecord {
                     id: session_id.clone(),
                     project_id: project.id.clone(),
                     name: format!("{} Session", project.name),
@@ -923,9 +938,8 @@ pub(crate) fn select_project(
                 session_id
             });
     }
-    workspace_config.root = root;
-    save_workspace_config_to_disk(&workspace_config).map_err(|error| error.to_string())?;
-    save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+    commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
+    publish_workspace_config_cache(&mut workspace_config, WorkspaceConfig { root });
 
     Ok(project_session_state(&config, None))
 }
@@ -943,7 +957,8 @@ pub(crate) fn select_session(
         .project_session_config
         .lock()
         .map_err(|error| format!("project session config lock poisoned: {error}"))?;
-    let Some(session) = config
+    let mut candidate = config.clone();
+    let Some(session) = candidate
         .sessions
         .iter()
         .find(|session| session.id == input.session_id && session.archived_at_ms.is_none())
@@ -954,7 +969,7 @@ pub(crate) fn select_session(
             Some("session not found".to_string()),
         ));
     };
-    let Some(project) = config
+    let Some(project) = candidate
         .projects
         .iter()
         .find(|project| project.id == session.project_id)
@@ -966,11 +981,10 @@ pub(crate) fn select_session(
         ));
     };
     let root = validate_workspace_root(&project.root)?;
-    config.active_project_id = project.id;
-    config.active_session_id = session.id;
-    workspace_config.root = root;
-    save_workspace_config_to_disk(&workspace_config).map_err(|error| error.to_string())?;
-    save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+    candidate.active_project_id = project.id;
+    candidate.active_session_id = session.id;
+    commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
+    publish_workspace_config_cache(&mut workspace_config, WorkspaceConfig { root });
 
     Ok(project_session_state(&config, None))
 }
@@ -990,7 +1004,8 @@ pub(crate) fn acknowledge_session_activity(
         .project_session_config
         .lock()
         .map_err(|error| format!("project session config lock poisoned: {error}"))?;
-    let Some(session) = config
+    let mut candidate = config.clone();
+    let Some(session) = candidate
         .sessions
         .iter_mut()
         .find(|session| session.id == input.session_id && session.archived_at_ms.is_none())
@@ -1002,7 +1017,7 @@ pub(crate) fn acknowledge_session_activity(
     };
     if acknowledged_sequence > session.seen_event_sequence {
         session.seen_event_sequence = acknowledged_sequence;
-        save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+        commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
     }
     project_session_state_from_store(&config, &store, None).map_err(|error| error.to_string())
 }
@@ -1013,15 +1028,38 @@ pub(crate) fn save_workspace_root(
     input: WorkspaceInput,
 ) -> Result<RuntimeStatus, String> {
     let root = validate_workspace_root(&input.path)?;
+    let mut workspace_config = state
+        .workspace_config
+        .lock()
+        .map_err(|error| format!("workspace config lock poisoned: {error}"))?;
+    let mut project_session_config = state
+        .project_session_config
+        .lock()
+        .map_err(|error| format!("project session config lock poisoned: {error}"))?;
+    let active_project_id = project_session_config.active_project_id.clone();
+    if project_session_config
+        .projects
+        .iter()
+        .any(|project| project.id == active_project_id)
     {
-        let mut config = state
-            .workspace_config
-            .lock()
-            .map_err(|error| format!("workspace config lock poisoned: {error}"))?;
-        config.root = root.clone();
-        save_workspace_config_to_disk(&config).map_err(|error| error.to_string())?;
+        let mut candidate = project_session_config.clone();
+        if let Some(project) = candidate
+            .projects
+            .iter_mut()
+            .find(|project| project.id == active_project_id)
+        {
+            project.root = root.display().to_string();
+            project.updated_at_ms = current_time_millis();
+        }
+        commit_project_session_config(&mut project_session_config, candidate)
+            .map_err(|error| error.to_string())?;
+        publish_workspace_config_cache(&mut workspace_config, WorkspaceConfig { root });
+    } else {
+        commit_workspace_config(&mut workspace_config, WorkspaceConfig { root })
+            .map_err(|error| error.to_string())?;
     }
-    sync_active_project_root(&state, &root)?;
+    drop(project_session_config);
+    drop(workspace_config);
 
     runtime_status(&state)
 }

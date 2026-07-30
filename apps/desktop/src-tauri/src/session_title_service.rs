@@ -75,8 +75,9 @@ pub(super) fn persist_completed_conversation_title(
         .project_session_config
         .lock()
         .map_err(|error| format!("project session config lock poisoned: {error}"))?;
+    let mut candidate = config.clone();
     let (project_id, expected_title, expected_updated_at_ms) = {
-        let Some(session) = config
+        let Some(session) = candidate
             .sessions
             .iter_mut()
             .find(|session| session.id == session_id && session.archived_at_ms.is_none())
@@ -94,14 +95,14 @@ pub(super) fn persist_completed_conversation_title(
             session.updated_at_ms,
         )
     };
-    if let Some(project) = config
+    if let Some(project) = candidate
         .projects
         .iter_mut()
         .find(|project| project.id == project_id)
     {
         project.updated_at_ms = expected_updated_at_ms;
     }
-    save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+    commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
     refinement_sessions.insert(session_id.to_string());
     Ok(Some(SessionTitleRefinement {
         session_id: session_id.to_string(),
@@ -127,9 +128,10 @@ pub(super) fn spawn_semantic_session_title_refinement(
                 .project_session_config
                 .lock()
                 .map_err(|error| format!("project session config lock poisoned: {error}"))?;
+            let mut candidate = config.clone();
             let now = current_time_millis();
             let project_id = {
-                let Some(session) = config.sessions.iter_mut().find(|session| {
+                let Some(session) = candidate.sessions.iter_mut().find(|session| {
                     session.id == refinement.session_id
                         && session.archived_at_ms.is_none()
                         && session.title_state != SessionTitleState::Manual
@@ -146,14 +148,15 @@ pub(super) fn spawn_semantic_session_title_refinement(
                 session.updated_at_ms = now;
                 session.project_id.clone()
             };
-            if let Some(project) = config
+            if let Some(project) = candidate
                 .projects
                 .iter_mut()
                 .find(|project| project.id == project_id)
             {
                 project.updated_at_ms = now;
             }
-            save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
+            commit_project_session_config(&mut config, candidate)
+                .map_err(|error| error.to_string())?;
             Ok(true)
         })();
 
