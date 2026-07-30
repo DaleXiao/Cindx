@@ -1,6 +1,8 @@
 use super::*;
 use crate::conductor_health_runtime::ConductorHealthLedger;
 
+const PERSISTENT_STORE_STARTUP_FAILURE: &str = "persistent state unavailable; startup aborted";
+
 fn install_rustls_crypto_provider() {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -8,7 +10,17 @@ fn install_rustls_crypto_provider() {
     debug_assert!(rustls::crypto::CryptoProvider::get_default().is_some());
 }
 
-pub fn run() {
+fn startup_probe_requested() -> bool {
+    std::env::var("CINDX_STARTUP_PROBE")
+        .map(|value| config_bool(&value))
+        .unwrap_or(false)
+}
+
+fn persistent_store_startup_error(error: &StorageError) -> String {
+    format!("{PERSISTENT_STORE_STARTUP_FAILURE}: {error}")
+}
+
+pub fn run() -> Result<(), String> {
     install_startup_panic_log();
     install_rustls_crypto_provider();
     if let Err(error) = migrate_legacy_app_data() {
@@ -22,23 +34,18 @@ pub fn run() {
     ));
     let data_root = app_data_root();
     let event_redaction_pending = !event_redaction_complete(&data_root);
-    let (mut store, persistent_store) = match open_app_store() {
-        Ok(store) => (store, true),
+    let mut store = match open_app_store() {
+        Ok(store) => store,
         Err(error) => {
-            append_startup_log(&format!(
-                "persistent state unavailable; using in-memory state: {error}"
-            ));
-            (
-                SqliteStore::in_memory().unwrap_or_else(|memory_error| {
-                    panic!(
-                        "failed to open persistent state ({error}) and in-memory state ({memory_error})"
-                    )
-                }),
-                false,
-            )
+            let message = persistent_store_startup_error(&error);
+            append_startup_log(&format!("fatal startup: {message}"));
+            if !startup_probe_requested() {
+                show_native_startup_failure(&message);
+            }
+            return Err(message);
         }
     };
-    if event_redaction_pending && persistent_store {
+    if event_redaction_pending {
         match redact_persisted_events(&mut store) {
             Ok(_) => {
                 if let Err(error) = mark_event_redaction_complete(&data_root) {
@@ -80,12 +87,9 @@ pub fn run() {
         }
     }
     apply_sidecar_env(&sidecar_config);
-    if std::env::var("CINDX_STARTUP_PROBE")
-        .map(|value| config_bool(&value))
-        .unwrap_or(false)
-    {
+    if startup_probe_requested() {
         append_startup_log("startup probe completed");
-        return;
+        return Ok(());
     }
 
     let app = tauri::Builder::default()
@@ -246,6 +250,7 @@ pub fn run() {
             }
         }
     });
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,7 +261,11 @@ pub(crate) struct QuitConfirmation {
 
 #[cfg(test)]
 mod tests {
-    use super::install_rustls_crypto_provider;
+    use super::{
+        install_rustls_crypto_provider, persistent_store_startup_error,
+        PERSISTENT_STORE_STARTUP_FAILURE,
+    };
+    use agent_storage::StorageError;
 
     #[test]
     fn rustls_crypto_provider_installation_is_idempotent() {
@@ -264,5 +273,13 @@ mod tests {
         install_rustls_crypto_provider();
         assert!(rustls::crypto::CryptoProvider::get_default().is_some());
         let _ = rustls::ClientConfig::builder();
+    }
+
+    #[test]
+    fn persistent_store_startup_failure_preserves_the_cause() {
+        let message = persistent_store_startup_error(&StorageError::new("database path is busy"));
+
+        assert!(message.starts_with(PERSISTENT_STORE_STARTUP_FAILURE));
+        assert!(message.contains("database path is busy"));
     }
 }

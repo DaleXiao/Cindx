@@ -118,6 +118,35 @@ pub(crate) fn show_native_quit_confirmation() -> QuitConfirmation {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+pub(crate) fn show_native_startup_failure(details: &str) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSAlert, NSAlertStyle, NSApplication};
+    use objc2_foundation::NSString;
+
+    let Some(main_thread) = MainThreadMarker::new() else {
+        return;
+    };
+    let application = NSApplication::sharedApplication(main_thread);
+    application.activateIgnoringOtherApps(true);
+
+    let alert = NSAlert::new(main_thread);
+    alert.setAlertStyle(NSAlertStyle::Critical);
+    if let Some(icon) = application.applicationIconImage() {
+        unsafe { alert.setIcon(Some(&icon)) };
+    }
+    alert.setMessageText(&NSString::from_str("Cindx couldn't open its data"));
+    alert.setInformativeText(&NSString::from_str(&format!(
+        "Cindx was not started to protect your history. No Agent or background work was started.\n\n{details}"
+    )));
+    alert.addButtonWithTitle(&NSString::from_str("Quit Cindx"));
+    alert.runModal();
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn show_native_startup_failure(_details: &str) {}
+
 #[tauri::command]
 pub(crate) async fn confirm_delete_action(
     app: tauri::AppHandle,
