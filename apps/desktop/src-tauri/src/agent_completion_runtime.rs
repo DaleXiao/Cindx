@@ -27,7 +27,6 @@ pub(crate) fn finalize_agent_completion(
         emit_agent_stream_delta(app, request_id, session_id, "", false, true, None);
         return Ok(AgentCompletionOutcome::RestartAfterSteer);
     }
-    clear_suspended_agent_run_for_context(state, run_context)?;
     let (completion_evidence, routing_learning_eligible) = completion_learning_signal(runtime);
     let tool_evidence =
         crate::agent_result_evidence::completion_tool_evidence(runtime, epoch_lease.epoch());
@@ -331,6 +330,9 @@ pub(crate) fn finalize_agent_completion(
             agent_state_for_session(&store, None, session_id).map_err(|error| error.to_string())?
         }
     };
+    if let Err(error) = clear_suspended_agent_run_for_context(state, run_context) {
+        eprintln!("completed agent suspended-run cleanup unavailable: {error}");
+    }
     emit_agent_stream_delta(app, request_id, session_id, "", true, false, None);
     crate::semantic_memory_worker::schedule_semantic_memory_refresh(
         app.clone(),

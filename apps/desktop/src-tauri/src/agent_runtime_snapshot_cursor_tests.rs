@@ -148,7 +148,9 @@ fn failed_runtime_transaction_does_not_publish_candidate_cursor() {
     {
         let mut transaction = AgentLoopAppendTransaction::begin(&mut runtime);
         let prefix = transaction.original_message_count();
-        append_internal_instruction(transaction.state_mut(), "model_response_retry", "candidate");
+        transaction.with_append_only_mutation(|runtime| {
+            append_internal_instruction(runtime, "model_response_retry", "candidate");
+        });
         let (_prepared, candidate) =
             cursor.prepare_after_append(transaction.state(), prefix, &context);
         assert_eq!(candidate.message_visits(), before_visits + 1);

@@ -198,6 +198,47 @@ fn commit_pending_steers(
     })
 }
 
+fn persist_pending_agent_steer_batch(
+    store: &mut agent_storage::SqliteStore,
+    workspace_root: &Path,
+    runtime: &mut AgentLoopState,
+    run_context: &Metadata,
+    pending: &[RunSteer],
+    snapshot_cursor: &mut AgentRuntimeSnapshotCursor,
+) -> Result<CommittedSteerBatch, StorageError> {
+    let mut transaction = AgentLoopAppendTransaction::begin(runtime);
+    let previous_message_count = transaction.original_message_count();
+    let mut committed_cursor = None;
+    let committed = store.with_immediate_transaction(|store| {
+        let committed = transaction.with_append_only_mutation(|runtime| {
+            commit_pending_steers(store, workspace_root, runtime, run_context, pending)
+        })?;
+        if committed.acknowledged_queue_ids.len() != pending.len() {
+            return Err(steer_storage_error(format!(
+                "steer batch acknowledged {} of {} pending messages",
+                committed.acknowledged_queue_ids.len(),
+                pending.len()
+            )));
+        }
+        if let Some(snapshot_context) = committed.snapshot_context.as_ref() {
+            let (prepared_snapshot, next_cursor) = snapshot_cursor.prepare_after_append(
+                transaction.state(),
+                previous_message_count,
+                snapshot_context,
+            );
+            persist_prepared_agent_runtime_snapshot(store, &prepared_snapshot)
+                .map_err(steer_storage_error)?;
+            committed_cursor = Some(next_cursor);
+        }
+        Ok(committed)
+    })?;
+    transaction.commit();
+    if let Some(next_cursor) = committed_cursor {
+        *snapshot_cursor = next_cursor;
+    }
+    Ok(committed)
+}
+
 pub(crate) fn apply_pending_agent_steers(
     state: &tauri::State<'_, AppState>,
     workspace_root: &Path,
@@ -226,40 +267,18 @@ pub(crate) fn apply_pending_agent_steers_with_cursor(
 ) -> Result<AgentSteerApplication, String> {
     let committed = cancellation
         .commit_pending_steers_with(|pending| {
-            let transaction = AgentLoopAppendTransaction::begin(runtime);
-            let previous_message_count = transaction.original_message_count();
-            let mut transaction = transaction;
             let mut store = state
                 .store
                 .lock()
                 .map_err(|error| steer_storage_error(format!("store lock poisoned: {error}")))?;
-            let mut committed_cursor = None;
-            let committed = store.with_immediate_transaction(|store| {
-                let committed = commit_pending_steers(
-                    store,
-                    workspace_root,
-                    transaction.state_mut(),
-                    run_context,
-                    pending,
-                )?;
-                if let Some(snapshot_context) = committed.snapshot_context.as_ref() {
-                    let (prepared_snapshot, next_cursor) = snapshot_cursor.prepare_after_append(
-                        transaction.state(),
-                        previous_message_count,
-                        snapshot_context,
-                    );
-                    persist_prepared_agent_runtime_snapshot(store, &prepared_snapshot)
-                        .map_err(steer_storage_error)?;
-                    committed_cursor = Some(next_cursor);
-                }
-                Ok(committed)
-            })?;
-            debug_assert_eq!(committed.acknowledged_queue_ids.len(), pending.len());
-            transaction.commit();
-            if let Some(next_cursor) = committed_cursor {
-                *snapshot_cursor = next_cursor;
-            }
-            Ok::<_, StorageError>(committed)
+            persist_pending_agent_steer_batch(
+                &mut store,
+                workspace_root,
+                runtime,
+                run_context,
+                pending,
+                snapshot_cursor,
+            )
         })
         .map_err(|error| error.to_string())?;
 
@@ -293,6 +312,7 @@ pub(crate) fn apply_pending_agent_steers_with_cursor(
 mod tests {
     use super::*;
     use crate::event_persistence::append_event;
+    use crate::runtime_constants::AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE;
     use agent_core::EventKind;
     use agent_runtime::{start_agent_loop, AgentRuntimeConfig};
     use agent_storage::{EventStore, SqliteStore};
@@ -524,6 +544,129 @@ mod tests {
                 .get("queue_id")
                 .map(String::as_str),
             Some("queue-tools")
+        );
+    }
+
+    #[test]
+    fn steer_snapshot_failure_rolls_back_and_retries_exactly_once() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let run_context = test_run_context();
+        append_queue_action(&mut store, &run_context, "enqueue", "queue-retry");
+        let control = AgentRunControl::new("pro");
+        assert_eq!(control.request_steer("queue-retry"), Ok(true));
+        let pending_before = control.pending_steers_snapshot();
+        let mut runtime = start_agent_loop(
+            phase16_task_id(),
+            "Original objective",
+            AgentRuntimeConfig::default(),
+        );
+        let runtime_before = runtime.clone();
+        let mut snapshot_cursor = AgentRuntimeSnapshotCursor::rebuild(&runtime, &run_context);
+        let cursor_visits_before = snapshot_cursor.message_visits();
+        store
+            .execute_batch_for_testing(
+                "
+                create trigger fail_steer_runtime_snapshot
+                before insert on read_models
+                when new.namespace = 'agent-runtime-snapshot-v1'
+                begin
+                  select raise(abort, 'injected steer snapshot failure');
+                end;
+                ",
+            )
+            .expect("failure trigger should install");
+
+        let failed = control.commit_pending_steers_with(|pending| {
+            persist_pending_agent_steer_batch(
+                &mut store,
+                Path::new("."),
+                &mut runtime,
+                &run_context,
+                pending,
+                &mut snapshot_cursor,
+            )
+        });
+
+        assert!(failed.is_err());
+        assert_eq!(runtime, runtime_before);
+        assert_eq!(snapshot_cursor.message_visits(), cursor_visits_before);
+        assert_eq!(control.pending_steers_snapshot(), pending_before);
+        let failed_events = store
+            .list_by_task(&phase16_task_id())
+            .expect("events should load");
+        assert_eq!(
+            failed_events
+                .iter()
+                .filter(|event| event_matches_steer(event, "queue-retry", "run-a"))
+                .count(),
+            0
+        );
+        assert_eq!(
+            failed_events
+                .iter()
+                .filter(|event| {
+                    event.metadata.get("queue_id").map(String::as_str) == Some("queue-retry")
+                        && event.metadata.get("queue_action").map(String::as_str) == Some("start")
+                })
+                .count(),
+            0
+        );
+        assert!(store
+            .load_read_model(AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE, "session-a")
+            .expect("runtime checkpoint lookup should succeed")
+            .is_none());
+
+        store
+            .execute_batch_for_testing("drop trigger fail_steer_runtime_snapshot;")
+            .expect("failure trigger should uninstall");
+        let retried = control
+            .commit_pending_steers_with(|pending| {
+                persist_pending_agent_steer_batch(
+                    &mut store,
+                    Path::new("."),
+                    &mut runtime,
+                    &run_context,
+                    pending,
+                    &mut snapshot_cursor,
+                )
+            })
+            .expect("steer retry should persist");
+
+        assert!(matches!(retried, RunSteerBatchCommit::Committed { .. }));
+        assert!(control.pending_steers_snapshot().is_empty());
+        assert_eq!(runtime.messages.len(), runtime_before.messages.len() + 1);
+        assert_eq!(snapshot_cursor.message_visits(), cursor_visits_before + 1);
+        let committed_events = store
+            .list_by_task(&phase16_task_id())
+            .expect("events should load");
+        assert_eq!(
+            committed_events
+                .iter()
+                .filter(|event| event_matches_steer(event, "queue-retry", "run-a"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            committed_events
+                .iter()
+                .filter(|event| {
+                    event.metadata.get("queue_id").map(String::as_str) == Some("queue-retry")
+                        && event.metadata.get("queue_action").map(String::as_str) == Some("start")
+                })
+                .count(),
+            1
+        );
+        assert!(store
+            .load_read_model(AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE, "session-a")
+            .expect("runtime checkpoint lookup should succeed")
+            .is_some());
+        assert_eq!(
+            control
+                .commit_pending_steers_with(|_| -> Result<(), StorageError> {
+                    panic!("drained steer must not run twice")
+                })
+                .expect("empty steer batch should resolve"),
+            RunSteerBatchCommit::NoPending
         );
     }
 }

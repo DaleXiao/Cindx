@@ -611,61 +611,44 @@ pub(crate) fn finish_agent_run_for_control_stop_with_task_state(
         &resource_snapshot,
     );
     metadata.insert("model".to_string(), "run-control".to_string());
+    let recovery_metadata = [
+        ("completion".to_string(), "partial".to_string()),
+        ("stop_reason".to_string(), reason.code().to_string()),
+        (
+            "elapsed_ms".to_string(),
+            progress.elapsed.as_millis().to_string(),
+        ),
+        (
+            "material_checkpoints".to_string(),
+            progress.checkpoints.to_string(),
+        ),
+        (
+            "observations".to_string(),
+            progress.observations.to_string(),
+        ),
+        (
+            "budget_extensions".to_string(),
+            progress.budget_extensions.to_string(),
+        ),
+        ("last_stage".to_string(), progress.stage),
+        ("last_detail".to_string(), progress.detail),
+    ]
+    .into_iter()
+    .collect();
     let mut store = state
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    append_message_event_with_metadata(
+    persist_paused_agent_run(
         &mut store,
-        &phase16_task_id(),
-        MessageRole::Assistant,
+        run_context,
         &answer,
         metadata,
-    )
-    .map_err(|error| error.to_string())?;
-    let events = agent_events_for_session(&store, &phase16_task_id(), session_id)
-        .map_err(|error| error.to_string())?;
-    let active_events = active_agent_events_for_session(&events, session_id);
-    let recovery_metadata = agent_recovery_metadata_with_task_state(
-        &active_events,
-        run_context,
-        "paused",
         reason.code(),
-        [
-            ("completion".to_string(), "partial".to_string()),
-            ("stop_reason".to_string(), reason.code().to_string()),
-            (
-                "elapsed_ms".to_string(),
-                progress.elapsed.as_millis().to_string(),
-            ),
-            (
-                "material_checkpoints".to_string(),
-                progress.checkpoints.to_string(),
-            ),
-            (
-                "observations".to_string(),
-                progress.observations.to_string(),
-            ),
-            (
-                "budget_extensions".to_string(),
-                progress.budget_extensions.to_string(),
-            ),
-            ("last_stage".to_string(), progress.stage),
-            ("last_detail".to_string(), progress.detail),
-        ]
-        .into_iter()
-        .collect(),
-        task_state,
-        Some(&resource_snapshot),
-    )?;
-    append_event(
-        &mut store,
-        &phase16_task_id(),
-        EventKind::TaskStatusChanged,
-        "Agent task paused",
         recovery_metadata,
-    )
-    .map_err(|error| error.to_string())?;
+        task_state,
+        &resource_snapshot,
+    )?;
     if let Err(error) = refresh_project_memory_after_run(&mut store, run_context) {
         eprintln!("project memory checkpoint unavailable: {error}");
     }
@@ -687,6 +670,81 @@ pub(crate) fn finish_agent_run_for_control_stop_with_task_state(
     agent_state_for_session(&store, None, session_id).map_err(|error| error.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn persist_paused_agent_run(
+    store: &mut SqliteStore,
+    run_context: &Metadata,
+    answer: &str,
+    assistant_metadata: Metadata,
+    reason: &str,
+    recovery_metadata: Metadata,
+    task_state: Option<&AgentTaskStateSnapshot>,
+    resource_snapshot: &RunResourceSnapshot,
+) -> Result<(), String> {
+    persist_paused_agent_run_with(
+        store,
+        run_context,
+        answer,
+        assistant_metadata,
+        reason,
+        recovery_metadata,
+        task_state,
+        resource_snapshot,
+        |store, session_id| {
+            delete_persisted_agent_runtime_snapshot(store, session_id).map_err(StorageError::new)
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_paused_agent_run_with(
+    store: &mut SqliteStore,
+    run_context: &Metadata,
+    answer: &str,
+    assistant_metadata: Metadata,
+    reason: &str,
+    recovery_metadata: Metadata,
+    task_state: Option<&AgentTaskStateSnapshot>,
+    resource_snapshot: &RunResourceSnapshot,
+    snapshot_handoff: impl FnOnce(&mut SqliteStore, Option<&str>) -> Result<(), StorageError>,
+) -> Result<(), String> {
+    let session_id = run_context.get("session_id").map(String::as_str);
+    store
+        .with_immediate_transaction(|store| {
+            append_message_event_with_metadata(
+                store,
+                &phase16_task_id(),
+                MessageRole::Assistant,
+                answer,
+                assistant_metadata,
+            )?;
+            let events = agent_events_for_session(store, &phase16_task_id(), session_id)?;
+            let active_events = active_agent_events_for_session(&events, session_id);
+            let recovery_metadata = agent_recovery_metadata_with_task_state(
+                &active_events,
+                run_context,
+                "paused",
+                reason,
+                recovery_metadata,
+                task_state,
+                Some(resource_snapshot),
+            )
+            .map_err(StorageError::new)?;
+            append_event(
+                store,
+                &phase16_task_id(),
+                EventKind::TaskStatusChanged,
+                "Agent task paused",
+                recovery_metadata,
+            )?;
+            if task_state.is_some() {
+                snapshot_handoff(store, session_id)?;
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
+}
+
 pub(crate) fn emit_agent_stream_delta(
     events: &impl DesktopEventSink,
     request_id: &str,
@@ -705,4 +763,192 @@ pub(crate) fn emit_agent_stream_delta(
         reset,
         error,
     });
+}
+
+#[cfg(test)]
+mod control_stop_persistence_tests {
+    use super::*;
+
+    fn run_context(session_id: &str) -> Metadata {
+        [
+            ("project_id".to_string(), "project-pause".to_string()),
+            ("session_id".to_string(), session_id.to_string()),
+            ("agent_run_id".to_string(), format!("run-{session_id}")),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    fn seed_running_session(store: &mut SqliteStore, run_context: &Metadata) {
+        let session_id = run_context
+            .get("session_id")
+            .expect("session id should exist");
+        append_event(
+            store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task started",
+            metadata_with_context(
+                [("prompt".to_string(), "finish alpha".to_string())]
+                    .into_iter()
+                    .collect(),
+                run_context,
+            ),
+        )
+        .expect("run should start");
+        append_message_event_with_metadata(
+            store,
+            &phase16_task_id(),
+            MessageRole::User,
+            "finish alpha",
+            run_context.clone(),
+        )
+        .expect("user message should persist");
+        for namespace in [
+            AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE,
+            AGENT_RESOURCE_SNAPSHOT_READ_MODEL_NAMESPACE,
+        ] {
+            store
+                .save_read_model(namespace, session_id, 2, "snapshot-before")
+                .expect("snapshot should persist");
+        }
+    }
+
+    fn assistant_metadata(run_context: &Metadata) -> Metadata {
+        metadata_with_context(
+            [("partial".to_string(), "true".to_string())]
+                .into_iter()
+                .collect(),
+            run_context,
+        )
+    }
+
+    fn recovery_metadata() -> Metadata {
+        [
+            ("completion".to_string(), "partial".to_string()),
+            ("stop_reason".to_string(), "deadline_exceeded".to_string()),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    fn checkpoint() -> AgentTaskStateSnapshot {
+        AgentTaskStateSnapshot::capture(&start_agent_loop(
+            phase16_task_id(),
+            "finish alpha",
+            AgentRuntimeConfig::default(),
+        ))
+    }
+
+    #[test]
+    fn paused_run_rolls_back_messages_status_and_snapshot_handoff_together() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let run_context = run_context("session-pause");
+        seed_running_session(&mut store, &run_context);
+        let checkpoint = checkpoint();
+        let resources = RunResourceSnapshot::default();
+
+        let error = persist_paused_agent_run_with(
+            &mut store,
+            &run_context,
+            "verified partial answer",
+            assistant_metadata(&run_context),
+            "deadline_exceeded",
+            recovery_metadata(),
+            Some(&checkpoint),
+            &resources,
+            |store, session_id| {
+                store.delete_read_model(
+                    AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE,
+                    session_id.expect("session should be present"),
+                )?;
+                Err(StorageError::new("injected snapshot handoff failure"))
+            },
+        )
+        .expect_err("injected handoff failure should abort pause persistence");
+        assert!(error.contains("injected snapshot handoff failure"));
+
+        let events = store
+            .list_by_task_and_metadata(&phase16_task_id(), "session_id", "session-pause")
+            .expect("events should load");
+        assert_eq!(events.len(), 2, "failed pause leaked a partial state");
+        for namespace in [
+            AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE,
+            AGENT_RESOURCE_SNAPSHOT_READ_MODEL_NAMESPACE,
+        ] {
+            assert_eq!(
+                store
+                    .load_read_model(namespace, "session-pause")
+                    .expect("snapshot should load")
+                    .map(|model| model.payload),
+                Some("snapshot-before".to_string())
+            );
+        }
+
+        persist_paused_agent_run(
+            &mut store,
+            &run_context,
+            "verified partial answer",
+            assistant_metadata(&run_context),
+            "deadline_exceeded",
+            recovery_metadata(),
+            Some(&checkpoint),
+            &resources,
+        )
+        .expect("pause persistence retry should succeed");
+        let events = store
+            .list_by_task_and_metadata(&phase16_task_id(), "session_id", "session-pause")
+            .expect("events should reload");
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[2].kind, EventKind::MessageAdded);
+        assert_eq!(events[3].summary, "Agent task paused");
+        assert!(events[3].metadata.contains_key("recovery_envelope"));
+        for namespace in [
+            AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE,
+            AGENT_RESOURCE_SNAPSHOT_READ_MODEL_NAMESPACE,
+        ] {
+            assert!(store
+                .load_read_model(namespace, "session-pause")
+                .expect("snapshot absence should load")
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn preparation_pause_without_task_state_keeps_recovery_snapshots() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let run_context = run_context("session-preparation-pause");
+        seed_running_session(&mut store, &run_context);
+
+        persist_paused_agent_run(
+            &mut store,
+            &run_context,
+            "preparation paused",
+            assistant_metadata(&run_context),
+            "deadline_exceeded",
+            recovery_metadata(),
+            None,
+            &RunResourceSnapshot::default(),
+        )
+        .expect("preparation pause should persist");
+
+        let events = store
+            .list_by_task_and_metadata(
+                &phase16_task_id(),
+                "session_id",
+                "session-preparation-pause",
+            )
+            .expect("events should load");
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[3].summary, "Agent task paused");
+        for namespace in [
+            AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE,
+            AGENT_RESOURCE_SNAPSHOT_READ_MODEL_NAMESPACE,
+        ] {
+            assert!(store
+                .load_read_model(namespace, "session-preparation-pause")
+                .expect("snapshot should load")
+                .is_some());
+        }
+    }
 }
