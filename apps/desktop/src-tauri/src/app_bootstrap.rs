@@ -1,8 +1,16 @@
 use super::*;
 use crate::conductor_health_runtime::ConductorHealthLedger;
 
+fn install_rustls_crypto_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    }
+    debug_assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+}
+
 pub fn run() {
     install_startup_panic_log();
+    install_rustls_crypto_provider();
     if let Err(error) = migrate_legacy_app_data() {
         append_startup_log(&format!("legacy data migration failed: {error}"));
     }
@@ -122,7 +130,7 @@ pub fn run() {
                 event,
                 tauri::WindowEvent::Resized(_)
                     | tauri::WindowEvent::ScaleFactorChanged { .. }
-                    | tauri::WindowEvent::Focused(true)
+                    | tauri::WindowEvent::Focused(_)
             ) {
                 schedule_macos_traffic_light_position_repair(window.app_handle(), window.label());
             }
@@ -244,4 +252,17 @@ pub fn run() {
 pub(crate) struct QuitConfirmation {
     pub(crate) confirmed: bool,
     pub(crate) suppress_future: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::install_rustls_crypto_provider;
+
+    #[test]
+    fn rustls_crypto_provider_installation_is_idempotent() {
+        install_rustls_crypto_provider();
+        install_rustls_crypto_provider();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+        let _ = rustls::ClientConfig::builder();
+    }
 }

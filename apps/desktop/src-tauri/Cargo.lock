@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "cindx-desktop"
-version = "0.1.61"
+version = "0.1.63"
 dependencies = [
  "agent-application",
  "agent-core",
@@ -1011,6 +1011,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "orchestrator",
+ "rustls",
  "serde",
  "serde_json",
  "tauri",
