@@ -173,6 +173,36 @@ try {
     if (!startupLog.includes("startup probe completed")) {
       throw new Error("Clean-machine startup probe did not complete");
     }
+
+    const failureData = path.join(probeRoot, "failure-data");
+    fs.mkdirSync(path.join(failureData, "state.sqlite3"), { recursive: true });
+    const failureResult = run(
+      path.join(builtApp, "Contents", "MacOS", "cindx-desktop"),
+      [],
+      {
+        env: {
+          ...buildEnv,
+          HOME: probeRoot,
+          CINDX_DATA_DIR: failureData,
+          CINDX_STARTUP_PROBE: "1"
+        },
+        encoding: "utf8",
+        allowFailure: true
+      }
+    );
+    if (failureResult.status === 0) {
+      throw new Error("Persistent-state failure probe unexpectedly started Cindx");
+    }
+    const failureLog = fs.readFileSync(
+      path.join(failureData, "startup.log"),
+      "utf8"
+    );
+    if (
+      !failureLog.includes("persistent state unavailable; startup aborted") ||
+      failureLog.includes("startup probe completed")
+    ) {
+      throw new Error("Persistent-state failure probe did not fail closed");
+    }
   } finally {
     fs.rmSync(probeRoot, { recursive: true, force: true });
   }

@@ -222,15 +222,38 @@ pub(crate) fn skill_catalog_for_root(workspace_root: &Path) -> SkillCatalog {
 
 pub(crate) fn open_app_store() -> Result<SqliteStore, StorageError> {
     let database_path = database_path();
+    open_app_store_at(&database_path)
+}
+
+pub(crate) fn open_app_store_at(database_path: &Path) -> Result<SqliteStore, StorageError> {
     if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| StorageError::new(error.to_string()))?;
-        secure_directory(parent).map_err(|error| StorageError::new(error.to_string()))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            StorageError::new(format!(
+                "failed to create Cindx data directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+        secure_directory(parent).map_err(|error| {
+            StorageError::new(format!(
+                "failed to secure Cindx data directory {}: {error}",
+                parent.display()
+            ))
+        })?;
     }
 
-    let store = SqliteStore::open(&database_path)?;
+    let store = SqliteStore::open(database_path).map_err(|error| {
+        StorageError::new(format!(
+            "failed to open Cindx state database {}: {error}",
+            database_path.display()
+        ))
+    })?;
     #[cfg(unix)]
-    fs::set_permissions(&database_path, fs::Permissions::from_mode(0o600))
-        .map_err(|error| StorageError::new(error.to_string()))?;
+    fs::set_permissions(&database_path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+        StorageError::new(format!(
+            "failed to secure Cindx state database {}: {error}",
+            database_path.display()
+        ))
+    })?;
 
     Ok(store)
 }

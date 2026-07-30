@@ -100,6 +100,16 @@ jobs:
           test -f "$PROBE_HOME/data/state.sqlite3"
           grep -q "startup probe completed" "$PROBE_HOME/data/startup.log"
 
+          # Probe persistent-state failure: the packaged app must refuse an unsafe in-memory start.
+          FAILURE_DATA="$PROBE_HOME/failure-data"
+          mkdir -p "$FAILURE_DATA/state.sqlite3"
+          if HOME="$PROBE_HOME" CINDX_DATA_DIR="$FAILURE_DATA" CINDX_STARTUP_PROBE=1 "$APP_PATH/Contents/MacOS/cindx-desktop"; then
+            echo "Cindx unexpectedly started without a persistent database" >&2
+            exit 1
+          fi
+          grep -q "persistent state unavailable; startup aborted" "$FAILURE_DATA/startup.log"
+          ! grep -q "startup probe completed" "$FAILURE_DATA/startup.log"
+
       - name: Package ad-hoc signed test app
         if: github.event_name != 'pull_request'
         run: |

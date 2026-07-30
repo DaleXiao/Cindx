@@ -1780,6 +1780,51 @@ fn installed_app_data_is_user_scoped_and_overrideable() {
 }
 
 #[test]
+fn persistent_app_store_creates_secures_and_reopens_database() {
+    let root = temp_test_root("cindx-persistent-store");
+    let database = root.join("state.sqlite3");
+
+    let store = open_app_store_at(&database).expect("persistent store should open");
+    drop(store);
+
+    assert!(database.is_file());
+    #[cfg(unix)]
+    assert_eq!(
+        fs::metadata(&database)
+            .expect("database metadata should load")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    drop(
+        SqliteStore::open_read_only(&database)
+            .expect("created persistent store should reopen read-only"),
+    );
+
+    fs::remove_dir_all(root).expect("persistent store fixture should be removed");
+}
+
+#[test]
+fn persistent_app_store_reports_database_path_when_open_fails() {
+    let root = temp_test_root("cindx-persistent-store-failure");
+    let database = root.join("state.sqlite3");
+    fs::create_dir_all(&database).expect("database-path directory fixture should exist");
+
+    let error = match open_app_store_at(&database) {
+        Ok(_) => panic!("a directory must not be accepted as a persistent database"),
+        Err(error) => error,
+    };
+
+    assert!(error
+        .message
+        .contains("failed to open Cindx state database"));
+    assert!(error.message.contains(&database.display().to_string()));
+
+    fs::remove_dir_all(root).expect("persistent store failure fixture should be removed");
+}
+
+#[test]
 fn attachment_paths_stay_inside_project_managed_storage() {
     let root = std::env::temp_dir().join(format!(
         "cindx-attachment-test-{}-{}",

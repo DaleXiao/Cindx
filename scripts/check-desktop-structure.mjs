@@ -1108,6 +1108,7 @@ assert(
     localBuildScript.includes("CARGO_TARGET_DIR: targetRoot") &&
     localBuildScript.includes('path.join(os.homedir(), ".cargo", "bin")') &&
     localBuildScript.includes('CINDX_STARTUP_PROBE: "1"') &&
+    localBuildScript.includes("Persistent-state failure probe did not fail closed") &&
     localBuildScript.includes('"--identifier"') &&
     localBuildScript.includes('const installApp = !args.has("--no-install")') &&
     localBuildScript.includes('run("pkill", ["-x", "cindx-desktop"]') &&
@@ -2916,7 +2917,13 @@ assert(
   /join\("Library"\)\s*\.join\("Application Support"\)\s*\.join\("Cindx"\)/.test(
     rustLib
   ) &&
-    rustLib.includes("persistent state unavailable; using in-memory state") &&
+    appBootstrapSource.includes("persistent state unavailable; startup aborted") &&
+    appBootstrapSource.includes("show_native_startup_failure(&message)") &&
+    !appBootstrapSource.includes("SqliteStore::in_memory()") &&
+    appBootstrapSource.indexOf("let mut store = match open_app_store()") <
+      appBootstrapSource.indexOf("tauri::Builder::default()") &&
+    rustLib.includes("pub(crate) fn open_app_store_at(database_path: &Path)") &&
+    rustLib.includes("ExitCode::FAILURE") &&
     rustLib.includes("install_startup_panic_log") &&
     cargoToml.includes(
       'rustls = { version = "0.23.42", default-features = false, features = ["aws_lc_rs"] }'
@@ -2931,12 +2938,14 @@ assert(
     ) &&
     rustLib.includes('std::env::var("CINDX_STARTUP_PROBE")') &&
     ciWorkflow.includes("Probe clean-machine startup") &&
+    ciWorkflow.includes("Probe persistent-state failure") &&
     !rustLib.includes('workspace_root().join(".cindx").join("state.sqlite3")'),
-  "Installed apps must use user-scoped data and survive persistent-state failures"
+  "Installed apps must use user-scoped data and fail closed before desktop services start"
 );
 assert(
   rustLib.includes("EVENT_REDACTION_MARKER_FILE") &&
-    rustLib.includes("event_redaction_pending && persistent_store") &&
+    appBootstrapSource.includes("if event_redaction_pending {") &&
+    !appBootstrapSource.includes("event_redaction_pending && persistent_store") &&
     rustLib.includes("event_redaction_marker_records_completed_migration"),
   "Legacy event redaction must be a versioned one-time startup migration"
 );
