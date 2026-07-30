@@ -1,5 +1,6 @@
 use super::*;
 use crate::conductor_health_runtime::ConductorHealthLedger;
+use crate::integration_commands;
 
 const PERSISTENT_STORE_STARTUP_FAILURE: &str = "persistent state unavailable; startup aborted";
 
@@ -144,21 +145,21 @@ pub fn run() -> Result<(), String> {
             reveal_main_window,
             set_sidebar_material_width,
             get_runtime_status,
-            get_sidecar_state,
-            save_sidecar_config,
-            get_web_search_config,
-            save_web_search_config,
-            get_mcp_state,
-            save_mcp_servers,
-            upsert_mcp_server,
-            update_mcp_server_policy,
-            remove_mcp_server,
-            refresh_mcp_server,
-            get_skill_state,
-            refresh_skills,
-            save_skill_preference,
-            install_skill_package,
-            install_skill_url,
+            integration_commands::get_sidecar_state,
+            integration_commands::save_sidecar_config,
+            integration_commands::get_web_search_config,
+            integration_commands::save_web_search_config,
+            integration_commands::get_mcp_state,
+            integration_commands::save_mcp_servers,
+            integration_commands::upsert_mcp_server,
+            integration_commands::update_mcp_server_policy,
+            integration_commands::remove_mcp_server,
+            integration_commands::refresh_mcp_server,
+            integration_commands::get_skill_state,
+            integration_commands::refresh_skills,
+            integration_commands::save_skill_preference,
+            integration_commands::install_skill_package,
+            integration_commands::install_skill_url,
             get_project_session_state,
             get_schedule_state,
             upsert_schedule,

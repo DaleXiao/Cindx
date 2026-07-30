@@ -1,4 +1,25 @@
-use super::*;
+use crate::app_state::AppState;
+use crate::configuration_models::{
+    McpServerInput, McpServerPolicyInput, McpServerView, McpServersInput, McpStateView,
+    SidecarConfig, SkillPackageInstallInput, SkillPreferenceInput, SkillStateView,
+    SkillUrlInstallInput,
+};
+use crate::persistence_runtime::{
+    active_workspace_root, invalidate_tool_registry_cache, skill_catalog_for_root,
+};
+use crate::runtime_values::normalized_config_value;
+use crate::sidecar_runtime::{
+    apply_sidecar_env, save_sidecar_config_to_disk, save_web_search_config_to_disk, sidecar_state,
+};
+use crate::view_models::{
+    SidecarConfigInput, SidecarState, WebSearchConfigInput, WebSearchConfigState,
+};
+use agent_mcp::{McpCatalogService, McpTransportConfig};
+use agent_skills::{install_skill_archive as install_skill_archive_package, SkillPreference};
+use base64::Engine;
+use std::path::Path;
+use tauri::Manager;
+use tools::WebSearchConfig;
 
 #[tauri::command]
 pub(crate) fn get_sidecar_state(state: tauri::State<'_, AppState>) -> Result<SidecarState, String> {

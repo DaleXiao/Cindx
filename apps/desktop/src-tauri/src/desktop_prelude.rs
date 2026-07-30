@@ -11,7 +11,7 @@ pub(crate) use agent_core::{
 pub(crate) use agent_graph::{
     extract_graph_from_chunk, graph_direct_recall, graph_walk_recall, FileGraphStore, GraphStore,
 };
-pub(crate) use agent_mcp::{McpCatalogService, McpServerConfig, McpTransportConfig};
+pub(crate) use agent_mcp::{McpCatalogService, McpServerConfig};
 pub(crate) use agent_memory::{
     build_restore_context_pack, build_session_checkpoint_at, conversation_memory_to_markdown,
     extract_durable_memories, fuse_memory_recalls_at, memory_recalls_to_markdown,
@@ -49,8 +49,7 @@ pub(crate) use agent_runtime::{
     MAX_COLLABORATION_WORKER_TOOL_CALLS, MAX_IDENTICAL_TOOL_FAILURES,
 };
 pub(crate) use agent_skills::{
-    install_skill_archive as install_skill_archive_package, SkillCatalog, SkillPreference,
-    SkillRecord,
+    SkillCatalog, SkillRecord,
 };
 pub(crate) use agent_storage::{
     EventStore, PermissionAuditRecord, PermissionStore, SqliteStore, StorageError,
