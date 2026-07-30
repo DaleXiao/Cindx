@@ -144,7 +144,6 @@ use desktop_prelude::*;
 use event_persistence::*;
 use event_projection::*;
 use event_security::*;
-use integration_commands::*;
 use knowledge_commands::*;
 use knowledge_runtime::*;
 use memory_runtime::*;

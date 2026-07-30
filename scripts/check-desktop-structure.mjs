@@ -1,5 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
+import {
+  inspectDesktopIntegrationBoundary,
+  rustCodeWithoutCommentsAndLiterals,
+} from "./desktop-integration-boundary.mjs";
 
 const root = process.cwd();
 
@@ -55,12 +59,13 @@ const listFrontendSourceFiles = (sourceDirectory) =>
       return [entryPath];
     });
 
-const productionRustLineCount = (source) => {
+const productionRustSource = (source) => {
   const testModuleIndex = source.search(/\n#\[cfg\(test\)\]\s*\nmod tests\s*\{/);
-  const productionSource =
-    testModuleIndex >= 0 ? source.slice(0, testModuleIndex) : source;
-  return productionSource.split("\n").length;
+  return testModuleIndex >= 0 ? source.slice(0, testModuleIndex) : source;
 };
+
+const productionRustLineCount = (source) =>
+  productionRustSource(source).split("\n").length;
 
 const capturedNames = (source, pattern) =>
   [...source.matchAll(pattern)].map((match) => match[1]);
@@ -477,18 +482,19 @@ const rustCommandDefinitionNames = uniqueSortedNames(
   )
 );
 const tauriHandlerBlocks = capturedNames(
-  appBootstrapSource,
+  rustCodeWithoutCommentsAndLiterals(appBootstrapSource),
   /tauri::generate_handler!\s*\[([\s\S]*?)\]/g
 );
-const registeredTauriCommandNames = uniqueSortedNames(
+const registeredTauriCommandPaths = uniqueSortedNames(
   tauriHandlerBlocks.flatMap((block) =>
     block
-      .replace(/\/\/.*$/gm, "")
       .split(",")
       .map((entry) => entry.trim())
       .filter(Boolean)
-      .map((entry) => entry.split("::").at(-1))
   )
+);
+const registeredTauriCommandNames = uniqueSortedNames(
+  registeredTauriCommandPaths.map((entry) => entry.split("::").at(-1))
 );
 const frontendCommandsMissingDefinitions = namesMissingFrom(
   frontendInvokeCommandNames,
@@ -627,6 +633,7 @@ const criticalDesktopAgentModules = desktopRustModules.filter(({ entry }) =>
 const implicitCriticalDesktopAgentModules = criticalDesktopAgentModules.filter(
   ({ source }) => /^use super::\*;/m.test(source)
 );
+const desktopIntegrationBoundary = inspectDesktopIntegrationBoundary(root);
 const oversizedCriticalDesktopAgentModules = criticalDesktopAgentModules
   .map(({ entry, source }) => ({
     entry,
@@ -734,6 +741,10 @@ assert(
     !rustCompositionRoot.includes("#[tauri::command]") &&
     !rustCompositionRoot.includes("pub(crate) fn "),
   `Desktop Rust composition root must remain declarative (found ${rustCompositionRootLineCount} lines)`
+);
+assert(
+  desktopIntegrationBoundary.ok,
+  desktopIntegrationBoundary.message
 );
 assert(
   tauriHandlerBlocks.length === 1 &&
