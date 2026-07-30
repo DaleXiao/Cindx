@@ -1835,7 +1835,7 @@ assert(
   "Session thread must show submitted user messages before paint and preserve them during polling"
 );
 assert(
-  rustLib.includes("config.sessions[index].seen_event_sequence = latest_sequence;") &&
+  rustLib.includes("candidate.sessions[index].seen_event_sequence = latest_sequence;") &&
     rustLib.includes("if session.archived {\n            continue;\n        }") &&
     rustLib.includes("fn archived_session_restore_does_not_revive_seen_activity()"),
   "Archiving or restoring a session must clear stale lifecycle status durably"

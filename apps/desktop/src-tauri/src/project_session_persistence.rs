@@ -2,208 +2,16 @@ use crate::{
     agent_read_model::is_agent_run_start_event,
     app_state::AppState,
     configuration_models::{
-        default_agent_effort, is_schedule_execution_session, AgentEffort, ProjectRecord,
-        ProjectSessionConfig, SessionRecord, WorkspaceConfig,
+        default_agent_effort, is_schedule_execution_session, ProjectRecord, ProjectSessionConfig,
+        SessionRecord,
     },
-    persistence_runtime::{
-        project_session_config_path, validate_workspace_root, workspace_config_path,
-    },
-    runtime_values::{
-        current_time_millis, new_session_id, sanitize_config_value, sanitize_record_field,
-    },
+    runtime_values::{current_time_millis, new_session_id},
     session_projection::load_agent_session_read_model_snapshot,
-    session_title_service::is_automatic_session_name,
     view_models::{ProjectSessionState, ProjectView, SessionView},
 };
 use agent_application::{project_session_lifecycle, SessionLifecycleInput, SessionTitleState};
 use agent_core::{Event, Metadata, EVENT_TYPE_METADATA_KEY};
 use agent_storage::{SqliteStore, StorageError};
-use std::{fs, io::Write, path::Path};
-
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-pub(crate) fn load_workspace_config() -> WorkspaceConfig {
-    let mut config = WorkspaceConfig::default();
-    let Ok(text) = fs::read_to_string(workspace_config_path()) else {
-        return config;
-    };
-
-    for line in text.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key == "root" {
-            if let Ok(root) = validate_workspace_root(value) {
-                config.root = root;
-            }
-        }
-    }
-
-    config
-}
-
-pub(crate) fn save_workspace_config_to_disk(
-    config: &WorkspaceConfig,
-) -> Result<(), std::io::Error> {
-    let path = workspace_config_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let mut options = fs::OpenOptions::new();
-    options.create(true).write(true).truncate(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(&path)?;
-    file.write_all(format!("root={}\n", config.root.display()).as_bytes())?;
-    #[cfg(unix)]
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-
-    Ok(())
-}
-
-pub(crate) fn load_project_session_config(fallback_root: &Path) -> ProjectSessionConfig {
-    let mut config = ProjectSessionConfig::default_for_root(fallback_root);
-    let Ok(text) = fs::read_to_string(project_session_config_path()) else {
-        return config;
-    };
-
-    let mut active_project_id = String::new();
-    let mut active_session_id = String::new();
-    let mut projects = Vec::new();
-    let mut sessions = Vec::new();
-
-    for line in text.lines() {
-        if let Some(value) = line.strip_prefix("active_project_id=") {
-            active_project_id = value.to_string();
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("active_session_id=") {
-            active_session_id = value.to_string();
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("project\t") {
-            let fields = value.split('\t').collect::<Vec<_>>();
-            if fields.len() >= 6 {
-                projects.push(ProjectRecord {
-                    id: fields[0].to_string(),
-                    name: fields[1].to_string(),
-                    root: fields[2].to_string(),
-                    detail: fields[3].to_string(),
-                    created_at_ms: fields[4].parse().unwrap_or_default(),
-                    updated_at_ms: fields[5].parse().unwrap_or_default(),
-                });
-            }
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("session\t") {
-            let fields = value.split('\t').collect::<Vec<_>>();
-            if fields.len() >= 7 {
-                let name = fields[2].to_string();
-                sessions.push(SessionRecord {
-                    id: fields[0].to_string(),
-                    project_id: fields[1].to_string(),
-                    title_state: SessionTitleState::parse(
-                        fields.get(9).copied(),
-                        is_automatic_session_name(&name),
-                    ),
-                    name,
-                    detail: fields[3].to_string(),
-                    effort: fields
-                        .get(8)
-                        .map(|value| AgentEffort::parse(value).label().to_string())
-                        .unwrap_or_else(default_agent_effort),
-                    seen_event_sequence: fields
-                        .get(10)
-                        .and_then(|value| value.parse::<u64>().ok())
-                        .unwrap_or_default(),
-                    created_at_ms: fields[4].parse().unwrap_or_default(),
-                    updated_at_ms: fields[5].parse().unwrap_or_default(),
-                    archived_at_ms: fields
-                        .get(7)
-                        .and_then(|value| value.parse::<u64>().ok())
-                        .filter(|value| *value > 0),
-                });
-                if fields[6] == "active" {
-                    active_session_id = fields[0].to_string();
-                }
-            }
-        }
-    }
-
-    config.projects = projects;
-    config.sessions = sessions;
-    config.active_project_id = active_project_id;
-    config.active_session_id = active_session_id;
-    if config.projects.is_empty() {
-        config.sessions.clear();
-        config.active_project_id.clear();
-        config.active_session_id.clear();
-        return config;
-    }
-    config.ensure_consistent(fallback_root);
-
-    config
-}
-
-pub(crate) fn save_project_session_config_to_disk(
-    config: &ProjectSessionConfig,
-) -> Result<(), std::io::Error> {
-    let path = project_session_config_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let mut text = format!(
-        "active_project_id={}\nactive_session_id={}\n",
-        sanitize_config_value(&config.active_project_id),
-        sanitize_config_value(&config.active_session_id)
-    );
-    for project in &config.projects {
-        text.push_str(&format!(
-            "project\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            sanitize_record_field(&project.id),
-            sanitize_record_field(&project.name),
-            sanitize_record_field(&project.root),
-            sanitize_record_field(&project.detail),
-            project.created_at_ms,
-            project.updated_at_ms
-        ));
-    }
-    for session in &config.sessions {
-        let active_marker = if session.id == config.active_session_id {
-            "active"
-        } else {
-            ""
-        };
-        text.push_str(&format!(
-            "session\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            sanitize_record_field(&session.id),
-            sanitize_record_field(&session.project_id),
-            sanitize_record_field(&session.name),
-            sanitize_record_field(&session.detail),
-            session.created_at_ms,
-            session.updated_at_ms,
-            active_marker,
-            session.archived_at_ms.unwrap_or_default(),
-            sanitize_record_field(&session.effort),
-            session.title_state.label(),
-            session.seen_event_sequence
-        ));
-    }
-
-    let mut options = fs::OpenOptions::new();
-    options.create(true).write(true).truncate(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(&path)?;
-    file.write_all(text.as_bytes())?;
-    #[cfg(unix)]
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-
-    Ok(())
-}
 
 pub(crate) fn project_session_state(
     config: &ProjectSessionConfig,
@@ -421,27 +229,6 @@ pub(crate) fn project_session_state_with_error(
         .map_err(|error| format!("project session config lock poisoned: {error}"))?
         .clone();
     Ok(project_session_state(&config, Some(message.into())))
-}
-
-pub(crate) fn sync_active_project_root(
-    state: &tauri::State<'_, AppState>,
-    root: &Path,
-) -> Result<(), String> {
-    let mut config = state
-        .project_session_config
-        .lock()
-        .map_err(|error| format!("project session config lock poisoned: {error}"))?;
-    let active_project_id = config.active_project_id.clone();
-    if let Some(project) = config
-        .projects
-        .iter_mut()
-        .find(|project| project.id == active_project_id)
-    {
-        project.root = root.display().to_string();
-        project.updated_at_ms = current_time_millis();
-        save_project_session_config_to_disk(&config).map_err(|error| error.to_string())?;
-    }
-    Ok(())
 }
 
 pub(crate) fn project_session_metadata_for_session(

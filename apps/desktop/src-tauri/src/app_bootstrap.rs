@@ -73,11 +73,7 @@ pub fn run() -> Result<(), String> {
             (ScheduleConfig::default(), Some(error))
         }
     };
-    if let Some(project) = project_session_config.active_project() {
-        if let Ok(root) = validate_workspace_root(&project.root) {
-            workspace_config.root = root;
-        }
-    }
+    apply_authoritative_project_root(&mut workspace_config, &project_session_config);
     for path in [
         context_checkpoint_path_for(&workspace_config.root),
         agent_trace_export_path_for(&workspace_config.root),
