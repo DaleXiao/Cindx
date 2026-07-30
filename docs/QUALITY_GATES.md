@@ -11,8 +11,13 @@ does not claim Fugu Ultra equivalence.
   120-case arena contract, memory, and frontend state behavior.
 - `control-plane`: deterministic agent contracts plus Rust workspace and desktop tests.
 - `performance`: long-session incremental projection, bounded context governance,
-  and 20k-chunk RAG diagnostics.
-- `full`: all deterministic gates, sidecars, frontend production build, and Rust tests.
+  graph/request reuse, frontend streaming, and 20k-chunk RAG diagnostics.
+- `shipping-performance`: resource-bounded hard gates for incremental Session and
+  runtime snapshots, shared graph parsing, prepared image/request reuse, retry
+  reuse, and linear frontend streaming Markdown work. It uses operation counts and
+  identity invariants, never cross-machine wall-clock thresholds.
+- `full`: all shipping deterministic gates, sidecars, frontend production build,
+  and Rust tests; heavier same-machine diagnostics remain in `performance`.
 
 Run a profile and keep its machine-readable report:
 
@@ -24,10 +29,12 @@ node scripts/run-quality-gates.mjs \
 
 The manifest is versioned at
 `benchmarks/system/quality-gates-v1.json`. Commands never use an interactive shell,
-and report assertions are checked after each producer exits successfully. Structured
-`cindx.*.diagnostic.*` JSON records emitted by performance tests are collected in the
-top-level `diagnostics` array of the quality-gate report, including repeated-sample
-P50/P95 timings where available.
+and report assertions are checked after each producer exits successfully. Gates may
+also require proof in their process output so an exact Rust filter cannot pass after
+running zero tests. Structured `cindx.*.diagnostic.*` and `cindx.*.scaling.*` JSON
+records emitted by performance tests are collected in the top-level `diagnostics`
+array of the quality-gate report, including repeated-sample P50/P95 timings where
+available.
 
 Compare two reports captured on the same hardware and build profile before accepting
 an optimization:
@@ -55,13 +62,18 @@ comparisons remain diagnostic only.
 - Memory recall is 100% at top-1 and recall@3 with no trust or dedup failures.
 - Queue, steer, permission suspension, recovery, and session projections pass the
   desktop Rust control-plane tests.
+- Each exact-filtered Rust shipping gate must prove that precisely one matching test
+  executed. The gates preserve constant delta visits, shared graph/request storage,
+  single request preparation across retries, and linear frontend parse/join work.
 
 ## Evidence Boundary
 
 Gate duration and local memory recall time are diagnostics, not portable latency
 thresholds. The performance profile records current local timings while enforcing
 scaling invariants such as reading one warm Session delta regardless of unrelated
-events. Provider-backed completion quality, long-horizon success, and GEPA
+events. CI, release, and normal local production builds run the separate
+`shipping-performance` profile and retain its report; this evidence guards resource
+growth only. Provider-backed completion quality, long-horizon success, and GEPA
 promotion require the hidden feedback, Pareto, and test datasets described in
 `AGENT_EVALUATION.md`. Missing provider evidence must remain explicit and must never
 be converted into a synthetic green result.

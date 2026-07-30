@@ -61,6 +61,13 @@ jobs:
       - name: Run deterministic quality gates
         run: node scripts/run-quality-gates.mjs --profile ci-contract --report target/quality-gate-report.json
 
+      - name: Test Tauri bridge
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+
+      - name: Run shipping performance contracts
+        timeout-minutes: 10
+        run: node scripts/run-quality-gates.mjs --profile shipping-performance --report target/shipping-performance-report.json
+
       - name: Upload quality reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -68,18 +75,12 @@ jobs:
           name: Cindx-quality-gates-${{ github.sha }}
           path: |
             target/quality-gate-report.json
+            target/shipping-performance-report.json
             target/agent-benchmark-report.json
             target/evaluation-v2-foundation.json
             target/memory-evaluation.json
           if-no-files-found: error
           retention-days: 30
-
-      - name: Test Tauri bridge
-        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
-
-      - name: Test frontend behavior
-        working-directory: apps/desktop
-        run: npm test
 
       - name: Build frontend
         working-directory: apps/desktop

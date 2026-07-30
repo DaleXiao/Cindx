@@ -225,6 +225,10 @@ mod tests {
         assert!(debug.contains("request_body_bytes"));
         assert!(!debug.contains("Inspect this screenshot"));
         assert!(!debug.contains("base64"));
+        println!(
+            "{{\"schema\":\"cindx.prepared-image-request-scaling.v1\",\"cache_hits\":{},\"image_reads\":{},\"image_encodes\":{},\"bytes_share_storage\":true}}",
+            cache_stats.hits, cache_stats.reads, cache_stats.encodes
+        );
     }
 
     #[test]

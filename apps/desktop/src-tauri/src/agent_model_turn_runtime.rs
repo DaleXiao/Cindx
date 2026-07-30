@@ -665,6 +665,11 @@ mod tests {
             provider.dispatches.load(Ordering::Relaxed),
             MAX_AGENT_MODEL_TRANSPORT_ATTEMPTS
         );
+        println!(
+            "{{\"schema\":\"cindx.model-transport-prepare-scaling.v1\",\"prepares\":{},\"dispatches\":{}}}",
+            provider.prepares.load(Ordering::Relaxed),
+            provider.dispatches.load(Ordering::Relaxed)
+        );
     }
 
     #[test]

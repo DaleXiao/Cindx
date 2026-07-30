@@ -327,6 +327,9 @@ const rustLib = readRustSourceTree(desktopRustSourceDirectory);
 const appBootstrapSource = read(
   "apps/desktop/src-tauri/src/app_bootstrap.rs"
 );
+const agentModelTurnRuntimeSource = read(
+  "apps/desktop/src-tauri/src/agent_model_turn_runtime.rs"
+);
 const voiceCommandsSource = read(
   "apps/desktop/src-tauri/src/voice_commands.rs"
 );
@@ -437,6 +440,81 @@ const benchmarkBaseline = JSON.parse(read("benchmarks/agent/core-v1-baseline.jso
 const memoryBenchmarkSuite = JSON.parse(read("benchmarks/agent/memory-v1.json"));
 const qualityGateManifest = JSON.parse(
   read("benchmarks/system/quality-gates-v1.json")
+);
+const shippingPerformanceGateIds = [
+  "session-projection-scaling",
+  "agent-runtime-snapshot-scaling",
+  "workspace-graph-cache-scaling",
+  "prepared-image-request-scaling",
+  "model-transport-prepare-scaling",
+  "frontend-streaming-markdown-scaling"
+];
+const shippingPerformanceProofs = new Map([
+  [
+    "session-projection-scaling",
+    [
+      "session_projection::tests::incremental_projection_reads_only_the_target_session_delta",
+      "cindx.session-projection-diagnostic.v1"
+    ]
+  ],
+  [
+    "agent-runtime-snapshot-scaling",
+    [
+      "agent_runtime_snapshot_cursor::tests::incremental_runtime_snapshot_visits_only_appended_messages",
+      "cindx.agent-runtime-snapshot-scaling.v1"
+    ]
+  ],
+  [
+    "workspace-graph-cache-scaling",
+    [
+      "tests::workspace_knowledge_snapshot_reuses_one_graph_parse_and_borrowed_projection",
+      "cindx.workspace-graph-cache-scaling.v1"
+    ]
+  ],
+  [
+    "prepared-image-request-scaling",
+    [
+      "prepared_request::tests::prepared_streaming_body_matches_canonical_json_and_shares_bytes",
+      "cindx.prepared-image-request-scaling.v1"
+    ]
+  ],
+  [
+    "model-transport-prepare-scaling",
+    [
+      "agent_model_turn_runtime::tests::transport_attempts_prepare_model_request_once",
+      "cindx.model-transport-prepare-scaling.v1"
+    ]
+  ],
+  [
+    "frontend-streaming-markdown-scaling",
+    [
+      "keeps rope string work linear across an eight MiB unbroken line",
+      "cindx.frontend-streaming-markdown-scaling.v1"
+    ]
+  ]
+]);
+const manualPerformanceProofs = new Map([
+  [
+    "context-governor-scaling",
+    [
+      "context_governor::tests::long_history_context_governor_scaling_diagnostic",
+      "cindx.context-governor-diagnostic.v1"
+    ]
+  ],
+  [
+    "conductor-health-scaling",
+    [
+      "conductor_health_runtime::tests::conductor_health_scaling_diagnostic",
+      "cindx.conductor-health-diagnostic.v1"
+    ]
+  ],
+  [
+    "rag-search-scaling",
+    ["tests::synthetic_rag_search_scaling_diagnostic", "cindx.rag-search-diagnostic.v1"]
+  ]
+]);
+const qualityGateById = new Map(
+  qualityGateManifest.gates.map((gate) => [gate.id, gate])
 );
 const qualityGateRunner = read("scripts/run-quality-gates.mjs");
 const qualityGateDoc = read("docs/QUALITY_GATES.md");
@@ -966,11 +1044,11 @@ assert(packageJson.scripts.dev.includes("vite"), "desktop dev script must run Vi
 assert(
   packageJson.scripts.test === "node --test tests/*.test.ts" &&
     frontendCheckScript.includes("npm test && npm run build") &&
-    ciWorkflow.includes("- name: Test frontend behavior") &&
-    ciWorkflow.includes("run: npm test") &&
+    ciWorkflow.includes("run-quality-gates.mjs --profile ci-contract") &&
+    releaseWorkflow.includes("npm --prefix apps/desktop test") &&
     qualityGateManifest.profiles["ci-contract"].includes("frontend-test") &&
     qualityGateManifest.profiles.full.includes("frontend-test"),
-  "Frontend behavior tests must run locally and in CI"
+  "Frontend behavior tests must run locally, in CI, and before release"
 );
 assert(packageJson.scripts.build.includes("vite build"), "desktop build script must build Vite");
 assert(
@@ -3681,6 +3759,98 @@ assert(
     ciWorkflow.includes("Upload quality reports") &&
     ciWorkflow.includes("target/agent-benchmark-report.json"),
   "CI must run the versioned offline benchmark and retain auditable quality guidance"
+);
+assert(
+  JSON.stringify(qualityGateManifest.profiles["shipping-performance"]) ===
+    JSON.stringify(shippingPerformanceGateIds) &&
+    shippingPerformanceGateIds.every(
+      (id) =>
+        qualityGateManifest.profiles.performance.includes(id) &&
+        qualityGateManifest.profiles.full.includes(id)
+    ) &&
+    !qualityGateManifest.profiles["shipping-performance"].some((id) =>
+      [
+        "routing-contract",
+        "evaluation-foundation",
+        "agent-arena-contract",
+        "memory-contract"
+      ].includes(id)
+    ) &&
+    shippingPerformanceGateIds.every((id) => {
+      const gate = qualityGateById.get(id);
+      const proof = shippingPerformanceProofs.get(id);
+      const isFrontend = id === "frontend-streaming-markdown-scaling";
+      return (
+        gate &&
+        proof &&
+        gate.category === "performance" &&
+        Array.isArray(gate.required_output) &&
+        gate.required_output.includes(proof[1]) &&
+        gate.required_output.includes(
+          isFrontend ? "# pass 1" : "test result: ok. 1 passed; 0 failed"
+        ) &&
+        gate.command.includes(proof[0]) &&
+        !gate.command.includes("--ignored") &&
+        !gate.command.includes("orchestrator-eval") &&
+        (isFrontend
+          ? gate.command[0] === "node" &&
+            gate.command[1] === "--test" &&
+            gate.command.includes("--test-name-pattern")
+          : gate.command[0] === "cargo" &&
+            gate.command[1] === "test" &&
+            gate.command.includes("--exact") &&
+            gate.command.includes("--nocapture"))
+      );
+    }) &&
+    [...manualPerformanceProofs].every(([id, [filter, schema]]) => {
+      const gate = qualityGateById.get(id);
+      return (
+        gate?.command[0] === "cargo" &&
+        gate.command[1] === "test" &&
+        gate.command.includes(filter) &&
+        gate.command.includes("--exact") &&
+        gate.command.includes("--ignored") &&
+        gate.required_output?.includes(schema) &&
+        gate.required_output.includes("test result: ok. 1 passed; 0 failed")
+      );
+    }) &&
+    qualityGateRunner.includes("validateRequiredOutput") &&
+    qualityGateRunner.includes("createRequiredOutputObserver") &&
+    qualityGateRunner.includes("createDiagnosticCollector") &&
+    qualityGateRunner.includes('schema.startsWith("cindx.")') &&
+    ciWorkflow.includes("Run shipping performance contracts") &&
+    ciWorkflow.includes(
+      "--profile shipping-performance --report target/shipping-performance-report.json"
+    ) &&
+    ciWorkflow.includes("target/shipping-performance-report.json") &&
+    releaseWorkflow.includes("Run shipping performance contracts") &&
+    releaseWorkflow.includes("Upload shipping performance report") &&
+    releaseWorkflow.includes(
+      "--profile shipping-performance --report target/shipping-performance-report.json"
+    ) &&
+    releaseWorkflow.includes(
+      "- name: Upload shipping performance report\n        if: always()"
+    ) &&
+    releaseWorkflow.includes("path: target/shipping-performance-report.json") &&
+    releaseWorkflow.includes("retention-days: 30") &&
+    localBuildScript.includes(
+      'path.join(repoRoot, "scripts", "run-quality-gates.mjs")'
+    ) &&
+    localBuildScript.includes('"target/shipping-performance-report.json"') &&
+    localBuildScript.indexOf('"shipping-performance"') >
+      localBuildScript.indexOf("if (!skipTests)") &&
+    localBuildScript.indexOf('"shipping-performance"') <
+      localBuildScript.indexOf(
+        'path.join(desktopRoot, "node_modules", ".bin", "tauri")'
+      ) &&
+    agentModelTurnRuntimeSource.indexOf("let mut prepared_request = None;") > 0 &&
+    agentModelTurnRuntimeSource.indexOf("let mut prepared_request = None;") <
+      agentModelTurnRuntimeSource.indexOf("let mut response = loop {") &&
+    agentModelTurnRuntimeSource.indexOf(
+      "prepared_streaming_request_once(provider, &request, &mut prepared_request)"
+    ) > agentModelTurnRuntimeSource.indexOf("let mut response = loop {") &&
+    qualityGateDoc.includes("never cross-machine wall-clock thresholds"),
+  "Shipping builds must enforce auditable deterministic scaling contracts"
 );
 assert(
   memoryBenchmarkSuite.schema === "cindx.memory-evaluation.v1" &&

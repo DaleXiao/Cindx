@@ -138,6 +138,13 @@ try {
     run("npm", ["test"], { cwd: desktopRoot });
     run("cargo", ["test", "--workspace", "--locked"]);
     run("cargo", ["test", "--manifest-path", path.join(tauriRoot, "Cargo.toml"), "--locked"]);
+    run(process.execPath, [
+      path.join(repoRoot, "scripts", "run-quality-gates.mjs"),
+      "--profile",
+      "shipping-performance",
+      "--report",
+      "target/shipping-performance-report.json"
+    ]);
   }
   run(
     path.join(desktopRoot, "node_modules", ".bin", "tauri"),
