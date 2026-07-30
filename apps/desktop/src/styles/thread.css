@@ -741,6 +741,11 @@
   display: contents;
 }
 
+.thread-markdown-deferred-tail:not(pre) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .thread-markdown-chunk:first-child > :first-child {
   margin-top: 0;
 }

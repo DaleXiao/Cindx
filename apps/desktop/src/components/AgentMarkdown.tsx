@@ -4,7 +4,6 @@ import {
   isValidElement,
   memo,
   useCallback,
-  useMemo,
   useRef,
   useState,
   type ComponentPropsWithoutRef,
@@ -15,7 +14,12 @@ import { openArtifact, openExternalUrl } from "../tauri";
 import { DiagramFullscreen } from "./DiagramFullscreen";
 import { MarkmapDiagram } from "./MarkmapDiagram";
 import { MermaidDiagram } from "./MermaidDiagram";
+import { StreamingMarkdownDeferredTail } from "./StreamingMarkdownDeferredTail";
 import { markdownDiagramForCode } from "./markdownDiagramModel";
+import type {
+  StreamingMarkdownChunk,
+  StreamingMarkdownSnapshot
+} from "./streamingMarkdownModel";
 
 type MarkdownLinkProps = ComponentPropsWithoutRef<"a"> & {
   onOpenError?: (message: string) => void;
@@ -194,43 +198,6 @@ function MarkdownCodeBlock({
   );
 }
 
-const STREAMING_MARKDOWN_CHUNK_TARGET = 1_600;
-
-function splitStreamingMarkdown(content: string) {
-  if (content.length <= STREAMING_MARKDOWN_CHUNK_TARGET) return [content];
-  const chunks: string[] = [];
-  let start = 0;
-  let offset = 0;
-  let fenceCharacter = "";
-  let fenceLength = 0;
-  for (const line of content.match(/.*(?:\n|$)/g) ?? []) {
-    if (!line) continue;
-    const trimmed = line.replace(/\n$/, "").trim();
-    const fence = trimmed.match(/^(`{3,}|~{3,})/);
-    if (fence) {
-      const marker = fence[1];
-      if (!fenceCharacter) {
-        fenceCharacter = marker[0];
-        fenceLength = marker.length;
-      } else if (marker[0] === fenceCharacter && marker.length >= fenceLength) {
-        fenceCharacter = "";
-        fenceLength = 0;
-      }
-    }
-    offset += line.length;
-    if (
-      !fenceCharacter &&
-      trimmed === "" &&
-      offset - start >= STREAMING_MARKDOWN_CHUNK_TARGET
-    ) {
-      chunks.push(content.slice(start, offset));
-      start = offset;
-    }
-  }
-  if (start < content.length) chunks.push(content.slice(start));
-  return chunks.length > 0 ? chunks : [content];
-}
-
 const MarkdownChunk = memo(function MarkdownChunk({
   content,
   streaming,
@@ -274,41 +241,66 @@ const MarkdownChunk = memo(function MarkdownChunk({
   );
 });
 
-export const AgentMarkdown = memo(function AgentMarkdown({
-  content,
-  streaming = false,
+const SettledMarkdownChunks = memo(function SettledMarkdownChunks({
+  chunks,
   onOpenError,
   onCopyCode
 }: {
-  content: string;
-  streaming?: boolean;
+  chunks: readonly StreamingMarkdownChunk[];
   onOpenError: (message: string) => void;
   onCopyCode: (content: string) => void;
 }) {
-  const streamingChunks = useMemo(
-    () => (streaming ? splitStreamingMarkdown(content) : []),
-    [content, streaming]
-  );
-  if (streaming) {
+  return chunks.map((chunk) => (
+    <MarkdownChunk
+      key={chunk.id}
+      content={chunk.content}
+      streaming={false}
+      className="thread-markdown-chunk"
+      onOpenError={onOpenError}
+      onCopyCode={onCopyCode}
+    />
+  ));
+});
+
+export const AgentMarkdown = memo(function AgentMarkdown({
+  content,
+  streamingContent,
+  onOpenError,
+  onCopyCode
+}: {
+  content?: string;
+  streamingContent?: StreamingMarkdownSnapshot;
+  onOpenError: (message: string) => void;
+  onCopyCode: (content: string) => void;
+}) {
+  if (streamingContent) {
     return (
       <div className="thread-markdown thread-markdown-stream">
-        {streamingChunks.map((chunk, index) => (
-          <MarkdownChunk
-            key={index}
-            content={chunk}
-            streaming={index === streamingChunks.length - 1}
-            className="thread-markdown-chunk"
-            onOpenError={onOpenError}
-            onCopyCode={onCopyCode}
-          />
-        ))}
+        <SettledMarkdownChunks
+          chunks={streamingContent.settledChunks}
+          onOpenError={onOpenError}
+          onCopyCode={onCopyCode}
+        />
+        <MarkdownChunk
+          key={streamingContent.tailId}
+          content={streamingContent.parsedTail.content}
+          streaming
+          className="thread-markdown-chunk"
+          onOpenError={onOpenError}
+          onCopyCode={onCopyCode}
+        />
+        <StreamingMarkdownDeferredTail
+          root={streamingContent.deferredTailRoot}
+          open={streamingContent.deferredTailOpen}
+          fenced={streamingContent.deferredInFence}
+        />
       </div>
     );
   }
   return (
     <MarkdownChunk
       className="thread-markdown"
-      content={content}
+      content={content ?? ""}
       streaming={false}
       onOpenError={onOpenError}
       onCopyCode={onCopyCode}
