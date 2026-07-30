@@ -69,6 +69,7 @@ pub(crate) fn remove_stale_preparation_context(history: &mut Vec<Message>) {
                     | "knowledge_context"
                     | "single_model_policy_guidance"
                     | "agent_evidence_packet"
+                    | "collaboration_tool_evidence"
                     | "workflow_execution_contract"
             )
         );
@@ -149,6 +150,13 @@ pub(crate) fn prepare_agent_execution_replay(
         }
         let preparation_epoch = cancellation.steer_epoch();
         run_context.insert("steer_epoch".to_string(), preparation_epoch.to_string());
+        // A no-op control steer may advance `steer_epoch` without changing the
+        // active objective. Keep prompt-scoped contracts on the epoch that was
+        // actually prepared so permission/recovery does not discard valid work.
+        run_context.insert(
+            "prompt_contract_epoch".to_string(),
+            preparation_epoch.to_string(),
+        );
         let initial_prompt = run_context
             .get("initial_prompt_objective")
             .cloned()

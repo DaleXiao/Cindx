@@ -82,7 +82,7 @@ pub(crate) fn is_durable_message(message: &Message) -> bool {
 }
 
 pub(crate) fn is_transient_run_context(message: &Message) -> bool {
-    if !matches!(message.role, MessageRole::System)
+    if !matches!(message.role, MessageRole::System | MessageRole::Reviewer)
         || message.metadata.get("internal").map(String::as_str) != Some("true")
     {
         return false;
@@ -96,6 +96,7 @@ pub(crate) fn is_transient_run_context(message: &Message) -> bool {
             "image_generation_policy"
                 | "workflow_execution_contract"
                 | "agent_evidence_packet"
+                | "collaboration_tool_evidence"
                 | "context_restore_pack"
                 | "artifact_manifest"
                 | "knowledge_context"

@@ -1,4 +1,5 @@
 use super::*;
+use crate::collaboration_service::COLLABORATION_TOOL_EVIDENCE_SCHEMA;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn complete_collaboration_worker_with_tools(
@@ -65,7 +66,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
     ));
     let mut worker_context = run_context.clone();
     let evidence_source = stage.clone();
-    worker_context.insert("collaboration_id".to_string(), collaboration_id);
+    worker_context.insert("collaboration_id".to_string(), collaboration_id.clone());
     worker_context.insert("stage".to_string(), stage.clone());
     worker_context.insert("role".to_string(), role_label(&role).to_string());
     worker_context.insert(
@@ -447,6 +448,9 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                         let observation =
                             observation_from_tool_result(&call.tool_name, "failed", reason);
                         evidence.push(CollaborationEvidence {
+                            evidence_schema: COLLABORATION_TOOL_EVIDENCE_SCHEMA.to_string(),
+                            steer_epoch: Some(objective_epoch),
+                            collaboration_id: collaboration_id.clone(),
                             source_step: evidence_source.clone(),
                             tool_call_id: tool_call_id.clone(),
                             tool_name: call.tool_name.clone(),
@@ -521,6 +525,9 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                             Ok(result) => {
                                 let status = result.status.clone();
                                 evidence.push(CollaborationEvidence {
+                                    evidence_schema: COLLABORATION_TOOL_EVIDENCE_SCHEMA.to_string(),
+                                    steer_epoch: Some(objective_epoch),
+                                    collaboration_id: collaboration_id.clone(),
                                     source_step: evidence_source.clone(),
                                     tool_call_id: tool_call_id.clone(),
                                     tool_name: call.tool_name.clone(),
@@ -535,6 +542,9 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                             }
                             Err(error) => {
                                 evidence.push(CollaborationEvidence {
+                                    evidence_schema: COLLABORATION_TOOL_EVIDENCE_SCHEMA.to_string(),
+                                    steer_epoch: Some(objective_epoch),
+                                    collaboration_id: collaboration_id.clone(),
                                     source_step: evidence_source.clone(),
                                     tool_call_id: tool_call_id.clone(),
                                     tool_name: call.tool_name.clone(),

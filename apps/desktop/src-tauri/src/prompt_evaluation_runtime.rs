@@ -559,6 +559,9 @@ pub(crate) fn complete_prompt_evaluation_worker(
                         }
                     };
                     evidence.push(CollaborationEvidence {
+                        evidence_schema: String::new(),
+                        steer_epoch: None,
+                        collaboration_id: String::new(),
                         source_step: "evaluation".to_string(),
                         tool_call_id: call.call_id.0.clone(),
                         tool_name: call.tool_name.clone(),

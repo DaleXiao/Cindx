@@ -75,7 +75,8 @@ pub use run_budget::{
 };
 pub use state_transaction::AgentLoopAppendTransaction;
 pub use task_contract::{
-    AgentTaskContract, ContractEvidence, ContractEvidenceKind, WorkspaceVerificationPolicy,
+    AgentTaskContract, ContractEvidence, ContractEvidenceKind, PromptEvidenceContext,
+    WorkspaceVerificationPolicy,
 };
 pub use task_state::{
     AgentTaskStateError, AgentTaskStateSnapshot, PersistedInteractionSurface,
@@ -436,10 +437,31 @@ pub fn model_request_for_turn_with_context_budget(
     context_window_tokens: u64,
     max_output_tokens: u64,
 ) -> (ModelRequest, ContextGovernorReport) {
+    model_request_for_turn_with_context_budget_and_overlays(
+        state,
+        tools,
+        user_instructions,
+        runtime_context,
+        &[],
+        context_window_tokens,
+        max_output_tokens,
+    )
+}
+
+pub fn model_request_for_turn_with_context_budget_and_overlays(
+    state: &AgentLoopState,
+    tools: &[ToolSpec],
+    user_instructions: Option<&str>,
+    runtime_context: Option<&str>,
+    context_overlays: &[Message],
+    context_window_tokens: u64,
+    max_output_tokens: u64,
+) -> (ModelRequest, ContextGovernorReport) {
     let system_prompt = agent_system_prompt_with_context(tools, user_instructions, runtime_context);
-    let (messages, report) = context_governor::govern_model_messages(
+    let (messages, report) = context_governor::govern_model_messages_with_overlays(
         &state.messages,
         system_prompt,
+        context_overlays,
         tools,
         context_window_tokens,
         max_output_tokens,

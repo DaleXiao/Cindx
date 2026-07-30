@@ -1,3 +1,6 @@
+use crate::execution::{
+    AGENT_EVIDENCE_CONTEXT_SCHEMA, COLLABORATION_GUIDANCE_SCHEMA, WORKFLOW_EXECUTION_CONTEXT_SCHEMA,
+};
 use agent_core::{Message, MessageRole};
 
 const CONTEXT_BASE_TOKENS: u64 = 512;
@@ -7,7 +10,9 @@ pub const CONTEXT_SOURCE_SCHEMA: &str = "cindx.context-source.v1";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ContextSourceKind {
     ImageGenerationPolicy,
+    CollaborationTrustPolicy,
     WorkflowExecutionContract,
+    GroundingEvidence,
     AgentEvidence,
     RestorePack,
     ArtifactManifest,
@@ -21,11 +26,102 @@ pub enum ContextSourceKind {
 
 impl ContextSourceKind {
     pub fn from_message(message: &Message) -> Option<Self> {
+        let reviewer_context = matches!(message.role, MessageRole::Reviewer)
+            && message.metadata.get("internal").map(String::as_str) == Some("true");
+        let reviewer_grounding = reviewer_context
+            && message
+                .metadata
+                .get("required_grounding")
+                .map(String::as_str)
+                == Some("true")
+            && (message
+                .metadata
+                .get("requirement_id")
+                .is_some_and(|value| !value.trim().is_empty())
+                || message
+                    .metadata
+                    .get("requirement_ids_json")
+                    .is_some_and(|value| value != "[]"))
+            && match message.metadata.get("kind").map(String::as_str) {
+                Some("grounding_evidence_capsule") => {
+                    message.metadata.get("evidence_schema").map(String::as_str)
+                        == Some("cindx.grounding-evidence.v1")
+                }
+                Some("knowledge_context") => {
+                    message
+                        .metadata
+                        .get("context_source_schema")
+                        .map(String::as_str)
+                        == Some(CONTEXT_SOURCE_SCHEMA)
+                }
+                Some("collaboration_tool_evidence") => {
+                    message.metadata.get("evidence_schema").map(String::as_str)
+                        == Some("cindx.collaboration-tool-evidence.v1")
+                }
+                _ => false,
+            };
+        if reviewer_grounding {
+            return Some(Self::GroundingEvidence);
+        }
+        if reviewer_context
+            && message.metadata.get("trust").map(String::as_str) == Some("untrusted_model_output")
+        {
+            match message.metadata.get("kind").map(String::as_str) {
+                Some("collaboration_guidance")
+                    if message.metadata.get("context_schema").map(String::as_str)
+                        == Some(COLLABORATION_GUIDANCE_SCHEMA) =>
+                {
+                    return Some(Self::Collaboration);
+                }
+                Some("agent_evidence_packet")
+                    if message.metadata.get("context_schema").map(String::as_str)
+                        == Some(AGENT_EVIDENCE_CONTEXT_SCHEMA)
+                        && message.metadata.get("evidence_schema").map(String::as_str)
+                            == Some("cindx.agent-evidence.v1") =>
+                {
+                    return Some(Self::AgentEvidence);
+                }
+                Some("workflow_execution_contract")
+                    if message.metadata.get("context_schema").map(String::as_str)
+                        == Some(WORKFLOW_EXECUTION_CONTEXT_SCHEMA) =>
+                {
+                    return Some(Self::WorkflowExecutionContract);
+                }
+                _ => {}
+            }
+        }
+        if reviewer_context
+            && message.metadata.get("kind").map(String::as_str) == Some("knowledge_context")
+            && message
+                .metadata
+                .get("context_source_schema")
+                .map(String::as_str)
+                == Some(CONTEXT_SOURCE_SCHEMA)
+        {
+            return Some(Self::WorkspaceKnowledge);
+        }
+        if reviewer_context
+            && message.metadata.get("kind").map(String::as_str)
+                == Some("collaboration_tool_evidence")
+            && message.metadata.get("evidence_schema").map(String::as_str)
+                == Some("cindx.collaboration-tool-evidence.v1")
+        {
+            return Some(Self::Collaboration);
+        }
         if !matches!(message.role, MessageRole::System) {
             return None;
         }
+        if message
+            .metadata
+            .get("required_grounding")
+            .map(String::as_str)
+            == Some("true")
+        {
+            return Some(Self::GroundingEvidence);
+        }
         Some(match message.metadata.get("kind").map(String::as_str) {
             Some("image_generation_policy") => Self::ImageGenerationPolicy,
+            Some("collaboration_trust_policy") => Self::CollaborationTrustPolicy,
             Some("workflow_execution_contract") => Self::WorkflowExecutionContract,
             Some("agent_evidence_packet") => Self::AgentEvidence,
             Some("context_restore_pack") => Self::RestorePack,
@@ -42,7 +138,9 @@ impl ContextSourceKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ImageGenerationPolicy => "image_generation_policy",
+            Self::CollaborationTrustPolicy => "collaboration_trust_policy",
             Self::WorkflowExecutionContract => "workflow_execution_contract",
+            Self::GroundingEvidence => "grounding_evidence",
             Self::AgentEvidence => "agent_evidence_packet",
             Self::RestorePack => "context_restore_pack",
             Self::ArtifactManifest => "artifact_manifest",
@@ -58,7 +156,9 @@ impl ContextSourceKind {
     pub(crate) const fn priority(self) -> u8 {
         match self {
             Self::ImageGenerationPolicy => 100,
+            Self::CollaborationTrustPolicy => 100,
             Self::WorkflowExecutionContract => 99,
+            Self::GroundingEvidence => 98,
             Self::AgentEvidence => 98,
             Self::RestorePack => 95,
             Self::ArtifactManifest => 90,
@@ -78,7 +178,9 @@ impl ContextSourceKind {
         matches!(
             self,
             Self::ImageGenerationPolicy
+                | Self::CollaborationTrustPolicy
                 | Self::WorkflowExecutionContract
+                | Self::GroundingEvidence
                 | Self::AgentEvidence
                 | Self::RestorePack
                 | Self::ArtifactManifest
@@ -376,6 +478,69 @@ mod tests {
         assert_eq!(source, ContextSourceKind::AgentEvidence);
         assert_eq!(source.as_str(), "agent_evidence_packet");
         assert!(source.priority() > ContextSourceKind::ProjectMemory.priority());
+        assert!(source.is_protected());
+    }
+
+    #[test]
+    fn schema_valid_reviewer_collaboration_context_keeps_its_priority() {
+        let packet = crate::AgentEvidencePacket::new(
+            "objective",
+            [crate::AgentEvidenceCandidate::new(
+                "candidate",
+                "reviewer",
+                "completed",
+                "candidate output",
+            )],
+        );
+        let mut history = Vec::new();
+        crate::AgentExecutionGuidance::new(
+            "collaboration-1",
+            "review the candidates",
+            Some(r#"{"schema":"cindx.workflow-handoff.v1"}"#.to_string()),
+        )
+        .with_evidence_packet(packet)
+        .append_to_history(&mut history);
+
+        assert_eq!(history.len(), 4);
+        assert_eq!(
+            ContextSourceKind::from_message(&history[0]),
+            Some(ContextSourceKind::CollaborationTrustPolicy)
+        );
+        assert_eq!(
+            ContextSourceKind::from_message(&history[1]),
+            Some(ContextSourceKind::Collaboration)
+        );
+        assert_eq!(
+            ContextSourceKind::from_message(&history[2]),
+            Some(ContextSourceKind::AgentEvidence)
+        );
+        assert_eq!(
+            ContextSourceKind::from_message(&history[3]),
+            Some(ContextSourceKind::WorkflowExecutionContract)
+        );
+        assert!(history[2..]
+            .iter()
+            .all(|message| ContextSourceKind::from_message(message)
+                .is_some_and(ContextSourceKind::is_protected)));
+    }
+
+    #[test]
+    fn contract_grounding_marker_promotes_only_the_credited_context() {
+        let mut knowledge = message(MessageRole::System, "workspace evidence");
+        knowledge
+            .metadata
+            .insert("kind".to_string(), "knowledge_context".to_string());
+        assert_eq!(
+            ContextSourceKind::from_message(&knowledge),
+            Some(ContextSourceKind::WorkspaceKnowledge)
+        );
+
+        knowledge
+            .metadata
+            .insert("required_grounding".to_string(), "true".to_string());
+        let source = ContextSourceKind::from_message(&knowledge).unwrap();
+        assert_eq!(source, ContextSourceKind::GroundingEvidence);
+        assert_eq!(source.as_str(), "grounding_evidence");
         assert!(source.is_protected());
     }
 

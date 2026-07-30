@@ -72,6 +72,8 @@ pub(super) fn prepare_adaptive_collaboration(
         .as_ref()
         .map(|checkpoint| checkpoint.plan.workflow_id.clone());
     if let Some(checkpoint) = workflow_checkpoint.as_mut() {
+        let prior_workflow_id = checkpoint.plan.workflow_id.clone();
+        rebind_checkpoint_grounding_provenance(checkpoint, &prior_workflow_id, collaboration_id)?;
         checkpoint.plan.workflow_id = collaboration_id.to_string();
         let additional_turns = checkpoint.plan.budget.max_model_turns_per_step;
         checkpoint.continue_with_budget(additional_turns, workflow_started_at_ms);

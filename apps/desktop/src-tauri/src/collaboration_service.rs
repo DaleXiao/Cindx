@@ -9,8 +9,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 const COLLABORATION_SHARED_EVIDENCE_MAX_ENTRIES: usize = 32;
+pub(crate) const COLLABORATION_GROUNDING_RECEIPT_MAX_ENTRIES: usize = 4;
 const COLLABORATION_EVIDENCE_REQUEST_MAX_CHARS: usize = 2_000;
 const COLLABORATION_EVIDENCE_OUTPUT_MAX_CHARS: usize = 2_000;
+const COLLABORATION_GROUNDING_OBSERVATION_MAX_CHARS: usize = 1_200;
+pub(crate) const COLLABORATION_TOOL_EVIDENCE_SCHEMA: &str = "cindx.collaboration-tool-evidence.v1";
 
 pub(crate) const WORKFLOW_RESUMABLE_ERROR_PREFIX: &str = "workflow checkpoint saved:";
 pub(crate) const WORKFLOW_SAFETY_ERROR_PREFIX: &str = "workflow safety gate blocked:";
@@ -24,6 +27,7 @@ pub(crate) struct AgentCollaboration {
     pub(crate) guidance: String,
     pub(crate) execution_contract: Option<String>,
     pub(crate) evidence_packet: Option<AgentEvidencePacket>,
+    pub(crate) grounding_receipts: Vec<CollaborationGroundingReceipt>,
     pub(crate) candidate_models: Vec<String>,
 }
 
@@ -32,6 +36,7 @@ pub(crate) struct AdaptiveCollaborationOutcome {
     pub(crate) guidance: String,
     pub(crate) execution_contract: Option<String>,
     pub(crate) evidence_packet: Option<AgentEvidencePacket>,
+    pub(crate) grounding_receipts: Vec<CollaborationGroundingReceipt>,
 }
 
 impl AdaptiveCollaborationOutcome {
@@ -40,6 +45,7 @@ impl AdaptiveCollaborationOutcome {
             guidance,
             execution_contract: None,
             evidence_packet: None,
+            grounding_receipts: Vec::new(),
         }
     }
 
@@ -49,10 +55,131 @@ impl AdaptiveCollaborationOutcome {
     ) -> Result<Self, String> {
         Ok(Self {
             evidence_packet: Some(checkpoint_evidence_packet(&guidance, checkpoint)),
+            grounding_receipts: checkpoint_grounding_receipts(checkpoint),
             guidance,
             execution_contract: Some(checkpoint.execution_handoff_json()?),
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CollaborationGroundingReceipt {
+    pub(crate) steer_epoch: u64,
+    pub(crate) collaboration_id: String,
+    pub(crate) source_step: String,
+    pub(crate) tool_call_id: String,
+    pub(crate) tool_name: String,
+    pub(crate) input_fingerprint: String,
+    pub(crate) observation: String,
+}
+
+fn checkpoint_grounding_receipts(
+    checkpoint: &WorkflowExecutionCheckpoint,
+) -> Vec<CollaborationGroundingReceipt> {
+    grounding_receipts_from_evidence(
+        checkpoint
+            .steps
+            .values()
+            .filter(|step| {
+                matches!(
+                    step.status,
+                    WorkflowStepStatus::Completed | WorkflowStepStatus::Degraded
+                )
+            })
+            .filter_map(|step| {
+                serde_json::from_str::<Vec<CollaborationEvidence>>(&step.evidence_json).ok()
+            })
+            .flatten(),
+        &checkpoint.plan.workflow_id,
+    )
+}
+
+fn grounding_receipts_from_evidence(
+    evidence: impl IntoIterator<Item = CollaborationEvidence>,
+    expected_collaboration_id: &str,
+) -> Vec<CollaborationGroundingReceipt> {
+    let mut seen = BTreeSet::new();
+    let candidates = evidence
+        .into_iter()
+        .filter(|evidence| {
+            evidence.evidence_schema == COLLABORATION_TOOL_EVIDENCE_SCHEMA
+                && evidence.steer_epoch.is_some()
+                && evidence.collaboration_id == expected_collaboration_id
+                && evidence.status == "succeeded"
+                && !evidence.output.trim().is_empty()
+                && !evidence.source_step.trim().is_empty()
+                && !evidence.tool_call_id.trim().is_empty()
+                && !evidence.tool_name.trim().is_empty()
+                && !matches!(
+                    evidence.tool_name.as_str(),
+                    "file.list" | "browser.tabs" | "tool.search" | "tool.inspect"
+                )
+        })
+        .filter(|evidence| seen.insert((evidence.tool_call_id.clone(), evidence.tool_name.clone())))
+        .take(COLLABORATION_SHARED_EVIDENCE_MAX_ENTRIES)
+        .collect::<Vec<_>>();
+    let mut distinct_tools = BTreeSet::new();
+    let mut preferred = Vec::new();
+    let mut remaining = Vec::new();
+    for evidence in candidates {
+        if distinct_tools.insert(evidence.tool_name.clone()) {
+            preferred.push(evidence);
+        } else {
+            remaining.push(evidence);
+        }
+    }
+    preferred
+        .into_iter()
+        .chain(remaining)
+        .take(COLLABORATION_GROUNDING_RECEIPT_MAX_ENTRIES)
+        .map(|evidence| CollaborationGroundingReceipt {
+            steer_epoch: evidence.steer_epoch.unwrap_or_default(),
+            collaboration_id: evidence.collaboration_id,
+            source_step: evidence.source_step,
+            tool_call_id: evidence.tool_call_id,
+            input_fingerprint: agent_runtime::tool_input_fingerprint(
+                &evidence.tool_name,
+                &evidence.request,
+            ),
+            tool_name: evidence.tool_name,
+            observation: truncate_for_collaboration(
+                &evidence.output,
+                COLLABORATION_GROUNDING_OBSERVATION_MAX_CHARS,
+            ),
+        })
+        .collect()
+}
+
+pub(crate) fn rebind_checkpoint_grounding_provenance(
+    checkpoint: &mut WorkflowExecutionCheckpoint,
+    prior_collaboration_id: &str,
+    collaboration_id: &str,
+) -> Result<(), String> {
+    if prior_collaboration_id == collaboration_id {
+        return Ok(());
+    }
+    for step in checkpoint.steps.values_mut() {
+        let Ok(mut evidence) =
+            serde_json::from_str::<Vec<CollaborationEvidence>>(&step.evidence_json)
+        else {
+            continue;
+        };
+        let mut changed = false;
+        for item in &mut evidence {
+            if item.evidence_schema == COLLABORATION_TOOL_EVIDENCE_SCHEMA
+                && item.collaboration_id == prior_collaboration_id
+            {
+                item.collaboration_id = collaboration_id.to_string();
+                changed = true;
+            }
+        }
+        if changed {
+            step.evidence_json = serde_json::to_string(&evidence).map_err(|error| {
+                format!("failed to rebind collaboration evidence provenance: {error}")
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn checkpoint_evidence_packet(
@@ -173,6 +300,12 @@ pub(crate) struct CollaborationCompletion {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CollaborationEvidence {
+    #[serde(default)]
+    pub(crate) evidence_schema: String,
+    #[serde(default)]
+    pub(crate) steer_epoch: Option<u64>,
+    #[serde(default)]
+    pub(crate) collaboration_id: String,
     pub(crate) source_step: String,
     pub(crate) tool_call_id: String,
     pub(crate) tool_name: String,
@@ -612,4 +745,212 @@ pub(crate) fn merge_collaboration_evidence(
             truncate_for_collaboration(&entry.output, COLLABORATION_EVIDENCE_OUTPUT_MAX_CHARS);
     }
     merged
+}
+
+#[cfg(test)]
+mod grounding_receipt_tests {
+    use super::*;
+    use orchestrator::{AdaptiveWorkflow, AdaptiveWorkflowStep, WorkflowBudget};
+
+    fn evidence(
+        schema: &str,
+        epoch: Option<u64>,
+        status: &str,
+        tool_name: &str,
+        call_id: &str,
+    ) -> CollaborationEvidence {
+        CollaborationEvidence {
+            evidence_schema: schema.to_string(),
+            steer_epoch: epoch,
+            collaboration_id: "collaboration-1".to_string(),
+            source_step: "inspect".to_string(),
+            tool_call_id: call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            request: r#"{"path":"README.md"}"#.to_string(),
+            status: status.to_string(),
+            output: "runtime observation".to_string(),
+        }
+    }
+
+    #[test]
+    fn grounding_receipts_accept_only_current_runtime_provenance_candidates() {
+        let mut wrong_collaboration = evidence(
+            COLLABORATION_TOOL_EVIDENCE_SCHEMA,
+            Some(4),
+            "succeeded",
+            "file.read",
+            "wrong-collaboration",
+        );
+        wrong_collaboration.collaboration_id = "collaboration-2".to_string();
+        let mut empty = evidence(
+            COLLABORATION_TOOL_EVIDENCE_SCHEMA,
+            Some(4),
+            "succeeded",
+            "file.read",
+            "empty",
+        );
+        empty.output = "   ".to_string();
+        let receipts = grounding_receipts_from_evidence(
+            [
+                evidence(
+                    COLLABORATION_TOOL_EVIDENCE_SCHEMA,
+                    Some(4),
+                    "succeeded",
+                    "file.read",
+                    "valid",
+                ),
+                evidence("", Some(4), "succeeded", "file.read", "legacy"),
+                evidence(
+                    COLLABORATION_TOOL_EVIDENCE_SCHEMA,
+                    None,
+                    "succeeded",
+                    "file.read",
+                    "missing-epoch",
+                ),
+                evidence(
+                    COLLABORATION_TOOL_EVIDENCE_SCHEMA,
+                    Some(4),
+                    "failed",
+                    "file.read",
+                    "failed",
+                ),
+                evidence(
+                    COLLABORATION_TOOL_EVIDENCE_SCHEMA,
+                    Some(4),
+                    "succeeded",
+                    "file.list",
+                    "discovery",
+                ),
+                wrong_collaboration,
+                empty,
+            ],
+            "collaboration-1",
+        );
+
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].tool_call_id, "valid");
+        assert_eq!(receipts[0].steer_epoch, 4);
+        assert!(!receipts[0].input_fingerprint.is_empty());
+        assert_eq!(receipts[0].observation, "runtime observation");
+    }
+
+    #[test]
+    fn grounding_receipts_preserve_distinct_tools_before_repeated_reads() {
+        let receipts = grounding_receipts_from_evidence(
+            [
+                evidence(
+                    COLLABORATION_TOOL_EVIDENCE_SCHEMA,
+                    Some(4),
+                    "succeeded",
+                    "file.read",
+                    "read-1",
+                ),
+                evidence(
+                    COLLABORATION_TOOL_EVIDENCE_SCHEMA,
+                    Some(4),
+                    "succeeded",
+                    "file.read",
+                    "read-2",
+                ),
+                evidence(
+                    COLLABORATION_TOOL_EVIDENCE_SCHEMA,
+                    Some(4),
+                    "succeeded",
+                    "file.read",
+                    "read-3",
+                ),
+                evidence(
+                    COLLABORATION_TOOL_EVIDENCE_SCHEMA,
+                    Some(4),
+                    "succeeded",
+                    "file.read",
+                    "read-4",
+                ),
+                evidence(
+                    COLLABORATION_TOOL_EVIDENCE_SCHEMA,
+                    Some(4),
+                    "succeeded",
+                    "web.search",
+                    "web",
+                ),
+                evidence(
+                    COLLABORATION_TOOL_EVIDENCE_SCHEMA,
+                    Some(4),
+                    "succeeded",
+                    "computer.screenshot",
+                    "screen",
+                ),
+            ],
+            "collaboration-1",
+        );
+
+        let tools = receipts
+            .iter()
+            .map(|receipt| receipt.tool_name.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(receipts.len(), 4);
+        assert!(tools.contains("file.read"));
+        assert!(tools.contains("web.search"));
+        assert!(tools.contains("computer.screenshot"));
+    }
+
+    #[test]
+    fn resumed_checkpoint_rebinds_only_trusted_grounding_provenance() {
+        let plan = WorkflowPlanIr::from_adaptive(
+            "old-collaboration",
+            "Audit the repository",
+            "auto",
+            "adaptive",
+            "coordinator",
+            &AdaptiveWorkflow {
+                steps: vec![AdaptiveWorkflowStep {
+                    id: "inspect".to_string(),
+                    role: "worker".to_string(),
+                    model: "worker".to_string(),
+                    subtask: "Inspect evidence".to_string(),
+                    access: Vec::new(),
+                }],
+            },
+            WorkflowBudget {
+                max_steps: 1,
+                max_models: 1,
+                max_model_turns_per_step: 2,
+                max_tool_calls_per_step: 2,
+                max_output_tokens_per_step: 1_024,
+            },
+        );
+        let mut checkpoint = WorkflowExecutionCheckpoint::new("resume", plan, 1);
+        let mut trusted = evidence(
+            COLLABORATION_TOOL_EVIDENCE_SCHEMA,
+            Some(3),
+            "succeeded",
+            "file.read",
+            "trusted",
+        );
+        trusted.collaboration_id = "old-collaboration".to_string();
+        let mut legacy = evidence("", Some(3), "succeeded", "file.read", "legacy");
+        legacy.collaboration_id = "old-collaboration".to_string();
+        let step = checkpoint.steps.get_mut("inspect").expect("step exists");
+        step.status = WorkflowStepStatus::Completed;
+        step.evidence_json =
+            serde_json::to_string(&vec![trusted, legacy]).expect("evidence serializes");
+
+        rebind_checkpoint_grounding_provenance(
+            &mut checkpoint,
+            "old-collaboration",
+            "new-collaboration",
+        )
+        .expect("trusted provenance rebinds");
+        checkpoint.plan.workflow_id = "new-collaboration".to_string();
+        let rebound = serde_json::from_str::<Vec<CollaborationEvidence>>(
+            &checkpoint.steps["inspect"].evidence_json,
+        )
+        .expect("evidence restores");
+
+        assert_eq!(rebound[0].collaboration_id, "new-collaboration");
+        assert_eq!(rebound[1].collaboration_id, "old-collaboration");
+        let receipts = checkpoint_grounding_receipts(&checkpoint);
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].collaboration_id, "new-collaboration");
+    }
 }
