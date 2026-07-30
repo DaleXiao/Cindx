@@ -6,8 +6,9 @@ import { providerApiKeySetAfterSave, resolveProviderProfile } from "./providerPr
 export const DESKTOP_VERSION = desktopPackage.version;
 
 export type * from "./tauriTypes";
+export type * from "./agentRunBudgetModel";
+import type { AgentEffort } from "./agentRunBudgetModel";
 import type {
-  AgentEffort,
   RuntimeStatus,
   PersonalizationConfig,
   SidecarEndpointState,
@@ -439,7 +440,7 @@ let browserAgentState: AgentState = {
   sessionName: "Runtime Session",
   status: "idle",
   turnCount: 0,
-  maxTurns: 24,
+  maxTurns: 0,
   transcriptMessages: 0,
   contextTokensUsed: 0,
   contextWindowTokens: 128000,
@@ -515,6 +516,7 @@ export async function getRuntimeStatus(): Promise<RuntimeStatus> {
       kernelStatus: "browser preview",
       workspaceRoot: ".",
       orchestrationModes: ["single", "plan_execute_review", "best_of_n", "auto_router"],
+      agentRunBudgets: null,
       registeredTools: [
         "file.read",
         "file.list",
@@ -574,6 +576,7 @@ export async function saveWorkspaceRoot(path: string): Promise<RuntimeStatus> {
       kernelStatus: "browser preview",
       workspaceRoot: path,
       orchestrationModes: ["single", "plan_execute_review", "best_of_n", "auto_router"],
+      agentRunBudgets: null,
       registeredTools: [
         "file.read",
         "file.list",

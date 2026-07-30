@@ -42,12 +42,6 @@ export function normalizedSessionEffort(effort: string | undefined): AgentEffort
   return "auto";
 }
 
-export function runBudgetForEffort(effort: AgentEffort) {
-  if (effort === "fast") return { durationMs: 3 * 60_000, modelCalls: 6, toolCalls: 12 };
-  if (effort === "pro") return { durationMs: 60 * 60_000, modelCalls: 96, toolCalls: 180 };
-  return { durationMs: 8 * 60_000, modelCalls: 18, toolCalls: 36 };
-}
-
 export function clampSidebarWidth(width: number) {
   return Math.min(320, Math.max(200, width));
 }

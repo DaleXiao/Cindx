@@ -20,9 +20,9 @@ import {
   BACKGROUND_AGENT_POLL_INTERVAL_MS,
   FOREGROUND_AGENT_POLL_INTERVAL_MS,
   loadDebugAlwaysVisible,
-  queuedMessageClientId,
-  runBudgetForEffort
+  queuedMessageClientId
 } from "./appShellModel";
+import { optimisticRunBudgetPatch } from "./agentRunBudgetModel";
 import { useAppWorkspaceProjection } from "./controllers/useAppWorkspaceProjection";
 import { useComposerAttachments } from "./controllers/useComposerAttachments";
 import { useComposerDrafts } from "./controllers/useComposerDrafts";
@@ -1805,7 +1805,7 @@ export function App() {
       attachments
     };
     addOptimisticUserMessage(sessionId, optimisticUserMessage);
-    const runBudget = runBudgetForEffort(agentEffort);
+    const runBudgetPatch = optimisticRunBudgetPatch(runtime?.agentRunBudgets, agentEffort);
     setAgentState((current) => {
       if (!current) return current;
       const contextTokensUsed =
@@ -1817,9 +1817,7 @@ export function App() {
         canCancel: true,
         canRetry: false,
         canContinue: false,
-        runBudgetMs: runBudget.durationMs,
-        runModelCallBudget: runBudget.modelCalls,
-        runToolCallBudget: runBudget.toolCalls,
+        ...runBudgetPatch,
         transcriptMessages: current.transcriptMessages + 1,
         contextTokensUsed,
         contextRemainingPercent: Math.max(
@@ -2345,7 +2343,7 @@ export function App() {
         workspaceRoot={runtime?.workspaceRoot ?? ""}
         agentStatus={activeAgentState?.status ?? "idle"}
         agentTurnCount={activeAgentState?.turnCount ?? 0}
-        agentMaxTurns={activeAgentState?.maxTurns ?? 24}
+        agentMaxTurns={activeAgentState?.maxTurns ?? 0}
         reviewCounts={{
           agent: agentApprovals.length,
           tool: toolApprovals.length,

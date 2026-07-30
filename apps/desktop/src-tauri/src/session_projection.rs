@@ -32,7 +32,7 @@ pub(crate) fn empty_agent_state_for_session(session_id: &str) -> AgentState {
         session_name: None,
         status: "idle".to_string(),
         turn_count: 0,
-        max_turns: RunBudget::for_effort("auto").max_model_calls,
+        max_turns: 0,
         transcript_messages: 0,
         context_tokens_used: 0,
         context_window_tokens: 128_000,
@@ -137,6 +137,12 @@ fn metadata_usize(event: &Event, key: &str) -> Option<usize> {
     event.metadata.get(key)?.parse::<usize>().ok()
 }
 
+fn normalize_agent_session_budget_state(model: &mut AgentSessionReadModel) -> bool {
+    let before = model.state.max_turns;
+    model.state.max_turns = model.state.run_model_call_budget;
+    before != model.state.max_turns
+}
+
 fn apply_event_to_agent_session_read_model(model: &mut AgentSessionReadModel, event: &Event) {
     model.revision = model.revision.max(event.sequence);
     model.event_count = model.event_count.saturating_add(1);
@@ -162,17 +168,24 @@ fn apply_event_to_agent_session_read_model(model: &mut AgentSessionReadModel, ev
     }
 
     if is_agent_run_start_event(event) {
+        let fallback_budget = agent_run_budget_from_start_event(event);
         model.state.status = "running".to_string();
         model.state.turn_count = 0;
         model.state.context_window_tokens = metadata_u64(event, "context_window_tokens")
             .unwrap_or(128_000)
             .max(1);
         model.state.run_started_at_ms = event.timestamp_ms;
-        model.state.run_budget_ms = metadata_u64(event, "run_budget_ms").unwrap_or_default();
+        model.state.run_budget_ms = metadata_u64(event, "run_budget_ms").unwrap_or_else(|| {
+            fallback_budget
+                .max_duration
+                .as_millis()
+                .min(u64::MAX as u128) as u64
+        });
         model.state.run_model_call_budget =
-            metadata_usize(event, "run_model_call_budget").unwrap_or_default();
+            metadata_usize(event, "run_model_call_budget").unwrap_or(fallback_budget.max_model_calls);
+        model.state.max_turns = model.state.run_model_call_budget;
         model.state.run_tool_call_budget =
-            metadata_usize(event, "run_tool_call_budget").unwrap_or_default();
+            metadata_usize(event, "run_tool_call_budget").unwrap_or(fallback_budget.max_tool_calls);
         model.state.last_error = None;
         model.state.can_continue = false;
         model.active_run_id = event.metadata.get("agent_run_id").cloned();
@@ -301,6 +314,11 @@ fn load_current_agent_session_read_model(
         });
 
     let (mut model, dirty, stats) = if let Some(mut model) = stored {
+        let needs_budget_rebuild = model.state.run_started_at_ms > 0
+            && (model.state.run_budget_ms == 0
+                || model.state.run_model_call_budget == 0
+                || model.state.run_tool_call_budget == 0);
+        let normalized_budget_state = normalize_agent_session_budget_state(&mut model);
         model.has_effective_context_usage |= !model.state.context_usage_estimated;
         let delta = store.list_by_task_and_metadata_after(
             &task_id,
@@ -308,7 +326,9 @@ fn load_current_agent_session_read_model(
             session_id,
             model.revision,
         )?;
-        if model.event_count.saturating_add(delta.len() as u64) != revision.event_count {
+        if needs_budget_rebuild
+            || model.event_count.saturating_add(delta.len() as u64) != revision.event_count
+        {
             let events = store.list_by_task_and_metadata(&task_id, "session_id", session_id)?;
             let events_read = events.len();
             (
@@ -320,7 +340,7 @@ fn load_current_agent_session_read_model(
                 },
             )
         } else {
-            let dirty = !delta.is_empty();
+            let dirty = normalized_budget_state || !delta.is_empty();
             let events_read = delta.len();
             for event in &delta {
                 apply_event_to_agent_session_read_model(&mut model, event);

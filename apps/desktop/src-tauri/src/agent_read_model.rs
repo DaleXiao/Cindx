@@ -165,20 +165,39 @@ pub(crate) fn agent_state_from_events(
     let run_start = active_events
         .iter()
         .find(|event| is_agent_run_start_event(event));
+    let fallback_run_budget = run_start.map(agent_run_budget_from_start_event);
     let run_started_at_ms = run_start
         .map(|event| event.timestamp_ms)
         .unwrap_or_default();
     let run_budget_ms = run_start
         .and_then(|event| event.metadata.get("run_budget_ms"))
         .and_then(|value| value.parse::<u64>().ok())
+        .or_else(|| {
+            fallback_run_budget.as_ref().map(|budget| {
+                budget
+                    .max_duration
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64
+            })
+        })
         .unwrap_or_default();
     let run_model_call_budget = run_start
         .and_then(|event| event.metadata.get("run_model_call_budget"))
         .and_then(|value| value.parse::<usize>().ok())
+        .or_else(|| {
+            fallback_run_budget
+                .as_ref()
+                .map(|budget| budget.max_model_calls)
+        })
         .unwrap_or_default();
     let run_tool_call_budget = run_start
         .and_then(|event| event.metadata.get("run_tool_call_budget"))
         .and_then(|value| value.parse::<usize>().ok())
+        .or_else(|| {
+            fallback_run_budget
+                .as_ref()
+                .map(|budget| budget.max_tool_calls)
+        })
         .unwrap_or_default();
     let partial_completion = active_events
         .iter()
@@ -201,11 +220,7 @@ pub(crate) fn agent_state_from_events(
         session_name: run_context.session_name,
         status,
         turn_count,
-        max_turns: if run_model_call_budget > 0 {
-            run_model_call_budget
-        } else {
-            RunBudget::for_effort("auto").max_model_calls
-        },
+        max_turns: run_model_call_budget,
         transcript_messages,
         context_tokens_used,
         context_window_tokens,
@@ -386,6 +401,15 @@ pub(crate) fn agent_effort_from_active_events(active_events: &[Event]) -> AgentE
         .and_then(|event| event.metadata.get("agent_effort"))
         .map(|effort| AgentEffort::parse(effort))
         .unwrap_or(AgentEffort::Auto)
+}
+
+pub(crate) fn agent_run_budget_from_start_event(event: &Event) -> RunBudget {
+    let effort = event
+        .metadata
+        .get("agent_effort")
+        .map(|value| AgentEffort::parse(value))
+        .unwrap_or(AgentEffort::Auto);
+    RunBudget::for_effort(effort.label())
 }
 
 pub(crate) fn agent_transcript_from_active_events(events: &[Event]) -> Vec<Message> {
