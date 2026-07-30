@@ -168,6 +168,13 @@ impl ToolEffectSemantics {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolExecutionConcurrency {
+    #[default]
+    Serialized,
+    IndependentRead,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolSpec {
     pub name: String,
@@ -179,6 +186,7 @@ pub struct ToolSpec {
     pub input_schema_json: String,
     pub output_schema_json: Option<String>,
     pub effect_semantics: ToolEffectSemantics,
+    pub execution_concurrency: ToolExecutionConcurrency,
 }
 
 impl ToolSpec {
@@ -202,11 +210,20 @@ impl ToolSpec {
             input_schema_json: input_schema_json.into(),
             output_schema_json: None,
             effect_semantics,
+            execution_concurrency: ToolExecutionConcurrency::default(),
         }
     }
 
     pub fn with_effect_semantics(mut self, effect_semantics: ToolEffectSemantics) -> Self {
         self.effect_semantics = effect_semantics;
+        self
+    }
+
+    pub fn with_execution_concurrency(
+        mut self,
+        execution_concurrency: ToolExecutionConcurrency,
+    ) -> Self {
+        self.execution_concurrency = execution_concurrency;
         self
     }
 
@@ -234,6 +251,22 @@ impl ToolSpec {
         if value.get("type").and_then(serde_json::Value::as_str) != Some("object") {
             return Err(format!(
                 "tool {} input schema must describe an object",
+                self.name
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.validate_input_schema()?;
+        if matches!(
+            self.execution_concurrency,
+            ToolExecutionConcurrency::IndependentRead
+        ) && (!matches!(self.risk, ToolRisk::ReadOnly)
+            || !matches!(self.effect_semantics, ToolEffectSemantics::ReadOnly))
+        {
+            return Err(format!(
+                "tool {} may use independent-read concurrency only with read-only risk and effect semantics",
                 self.name
             ));
         }
@@ -349,4 +382,48 @@ pub struct ModelProfile {
     pub supports_tools: bool,
     pub supports_vision: bool,
     pub metadata: Metadata,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(risk: ToolRisk) -> ToolSpec {
+        ToolSpec::builtin(
+            "test.tool",
+            "test",
+            "test tool",
+            risk,
+            r#"{"type":"object","properties":{}}"#,
+        )
+    }
+
+    #[test]
+    fn tool_specs_default_to_serial_execution() {
+        assert_eq!(
+            spec(ToolRisk::ReadOnly).execution_concurrency,
+            ToolExecutionConcurrency::Serialized
+        );
+    }
+
+    #[test]
+    fn independent_read_concurrency_requires_read_only_risk_and_effect() {
+        assert!(spec(ToolRisk::ReadOnly)
+            .with_execution_concurrency(ToolExecutionConcurrency::IndependentRead)
+            .validate()
+            .is_ok());
+
+        let write_error = spec(ToolRisk::WritesWorkspace)
+            .with_execution_concurrency(ToolExecutionConcurrency::IndependentRead)
+            .validate()
+            .expect_err("write tools must remain serialized");
+        assert!(write_error.contains("read-only risk and effect semantics"));
+
+        let effect_error = spec(ToolRisk::ReadOnly)
+            .with_effect_semantics(ToolEffectSemantics::Idempotent)
+            .with_execution_concurrency(ToolExecutionConcurrency::IndependentRead)
+            .validate()
+            .expect_err("non-read-only effects must remain serialized");
+        assert!(effect_error.contains("read-only risk and effect semantics"));
+    }
 }

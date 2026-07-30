@@ -317,6 +317,263 @@ fn detects_short_alternating_action_cycles() {
 }
 
 #[test]
+fn batch_tool_admission_reserves_ordered_calls_atomically() {
+    let mut budget = test_budget();
+    budget.initial_tool_calls = 8;
+    budget.max_tool_calls = 8;
+    let control = AgentRunControl::with_budget(budget);
+    let lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+    let calls = [("file.read", "a"), ("file.list", "b"), ("file.search", "c")];
+
+    assert_eq!(
+        control.begin_tool_call_batch_with_epoch(lease, "main", &calls),
+        RunToolCallBatchStart::Started {
+            first_call: 1,
+            call_count: 3,
+        }
+    );
+    assert_eq!(control.progress().tool_calls, 3);
+    {
+        let state = control.state.lock().expect("run control state should lock");
+        assert_eq!(state.active_tool_calls, 3);
+        assert_eq!(
+            state.action_history.get("main"),
+            Some(&(fingerprint(&calls[2]), 1))
+        );
+        assert_eq!(
+            state
+                .recent_actions
+                .get("main")
+                .expect("ordered action history should exist")
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            calls.iter().map(fingerprint).collect::<Vec<_>>()
+        );
+        assert_eq!(state.stage, "tool");
+        assert_eq!(state.detail, "file.search");
+    }
+
+    for _ in &calls {
+        assert!(control.finish_tool_call_at(lease.epoch()));
+    }
+    assert_eq!(
+        control
+            .state
+            .lock()
+            .expect("run control state should lock")
+            .active_tool_calls,
+        0
+    );
+}
+
+#[test]
+fn batch_tool_admission_without_budget_headroom_has_no_side_effects() {
+    let control = AgentRunControl::with_budget(test_budget());
+    let lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+    let before = {
+        let state = control.state.lock().expect("run control state should lock");
+        (
+            state.action_history.clone(),
+            state.recent_actions.clone(),
+            state.active_tool_calls,
+            state.stage.clone(),
+            state.detail.clone(),
+        )
+    };
+
+    assert_eq!(
+        control.begin_tool_call_batch_with_epoch(
+            lease,
+            "main",
+            &[("file.read", "a"), ("file.read", "b"), ("file.read", "c"),],
+        ),
+        RunToolCallBatchStart::SerialRequired
+    );
+    assert_eq!(control.progress().tool_calls, 0);
+    assert_eq!(control.stop_reason(), None);
+    let after = {
+        let state = control.state.lock().expect("run control state should lock");
+        (
+            state.action_history.clone(),
+            state.recent_actions.clone(),
+            state.active_tool_calls,
+            state.stage.clone(),
+            state.detail.clone(),
+        )
+    };
+    assert_eq!(after, before);
+
+    assert_eq!(
+        control.begin_tool_call_batch_with_epoch(
+            lease,
+            "main",
+            &[("file.read", "a"), ("file.read", "b")],
+        ),
+        RunToolCallBatchStart::Started {
+            first_call: 1,
+            call_count: 2,
+        }
+    );
+    control.finish_tool_call();
+    control.finish_tool_call();
+}
+
+#[test]
+fn batch_tool_admission_repeated_action_fallback_has_no_side_effects() {
+    let mut budget = test_budget();
+    budget.initial_tool_calls = 10;
+    budget.max_tool_calls = 10;
+    let control = AgentRunControl::with_budget(budget);
+    assert_eq!(control.begin_tool_call("main", "file.read", "a"), Ok(1));
+    control.finish_tool_call();
+    assert_eq!(control.begin_tool_call("main", "file.read", "a"), Ok(2));
+    control.finish_tool_call();
+    let lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+    let before = {
+        let state = control.state.lock().expect("run control state should lock");
+        (
+            state.action_history.clone(),
+            state.recent_actions.clone(),
+            state.active_tool_calls,
+        )
+    };
+
+    assert_eq!(
+        control.begin_tool_call_batch_with_epoch(
+            lease,
+            "main",
+            &[("file.read", "a"), ("file.read", "b")],
+        ),
+        RunToolCallBatchStart::SerialRequired
+    );
+    assert_eq!(control.progress().tool_calls, 2);
+    assert_eq!(control.stop_reason(), None);
+    let state = control.state.lock().expect("run control state should lock");
+    assert_eq!(
+        (
+            state.action_history.clone(),
+            state.recent_actions.clone(),
+            state.active_tool_calls,
+        ),
+        before
+    );
+}
+
+#[test]
+fn batch_tool_admission_cycle_fallback_has_no_side_effects() {
+    let mut budget = test_budget();
+    budget.initial_tool_calls = 12;
+    budget.max_tool_calls = 12;
+    let control = AgentRunControl::with_budget(budget);
+    for input in ["a", "b", "a", "b", "a"] {
+        assert!(control.begin_tool_call("main", "file.read", input).is_ok());
+        control.finish_tool_call();
+    }
+    let lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+    let before = {
+        let state = control.state.lock().expect("run control state should lock");
+        (
+            state.action_history.clone(),
+            state.recent_actions.clone(),
+            state.active_tool_calls,
+        )
+    };
+
+    assert_eq!(
+        control.begin_tool_call_batch_with_epoch(
+            lease,
+            "main",
+            &[("file.read", "b"), ("file.read", "c")],
+        ),
+        RunToolCallBatchStart::SerialRequired
+    );
+    assert_eq!(control.progress().tool_calls, 5);
+    assert_eq!(control.stop_reason(), None);
+    let state = control.state.lock().expect("run control state should lock");
+    assert_eq!(
+        (
+            state.action_history.clone(),
+            state.recent_actions.clone(),
+            state.active_tool_calls,
+        ),
+        before
+    );
+}
+
+#[test]
+fn batch_tool_admission_preserves_stale_stop_and_terminal_semantics() {
+    let stale_control = AgentRunControl::new("pro");
+    let stale_lease = match stale_control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+    assert_eq!(stale_control.request_steer("new-objective"), Ok(true));
+    assert!(matches!(
+        stale_control
+            .commit_pending_steers_with(|_| Ok::<_, ()>(()))
+            .expect("steer application should succeed"),
+        RunSteerBatchCommit::Committed { .. }
+    ));
+    assert_eq!(
+        stale_control.begin_tool_call_batch_with_epoch(
+            stale_lease,
+            "main",
+            &[("file.read", "a"), ("file.read", "b")],
+        ),
+        RunToolCallBatchStart::RestartAfterSteer
+    );
+    assert_eq!(stale_control.progress().tool_calls, 0);
+
+    let stopped_control = AgentRunControl::new("pro");
+    let stopped_lease = match stopped_control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+    stopped_control.request_stop(RunStopReason::ProviderUnavailable);
+    assert_eq!(
+        stopped_control.begin_tool_call_batch_with_epoch(
+            stopped_lease,
+            "main",
+            &[("file.read", "a"), ("file.read", "b")],
+        ),
+        RunToolCallBatchStart::Stopped(RunStopReason::ProviderUnavailable)
+    );
+    assert_eq!(stopped_control.progress().tool_calls, 0);
+
+    let terminal_control = AgentRunControl::new("pro");
+    let terminal_lease = match terminal_control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+    assert_eq!(
+        terminal_control.commit_terminal_result_with(terminal_lease, || Ok::<_, ()>(())),
+        Ok(RunTerminalCommit::Committed(()))
+    );
+    assert_eq!(
+        terminal_control.begin_tool_call_batch_with_epoch(
+            terminal_lease,
+            "main",
+            &[("file.read", "a"), ("file.read", "b")],
+        ),
+        RunToolCallBatchStart::TerminalCommitted
+    );
+    assert_eq!(terminal_control.progress().tool_calls, 0);
+}
+
+#[test]
 fn stops_after_no_progress() {
     let control = AgentRunControl::with_budget(test_budget());
     thread::sleep(Duration::from_millis(35));

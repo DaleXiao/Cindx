@@ -8,12 +8,12 @@ pub(crate) enum AgentToolBatchOutcome {
     Paused(Box<AgentState>),
 }
 
-fn paused_agent_tools(state: AgentState) -> AgentToolBatchOutcome {
+pub(super) fn paused_agent_tools(state: AgentState) -> AgentToolBatchOutcome {
     AgentToolBatchOutcome::Paused(Box::new(state))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn commit_agent_tool_observation(
+pub(super) fn commit_agent_tool_observation(
     state: &tauri::State<'_, AppState>,
     runtime: &mut agent_runtime::AgentLoopState,
     run_context: &Metadata,
@@ -74,7 +74,7 @@ fn commit_agent_tool_observation(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn agent_tool_batch_outcome_after_commit(
+pub(super) fn agent_tool_batch_outcome_after_commit(
     commit: agent_runtime::RunExecutionStepCommit<()>,
     app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
@@ -108,6 +108,58 @@ fn agent_tool_batch_outcome_after_commit(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_agent_tool_batch(
+    app: &tauri::AppHandle,
+    state: &tauri::State<'_, AppState>,
+    workspace_root: &Path,
+    runtime: &mut agent_runtime::AgentLoopState,
+    prompt: &str,
+    run_context: &Metadata,
+    active_collaboration: Option<&AgentCollaboration>,
+    cancellation: &Arc<AgentRunControl>,
+    epoch_lease: agent_runtime::RunEpochLease,
+    registry: &ToolRegistry,
+    tools: &[ToolSpec],
+    calls: Vec<AgentToolRequest>,
+    snapshot_cursor: &mut AgentRuntimeSnapshotCursor,
+) -> Result<AgentToolBatchOutcome, String> {
+    if let Some(outcome) =
+        crate::agent_parallel_tool_runtime::try_execute_parallel_agent_tool_batch(
+            app,
+            state,
+            workspace_root,
+            runtime,
+            prompt,
+            run_context,
+            active_collaboration,
+            cancellation,
+            epoch_lease,
+            registry,
+            tools,
+            &calls,
+            snapshot_cursor,
+        )?
+    {
+        return Ok(outcome);
+    }
+    execute_agent_tool_batch_serial(
+        app,
+        state,
+        workspace_root,
+        runtime,
+        prompt,
+        run_context,
+        active_collaboration,
+        cancellation,
+        epoch_lease,
+        registry,
+        tools,
+        calls,
+        snapshot_cursor,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_agent_tool_batch_serial(
     app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
     workspace_root: &Path,

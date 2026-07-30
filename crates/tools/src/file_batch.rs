@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use agent_core::{
-    Metadata, PermissionRequest, ToolInvocation, ToolOutcomeStatus, ToolRisk, ToolSpec,
+    Metadata, PermissionRequest, ToolExecutionConcurrency, ToolInvocation, ToolOutcomeStatus,
+    ToolRisk, ToolSpec,
 };
 
 use super::{tool_result, ReadFileTool, Tool, ToolError};
@@ -52,6 +53,7 @@ impl Tool for ReadFilesTool {
             })
             .to_string(),
         )
+        .with_execution_concurrency(ToolExecutionConcurrency::IndependentRead)
     }
 
     fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {

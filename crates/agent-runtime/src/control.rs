@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 mod construction;
 #[path = "control_resources.rs"]
 mod resources;
+#[path = "control_tool_batch.rs"]
+mod tool_batch;
 
 const PARTIAL_OUTPUT_MAX_CHARS: usize = 24_000;
 
@@ -44,6 +46,18 @@ pub enum RunContinuationDirective {
     Continue,
     CommitTerminalResult,
     Stop(RunStopReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunToolCallBatchStart {
+    Started {
+        first_call: usize,
+        call_count: usize,
+    },
+    SerialRequired,
+    RestartAfterSteer,
+    Stopped(RunStopReason),
+    TerminalCommitted,
 }
 
 impl RunStopReason {
