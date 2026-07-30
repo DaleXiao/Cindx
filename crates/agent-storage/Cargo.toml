@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 agent-core = { path = "../agent-core" }
 sha2 = "0.10"

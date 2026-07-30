@@ -10,14 +10,13 @@ use crate::{
     },
     agent_read_model::{agent_state_for_session, agent_state_with_error_in_context},
     agent_runtime_snapshot::{
-        capture_persistable_agent_task_state, persist_prepared_agent_runtime_snapshot,
+        capture_persistable_agent_task_state, persist_runtime_append_and_snapshot,
     },
     agent_runtime_snapshot_cursor::AgentRuntimeSnapshotCursor,
     agent_steer_runtime::{apply_pending_agent_steers_with_cursor, AgentSteerApplication},
     agent_tool_runtime::{execute_agent_tool_batch, AgentToolBatchOutcome},
     app_state::{AppState, SuspendedAgentRun},
     configuration_models::ProviderConfig,
-    event_persistence::persist_new_runtime_messages,
     persistence_runtime::tool_registry_for_state,
     runtime_constants::AGENT_MAX_OUTPUT_TOKENS,
     runtime_values::{
@@ -169,28 +168,95 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             RunContinuationDirective::CommitTerminalResult
         );
         if terminal_commit {
-            let previous_message_count = runtime.messages.len();
-            ensure_terminal_commit_instruction(&mut runtime);
-            if runtime.messages.len() > previous_message_count {
-                let (prepared_snapshot, next_cursor) = snapshot_cursor.prepare_after_append(
-                    &runtime,
-                    previous_message_count,
-                    &run_context,
-                );
-                let mut store = state
-                    .store
-                    .lock()
-                    .map_err(|error| format!("store lock poisoned: {error}"))?;
-                persist_new_runtime_messages(
-                    &mut store,
-                    &runtime.task_id,
-                    &runtime.messages,
-                    previous_message_count,
-                    &run_context,
-                )
-                .map_err(|error| error.to_string())?;
-                persist_prepared_agent_runtime_snapshot(&mut store, &prepared_snapshot)?;
-                snapshot_cursor = next_cursor;
+            let epoch_lease = match cancellation.execution_epoch_lease() {
+                agent_runtime::RunEpochLeaseOutcome::Acquired(lease) => lease,
+                agent_runtime::RunEpochLeaseOutcome::RestartAfterSteer => {
+                    active_collaboration = None;
+                    continue 'agent_loop;
+                }
+                agent_runtime::RunEpochLeaseOutcome::Stopped(_) => {
+                    return pause_agent_loop_for_control_stop(
+                        app,
+                        state,
+                        workspace_root,
+                        &runtime,
+                        &prompt,
+                        &run_context,
+                        active_collaboration,
+                        cancellation,
+                    )
+                    .map(AgentLoopExecutionOutcome::Finished);
+                }
+                agent_runtime::RunEpochLeaseOutcome::TerminalCommitted => {
+                    let store = state
+                        .store
+                        .lock()
+                        .map_err(|error| format!("store lock poisoned: {error}"))?;
+                    return agent_state_for_session(&store, None, session_id)
+                        .map(AgentLoopExecutionOutcome::Finished)
+                        .map_err(|error| error.to_string());
+                }
+            };
+            let instruction_commit =
+                cancellation.commit_execution_step_with(epoch_lease, || {
+                    let mut transaction = AgentLoopAppendTransaction::begin(&mut runtime);
+                    let previous_message_count = transaction.original_message_count();
+                    let instruction_added =
+                        transaction.with_append_only_mutation(ensure_terminal_commit_instruction);
+                    if instruction_added {
+                        let (prepared_snapshot, next_cursor) = snapshot_cursor
+                            .prepare_after_append(
+                                transaction.state(),
+                                previous_message_count,
+                                &run_context,
+                            );
+                        let mut store = state
+                            .store
+                            .lock()
+                            .map_err(|error| format!("store lock poisoned: {error}"))?;
+                        persist_runtime_append_and_snapshot(
+                            &mut store,
+                            transaction.state(),
+                            previous_message_count,
+                            &run_context,
+                            &prepared_snapshot,
+                        )?;
+                        drop(store);
+                        transaction.commit();
+                        snapshot_cursor = next_cursor;
+                    } else {
+                        transaction.commit();
+                    }
+                    Ok::<_, String>(())
+                })?;
+            match instruction_commit {
+                agent_runtime::RunExecutionStepCommit::Committed(()) => {}
+                agent_runtime::RunExecutionStepCommit::RestartAfterSteer => {
+                    active_collaboration = None;
+                    continue 'agent_loop;
+                }
+                agent_runtime::RunExecutionStepCommit::Stopped(_) => {
+                    return pause_agent_loop_for_control_stop(
+                        app,
+                        state,
+                        workspace_root,
+                        &runtime,
+                        &prompt,
+                        &run_context,
+                        active_collaboration,
+                        cancellation,
+                    )
+                    .map(AgentLoopExecutionOutcome::Finished);
+                }
+                agent_runtime::RunExecutionStepCommit::TerminalCommitted => {
+                    let store = state
+                        .store
+                        .lock()
+                        .map_err(|error| format!("store lock poisoned: {error}"))?;
+                    return agent_state_for_session(&store, None, session_id)
+                        .map(AgentLoopExecutionOutcome::Finished)
+                        .map_err(|error| error.to_string());
+                }
             }
         }
         let prepared_turn = match AgentKernel::new(&mut runtime, &tools).prepare_model_turn(
@@ -266,33 +332,34 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
         let previous_message_count = runtime.messages.len();
         let response_commit = cancellation.commit_execution_step_with(epoch_lease, || {
             let mut transaction = AgentLoopAppendTransaction::begin(&mut runtime);
-            let (advance, verification_required) = {
-                let next_runtime = transaction.state_mut();
-                let mut advance =
-                    AgentKernel::new(next_runtime, &tools).advance_model_response(response);
-                let mut verification_required = false;
-                if matches!(&advance, AgentAdvance::Completed { .. }) {
-                    let verification_instruction =
-                        AgentKernel::new(next_runtime, &tools).completion_gate_for_task();
-                    match verification_instruction {
-                        Ok(Some(instruction)) => {
-                            next_runtime.messages.truncate(previous_message_count);
-                            AgentKernel::new(next_runtime, &tools).apply_instruction(&instruction);
-                            verification_required = true;
-                        }
-                        Ok(None) => {}
-                        Err(failure) => {
-                            next_runtime.messages.truncate(previous_message_count);
-                            advance = AgentAdvance::Failed { failure };
+            let (advance, verification_required) =
+                transaction.with_append_only_mutation(|next_runtime| {
+                    let mut advance =
+                        AgentKernel::new(next_runtime, &tools).advance_model_response(response);
+                    let mut verification_required = false;
+                    if matches!(&advance, AgentAdvance::Completed { .. }) {
+                        let verification_instruction =
+                            AgentKernel::new(next_runtime, &tools).completion_gate_for_task();
+                        match verification_instruction {
+                            Ok(Some(instruction)) => {
+                                next_runtime.messages.truncate(previous_message_count);
+                                AgentKernel::new(next_runtime, &tools)
+                                    .apply_instruction(&instruction);
+                                verification_required = true;
+                            }
+                            Ok(None) => {}
+                            Err(failure) => {
+                                next_runtime.messages.truncate(previous_message_count);
+                                advance = AgentAdvance::Failed { failure };
+                            }
                         }
                     }
-                }
-                if let AgentAdvance::Retry { instruction } = &advance {
-                    AgentKernel::new(next_runtime, &tools)
-                        .apply_model_response_retry(instruction.clone());
-                }
-                (advance, verification_required)
-            };
+                    if let AgentAdvance::Retry { instruction } = &advance {
+                        AgentKernel::new(next_runtime, &tools)
+                            .apply_model_response_retry(instruction.clone());
+                    }
+                    (advance, verification_required)
+                });
             let (prepared_snapshot, next_cursor) = snapshot_cursor.prepare_after_append(
                 transaction.state(),
                 previous_message_count,
@@ -302,19 +369,13 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                 .store
                 .lock()
                 .map_err(|error| format!("store lock poisoned: {error}"))?;
-            store
-                .with_immediate_transaction(|store| {
-                    persist_new_runtime_messages(
-                        store,
-                        &transaction.state().task_id,
-                        &transaction.state().messages,
-                        previous_message_count,
-                        &run_context,
-                    )?;
-                    persist_prepared_agent_runtime_snapshot(store, &prepared_snapshot)
-                        .map_err(agent_storage::StorageError::new)
-                })
-                .map_err(|error| error.to_string())?;
+            persist_runtime_append_and_snapshot(
+                &mut store,
+                transaction.state(),
+                previous_message_count,
+                &run_context,
+                &prepared_snapshot,
+            )?;
             drop(store);
             transaction.commit();
             snapshot_cursor = next_cursor;

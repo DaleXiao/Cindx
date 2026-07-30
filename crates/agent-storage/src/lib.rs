@@ -265,19 +265,29 @@ impl SqliteStore {
         operation: impl FnOnce(&mut Self) -> Result<T, StorageError>,
     ) -> Result<T, StorageError> {
         self.exec_batch("begin immediate transaction;")?;
-        match operation(self) {
-            Ok(value) => match self.exec_batch("commit;") {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(self))) {
+            Ok(Ok(value)) => match self.exec_batch("commit;") {
                 Ok(()) => Ok(value),
                 Err(error) => {
                     let _ = self.exec_batch("rollback;");
                     Err(error)
                 }
             },
-            Err(error) => {
+            Ok(Err(error)) => {
                 let _ = self.exec_batch("rollback;");
                 Err(error)
             }
+            Err(payload) => {
+                let _ = self.exec_batch("rollback;");
+                std::panic::resume_unwind(payload)
+            }
         }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn execute_batch_for_testing(&self, sql: &str) -> Result<(), StorageError> {
+        self.exec_batch(sql)
     }
 
     pub fn next_sequence(&self, task_id: &TaskId) -> Result<u64, StorageError> {
@@ -3253,5 +3263,42 @@ mod tests {
                 transaction.exec_batch("insert into transaction_child(parent_id) values (1);")
             })
             .expect("connection should accept a new transaction after failed commit");
+    }
+
+    #[test]
+    fn immediate_transaction_rolls_back_before_resuming_a_panic() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("panic-transaction-task".to_string());
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<(), StorageError> = store.with_immediate_transaction(|transaction| {
+                transaction.append_next_event(
+                    EventId("panic-event".to_string()),
+                    task_id.clone(),
+                    1,
+                    EventKind::MessageAdded,
+                    "must roll back".to_string(),
+                    Metadata::new(),
+                )?;
+                panic!("injected transaction panic");
+            });
+        }));
+
+        assert!(panic.is_err());
+        assert!(store
+            .list_by_task(&task_id)
+            .expect("events should load")
+            .is_empty());
+        store
+            .with_immediate_transaction(|transaction| {
+                transaction.append_next_event(
+                    EventId("after-panic-event".to_string()),
+                    task_id.clone(),
+                    2,
+                    EventKind::MessageAdded,
+                    "connection remains usable".to_string(),
+                    Metadata::new(),
+                )
+            })
+            .expect("connection should accept a transaction after panic rollback");
     }
 }

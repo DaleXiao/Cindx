@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
 struct AgentLoopControlCheckpoint {
+    task_id: agent_core::TaskId,
     user_prompt: String,
     turn: usize,
     max_turns: usize,
@@ -22,6 +23,7 @@ struct AgentLoopControlCheckpoint {
 impl AgentLoopControlCheckpoint {
     fn capture(state: &AgentLoopState) -> Self {
         Self {
+            task_id: state.task_id.clone(),
             user_prompt: state.user_prompt.clone(),
             turn: state.turn,
             max_turns: state.max_turns,
@@ -38,6 +40,7 @@ impl AgentLoopControlCheckpoint {
     }
 
     fn restore(self, state: &mut AgentLoopState) {
+        state.task_id = self.task_id;
         state.user_prompt = self.user_prompt;
         state.turn = self.turn;
         state.max_turns = self.max_turns;
@@ -55,13 +58,16 @@ impl AgentLoopControlCheckpoint {
 
 /// Rollback guard for runtime transitions that may only append messages.
 ///
-/// Existing messages must remain immutable while this guard is active. The
-/// guard deliberately checkpoints only bounded control state, avoiding a clone
-/// of the potentially large transcript on every model or tool step.
+/// Existing messages must remain immutable while this guard is active. Release
+/// builds checkpoint only bounded control state; debug and test builds retain a
+/// prefix copy so append-only violations are detected and recoverable without
+/// adding a long-transcript scan to the production hot path.
 pub struct AgentLoopAppendTransaction<'state> {
     state: &'state mut AgentLoopState,
     original_message_count: usize,
     checkpoint: Option<AgentLoopControlCheckpoint>,
+    #[cfg(any(test, debug_assertions))]
+    committed_message_prefix: Vec<agent_core::Message>,
 }
 
 impl<'state> AgentLoopAppendTransaction<'state> {
@@ -69,6 +75,8 @@ impl<'state> AgentLoopAppendTransaction<'state> {
         Self {
             original_message_count: state.messages.len(),
             checkpoint: Some(AgentLoopControlCheckpoint::capture(state)),
+            #[cfg(any(test, debug_assertions))]
+            committed_message_prefix: state.messages.clone(),
             state,
         }
     }
@@ -77,8 +85,13 @@ impl<'state> AgentLoopAppendTransaction<'state> {
         self.state
     }
 
-    pub fn state_mut(&mut self) -> &mut AgentLoopState {
-        self.state
+    pub fn with_append_only_mutation<T>(
+        &mut self,
+        mutation: impl FnOnce(&mut AgentLoopState) -> T,
+    ) -> T {
+        let result = mutation(self.state);
+        self.assert_transaction_invariants();
+        result
     }
 
     pub fn original_message_count(&self) -> usize {
@@ -86,22 +99,54 @@ impl<'state> AgentLoopAppendTransaction<'state> {
     }
 
     pub fn commit(mut self) {
+        self.assert_transaction_invariants();
         self.checkpoint = None;
+    }
+
+    fn assert_transaction_invariants(&mut self) {
+        let task_id_is_unchanged = self
+            .checkpoint
+            .as_ref()
+            .is_none_or(|checkpoint| checkpoint.task_id == self.state.task_id);
+        let prefix_is_present = self.state.messages.len() >= self.original_message_count;
+        #[cfg(any(test, debug_assertions))]
+        let prefix_is_unchanged = prefix_is_present
+            && self.state.messages[..self.original_message_count]
+                == self.committed_message_prefix[..];
+        #[cfg(not(any(test, debug_assertions)))]
+        let prefix_is_unchanged = prefix_is_present;
+
+        if task_id_is_unchanged && prefix_is_unchanged {
+            return;
+        }
+        let violation = if !task_id_is_unchanged {
+            "agent append transaction modified its task id"
+        } else {
+            "agent append transaction modified a committed message prefix"
+        };
+        self.rollback();
+        panic!("{violation}");
+    }
+
+    fn rollback(&mut self) {
+        let Some(checkpoint) = self.checkpoint.take() else {
+            return;
+        };
+        #[cfg(any(test, debug_assertions))]
+        {
+            self.state.messages = std::mem::take(&mut self.committed_message_prefix);
+        }
+        #[cfg(not(any(test, debug_assertions)))]
+        {
+            self.state.messages.truncate(self.original_message_count);
+        }
+        checkpoint.restore(self.state);
     }
 }
 
 impl Drop for AgentLoopAppendTransaction<'_> {
     fn drop(&mut self) {
-        let Some(checkpoint) = self.checkpoint.take() else {
-            return;
-        };
-        if self.state.messages.len() < self.original_message_count {
-            // All production users are append-only. Failing closed here avoids
-            // pretending that a removed durable prefix could be reconstructed.
-            panic!("agent append transaction removed a committed message prefix");
-        }
-        self.state.messages.truncate(self.original_message_count);
-        checkpoint.restore(self.state);
+        self.rollback();
     }
 }
 
@@ -121,33 +166,78 @@ mod tests {
         let before = state.clone();
         {
             let mut transaction = AgentLoopAppendTransaction::begin(&mut state);
-            let state = transaction.state_mut();
-            state.user_prompt = "revised objective".to_string();
-            state.turn = 7;
-            state.max_turns = 99;
-            state.failed_tool_signatures.insert("tool:a".to_string(), 2);
-            state.consecutive_empty_responses = 2;
-            state.successful_mutations = 3;
-            state.verified_after_last_mutation = true;
-            state.verification_gate_requests = 4;
-            state.pending_interaction_verifications.insert(
-                InteractionSurface::Browser,
-                PendingInteractionVerification {
-                    surface: InteractionSurface::Browser,
-                    action_tool: "browser.click".to_string(),
-                },
-            );
-            state.verified_interactions = 5;
-            state.interaction_verification_gate_requests = 6;
-            state.task_contract.merge_workspace_verification_policy(
-                WorkspaceVerificationPolicy::RequiredAfterMutation,
-            );
-            state.messages.push(Message {
-                role: MessageRole::Assistant,
-                content: "candidate".to_string(),
-                metadata: Metadata::new(),
+            transaction.with_append_only_mutation(|state| {
+                state.user_prompt = "revised objective".to_string();
+                state.turn = 7;
+                state.max_turns = 99;
+                state.failed_tool_signatures.insert("tool:a".to_string(), 2);
+                state.consecutive_empty_responses = 2;
+                state.successful_mutations = 3;
+                state.verified_after_last_mutation = true;
+                state.verification_gate_requests = 4;
+                state.pending_interaction_verifications.insert(
+                    InteractionSurface::Browser,
+                    PendingInteractionVerification {
+                        surface: InteractionSurface::Browser,
+                        action_tool: "browser.click".to_string(),
+                    },
+                );
+                state.verified_interactions = 5;
+                state.interaction_verification_gate_requests = 6;
+                state.task_contract.merge_workspace_verification_policy(
+                    WorkspaceVerificationPolicy::RequiredAfterMutation,
+                );
+                state.messages.push(Message {
+                    role: MessageRole::Assistant,
+                    content: "candidate".to_string(),
+                    metadata: Metadata::new(),
+                });
             });
         }
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn failed_append_transaction_restores_task_id() {
+        let mut state = start_agent_loop(
+            TaskId("task-a".to_string()),
+            "inspect",
+            AgentRuntimeConfig::default(),
+        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut transaction = AgentLoopAppendTransaction::begin(&mut state);
+            transaction.with_append_only_mutation(|state| {
+                state.task_id = TaskId("candidate-task".to_string());
+                panic!("injected transaction failure");
+            });
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(state.task_id, TaskId("task-a".to_string()));
+    }
+
+    #[test]
+    fn committed_task_id_rewrite_is_rejected_and_rolled_back() {
+        let mut state = start_agent_loop(
+            TaskId("task-a".to_string()),
+            "inspect",
+            AgentRuntimeConfig::default(),
+        );
+        let before = state.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut transaction = AgentLoopAppendTransaction::begin(&mut state);
+            transaction.with_append_only_mutation(|state| {
+                state.task_id = TaskId("candidate-task".to_string());
+                state.messages.push(Message {
+                    role: MessageRole::Assistant,
+                    content: "candidate".to_string(),
+                    metadata: Metadata::new(),
+                });
+            });
+            transaction.commit();
+        }));
+
+        assert!(result.is_err());
         assert_eq!(state, before);
     }
 
@@ -160,16 +250,42 @@ mod tests {
         );
         let transaction = {
             let mut transaction = AgentLoopAppendTransaction::begin(&mut state);
-            transaction.state_mut().turn = 1;
-            transaction.state_mut().messages.push(Message {
-                role: MessageRole::Assistant,
-                content: "committed".to_string(),
-                metadata: Metadata::new(),
+            transaction.with_append_only_mutation(|state| {
+                state.turn = 1;
+                state.messages.push(Message {
+                    role: MessageRole::Assistant,
+                    content: "committed".to_string(),
+                    metadata: Metadata::new(),
+                });
             });
             transaction
         };
         transaction.commit();
         assert_eq!(state.turn, 1);
         assert_eq!(state.messages.len(), 2);
+    }
+
+    #[test]
+    fn committed_prefix_rewrite_is_detected_and_rolled_back() {
+        let mut state = start_agent_loop(
+            TaskId("task-a".to_string()),
+            "inspect",
+            AgentRuntimeConfig::default(),
+        );
+        let before = state.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut transaction = AgentLoopAppendTransaction::begin(&mut state);
+            transaction.with_append_only_mutation(|state| {
+                state.messages[0].content = "rewritten committed prompt".to_string();
+                state.messages.push(Message {
+                    role: MessageRole::Assistant,
+                    content: "candidate".to_string(),
+                    metadata: Metadata::new(),
+                });
+            });
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(state, before);
     }
 }

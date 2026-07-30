@@ -1,13 +1,14 @@
 use crate::{
     agent_resource_snapshot::delete_persisted_agent_resource_snapshot,
     agent_runtime_snapshot_cursor::{AgentRuntimeSnapshotCursor, PreparedAgentRuntimeSnapshot},
+    event_persistence::persist_new_runtime_messages,
     event_security::{redact_metadata, redact_sensitive_text},
     runtime_constants::AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE,
     runtime_values::{current_time_millis, phase16_task_id},
 };
 use agent_core::{MessageRole, Metadata};
 use agent_runtime::{sanitize_assistant_content, AgentTaskStateSnapshot};
-use agent_storage::SqliteStore;
+use agent_storage::{SqliteStore, StorageError};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -64,6 +65,43 @@ pub(super) fn persist_prepared_agent_runtime_snapshot(
             revision,
             &payload,
         )
+        .map_err(|error| error.to_string())
+}
+
+fn persist_runtime_append_and_snapshot_rows(
+    store: &mut SqliteStore,
+    runtime: &agent_runtime::AgentLoopState,
+    previous_message_count: usize,
+    run_context: &Metadata,
+    prepared: &PreparedAgentRuntimeSnapshot,
+) -> Result<(), StorageError> {
+    persist_new_runtime_messages(
+        store,
+        &runtime.task_id,
+        &runtime.messages,
+        previous_message_count,
+        run_context,
+    )?;
+    persist_prepared_agent_runtime_snapshot(store, prepared).map_err(StorageError::new)
+}
+
+pub(super) fn persist_runtime_append_and_snapshot(
+    store: &mut SqliteStore,
+    runtime: &agent_runtime::AgentLoopState,
+    previous_message_count: usize,
+    run_context: &Metadata,
+    prepared: &PreparedAgentRuntimeSnapshot,
+) -> Result<(), String> {
+    store
+        .with_immediate_transaction(|store| {
+            persist_runtime_append_and_snapshot_rows(
+                store,
+                runtime,
+                previous_message_count,
+                run_context,
+                prepared,
+            )
+        })
         .map_err(|error| error.to_string())
 }
 

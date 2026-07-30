@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent_runtime_snapshot::persist_runtime_append_and_snapshot;
 use crate::agent_runtime_snapshot_cursor::AgentRuntimeSnapshotCursor;
 
 pub(crate) enum AgentToolBatchOutcome {
@@ -29,8 +30,7 @@ fn commit_agent_tool_observation(
     cancellation.commit_execution_step_with(epoch_lease, || {
         let mut transaction = AgentLoopAppendTransaction::begin(runtime);
         let previous_message_count = transaction.original_message_count();
-        {
-            let next_runtime = transaction.state_mut();
+        transaction.with_append_only_mutation(|next_runtime| {
             let verified_interactions_before = next_runtime.verified_interactions;
             AgentKernel::new(next_runtime, tools).apply_tool_observation(
                 call,
@@ -50,7 +50,7 @@ fn commit_agent_tool_observation(
                 postcondition_verified,
             );
             append_visual_reference_message(next_runtime, &call.tool_name, image_paths);
-        }
+        });
         let (prepared_snapshot, next_cursor) = snapshot_cursor.prepare_after_append(
             transaction.state(),
             previous_message_count,
@@ -60,19 +60,13 @@ fn commit_agent_tool_observation(
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        store
-            .with_immediate_transaction(|store| {
-                persist_new_runtime_messages(
-                    store,
-                    &transaction.state().task_id,
-                    &transaction.state().messages,
-                    previous_message_count,
-                    run_context,
-                )?;
-                persist_prepared_agent_runtime_snapshot(store, &prepared_snapshot)
-                    .map_err(agent_storage::StorageError::new)
-            })
-            .map_err(|error| error.to_string())?;
+        persist_runtime_append_and_snapshot(
+            &mut store,
+            transaction.state(),
+            previous_message_count,
+            run_context,
+            &prepared_snapshot,
+        )?;
         transaction.commit();
         *snapshot_cursor = next_cursor;
         Ok(())
