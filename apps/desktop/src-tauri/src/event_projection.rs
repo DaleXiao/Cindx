@@ -182,8 +182,7 @@ pub(crate) fn permission_review_item(
         .find_map(|key| record.request.metadata.get(key))
         .map(|value| redact_sensitive_text(value))
         .unwrap_or_default();
-    let can_allow_session =
-        source == "agent" && !matches!(record.request.risk, PermissionRisk::Destructive);
+    let can_allow_session = source == "agent" && permission_can_allow_session(&record.request);
 
     PermissionReviewItem {
         request_id: record.request.id.0,

@@ -132,7 +132,8 @@ pub(crate) use crate::parallel_execution::{
     InterruptibleQuorumPolicy, ParallelJobCompletion, ParallelJobSupervisor,
 };
 pub(crate) use crate::permission_service::{
-    agent_session_permission_granted, pending_agent_permissions_for_run, permission_decision_label,
+    agent_session_permission_granted, pending_agent_permissions_for_run,
+    permission_can_allow_session, permission_capability_matches, permission_decision_label,
     permission_decision_past_tense, permission_risk_label,
 };
 pub(crate) use crate::queue_service::{

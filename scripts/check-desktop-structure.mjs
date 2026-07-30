@@ -2889,12 +2889,21 @@ assert(
     permissionServiceSource.includes("permission_capability_matches") &&
     permissionServiceSource.includes("granted.risk == requested.risk") &&
     permissionServiceSource.includes("granted.action == requested.action") &&
+    permissionServiceSource.includes("permission_capability_metadata_matches") &&
+    permissionServiceSource.includes("permission_can_allow_session") &&
+    agentStorageSource.includes("idx_permission_requests_session_capability_key") &&
+    agentStorageSource.includes("backfill_permission_capability_keys") &&
+    permissionServiceSource.includes('request.metadata.contains_key("command")') &&
     desktopAgentToolRuntimeSource.includes("agent_session_permission_granted(") &&
     permissionServiceSource.includes("request.risk == PermissionRisk::Destructive") &&
+    permissionServiceSource.includes("session_reusable == Some(\"true\")") &&
     rustLib.includes(
-      ".filter(|pending| !matches!(&pending.risk, PermissionRisk::Destructive))"
+      ".filter(|pending| permission_capability_matches(&request, pending))"
     ) &&
-    rustLib.includes("destructive permissions can only be allowed once"),
+    rustLib.includes("this permission can only be allowed once") &&
+    composerSource.includes("approvalInputSummary") &&
+    composerSource.includes("pendingApproval.canAllowSession") &&
+    composerSource.includes("Reuse only this exact command in this session"),
   "Allow session must reuse only the same capability and never cover destructive tools"
 );
 assert(

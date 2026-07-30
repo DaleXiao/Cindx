@@ -97,6 +97,7 @@ name = "agent-storage"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "sha2",
 ]
 
 [[package]]
@@ -991,7 +992,7 @@ dependencies = [
 
 [[package]]
 name = "cindx-desktop"
-version = "0.1.63"
+version = "0.1.64"
 dependencies = [
  "agent-application",
  "agent-core",

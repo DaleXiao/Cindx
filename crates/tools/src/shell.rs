@@ -121,10 +121,13 @@ impl Tool for ShellRunTool {
             .unwrap_or_else(|| "<missing command>".to_string());
         let cwd = input.get("cwd").cloned().unwrap_or_else(|| ".".to_string());
         let (risk, risk_reason) = classify_shell_permission(&command);
+        let session_reusable = risk != PermissionRisk::Destructive
+            && shell_command_can_reuse_session_permission(&command);
         let mut metadata: Metadata = [
             ("tool_call_id".to_string(), invocation.id.0.clone()),
             ("tool_name".to_string(), invocation.tool_name.clone()),
             ("command".to_string(), command),
+            ("session_reusable".to_string(), session_reusable.to_string()),
             (
                 "environment_policy".to_string(),
                 "developer_safe_v1".to_string(),
@@ -141,6 +144,8 @@ impl Tool for ShellRunTool {
             "shell.run",
             if risk_reason.is_some() {
                 "Run a destructive local process. This approval cannot be reused."
+            } else if !session_reusable {
+                "Run a local process with dynamic shell behavior. This approval can only be used once."
             } else {
                 "Run a local process in the selected workspace."
             },
@@ -599,6 +604,133 @@ fn classify_shell_permission(command: &str) -> (PermissionRisk, Option<&'static 
     (PermissionRisk::Execute, None)
 }
 
+fn shell_command_can_reuse_session_permission(command: &str) -> bool {
+    const CONTROL_WORDS: &str =
+        "if then elif else fi for while until do done case esac select function coproc repeat noglob nocorrect !";
+    const STDIN_INTERPRETERS: &[&str] = &[
+        "sh", "bash", "zsh", "dash", "ksh", "python", "python3", "node", "ruby", "perl", "php",
+    ];
+
+    if command.chars().count() > 2_000 || has_active_shell_indirection(command) {
+        return false;
+    }
+    shell_command_segments(command).iter().all(|segment| {
+        if segment
+            .iter()
+            .find(|token| !is_environment_assignment(token))
+            .is_some_and(|token| {
+                CONTROL_WORDS
+                    .split_ascii_whitespace()
+                    .any(|word| word == token)
+            })
+        {
+            return false;
+        }
+        let Some(executable) = first_executable(segment) else {
+            return segment.iter().all(|token| is_environment_assignment(token));
+        };
+        let executable_token = first_executable_token(segment).unwrap_or_default();
+        let dynamic_executable = executable_token.contains('$') || executable_token.contains('`');
+        let opaque_builtin = matches!(executable_token, "source" | ".");
+        let indirect_find = executable == "find"
+            && segment
+                .iter()
+                .any(|token| matches!(token.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir"));
+        let opaque_env = env_requires_one_shot(segment);
+        let interpreter_without_explicit_source = STDIN_INTERPRETERS.contains(&executable.as_str())
+            && interpreter_reads_standard_input(segment, &executable);
+
+        !dynamic_executable
+            && !opaque_builtin
+            && !indirect_find
+            && !opaque_env
+            && !interpreter_without_explicit_source
+            && !matches!(
+                executable.as_str(),
+                "eval" | "exec" | "xargs" | "nice" | "ionice" | "timeout"
+            )
+    })
+}
+
+fn env_requires_one_shot(segment: &[String]) -> bool {
+    let mut tokens = segment
+        .iter()
+        .skip_while(|token| is_environment_assignment(token));
+    if !tokens
+        .next()
+        .is_some_and(|token| executable_basename(token) == "env")
+    {
+        return false;
+    }
+    tokens
+        .take_while(|token| token.as_str() != "--")
+        .find(|token| {
+            !is_environment_assignment(token)
+                && !matches!(token.as_str(), "-i" | "--ignore-environment")
+        })
+        .is_some_and(|token| token.starts_with('-'))
+}
+
+fn interpreter_reads_standard_input(segment: &[String], executable: &str) -> bool {
+    let Some(index) = segment
+        .iter()
+        .position(|token| executable_basename(token) == executable)
+    else {
+        return true;
+    };
+    let arguments = &segment[index + 1..];
+    arguments.is_empty()
+        || arguments.iter().any(|argument| argument == "-")
+        || (arguments.iter().all(|argument| argument.starts_with('-'))
+            && !arguments
+                .iter()
+                .all(|argument| matches!(argument.as_str(), "--help" | "--version")))
+}
+
+fn has_active_shell_indirection(command: &str) -> bool {
+    let mut characters = command.chars().peekable();
+    let mut quote = None;
+    let mut escaped = false;
+    while let Some(character) = characters.next() {
+        if quote == Some('\'') {
+            if character == '\'' {
+                quote = None;
+            }
+            continue;
+        }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if quote == Some('"') {
+            if character == '"' {
+                quote = None;
+                continue;
+            }
+        } else {
+            if character == '\'' {
+                quote = Some('\'');
+                continue;
+            }
+            if character == '"' {
+                quote = Some('"');
+                continue;
+            }
+        }
+        if character == '`'
+            || matches!(character, '$' | '<' | '>' | '=')
+                && characters.peek().is_some_and(|next| *next == '(')
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn opaque_interpreter_execution(segment: &[String], executable: &str) -> bool {
     let executable_index = segment
         .iter()
@@ -726,6 +858,10 @@ fn executables_for_segments(segments: &[Vec<String>]) -> Vec<Option<String>> {
 }
 
 fn first_executable(segment: &[String]) -> Option<String> {
+    first_executable_token(segment).map(executable_basename)
+}
+
+fn first_executable_token(segment: &[String]) -> Option<&str> {
     let mut index = 0usize;
     while index < segment.len() {
         let token = &segment[index];
@@ -745,9 +881,12 @@ fn first_executable(segment: &[String]) -> Option<String> {
         }
         if matches!(basename.as_str(), "command" | "builtin" | "nohup" | "time") {
             index += 1;
+            while index < segment.len() && segment[index].starts_with('-') {
+                index += 1;
+            }
             continue;
         }
-        return Some(basename);
+        return Some(token);
     }
     None
 }
@@ -920,6 +1059,52 @@ mod tests {
                     Some("opaque interpreter execution")
                 ),
                 "{command} must be one-shot permission gated"
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_shell_commands_are_never_session_reusable() {
+        let tool = ShellRunTool::new(temp_workspace());
+        for command in [
+            "printf '%s' \"$(rm -rf target)\"",
+            "printf '%s' \"'$(touch target)'\"",
+            "runner=rm; \"$runner\" -rf target",
+            "env \"$runner\" -rf target",
+            "source ./scripts/mutate.sh",
+            "find . -exec rm -rf {} +",
+            "nice rm -rf target",
+            "printf 'print(1)' | python3 -",
+            "env -S 'rm -rf target'",
+            "cat script.sh | sh",
+            "cat script.sh | sh -s",
+            "printf 'print(1)' | python3",
+            "printf 'print(1)' | python3 -u",
+            "if true; then rm -rf target; fi",
+            "noglob rm -rf target",
+            "command -p rm -rf target",
+            "FOO=1 env -S 'rm -rf target'",
+            "env --split-string='rm -rf target'",
+            "env -u FOO sh -c 'rm -rf target'",
+            &"x".repeat(2_001),
+        ] {
+            let request = tool
+                .permission_request(&invocation(command))
+                .expect("shell should request permission");
+            assert_eq!(
+                request.metadata.get("session_reusable").map(String::as_str),
+                Some("false"),
+                "{command} must require one-shot approval"
+            );
+        }
+        for command in ["cargo test", "git status", "rg TODO", "echo '$(literal)'"] {
+            let request = tool
+                .permission_request(&invocation(command))
+                .expect("shell should request permission");
+            assert_eq!(
+                request.metadata.get("session_reusable").map(String::as_str),
+                Some("true"),
+                "{command} should retain exact-command session reuse"
             );
         }
     }

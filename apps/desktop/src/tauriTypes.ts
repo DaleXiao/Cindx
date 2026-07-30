@@ -494,6 +494,7 @@ export type ToolApprovalView = {
   scope: string;
   input: string;
   requestedAtMs: number;
+  canAllowSession: boolean;
 };
 
 export type Phase5State = {

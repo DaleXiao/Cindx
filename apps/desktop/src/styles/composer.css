@@ -660,7 +660,8 @@ textarea::placeholder {
 }
 
 .composer-permission-copy p,
-.composer-permission-copy span {
+.composer-permission-copy span,
+.composer-permission-copy code {
   overflow: hidden;
   color: var(--muted);
   font-size: 11px;
@@ -669,6 +670,11 @@ textarea::placeholder {
 }
 
 .composer-permission-copy span {
+  color: var(--subtle);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+
+.composer-permission-copy code {
   color: var(--subtle);
   font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
 }

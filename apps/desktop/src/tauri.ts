@@ -1465,7 +1465,7 @@ export async function getPermissionReviewState(): Promise<PermissionReviewState>
       ...context,
       input: approval.input,
       requestedAtMs: approval.requestedAtMs,
-      canAllowSession: approval.risk !== "destructive"
+      canAllowSession: approval.canAllowSession
     }));
     const testReviews = browserPhase3State.permissions
       .filter((permission) => permission.status === "pending")
@@ -2165,7 +2165,8 @@ export async function runTool(toolName: string, input: string): Promise<Phase5St
             reason: toolName === "shell.run" ? "Run a local process." : "Write a workspace file.",
             scope: ".",
             input,
-            requestedAtMs: now
+            requestedAtMs: now,
+            canAllowSession: false
           },
           ...browserPhase5State.pendingApprovals
         ],
@@ -2448,7 +2449,8 @@ export async function runBrowserTool(toolName: string, input: string): Promise<P
           reason: "Use a network or browser observation tool.",
           scope: input,
           input,
-          requestedAtMs: now
+          requestedAtMs: now,
+          canAllowSession: false
         },
         ...browserPhase8State.pendingApprovals
       ],

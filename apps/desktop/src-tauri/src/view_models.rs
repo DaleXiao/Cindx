@@ -542,6 +542,7 @@ pub(crate) struct ToolApprovalView {
     pub(crate) scope: String,
     pub(crate) input: String,
     pub(crate) requested_at_ms: u64,
+    pub(crate) can_allow_session: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

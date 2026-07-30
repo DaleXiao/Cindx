@@ -6,3 +6,4 @@ license.workspace = true
 
 [dependencies]
 agent-core = { path = "../agent-core" }
+sha2 = "0.10"

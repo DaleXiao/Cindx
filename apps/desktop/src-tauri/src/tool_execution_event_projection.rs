@@ -180,6 +180,7 @@ pub(crate) fn tool_run_from_event(event: &Event) -> Option<ToolRunView> {
 }
 
 pub(crate) fn tool_approval_from_audit(record: PermissionAuditRecord) -> Option<ToolApprovalView> {
+    let can_allow_session = permission_can_allow_session(&record.request);
     Some(ToolApprovalView {
         request_id: record.request.id.0,
         invocation_id: record.request.metadata.get("tool_call_id")?.to_string(),
@@ -194,6 +195,7 @@ pub(crate) fn tool_approval_from_audit(record: PermissionAuditRecord) -> Option<
             .map(|value| redact_sensitive_text(value))
             .unwrap_or_default(),
         requested_at_ms: record.requested_at_ms,
+        can_allow_session,
     })
 }
 
