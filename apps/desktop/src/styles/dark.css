@@ -643,6 +643,10 @@
     animation: none;
   }
 
+  .settings-transition-backdrop {
+    transition: opacity 0s 34ms;
+  }
+
   .app-shell::after,
   .window-toolbar::before,
   .window-toolbar-panel {

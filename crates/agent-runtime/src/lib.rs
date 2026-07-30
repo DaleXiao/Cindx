@@ -23,8 +23,10 @@ mod parallel;
 mod resource_ledger;
 mod result_frontier;
 mod run_budget;
+mod state_transaction;
 mod task_contract;
 mod task_state;
+mod task_state_lineage;
 mod tool_runtime;
 mod turn_budget;
 mod worker_policy;
@@ -71,6 +73,7 @@ pub use run_budget::{
     RunBudget, RunStageBudget, RunStageClass, CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT,
     PHYSICAL_MODEL_ATTEMPTS_PER_LOGICAL_CALL,
 };
+pub use state_transaction::AgentLoopAppendTransaction;
 pub use task_contract::{
     AgentTaskContract, ContractEvidence, ContractEvidenceKind, WorkspaceVerificationPolicy,
 };
@@ -78,6 +81,7 @@ pub use task_state::{
     AgentTaskStateError, AgentTaskStateSnapshot, PersistedInteractionSurface,
     PersistedInteractionVerification, AGENT_TASK_STATE_SCHEMA,
 };
+pub use task_state_lineage::{AgentTaskStateLineage, AgentTranscriptFingerprintAccumulator};
 pub use tool_runtime::{
     apply_tool_spec_runtime_metadata, decode_persisted_tool_artifacts, finalize_tool_result,
     recovery_source_scope_matches, supports_recovery_effect_replay, tool_effect_recovery_policy,

@@ -143,7 +143,7 @@ fn workspace_generation_lock(workspace_root: &Path) -> Result<Arc<RwLock<()>>, S
     Ok(lock)
 }
 
-fn with_workspace_generation_read<T>(
+pub(crate) fn with_workspace_generation_read<T>(
     workspace_root: &Path,
     operation: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {

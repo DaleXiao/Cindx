@@ -2,7 +2,8 @@ use crate::agent_commands::{
     add_attachment_metadata, prompt_with_attachments, validate_agent_attachments,
 };
 use crate::agent_query_commands::append_agent_queue_event;
-use crate::agent_runtime_snapshot::persist_agent_runtime_snapshot;
+use crate::agent_runtime_snapshot::persist_prepared_agent_runtime_snapshot;
+use crate::agent_runtime_snapshot_cursor::AgentRuntimeSnapshotCursor;
 use crate::app_state::AppState;
 use crate::event_persistence::persist_new_runtime_messages;
 #[cfg(test)]
@@ -14,7 +15,8 @@ use crate::tool_execution::runtime_message_from_event;
 use agent_core::MessageRole;
 use agent_core::{Event, EventKind, Message, Metadata};
 use agent_runtime::{
-    AgentKernel, AgentLoopState, AgentRunControl, RunSteer, RunSteerBatchCommit, RunStopReason,
+    AgentKernel, AgentLoopAppendTransaction, AgentLoopState, AgentRunControl, RunSteer,
+    RunSteerBatchCommit, RunStopReason,
 };
 use agent_storage::StorageError;
 use std::path::Path;
@@ -37,6 +39,7 @@ pub(crate) enum AgentSteerApplication {
 struct CommittedSteerBatch {
     acknowledged_queue_ids: Vec<String>,
     latest: Option<AppliedAgentSteer>,
+    snapshot_context: Option<Metadata>,
 }
 
 fn steer_storage_error(error: impl Into<String>) -> StorageError {
@@ -187,13 +190,11 @@ fn commit_pending_steers(
         });
     }
 
-    if latest.is_some() {
-        persist_agent_runtime_snapshot(store, runtime, &snapshot_context)
-            .map_err(steer_storage_error)?;
-    }
+    let snapshot_context = latest.is_some().then_some(snapshot_context);
     Ok(CommittedSteerBatch {
         acknowledged_queue_ids,
         latest,
+        snapshot_context,
     })
 }
 
@@ -204,24 +205,61 @@ pub(crate) fn apply_pending_agent_steers(
     run_context: &Metadata,
     cancellation: &AgentRunControl,
 ) -> Result<AgentSteerApplication, String> {
+    let mut snapshot_cursor = AgentRuntimeSnapshotCursor::rebuild(runtime, run_context);
+    apply_pending_agent_steers_with_cursor(
+        state,
+        workspace_root,
+        runtime,
+        run_context,
+        cancellation,
+        &mut snapshot_cursor,
+    )
+}
+
+pub(crate) fn apply_pending_agent_steers_with_cursor(
+    state: &tauri::State<'_, AppState>,
+    workspace_root: &Path,
+    runtime: &mut AgentLoopState,
+    run_context: &Metadata,
+    cancellation: &AgentRunControl,
+    snapshot_cursor: &mut AgentRuntimeSnapshotCursor,
+) -> Result<AgentSteerApplication, String> {
     let committed = cancellation
         .commit_pending_steers_with(|pending| {
-            let mut next_runtime = runtime.clone();
+            let transaction = AgentLoopAppendTransaction::begin(runtime);
+            let previous_message_count = transaction.original_message_count();
+            let mut transaction = transaction;
             let mut store = state
                 .store
                 .lock()
                 .map_err(|error| steer_storage_error(format!("store lock poisoned: {error}")))?;
+            let mut committed_cursor = None;
             let committed = store.with_immediate_transaction(|store| {
-                commit_pending_steers(
+                let committed = commit_pending_steers(
                     store,
                     workspace_root,
-                    &mut next_runtime,
+                    transaction.state_mut(),
                     run_context,
                     pending,
-                )
+                )?;
+                if let Some(snapshot_context) = committed.snapshot_context.as_ref() {
+                    let (prepared_snapshot, next_cursor) = snapshot_cursor.prepare_after_append(
+                        transaction.state(),
+                        previous_message_count,
+                        snapshot_context,
+                    );
+                    persist_prepared_agent_runtime_snapshot(store, &prepared_snapshot)
+                        .map_err(steer_storage_error)?;
+                    committed_cursor = Some(next_cursor);
+                }
+                Ok(committed)
             })?;
             debug_assert_eq!(committed.acknowledged_queue_ids.len(), pending.len());
-            Ok::<_, StorageError>((next_runtime, committed))
+            transaction.commit();
+            if let Some(next_cursor) = committed_cursor {
+                *snapshot_cursor = next_cursor;
+            }
+            Ok::<_, StorageError>(committed)
         })
         .map_err(|error| error.to_string())?;
 
@@ -229,10 +267,9 @@ pub(crate) fn apply_pending_agent_steers(
         RunSteerBatchCommit::NoPending => Ok(AgentSteerApplication::NoPending),
         RunSteerBatchCommit::Stopped(reason) => Ok(AgentSteerApplication::Stopped(reason)),
         RunSteerBatchCommit::Committed {
-            value: (next_runtime, committed),
+            value: committed,
             steers,
         } => {
-            *runtime = next_runtime;
             if let Some(latest) = committed.latest {
                 cancellation.record_checkpoint_at(
                     latest.epoch,

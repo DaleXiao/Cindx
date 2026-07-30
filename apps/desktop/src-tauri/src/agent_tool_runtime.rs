@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent_runtime_snapshot_cursor::AgentRuntimeSnapshotCursor;
 
 pub(crate) enum AgentToolBatchOutcome {
     Continue,
@@ -23,29 +24,38 @@ fn commit_agent_tool_observation(
     risk: Option<&ToolRisk>,
     observation: &str,
     image_paths: &[String],
+    snapshot_cursor: &mut AgentRuntimeSnapshotCursor,
 ) -> Result<agent_runtime::RunExecutionStepCommit<()>, String> {
     cancellation.commit_execution_step_with(epoch_lease, || {
-        let mut next_runtime = runtime.clone();
-        let previous_message_count = next_runtime.messages.len();
-        let verified_interactions_before = next_runtime.verified_interactions;
-        AgentKernel::new(&mut next_runtime, tools).apply_tool_observation(
-            call,
-            status,
-            risk,
-            observation,
+        let mut transaction = AgentLoopAppendTransaction::begin(runtime);
+        let previous_message_count = transaction.original_message_count();
+        {
+            let next_runtime = transaction.state_mut();
+            let verified_interactions_before = next_runtime.verified_interactions;
+            AgentKernel::new(next_runtime, tools).apply_tool_observation(
+                call,
+                status,
+                risk,
+                observation,
+            );
+            let postcondition_verified =
+                next_runtime.verified_interactions > verified_interactions_before;
+            crate::agent_result_evidence::annotate_latest_tool_observation(
+                next_runtime,
+                tools,
+                call,
+                status,
+                risk,
+                epoch_lease.epoch(),
+                postcondition_verified,
+            );
+            append_visual_reference_message(next_runtime, &call.tool_name, image_paths);
+        }
+        let (prepared_snapshot, next_cursor) = snapshot_cursor.prepare_after_append(
+            transaction.state(),
+            previous_message_count,
+            run_context,
         );
-        let postcondition_verified =
-            next_runtime.verified_interactions > verified_interactions_before;
-        crate::agent_result_evidence::annotate_latest_tool_observation(
-            &mut next_runtime,
-            tools,
-            call,
-            status,
-            risk,
-            epoch_lease.epoch(),
-            postcondition_verified,
-        );
-        append_visual_reference_message(&mut next_runtime, &call.tool_name, image_paths);
         let mut store = state
             .store
             .lock()
@@ -54,16 +64,17 @@ fn commit_agent_tool_observation(
             .with_immediate_transaction(|store| {
                 persist_new_runtime_messages(
                     store,
-                    &next_runtime.task_id,
-                    &next_runtime.messages,
+                    &transaction.state().task_id,
+                    &transaction.state().messages,
                     previous_message_count,
                     run_context,
                 )?;
-                persist_agent_runtime_snapshot(store, &next_runtime, run_context)
+                persist_prepared_agent_runtime_snapshot(store, &prepared_snapshot)
                     .map_err(agent_storage::StorageError::new)
             })
             .map_err(|error| error.to_string())?;
-        *runtime = next_runtime;
+        transaction.commit();
+        *snapshot_cursor = next_cursor;
         Ok(())
     })
 }
@@ -115,6 +126,7 @@ pub(crate) fn execute_agent_tool_batch(
     registry: &ToolRegistry,
     tools: &[ToolSpec],
     calls: Vec<AgentToolRequest>,
+    snapshot_cursor: &mut AgentRuntimeSnapshotCursor,
 ) -> Result<AgentToolBatchOutcome, String> {
     let session_id_owned = run_context.get("session_id").cloned();
     let session_id = session_id_owned.as_deref();
@@ -192,6 +204,7 @@ pub(crate) fn execute_agent_tool_batch(
                 None,
                 &observation,
                 &[],
+                snapshot_cursor,
             )?;
             if let Some(outcome) = agent_tool_batch_outcome_after_commit(
                 commit,
@@ -239,6 +252,7 @@ pub(crate) fn execute_agent_tool_batch(
                 None,
                 &observation,
                 &[],
+                snapshot_cursor,
             )?;
             if let Some(outcome) = agent_tool_batch_outcome_after_commit(
                 commit,
@@ -376,6 +390,7 @@ pub(crate) fn execute_agent_tool_batch(
             Some(&tool_risk),
             &observation,
             &image_paths,
+            snapshot_cursor,
         )?;
         if let Some(outcome) = agent_tool_batch_outcome_after_commit(
             commit,
@@ -407,7 +422,8 @@ pub(crate) fn execute_agent_tool_batch(
         return Ok(AgentToolBatchOutcome::RestartAfterSteer);
     }
     if waiting_for_permission {
-        let task_state = capture_persistable_agent_task_state(runtime);
+        let (task_state, next_cursor) = snapshot_cursor.capture_current(runtime, run_context);
+        *snapshot_cursor = next_cursor;
         let suspended = SuspendedAgentRun {
             runtime: runtime.clone(),
             prompt: prompt.to_string(),

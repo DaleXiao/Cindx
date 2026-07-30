@@ -169,6 +169,26 @@ impl FileGraphStore {
         self.save()
     }
 
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    pub fn nodes_iter(&self) -> impl Iterator<Item = &GraphNode> {
+        self.nodes.values()
+    }
+
+    pub fn edges_iter(&self) -> impl Iterator<Item = &GraphEdge> {
+        self.edges.values()
+    }
+
     fn merge(&mut self, extraction: GraphExtraction) {
         for node in extraction.nodes {
             self.nodes.insert(node.id.clone(), node);

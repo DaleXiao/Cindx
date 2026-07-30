@@ -2076,6 +2076,8 @@ export function App() {
         }
       />
 
+      <div className="settings-transition-backdrop" aria-hidden="true" />
+
       {activeView !== "settings" && sidebarOpen && (
         <div
           className="sidebar-resize-handle"

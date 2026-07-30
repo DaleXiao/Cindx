@@ -992,7 +992,7 @@ dependencies = [
 
 [[package]]
 name = "cindx-desktop"
-version = "0.1.66"
+version = "0.1.67"
 dependencies = [
  "agent-application",
  "agent-core",
@@ -4827,6 +4827,7 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "base64 0.22.1",
+ "bytes",
  "futures-util",
  "reqwest 0.13.4",
  "serde_json",

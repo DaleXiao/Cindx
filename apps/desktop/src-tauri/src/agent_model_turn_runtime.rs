@@ -1,4 +1,18 @@
 use super::*;
+use model_provider::ModelError;
+
+fn prepared_streaming_request_once<'a>(
+    provider: &dyn StreamingModelProvider,
+    request: &ModelRequest,
+    prepared: &'a mut Option<PreparedStreamingModelRequest>,
+) -> Result<&'a PreparedStreamingModelRequest, ModelError> {
+    if prepared.is_none() {
+        *prepared = Some(provider.prepare_streaming_request(request)?);
+    }
+    Ok(prepared
+        .as_ref()
+        .expect("prepared request slot must be set"))
+}
 
 pub(crate) struct AgentModelTurnResponse {
     pub response: ModelResponse,
@@ -176,6 +190,7 @@ pub(crate) fn execute_agent_model_turn(
     } else {
         RunStageClass::Other
     };
+    let mut prepared_request = None;
     let mut response = loop {
         transport_attempt += 1;
         partial_stream.clear();
@@ -238,11 +253,14 @@ pub(crate) fn execute_agent_model_turn(
             agent_run_should_stop(cancellation)
                 || !cancellation.execution_epoch_lease_is_current(epoch_lease)
         };
-        let result = provider.complete_streaming_cancellable(
-            request.clone(),
-            &mut on_delta,
-            &mut should_cancel,
-        );
+        let result = prepared_streaming_request_once(provider, &request, &mut prepared_request)
+            .and_then(|prepared| {
+                provider.complete_prepared_streaming_cancellable(
+                    prepared,
+                    &mut on_delta,
+                    &mut should_cancel,
+                )
+            });
         match result {
             Ok(response) => {
                 let _ = model_attempt.settle_response(&response);
@@ -560,4 +578,120 @@ pub(crate) fn execute_agent_model_turn(
         streamed_output,
         epoch_lease,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingPreparedProvider {
+        prepares: AtomicUsize,
+        dispatches: AtomicUsize,
+        prepare_failures: AtomicUsize,
+    }
+
+    impl StreamingModelProvider for CountingPreparedProvider {
+        fn prepare_streaming_request(
+            &self,
+            request: &ModelRequest,
+        ) -> Result<PreparedStreamingModelRequest, ModelError> {
+            self.prepares.fetch_add(1, Ordering::Relaxed);
+            if self
+                .prepare_failures
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(ModelError::new("service temporarily unavailable"));
+            }
+            Ok(PreparedStreamingModelRequest::deferred(request.clone()))
+        }
+
+        fn complete_streaming_cancellable(
+            &self,
+            request: ModelRequest,
+            _on_delta: &mut dyn FnMut(&str),
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<ModelResponse, ModelError> {
+            self.dispatches.fetch_add(1, Ordering::Relaxed);
+            Ok(ModelResponse {
+                message: Message {
+                    role: MessageRole::Assistant,
+                    content: "ok".to_string(),
+                    metadata: Metadata::new(),
+                },
+                raw_tool_calls_json: None,
+                tool_calls: Vec::new(),
+                metadata: request.metadata,
+            })
+        }
+    }
+
+    #[test]
+    fn transport_attempts_prepare_model_request_once() {
+        let provider = CountingPreparedProvider {
+            prepares: AtomicUsize::new(0),
+            dispatches: AtomicUsize::new(0),
+            prepare_failures: AtomicUsize::new(0),
+        };
+        let request = ModelRequest {
+            role: ModelRole::Executor,
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: "hello".to_string(),
+                metadata: Metadata::new(),
+            }],
+            tools: Vec::new(),
+            mode: ModelCallMode::Streaming,
+            metadata: Metadata::new(),
+        };
+        let mut prepared = None;
+
+        for _ in 0..MAX_AGENT_MODEL_TRANSPORT_ATTEMPTS {
+            let prepared_request =
+                prepared_streaming_request_once(&provider, &request, &mut prepared)
+                    .expect("request should prepare");
+            provider
+                .complete_prepared_streaming_cancellable(prepared_request, &mut |_| {}, &mut || {
+                    false
+                })
+                .expect("prepared request should dispatch");
+        }
+
+        assert_eq!(provider.prepares.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            provider.dispatches.load(Ordering::Relaxed),
+            MAX_AGENT_MODEL_TRANSPORT_ATTEMPTS
+        );
+    }
+
+    #[test]
+    fn retryable_prepare_error_is_not_cached() {
+        let provider = CountingPreparedProvider {
+            prepares: AtomicUsize::new(0),
+            dispatches: AtomicUsize::new(0),
+            prepare_failures: AtomicUsize::new(1),
+        };
+        let request = ModelRequest {
+            role: ModelRole::Executor,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            mode: ModelCallMode::Streaming,
+            metadata: Metadata::new(),
+        };
+        let mut prepared = None;
+
+        let error = prepared_streaming_request_once(&provider, &request, &mut prepared)
+            .expect_err("first preparation should fail transiently");
+        assert!(error.is_retryable());
+        assert!(prepared.is_none());
+
+        prepared_streaming_request_once(&provider, &request, &mut prepared)
+            .expect("second preparation should retry and succeed");
+        prepared_streaming_request_once(&provider, &request, &mut prepared)
+            .expect("successful preparation should be reused");
+        assert_eq!(provider.prepares.load(Ordering::Relaxed), 2);
+    }
 }

@@ -3914,6 +3914,7 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "base64",
+ "bytes",
  "futures-util",
  "reqwest 0.13.4",
  "serde_json",

@@ -10,9 +10,10 @@ use crate::{
     },
     agent_read_model::{agent_state_for_session, agent_state_with_error_in_context},
     agent_runtime_snapshot::{
-        capture_persistable_agent_task_state, persist_agent_runtime_snapshot,
+        capture_persistable_agent_task_state, persist_prepared_agent_runtime_snapshot,
     },
-    agent_steer_runtime::{apply_pending_agent_steers, AgentSteerApplication},
+    agent_runtime_snapshot_cursor::AgentRuntimeSnapshotCursor,
+    agent_steer_runtime::{apply_pending_agent_steers_with_cursor, AgentSteerApplication},
     agent_tool_runtime::{execute_agent_tool_batch, AgentToolBatchOutcome},
     app_state::{AppState, SuspendedAgentRun},
     configuration_models::ProviderConfig,
@@ -111,16 +112,18 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
         )
         .inline;
     apply_run_task_contract(&mut runtime, &run_context)?;
+    let mut snapshot_cursor = AgentRuntimeSnapshotCursor::rebuild(&runtime, &run_context);
     let mut runtime_context = agent_runtime_context_for_run(&run_context);
     let mut active_collaboration = collaboration;
 
     'agent_loop: loop {
-        match apply_pending_agent_steers(
+        match apply_pending_agent_steers_with_cursor(
             state,
             workspace_root,
             &mut runtime,
             &run_context,
             cancellation,
+            &mut snapshot_cursor,
         )? {
             AgentSteerApplication::Applied(steer) => {
                 run_context.insert("steer_epoch".to_string(), steer.epoch.to_string());
@@ -169,6 +172,11 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             let previous_message_count = runtime.messages.len();
             ensure_terminal_commit_instruction(&mut runtime);
             if runtime.messages.len() > previous_message_count {
+                let (prepared_snapshot, next_cursor) = snapshot_cursor.prepare_after_append(
+                    &runtime,
+                    previous_message_count,
+                    &run_context,
+                );
                 let mut store = state
                     .store
                     .lock()
@@ -181,7 +189,8 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                     &run_context,
                 )
                 .map_err(|error| error.to_string())?;
-                persist_agent_runtime_snapshot(&mut store, &runtime, &run_context)?;
+                persist_prepared_agent_runtime_snapshot(&mut store, &prepared_snapshot)?;
+                snapshot_cursor = next_cursor;
             }
         }
         let prepared_turn = match AgentKernel::new(&mut runtime, &tools).prepare_model_turn(
@@ -256,30 +265,39 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
         let visible_stream = active_collaboration.is_none();
         let previous_message_count = runtime.messages.len();
         let response_commit = cancellation.commit_execution_step_with(epoch_lease, || {
-            let mut next_runtime = runtime.clone();
-            let mut advance =
-                AgentKernel::new(&mut next_runtime, &tools).advance_model_response(response);
-            let mut verification_required = false;
-            if matches!(&advance, AgentAdvance::Completed { .. }) {
-                let verification_instruction =
-                    AgentKernel::new(&mut next_runtime, &tools).completion_gate_for_task();
-                match verification_instruction {
-                    Ok(Some(instruction)) => {
-                        next_runtime.messages.truncate(previous_message_count);
-                        AgentKernel::new(&mut next_runtime, &tools).apply_instruction(&instruction);
-                        verification_required = true;
-                    }
-                    Ok(None) => {}
-                    Err(failure) => {
-                        next_runtime.messages.truncate(previous_message_count);
-                        advance = AgentAdvance::Failed { failure };
+            let mut transaction = AgentLoopAppendTransaction::begin(&mut runtime);
+            let (advance, verification_required) = {
+                let next_runtime = transaction.state_mut();
+                let mut advance =
+                    AgentKernel::new(next_runtime, &tools).advance_model_response(response);
+                let mut verification_required = false;
+                if matches!(&advance, AgentAdvance::Completed { .. }) {
+                    let verification_instruction =
+                        AgentKernel::new(next_runtime, &tools).completion_gate_for_task();
+                    match verification_instruction {
+                        Ok(Some(instruction)) => {
+                            next_runtime.messages.truncate(previous_message_count);
+                            AgentKernel::new(next_runtime, &tools).apply_instruction(&instruction);
+                            verification_required = true;
+                        }
+                        Ok(None) => {}
+                        Err(failure) => {
+                            next_runtime.messages.truncate(previous_message_count);
+                            advance = AgentAdvance::Failed { failure };
+                        }
                     }
                 }
-            }
-            if let AgentAdvance::Retry { instruction } = &advance {
-                AgentKernel::new(&mut next_runtime, &tools)
-                    .apply_model_response_retry(instruction.clone());
-            }
+                if let AgentAdvance::Retry { instruction } = &advance {
+                    AgentKernel::new(next_runtime, &tools)
+                        .apply_model_response_retry(instruction.clone());
+                }
+                (advance, verification_required)
+            };
+            let (prepared_snapshot, next_cursor) = snapshot_cursor.prepare_after_append(
+                transaction.state(),
+                previous_message_count,
+                &run_context,
+            );
             let mut store = state
                 .store
                 .lock()
@@ -288,17 +306,18 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                 .with_immediate_transaction(|store| {
                     persist_new_runtime_messages(
                         store,
-                        &next_runtime.task_id,
-                        &next_runtime.messages,
+                        &transaction.state().task_id,
+                        &transaction.state().messages,
                         previous_message_count,
                         &run_context,
                     )?;
-                    persist_agent_runtime_snapshot(store, &next_runtime, &run_context)
+                    persist_prepared_agent_runtime_snapshot(store, &prepared_snapshot)
                         .map_err(agent_storage::StorageError::new)
                 })
                 .map_err(|error| error.to_string())?;
             drop(store);
-            runtime = next_runtime;
+            transaction.commit();
+            snapshot_cursor = next_cursor;
             Ok::<_, String>((advance, verification_required))
         })?;
         let (advance, verification_required) = match response_commit {
@@ -422,6 +441,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                     &registry,
                     &tools,
                     calls,
+                    &mut snapshot_cursor,
                 )? {
                     AgentToolBatchOutcome::Continue => {}
                     AgentToolBatchOutcome::RestartAfterSteer => {

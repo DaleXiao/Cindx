@@ -1,18 +1,15 @@
 use super::*;
 use crate::knowledge_generation_runtime::{
-    build_and_publish_knowledge_generation_cancellable, knowledge_paths_for_rag_index,
-    with_workspace_knowledge_index_lock, PublishedKnowledgeGeneration,
+    build_and_publish_knowledge_generation_cancellable, with_workspace_knowledge_index_lock,
+    PublishedKnowledgeGeneration,
 };
 
 #[tauri::command]
 pub(crate) fn get_phase7_state(state: tauri::State<'_, AppState>) -> Result<Phase7State, String> {
     let root = active_workspace_root(&state)?;
     let project_id = active_project_id_for_memory(&state)?;
-    let (adapter, _) = cached_rag_adapter_for(&state, &root)?;
-    let graph = graph_state_at_path(
-        &knowledge_paths_for_rag_index(adapter.path()).graph_store,
-        &[],
-    )?;
+    let snapshot = cached_workspace_knowledge_snapshot_for(&state, &root)?;
+    let graph = graph_state_for_snapshot(&snapshot, &[]);
     let mut store = state
         .store
         .lock()
@@ -22,7 +19,7 @@ pub(crate) fn get_phase7_state(state: tauri::State<'_, AppState>) -> Result<Phas
 
     phase7_state(
         &store,
-        &adapter,
+        &snapshot.adapter,
         memory,
         Vec::new(),
         None,
@@ -50,12 +47,13 @@ pub(crate) fn ensure_workspace_knowledge_blocking(
     let root = active_workspace_root(&state)?;
     let project_id = active_project_id_for_memory(&state)?;
     let config = clone_provider_config(&state)?;
-    let (mut adapter, cache_hit) = cached_rag_adapter_for(&state, &root)?;
+    let mut snapshot = cached_workspace_knowledge_snapshot_for(&state, &root)?;
+    let cache_hit = snapshot.cache_hit;
     let cancellation = Arc::new(AgentRunControl::new("auto"));
     let expected_epoch = cancellation.steer_epoch();
     let indexed = ensure_workspace_knowledge_index(
         &root,
-        &mut adapter,
+        &mut snapshot.adapter,
         cache_hit,
         &config,
         &cancellation,
@@ -63,13 +61,11 @@ pub(crate) fn ensure_workspace_knowledge_blocking(
         None,
     )?;
     if workspace_knowledge_cache_needs_refresh(cache_hit, indexed.is_some()) {
-        cache_rag_adapter(&state, &root, &adapter)?;
+        cache_rag_adapter(&state, &root, &snapshot.adapter)?;
+        snapshot = cached_workspace_knowledge_snapshot_for(&state, &root)?;
     }
 
-    let graph = graph_state_at_path(
-        &knowledge_paths_for_rag_index(adapter.path()).graph_store,
-        &[],
-    )?;
+    let graph = graph_state_for_snapshot(&snapshot, &[]);
     let mut store = state
         .store
         .lock()
@@ -79,7 +75,7 @@ pub(crate) fn ensure_workspace_knowledge_blocking(
 
     phase7_state(
         &store,
-        &adapter,
+        &snapshot.adapter,
         memory,
         Vec::new(),
         None,
@@ -180,6 +176,7 @@ pub(crate) fn index_workspace_rag_blocking(
     let lancedb_export_path = paths.lancedb_export.clone();
     let lancedb_path = paths.lancedb_database.clone();
     cache_rag_adapter(&state, &root, &adapter)?;
+    let snapshot = cached_workspace_knowledge_snapshot_for(&state, &root)?;
     let mut store = state
         .store
         .lock()
@@ -233,12 +230,12 @@ pub(crate) fn index_workspace_rag_blocking(
     )
     .map_err(|error| error.to_string())?;
 
-    let graph = graph_state_at_path(&paths.graph_store, &[])?;
+    let graph = graph_state_for_snapshot(&snapshot, &[]);
     let memory = project_memory_stats(&mut store, project_id.as_deref())
         .map_err(|error| error.to_string())?;
     phase7_state(
         &store,
-        &adapter,
+        &snapshot.adapter,
         memory,
         Vec::new(),
         None,
@@ -261,18 +258,18 @@ pub(crate) fn search_rag(
         return phase7_state_with_error(&state, "RAG query is empty", Vec::new(), None);
     }
 
-    let (adapter, index_cache_hit) = cached_rag_adapter_for(&state, &root)?;
-    let graph_store = cached_graph_store_for_adapter(&state, &root, &adapter)?;
+    let snapshot = cached_workspace_knowledge_snapshot_for(&state, &root)?;
+    let index_cache_hit = snapshot.cache_hit;
     let config = clone_provider_config(&state)?;
     let cancellation = Arc::new(AgentRunControl::new("auto"));
     let mut retrieval = run_parallel_retrieval(
         &root,
-        &adapter,
+        &snapshot.adapter,
         &config,
         &query,
         input.limit.unwrap_or(6),
         "four_way_parallel",
-        graph_store.as_ref(),
+        snapshot.graph_store.as_deref(),
         &cancellation,
         None,
     )?;
@@ -282,10 +279,7 @@ pub(crate) fn search_rag(
         .iter()
         .map(|source| source.path.clone())
         .collect::<Vec<_>>();
-    let graph = graph_state_at_path(
-        &knowledge_paths_for_rag_index(adapter.path()).graph_store,
-        &focus_paths,
-    )?;
+    let graph = graph_state_for_snapshot(&snapshot, &focus_paths);
     let mut store = state
         .store
         .lock()
@@ -303,7 +297,7 @@ pub(crate) fn search_rag(
 
     phase7_state(
         &store,
-        &adapter,
+        &snapshot.adapter,
         memory,
         retrieval.sources,
         Some(retrieval.trace),
@@ -326,18 +320,18 @@ pub(crate) fn answer_with_rag(
         return phase7_state_with_error(&state, "RAG query is empty", Vec::new(), None);
     }
 
-    let (adapter, index_cache_hit) = cached_rag_adapter_for(&state, &root)?;
-    let graph_store = cached_graph_store_for_adapter(&state, &root, &adapter)?;
+    let snapshot = cached_workspace_knowledge_snapshot_for(&state, &root)?;
+    let index_cache_hit = snapshot.cache_hit;
     let config = clone_provider_config(&state)?;
     let cancellation = Arc::new(AgentRunControl::new("auto"));
     let mut retrieval = run_parallel_retrieval(
         &root,
-        &adapter,
+        &snapshot.adapter,
         &config,
         &query,
         input.limit.unwrap_or(6),
         "four_way_parallel",
-        graph_store.as_ref(),
+        snapshot.graph_store.as_deref(),
         &cancellation,
         None,
     )?;
@@ -348,10 +342,7 @@ pub(crate) fn answer_with_rag(
         .iter()
         .map(|source| source.path.clone())
         .collect::<Vec<_>>();
-    let graph = graph_state_at_path(
-        &knowledge_paths_for_rag_index(adapter.path()).graph_store,
-        &focus_paths,
-    )?;
+    let graph = graph_state_for_snapshot(&snapshot, &focus_paths);
 
     {
         let mut store = state
@@ -522,7 +513,7 @@ pub(crate) fn answer_with_rag(
 
             phase7_state(
                 &store,
-                &adapter,
+                &snapshot.adapter,
                 memory,
                 sources,
                 Some(retrieval.trace),

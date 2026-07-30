@@ -328,13 +328,12 @@ pub(crate) fn phase7_state_with_error(
     let message = message.into();
     let root = active_workspace_root(state)?;
     let project_id = active_project_id_for_memory(state)?;
-    let (adapter, _) = cached_rag_adapter_for(state, &root)?;
+    let snapshot = cached_workspace_knowledge_snapshot_for(state, &root)?;
     let focus_paths = sources
         .iter()
         .map(|source| source.path.clone())
         .collect::<Vec<_>>();
-    let graph =
-        graph_state_for_adapter(&adapter, &focus_paths).unwrap_or_else(|_| empty_graph_state());
+    let graph = graph_state_for_snapshot(&snapshot, &focus_paths);
     let mut store = state
         .store
         .lock()
@@ -354,7 +353,7 @@ pub(crate) fn phase7_state_with_error(
 
     phase7_state(
         &store,
-        &adapter,
+        &snapshot.adapter,
         memory,
         sources,
         None,

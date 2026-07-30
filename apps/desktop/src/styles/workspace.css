@@ -16,6 +16,10 @@
   grid-row: 1 / -1;
 }
 
+.workspace[data-view="settings"] {
+  z-index: 30;
+}
+
 .workspace[data-view="timeline"] .session-thread {
   padding-top: calc(var(--titlebar-height) + 22px);
   scroll-padding-top: calc(var(--titlebar-height) + 18px);
@@ -126,5 +130,4 @@
 .runtime-pill.ready svg {
   color: #2f9e64;
 }
-
 
