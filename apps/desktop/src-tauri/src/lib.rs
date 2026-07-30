@@ -22,6 +22,7 @@ mod agent_grounding_policy;
 mod agent_loop_runtime;
 mod agent_loop_service;
 mod agent_model_turn_runtime;
+mod agent_parallel_tool_runtime;
 mod agent_preparation_runtime;
 mod agent_query_commands;
 mod agent_read_model;

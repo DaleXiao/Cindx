@@ -1,6 +1,7 @@
-use super::{Tool, ToolError, ToolRegistry};
+use super::{Tool, ToolError, ToolExecutionControl, ToolRegistry};
 use agent_core::{
-    Metadata, PermissionRequest, ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
+    Metadata, PermissionRequest, ToolExecutionConcurrency, ToolInvocation, ToolOutcomeStatus,
+    ToolResult, ToolRisk, ToolSpec,
 };
 
 pub(super) struct ToolSearchMeta {
@@ -26,6 +27,7 @@ impl Tool for ToolSearchMeta {
             })
             .to_string(),
         )
+        .with_execution_concurrency(ToolExecutionConcurrency::IndependentRead)
     }
 
     fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -91,6 +93,7 @@ impl Tool for ToolInspectMeta {
             })
             .to_string(),
         )
+        .with_execution_concurrency(ToolExecutionConcurrency::IndependentRead)
     }
 
     fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -191,6 +194,18 @@ impl Tool for ToolInvokeMeta {
             .get(&target.tool_name)
             .ok_or_else(|| ToolError::new(format!("unknown tool: {}", target.tool_name)))?
             .execute(target)
+    }
+
+    fn execute_with_control(
+        &self,
+        invocation: ToolInvocation,
+        control: &ToolExecutionControl,
+    ) -> Result<ToolResult, ToolError> {
+        let target = self.target_invocation(&invocation)?;
+        self.catalog
+            .get(&target.tool_name)
+            .ok_or_else(|| ToolError::new(format!("unknown tool: {}", target.tool_name)))?
+            .execute_with_control(target, control)
     }
 }
 

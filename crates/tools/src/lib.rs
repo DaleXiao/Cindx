@@ -16,6 +16,7 @@ use agent_core::{
 };
 mod desktop_control;
 mod file_batch;
+mod file_search;
 mod file_tools;
 mod image_generation;
 mod meta_tools;
@@ -31,7 +32,8 @@ use desktop_control::{
 };
 pub use desktop_control::{BrowserTool, ComputerTool};
 pub use file_batch::ReadFilesTool;
-pub use file_tools::{ListDirectoryTool, ReadFileTool, SearchFilesTool, WriteFileTool};
+pub use file_search::SearchFilesTool;
+pub use file_tools::{ListDirectoryTool, ReadFileTool, WriteFileTool};
 pub use image_generation::ImageGenerationTool;
 pub use shell::ShellRunTool;
 pub use web_search::WebSearchTool;
@@ -39,7 +41,7 @@ pub use web_search::WebSearchTool;
 use meta_tools::{ToolInspectMeta, ToolInvokeMeta, ToolSearchMeta};
 
 #[cfg(test)]
-use agent_core::ToolEffectSemantics;
+use agent_core::{ToolEffectSemantics, ToolExecutionConcurrency};
 #[cfg(test)]
 use image_generation::image_output_path;
 #[cfg(test)]
@@ -228,7 +230,7 @@ impl ToolRegistry {
 
     pub fn try_register(&mut self, tool: Box<dyn Tool>) -> Result<bool, String> {
         let spec = tool.spec();
-        spec.validate_input_schema()?;
+        spec.validate()?;
         if self.tools.contains_key(&spec.name) {
             return Ok(false);
         }
@@ -692,7 +694,7 @@ pub(crate) fn stable_hash(value: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -702,6 +704,8 @@ mod tests {
     }
 
     struct InvalidSchemaTool;
+
+    struct InvalidConcurrencyTool;
 
     struct CompletesWhileCancellationArrives {
         cancelled: Arc<AtomicBool>,
@@ -783,6 +787,33 @@ mod tests {
         }
     }
 
+    impl Tool for InvalidConcurrencyTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec::builtin(
+                "invalid.concurrency",
+                "test",
+                "Invalid concurrency fixture",
+                ToolRisk::ReadOnly,
+                r#"{"type":"object","properties":{}}"#,
+            )
+            .with_effect_semantics(ToolEffectSemantics::Idempotent)
+            .with_execution_concurrency(ToolExecutionConcurrency::IndependentRead)
+        }
+
+        fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
+            None
+        }
+
+        fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
+            Ok(ToolResult::text(
+                invocation.id,
+                ToolOutcomeStatus::Succeeded,
+                "invalid",
+                Metadata::new(),
+            ))
+        }
+    }
+
     fn temp_workspace() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "cindx-tools-test-{}",
@@ -828,6 +859,31 @@ mod tests {
         assert!(specs
             .iter()
             .all(|spec| spec.validate_input_schema().is_ok()));
+
+        for name in ["file.read", "file.read_many", "file.search"] {
+            assert_eq!(
+                specs
+                    .iter()
+                    .find(|spec| spec.name == name)
+                    .map(|spec| spec.execution_concurrency),
+                Some(ToolExecutionConcurrency::IndependentRead)
+            );
+        }
+        for name in [
+            "file.list",
+            "file.write",
+            "shell.run",
+            "web.search",
+            "browser.open",
+        ] {
+            assert_eq!(
+                specs
+                    .iter()
+                    .find(|spec| spec.name == name)
+                    .map(|spec| spec.execution_concurrency),
+                Some(ToolExecutionConcurrency::Serialized)
+            );
+        }
     }
 
     #[test]
@@ -916,6 +972,12 @@ mod tests {
             .contains("must describe an object"));
         assert!(registry.get("catalog.unique").is_some());
         assert!(registry.get("invalid.schema").is_none());
+
+        assert!(registry
+            .try_register(Box::new(InvalidConcurrencyTool))
+            .expect_err("unsafe concurrency declaration must be rejected")
+            .contains("read-only risk and effect semantics"));
+        assert!(registry.get("invalid.concurrency").is_none());
     }
 
     #[test]
@@ -948,6 +1010,22 @@ mod tests {
         assert!(plan.inline.iter().any(|spec| spec.name == "tool.search"));
         assert!(plan.inline.iter().any(|spec| spec.name == "tool.inspect"));
         assert!(plan.inline.iter().any(|spec| spec.name == "tool.invoke"));
+        for name in ["tool.search", "tool.inspect"] {
+            assert_eq!(
+                plan.inline
+                    .iter()
+                    .find(|spec| spec.name == name)
+                    .map(|spec| spec.execution_concurrency),
+                Some(ToolExecutionConcurrency::IndependentRead)
+            );
+        }
+        assert_eq!(
+            plan.inline
+                .iter()
+                .find(|spec| spec.name == "tool.invoke")
+                .map(|spec| spec.execution_concurrency),
+            Some(ToolExecutionConcurrency::Serialized)
+        );
     }
 
     #[test]
@@ -995,6 +1073,10 @@ mod tests {
             meta.effect_spec(&read).effect_semantics,
             ToolEffectSemantics::ReadOnly
         );
+        assert_eq!(
+            meta.effect_spec(&read).execution_concurrency,
+            ToolExecutionConcurrency::IndependentRead
+        );
 
         let write = invocation(
             "tool.invoke",
@@ -1010,6 +1092,38 @@ mod tests {
                 verifier: "workspace_file_content_v1".to_string(),
             }
         );
+        assert_eq!(
+            meta.effect_spec(&write).execution_concurrency,
+            ToolExecutionConcurrency::Serialized
+        );
+    }
+
+    #[test]
+    fn meta_invoke_delegates_cooperative_cancellation_to_its_target() {
+        let root = temp_workspace();
+        fs::write(root.join("note.txt"), "needle\n").expect("fixture should be written");
+        let mut registry = ToolRegistry::with_workspace_tools(root);
+        registry.install_meta_tools();
+        let meta = registry.get("tool.invoke").expect("meta tool registered");
+        let checks = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&checks);
+        let control =
+            ToolExecutionControl::new(move || observed.fetch_add(1, Ordering::SeqCst) >= 2);
+        let request = invocation(
+            "tool.invoke",
+            serde_json::json!({
+                "name": "file.search",
+                "arguments": { "path": ".", "query": "needle" }
+            })
+            .to_string(),
+        );
+
+        let result = meta
+            .execute_with_control(request, &control)
+            .expect("cancelled target should return a structured result");
+
+        assert_eq!(result.status, ToolOutcomeStatus::Cancelled);
+        assert!(checks.load(Ordering::SeqCst) >= 3);
     }
 
     #[test]
@@ -1049,6 +1163,61 @@ mod tests {
         assert_eq!(read.output, "hello workspace\nline two");
         assert!(listed.output.contains("today.txt"));
         assert!(searched.output.contains("notes/today.txt:1"));
+    }
+
+    #[test]
+    fn file_search_cooperatively_stops_during_a_scan() {
+        let root = temp_workspace();
+        fs::create_dir_all(root.join("notes")).expect("fixture directory should be created");
+        fs::write(root.join("notes/one.txt"), "needle\n").expect("fixture should be written");
+        let searcher = SearchFilesTool::new(root);
+        let checks = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&checks);
+        let control =
+            ToolExecutionControl::new(move || observed.fetch_add(1, Ordering::SeqCst) >= 2);
+
+        let result = searcher
+            .execute_with_control(
+                invocation(
+                    "file.search",
+                    encode_input(&[("path", "."), ("query", "needle")]),
+                ),
+                &control,
+            )
+            .expect("cancelled search should return a structured result");
+
+        assert_eq!(result.status, ToolOutcomeStatus::Cancelled);
+        assert!(checks.load(Ordering::SeqCst) >= 3);
+    }
+
+    #[test]
+    fn file_search_samples_cancellation_outside_the_per_line_hot_loop() {
+        let root = temp_workspace();
+        let content = (0..300)
+            .map(|index| format!("ordinary line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(root.join("many-lines.txt"), content).expect("fixture should be written");
+        let searcher = SearchFilesTool::new(root);
+        let checks = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&checks);
+        let control = ToolExecutionControl::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            false
+        });
+
+        let result = searcher
+            .execute_with_control(
+                invocation(
+                    "file.search",
+                    encode_input(&[("path", "."), ("query", "absent query")]),
+                ),
+                &control,
+            )
+            .expect("search should succeed");
+
+        assert_eq!(result.status, ToolOutcomeStatus::Succeeded);
+        assert!(checks.load(Ordering::SeqCst) <= 12);
     }
 
     #[test]

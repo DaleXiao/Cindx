@@ -46,7 +46,7 @@ pub use control::{
     AgentRunControl, RunContinuationDirective, RunControlSnapshot, RunEpochLease,
     RunEpochLeaseOutcome, RunExecutionStepCommit, RunPreparationCommit, RunProgressSnapshot,
     RunStageUsageSnapshot, RunSteer, RunSteerBatchCommit, RunSteerRequestCommit, RunStopReason,
-    RunTerminalCommit, RunToolCallStart,
+    RunTerminalCommit, RunToolCallBatchStart, RunToolCallStart,
 };
 pub use execution::{
     run_no_tool_agent, AgentEvidenceCandidate, AgentEvidencePacket, AgentExecutionGuidance,

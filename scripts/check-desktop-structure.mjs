@@ -677,6 +677,7 @@ const oversizedModelProviderModules = modelProviderModules.filter(({ entry, line
 const toolsModuleBudgets = new Map([
   ["desktop_control.rs", 1_350],
   ["file_batch.rs", 230],
+  ["file_search.rs", 260],
   ["file_tools.rs", 540],
   ["image_generation.rs", 280],
   ["lib.rs", 720],

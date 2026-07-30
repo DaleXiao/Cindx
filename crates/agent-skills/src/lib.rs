@@ -1,6 +1,6 @@
 use agent_core::{
-    Metadata, ToolExposure, ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSource,
-    ToolSpec,
+    Metadata, ToolExecutionConcurrency, ToolExposure, ToolInvocation, ToolOutcomeStatus,
+    ToolResult, ToolRisk, ToolSource, ToolSpec,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -487,6 +487,7 @@ impl Tool for SkillSearchTool {
             })
             .to_string(),
         )
+        .with_execution_concurrency(ToolExecutionConcurrency::IndependentRead)
     }
 
     fn permission_request(
@@ -545,6 +546,7 @@ impl Tool for SkillLoadTool {
             })
             .to_string(),
         )
+        .with_execution_concurrency(ToolExecutionConcurrency::IndependentRead)
     }
 
     fn permission_request(
@@ -805,6 +807,35 @@ mod tests {
         assert!(read_skill_instructions(&skill)
             .unwrap()
             .contains("SKILL.md contract"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn skill_catalog_tools_allow_independent_read_execution() {
+        let root = test_root();
+        let catalog = SkillCatalog::load(
+            root.join("global"),
+            root.join("project"),
+            root.join("preferences.json"),
+        );
+
+        let specs = catalog
+            .tools()
+            .into_iter()
+            .map(|tool| tool.spec())
+            .collect::<Vec<_>>();
+        for name in ["skill.search", "skill.load"] {
+            let spec = specs
+                .iter()
+                .find(|spec| spec.name == name)
+                .expect("skill tool should be registered");
+            assert_eq!(
+                spec.execution_concurrency,
+                ToolExecutionConcurrency::IndependentRead
+            );
+            assert!(spec.validate().is_ok());
+        }
+
         let _ = fs::remove_dir_all(root);
     }
 
