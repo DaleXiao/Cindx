@@ -1,4 +1,3 @@
-import { useRef } from "react";
 import type { ProviderVoiceTransport } from "../providerProfiles";
 import type { VoiceInputStatus } from "./voiceInputModel";
 import { useAlibabaVoiceInput } from "./useAlibabaVoiceInput";
@@ -14,7 +13,6 @@ type UseVoiceInputOptions = {
 };
 
 export function useVoiceInput(options: UseVoiceInputOptions) {
-  const unavailableCanvasRef = useRef<HTMLCanvasElement>(null);
   const openAi = useOpenAiVoiceInput({
     ...options,
     enabled: options.enabled && options.transport === "openai_webrtc"
@@ -26,7 +24,6 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
   if (options.transport === "openai_webrtc") return openAi;
   if (options.transport === "dashscope_websocket") return alibaba;
   return {
-    canvasRef: unavailableCanvasRef,
     status: "idle" as const,
     toggle: () => {}
   };

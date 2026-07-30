@@ -19,14 +19,11 @@
 
 .inspector[data-open="false"] {
   overflow: hidden;
-  opacity: 0;
-  transform: translateX(8px);
+  opacity: 1;
+  transform: none;
   visibility: hidden;
   pointer-events: none;
-  transition:
-    opacity 120ms ease-out,
-    transform 150ms var(--ease-out-quart),
-    visibility 0s 150ms;
+  transition: visibility 0s 180ms;
 }
 
 .inspector-resize-handle {
@@ -856,5 +853,4 @@
   width: 13px;
   height: 13px;
 }
-
 

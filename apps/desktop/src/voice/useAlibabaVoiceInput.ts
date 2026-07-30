@@ -28,8 +28,11 @@ type UseAlibabaVoiceInputOptions = {
 
 function errorMessage(error: unknown): string {
   if (error instanceof DOMException) {
-    if (error.name === "NotAllowedError") return "Microphone access was denied";
+    if (error.name === "NotAllowedError") {
+      return "Microphone access was denied. Enable Cindx in System Settings → Privacy & Security → Microphone.";
+    }
     if (error.name === "NotFoundError") return "No microphone is available";
+    if (error.name === "NotReadableError") return "The microphone is busy or unavailable";
   }
   return error instanceof Error ? error.message : String(error);
 }
@@ -42,7 +45,6 @@ export function useAlibabaVoiceInput({
   onStatusChange
 }: UseAlibabaVoiceInputOptions) {
   const [status, setStatus] = useState<VoiceInputStatus>("idle");
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const activeRunRef = useRef<AlibabaVoiceRun | null>(null);
   const runSequenceRef = useRef(0);
   const sessionIdRef = useRef(sessionId);
@@ -149,7 +151,7 @@ export function useAlibabaVoiceInput({
     activeRunRef.current = run;
     publishStatus("connecting");
     try {
-      const capture = await startVoicePcmCapture(canvasRef.current, () => {
+      const capture = await startVoicePcmCapture(() => {
         if (voiceWatchdogAction(run.status, "recording_limit") === "finish") finish(run);
       });
       if (!isCurrent(run)) {
@@ -180,5 +182,5 @@ export function useAlibabaVoiceInput({
   }, [forceDispose, sessionId]);
   useEffect(() => () => forceDispose(false), [forceDispose]);
 
-  return { canvasRef, status, toggle };
+  return { status, toggle };
 }

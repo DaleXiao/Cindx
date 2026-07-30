@@ -103,6 +103,8 @@ import {
   projectReadSessionResult
 } from "./sessionRuntimeModel";
 
+const SIDEBAR_MATERIAL_HIDE_DELAY_MS = 220;
+
 const ScheduleView = lazy(() =>
   import("./components/ScheduleView").then((module) => ({
     default: module.ScheduleView
@@ -420,12 +422,25 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const frame = window.requestAnimationFrame(() => {
-      void setSidebarMaterialWidth(
-        activeView === "settings" || !sidebarOpen ? 0 : sidebarWidth
-      ).catch(() => {});
-    });
-    return () => window.cancelAnimationFrame(frame);
+    let frame: number | null = null;
+    let timer: number | null = null;
+    const width = activeView === "settings" || !sidebarOpen ? 0 : sidebarWidth;
+    const updateMaterial = () => {
+      frame = window.requestAnimationFrame(() => {
+        void setSidebarMaterialWidth(width).catch(() => {});
+      });
+    };
+
+    if (width === 0) {
+      timer = window.setTimeout(updateMaterial, SIDEBAR_MATERIAL_HIDE_DELAY_MS);
+    } else {
+      updateMaterial();
+    }
+
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
   }, [activeView, sidebarOpen, sidebarWidth]);
 
   useEffect(() => {

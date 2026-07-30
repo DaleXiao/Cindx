@@ -114,8 +114,11 @@ function formatDuration(durationMs: number | null) {
   return `${(durationMs / 1000).toFixed(1)} s`;
 }
 
+const INSPECTOR_MIN_WIDTH = 280;
+const INSPECTOR_MAX_WIDTH = 420;
+
 function clampWidth(width: number) {
-  return Math.min(520, Math.max(280, width));
+  return Math.min(INSPECTOR_MAX_WIDTH, Math.max(INSPECTOR_MIN_WIDTH, width));
 }
 
 type OutputArtifact = AgentOutputArtifactView & {
@@ -753,8 +756,8 @@ export function Inspector({
         role="separator"
         aria-label="Resize inspector"
         aria-orientation="vertical"
-        aria-valuemin={280}
-        aria-valuemax={520}
+        aria-valuemin={INSPECTOR_MIN_WIDTH}
+        aria-valuemax={INSPECTOR_MAX_WIDTH}
         aria-valuenow={width}
         tabIndex={0}
         onPointerDown={beginResize}

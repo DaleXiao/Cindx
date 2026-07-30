@@ -397,6 +397,10 @@
   border-top-color: var(--border);
 }
 
+:root[data-theme="dark"] .inspector-debug {
+  background: var(--panel);
+}
+
 :root[data-theme="dark"] .inspector-code {
   color: var(--text);
   background: var(--surface-hover);
@@ -615,6 +619,7 @@
   .settings-disclosure-chevron,
   .settings-action-chevron,
   .settings-refresh-turn,
+  .provider-model-toggle svg,
   .composer-effort-trigger > svg,
   .composer-effort-menu,
   .project-disclosure-chevron,
