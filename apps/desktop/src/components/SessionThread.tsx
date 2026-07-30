@@ -17,7 +17,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent
 } from "react";
 import { measureElement as measureVirtualElement, useVirtualizer } from "@tanstack/react-virtual";
-import { getAgentSessionOutputs, subscribeToModelStream } from "../tauri";
+import { getAgentSessionOutputs } from "../tauri";
 import type {
   AgentOutputArtifactView,
   AgentState,
@@ -58,7 +58,9 @@ import {
   type SessionThreadSelection
 } from "./sessionThreadProjection";
 import { useSessionMinimapInteraction } from "./useSessionMinimapInteraction";
+import { useModelStreamAnswer } from "./useModelStreamAnswer";
 import { SessionThreadViewCache } from "./sessionThreadViewCache";
+import type { StreamingMarkdownSnapshot } from "./streamingMarkdownModel";
 
 export type { SessionThreadSelection } from "./sessionThreadProjection";
 
@@ -67,7 +69,7 @@ type SessionThreadProps = {
   loading: boolean;
   messages: ChatMessageView[];
   timeline: TimelineEntry[];
-  streamAnswer: string;
+  streamAnswer: StreamingMarkdownSnapshot | null;
   status: AgentState["status"] | "idle";
   runStartedAtMs: number;
   hasOlderHistory: boolean;
@@ -82,7 +84,7 @@ type SessionThreadProps = {
 
 type LiveSessionThreadProps = Omit<SessionThreadProps, "streamAnswer"> & {
   streamResetVersion: number;
-  onStreamDone: (sessionId: string) => void;
+  onStreamDone: (sessionId: string) => boolean | Promise<boolean>;
 };
 
 type ThreadScrollMetrics = {
@@ -354,9 +356,14 @@ export const SessionThread = memo(function SessionThread({
     () => activeAgentActionRowId(threadRows, status, runStartedAtMs),
     [runStartedAtMs, status, threadRows]
   );
-  const hasStreamAnswer = Boolean(streamAnswer);
+  const hasStreamAnswer = streamAnswer !== null;
   const minimapMarkers = useMemo(
-    () => sessionMinimapMarkers(projection, streamAnswer, MAX_MINIMAP_MARKERS),
+    () =>
+      sessionMinimapMarkers(
+        projection,
+        streamAnswer?.preview ?? "",
+        MAX_MINIMAP_MARKERS
+      ),
     [projection, streamAnswer]
   );
 
@@ -553,8 +560,14 @@ export const SessionThread = memo(function SessionThread({
       followLatestRef.current = false;
       setShowJumpToLatest(true);
     };
+    const handleSelectStart = () => {
+      jumpingToLatestRef.current = false;
+      followLatestRef.current = false;
+      setShowJumpToLatest(thread.scrollHeight > thread.clientHeight + 2);
+    };
     thread.addEventListener("scroll", handleScroll, { passive: true });
     thread.addEventListener("wheel", handleWheel, { passive: true });
+    thread.addEventListener("selectstart", handleSelectStart, { passive: true });
 
     const resizeObserver = new ResizeObserver((entries) => {
       const viewportEntry = entries.find((entry) => entry.target === thread);
@@ -587,6 +600,7 @@ export const SessionThread = memo(function SessionThread({
       resizeObserver.disconnect();
       thread.removeEventListener("scroll", handleScroll);
       thread.removeEventListener("wheel", handleWheel);
+      thread.removeEventListener("selectstart", handleSelectStart);
     };
   }, [
     hasOlderHistory,
@@ -631,7 +645,9 @@ export const SessionThread = memo(function SessionThread({
     } else if (runStarted || followLatestRef.current) {
       followLatestRef.current = true;
       setShowJumpToLatest(false);
-      pinLatestOutput(true);
+      pinLatestOutput(runStarted);
+    } else if (streamAnswer) {
+      setShowJumpToLatest(thread.scrollHeight > thread.clientHeight + 2);
     }
     previousThreadRef.current = { sessionId, firstId, status };
     syncScrollMetrics();
@@ -1000,8 +1016,7 @@ export const SessionThread = memo(function SessionThread({
           >
             <RunProgressStatus progress={runProgress} className="thread-streaming-status" />
             <AgentMarkdown
-              content={streamAnswer}
-              streaming
+              streamingContent={streamAnswer}
               onOpenError={onLinkOpenError}
               onCopyCode={copyCode}
             />
@@ -1072,77 +1087,18 @@ export const LiveSessionThread = memo(function LiveSessionThread({
   onLinkOpenError,
   ...props
 }: LiveSessionThreadProps) {
-  const activeSessionIdRef = useRef(sessionId);
-  const streamBufferRef = useRef("");
-  const streamSessionIdRef = useRef<string | null>(null);
-  const flushTimerRef = useRef<number | null>(null);
-  const [streamState, setStreamState] = useState({
-    sessionId: null as string | null,
-    answer: ""
+  const streamAnswer = useModelStreamAnswer({
+    sessionId,
+    streamResetVersion,
+    onStreamDone,
+    onError: onLinkOpenError
   });
-  activeSessionIdRef.current = sessionId;
-
-  const clearStream = useCallback(() => {
-    streamBufferRef.current = "";
-    streamSessionIdRef.current = null;
-    if (flushTimerRef.current !== null) window.clearTimeout(flushTimerRef.current);
-    flushTimerRef.current = null;
-    setStreamState({ sessionId: null, answer: "" });
-  }, []);
-
-  useEffect(clearStream, [clearStream, sessionId, streamResetVersion]);
-
-  useEffect(() => {
-    let disposed = false;
-    let unlisten = () => {};
-    const flush = () => {
-      if (flushTimerRef.current !== null) window.clearTimeout(flushTimerRef.current);
-      flushTimerRef.current = null;
-      const delta = streamBufferRef.current;
-      const targetSessionId = streamSessionIdRef.current ?? activeSessionIdRef.current;
-      streamBufferRef.current = "";
-      if (!delta || !targetSessionId || targetSessionId !== activeSessionIdRef.current) return;
-      setStreamState((current) => ({
-        sessionId: targetSessionId,
-        answer: current.sessionId === targetSessionId ? `${current.answer}${delta}` : delta
-      }));
-    };
-
-    void subscribeToModelStream((payload) => {
-      const targetSessionId = payload.sessionId ?? activeSessionIdRef.current;
-      if (targetSessionId && targetSessionId !== activeSessionIdRef.current) return;
-      streamSessionIdRef.current = targetSessionId;
-      if (payload.reset) clearStream();
-      if (payload.done) {
-        flush();
-        if (payload.error) onLinkOpenError(payload.error);
-        if (targetSessionId) onStreamDone(targetSessionId);
-        return;
-      }
-      if (payload.delta) {
-        streamBufferRef.current += payload.delta;
-        if (flushTimerRef.current === null) {
-          flushTimerRef.current = window.setTimeout(flush, 80);
-        }
-      }
-    }).then((handler) => {
-      if (disposed) handler();
-      else unlisten = handler;
-    });
-
-    return () => {
-      disposed = true;
-      if (flushTimerRef.current !== null) window.clearTimeout(flushTimerRef.current);
-      flushTimerRef.current = null;
-      unlisten();
-    };
-  }, [clearStream, onLinkOpenError, onStreamDone]);
 
   return (
     <SessionThread
       {...props}
       sessionId={sessionId}
-      streamAnswer={streamState.sessionId === sessionId ? streamState.answer : ""}
+      streamAnswer={streamAnswer}
       onLinkOpenError={onLinkOpenError}
     />
   );

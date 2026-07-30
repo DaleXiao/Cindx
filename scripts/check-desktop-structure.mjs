@@ -158,6 +158,27 @@ const sessionMinimapInteractionSource = read(
   "apps/desktop/src/components/useSessionMinimapInteraction.ts"
 );
 const agentMarkdownSource = read("apps/desktop/src/components/AgentMarkdown.tsx");
+const streamingMarkdownModelSource = read(
+  "apps/desktop/src/components/streamingMarkdownModel.ts"
+);
+const streamingMarkdownTailBufferSource = read(
+  "apps/desktop/src/components/streamingMarkdownTailBuffer.ts"
+);
+const modelStreamAccumulatorSource = read(
+  "apps/desktop/src/components/modelStreamAccumulator.ts"
+);
+const modelStreamEventRouterSource = read(
+  "apps/desktop/src/components/modelStreamEventRouter.ts"
+);
+const modelStreamSubscriptionSource = read(
+  "apps/desktop/src/components/modelStreamSubscription.ts"
+);
+const modelStreamAnswerSource = read(
+  "apps/desktop/src/components/useModelStreamAnswer.ts"
+);
+const streamingMarkdownDeferredTailSource = read(
+  "apps/desktop/src/components/StreamingMarkdownDeferredTail.tsx"
+);
 const sessionThreadSource = [
   sessionThreadFileSource,
   sessionThreadNavigationSource,
@@ -508,6 +529,13 @@ const extractedDesktopBoundaryBudgets = [
   ["usePermissionReviewController.ts", permissionReviewControllerSource, 130],
   ["useSidebarResize.ts", sidebarResizeSource, 80],
   ["AgentMarkdown.tsx", agentMarkdownSource, 340],
+  ["streamingMarkdownModel.ts", streamingMarkdownModelSource, 180],
+  ["streamingMarkdownTailBuffer.ts", streamingMarkdownTailBufferSource, 210],
+  ["modelStreamAccumulator.ts", modelStreamAccumulatorSource, 200],
+  ["modelStreamEventRouter.ts", modelStreamEventRouterSource, 170],
+  ["modelStreamSubscription.ts", modelStreamSubscriptionSource, 120],
+  ["useModelStreamAnswer.ts", modelStreamAnswerSource, 160],
+  ["StreamingMarkdownDeferredTail.tsx", streamingMarkdownDeferredTailSource, 60],
   ["PromptEvolutionPanel.tsx", promptEvolutionPanelSource, 280],
   ["SettingsModelsPanel.tsx", settingsModelsPanelSource, 320],
   ["ProviderModalityFields.tsx", providerModalityFieldsSource, 140],
@@ -1164,8 +1192,7 @@ assert(
     sessionThreadSource.includes('from "markdown-to-jsx"') &&
     sessionThreadSource.includes("disableParsingRawHTML: true") &&
     sessionThreadSource.includes("content={item.message.content}") &&
-    sessionThreadSource.includes("content={streamAnswer}") &&
-    sessionThreadSource.includes("streaming") &&
+    sessionThreadSource.includes("streamingContent={streamAnswer}") &&
     sessionThreadSource.includes("function MarkdownCodeBlock") &&
     sessionThreadSource.includes("markdownDiagramForCode") &&
     sessionThreadSource.includes("renderDiagrams: !streaming") &&
@@ -1231,6 +1258,7 @@ assert(
 assert(
   sessionThreadSource.includes("useLayoutEffect") &&
     sessionThreadSource.includes("knownMessageIdsRef") &&
+    sessionThreadSource.includes('addEventListener("selectstart"') &&
     sessionThreadSource.includes("thread-message-arriving") &&
     styles.includes("@keyframes thread-message-arrive") &&
     styles.includes("@keyframes thread-markdown-block-arrive") &&
@@ -1259,10 +1287,35 @@ assert(
     rustLib.includes("emit_agent_stream_delta") &&
     appSource.includes("<LiveSessionThread") &&
     !appSource.includes("subscribeToModelStream") &&
-    sessionThreadSource.includes("payload.sessionId ?? activeSessionIdRef.current") &&
-    sessionThreadSource.includes("if (payload.reset) clearStream()") &&
-    sessionThreadSource.includes("streamBufferRef.current += payload.delta") &&
-    sessionThreadSource.includes("window.setTimeout(flush, 80)") &&
+    sessionThreadFileSource.includes("useModelStreamAnswer") &&
+    sessionThreadFileSource.includes("streamingContent={streamAnswer}") &&
+    modelStreamAnswerSource.includes("subscribeToModelStream") &&
+    modelStreamAnswerSource.includes("startModelStreamSubscription") &&
+    modelStreamAnswerSource.includes('document.addEventListener("visibilitychange"') &&
+    modelStreamSubscriptionSource.includes("router.route(payload, sessionId)") &&
+    modelStreamSubscriptionSource.includes("accumulator.finish()") &&
+    modelStreamEventRouterSource.includes('AGENT_STREAM_TASK_ID = "phase-16-agent-loop"') &&
+    modelStreamEventRouterSource.includes("payload.sessionId === null") &&
+    modelStreamEventRouterSource.includes("resetCandidateId") &&
+    modelStreamEventRouterSource.includes("prepareForNextRequest") &&
+    modelStreamEventRouterSource.includes("MODEL_STREAM_RETIRED_REQUEST_LIMIT") &&
+    modelStreamAccumulatorSource.includes("adaptiveDelay") &&
+    modelStreamAccumulatorSource.includes("URGENT_PENDING_LENGTH") &&
+    modelStreamAccumulatorSource.includes("pendingSlabs") &&
+    modelStreamAccumulatorSource.includes("hasUnpublishedSnapshot") &&
+    streamingMarkdownModelSource.includes("settledChunks") &&
+    streamingMarkdownModelSource.includes("tailId") &&
+    streamingMarkdownModelSource.includes("scannedCharacters") &&
+    streamingMarkdownModelSource.includes("STREAMING_MARKDOWN_SETTLED_CHUNK_LIMIT") &&
+    streamingMarkdownTailBufferSource.includes("nextParseAt") &&
+    streamingMarkdownTailBufferSource.includes("deferredTailRoot") &&
+    streamingMarkdownTailBufferSource.includes("insertLeaf") &&
+    agentMarkdownSource.includes("SettledMarkdownChunks") &&
+    agentMarkdownSource.includes("StreamingMarkdownDeferredTail") &&
+    streamingMarkdownDeferredTailSource.includes('data-fenced="true"') &&
+    styles.includes(".thread-markdown-deferred-tail") &&
+    !sessionThreadFileSource.includes("streamBufferRef") &&
+    !agentMarkdownSource.includes("splitStreamingMarkdown") &&
     appSource.includes("markSessionBusy(sessionId, false)") &&
     tauriBridge.includes("sessionId: string | null") &&
     tauriBridge.includes("reset: boolean"),
@@ -3490,8 +3543,8 @@ assert(
 );
 assert(
   appSource.includes("onStreamDone={handleAgentStreamDone}") &&
-    sessionThreadSource.includes("onStreamDone: (sessionId: string) => void") &&
-    sessionThreadSource.includes("if (targetSessionId) onStreamDone(targetSessionId)") &&
+    sessionThreadSource.includes("onStreamDone: (sessionId: string) => boolean | Promise<boolean>") &&
+    modelStreamSubscriptionSource.includes("finishAndSynchronize") &&
     rustLib.includes("let completed_state = match terminal_commit") &&
     rustLib.includes("RunTerminalCommit::Committed(state) => state") &&
     rustLib.includes(

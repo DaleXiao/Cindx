@@ -645,26 +645,27 @@ export function App() {
     activeSessionIdRef.current = activeSession?.id ?? null;
   }, [activeSession?.id]);
 
-  const handleAgentStreamDone = useCallback((sessionId: string) => {
-    if (activeSessionIdRef.current !== sessionId) return;
-    void requestSessionAgentState(sessionId)
-      .then((next) => {
-        if (activeSessionIdRef.current !== sessionId) return;
-        acknowledgeOptimisticUserMessage(sessionId, next.messages);
-        setAgentState((current) => {
-          const merged = preserveOptimisticQueuedMessages(
-            sessionId,
-            mergeAgentStateSnapshot(current, next)
-          );
-          return agentStateUnchanged(current, merged) ? current : merged;
-        });
-        updateSessionStatus(sessionId, next.status, next.canContinue);
-      })
-      .catch((error) => {
-        if (activeSessionIdRef.current === sessionId) {
-          setComposerError(error instanceof Error ? error.message : String(error));
-        }
+  const handleAgentStreamDone = useCallback(async (sessionId: string) => {
+    if (activeSessionIdRef.current !== sessionId) return false;
+    try {
+      const next = await requestSessionAgentState(sessionId);
+      if (activeSessionIdRef.current !== sessionId) return false;
+      acknowledgeOptimisticUserMessage(sessionId, next.messages);
+      setAgentState((current) => {
+        const merged = preserveOptimisticQueuedMessages(
+          sessionId,
+          mergeAgentStateSnapshot(current, next)
+        );
+        return agentStateUnchanged(current, merged) ? current : merged;
       });
+      updateSessionStatus(sessionId, next.status, next.canContinue);
+      return next.status === "completed" && Boolean(next.latestAnswer?.trim());
+    } catch (error) {
+      if (activeSessionIdRef.current === sessionId) {
+        setComposerError(error instanceof Error ? error.message : String(error));
+      }
+      return false;
+    }
   }, []);
 
   useEffect(() => {
