@@ -329,14 +329,10 @@
   filter: brightness(0.9);
 }
 
-.composer-voice-button > canvas {
-  display: none;
-  width: 25px;
-  height: 25px;
-}
-
-.composer-voice-button[data-status="recording"] > canvas {
+.composer-voice-working {
   display: block;
+  width: 20px;
+  height: 20px;
 }
 
 .composer-voice-button > svg {

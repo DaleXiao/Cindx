@@ -1603,6 +1603,16 @@ assert(
   "Pane transitions must be subtle and respect reduced-motion preferences"
 );
 assert(
+  appSource.includes("const SIDEBAR_MATERIAL_HIDE_DELAY_MS = 220") &&
+    /\.app-shell\[data-sidebar-open="false"\] \.sidebar \{[^}]*opacity: 1;[^}]*visibility: hidden;[^}]*visibility 0s 180ms;/.test(styles) &&
+    /\.inspector\[data-open="false"\] \{[^}]*opacity: 1;[^}]*visibility: hidden;[^}]*visibility 0s 180ms;/.test(styles) &&
+    /\.app-shell\[data-sidebar-open="false"\] \.window-toolbar-panel-left,\s*\.app-shell\[data-inspector-open="false"\] \.window-toolbar-panel-right \{[^}]*width: 0;/.test(styles) &&
+    styles.includes('.app-shell[data-sidebar-resizing="true"] .window-toolbar-panel-left') &&
+    inspectorSource.includes("const INSPECTOR_MAX_WIDTH = 420") &&
+    /:root\[data-theme="dark"\] \.inspector-debug \{[^}]*background: var\(--panel\);/.test(styles),
+  "Pane close animations must keep opaque coverage, bound the inspector, and seal the dark debug edge"
+);
+assert(
   styles.includes("--radius-xs: 4px") &&
     styles.includes("--radius-sm: 6px") &&
     styles.includes("--radius-md: 8px") &&
@@ -1733,8 +1743,12 @@ assert(
     voiceInputButtonSource.includes("disabled={disabled}") &&
     voiceInputButtonSource.includes('data-status={status}') &&
     voiceInputButtonSource.includes('status === "finishing"') &&
+    voiceInputButtonSource.includes('state="working"') &&
+    voiceInputButtonSource.includes('theme="dark"') &&
+    styles.includes(".composer-voice-working") &&
     voiceInputImplementationSource.includes("navigator.mediaDevices.getUserMedia") &&
-    voiceWebRtcRuntimeSource.includes("getByteTimeDomainData") &&
+    voiceInputImplementationSource.includes("Microphone capture did not start") &&
+    !voiceInputImplementationSource.includes("getByteTimeDomainData") &&
     voiceWebRtcRuntimeSource.includes("track.enabled = false") &&
     voiceInputImplementationSource.includes("activeRunRef.current === run") &&
     voiceInputImplementationSource.includes("run.sessionId !== sessionId") &&

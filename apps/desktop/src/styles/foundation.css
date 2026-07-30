@@ -259,6 +259,11 @@ pre {
   transition: none;
 }
 
+.app-shell[data-sidebar-resizing="true"] .window-toolbar-panel-left,
+.app-shell[data-inspector-resizing="true"] .window-toolbar-panel-right {
+  transition: none;
+}
+
 .app-shell[data-inspector-open="false"]::after {
   opacity: 0;
 }
@@ -307,7 +312,9 @@ pre {
   pointer-events: none;
   background: var(--panel);
   z-index: 0;
-  transition: opacity 120ms ease-out;
+  transition:
+    width 180ms var(--ease-out-quart),
+    opacity 120ms ease-out;
 }
 
 .window-toolbar-panel-left {
@@ -324,11 +331,9 @@ pre {
   width: var(--inspector-layout-width);
 }
 
-.app-shell[data-active-view="settings"] .window-toolbar-panel-left,
-.app-shell[data-active-view="settings"] .window-toolbar-panel-right,
 .app-shell[data-sidebar-open="false"] .window-toolbar-panel-left,
 .app-shell[data-inspector-open="false"] .window-toolbar-panel-right {
-  opacity: 0;
+  width: 0;
 }
 
 .window-workspace-header {
@@ -474,4 +479,3 @@ pre {
 .sidebar-resize-handle:focus-visible {
   outline: 0;
 }
-

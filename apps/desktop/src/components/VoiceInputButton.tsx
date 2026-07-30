@@ -1,4 +1,5 @@
 import { LoaderCircle, Mic } from "lucide-react";
+import { ThinkingOrb } from "thinking-orbs";
 import { useVoiceInput } from "../voice/useVoiceInput";
 import {
   voiceInputButtonDisabled,
@@ -23,7 +24,7 @@ export function VoiceInputButton({
   onError,
   onStatusChange
 }: VoiceInputButtonProps) {
-  const { canvasRef, status, toggle } = useVoiceInput({
+  const { status, toggle } = useVoiceInput({
     enabled: configured,
     transport,
     sessionId,
@@ -54,9 +55,16 @@ export function VoiceInputButton({
       disabled={disabled}
       onClick={toggle}
     >
-      <canvas ref={canvasRef} width={64} height={64} aria-hidden="true" />
       {status === "connecting" || status === "finishing" ? (
         <LoaderCircle className="composer-voice-loading" aria-hidden="true" />
+      ) : status === "recording" ? (
+        <ThinkingOrb
+          className="composer-voice-working"
+          state="working"
+          size={20}
+          theme="dark"
+          aria-hidden="true"
+        />
       ) : status === "idle" ? (
         <Mic aria-hidden="true" />
       ) : null}

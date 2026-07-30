@@ -10,7 +10,6 @@ import {
 import {
   disposeVoiceWebRtc,
   releaseVoiceCapture,
-  startVoiceOscilloscope,
   updateVoiceDisconnectGrace,
   type VoiceWebRtcResources
 } from "./voiceWebRtcRuntime";
@@ -35,8 +34,11 @@ type UseVoiceInputOptions = {
 
 function errorMessage(error: unknown): string {
   if (error instanceof DOMException) {
-    if (error.name === "NotAllowedError") return "Microphone access was denied";
+    if (error.name === "NotAllowedError") {
+      return "Microphone access was denied. Enable Cindx in System Settings → Privacy & Security → Microphone.";
+    }
     if (error.name === "NotFoundError") return "No microphone is available";
+    if (error.name === "NotReadableError") return "The microphone is busy or unavailable";
   }
   return error instanceof Error ? error.message : String(error);
 }
@@ -49,7 +51,6 @@ export function useOpenAiVoiceInput({
   onStatusChange
 }: UseVoiceInputOptions) {
   const [status, setStatus] = useState<VoiceInputStatus>("idle");
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const activeRunRef = useRef<VoiceRun | null>(null);
   const runSequenceRef = useRef(0);
   const sessionIdRef = useRef(sessionId);
@@ -159,8 +160,6 @@ export function useOpenAiVoiceInput({
       peer: null,
       channel: null,
       stream: null,
-      audioContext: null,
-      animationFrame: null,
       timeout: null,
       commitDelay: null,
       disconnectTimeout: null
@@ -205,7 +204,6 @@ export function useOpenAiVoiceInput({
           if (run.timeout !== null) window.clearTimeout(run.timeout);
           run.timeout = null;
           run.turn = { ...run.turn, status: "recording" };
-          if (canvasRef.current) startVoiceOscilloscope(run, canvasRef.current);
           publishStatus("recording");
         } catch (error) {
           failRun(run, errorMessage(error));
@@ -272,5 +270,5 @@ export function useOpenAiVoiceInput({
   }, [forceDispose, sessionId]);
   useEffect(() => () => forceDispose(false), [forceDispose]);
 
-  return { canvasRef, status, toggle };
+  return { status, toggle };
 }
