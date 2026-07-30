@@ -140,7 +140,7 @@ fn conductor_verification_policies_reach_the_persistent_task_contract() {
             "update the workspace",
             AgentRuntimeConfig::default(),
         );
-        apply_run_task_contract(&mut runtime, &run_context)
+        apply_run_task_contract(&mut runtime, &run_context, &[], None)
             .expect("runtime contract should accept the policy");
         assert_eq!(
             runtime.task_contract.workspace_verification_policy(),
@@ -1079,7 +1079,8 @@ fn goal2_prompt_derived_image_contract_is_scoped_to_the_steer_epoch() {
     ]
     .into_iter()
     .collect::<Metadata>();
-    apply_run_task_contract(&mut runtime, &run_context).expect("image contract should apply");
+    apply_run_task_contract(&mut runtime, &run_context, &[], None)
+        .expect("image contract should apply");
     record_tool_outcome_with_risk(
         &mut runtime,
         "image.generate",
@@ -1093,12 +1094,14 @@ fn goal2_prompt_derived_image_contract_is_scoped_to_the_steer_epoch() {
 
     run_context.insert("steer_epoch".to_string(), "1".to_string());
     run_context.remove("image_generation_required");
-    apply_run_task_contract(&mut runtime, &run_context).expect("text contract should apply");
+    apply_run_task_contract(&mut runtime, &run_context, &[], None)
+        .expect("text contract should apply");
     assert!(runtime.task_contract.model_context_for_task(&[]).is_none());
 
     run_context.insert("steer_epoch".to_string(), "2".to_string());
     run_context.insert("image_generation_required".to_string(), "true".to_string());
-    apply_run_task_contract(&mut runtime, &run_context).expect("new image contract should apply");
+    apply_run_task_contract(&mut runtime, &run_context, &[], None)
+        .expect("new image contract should apply");
     assert!(!runtime
         .task_contract
         .required_tool_satisfied("image.generate"));
@@ -4805,6 +4808,9 @@ fn conductor_result_separates_worker_claims_from_tool_evidence() {
         "model-a",
         "The config probably uses model A.",
         &[CollaborationEvidence {
+            evidence_schema: String::new(),
+            steer_epoch: None,
+            collaboration_id: String::new(),
             source_step: "worker_1".to_string(),
             tool_call_id: "call-1".to_string(),
             tool_name: "file.read".to_string(),
@@ -4823,6 +4829,9 @@ fn conductor_result_separates_worker_claims_from_tool_evidence() {
 #[test]
 fn conductor_merges_authorized_evidence_and_deduplicates_provenance() {
     let a = CollaborationEvidence {
+        evidence_schema: String::new(),
+        steer_epoch: None,
+        collaboration_id: String::new(),
         source_step: "worker_a".to_string(),
         tool_call_id: "call-1".to_string(),
         tool_name: "file.read".to_string(),
@@ -4831,6 +4840,9 @@ fn conductor_merges_authorized_evidence_and_deduplicates_provenance() {
         output: "A".to_string(),
     };
     let b = CollaborationEvidence {
+        evidence_schema: String::new(),
+        steer_epoch: None,
+        collaboration_id: String::new(),
         source_step: "worker_b".to_string(),
         tool_call_id: "call-1".to_string(),
         tool_name: "file.read".to_string(),
@@ -4857,6 +4869,9 @@ fn conductor_merges_authorized_evidence_and_deduplicates_provenance() {
 fn conductor_bounds_checkpoint_evidence_and_preserves_current_step_observations() {
     let inherited = (0..40)
         .map(|index| CollaborationEvidence {
+            evidence_schema: String::new(),
+            steer_epoch: None,
+            collaboration_id: String::new(),
             source_step: "source".to_string(),
             tool_call_id: format!("inherited-{index}"),
             tool_name: "file.read".to_string(),
@@ -4867,6 +4882,9 @@ fn conductor_bounds_checkpoint_evidence_and_preserves_current_step_observations(
         .collect::<Vec<_>>();
     let own = (0..4)
         .map(|index| CollaborationEvidence {
+            evidence_schema: String::new(),
+            steer_epoch: None,
+            collaboration_id: String::new(),
             source_step: "current".to_string(),
             tool_call_id: format!("own-{index}"),
             tool_name: "file.read".to_string(),
@@ -7714,7 +7732,7 @@ fn image_generation_run_cannot_complete_without_the_configured_tool() {
     let run_context = [("image_generation_required".to_string(), "true".to_string())]
         .into_iter()
         .collect();
-    apply_run_task_contract(&mut runtime, &run_context).expect("task contract applies");
+    apply_run_task_contract(&mut runtime, &run_context, &[], None).expect("task contract applies");
     assert!(!runtime
         .task_contract
         .required_tool_satisfied("image.generate"));
@@ -9723,14 +9741,19 @@ fn agent_transcript_restores_assistant_tool_and_tool_messages() {
             .collect(),
         )
         .expect("assistant tool call should append");
-    append_tool_message_event(
+    append_message_event_with_metadata(
         &mut store,
         &phase16_task_id(),
-        "call-1",
-        "file.read",
-        "succeeded",
+        MessageRole::Tool,
         "tool=file.read\nstatus=succeeded\noutput=hello",
-        None,
+        [
+            ("kind".to_string(), "tool_observation".to_string()),
+            ("tool_call_id".to_string(), "call-1".to_string()),
+            ("tool".to_string(), "file.read".to_string()),
+            ("status".to_string(), "succeeded".to_string()),
+        ]
+        .into_iter()
+        .collect(),
     )
     .expect("tool message should append");
 

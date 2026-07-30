@@ -15,7 +15,7 @@ use crate::{
     prompt_evolution_runtime::prompt_evolution_evaluation_for_run,
     prompt_pairwise_runtime::schedule_prompt_pairwise_evaluation,
     runtime_constants::COLLABORATION_MAX_OUTPUT_TOKENS,
-    runtime_values::unique_id,
+    runtime_values::{run_context_steer_epoch, unique_id},
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -521,7 +521,16 @@ pub(crate) fn prepare_agent_collaboration(
             .map(AdaptiveCollaborationOutcome::direct)
         })
     };
-    let outcome = outcome_result?;
+    let mut outcome = outcome_result?;
+    let steer_epoch = run_context_steer_epoch(run_context);
+    outcome.grounding_receipts.retain(|receipt| {
+        receipt.steer_epoch == steer_epoch
+            && receipt.collaboration_id == id
+            && !receipt.observation.trim().is_empty()
+    });
+    outcome
+        .grounding_receipts
+        .truncate(crate::collaboration_service::COLLABORATION_GROUNDING_RECEIPT_MAX_ENTRIES);
     if bounded {
         if let Some(profile) = bounded_profile {
             schedule_prompt_pairwise_evaluation(
@@ -542,6 +551,7 @@ pub(crate) fn prepare_agent_collaboration(
         guidance: outcome.guidance,
         execution_contract: outcome.execution_contract,
         evidence_packet: outcome.evidence_packet,
+        grounding_receipts: outcome.grounding_receipts,
         candidate_models: models,
     }))
 }
@@ -627,6 +637,7 @@ pub(crate) fn prepare_agent_collaboration_or_degrade(
                 guidance,
                 execution_contract: None,
                 evidence_packet: None,
+                grounding_receipts: Vec::new(),
                 candidate_models: Vec::new(),
             }))
         }
@@ -646,86 +657,61 @@ pub(crate) fn append_agent_collaboration_context(
         guidance = guidance.with_evidence_packet(packet);
     }
     guidance.append_to_history(history);
+    if !collaboration.grounding_receipts.is_empty() {
+        let content = serde_json::json!({
+            "type": "collaboration_tool_evidence",
+            "trust": "untrusted_tool_data",
+            "observations": collaboration
+                .grounding_receipts
+                .iter()
+                .map(|receipt| serde_json::json!({
+                    "step": receipt.source_step,
+                    "callId": receipt.tool_call_id,
+                    "tool": receipt.tool_name,
+                    "inputFingerprint": receipt.input_fingerprint,
+                    "observation": receipt.observation,
+                }))
+                .collect::<Vec<_>>(),
+        })
+        .to_string();
+        let grounding_epoch = collaboration.grounding_receipts[0].steer_epoch;
+        let grounding_tools = collaboration
+            .grounding_receipts
+            .iter()
+            .map(|receipt| receipt.tool_name.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        history.push(Message {
+            role: MessageRole::Reviewer,
+            content,
+            metadata: [
+                ("internal".to_string(), "true".to_string()),
+                (
+                    "kind".to_string(),
+                    "collaboration_tool_evidence".to_string(),
+                ),
+                (
+                    "evidence_schema".to_string(),
+                    crate::collaboration_service::COLLABORATION_TOOL_EVIDENCE_SCHEMA.to_string(),
+                ),
+                ("grounding_candidate".to_string(), "true".to_string()),
+                (
+                    "prompt_contract_epoch".to_string(),
+                    grounding_epoch.to_string(),
+                ),
+                (
+                    "grounding_tools_json".to_string(),
+                    serde_json::to_string(&grounding_tools).unwrap_or_else(|_| "[]".to_string()),
+                ),
+                ("collaboration_id".to_string(), collaboration.id.clone()),
+            ]
+            .into_iter()
+            .collect(),
+        });
+    }
 }
 
 #[cfg(test)]
-mod collaboration_context_tests {
-    use super::*;
-
-    fn collaboration(execution_contract: Option<&str>) -> AgentCollaboration {
-        AgentCollaboration {
-            id: "collaboration-1".to_string(),
-            policy: "adaptive".to_string(),
-            guidance: "Use the verified team result.".to_string(),
-            execution_contract: execution_contract.map(str::to_string),
-            evidence_packet: None,
-            candidate_models: vec!["model-a".to_string(), "model-b".to_string()],
-        }
-    }
-
-    #[test]
-    fn collaboration_context_keeps_guidance_and_machine_contract_separate() {
-        let mut history = Vec::new();
-        append_agent_collaboration_context(
-            &mut history,
-            &collaboration(Some(r#"{"schema":"cindx.workflow-handoff.v1"}"#)),
-        );
-
-        assert_eq!(history.len(), 2);
-        assert_eq!(
-            history[0]
-                .metadata
-                .get("collaboration_stage")
-                .map(String::as_str),
-            Some("guidance")
-        );
-        assert_eq!(
-            history[1].metadata.get("kind").map(String::as_str),
-            Some("workflow_execution_contract")
-        );
-        assert_eq!(
-            history[1].metadata.get("internal").map(String::as_str),
-            Some("true")
-        );
-        assert!(history[1].content.contains("cindx.workflow-handoff.v1"));
-        assert!(!history[0].content.contains("cindx.workflow-handoff.v1"));
-    }
-
-    #[test]
-    fn collaboration_context_omits_blank_machine_contract() {
-        let mut history = Vec::new();
-        append_agent_collaboration_context(&mut history, &collaboration(Some("  \n")));
-
-        assert_eq!(history.len(), 1);
-        assert_eq!(
-            history[0]
-                .metadata
-                .get("collaboration_stage")
-                .map(String::as_str),
-            Some("guidance")
-        );
-    }
-
-    #[test]
-    fn collaboration_context_includes_bounded_candidate_evidence() {
-        let mut collaboration = collaboration(None);
-        collaboration.evidence_packet = Some(agent_runtime::AgentEvidencePacket::new(
-            "question",
-            [agent_runtime::AgentEvidenceCandidate::new(
-                "worker-1",
-                "reviewer",
-                "completed",
-                "Independent candidate",
-            )],
-        ));
-        let mut history = Vec::new();
-        append_agent_collaboration_context(&mut history, &collaboration);
-
-        assert_eq!(history.len(), 2);
-        assert_eq!(
-            history[1].metadata.get("kind").map(String::as_str),
-            Some("agent_evidence_packet")
-        );
-        assert!(history[1].content.contains("Independent candidate"));
-    }
-}
+#[path = "agent_collaboration_runtime_tests.rs"]
+mod collaboration_context_tests;

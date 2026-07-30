@@ -180,7 +180,7 @@ pub(crate) fn prepare_agent_knowledge_context(
     }
 
     Ok(Some(Message {
-        role: MessageRole::System,
+        role: MessageRole::Reviewer,
         content,
         metadata: [
             ("internal".to_string(), "true".to_string()),

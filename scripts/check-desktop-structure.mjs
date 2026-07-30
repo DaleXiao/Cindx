@@ -3384,11 +3384,14 @@ assert(rustLib.includes("fn archive_session("), "Session archive command is miss
 assert(rustLib.includes("fn restore_session("), "Session restore command is missing");
 assert(rustLib.includes("fn delete_session("), "Session delete command is missing");
 assert(
-  rustLib.includes("async fn resolve_agent_permission(") &&
+    rustLib.includes("async fn resolve_agent_permission(") &&
     rustLib.includes("Agent task resumed after permission") &&
-    rustLib.includes("checkpoint_transcript_before_resolved_tools") &&
+    rustLib.includes("permission_checkpoint_message_boundary") &&
     rustLib.includes(
-      "permission_recovery_checkpoint_excludes_resolved_tool_suffix"
+      "permission_checkpoint_boundary_uses_the_matching_blocked_event"
+    ) &&
+    rustLib.includes(
+      "permission_boundary_uses_unique_permission_id_when_call_ids_repeat"
     ),
   "Permission resolution must resume the agent off the IPC thread"
 );

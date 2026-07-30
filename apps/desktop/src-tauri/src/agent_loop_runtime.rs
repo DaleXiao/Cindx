@@ -67,7 +67,9 @@ pub(crate) fn pause_agent_loop_for_control_stop(
 
 #[path = "agent_loop_contract_runtime.rs"]
 mod contract_runtime;
+#[cfg(test)]
 pub(crate) use contract_runtime::apply_run_task_contract;
+pub(crate) use contract_runtime::apply_run_task_contract_with_evidence_scopes;
 use contract_runtime::{
     record_retained_agent_decision_after_noop_steer, synchronize_noop_control_epoch_context,
 };
@@ -104,13 +106,24 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
     let session_id_owned = run_context.get("session_id").cloned();
     let session_id = session_id_owned.as_deref();
     let registry = tool_registry_for_state(state, workspace_root)?;
-    let tools = registry
+    let mut tools = registry
         .exposure_plan(
             effective_agent_objective(&run_context, &prompt),
             config.context_window_tokens,
         )
         .inline;
-    apply_run_task_contract(&mut runtime, &run_context)?;
+    let evidence_scopes = crate::agent_grounding_policy::pin_prompt_evidence_tools(
+        &run_context,
+        &registry.specs(),
+        &mut tools,
+    );
+    apply_run_task_contract_with_evidence_scopes(
+        &mut runtime,
+        &run_context,
+        &tools,
+        collaboration,
+        &evidence_scopes,
+    )?;
     let mut snapshot_cursor = AgentRuntimeSnapshotCursor::rebuild(&runtime, &run_context);
     let mut runtime_context = agent_runtime_context_for_run(&run_context);
     let mut active_collaboration = collaboration;

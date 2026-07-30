@@ -8,11 +8,13 @@ const MAX_CONTRACT_EVIDENCE: usize = 128;
 const MAX_COMPLETION_GATE_ATTEMPTS: usize = 2;
 const MAX_CONTEXT_TARGETS: usize = 8;
 const MAX_CONTEXT_EVIDENCE: usize = 8;
+const MAX_GROUNDING_EXCERPT_CHARS: usize = 1_600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContractEvidenceKind {
     RequiredTool,
+    Grounding,
     Read,
     Mutation,
     Verification,
@@ -50,6 +52,32 @@ pub struct ContractEvidence {
     pub kind: ContractEvidenceKind,
     pub source: String,
     pub input_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptEvidenceContext {
+    pub requirement_id: String,
+    pub source: String,
+    pub observation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptEvidenceReceipt {
+    source: String,
+    observation: String,
+    context_backed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PromptEvidenceRequirement {
+    #[serde(default)]
+    tools: BTreeSet<String>,
+    // Observations are request-scoped model context, not durable state. A cold
+    // restore therefore fails closed and re-observes instead of persisting
+    // potentially sensitive tool output or claiming evidence the model cannot see.
+    #[serde(skip, default)]
+    receipt: Option<PromptEvidenceReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -111,6 +139,10 @@ pub struct AgentTaskContract {
     #[serde(default)]
     prompt_successful_tools: BTreeSet<String>,
     #[serde(default)]
+    prompt_evidence_epoch: u64,
+    #[serde(default)]
+    prompt_evidence_requirements: BTreeMap<String, PromptEvidenceRequirement>,
+    #[serde(default)]
     mutation_targets: BTreeSet<String>,
     #[serde(default)]
     mutation_epoch: u64,
@@ -170,6 +202,199 @@ impl AgentTaskContract {
                 .retain(|key, _| !key.starts_with("prompt_tool:"));
         }
         self.prompt_required_tool_successes = required_tools;
+    }
+
+    /// Replaces the substantive evidence obligation derived from the active prompt.
+    ///
+    /// Evidence is scoped to the current steer epoch. Replaying the same persisted
+    /// contract retains committed evidence, while a new objective or requirement
+    /// clears it so an earlier task cannot satisfy the new one.
+    pub fn replace_prompt_evidence_requirements(
+        &mut self,
+        epoch: u64,
+        requirements: BTreeMap<String, BTreeSet<String>>,
+    ) {
+        let requirements = requirements
+            .into_iter()
+            .filter_map(|(requirement_id, tools)| {
+                let requirement_id = requirement_id.trim().to_string();
+                if requirement_id.is_empty() {
+                    return None;
+                }
+                let tools = tools
+                    .into_iter()
+                    .map(|tool| tool.trim().to_string())
+                    .filter(|tool| !tool.is_empty())
+                    .collect::<BTreeSet<_>>();
+                Some((requirement_id, tools))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let current_tools = self
+            .prompt_evidence_requirements
+            .iter()
+            .map(|(id, requirement)| (id.clone(), requirement.tools.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let changed = self.prompt_evidence_epoch != epoch || current_tools != requirements;
+
+        if changed {
+            self.prompt_evidence_requirements = requirements
+                .into_iter()
+                .map(|(id, tools)| {
+                    (
+                        id,
+                        PromptEvidenceRequirement {
+                            tools,
+                            receipt: None,
+                        },
+                    )
+                })
+                .collect();
+            self.gate_attempts
+                .retain(|key, _| !key.starts_with("prompt_evidence:"));
+        }
+        self.prompt_evidence_epoch = epoch;
+    }
+
+    pub fn replace_prompt_evidence_requirement<I, S>(
+        &mut self,
+        epoch: u64,
+        requirement_id: Option<&str>,
+        tools: I,
+    ) where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let requirements = requirement_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|requirement_id| {
+                [(
+                    requirement_id.to_string(),
+                    tools
+                        .into_iter()
+                        .map(Into::into)
+                        .collect::<BTreeSet<String>>(),
+                )]
+                .into_iter()
+                .collect()
+            })
+            .unwrap_or_default();
+        self.replace_prompt_evidence_requirements(epoch, requirements);
+    }
+
+    /// Records a trusted, substantive observation for one prompt obligation.
+    /// The bounded observation remains runtime-only so persisted recovery
+    /// cannot leak tool output or silently complete without visible evidence.
+    pub fn record_prompt_evidence_for_requirement_at(
+        &mut self,
+        epoch: u64,
+        requirement_id: &str,
+        source: &str,
+        receipt: &str,
+        observation: &str,
+    ) -> bool {
+        self.record_prompt_evidence_at(epoch, requirement_id, source, receipt, observation, false)
+    }
+
+    pub fn record_prompt_context_evidence_for_requirement_at(
+        &mut self,
+        epoch: u64,
+        requirement_id: &str,
+        source: &str,
+        receipt: &str,
+        observation: &str,
+    ) -> bool {
+        self.record_prompt_evidence_at(epoch, requirement_id, source, receipt, observation, true)
+    }
+
+    fn record_prompt_evidence_at(
+        &mut self,
+        epoch: u64,
+        requirement_id: &str,
+        source: &str,
+        receipt: &str,
+        observation: &str,
+        context_backed: bool,
+    ) -> bool {
+        if self.prompt_evidence_epoch != epoch
+            || source.trim().is_empty()
+            || !substantive_observation(observation)
+        {
+            return false;
+        }
+        let Some(requirement) = self.prompt_evidence_requirements.get_mut(requirement_id) else {
+            return false;
+        };
+        let first_receipt = requirement.receipt.is_none();
+        requirement.receipt = Some(PromptEvidenceReceipt {
+            source: source.to_string(),
+            observation: bounded_grounding_excerpt(observation),
+            context_backed,
+        });
+        let gate_key = format!(
+            "prompt_evidence:{}:{requirement_id}",
+            self.prompt_evidence_epoch
+        );
+        self.gate_attempts.remove(&gate_key);
+        if first_receipt {
+            self.record_evidence(ContractEvidenceKind::Grounding, source, receipt);
+        }
+        true
+    }
+
+    pub fn record_prompt_tool_evidence_observation_at(
+        &mut self,
+        epoch: u64,
+        tool_name: &str,
+        source: &str,
+        receipt: &str,
+        observation: &str,
+    ) -> bool {
+        if self.prompt_evidence_epoch != epoch || !substantive_observation(observation) {
+            return false;
+        }
+        let requirement_ids = self
+            .prompt_evidence_requirements
+            .iter()
+            .filter(|(_, requirement)| requirement.tools.contains(tool_name))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        let mut recorded = false;
+        for requirement_id in requirement_ids {
+            recorded |= self.record_prompt_evidence_for_requirement_at(
+                epoch,
+                &requirement_id,
+                source,
+                receipt,
+                observation,
+            );
+        }
+        recorded
+    }
+
+    pub fn prompt_evidence_contexts(&self) -> Vec<PromptEvidenceContext> {
+        self.prompt_evidence_requirements
+            .iter()
+            .filter_map(|(requirement_id, requirement)| {
+                requirement.receipt.as_ref().and_then(|receipt| {
+                    (!receipt.context_backed).then(|| PromptEvidenceContext {
+                        requirement_id: requirement_id.clone(),
+                        source: receipt.source.clone(),
+                        observation: receipt.observation.clone(),
+                    })
+                })
+            })
+            .collect()
+    }
+
+    pub fn has_prompt_evidence(&self) -> bool {
+        self.prompt_evidence_requirements
+            .values()
+            .any(|requirement| requirement.receipt.is_some())
+    }
+
+    pub fn prompt_evidence_epoch(&self) -> u64 {
+        self.prompt_evidence_epoch
     }
 
     pub fn require_any_tool_success<I, S>(&mut self, requirement_id: impl Into<String>, tools: I)
@@ -256,7 +481,7 @@ impl AgentTaskContract {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let unresolved_any_tool_requirements = self
+        let mut unresolved_any_tool_requirements = self
             .required_any_tool_successes
             .iter()
             .filter(|(_, alternatives)| alternatives.is_disjoint(&self.successful_tools))
@@ -269,6 +494,20 @@ impl AgentTaskContract {
                     .collect(),
             })
             .collect::<Vec<_>>();
+        unresolved_any_tool_requirements.extend(
+            self.prompt_evidence_requirements
+                .iter()
+                .filter(|(_, requirement)| requirement.receipt.is_none())
+                .map(|(id, requirement)| TaskContractAnyToolRequirement {
+                    id: id.clone(),
+                    alternatives: requirement
+                        .tools
+                        .iter()
+                        .filter(|tool| available_tools.contains(tool.as_str()))
+                        .cloned()
+                        .collect(),
+                }),
+        );
         let pending_postconditions = self
             .pending_interactions
             .iter()
@@ -556,6 +795,40 @@ impl AgentTaskContract {
             )));
         }
 
+        if let Some((requirement_id, requirement)) = self
+            .prompt_evidence_requirements
+            .iter()
+            .find(|(_, requirement)| requirement.receipt.is_none())
+            .map(|(id, requirement)| (id.clone(), requirement.clone()))
+        {
+            let available_alternatives = requirement
+                .tools
+                .iter()
+                .filter(|tool| available_tools.contains(tool.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            if available_alternatives.is_empty() {
+                return Err(AgentFailure::contract(
+                    "required_evidence_unavailable",
+                    format!(
+                        "task contract requirement `{requirement_id}` has no available substantive evidence tool"
+                    ),
+                ));
+            }
+            self.claim_gate(format!(
+                "prompt_evidence:{}:{requirement_id}",
+                self.prompt_evidence_epoch
+            ))?;
+            let alternatives = available_alternatives
+                .iter()
+                .map(|tool| format!("`{tool}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Ok(Some(format!(
+                "The current request requires grounded evidence before completion. Requirement `{requirement_id}` needs a successful substantive observation from at least one of: {alternatives}. Discovery-only results, failed calls, and evidence from an earlier user objective do not satisfy it."
+            )));
+        }
+
         if !self.pending_interactions.is_empty() {
             let requirements =
                 interaction_requirements(&self.pending_interactions, &available_tools);
@@ -614,6 +887,33 @@ impl AgentTaskContract {
 
 fn fingerprint(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+fn substantive_observation(observation: &str) -> bool {
+    let observation = observation.trim();
+    if observation.is_empty() {
+        return false;
+    }
+    if let Some((_, output)) = observation.split_once("output=") {
+        return !output.trim().is_empty();
+    }
+    true
+}
+
+fn bounded_grounding_excerpt(observation: &str) -> String {
+    let observation = observation.trim();
+    let character_count = observation.chars().count();
+    if character_count <= MAX_GROUNDING_EXCERPT_CHARS {
+        return observation.to_string();
+    }
+    let tail_chars = MAX_GROUNDING_EXCERPT_CHARS / 4;
+    let head_chars = MAX_GROUNDING_EXCERPT_CHARS - tail_chars;
+    let head = observation.chars().take(head_chars).collect::<String>();
+    let tail = observation
+        .chars()
+        .skip(character_count - tail_chars)
+        .collect::<String>();
+    format!("{head}\n...[grounding observation truncated]...\n{tail}")
 }
 
 fn structured_targets(input_json: &str) -> BTreeSet<String> {
@@ -974,6 +1274,142 @@ mod tests {
             .completion_instruction_for_task(&tools)
             .expect("completion gate")
             .is_some());
+    }
+
+    #[test]
+    fn prompt_evidence_is_scoped_to_the_active_epoch() {
+        let mut contract = AgentTaskContract::default();
+        let tools = vec![tool("file.read", ToolRisk::ReadOnly)];
+        contract.replace_prompt_evidence_requirement(3, Some("workspace_grounding"), ["file.read"]);
+        contract.record_tool_outcome(
+            "file.read",
+            r#"{"path":"README.md"}"#,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ReadOnly),
+        );
+        assert!(contract.record_prompt_tool_evidence_observation_at(
+            3,
+            "file.read",
+            "file.read",
+            r#"{"path":"README.md"}"#,
+            "tool=file.read\nstatus=succeeded\noutput=\nrepository readme",
+        ));
+        assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
+
+        contract.replace_prompt_evidence_requirement(3, Some("workspace_grounding"), ["file.read"]);
+        assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
+
+        contract.replace_prompt_evidence_requirement(4, Some("workspace_grounding"), ["file.read"]);
+        assert!(contract
+            .completion_instruction_for_task(&tools)
+            .expect("completion gate evaluates")
+            .is_some());
+
+        contract.replace_prompt_evidence_requirement(5, None, std::iter::empty::<&str>());
+        assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
+    }
+
+    #[test]
+    fn prompt_evidence_rejects_failures_discovery_and_precontract_text_replay() {
+        let mut contract = AgentTaskContract::default();
+        let tools = vec![
+            tool("file.list", ToolRisk::ReadOnly),
+            tool("file.read", ToolRisk::ReadOnly),
+        ];
+        contract.record_tool_outcome(
+            "file.read",
+            r#"{"path":"forged.md"}"#,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ReadOnly),
+        );
+        contract.replace_prompt_evidence_requirement(1, Some("workspace_grounding"), ["file.read"]);
+
+        for (tool_name, status) in [
+            ("file.list", ToolOutcomeStatus::Succeeded),
+            ("file.read", ToolOutcomeStatus::Failed),
+            ("file.read", ToolOutcomeStatus::Denied),
+            ("file.read", ToolOutcomeStatus::Cancelled),
+        ] {
+            contract.record_tool_outcome(
+                tool_name,
+                r#"{"path":"README.md"}"#,
+                &status,
+                Some(&ToolRisk::ReadOnly),
+            );
+        }
+        assert!(contract
+            .completion_instruction_for_task(&tools)
+            .expect("completion gate evaluates")
+            .is_some());
+
+        contract.record_tool_outcome(
+            "file.read",
+            r#"{"path":"README.md"}"#,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ReadOnly),
+        );
+        assert!(!contract.record_prompt_tool_evidence_observation_at(
+            1,
+            "file.read",
+            "file.read",
+            r#"{"path":"README.md"}"#,
+            "tool=file.read\nstatus=succeeded\noutput=\n   ",
+        ));
+        assert!(contract.record_prompt_tool_evidence_observation_at(
+            1,
+            "file.read",
+            "file.read",
+            r#"{"path":"README.md"}"#,
+            "tool=file.read\nstatus=succeeded\noutput=\nrepository readme",
+        ));
+        assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
+    }
+
+    #[test]
+    fn trusted_prompt_evidence_receipt_round_trips_without_a_tool_alternative() {
+        let mut contract = AgentTaskContract::default();
+        contract.replace_prompt_evidence_requirement(
+            9,
+            Some("workspace_grounding"),
+            std::iter::empty::<&str>(),
+        );
+        let failure = contract
+            .completion_instruction_for_task(&[])
+            .expect_err("missing evidence capability must fail closed");
+        assert_eq!(failure.code, "required_evidence_unavailable");
+
+        assert!(!contract.record_prompt_evidence_for_requirement_at(
+            8,
+            "workspace_grounding",
+            "stale_knowledge_context",
+            "selected_count=3",
+            "grounded snippets",
+        ));
+        assert!(!contract.record_prompt_tool_evidence_observation_at(
+            9,
+            "web.search",
+            "wrong_domain",
+            "receipt",
+            "search result",
+        ));
+        assert!(contract.record_prompt_evidence_for_requirement_at(
+            9,
+            "workspace_grounding",
+            "knowledge_context",
+            "selected_count=3",
+            "grounded snippets",
+        ));
+        let encoded = serde_json::to_string(&contract).expect("contract serializes");
+        let mut restored =
+            serde_json::from_str::<AgentTaskContract>(&encoded).expect("contract should restore");
+        let restored_failure = restored
+            .completion_instruction_for_task(&[])
+            .expect_err("runtime-only evidence must fail closed after persistence");
+        assert_eq!(restored_failure.code, "required_evidence_unavailable");
+        assert!(restored.evidence().iter().any(|evidence| {
+            evidence.kind == ContractEvidenceKind::Grounding
+                && evidence.source == "knowledge_context"
+        }));
     }
 
     #[test]

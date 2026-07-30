@@ -123,8 +123,9 @@ pub(crate) use crate::collaboration_service::{
     collaboration_context_for_genome, collaboration_fallback_models, collaboration_recent_context,
     collaboration_recovery_evidence, collaboration_step_result,
     effective_workflow_model_turn_budget, effective_workflow_step_attempt_budget,
-    merge_collaboration_evidence, truncate_for_collaboration, AdaptiveCollaborationOutcome,
-    AdaptiveCollaborationSpec, AgentCollaboration, CollaborationCompletion, CollaborationEvidence,
+    merge_collaboration_evidence, rebind_checkpoint_grounding_provenance,
+    truncate_for_collaboration, AdaptiveCollaborationOutcome, AdaptiveCollaborationSpec,
+    AgentCollaboration, CollaborationCompletion, CollaborationEvidence,
     COLLABORATION_STEER_INTERRUPTED, WORKFLOW_RESUMABLE_ERROR_PREFIX, WORKFLOW_SAFETY_ERROR_PREFIX,
 };
 pub(crate) use crate::parallel_execution::{

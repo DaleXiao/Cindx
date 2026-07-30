@@ -18,6 +18,7 @@ mod agent_commands;
 mod agent_completion_runtime;
 mod agent_conductor_runtime;
 mod agent_conductor_scheduler;
+mod agent_grounding_policy;
 mod agent_loop_runtime;
 mod agent_loop_service;
 mod agent_model_turn_runtime;
