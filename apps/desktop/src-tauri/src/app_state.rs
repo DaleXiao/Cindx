@@ -82,7 +82,7 @@ impl ToolRegistryCache {
 #[derive(Debug, Clone)]
 pub(crate) struct WorkspaceKnowledgeCacheEntry {
     pub(crate) adapter: FileRagAdapter,
-    pub(crate) graph_store: Option<FileGraphStore>,
+    pub(crate) graph_store: Option<Arc<FileGraphStore>>,
     pub(crate) validated_at: Instant,
 }
 

@@ -9036,6 +9036,164 @@ fn workspace_cache_ttl_advances_only_after_validation_or_index_change() {
 }
 
 #[test]
+fn workspace_knowledge_snapshot_reuses_one_graph_parse_and_borrowed_projection() {
+    let root = temp_test_root("phase7-shared-graph-snapshot");
+    fs::create_dir_all(&root).expect("temp root should exist");
+    fs::write(
+        root.join("notes.md"),
+        "SharedGraphMarker uses file.read with docs/reference.md",
+    )
+    .expect("fixture should write");
+    let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+    index_graph_chunks(&root, &index.chunks).expect("graph should build");
+    let mut adapter = open_rag_adapter_for(&root).expect("adapter should open");
+    adapter.replace_all(index).expect("index should persist");
+
+    reset_graph_store_open_count();
+    let entry = workspace_knowledge_cache_entry(&adapter).expect("cache entry should build");
+    assert_eq!(graph_store_open_count(), 1);
+    let first = entry
+        .snapshot_if_current(adapter.path())
+        .expect("current cache entry should produce a snapshot");
+    let second = entry
+        .snapshot_if_current(adapter.path())
+        .expect("repeated cache hit should produce a snapshot");
+    let first_graph = first
+        .graph_store
+        .as_ref()
+        .expect("snapshot should include graph");
+    let second_graph = second
+        .graph_store
+        .as_ref()
+        .expect("snapshot should include graph");
+    assert!(Arc::ptr_eq(first_graph, second_graph));
+    assert_eq!(
+        first_graph.path(),
+        crate::knowledge_generation_runtime::knowledge_paths_for_rag_index(first.adapter.path())
+            .graph_store
+    );
+
+    let focus_paths = vec!["notes.md".to_string()];
+    let borrowed = graph_state_for_snapshot(&first, &focus_paths);
+    assert_eq!(graph_store_open_count(), 1);
+    assert!(borrowed.nodes.len() <= 80);
+    assert!(borrowed.edges.len() <= 140);
+    let from_disk = graph_state_at_path(first_graph.path(), &focus_paths)
+        .expect("disk projection should remain available");
+    assert_eq!(graph_store_open_count(), 2);
+    assert_eq!(
+        serde_json::to_value(&borrowed).expect("borrowed graph should serialize"),
+        serde_json::to_value(&from_disk).expect("disk graph should serialize")
+    );
+
+    fs::remove_file(first_graph.path()).expect("graph fixture should be removable");
+    let after_removal = graph_state_for_snapshot(&second, &focus_paths);
+    assert_eq!(graph_store_open_count(), 2);
+    assert_eq!(
+        serde_json::to_value(&after_removal).expect("leased graph should serialize"),
+        serde_json::to_value(&borrowed).expect("original graph should serialize")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn workspace_knowledge_snapshot_preserves_ttl_and_generation_validation() {
+    let root = temp_test_root("phase7-shared-graph-validation");
+    fs::create_dir_all(&root).expect("temp root should exist");
+    let adapter = open_rag_adapter_for(&root).expect("adapter should open");
+    let mut entry = workspace_knowledge_cache_entry(&adapter).expect("cache entry should build");
+
+    assert!(entry.snapshot_if_current(adapter.path()).is_some());
+    assert!(entry
+        .snapshot_if_current(&root.join(".cindx").join("different-generation.tsv"))
+        .is_none());
+    entry.validated_at = Instant::now() - WORKSPACE_KNOWLEDGE_CACHE_TTL - Duration::from_millis(1);
+    assert!(entry.snapshot_if_current(adapter.path()).is_none());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn stale_generation_cannot_overwrite_the_active_knowledge_cache() {
+    let root = temp_test_root("phase7-stale-generation-cache");
+    fs::create_dir_all(&root).expect("temp root should exist");
+    fs::write(root.join("first.md"), "first generation cache evidence")
+        .expect("first fixture should write");
+    let first_index =
+        index_workspace(&root, IndexOptions::default()).expect("first index should build");
+    let first =
+        crate::knowledge_generation_runtime::build_and_publish_knowledge_generation_cancellable(
+            &root,
+            first_index,
+            || false,
+        )
+        .expect("first generation should publish");
+
+    let cache = Arc::new(Mutex::new(BTreeMap::new()));
+    let old_ready = Arc::new(std::sync::Barrier::new(2));
+    let release_old = Arc::new(std::sync::Barrier::new(2));
+    let old_cache = Arc::clone(&cache);
+    let old_root = root.clone();
+    let old_adapter = first.adapter.clone();
+    let old_ready_worker = Arc::clone(&old_ready);
+    let release_old_worker = Arc::clone(&release_old);
+    let old_writer = std::thread::spawn(move || {
+        old_ready_worker.wait();
+        release_old_worker.wait();
+        cache_rag_adapter_in(&old_cache, &old_root, &old_adapter)
+    });
+    old_ready.wait();
+
+    fs::write(
+        root.join("second.rs"),
+        "struct SecondGenerationCacheMarker; fn second_generation_cache_marker() {}",
+    )
+    .expect("second fixture should write");
+    let second_index =
+        index_workspace(&root, IndexOptions::default()).expect("second index should build");
+    let second =
+        crate::knowledge_generation_runtime::build_and_publish_knowledge_generation_cancellable(
+            &root,
+            second_index,
+            || false,
+        )
+        .expect("second generation should publish");
+
+    reset_graph_store_open_count();
+    assert!(cache_rag_adapter_in(&cache, &root, &second.adapter)
+        .expect("active generation should enter the cache"));
+    assert_eq!(graph_store_open_count(), 1);
+    release_old.wait();
+    assert!(!old_writer
+        .join()
+        .expect("old cache writer should join")
+        .expect("old cache writer should remain non-fatal"));
+
+    let key = workspace_knowledge_cache_key(&root);
+    let cache = cache.lock().expect("knowledge cache should lock");
+    let entry = cache.get(&key).expect("active cache entry should remain");
+    assert_eq!(entry.adapter.path(), second.adapter.path());
+    let first_snapshot = entry
+        .snapshot_if_current(second.adapter.path())
+        .expect("active cache entry should produce a snapshot");
+    let second_snapshot = entry
+        .snapshot_if_current(second.adapter.path())
+        .expect("repeated cache hit should produce a snapshot");
+    assert!(Arc::ptr_eq(
+        first_snapshot
+            .graph_store
+            .as_ref()
+            .expect("first snapshot should include graph"),
+        second_snapshot
+            .graph_store
+            .as_ref()
+            .expect("second snapshot should include graph"),
+    ));
+    assert_eq!(graph_store_open_count(), 1);
+    drop(cache);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn empty_workspace_knowledge_generation_is_reused() {
     let root = temp_test_root("phase7-empty-generation");
     fs::create_dir_all(&root).expect("temp root should exist");

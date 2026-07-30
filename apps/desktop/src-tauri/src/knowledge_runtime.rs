@@ -11,8 +11,7 @@ use crate::{
         with_workspace_knowledge_index_lock,
     },
     persistence_runtime::{
-        cache_rag_adapter, cached_graph_store_for_adapter, cached_rag_adapter_for,
-        open_rag_adapter_for,
+        cache_rag_adapter, cached_workspace_knowledge_snapshot_for, open_rag_adapter_for,
     },
     project_session_persistence::metadata_with_context,
     runtime_values::phase7_task_id,
@@ -48,10 +47,11 @@ pub(crate) fn prepare_agent_knowledge_context(
         crate::agent_resource_snapshot::checkpoint_agent_run_resources(state, run_context, control)
     };
     let index_started_at = Instant::now();
-    let (mut adapter, index_cache_hit) = cached_rag_adapter_for(state, workspace_root)?;
+    let mut snapshot = cached_workspace_knowledge_snapshot_for(state, workspace_root)?;
+    let index_cache_hit = snapshot.cache_hit;
     let auto_indexed = ensure_workspace_knowledge_index(
         workspace_root,
-        &mut adapter,
+        &mut snapshot.adapter,
         index_cache_hit,
         config,
         cancellation,
@@ -59,7 +59,8 @@ pub(crate) fn prepare_agent_knowledge_context(
         Some(&resource_checkpoint),
     )?;
     if workspace_knowledge_cache_needs_refresh(index_cache_hit, auto_indexed.is_some()) {
-        cache_rag_adapter(state, workspace_root, &adapter)?;
+        cache_rag_adapter(state, workspace_root, &snapshot.adapter)?;
+        snapshot = cached_workspace_knowledge_snapshot_for(state, workspace_root)?;
     }
     let index_duration_ms = index_started_at.elapsed().as_millis() as u64;
     if knowledge_preparation_should_interrupt(cancellation, expected_epoch) {
@@ -71,17 +72,17 @@ pub(crate) fn prepare_agent_knowledge_context(
             WorkspaceRetrievalChannel::GraphDirect | WorkspaceRetrievalChannel::GraphWalk
         )
     }) {
-        cached_graph_store_for_adapter(state, workspace_root, &adapter)?
+        snapshot.graph_store.as_deref()
     } else {
         None
     };
     let mut retrieval = run_planned_retrieval(
         workspace_root,
-        &adapter,
+        &snapshot.adapter,
         config,
         query,
         retrieval_plan,
-        graph_store.as_ref(),
+        graph_store,
         cancellation,
         expected_epoch,
         Some(&resource_checkpoint),

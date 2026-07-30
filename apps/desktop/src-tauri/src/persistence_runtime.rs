@@ -5,6 +5,7 @@ use crate::knowledge_generation_runtime::legacy_knowledge_paths;
 use crate::knowledge_generation_runtime::with_active_knowledge_paths;
 use crate::knowledge_generation_runtime::{
     active_knowledge_paths, knowledge_paths_for_rag_index, open_active_knowledge_adapter,
+    with_workspace_generation_read,
 };
 
 pub(crate) fn validate_workspace_root(path: &str) -> Result<PathBuf, String> {
@@ -342,6 +343,7 @@ pub(crate) fn graph_state_for(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn graph_state_for_adapter(
     adapter: &FileRagAdapter,
     focus_paths: &[String],
@@ -350,21 +352,27 @@ pub(crate) fn graph_state_for_adapter(
     graph_state_at_path(&paths.graph_store, focus_paths)
 }
 
+#[cfg(test)]
 pub(crate) fn graph_state_at_path(
     graph_path: &Path,
     focus_paths: &[String],
 ) -> Result<GraphStateView, String> {
-    let store = FileGraphStore::open(graph_path).map_err(|error| error.to_string())?;
-    let all_nodes = store.nodes();
-    let all_edges = store.edges();
-    let total_nodes = all_nodes.len();
-    let total_edges = all_edges.len();
+    let store = open_graph_store_at_path(graph_path)?;
+    Ok(graph_state_from_store(&store, focus_paths))
+}
+
+pub(crate) fn graph_state_from_store(
+    store: &FileGraphStore,
+    focus_paths: &[String],
+) -> GraphStateView {
+    let total_nodes = store.node_count();
+    let total_edges = store.edge_count();
     let focus_paths = focus_paths
         .iter()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
-    let mut selected_ids = all_nodes
-        .iter()
+    let mut selected_ids = store
+        .nodes_iter()
         .filter(|node| {
             if focus_paths.is_empty() {
                 node.kind.label() == "file"
@@ -377,31 +385,34 @@ pub(crate) fn graph_state_at_path(
         .map(|node| node.id.clone())
         .collect::<BTreeSet<_>>();
     if selected_ids.is_empty() {
-        selected_ids.extend(all_nodes.iter().take(24).map(|node| node.id.clone()));
+        selected_ids.extend(store.nodes_iter().take(24).map(|node| node.id.clone()));
     }
     for _ in 0..2 {
-        let neighbors = all_edges
-            .iter()
-            .filter(|edge| selected_ids.contains(&edge.from) || selected_ids.contains(&edge.to))
-            .flat_map(|edge| [edge.from.clone(), edge.to.clone()])
-            .collect::<Vec<_>>();
-        for id in neighbors {
-            if selected_ids.len() >= 80 {
-                break;
+        let frontier = selected_ids.clone();
+        'edges: for edge in store
+            .edges_iter()
+            .filter(|edge| frontier.contains(&edge.from) || frontier.contains(&edge.to))
+        {
+            for id in [&edge.from, &edge.to] {
+                if selected_ids.len() >= 80 {
+                    break 'edges;
+                }
+                if !selected_ids.contains(id) {
+                    selected_ids.insert(id.clone());
+                }
             }
-            selected_ids.insert(id);
         }
     }
-    let mut nodes = all_nodes
-        .into_iter()
+    let mut nodes = store
+        .nodes_iter()
         .filter(|node| selected_ids.contains(&node.id))
         .map(|node| GraphNodeView {
             focused: focus_paths.contains(node.label.as_str())
                 || focus_paths.contains(node.provenance.source_path.as_str()),
-            id: node.id,
+            id: node.id.clone(),
             kind: node.kind.label().to_string(),
-            label: node.label,
-            source_path: node.provenance.source_path,
+            label: node.label.clone(),
+            source_path: node.provenance.source_path.clone(),
         })
         .collect::<Vec<_>>();
     nodes.sort_by(|left, right| {
@@ -415,26 +426,26 @@ pub(crate) fn graph_state_at_path(
         .iter()
         .map(|node| node.id.as_str())
         .collect::<BTreeSet<_>>();
-    let mut edges = all_edges
-        .into_iter()
+    let mut edges = store
+        .edges_iter()
         .filter(|edge| {
             visible_ids.contains(edge.from.as_str()) && visible_ids.contains(edge.to.as_str())
         })
         .map(|edge| GraphEdgeView {
-            id: edge.id,
-            from: edge.from,
-            to: edge.to,
+            id: edge.id.clone(),
+            from: edge.from.clone(),
+            to: edge.to.clone(),
             kind: edge.kind.label().to_string(),
         })
         .collect::<Vec<_>>();
     edges.sort_by(|left, right| left.id.cmp(&right.id));
     edges.truncate(140);
-    Ok(GraphStateView {
+    GraphStateView {
         total_nodes,
         total_edges,
         nodes,
         edges,
-    })
+    }
 }
 
 pub(crate) fn empty_graph_state() -> GraphStateView {
@@ -444,6 +455,17 @@ pub(crate) fn empty_graph_state() -> GraphStateView {
         nodes: Vec::new(),
         edges: Vec::new(),
     }
+}
+
+pub(crate) fn graph_state_for_snapshot(
+    snapshot: &WorkspaceKnowledgeSnapshot,
+    focus_paths: &[String],
+) -> GraphStateView {
+    snapshot
+        .graph_store
+        .as_deref()
+        .map(|store| graph_state_from_store(store, focus_paths))
+        .unwrap_or_else(empty_graph_state)
 }
 
 pub(crate) fn context_checkpoint_path_for(workspace_root: &Path) -> PathBuf {
@@ -500,26 +522,94 @@ pub(crate) fn workspace_knowledge_cache_key(workspace_root: &Path) -> String {
         .to_string()
 }
 
-pub(crate) fn cached_rag_adapter_for(
+#[derive(Debug, Clone)]
+pub(crate) struct WorkspaceKnowledgeSnapshot {
+    pub(crate) adapter: FileRagAdapter,
+    pub(crate) graph_store: Option<Arc<FileGraphStore>>,
+    pub(crate) cache_hit: bool,
+}
+
+impl WorkspaceKnowledgeCacheEntry {
+    pub(crate) fn snapshot_if_current(
+        &self,
+        active_index_path: &Path,
+    ) -> Option<WorkspaceKnowledgeSnapshot> {
+        (self.validated_at.elapsed() <= WORKSPACE_KNOWLEDGE_CACHE_TTL
+            && self.adapter.path() == active_index_path)
+            .then(|| WorkspaceKnowledgeSnapshot {
+                adapter: self.adapter.clone(),
+                graph_store: self.graph_store.clone(),
+                cache_hit: true,
+            })
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static GRAPH_STORE_OPEN_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn open_graph_store_at_path(graph_path: &Path) -> Result<FileGraphStore, String> {
+    #[cfg(test)]
+    GRAPH_STORE_OPEN_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+    FileGraphStore::open(graph_path).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+pub(crate) fn reset_graph_store_open_count() {
+    GRAPH_STORE_OPEN_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn graph_store_open_count() -> u64 {
+    GRAPH_STORE_OPEN_COUNT.with(std::cell::Cell::get)
+}
+
+fn graph_store_for_adapter(
+    adapter: &FileRagAdapter,
+) -> Result<Option<Arc<FileGraphStore>>, String> {
+    let graph_path = knowledge_paths_for_rag_index(adapter.path()).graph_store;
+    graph_path
+        .exists()
+        .then(|| open_graph_store_at_path(&graph_path).map(Arc::new))
+        .transpose()
+}
+
+pub(crate) fn workspace_knowledge_cache_entry(
+    adapter: &FileRagAdapter,
+) -> Result<WorkspaceKnowledgeCacheEntry, String> {
+    Ok(WorkspaceKnowledgeCacheEntry {
+        adapter: adapter.clone(),
+        graph_store: graph_store_for_adapter(adapter)?,
+        validated_at: Instant::now(),
+    })
+}
+
+pub(crate) fn cached_workspace_knowledge_snapshot_for(
     state: &tauri::State<'_, AppState>,
     workspace_root: &Path,
-) -> Result<(FileRagAdapter, bool), String> {
+) -> Result<WorkspaceKnowledgeSnapshot, String> {
     let key = workspace_knowledge_cache_key(workspace_root);
     let active_index_path = rag_index_path_for(workspace_root);
-    if let Some(entry) = state
-        .workspace_knowledge_cache
-        .lock()
-        .map_err(|error| format!("workspace knowledge cache lock poisoned: {error}"))?
-        .get(&key)
-        .filter(|entry| {
-            entry.validated_at.elapsed() <= WORKSPACE_KNOWLEDGE_CACHE_TTL
-                && entry.adapter.path() == active_index_path
-        })
-        .cloned()
-    {
-        return Ok((entry.adapter, true));
+    let cached = {
+        let cache = state
+            .workspace_knowledge_cache
+            .lock()
+            .map_err(|error| format!("workspace knowledge cache lock poisoned: {error}"))?;
+        cache
+            .get(&key)
+            .and_then(|entry| entry.snapshot_if_current(&active_index_path))
+    };
+    if let Some(snapshot) = cached {
+        return Ok(snapshot);
     }
-    open_rag_adapter_for(workspace_root).map(|adapter| (adapter, false))
+    let adapter = open_rag_adapter_for(workspace_root)?;
+    let graph_store = graph_store_for_adapter(&adapter)?;
+    Ok(WorkspaceKnowledgeSnapshot {
+        adapter,
+        graph_store,
+        cache_hit: false,
+    })
 }
 
 pub(crate) fn cache_rag_adapter(
@@ -527,63 +617,36 @@ pub(crate) fn cache_rag_adapter(
     workspace_root: &Path,
     adapter: &FileRagAdapter,
 ) -> Result<(), String> {
-    let key = workspace_knowledge_cache_key(workspace_root);
-    let graph_path = knowledge_paths_for_rag_index(adapter.path()).graph_store;
-    let graph_store = graph_path
-        .exists()
-        .then(|| FileGraphStore::open(&graph_path).map_err(|error| error.to_string()))
-        .transpose()?;
-    let mut cache = state
-        .workspace_knowledge_cache
-        .lock()
-        .map_err(|error| format!("workspace knowledge cache lock poisoned: {error}"))?;
-    cache.retain(|_, entry| entry.validated_at.elapsed() <= WORKSPACE_KNOWLEDGE_CACHE_TTL);
-    if !cache.contains_key(&key) && cache.len() >= WORKSPACE_KNOWLEDGE_CACHE_MAX_ENTRIES {
-        let oldest = cache
-            .iter()
-            .max_by_key(|(_, entry)| entry.validated_at.elapsed())
-            .map(|(key, _)| key.clone());
-        if let Some(oldest) = oldest {
-            cache.remove(&oldest);
-        }
-    }
-    cache.insert(
-        key,
-        WorkspaceKnowledgeCacheEntry {
-            adapter: adapter.clone(),
-            graph_store,
-            validated_at: Instant::now(),
-        },
-    );
-    Ok(())
+    cache_rag_adapter_in(&state.workspace_knowledge_cache, workspace_root, adapter).map(|_| ())
 }
 
-pub(crate) fn cached_graph_store_for_adapter(
-    state: &tauri::State<'_, AppState>,
+pub(crate) fn cache_rag_adapter_in(
+    cache: &Mutex<BTreeMap<String, WorkspaceKnowledgeCacheEntry>>,
     workspace_root: &Path,
     adapter: &FileRagAdapter,
-) -> Result<Option<FileGraphStore>, String> {
+) -> Result<bool, String> {
     let key = workspace_knowledge_cache_key(workspace_root);
-    if let Some(graph_store) = state
-        .workspace_knowledge_cache
-        .lock()
-        .map_err(|error| format!("workspace knowledge cache lock poisoned: {error}"))?
-        .get(&key)
-        .filter(|entry| {
-            entry.validated_at.elapsed() <= WORKSPACE_KNOWLEDGE_CACHE_TTL
-                && entry.adapter.path() == adapter.path()
-        })
-        .and_then(|entry| entry.graph_store.clone())
-    {
-        return Ok(Some(graph_store));
-    }
-    let graph_path = knowledge_paths_for_rag_index(adapter.path()).graph_store;
-    if !graph_path.exists() {
-        return Ok(None);
-    }
-    FileGraphStore::open(graph_path)
-        .map(Some)
-        .map_err(|error| error.to_string())
+    with_workspace_generation_read(workspace_root, || {
+        if adapter.path() != rag_index_path_for(workspace_root) {
+            return Ok(false);
+        }
+        let entry = workspace_knowledge_cache_entry(adapter)?;
+        let mut cache = cache
+            .lock()
+            .map_err(|error| format!("workspace knowledge cache lock poisoned: {error}"))?;
+        cache.retain(|_, entry| entry.validated_at.elapsed() <= WORKSPACE_KNOWLEDGE_CACHE_TTL);
+        if !cache.contains_key(&key) && cache.len() >= WORKSPACE_KNOWLEDGE_CACHE_MAX_ENTRIES {
+            let oldest = cache
+                .iter()
+                .max_by_key(|(_, entry)| entry.validated_at.elapsed())
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(key, entry);
+        Ok(true)
+    })
 }
 
 pub(crate) fn invalidate_workspace_knowledge_cache(

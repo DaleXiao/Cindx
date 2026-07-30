@@ -4,16 +4,11 @@ use crate::json_wire::{
     parse_number_array, split_top_level_objects,
 };
 use crate::request_tool_calls::{assistant_tool_calls_json, tool_call_ids_from_json};
+use crate::request_vision::{image_data_url, model_supports_vision_content};
 use crate::response_parser::{parse_provider_error, tool_function_name};
 use agent_core::{Message, MessageRole, Metadata, ToolSpec};
-use base64::Engine;
-use std::collections::{BTreeSet, HashSet};
-use std::fs;
-use std::path::Path;
-use std::sync::OnceLock;
-
-const PROVIDER_CATALOG_JSON: &str = include_str!("../providerCatalog.json");
-static CATALOG_MODEL_MODALITIES: OnceLock<(HashSet<String>, HashSet<String>)> = OnceLock::new();
+use std::collections::BTreeSet;
+use std::sync::Arc;
 
 pub fn build_embedding_request_json(
     model: &str,
@@ -118,6 +113,26 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_and_vision(
     max_output_tokens: Option<u64>,
     supports_vision: bool,
 ) -> Result<String, ModelError> {
+    build_chat_request_json_with_tools_output_limit_vision_and_images(
+        model,
+        messages,
+        stream,
+        tools,
+        max_output_tokens,
+        supports_vision,
+        &mut image_data_url,
+    )
+}
+
+pub(super) fn build_chat_request_json_with_tools_output_limit_vision_and_images(
+    model: &str,
+    messages: &[Message],
+    stream: bool,
+    tools: &[ToolSpec],
+    max_output_tokens: Option<u64>,
+    supports_vision: bool,
+    image_resolver: &mut dyn FnMut(&str) -> Option<Arc<str>>,
+) -> Result<String, ModelError> {
     let mut declared_tool_calls = BTreeSet::new();
     let messages_json = messages
         .iter()
@@ -155,7 +170,7 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_and_vision(
             _ => Some(format!(
                 "{{\"role\":\"{}\",\"content\":{}}}",
                 json_escape(message_role_to_str(&message.role)),
-                message_content_json(supports_vision, message)
+                message_content_json(supports_vision, message, image_resolver)
             )),
         })
         .collect::<Vec<_>>();
@@ -186,7 +201,11 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_and_vision(
     ))
 }
 
-fn message_content_json(supports_vision: bool, message: &Message) -> String {
+fn message_content_json(
+    supports_vision: bool,
+    message: &Message,
+    image_resolver: &mut dyn FnMut(&str) -> Option<Arc<str>>,
+) -> String {
     let Some(paths) = message.metadata.get("image_paths") else {
         return format!("\"{}\"", json_escape(&message.content));
     };
@@ -199,7 +218,7 @@ fn message_content_json(supports_vision: bool, message: &Message) -> String {
             ))
         );
     }
-    let images = paths.lines().filter_map(image_data_url).collect::<Vec<_>>();
+    let images = paths.lines().filter_map(image_resolver).collect::<Vec<_>>();
     if images.is_empty() {
         return format!("\"{}\"", json_escape(&message.content));
     }
@@ -210,98 +229,10 @@ fn message_content_json(supports_vision: bool, message: &Message) -> String {
     parts.extend(images.into_iter().map(|data_url| {
         format!(
             "{{\"type\":\"image_url\",\"image_url\":{{\"url\":\"{}\"}}}}",
-            json_escape(&data_url)
+            json_escape(data_url.as_ref())
         )
     }));
     format!("[{}]", parts.join(","))
-}
-
-pub fn model_supports_vision_content(model: &str) -> bool {
-    let model = model.trim().to_ascii_lowercase().replace('_', "-");
-    if let Some(supports_vision) = catalog_model_supports_vision(&model) {
-        return supports_vision;
-    }
-    model.contains("vision")
-        || model.contains("-vl")
-        || model.contains("omni")
-        || model.contains("pixtral")
-        || model.contains("llava")
-        || model.contains("glm-4v")
-        || model.starts_with("gpt-4o")
-        || model.starts_with("gpt-4.1")
-        || model.starts_with("gpt-5")
-        || model.starts_with("gemini")
-        || model.starts_with("claude-3")
-        || model.starts_with("claude-4")
-}
-
-fn catalog_model_supports_vision(model: &str) -> Option<bool> {
-    let (chat, multimodal) = CATALOG_MODEL_MODALITIES.get_or_init(|| {
-        let catalog: serde_json::Value = serde_json::from_str(PROVIDER_CATALOG_JSON)
-            .expect("embedded provider catalog must be valid JSON");
-        let mut chat = HashSet::new();
-        let mut multimodal = HashSet::new();
-        for provider in catalog["providers"].as_array().into_iter().flatten() {
-            for candidate in provider["models"].as_array().into_iter().flatten() {
-                let Some(id) = candidate["id"].as_str() else {
-                    continue;
-                };
-                let id = id.trim().to_ascii_lowercase().replace('_', "-");
-                let modalities = candidate["modalities"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(serde_json::Value::as_str)
-                    .collect::<Vec<_>>();
-                if modalities.contains(&"chat") {
-                    chat.insert(id.clone());
-                }
-                if modalities.contains(&"imageInput") {
-                    multimodal.insert(id);
-                }
-            }
-        }
-        (chat, multimodal)
-    });
-    if multimodal.contains(model) {
-        Some(true)
-    } else if chat.contains(model) {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-fn image_data_url(value: &str) -> Option<String> {
-    let path = Path::new(value.trim());
-    if !path.is_absolute()
-        || !path
-            .components()
-            .any(|component| component.as_os_str() == ".cindx")
-    {
-        return None;
-    }
-    let metadata = fs::metadata(path).ok()?;
-    if !metadata.is_file() || metadata.len() > 24 * 1024 * 1024 {
-        return None;
-    }
-    let mime_type = match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "avif" => "image/avif",
-        "gif" => "image/gif",
-        "jpeg" | "jpg" => "image/jpeg",
-        "png" => "image/png",
-        "webp" => "image/webp",
-        _ => return None,
-    };
-    let bytes = fs::read(path).ok()?;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-    Some(format!("data:{mime_type};base64,{encoded}"))
 }
 
 fn message_role_to_str(role: &MessageRole) -> &'static str {

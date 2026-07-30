@@ -1,4 +1,5 @@
 use agent_core::{Message, Metadata, ModelRole, ToolSpec};
+use bytes::Bytes;
 use futures_util::StreamExt;
 use reqwest::{header, redirect, Client, RequestBuilder, Response, StatusCode};
 use std::future::Future;
@@ -11,20 +12,26 @@ mod dashscope_realtime_provider;
 mod error;
 mod image_provider;
 mod json_wire;
+mod prepared_request;
 mod provider_validation;
 mod realtime_provider;
 mod redirect_policy;
 mod request_builder;
 mod request_tool_calls;
+mod request_vision;
 mod response_parser;
 mod streaming_response;
 mod streaming_wire;
 mod usage;
 
 use redirect_policy::api_key_safe_redirect_policy;
+use request_builder::build_chat_request_json_with_tools_output_limit_vision_and_images;
 #[cfg(test)]
-use request_builder::build_chat_request_json_with_tools_and_output_limit;
-use request_builder::build_chat_request_json_with_tools_output_limit_and_vision;
+use request_builder::{
+    build_chat_request_json_with_tools_and_output_limit,
+    build_chat_request_json_with_tools_output_limit_and_vision,
+};
+use request_vision::ImageDataUrlCache;
 use streaming_response::consume_streaming_response;
 #[cfg(test)]
 use streaming_response::{consume_streaming_body, finish_streaming_response};
@@ -36,14 +43,16 @@ pub use error::{classify_provider_failure, ProviderFailureClass};
 pub use image_provider::{
     build_image_generation_request_json, OpenAiCompatibleImageConfig, OpenAiCompatibleImageProvider,
 };
+pub use prepared_request::PreparedStreamingModelRequest;
 pub use provider_validation::parse_model_list_response;
 pub use realtime_provider::{
     build_realtime_session_json, OpenAiCompatibleRealtimeConfig, OpenAiCompatibleRealtimeProvider,
 };
 pub use request_builder::{
     build_chat_request_json, build_chat_request_json_with_tools, build_embedding_request_json,
-    model_supports_vision_content, parse_embedding_response,
+    parse_embedding_response,
 };
+pub use request_vision::model_supports_vision_content;
 pub use response_parser::{
     parse_chat_response, parse_model_response, parse_provider_error, parse_tool_calls,
     tool_arguments_to_key_value_input, tool_function_name,
@@ -272,6 +281,25 @@ pub trait ModelProvider {
 }
 
 pub trait StreamingModelProvider: Send + Sync {
+    fn prepare_streaming_request(
+        &self,
+        request: &ModelRequest,
+    ) -> Result<PreparedStreamingModelRequest, ModelError> {
+        Ok(PreparedStreamingModelRequest::deferred(request.clone()))
+    }
+
+    fn complete_prepared_streaming_cancellable(
+        &self,
+        request: &PreparedStreamingModelRequest,
+        on_delta: &mut dyn FnMut(&str),
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<ModelResponse, ModelError> {
+        let request = request
+            .deferred_request()
+            .ok_or_else(|| ModelError::new("provider received an incompatible prepared request"))?;
+        self.complete_streaming_cancellable(request.clone(), on_delta, should_cancel)
+    }
+
     fn complete_streaming_cancellable(
         &self,
         request: ModelRequest,
@@ -321,6 +349,7 @@ impl OpenAiCompatibleConfig {
 
 pub struct OpenAiCompatibleProvider {
     config: OpenAiCompatibleConfig,
+    image_cache: ImageDataUrlCache,
 }
 
 fn streaming_hard_timeout_seconds(idle_timeout_seconds: u64) -> u64 {
@@ -386,7 +415,7 @@ fn run_http<T>(future: impl Future<Output = Result<T, ModelError>>) -> Result<T,
 fn http_request(
     url: &str,
     api_key: &str,
-    request_body: Option<&str>,
+    request_body: Option<Bytes>,
     hard_timeout: Duration,
     streaming: bool,
 ) -> Result<RequestBuilder, ModelError> {
@@ -400,7 +429,7 @@ fn http_request(
         client
             .post(url)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(request_body.to_string())
+            .body(request_body)
     } else {
         client.get(url)
     };
@@ -542,6 +571,24 @@ fn execute_http_cancellable(
     max_response_bytes: usize,
     should_cancel: &mut impl FnMut() -> bool,
 ) -> Result<HttpOutput, ModelError> {
+    execute_http_bytes_cancellable(
+        url,
+        api_key,
+        request_body.map(|body| Bytes::copy_from_slice(body.as_bytes())),
+        timeout_seconds,
+        max_response_bytes,
+        should_cancel,
+    )
+}
+
+fn execute_http_bytes_cancellable(
+    url: &str,
+    api_key: &str,
+    request_body: Option<Bytes>,
+    timeout_seconds: u64,
+    max_response_bytes: usize,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<HttpOutput, ModelError> {
     let timeout = Duration::from_secs(timeout_seconds.max(1));
     let deadline = Instant::now() + timeout;
     let request = http_request(url, api_key, request_body, timeout, false)?;
@@ -629,7 +676,10 @@ fn marker_prefix_suffix_len(value: &str, marker: &str) -> usize {
 
 impl OpenAiCompatibleProvider {
     pub fn new(config: OpenAiCompatibleConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            image_cache: ImageDataUrlCache::new(),
+        }
     }
 
     pub fn complete_streaming(
@@ -646,58 +696,9 @@ impl OpenAiCompatibleProvider {
         mut on_delta: impl FnMut(&str),
         mut should_cancel: impl FnMut() -> bool,
     ) -> Result<ModelResponse, ModelError> {
-        if !self.config.is_ready() {
-            return Err(ModelError::new("provider config is incomplete"));
-        }
-
-        let estimated_prompt_tokens = estimate_request_tokens(&request.messages, &request.tools);
-        let max_output_tokens = request
-            .metadata
-            .get("max_output_tokens")
-            .and_then(|value| value.parse::<u64>().ok())
-            .filter(|value| *value > 0);
-        let request_body = build_chat_request_json_with_tools_output_limit_and_vision(
-            &self.config.model,
-            &request.messages,
-            true,
-            &request.tools,
-            max_output_tokens,
-            self.config.supports_vision_content(),
-        )?;
-        let idle_timeout = Duration::from_secs(self.config.timeout_seconds.max(1));
-        let hard_timeout =
-            Duration::from_secs(streaming_hard_timeout_seconds(self.config.timeout_seconds));
-        let deadline = Instant::now() + hard_timeout;
-        let http_request = http_request(
-            &self.config.chat_completions_url(),
-            &self.config.api_key,
-            Some(&request_body),
-            hard_timeout,
-            true,
-        )?;
-        let mut response = run_http(async {
-            let response = await_http(
-                http_request.send(),
-                deadline,
-                hard_timeout,
-                "model stream request",
-                &mut should_cancel,
-            )
-            .await?;
-            consume_streaming_response(
-                response,
-                &self.config.model,
-                &self.config.base_url,
-                idle_timeout,
-                hard_timeout,
-                deadline,
-                &mut on_delta,
-                &mut should_cancel,
-            )
-            .await
-        })?;
-        normalize_model_usage(&mut response, estimated_prompt_tokens);
-        Ok(response)
+        let prepared = self.prepare_streaming_model_request(&request)?;
+        drop(request);
+        self.complete_prepared_streaming_model_request(&prepared, &mut on_delta, &mut should_cancel)
     }
 
     pub fn complete_once(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
@@ -711,13 +712,14 @@ impl OpenAiCompatibleProvider {
             .get("max_output_tokens")
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| *value > 0);
-        let request_body = build_chat_request_json_with_tools_output_limit_and_vision(
+        let request_body = build_chat_request_json_with_tools_output_limit_vision_and_images(
             &self.config.model,
             &request.messages,
             false,
             &request.tools,
             max_output_tokens,
             self.config.supports_vision_content(),
+            &mut |path| self.image_cache.resolve(path),
         )?;
         let output = execute_http(
             &self.config.chat_completions_url(),
@@ -806,6 +808,22 @@ impl OpenAiCompatibleProvider {
 }
 
 impl StreamingModelProvider for OpenAiCompatibleProvider {
+    fn prepare_streaming_request(
+        &self,
+        request: &ModelRequest,
+    ) -> Result<PreparedStreamingModelRequest, ModelError> {
+        self.prepare_streaming_model_request(request)
+    }
+
+    fn complete_prepared_streaming_cancellable(
+        &self,
+        request: &PreparedStreamingModelRequest,
+        on_delta: &mut dyn FnMut(&str),
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<ModelResponse, ModelError> {
+        self.complete_prepared_streaming_model_request(request, on_delta, should_cancel)
+    }
+
     fn complete_streaming_cancellable(
         &self,
         request: ModelRequest,
@@ -1081,10 +1099,11 @@ mod tests {
     #[test]
     fn pooled_http_request_keeps_credentials_in_headers_and_bodies_in_memory() {
         let request_text = format!("{{\"prompt\":\"{}\"}}", "x".repeat(2_000_000));
+        let request_len = request_text.len();
         let request = http_request(
             "https://example.test/v1/chat/completions",
             "test-secret",
-            Some(&request_text),
+            Some(Bytes::from(request_text)),
             Duration::from_secs(10),
             false,
         )
@@ -1109,7 +1128,7 @@ mod tests {
                 .and_then(|body| body.as_bytes())
                 .expect("request body should remain in memory")
                 .len(),
-            request_text.len()
+            request_len
         );
         assert!(std::ptr::eq(
             http_client().expect("shared client should exist"),

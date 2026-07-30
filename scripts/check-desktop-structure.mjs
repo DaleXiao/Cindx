@@ -649,11 +649,13 @@ const modelProviderModuleBudgets = new Map([
   ["image_provider.rs", 430],
   ["json_wire.rs", 320],
   ["lib.rs", 900],
+  ["prepared_request.rs", 140],
   ["provider_validation.rs", 220],
   ["realtime_provider.rs", 190],
   ["redirect_policy.rs", 100],
   ["request_builder.rs", 340],
   ["request_tool_calls.rs", 80],
+  ["request_vision.rs", 400],
   ["response_parser.rs", 380],
   ["streaming_response.rs", 380],
   ["streaming_wire.rs", 160],
@@ -1652,6 +1654,12 @@ assert(
 );
 assert(
   /\.app-shell\[data-active-view="settings"\] \{[\s\S]*?--sidebar-layout-width: 0px;[\s\S]*?grid-template-columns: 0 minmax\(0, 1fr\) 0;[\s\S]*?transition: grid-template-columns 220ms var\(--ease-out-quart\);/.test(styles) &&
+    appSource.includes('<div className="settings-transition-backdrop" aria-hidden="true" />') &&
+    /\.settings-transition-backdrop \{[\s\S]*?position: absolute;[\s\S]*?z-index: 25;[\s\S]*?inset: 0;[\s\S]*?pointer-events: none;[\s\S]*?background: var\(--bg\);[\s\S]*?opacity: 0;[\s\S]*?transition: opacity 220ms var\(--ease-out-quart\);/.test(styles) &&
+    /\.app-shell\[data-active-view="settings"\] \.settings-transition-backdrop \{[\s\S]*?opacity: 1;[\s\S]*?transition: none;/.test(styles) &&
+    /\.workspace\[data-view="settings"\] \{[\s\S]*?z-index: 30;/.test(styles) &&
+    /@media \(max-width: 1180px\)[\s\S]*?\.inspector\[data-open="true"\] \{[\s\S]*?z-index: 20;/.test(styles) &&
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.settings-transition-backdrop \{[\s\S]*?transition: opacity 0s 34ms;/.test(styles) &&
     /\.app-shell\[data-active-view="settings"\] \.window-toolbar,\s*\.app-shell\[data-active-view="schedule"\] \.window-toolbar \{[\s\S]*?background: transparent;/.test(styles) &&
     /\.app-shell\[data-active-view="settings"\] \.window-workspace-header,\s*\.app-shell\[data-active-view="schedule"\] \.window-workspace-header \{[\s\S]*?background: var\(--bg\);/.test(styles) &&
     /\.settings-view \{[\s\S]*?overflow-y: auto;[\s\S]*?scrollbar-gutter: stable;/.test(
@@ -3042,7 +3050,11 @@ assert(
 );
 assert(
   rustLib.includes("WORKSPACE_KNOWLEDGE_CACHE_TTL") &&
-    rustLib.includes("cached_rag_adapter_for") &&
+    rustLib.includes("cached_workspace_knowledge_snapshot_for") &&
+    rustLib.includes("graph_store: Option<Arc<FileGraphStore>>") &&
+    rustLib.includes("entry.snapshot_if_current(&active_index_path)") &&
+    rustLib.includes("snapshot.graph_store.as_deref()") &&
+    rustLib.includes("graph_state_for_snapshot(&snapshot") &&
     rustLib.includes("invalidate_workspace_knowledge_cache") &&
     rustLib.includes('timed_retrieval_channel("graph_walk"') &&
     rustLib.includes("let mut channels = std::thread::scope") &&

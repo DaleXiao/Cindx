@@ -1,9 +1,12 @@
 use crate::{
+    task_state_lineage::{
+        is_durable_message, is_transient_run_context, text_fingerprint, AgentTaskStateLineage,
+        AgentTranscriptFingerprintAccumulator,
+    },
     AgentLoopState, AgentTaskContract, InteractionSurface, PendingInteractionVerification,
 };
-use agent_core::{Message, MessageRole, TaskId};
+use agent_core::{Message, TaskId};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fmt};
 
 pub const AGENT_TASK_STATE_SCHEMA: &str = "cindx.agent.task-state.v1";
@@ -85,13 +88,19 @@ impl std::error::Error for AgentTaskStateError {}
 
 impl AgentTaskStateSnapshot {
     pub fn capture(state: &AgentLoopState) -> Self {
-        let durable_messages = durable_messages(&state.messages);
+        let transcript =
+            AgentTranscriptFingerprintAccumulator::from_messages(state.messages.iter());
+        let lineage = AgentTaskStateLineage::from_projection(&state.user_prompt, &transcript);
+        Self::capture_with_lineage(state, lineage)
+    }
+
+    pub fn capture_with_lineage(state: &AgentLoopState, lineage: AgentTaskStateLineage) -> Self {
         Self {
             schema: AGENT_TASK_STATE_SCHEMA.to_string(),
             task_id: state.task_id.0.clone(),
-            user_prompt_fingerprint: text_fingerprint(&state.user_prompt),
-            transcript_fingerprint: transcript_fingerprint(&durable_messages),
-            durable_message_count: durable_messages.len(),
+            user_prompt_fingerprint: lineage.user_prompt_fingerprint,
+            transcript_fingerprint: lineage.transcript_fingerprint,
+            durable_message_count: lineage.durable_message_count,
             turn: state.turn,
             max_turns: state.max_turns,
             failed_tool_signatures: state.failed_tool_signatures.clone(),
@@ -198,7 +207,9 @@ impl AgentTaskStateSnapshot {
             return None;
         }
         if self.durable_message_count == 0 {
-            return (self.transcript_fingerprint == transcript_fingerprint(&[])).then(Vec::new);
+            return (self.transcript_fingerprint
+                == AgentTranscriptFingerprintAccumulator::default().fingerprint())
+            .then(Vec::new);
         }
 
         // Context compaction replaces an older durable prefix with a transient
@@ -212,7 +223,11 @@ impl AgentTaskStateSnapshot {
             .collect::<Vec<_>>();
         let durable_projection = durable_messages(&projection);
         (durable_projection.len() == self.durable_message_count
-            && self.transcript_fingerprint == transcript_fingerprint(&durable_projection))
+            && self.transcript_fingerprint
+                == AgentTranscriptFingerprintAccumulator::from_messages(
+                    durable_projection.iter().copied(),
+                )
+                .fingerprint())
         .then_some(projection)
     }
 
@@ -258,71 +273,6 @@ fn durable_messages(messages: &[Message]) -> Vec<&Message> {
         .collect()
 }
 
-fn is_durable_message(message: &Message) -> bool {
-    message.metadata.get("kind").map(String::as_str) != Some("recovery_observation")
-        && message.metadata.get("model").map(String::as_str) != Some("run-control")
-        && !is_transient_run_context(message)
-}
-
-fn is_transient_run_context(message: &Message) -> bool {
-    if !matches!(message.role, MessageRole::System)
-        || message.metadata.get("internal").map(String::as_str) != Some("true")
-    {
-        return false;
-    }
-    if message.metadata.contains_key("collaboration_stage") {
-        return true;
-    }
-    matches!(
-        message.metadata.get("kind").map(String::as_str),
-        Some(
-            "image_generation_policy"
-                | "workflow_execution_contract"
-                | "agent_evidence_packet"
-                | "context_restore_pack"
-                | "artifact_manifest"
-                | "knowledge_context"
-                | "project_memory"
-                | "skill_context"
-                | "single_model_policy_guidance"
-        )
-    )
-}
-
-fn transcript_fingerprint(messages: &[&Message]) -> String {
-    let mut hasher = Sha256::new();
-    for message in messages {
-        hasher.update(message_role_label(&message.role).as_bytes());
-        hasher.update([0]);
-        hasher.update(message.content.as_bytes());
-        hasher.update([0]);
-        for key in ["tool_call_id", "tool_call_ids", "kind", "status"] {
-            if let Some(value) = message.metadata.get(key) {
-                hasher.update(key.as_bytes());
-                hasher.update(*b"=");
-                hasher.update(value.as_bytes());
-                hasher.update([0]);
-            }
-        }
-        hasher.update(*b"\n");
-    }
-    format!("{:x}", hasher.finalize())
-}
-
-fn text_fingerprint(text: &str) -> String {
-    format!("{:x}", Sha256::digest(text.as_bytes()))
-}
-
-fn message_role_label(role: &MessageRole) -> &'static str {
-    match role {
-        MessageRole::System => "system",
-        MessageRole::User => "user",
-        MessageRole::Assistant => "assistant",
-        MessageRole::Tool => "tool",
-        MessageRole::Reviewer => "reviewer",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,7 +280,7 @@ mod tests {
         record_tool_outcome_with_risk, start_agent_loop, AgentRuntimeConfig,
         WorkspaceVerificationPolicy,
     };
-    use agent_core::{Metadata, TaskId, ToolOutcomeStatus, ToolRisk};
+    use agent_core::{MessageRole, Metadata, TaskId, ToolOutcomeStatus, ToolRisk};
 
     #[test]
     fn round_trips_control_state_against_the_durable_transcript() {

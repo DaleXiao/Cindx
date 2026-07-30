@@ -41,6 +41,7 @@
     "performance": [
       "performance-comparator-contract",
       "session-projection-scaling",
+      "agent-runtime-snapshot-scaling",
       "context-governor-scaling",
       "conductor-health-scaling",
       "rag-search-scaling"
@@ -237,6 +238,20 @@
         "long_history_context_governor_scaling_diagnostic",
         "--",
         "--ignored",
+        "--nocapture"
+      ]
+    },
+    {
+      "id": "agent-runtime-snapshot-scaling",
+      "category": "performance",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--locked",
+        "incremental_runtime_snapshot_visits_only_appended_messages",
+        "--",
         "--nocapture"
       ]
     },
