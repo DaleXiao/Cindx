@@ -1,8 +1,7 @@
 import type { ProviderId } from "./providerProfiles";
+import type { AgentEffort, AgentRunBudgets } from "./agentRunBudgetModel";
 
 export type { ProviderId } from "./providerProfiles";
-
-export type AgentEffort = "fast" | "auto" | "pro";
 
 export type RuntimeStatus = {
   appVersion: string;
@@ -10,6 +9,7 @@ export type RuntimeStatus = {
   workspaceRoot: string;
   orchestrationModes: string[];
   registeredTools: string[];
+  agentRunBudgets: AgentRunBudgets | null;
 };
 
 export type PersonalizationConfig = {

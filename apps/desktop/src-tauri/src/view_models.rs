@@ -8,6 +8,23 @@ pub(crate) struct RuntimeStatus {
     pub(crate) workspace_root: String,
     pub(crate) orchestration_modes: Vec<String>,
     pub(crate) registered_tools: Vec<String>,
+    pub(crate) agent_run_budgets: AgentRunBudgetsView,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AgentRunBudgetView {
+    pub(crate) max_duration_ms: u64,
+    pub(crate) max_model_calls: usize,
+    pub(crate) max_tool_calls: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AgentRunBudgetsView {
+    pub(crate) fast: AgentRunBudgetView,
+    pub(crate) auto: AgentRunBudgetView,
+    pub(crate) pro: AgentRunBudgetView,
 }
 
 #[derive(Debug, Clone, Serialize)]

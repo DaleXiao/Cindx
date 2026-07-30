@@ -288,4 +288,25 @@ mod tests {
             assert!(budget.finalizer_time_reserve() >= budget.model_call_timeout);
         }
     }
+
+    #[test]
+    fn effort_profiles_preserve_the_published_run_limits() {
+        for (effort, expected) in [
+            ("fast", (5 * 60, 6, 12, 12, 24)),
+            ("auto", (45 * 60, 18, 72, 36, 144)),
+            ("pro", (4 * 60 * 60, 48, 384, 96, 768)),
+        ] {
+            let budget = RunBudget::for_effort(effort);
+            assert_eq!(
+                (
+                    budget.max_duration.as_secs(),
+                    budget.initial_model_calls,
+                    budget.max_model_calls,
+                    budget.initial_tool_calls,
+                    budget.max_tool_calls,
+                ),
+                expected
+            );
+        }
+    }
 }

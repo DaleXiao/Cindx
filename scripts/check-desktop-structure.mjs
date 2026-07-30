@@ -251,7 +251,10 @@ const styles = [
 ].join("\n");
 const tauriBridgeImplementation = read("apps/desktop/src/tauri.ts");
 const tauriTypesSource = read("apps/desktop/src/tauriTypes.ts");
-const tauriBridge = `${tauriBridgeImplementation}\n${tauriTypesSource}`;
+const agentRunBudgetModelSource = read(
+  "apps/desktop/src/agentRunBudgetModel.ts"
+);
+const tauriBridge = `${tauriBridgeImplementation}\n${tauriTypesSource}\n${agentRunBudgetModelSource}`;
 const desktopControllerEntries = [
   "useAppWorkspaceProjection.ts",
   "useComposerAttachments.ts",
@@ -2881,6 +2884,19 @@ assert(
     rustLib.includes('"agent_effort".to_string()') &&
     rustLib.includes("agent_effort_from_active_events"),
   "Composer effort must persist per session, default independently, and survive retries and traces"
+);
+assert(
+  tauriTypesSource.includes("agentRunBudgets: AgentRunBudgets | null") &&
+    agentRunBudgetModelSource.includes("budgets?.[effort]") &&
+    appSource.includes(
+      "optimisticRunBudgetPatch(runtime?.agentRunBudgets, agentEffort)"
+    ) &&
+    !appShellModelSource.includes("runBudgetForEffort") &&
+    rustLib.includes("agent_run_budgets: AgentRunBudgetsView") &&
+    rustLib.includes('fast: agent_run_budget_view("fast")') &&
+    rustLib.includes('auto: agent_run_budget_view("auto")') &&
+    rustLib.includes('pro: agent_run_budget_view("pro")'),
+  "Agent run budgets must flow from the Rust runtime catalog into optimistic UI state"
 );
 assert(
   tauriBridge.includes("function currentAgentTimeContext()") &&

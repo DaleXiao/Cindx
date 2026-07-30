@@ -1167,5 +1167,19 @@ pub(crate) fn runtime_status_for_root(root: PathBuf) -> RuntimeStatus {
             "computer.key".to_string(),
             "computer.scroll".to_string(),
         ],
+        agent_run_budgets: AgentRunBudgetsView {
+            fast: agent_run_budget_view("fast"),
+            auto: agent_run_budget_view("auto"),
+            pro: agent_run_budget_view("pro"),
+        },
+    }
+}
+
+fn agent_run_budget_view(effort: &str) -> AgentRunBudgetView {
+    let budget = RunBudget::for_effort(effort);
+    AgentRunBudgetView {
+        max_duration_ms: u64::try_from(budget.max_duration.as_millis()).unwrap_or(u64::MAX),
+        max_model_calls: budget.max_model_calls,
+        max_tool_calls: budget.max_tool_calls,
     }
 }
