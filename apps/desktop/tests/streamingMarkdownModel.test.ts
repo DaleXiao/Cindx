@@ -383,6 +383,14 @@ test("keeps rope string work linear across an eight MiB unbroken line", () => {
   );
   assert.ok(model.parseWork <= sourceLength * 3);
   assert.ok(model.joinWork <= sourceLength * 4);
+  console.log(
+    JSON.stringify({
+      schema: "cindx.frontend-streaming-markdown-scaling.v1",
+      source_length: sourceLength,
+      parse_work: model.parseWork,
+      join_work: model.joinWork
+    })
+  );
 });
 
 test("bounds settled metadata before continuing with geometric tail checkpoints", () => {

@@ -53,6 +53,8 @@ const env = {
     .join(path.delimiter)
 };
 const outputTailLimit = 16 * 1024;
+const diagnosticLineLimit = 64 * 1024;
+const diagnosticRecordLimit = 128;
 
 function appendTail(current, chunk) {
   const next = `${current}${chunk}`;
@@ -79,13 +81,21 @@ function validateReport(gate) {
   });
 }
 
+function validateRequiredOutput(gate, observed) {
+  return (gate.required_output ?? []).flatMap((expected) =>
+    observed.has(expected) ? [] : [`required output missing: ${expected}`]
+  );
+}
+
 function diagnosticRecords(output) {
   return output.split(/\r?\n/).flatMap((line) => {
     const objectStart = line.indexOf("{");
     if (objectStart < 0) return [];
     try {
       const value = JSON.parse(line.slice(objectStart));
-      return typeof value?.schema === "string" && value.schema.includes("diagnostic")
+      const schema = typeof value?.schema === "string" ? value.schema : "";
+      return schema.startsWith("cindx.") &&
+        (schema.includes("diagnostic") || schema.includes("scaling"))
         ? [value]
         : [];
     } catch {
@@ -94,12 +104,65 @@ function diagnosticRecords(output) {
   });
 }
 
+function createRequiredOutputObserver(expectedValues, observed) {
+  const overlapLimit = Math.max(0, ...expectedValues.map((value) => value.length - 1));
+  let carry = "";
+  return (chunk) => {
+    const output = `${carry}${chunk}`;
+    for (const expected of expectedValues) {
+      if (output.includes(expected)) observed.add(expected);
+    }
+    carry = overlapLimit > 0 ? output.slice(-overlapLimit) : "";
+  };
+}
+
+function createDiagnosticCollector() {
+  let carry = "";
+  const records = [];
+  const collect = (line) => {
+    records.push(...diagnosticRecords(line));
+    if (records.length > diagnosticRecordLimit) {
+      records.splice(0, records.length - diagnosticRecordLimit);
+    }
+  };
+  return {
+    append(chunk) {
+      const lines = `${carry}${chunk}`.split(/\r?\n/);
+      carry = lines.pop() ?? "";
+      for (const line of lines) collect(line);
+      if (carry.length > diagnosticLineLimit) carry = carry.slice(-diagnosticLineLimit);
+    },
+    finish() {
+      if (carry) collect(carry);
+      carry = "";
+      return records;
+    }
+  };
+}
+
 function runGate(gate) {
   return new Promise((resolve) => {
     const [executable, ...commandArgs] = gate.command;
     const startedAt = Date.now();
     let stdoutTail = "";
     let stderrTail = "";
+    const requiredOutputObserved = new Set();
+    const observeStdoutProof = createRequiredOutputObserver(
+      gate.required_output ?? [],
+      requiredOutputObserved
+    );
+    const observeStderrProof = createRequiredOutputObserver(
+      gate.required_output ?? [],
+      requiredOutputObserved
+    );
+    const stdoutDiagnostics = createDiagnosticCollector();
+    const stderrDiagnostics = createDiagnosticCollector();
+    let finalizedDiagnostics;
+    const finishDiagnostics = () =>
+      (finalizedDiagnostics ??= [
+        ...stdoutDiagnostics.finish(),
+        ...stderrDiagnostics.finish()
+      ]);
     process.stdout.write(`\n[quality-gate] ${gate.id}\n`);
     const child = spawn(executable, commandArgs, {
       cwd: path.resolve(repoRoot, gate.cwd ?? "."),
@@ -109,10 +172,14 @@ function runGate(gate) {
     child.stdout.on("data", (chunk) => {
       process.stdout.write(chunk);
       stdoutTail = appendTail(stdoutTail, chunk);
+      observeStdoutProof(chunk);
+      stdoutDiagnostics.append(chunk);
     });
     child.stderr.on("data", (chunk) => {
       process.stderr.write(chunk);
       stderrTail = appendTail(stderrTail, chunk);
+      observeStderrProof(chunk);
+      stderrDiagnostics.append(chunk);
     });
     child.on("error", (error) => {
       resolve({
@@ -122,13 +189,19 @@ function runGate(gate) {
         duration_ms: Date.now() - startedAt,
         exit_code: null,
         errors: [error.message],
-        diagnostics: diagnosticRecords(stdoutTail),
+        diagnostics: finishDiagnostics(),
         stdout_tail: stdoutTail,
         stderr_tail: stderrTail
       });
     });
     child.on("close", (exitCode) => {
-      const errors = exitCode === 0 ? validateReport(gate) : [`exit code ${exitCode}`];
+      const errors =
+        exitCode === 0
+          ? [
+              ...validateReport(gate),
+              ...validateRequiredOutput(gate, requiredOutputObserved)
+            ]
+          : [`exit code ${exitCode}`];
       resolve({
         id: gate.id,
         category: gate.category,
@@ -136,7 +209,7 @@ function runGate(gate) {
         duration_ms: Date.now() - startedAt,
         exit_code: exitCode,
         errors,
-        diagnostics: diagnosticRecords(stdoutTail),
+        diagnostics: finishDiagnostics(),
         stdout_tail: stdoutTail,
         stderr_tail: stderrTail
       });

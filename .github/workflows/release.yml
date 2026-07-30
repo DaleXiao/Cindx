@@ -53,7 +53,21 @@ jobs:
         run: |
           cargo test --workspace --locked
           cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+          npm --prefix apps/desktop test
           node scripts/check-desktop-structure.mjs
+
+      - name: Run shipping performance contracts
+        timeout-minutes: 10
+        run: node scripts/run-quality-gates.mjs --profile shipping-performance --report target/shipping-performance-report.json
+
+      - name: Upload shipping performance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cindx-shipping-performance-${{ github.sha }}
+          path: target/shipping-performance-report.json
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Import optional Apple Developer certificate
         id: apple-signing

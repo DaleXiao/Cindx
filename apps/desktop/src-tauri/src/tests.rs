@@ -9264,6 +9264,12 @@ fn workspace_knowledge_snapshot_reuses_one_graph_parse_and_borrowed_projection()
         serde_json::to_value(&after_removal).expect("leased graph should serialize"),
         serde_json::to_value(&borrowed).expect("original graph should serialize")
     );
+    println!(
+        "{{\"schema\":\"cindx.workspace-graph-cache-scaling.v1\",\"cache_hit_graph_opens\":1,\"final_graph_opens\":{},\"shared_graph_store\":true,\"borrowed_nodes\":{},\"borrowed_edges\":{}}}",
+        graph_store_open_count(),
+        borrowed.nodes.len(),
+        borrowed.edges.len()
+    );
     let _ = fs::remove_dir_all(root);
 }
 

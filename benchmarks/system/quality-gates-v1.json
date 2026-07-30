@@ -42,9 +42,21 @@
       "performance-comparator-contract",
       "session-projection-scaling",
       "agent-runtime-snapshot-scaling",
+      "workspace-graph-cache-scaling",
+      "prepared-image-request-scaling",
+      "model-transport-prepare-scaling",
+      "frontend-streaming-markdown-scaling",
       "context-governor-scaling",
       "conductor-health-scaling",
       "rag-search-scaling"
+    ],
+    "shipping-performance": [
+      "session-projection-scaling",
+      "agent-runtime-snapshot-scaling",
+      "workspace-graph-cache-scaling",
+      "prepared-image-request-scaling",
+      "model-transport-prepare-scaling",
+      "frontend-streaming-markdown-scaling"
     ],
     "full": [
       "version-contract",
@@ -60,6 +72,12 @@
       "workspace-tests",
       "desktop-tests",
       "frontend-test",
+      "session-projection-scaling",
+      "agent-runtime-snapshot-scaling",
+      "workspace-graph-cache-scaling",
+      "prepared-image-request-scaling",
+      "model-transport-prepare-scaling",
+      "frontend-streaming-markdown-scaling",
       "frontend-build"
     ]
   },
@@ -221,9 +239,14 @@
         "--manifest-path",
         "apps/desktop/src-tauri/Cargo.toml",
         "--locked",
-        "incremental_projection_reads_only_the_target_session_delta",
+        "session_projection::tests::incremental_projection_reads_only_the_target_session_delta",
         "--",
+        "--exact",
         "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.session-projection-diagnostic.v1"
       ]
     },
     {
@@ -235,10 +258,15 @@
         "--locked",
         "-p",
         "agent-runtime",
-        "long_history_context_governor_scaling_diagnostic",
+        "context_governor::tests::long_history_context_governor_scaling_diagnostic",
         "--",
+        "--exact",
         "--ignored",
         "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.context-governor-diagnostic.v1"
       ]
     },
     {
@@ -250,9 +278,87 @@
         "--manifest-path",
         "apps/desktop/src-tauri/Cargo.toml",
         "--locked",
-        "incremental_runtime_snapshot_visits_only_appended_messages",
+        "agent_runtime_snapshot_cursor::tests::incremental_runtime_snapshot_visits_only_appended_messages",
         "--",
+        "--exact",
         "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.agent-runtime-snapshot-scaling.v1"
+      ]
+    },
+    {
+      "id": "workspace-graph-cache-scaling",
+      "category": "performance",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--locked",
+        "tests::workspace_knowledge_snapshot_reuses_one_graph_parse_and_borrowed_projection",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.workspace-graph-cache-scaling.v1"
+      ]
+    },
+    {
+      "id": "prepared-image-request-scaling",
+      "category": "performance",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "model-provider",
+        "prepared_request::tests::prepared_streaming_body_matches_canonical_json_and_shares_bytes",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.prepared-image-request-scaling.v1"
+      ]
+    },
+    {
+      "id": "model-transport-prepare-scaling",
+      "category": "performance",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--locked",
+        "agent_model_turn_runtime::tests::transport_attempts_prepare_model_request_once",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.model-transport-prepare-scaling.v1"
+      ]
+    },
+    {
+      "id": "frontend-streaming-markdown-scaling",
+      "category": "performance",
+      "cwd": "apps/desktop",
+      "command": [
+        "node",
+        "--test",
+        "--test-name-pattern",
+        "keeps rope string work linear across an eight MiB unbroken line",
+        "tests/streamingMarkdownModel.test.ts"
+      ],
+      "required_output": [
+        "# pass 1",
+        "cindx.frontend-streaming-markdown-scaling.v1"
       ]
     },
     {
@@ -264,10 +370,15 @@
         "--manifest-path",
         "apps/desktop/src-tauri/Cargo.toml",
         "--locked",
-        "conductor_health_scaling_diagnostic",
+        "conductor_health_runtime::tests::conductor_health_scaling_diagnostic",
         "--",
+        "--exact",
         "--ignored",
         "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.conductor-health-diagnostic.v1"
       ]
     },
     {
@@ -279,10 +390,15 @@
         "--locked",
         "-p",
         "agent-rag",
-        "synthetic_rag_search_scaling_diagnostic",
+        "tests::synthetic_rag_search_scaling_diagnostic",
         "--",
+        "--exact",
         "--ignored",
         "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.rag-search-diagnostic.v1"
       ]
     }
   ]
