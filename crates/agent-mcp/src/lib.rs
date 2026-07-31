@@ -7,8 +7,6 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -16,7 +14,7 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tools::{Tool, ToolError, ToolExecutionControl};
+use tools::{write_private_file_atomically, Tool, ToolError, ToolExecutionControl};
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -1372,19 +1370,8 @@ fn write_private_text(path: &Path, text: &str) -> Result<(), McpError> {
             McpError::new(format!("failed to create MCP config directory: {error}"))
         })?;
     }
-    let mut options = fs::OpenOptions::new();
-    options.create(true).write(true).truncate(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options
-        .open(path)
-        .map_err(|error| McpError::new(format!("failed to open {}: {error}", path.display())))?;
-    file.write_all(text.as_bytes())
-        .map_err(|error| McpError::new(format!("failed to write {}: {error}", path.display())))?;
-    #[cfg(unix)]
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|error| McpError::new(format!("failed to secure {}: {error}", path.display())))?;
-    Ok(())
+    write_private_file_atomically(path, text.as_bytes())
+        .map_err(|error| McpError::new(format!("failed to write {}: {error}", path.display())))
 }
 
 fn normalize_object_schema(schema: Value) -> Value {

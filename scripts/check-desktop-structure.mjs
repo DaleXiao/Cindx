@@ -841,6 +841,7 @@ const toolsModuleBudgets = new Map([
   ["image_generation.rs", 280],
   ["lib.rs", 720],
   ["meta_tools.rs", 240],
+  ["private_file.rs", 80],
   ["process_control.rs", 30],
   ["shell.rs", 950],
   ["stream_capture.rs", 60],

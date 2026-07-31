@@ -5859,6 +5859,7 @@ dependencies = [
  "agent-core",
  "model-provider",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
