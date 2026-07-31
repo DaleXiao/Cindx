@@ -23,6 +23,7 @@ import {
   providerSubmissionPreflight,
   type ProviderReadiness
 } from "../providerReadinessModel";
+import { permissionFocusTarget } from "./accessibilityFocusModel";
 import { VoiceInputButton } from "./VoiceInputButton";
 
 const COMPOSER_TEXTAREA_MIN_HEIGHT = 58;
@@ -150,6 +151,12 @@ export function Composer({
   onResolvePermission
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const permissionDialogRef = useRef<HTMLElement>(null);
+  const previousApprovalRequestIdRef = useRef<string | null>(null);
+  const restoreComposerAfterPermissionRef = useRef<{
+    requestId: string;
+    sessionId: string | null;
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const effortControlRef = useRef<HTMLDivElement>(null);
   const effortTriggerRef = useRef<HTMLButtonElement>(null);
@@ -172,6 +179,31 @@ export function Composer({
   useEffect(() => {
     if (pendingApproval) setVoiceStatus("idle");
   }, [pendingApproval]);
+
+  useLayoutEffect(() => {
+    const currentRequestId = pendingApproval?.requestId ?? null;
+    const previousRequestId = previousApprovalRequestIdRef.current;
+    const restoreRequest = restoreComposerAfterPermissionRef.current;
+    const focusTarget = permissionFocusTarget(
+      previousRequestId,
+      currentRequestId,
+      Boolean(
+        previousRequestId &&
+          restoreRequest?.requestId === previousRequestId &&
+          restoreRequest.sessionId === sessionId
+      )
+    );
+    previousApprovalRequestIdRef.current = currentRequestId;
+    if (currentRequestId !== previousRequestId) {
+      restoreComposerAfterPermissionRef.current = null;
+    }
+    if (focusTarget === "request") {
+      permissionDialogRef.current?.focus({ preventScroll: true });
+    } else if (focusTarget === "composer") {
+      textareaRef.current?.focus({ preventScroll: true });
+      textareaRef.current?.setSelectionRange(value.length, value.length);
+    }
+  }, [pendingApproval?.requestId, sessionId]);
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
@@ -228,6 +260,17 @@ export function Composer({
     if (providerPreflight.clearDraft) onChange("");
   }
 
+  function resolvePendingPermission(
+    decision: "allow_once" | "allow_for_session" | "deny"
+  ) {
+    if (!pendingApproval) return;
+    restoreComposerAfterPermissionRef.current = {
+      requestId: pendingApproval.requestId,
+      sessionId
+    };
+    onResolvePermission(pendingApproval.requestId, decision);
+  }
+
   return (
     <form
       className="composer"
@@ -240,11 +283,19 @@ export function Composer({
     >
       <div className="composer-field">
         {pendingApproval ? (
-          <section className="composer-permission" aria-label="Agent permission request">
+          <section
+            key={pendingApproval.requestId}
+            className="composer-permission"
+            role="alertdialog"
+            aria-labelledby="composer-permission-title"
+            aria-describedby="composer-permission-description"
+            ref={permissionDialogRef}
+            tabIndex={-1}
+          >
             <ShieldCheck aria-hidden="true" />
             <div className="composer-permission-copy">
-              <strong>{pendingApproval.toolName}</strong>
-              <p>{pendingApproval.reason}</p>
+              <strong id="composer-permission-title">{pendingApproval.toolName}</strong>
+              <p id="composer-permission-description">{pendingApproval.reason}</p>
               {approvalInput && (
                 <code className="composer-permission-input" title={approvalInput}>
                   {approvalInput}
@@ -259,7 +310,7 @@ export function Composer({
                 className="permission-once"
                 type="button"
                 disabled={permissionBusy}
-                onClick={() => onResolvePermission(pendingApproval.requestId, "allow_once")}
+                onClick={() => resolvePendingPermission("allow_once")}
               >
                 <CircleCheck aria-hidden="true" />
                 <span>Once</span>
@@ -269,9 +320,7 @@ export function Composer({
                   className="permission-session"
                   type="button"
                   disabled={permissionBusy}
-                  onClick={() =>
-                    onResolvePermission(pendingApproval.requestId, "allow_for_session")
-                  }
+                  onClick={() => resolvePendingPermission("allow_for_session")}
                   title={
                     pendingApproval.toolName === "shell.run"
                       ? "Reuse only this exact command in this session"
@@ -290,7 +339,7 @@ export function Composer({
                 className="permission-deny"
                 type="button"
                 disabled={permissionBusy}
-                onClick={() => onResolvePermission(pendingApproval.requestId, "deny")}
+                onClick={() => resolvePendingPermission("deny")}
               >
                 <X aria-hidden="true" />
                 <span>Deny</span>
@@ -498,7 +547,7 @@ export function Composer({
         )}
       </div>
       {error && (
-        <div className="composer-error">
+        <div className="composer-error" role="alert" aria-live="assertive" aria-atomic="true">
           <span>{error}</span>
           <div className="composer-error-actions">
             {canRetryError && (

@@ -2250,8 +2250,24 @@ assert(
   "User messages must reveal a compact 24-hour timestamp without restoring agent metadata"
 );
 assert(
-  composerSource.includes("pendingApproval") && composerSource.includes("composer-permission"),
-  "Agent permissions must be actionable from the composer"
+  composerSource.includes("pendingApproval") &&
+    composerSource.includes("composer-permission") &&
+    composerSource.includes('role="alertdialog"') &&
+    composerSource.includes("key={pendingApproval.requestId}") &&
+    composerSource.includes('aria-labelledby="composer-permission-title"') &&
+    composerSource.includes('aria-describedby="composer-permission-description"') &&
+    composerSource.includes("permissionFocusTarget(") &&
+    composerSource.includes("restoreComposerAfterPermissionRef") &&
+    composerSource.includes("restoreRequest.sessionId === sessionId") &&
+    composerSource.includes('focusTarget === "request"') &&
+    composerSource.includes('focusTarget === "composer"'),
+  "Agent permissions must announce and focus each request before returning focus to the composer"
+);
+assert(
+  composerSource.includes(
+    'className="composer-error" role="alert" aria-live="assertive" aria-atomic="true"'
+  ),
+  "Composer errors must announce atomically without becoming a focus target"
 );
 assert(
   composerSource.includes("composer-stop-icon") &&
@@ -4155,6 +4171,11 @@ assert(
     scheduleViewSource.includes("Ends (optional)") &&
     scheduleViewSource.includes("weekdayOptions") &&
     scheduleViewSource.includes("Back to App") &&
+    scheduleViewSource.includes("deleteCancelRef.current?.focus") &&
+    scheduleViewSource.includes("wrappedDialogFocusIndex(") &&
+    scheduleViewSource.includes("closeDeleteDialog();") &&
+    scheduleViewSource.includes("restoreDeleteTriggerFocus();") &&
+    scheduleViewSource.includes("focusScheduleRow(nextScheduleId)") &&
     sidebarSource.includes("const [scheduleExpanded, setScheduleExpanded] = useState(false)") &&
     sidebarSource.includes('aria-label={scheduleExpanded ? "Collapse schedules" : "Expand schedules"}') &&
     styles.includes(".schedule-layout") &&

@@ -25,7 +25,7 @@
   --border-strong: #c9c9c9;
   --text: #181818;
   --muted: #707070;
-  --subtle: #989898;
+  --subtle: #707070;
   --ink: #202020;
   --accent: #2563eb;
   --toolbar-solid: rgba(255, 255, 255, 0.96);
@@ -69,7 +69,7 @@
   --border-strong: #505050;
   --text: #f1f1f1;
   --muted: #b0b0b0;
-  --subtle: #858585;
+  --subtle: #989898;
   --ink: #f5f5f5;
   --toolbar-solid: rgba(23, 23, 23, 0.96);
   --toolbar-glass: rgba(23, 23, 23, 0.8);
