@@ -1,4 +1,5 @@
 use super::*;
+use crate::conductor_fallback_runtime::deterministic_conductor_fallback;
 
 pub(super) enum AdaptiveConductorOutcome {
     Plan {
@@ -144,7 +145,7 @@ pub(super) fn plan_adaptive_workflow(
             }
             if effort != "fast" {
                 let workflow_plan = deterministic_conductor_fallback(
-                    state,
+                    &state.store,
                     task_id,
                     run_context,
                     collaboration_id,
@@ -199,7 +200,7 @@ pub(super) fn plan_adaptive_workflow(
                         Err(reason) => {
                             if effort != "fast" {
                                 let workflow_plan = deterministic_conductor_fallback(
-                                    state,
+                                    &state.store,
                                     task_id,
                                     run_context,
                                     collaboration_id,
@@ -262,7 +263,7 @@ pub(super) fn plan_adaptive_workflow(
                         }
                         if effort != "fast" {
                             let workflow_plan = deterministic_conductor_fallback(
-                                state,
+                                &state.store,
                                 task_id,
                                 run_context,
                                 collaboration_id,
@@ -299,7 +300,7 @@ pub(super) fn plan_adaptive_workflow(
             Err(error) => {
                 if effort != "fast" {
                     let workflow_plan = deterministic_conductor_fallback(
-                        state,
+                        &state.store,
                         task_id,
                         run_context,
                         collaboration_id,
