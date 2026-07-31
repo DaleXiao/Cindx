@@ -23,6 +23,7 @@ import {
   queuedMessageClientId
 } from "./appShellModel";
 import { optimisticRunBudgetPatch } from "./agentRunBudgetModel";
+import { providerReadinessMessage, providerStatusText } from "./providerReadinessModel";
 import { useAppWorkspaceProjection } from "./controllers/useAppWorkspaceProjection";
 import { useComposerAttachments } from "./controllers/useComposerAttachments";
 import { useComposerDrafts } from "./controllers/useComposerDrafts";
@@ -232,11 +233,13 @@ export function App() {
     providerModelsBusy,
     providerModelsError,
     providerModelsRefreshTurn,
+    providerReadiness,
+    providerSettingsError,
     setProviderDraft,
     voiceConfigured,
     voiceTransport
   } = useProviderSettingsController({
-    reportError: reportComposerError,
+    runtimeProviderReady: runtime?.providerReady ?? null,
     showSaved: showSettingsSaved
   });
   const {
@@ -531,12 +534,11 @@ export function App() {
       if (fontWaitTimer !== null) window.clearTimeout(fontWaitTimer);
     };
   }, [projectSessionState, runtime]);
-
   const statusText = useMemo(() => {
     if (!runtime) return "Connecting";
-    if (runtime.kernelStatus === "kernel bridge online") return "Ready";
+    if (runtime.kernelStatus === "kernel bridge online") return providerStatusText(providerReadiness);
     return runtime.kernelStatus;
-  }, [runtime]);
+  }, [providerReadiness, runtime]);
 
   const {
     activeAgentState,
@@ -2180,10 +2182,17 @@ export function App() {
                 sessionId={activeSession?.id ?? null}
                 voiceConfigured={voiceConfigured}
                 voiceTransport={voiceTransport}
+                providerReadiness={providerReadiness}
                 onChange={setActiveComposerDraft}
                 onEffortChange={(effort) => void handleSessionEffortChange(effort)}
                 onVoiceTranscript={appendComposerDraftForSession}
                 onVoiceError={(message) => setComposerError(message)}
+                onProviderRequired={(readiness) => setComposerError(providerReadinessMessage(readiness))}
+                onConfigureProvider={() => {
+                  setSettingsCategory("models");
+                  handleWorkspaceViewChange("settings");
+                  void loadProviderState();
+                }}
                 onSend={(value) => void handleSendPrompt(value)}
                 onPickAttachments={(files) => void handlePickAttachments(files)}
                 onRemoveAttachment={handleRemoveAttachment}
@@ -2233,6 +2242,7 @@ export function App() {
               handleInstallSkillPackage,
               handleInstallSkillUrl,
               handleLoadProviderModels,
+              handleReloadProviderState: loadProviderState,
               handleMcpPolicy,
               handlePickWorkspace,
               handlePromptEvolutionToggle,
@@ -2274,6 +2284,7 @@ export function App() {
               providerModelsBusy,
               providerModelsError,
               providerModelsRefreshTurn,
+              providerSettingsError,
               canUseConfiguredKey,
               ragBusy,
               ragQuery,

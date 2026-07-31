@@ -225,6 +225,7 @@ const markdownDiagramModelSource = read(
   "apps/desktop/src/components/markdownDiagramModel.ts"
 );
 const composerSource = read("apps/desktop/src/components/Composer.tsx");
+const providerReadinessModelSource = read("apps/desktop/src/providerReadinessModel.ts");
 const voiceInputButtonSource = read(
   "apps/desktop/src/components/VoiceInputButton.tsx"
 );
@@ -638,6 +639,7 @@ const extractedDesktopBoundaryBudgets = [
   ["SettingsModelsPanel.tsx", settingsModelsPanelSource, 320],
   ["ProviderModalityFields.tsx", providerModalityFieldsSource, 140],
   ["VoiceInputButton.tsx", voiceInputButtonSource, 80],
+  ["providerReadinessModel.ts", providerReadinessModelSource, 80],
   ["SettingsMemoryPanel.tsx", settingsMemoryPanelSource, 400],
   ["useMemorySettingsController.ts", memorySettingsControllerSource, 180],
   ["SettingsPermissionsPanel.tsx", settingsPermissionsPanelSource, 220],
@@ -2775,6 +2777,24 @@ assert(
 assert(!tauriBridge.includes("apiKeyPreview"), "Provider state must not expose API key suffixes");
 assert(settingsPageSource.includes("<ModelSelect"), "Provider models must use select controls");
 assert(desktopUiSource.includes("listProviderModels"), "Provider settings must load the remote model catalog");
+assert(
+  appSource.includes("providerStatusText(providerReadiness)") &&
+    composerSource.includes("providerSubmissionPreflight(providerReadiness)") &&
+    composerSource.indexOf("if (!providerPreflight.allowSubmit)") <
+      composerSource.indexOf("onSend(prompt)") &&
+    composerSource.indexOf("onSend(prompt)") < composerSource.indexOf('onChange("")') &&
+    composerSource.includes("Configure Models") &&
+    appSource.includes('setSettingsCategory("models")') &&
+    settingsModelsPanelSource.includes("providerSettingsError") &&
+    settingsModelsPanelSource.includes('role="alert"') &&
+    settingsModelsPanelSource.includes("handleReloadProviderState") &&
+    settingsModelsPanelSource.includes("Retry provider settings") &&
+    settingsModelsPanelSource.includes(
+      '          </div>\n        )}\n        {providerSettingsError && ('
+    ) &&
+    rustLib.includes("ready: config.is_ready()"),
+  "Provider first-use gate must preserve drafts, expose Models recovery, and use Rust readiness"
+);
 assert(
   settingsPageSource.includes('label="Conductor"') &&
     settingsPageSource.includes("providerDraft.conductorModel") &&

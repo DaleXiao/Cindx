@@ -1,11 +1,11 @@
 import type { ProviderId } from "./providerProfiles";
 import type { AgentEffort, AgentRunBudgets } from "./agentRunBudgetModel";
-
 export type { ProviderId } from "./providerProfiles";
 
 export type RuntimeStatus = {
   appVersion: string;
   kernelStatus: string;
+  providerReady: boolean;
   workspaceRoot: string;
   orchestrationModes: string[];
   registeredTools: string[];
@@ -340,6 +340,7 @@ export type ProviderConfigState = {
   promptEvolutionEnabled: boolean;
   contextWindowTokens: number;
   agentSystemPrompt: string;
+  ready: boolean;
   apiKeySet: boolean;
   authVerified: boolean;
   authVerifiedAtMs: number | null;

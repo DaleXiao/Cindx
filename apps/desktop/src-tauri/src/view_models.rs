@@ -5,6 +5,7 @@ use super::*;
 pub(crate) struct RuntimeStatus {
     pub(crate) app_version: String,
     pub(crate) kernel_status: String,
+    pub(crate) provider_ready: bool,
     pub(crate) workspace_root: String,
     pub(crate) orchestration_modes: Vec<String>,
     pub(crate) registered_tools: Vec<String>,
@@ -426,6 +427,7 @@ pub(crate) struct ProviderConfigState {
     pub(crate) prompt_evolution_enabled: bool,
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
+    pub(crate) ready: bool,
     pub(crate) api_key_set: bool,
     pub(crate) auth_verified: bool,
     pub(crate) auth_verified_at_ms: Option<u64>,

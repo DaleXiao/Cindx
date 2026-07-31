@@ -1,5 +1,6 @@
 import {
   CheckCircle2,
+  CircleAlert,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
@@ -103,7 +104,11 @@ export function WorkspaceChrome({
               />
             </div>
             <div className={`runtime-pill ${statusText === "Ready" ? "ready" : ""}`}>
-              <CheckCircle2 size={16} aria-hidden="true" />
+              {statusText === "Ready" ? (
+                <CheckCircle2 size={16} aria-hidden="true" />
+              ) : (
+                <CircleAlert size={16} aria-hidden="true" />
+              )}
               <span>{statusText}</span>
             </div>
           </div>

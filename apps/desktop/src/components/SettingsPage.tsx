@@ -129,6 +129,7 @@ export type SettingsPageProps = {
   handleInstallSkillPackage: (file: File) => Promise<void>;
   handleInstallSkillUrl: () => Promise<void>;
   handleLoadProviderModels: () => Promise<void>;
+  handleReloadProviderState: () => Promise<unknown>;
   handleMcpPolicy: (serverId: string, enabled: boolean, requireApproval: boolean) => Promise<void>;
   handlePickWorkspace: () => Promise<void>;
   handlePromptEvolutionToggle: (enabled: boolean) => Promise<void>;
@@ -173,6 +174,7 @@ export type SettingsPageProps = {
   providerModelsBusy: boolean;
   providerModelsError: string | null;
   providerModelsRefreshTurn: number;
+  providerSettingsError: string | null;
   ragBusy: boolean;
   ragQuery: string;
   ragSources: RagSourceView[];
@@ -277,6 +279,7 @@ export function SettingsPage(props: SettingsPageProps) {
     handleInstallSkillPackage,
     handleInstallSkillUrl,
     handleLoadProviderModels,
+    handleReloadProviderState,
     handleMcpPolicy,
     handlePickWorkspace,
     handlePromptEvolutionToggle,
@@ -318,6 +321,7 @@ export function SettingsPage(props: SettingsPageProps) {
     providerModelsBusy,
     providerModelsError,
     providerModelsRefreshTurn,
+    providerSettingsError,
     ragBusy,
     ragQuery,
     ragSources,
@@ -659,6 +663,7 @@ export function SettingsPage(props: SettingsPageProps) {
                     canUseConfiguredKey={canUseConfiguredKey}
                     collaborationModelCount={collaborationModelCount}
                     handleLoadProviderModels={handleLoadProviderModels}
+                    handleReloadProviderState={handleReloadProviderState}
                     handlePromptEvolutionToggle={handlePromptEvolutionToggle}
                     handleSaveProviderConfig={handleSaveProviderConfig}
                     imageEndpointValidation={imageEndpointValidation}
@@ -670,6 +675,7 @@ export function SettingsPage(props: SettingsPageProps) {
                     providerModelsBusy={providerModelsBusy}
                     providerModelsError={providerModelsError}
                     providerModelsRefreshTurn={providerModelsRefreshTurn}
+                    providerSettingsError={providerSettingsError}
                     setProviderDraft={setProviderDraft}
                   />
                 )}

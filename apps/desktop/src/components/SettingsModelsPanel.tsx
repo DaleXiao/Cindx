@@ -1,4 +1,4 @@
-import { KeyRound, Save } from "lucide-react";
+import { KeyRound, RefreshCw, Save } from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
 import type { Phase4State, ProviderConfigInput } from "../tauri";
 import {
@@ -17,6 +17,7 @@ type SettingsModelsPanelProps = {
   canUseConfiguredKey: boolean;
   collaborationModelCount: number;
   handleLoadProviderModels: () => Promise<void>;
+  handleReloadProviderState: () => Promise<unknown>;
   handlePromptEvolutionToggle: (enabled: boolean) => Promise<void>;
   handleSaveProviderConfig: () => Promise<void>;
   imageEndpointValidation: "idle" | "checking" | "valid" | "invalid";
@@ -28,6 +29,7 @@ type SettingsModelsPanelProps = {
   providerModelsBusy: boolean;
   providerModelsError: string | null;
   providerModelsRefreshTurn: number;
+  providerSettingsError: string | null;
   setProviderDraft: Dispatch<SetStateAction<ProviderConfigInput | null>>;
 };
 
@@ -35,6 +37,7 @@ export function SettingsModelsPanel({
   canUseConfiguredKey,
   collaborationModelCount,
   handleLoadProviderModels,
+  handleReloadProviderState,
   handlePromptEvolutionToggle,
   handleSaveProviderConfig,
   imageEndpointValidation,
@@ -46,6 +49,7 @@ export function SettingsModelsPanel({
   providerModelsBusy,
   providerModelsError,
   providerModelsRefreshTurn,
+  providerSettingsError,
   setProviderDraft
 }: SettingsModelsPanelProps) {
   const refreshAnimationClass =
@@ -250,6 +254,22 @@ export function SettingsModelsPanel({
               <span>{providerBusy ? "Verifying" : "Connect provider"}</span>
             </button>
           </div>
+        )}
+        {providerSettingsError && (
+          <div className="settings-inline-error" role="alert" aria-live="polite">
+            {providerSettingsError}
+          </div>
+        )}
+        {!providerDraft && providerSettingsError && (
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={providerBusy}
+            onClick={() => void handleReloadProviderState()}
+          >
+            <RefreshCw size={17} aria-hidden="true" />
+            <span>Retry provider settings</span>
+          </button>
         )}
       </section>
 

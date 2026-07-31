@@ -192,7 +192,7 @@ let browserPhase4State: Phase4State = {
     contextWindowTokens: 1047576,
     agentSystemPrompt:
       "You are Cindx, a desktop-first assistant. Work carefully, be direct, and ask for clarification when the task is ambiguous.",
-    apiKeySet: false, authVerified: false, authVerifiedAtMs: null
+    ready: false, apiKeySet: false, authVerified: false, authVerifiedAtMs: null
   },
   promptEvolution: {
     enabled: true,
@@ -508,42 +508,47 @@ export async function setSidebarMaterialWidth(width: number): Promise<void> {
   await invoke<void>("set_sidebar_material_width", { width });
 }
 
+function browserRuntimeStatus(workspaceRoot: string): RuntimeStatus {
+  return {
+    appVersion: DESKTOP_VERSION,
+    kernelStatus: "browser preview",
+    providerReady: browserPhase4State.provider.ready,
+    workspaceRoot,
+    orchestrationModes: ["single", "plan_execute_review", "best_of_n", "auto_router"],
+    agentRunBudgets: null,
+    registeredTools: [
+      "file.read",
+      "file.list",
+      "file.write",
+      "file.search",
+      "shell.run",
+      "rag.index",
+      "rag.search",
+      "rag.answer",
+      "web.search",
+      "browser.open",
+      "browser.extract_text",
+      "browser.capture",
+      "browser.click",
+      "browser.type",
+      "browser.scroll",
+      "browser.tabs",
+      "browser.select_tab",
+      "computer.screenshot",
+      "computer.click",
+      "computer.type",
+      "computer.key",
+      "computer.scroll"
+    ]
+  };
+}
+
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {
   try {
     return await invoke<RuntimeStatus>("get_runtime_status");
   } catch (error) {
     requireBrowserPreviewFallback(error);
-    return {
-      appVersion: DESKTOP_VERSION,
-      kernelStatus: "browser preview",
-      workspaceRoot: ".",
-      orchestrationModes: ["single", "plan_execute_review", "best_of_n", "auto_router"],
-      agentRunBudgets: null,
-      registeredTools: [
-        "file.read",
-        "file.list",
-        "file.write",
-        "file.search",
-        "shell.run",
-        "rag.index",
-        "rag.search",
-        "rag.answer",
-        "web.search",
-        "browser.open",
-        "browser.extract_text",
-        "browser.capture",
-        "browser.click",
-        "browser.type",
-        "browser.scroll",
-        "browser.tabs",
-        "browser.select_tab",
-        "computer.screenshot",
-        "computer.click",
-        "computer.type",
-        "computer.key",
-        "computer.scroll"
-      ]
-    };
+    return browserRuntimeStatus(".");
   }
 }
 
@@ -573,37 +578,7 @@ export async function saveWorkspaceRoot(path: string): Promise<RuntimeStatus> {
     return await invoke<RuntimeStatus>("save_workspace_root", { input: { path } });
   } catch (error) {
     if (isTauriRuntime()) throw error;
-    return {
-      appVersion: DESKTOP_VERSION,
-      kernelStatus: "browser preview",
-      workspaceRoot: path,
-      orchestrationModes: ["single", "plan_execute_review", "best_of_n", "auto_router"],
-      agentRunBudgets: null,
-      registeredTools: [
-        "file.read",
-        "file.list",
-        "file.write",
-        "file.search",
-        "shell.run",
-        "rag.index",
-        "rag.search",
-        "rag.answer",
-        "web.search",
-        "browser.open",
-        "browser.extract_text",
-        "browser.capture",
-        "browser.click",
-        "browser.type",
-        "browser.scroll",
-        "browser.tabs",
-        "browser.select_tab",
-        "computer.screenshot",
-        "computer.click",
-        "computer.type",
-        "computer.key",
-        "computer.scroll"
-      ]
-    };
+    return browserRuntimeStatus(path);
   }
 }
 
@@ -1597,6 +1572,8 @@ export async function saveProviderConfig(input: ProviderConfigInput): Promise<Ph
     requireBrowserPreviewFallback(error);
     const previousProvider = browserPhase4State.provider;
     const profile = resolveProviderProfile(input);
+    const executorModel = input.executorModel || input.model;
+    const apiKeySet = providerApiKeySetAfterSave({ ...input, ...profile }, previousProvider);
     browserPhase4State = {
       ...browserPhase4State,
       provider: {
@@ -1606,7 +1583,7 @@ export async function saveProviderConfig(input: ProviderConfigInput): Promise<Ph
         model: input.model,
         conductorModel: input.conductorModel || input.plannerModel || input.model,
         plannerModel: input.plannerModel || input.model,
-        executorModel: input.executorModel || input.model,
+        executorModel,
         reviewerModel: input.reviewerModel || input.model,
         summarizerModel: input.summarizerModel || input.model,
         embeddingModel: input.embeddingModel || "text-embedding-3-small",
@@ -1617,7 +1594,8 @@ export async function saveProviderConfig(input: ProviderConfigInput): Promise<Ph
         promptEvolutionEnabled: input.promptEvolutionEnabled,
         contextWindowTokens: Math.max(4096, input.contextWindowTokens || 128000),
         agentSystemPrompt: input.agentSystemPrompt,
-        apiKeySet: providerApiKeySetAfterSave({ ...input, ...profile }, previousProvider),
+        ready: Boolean(profile.baseUrl.trim() && apiKeySet && executorModel.trim()),
+        apiKeySet,
         authVerified: false, authVerifiedAtMs: null
       },
       timeline: [
