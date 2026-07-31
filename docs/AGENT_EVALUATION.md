@@ -40,6 +40,39 @@ matrix, provider-backed provenance, deterministic verifier evidence, zero
 budget overruns, and no duplicate run keys. Missing evidence remains visible;
 synthetic scores cannot make the arena green.
 
+The checked-in 120-case Arena is a schema and evidence-analysis contract. It
+does not contain an executable provider runner or the private task fixtures, so
+its credential-free CI result is `not_observed`, not an Agent-quality pass.
+
+## Provider-backed matched baseline
+
+The narrow executable baseline reuses the existing ignored GPQA provider test
+for 12 pinned GPQA-Diamond questions across Direct, Auto, and Pro. Run preflight
+first; it verifies the pinned dataset SHA-256, a clean tracked worktree, the full
+Git commit, and private output boundaries without making a provider call:
+
+```bash
+node scripts/run-provider-baseline.mjs \
+  --gpqa /private/path/gpqa_diamond.csv \
+  --raw /private/tmp/cindx-provider-baseline.raw.json \
+  --sanitized docs/evaluations/CINDX_PROVIDER_BASELINE_CURRENT.json \
+  --markdown docs/evaluations/CINDX_PROVIDER_BASELINE_CURRENT.md
+```
+
+After reviewing the preflight, add `--execute` to the same command. This is the
+only mode that invokes the configured cloud provider. The script passes paths
+as process arguments without a shell, never accepts or prints an API key, keeps
+raw prompts and outputs outside the repository, and publishes only the
+sanitized report after the frozen baseline contract succeeds.
+
+This is a matched product-treatment baseline: all three treatments use the same
+questions, expected-answer hashes, source commit, and evaluation limits, while
+Auto and Pro intentionally use their configured role models. Model differences
+therefore remain a confound when attributing any difference solely to
+orchestration. The 12-question, one-repeat result is descriptive; it cannot
+support a significance claim, Fugu parity, GEPA improvement, or a general claim
+that Auto or Pro is superior.
+
 ## Evaluation v2 Foundation
 
 The pre-GEPA baseline is frozen at commit `340e263c6207cb043655a870661fb2be317f95bd` in `benchmarks/agent/evaluation-v2-baseline.json`. It records SHA-256 fingerprints for the 72-case routing suite and baseline. The foundation command verifies those files before reporting any optimization readiness:

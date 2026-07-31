@@ -4,6 +4,19 @@ use orchestrator::{AdaptiveWorkflow, AdaptiveWorkflowStep, WorkflowOutputKind};
 const EXTERNAL_EFFECT_SCHEMA: &str = "cindx.external_effect_eval.raw.v3";
 const GPQA_SOURCE_URL: &str = "https://github.com/idavidrein/gpqa";
 const GPQA_SOURCE_REVISION: &str = "56686c06f5e19865c153de0fdb11be3890014df7";
+const GPQA_SOURCE_FILE_SHA256: &str =
+    "41d1213cd7a4998605a26c2798500652572007161b3a92817ba46b35befcd305";
+const GPQA_BASELINE_CASES_PER_DOMAIN: usize = 4;
+const GPQA_BASELINE_CASE_COUNT: usize = 12;
+const GPQA_BASELINE_MANIFEST_SHA256: &str =
+    "203d665f53e6ecdd1e07fb325792bd4a48c6ac954a4a144b3114f26a4efea02d";
+const GPQA_BASELINE_DIRECT_PROFILE: &str = "gpqa-direct-baseline-v1";
+const GPQA_BASELINE_DIRECT_PROFILE_SHA256: &str =
+    "e5ec8624aeaeb02021e6e6db4cc00ab97af1793af3a6e051094a1583fe2d6443";
+const GPQA_BASELINE_AUTO_PROFILE_SHA256: &str =
+    "be58315c193ef1544b1bea4bc0cfd8c666f27f82447699cb5c5f975a67bdd68a";
+const GPQA_BASELINE_PRO_PROFILE_SHA256: &str =
+    "f6f7df16306550cfc54dbbad3ed834df9d4253e7e7c7bfb8bb303fd4c7db7697";
 const MRCR_SOURCE_URL: &str = "https://huggingface.co/datasets/openai/mrcr";
 const MRCR_DATASET_REVISION: &str = "2025-12-05-bugfix";
 const EVALUATION_MODEL_CALL_TIMEOUT_SECONDS: u64 = 180;
@@ -44,6 +57,23 @@ struct GpqaCase {
     domain: String,
     prompt: String,
     expected: char,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum GpqaTreatment {
+    Direct,
+    Auto,
+    Pro,
+}
+
+impl GpqaTreatment {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Direct => "direct_default",
+            Self::Auto => "cindx_auto",
+            Self::Pro => "cindx_pro",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,6 +119,7 @@ struct ExternalEffectRun {
     case_id: String,
     category: String,
     treatment: String,
+    treatment_position: usize,
     requested_policy: String,
     effective_policy: String,
     models: Vec<String>,
@@ -212,6 +243,28 @@ fn evaluation_prompt_profile(effort: &str) -> Result<EvaluationPromptProfile, St
     EvaluationPromptProfile::from_frozen_snapshot(effort, snapshot)
 }
 
+fn validate_gpqa_baseline_profiles(
+    auto: &EvaluationPromptProfile,
+    pro: &EvaluationPromptProfile,
+) -> Result<(), String> {
+    if fixed_protocol_sha256(GPQA_BASELINE_DIRECT_PROFILE)
+        != GPQA_BASELINE_DIRECT_PROFILE_SHA256
+        || auto.origin != "built_in_seed"
+        || auto.genome.id != "seed-auto-v1"
+        || auto.genome_sha256 != GPQA_BASELINE_AUTO_PROFILE_SHA256
+        || auto.artifact_sha256.is_some()
+        || auto.gepa_frozen
+        || pro.origin != "built_in_seed"
+        || pro.genome.id != "seed-pro-v1"
+        || pro.genome_sha256 != GPQA_BASELINE_PRO_PROFILE_SHA256
+        || pro.artifact_sha256.is_some()
+        || pro.gepa_frozen
+    {
+        return Err("provider baseline prompt profiles have drifted".to_string());
+    }
+    Ok(())
+}
+
 fn fixed_protocol_sha256(profile: &str) -> String {
     sha256_hex(profile.as_bytes())
 }
@@ -277,6 +330,54 @@ fn load_gpqa_cases(path: &Path, per_domain: usize) -> Result<Vec<GpqaCase>, Stri
         selected.extend(cases.iter().take(per_domain).cloned());
     }
     Ok(selected)
+}
+
+fn gpqa_treatment_order(case_index: usize) -> [GpqaTreatment; 3] {
+    match case_index % 3 {
+        0 => [
+            GpqaTreatment::Direct,
+            GpqaTreatment::Auto,
+            GpqaTreatment::Pro,
+        ],
+        1 => [
+            GpqaTreatment::Auto,
+            GpqaTreatment::Pro,
+            GpqaTreatment::Direct,
+        ],
+        _ => [
+            GpqaTreatment::Pro,
+            GpqaTreatment::Direct,
+            GpqaTreatment::Auto,
+        ],
+    }
+}
+
+fn validate_gpqa_baseline_cases(cases: &[GpqaCase]) -> Result<(), String> {
+    if cases.len() != GPQA_BASELINE_CASE_COUNT {
+        return Err(format!(
+            "provider baseline requires exactly {GPQA_BASELINE_CASE_COUNT} GPQA cases, got {}",
+            cases.len()
+        ));
+    }
+    let manifest = cases
+        .iter()
+        .map(|case| {
+            format!(
+                "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+                case.case_id,
+                case.domain,
+                sha256_hex(case.prompt.as_bytes()),
+                sha256_hex(case.expected.to_string().as_bytes())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if sha256_hex(manifest.as_bytes()) != GPQA_BASELINE_MANIFEST_SHA256 {
+        return Err(
+            "provider baseline GPQA cases do not match the pinned ordered manifest".to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn parse_gpqa_answer(output: &str) -> Option<char> {
@@ -385,7 +486,7 @@ fn direct_gpqa_treatment(config: &ProviderConfig, prompt: &str) -> TreatmentOutp
     treatment_from_completion(
         "single",
         vec![model.clone()],
-        "gpqa-direct-baseline-v1",
+        GPQA_BASELINE_DIRECT_PROFILE,
         complete_collaboration_model_for_stage_with_control(
             config.clone(),
             "terminal_executor".to_string(),
@@ -1105,6 +1206,7 @@ fn append_gpqa_run(
     runs: &mut Vec<ExternalEffectRun>,
     case: &GpqaCase,
     treatment: &str,
+    treatment_position: usize,
     result: TreatmentOutput,
 ) {
     let parsed = parse_gpqa_answer(&result.output);
@@ -1114,6 +1216,7 @@ fn append_gpqa_run(
         case_id: case.case_id.clone(),
         category: case.domain.clone(),
         treatment: treatment.to_string(),
+        treatment_position,
         requested_policy: treatment.to_string(),
         effective_policy: result.policy,
         models: result.models,
@@ -1151,6 +1254,7 @@ fn append_mrcr_run(
     runs: &mut Vec<ExternalEffectRun>,
     page_row: &MrcrPageRow,
     treatment: &str,
+    treatment_position: usize,
     policy: &str,
     models: Vec<String>,
     result: CollaborationCompletion,
@@ -1162,6 +1266,7 @@ fn append_mrcr_run(
         case_id: format!("row-{}", page_row.row_idx),
         category: format!("{}-chars", page_row.row.n_chars),
         treatment: treatment.to_string(),
+        treatment_position,
         requested_policy: treatment.to_string(),
         effective_policy: policy.to_string(),
         models,
@@ -1249,16 +1354,10 @@ fn write_external_effect_checkpoint(
         sources,
         runs,
     };
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent).expect("raw evaluation output directory should exist");
-    }
-    let temporary_path = output_path.with_extension("json.tmp");
-    fs::write(
-        &temporary_path,
-        serde_json::to_vec_pretty(&report).expect("raw evaluation report should serialize"),
-    )
-    .expect("raw evaluation checkpoint should write");
-    fs::rename(&temporary_path, output_path).expect("raw evaluation checkpoint should publish");
+    let encoded =
+        serde_json::to_vec_pretty(&report).expect("raw evaluation report should serialize");
+    write_private_file_atomically(output_path, &encoded, "raw evaluation checkpoint")
+        .expect("raw evaluation checkpoint should publish");
 }
 
 #[test]
@@ -1287,6 +1386,34 @@ fn gpqa_option_order_is_deterministic() {
     let second = gpqa_case_from_row(row(), "seed");
     assert_eq!(first.prompt, second.prompt);
     assert_eq!(first.expected, second.expected);
+}
+
+#[test]
+fn gpqa_treatment_rotation_balances_all_three_positions() {
+    let mut counts = BTreeMap::<(GpqaTreatment, usize), usize>::new();
+    for case_index in 0..GPQA_BASELINE_CASE_COUNT {
+        let order = gpqa_treatment_order(case_index);
+        assert_eq!(order.iter().copied().collect::<BTreeSet<_>>().len(), 3);
+        for (position, treatment) in order.into_iter().enumerate() {
+            *counts.entry((treatment, position)).or_default() += 1;
+        }
+    }
+    for treatment in [
+        GpqaTreatment::Direct,
+        GpqaTreatment::Auto,
+        GpqaTreatment::Pro,
+    ] {
+        for position in 0..3 {
+            assert_eq!(counts[&(treatment, position)], 4);
+        }
+    }
+}
+
+#[test]
+fn gpqa_provider_baseline_profiles_are_frozen() {
+    let auto = EvaluationPromptProfile::seed("auto");
+    let pro = EvaluationPromptProfile::seed("pro");
+    validate_gpqa_baseline_profiles(&auto, &pro).expect("baseline profiles must be stable");
 }
 
 #[test]
@@ -1460,17 +1587,25 @@ fn terminal_provider_failover_never_overrides_a_control_stop() {
 #[ignore = "requires configured cloud models, network access, and official benchmark files"]
 fn provider_backed_fugu_external_effect_pilot() {
     evaluation_git_commit().expect("evaluation source commit must be declared before model calls");
-    let config = load_provider_config();
-    assert!(config.is_ready(), "provider configuration is required");
-    let auto_profile = evaluation_prompt_profile("auto")
-        .expect("auto evaluation prompt profile should be reproducible");
-    let pro_profile = evaluation_prompt_profile("pro")
-        .expect("pro evaluation prompt profile should be reproducible");
+    let provider_baseline = std::env::var("CINDX_PROVIDER_BASELINE").as_deref() == Ok("1");
+    if provider_baseline {
+        assert!(
+            std::env::var_os("CINDX_EVAL_FROZEN_GEPA_AUTO_PATH").is_none()
+                && std::env::var_os("CINDX_EVAL_FROZEN_GEPA_PRO_PATH").is_none(),
+            "provider baseline excludes external GEPA prompt profiles"
+        );
+    }
     let gpqa_path = PathBuf::from(
         std::env::var("CINDX_GPQA_CSV").expect("CINDX_GPQA_CSV must point to gpqa_diamond.csv"),
     );
-    let mrcr_paths = std::env::var("CINDX_MRCR_JSONS")
-        .expect("CINDX_MRCR_JSONS must contain comma-separated Hugging Face page JSON files")
+    let mrcr_paths_value = std::env::var("CINDX_MRCR_JSONS").unwrap_or_else(|_| {
+        assert!(
+            provider_baseline,
+            "CINDX_MRCR_JSONS must contain comma-separated Hugging Face page JSON files"
+        );
+        String::new()
+    });
+    let mrcr_paths = mrcr_paths_value
         .split(',')
         .filter(|value| !value.trim().is_empty())
         .map(|value| PathBuf::from(value.trim()))
@@ -1479,47 +1614,99 @@ fn provider_backed_fugu_external_effect_pilot() {
         std::env::var("CINDX_EXTERNAL_EVAL_OUTPUT")
             .expect("CINDX_EXTERNAL_EVAL_OUTPUT must point to a private raw result path"),
     );
-    let per_domain = std::env::var("CINDX_GPQA_PER_DOMAIN")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(4)
-        .max(1);
-    let mrcr_limit = std::env::var("CINDX_MRCR_LIMIT")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(mrcr_paths.len())
-        .min(mrcr_paths.len());
+    let per_domain_override = std::env::var("CINDX_GPQA_PER_DOMAIN").ok().map(|value| {
+        value
+            .parse::<usize>()
+            .expect("CINDX_GPQA_PER_DOMAIN must be an integer")
+    });
+    let per_domain = if provider_baseline {
+        assert!(
+            per_domain_override.is_none()
+                || per_domain_override == Some(GPQA_BASELINE_CASES_PER_DOMAIN),
+            "provider baseline requires CINDX_GPQA_PER_DOMAIN=4 when it is set"
+        );
+        GPQA_BASELINE_CASES_PER_DOMAIN
+    } else {
+        per_domain_override
+            .unwrap_or(GPQA_BASELINE_CASES_PER_DOMAIN)
+            .max(1)
+    };
+    let mrcr_limit_override = std::env::var("CINDX_MRCR_LIMIT").ok().map(|value| {
+        value
+            .parse::<usize>()
+            .expect("CINDX_MRCR_LIMIT must be an integer")
+    });
+    let mrcr_limit = if provider_baseline {
+        assert!(mrcr_paths.is_empty(), "provider baseline excludes MRCR");
+        assert!(
+            mrcr_limit_override.is_none() || mrcr_limit_override == Some(0),
+            "provider baseline requires CINDX_MRCR_LIMIT=0 when it is set"
+        );
+        0
+    } else {
+        mrcr_limit_override
+            .unwrap_or(mrcr_paths.len())
+            .min(mrcr_paths.len())
+    };
     let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .canonicalize()
         .expect("repository root should resolve");
+    let gpqa_file_sha256 = file_sha256(&gpqa_path).expect("GPQA file should hash");
+    assert_eq!(
+        gpqa_file_sha256, GPQA_SOURCE_FILE_SHA256,
+        "GPQA CSV must match the pinned source artifact"
+    );
     let mut gpqa_cases = load_gpqa_cases(&gpqa_path, per_domain).expect("GPQA cases should load");
-    if let Ok(raw_case_ids) = std::env::var("CINDX_GPQA_CASE_IDS") {
-        let requested = raw_case_ids
-            .split(',')
-            .map(str::trim)
-            .filter(|case_id| !case_id.is_empty())
-            .collect::<BTreeSet<_>>();
-        if !requested.is_empty() {
-            gpqa_cases.retain(|case| requested.contains(case.case_id.as_str()));
-            assert_eq!(
-                gpqa_cases.len(),
-                requested.len(),
-                "every CINDX_GPQA_CASE_IDS entry must exist in the frozen sample"
-            );
+    if provider_baseline {
+        assert!(
+            std::env::var_os("CINDX_GPQA_CASE_IDS").is_none(),
+            "provider baseline does not allow CINDX_GPQA_CASE_IDS"
+        );
+        assert!(
+            std::env::var_os("CINDX_GPQA_CASE_LIMIT").is_none(),
+            "provider baseline does not allow CINDX_GPQA_CASE_LIMIT"
+        );
+        validate_gpqa_baseline_cases(&gpqa_cases)
+            .expect("provider baseline cases must match the pinned ordered manifest");
+    } else {
+        if let Ok(raw_case_ids) = std::env::var("CINDX_GPQA_CASE_IDS") {
+            let requested = raw_case_ids
+                .split(',')
+                .map(str::trim)
+                .filter(|case_id| !case_id.is_empty())
+                .collect::<BTreeSet<_>>();
+            if !requested.is_empty() {
+                gpqa_cases.retain(|case| requested.contains(case.case_id.as_str()));
+                assert_eq!(
+                    gpqa_cases.len(),
+                    requested.len(),
+                    "every CINDX_GPQA_CASE_IDS entry must exist in the frozen sample"
+                );
+            }
         }
+        let gpqa_case_limit = std::env::var("CINDX_GPQA_CASE_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(gpqa_cases.len())
+            .min(gpqa_cases.len());
+        gpqa_cases.truncate(gpqa_case_limit);
     }
-    let gpqa_case_limit = std::env::var("CINDX_GPQA_CASE_LIMIT")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(gpqa_cases.len())
-        .min(gpqa_cases.len());
-    gpqa_cases.truncate(gpqa_case_limit);
+    let config = load_provider_config();
+    assert!(config.is_ready(), "provider configuration is required");
+    let auto_profile = evaluation_prompt_profile("auto")
+        .expect("auto evaluation prompt profile should be reproducible");
+    let pro_profile = evaluation_prompt_profile("pro")
+        .expect("pro evaluation prompt profile should be reproducible");
+    if provider_baseline {
+        validate_gpqa_baseline_profiles(&auto_profile, &pro_profile)
+            .expect("provider baseline prompt profiles must match the frozen contract");
+    }
     let mut sources = vec![EvalSource {
         benchmark: "gpqa_diamond".to_string(),
         source_url: GPQA_SOURCE_URL.to_string(),
         revision: GPQA_SOURCE_REVISION.to_string(),
-        file_sha256: file_sha256(&gpqa_path).expect("GPQA file should hash"),
+        file_sha256: gpqa_file_sha256,
         sample_count: gpqa_cases.len(),
         protocol: "EvalScope-compatible zero-shot multiple choice; deterministic option shuffle; no tools; exact answer parsing."
             .to_string(),
@@ -1533,32 +1720,24 @@ fn provider_backed_fugu_external_effect_pilot() {
             case.domain,
             case.case_id
         );
-        append_gpqa_run(
-            &mut runs,
-            case,
-            "direct_default",
-            direct_gpqa_treatment(&config, &case.prompt),
-        );
-        append_gpqa_run(
-            &mut runs,
-            case,
-            "cindx_auto",
-            auto_gpqa_treatment(&config, &repository_root, &case.prompt, &auto_profile),
-        );
-        append_gpqa_run(
-            &mut runs,
-            case,
-            "cindx_pro",
-            conductor_gpqa_treatment(
-                &config,
-                &repository_root,
-                &case.prompt,
-                "pro",
-                3,
-                "best_of_n".to_string(),
-                &pro_profile,
-            ),
-        );
+        for (position, treatment) in gpqa_treatment_order(index).into_iter().enumerate() {
+            let result = match treatment {
+                GpqaTreatment::Direct => direct_gpqa_treatment(&config, &case.prompt),
+                GpqaTreatment::Auto => {
+                    auto_gpqa_treatment(&config, &repository_root, &case.prompt, &auto_profile)
+                }
+                GpqaTreatment::Pro => conductor_gpqa_treatment(
+                    &config,
+                    &repository_root,
+                    &case.prompt,
+                    "pro",
+                    3,
+                    "best_of_n".to_string(),
+                    &pro_profile,
+                ),
+            };
+            append_gpqa_run(&mut runs, case, treatment.label(), position, result);
+        }
         write_external_effect_checkpoint(&output_path, &config, &sources, &runs);
     }
 
@@ -1581,6 +1760,7 @@ fn provider_backed_fugu_external_effect_pilot() {
             &mut runs,
             page_row,
             "direct_default",
+            0,
             "single_raw_protocol",
             vec![default_model.clone()],
             raw_protocol_completion(
@@ -1604,6 +1784,7 @@ fn provider_backed_fugu_external_effect_pilot() {
             &mut runs,
             page_row,
             "cindx_auto_model_route",
+            1,
             route.policy.label(),
             vec![route.model.clone()],
             raw_protocol_completion(&config, ModelRole::Executor, route.model, messages),

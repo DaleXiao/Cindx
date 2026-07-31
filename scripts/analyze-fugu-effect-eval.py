@@ -13,12 +13,45 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from provider_baseline_contract import BaselineContractError, validate_provider_baseline
+
 RAW_SCHEMAS = {
     "cindx.external_effect_eval.raw.v1",
     "cindx.external_effect_eval.raw.v2",
     "cindx.external_effect_eval.raw.v3",
 }
 SANITIZED_SCHEMA = "cindx.external_effect_eval.sanitized.v1"
+SANITIZED_RUN_FIELDS = {
+    "benchmark",
+    "case_id",
+    "category",
+    "treatment",
+    "treatment_position",
+    "requested_policy",
+    "effective_policy",
+    "models",
+    "prompt_profile",
+    "prompt_profile_origin",
+    "prompt_profile_sha256",
+    "prompt_profile_artifact_sha256",
+    "gepa_frozen",
+    "succeeded",
+    "latency_ms",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "first_token_latency_ms",
+    "input_sha256",
+    "expected_sha256",
+    "output_sha256",
+    "parsed_answer",
+    "exact_score",
+    "prefix_valid",
+    "n_chars",
+    "n_needles",
+    "total_messages",
+}
+MODEL_ROLES = {"default", "conductor", "planner", "executor", "reviewer", "summarizer"}
 
 
 def percentile(values: list[float], quantile: float) -> float | None:
@@ -60,11 +93,78 @@ def sanitize_run(run: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in run.items()
-        if key not in {"expected", "output"}
+        if key in SANITIZED_RUN_FIELDS
     } | {
         "score": score,
         "error_class": classify_error(run.get("error")),
     }
+
+
+def sanitize_configured_models(models: Any) -> dict[str, str]:
+    if not isinstance(models, dict):
+        return {}
+    return {
+        role: model
+        for role, model in models.items()
+        if role in MODEL_ROLES and isinstance(model, str) and model.strip()
+    }
+
+
+def sanitize_sources(sources: Any) -> list[dict[str, Any]]:
+    if not isinstance(sources, list):
+        return []
+    fields = {
+        "benchmark",
+        "source_url",
+        "revision",
+        "file_sha256",
+        "sample_count",
+        "protocol",
+    }
+    return [
+        {key: value for key, value in source.items() if key in fields}
+        for source in sources
+        if isinstance(source, dict)
+    ]
+
+
+def build_report(
+    raw_bytes: bytes,
+    raw: dict[str, Any],
+    contract_bytes: bytes | None = None,
+    contract: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if (contract_bytes is None) != (contract is None):
+        raise ValueError("baseline contract bytes and document must be provided together")
+    if contract is not None:
+        validate_provider_baseline(raw, contract)
+    sanitized_runs = [sanitize_run(run) for run in raw["runs"]]
+    report = {
+        "schema": SANITIZED_SCHEMA,
+        "generated_at_ms": raw["generated_at_ms"],
+        "git_commit": raw["git_commit"],
+        "app_version": raw["app_version"],
+        "provider_endpoint_sha256": hashlib.sha256(
+            raw["provider_endpoint"].encode("utf-8")
+        ).hexdigest(),
+        "configured_models": sanitize_configured_models(raw.get("configured_models")),
+        "evaluation_limits": raw["evaluation_limits"],
+        "raw_evidence_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+        "sources": sanitize_sources(raw.get("sources")),
+        "aggregates": aggregate(sanitized_runs),
+        "gpqa_domains": gpqa_domain_breakdown(sanitized_runs),
+        "paired_gpqa": paired_gpqa_comparisons(sanitized_runs),
+        "runs": sanitized_runs,
+    }
+    if contract is not None and contract_bytes is not None:
+        report["baseline_contract"] = {
+            "id": contract["id"],
+            "sha256": hashlib.sha256(contract_bytes).hexdigest(),
+            "treatment_boundaries": {
+                item["id"]: item["boundary"] for item in contract["treatments"]
+            },
+        }
+    return report
 
 
 def classify_error(error: str | None) -> str | None:
@@ -215,6 +315,42 @@ def fmt_ms(value: float | None) -> str:
     if value >= 1000:
         return f"{value / 1000:.1f}s"
     return f"{value:.0f}ms"
+
+
+def diagnostic_domain_finding(
+    rows: list[dict[str, Any]], treatment: str
+) -> str:
+    candidates = [
+        row
+        for row in rows
+        if row.get("treatment") == treatment
+        and row.get("budgeted_score") is not None
+    ]
+    if not candidates:
+        return "No domain-level diagnostic is available for this treatment."
+    lowest_score = min(float(row["budgeted_score"]) for row in candidates)
+    domains = sorted(
+        row["category"]
+        for row in candidates
+        if math.isclose(
+            float(row["budgeted_score"]), lowest_score, rel_tol=0.0, abs_tol=1e-12
+        )
+    )
+    if len(domains) == 1:
+        description = f"{domains[0]} was the lowest-scoring diagnostic slice"
+    else:
+        domain_list = (
+            f"{domains[0]} and {domains[1]}"
+            if len(domains) == 2
+            else f"{', '.join(domains[:-1])}, and {domains[-1]}"
+        )
+        description = (
+            f"{domain_list} were tied for the lowest-scoring diagnostic slices"
+        )
+    return (
+        f"{description} at {fmt_percent(lowest_score)}; "
+        "the sample is too small for a domain-level conclusion."
+    )
 
 
 def render_markdown(
@@ -382,6 +518,9 @@ def render_markdown(
     observed_uplift = max(auto_gpqa["mean_score"], pro_gpqa["mean_score"]) > direct_gpqa[
         "mean_score"
     ]
+    auto_domain_finding = diagnostic_domain_finding(
+        report["gpqa_domains"], "cindx_auto"
+    )
     findings = [
         "## Observed Findings",
         "",
@@ -392,7 +531,7 @@ def render_markdown(
             else "This pilot therefore does not demonstrate orchestration uplift."
         ),
         f"- Cindx Pro completed **{pro_gpqa['completed']}/{pro_gpqa['n']}** GPQA cases and answered **{fmt_percent(pro_gpqa['completed_mean_score'])}** of completed cases correctly; {pro_latency_finding}.",
-        f"- Cindx Auto completed **{auto_gpqa['completed']}/{auto_gpqa['n']}** GPQA cases and answered **{fmt_percent(auto_gpqa['completed_mean_score'])}** of completed cases correctly. Chemistry was the weakest diagnostic slice; the sample is too small for a domain-level conclusion.",
+        f"- Cindx Auto completed **{auto_gpqa['completed']}/{auto_gpqa['n']}** GPQA cases and answered **{fmt_percent(auto_gpqa['completed_mean_score'])}** of completed cases correctly. {auto_domain_finding}",
     ]
     if direct_mrcr is not None and auto_mrcr is not None:
         findings.append(
@@ -440,15 +579,19 @@ def render_markdown(
             "## Decision and Next Gate",
             "",
             "- Do not claim Fugu parity or an Auto/Pro quality uplift from this pilot.",
-            "- Treat Pro deadline-aware scheduling and fail-soft aggregation as the highest-priority harness issue, then rerun the identical frozen sample before expanding it.",
-            "- Instrument complete usage telemetry and inspect Auto's answer aggregation, especially the Chemistry failures, before making cost or router-quality claims.",
+            "- Record this run as a small-sample observation only; Goal 10 does not tune routing or orchestration from it.",
+            "- Repeat the identical frozen protocol with complete usage telemetry before deciding whether a product change or a larger evaluation is warranted.",
             "- Add a trusted disposable code sandbox before enabling LiveCodeBench or SciCode; generated benchmark code must remain off the host system.",
             "",
             "## Reproduction",
             "",
             "1. Obtain GPQA-Diamond from the pinned public repository revision.",
             "2. Run the ignored Rust test `provider_backed_fugu_external_effect_pilot` with the documented dataset environment variables.",
-            "3. Run `scripts/analyze-fugu-effect-eval.py` on the private raw result to produce the sanitized JSON and this report.",
+            (
+                "3. Run `scripts/analyze-fugu-effect-eval.py --baseline-contract benchmarks/agent/provider-baseline-v1.json` on the private raw result to produce the sanitized JSON and this report."
+                if "baseline_contract" in report
+                else "3. Run `scripts/analyze-fugu-effect-eval.py` on the private raw result to produce the sanitized JSON and this report."
+            ),
             "",
         ]
     if has_mrcr:
@@ -467,6 +610,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("raw", type=Path)
     parser.add_argument("sanitized", type=Path)
+    parser.add_argument("--baseline-contract", type=Path)
     parser.add_argument("--markdown", type=Path)
     parser.add_argument("--title", default="Cindx Fugu External Effect Pilot V1")
     args = parser.parse_args()
@@ -475,22 +619,12 @@ def main() -> None:
     raw = json.loads(raw_bytes)
     if raw.get("schema") not in RAW_SCHEMAS:
         raise SystemExit(f"unexpected raw schema: {raw.get('schema')}")
-    sanitized_runs = [sanitize_run(run) for run in raw["runs"]]
-    report = {
-        "schema": SANITIZED_SCHEMA,
-        "generated_at_ms": raw["generated_at_ms"],
-        "git_commit": raw["git_commit"],
-        "app_version": raw["app_version"],
-        "provider_endpoint": raw["provider_endpoint"],
-        "configured_models": raw["configured_models"],
-        "evaluation_limits": raw.get("evaluation_limits", {}),
-        "raw_evidence_sha256": hashlib.sha256(raw_bytes).hexdigest(),
-        "sources": raw["sources"],
-        "aggregates": aggregate(sanitized_runs),
-        "gpqa_domains": gpqa_domain_breakdown(sanitized_runs),
-        "paired_gpqa": paired_gpqa_comparisons(sanitized_runs),
-        "runs": sanitized_runs,
-    }
+    contract_bytes = args.baseline_contract.read_bytes() if args.baseline_contract else None
+    contract = json.loads(contract_bytes) if contract_bytes is not None else None
+    try:
+        report = build_report(raw_bytes, raw, contract_bytes, contract)
+    except BaselineContractError as error:
+        raise SystemExit(f"baseline contract validation failed: {error}") from None
     args.sanitized.parent.mkdir(parents=True, exist_ok=True)
     args.sanitized.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     if args.markdown:
