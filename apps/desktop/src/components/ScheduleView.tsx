@@ -13,7 +13,7 @@ import {
   X,
   XCircle
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   cancelScheduleRun,
@@ -30,6 +30,7 @@ import {
   type SessionView,
   type UpsertScheduleInput
 } from "../tauri";
+import { wrappedDialogFocusIndex } from "./accessibilityFocusModel";
 
 type ScheduleDraft = {
   id: string | null;
@@ -172,6 +173,15 @@ export function ScheduleView({
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ScheduleRecord | null>(null);
+  const deleteDialogRef = useRef<HTMLElement>(null);
+  const deleteCancelRef = useRef<HTMLButtonElement>(null);
+  const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const newScheduleButtonRef = useRef<HTMLButtonElement>(null);
+  const scheduleRowRefs = useRef(new Map<string, HTMLButtonElement>());
+
+  useLayoutEffect(() => {
+    if (deleteTarget) deleteCancelRef.current?.focus({ preventScroll: true });
+  }, [deleteTarget?.id]);
 
   useEffect(() => {
     let disposed = false;
@@ -294,6 +304,73 @@ export function ScheduleView({
     setEditing(false);
   }
 
+  function focusScheduleRow(scheduleId: string | null) {
+    window.requestAnimationFrame(() => {
+      if (scheduleId) {
+        scheduleRowRefs.current.get(scheduleId)?.focus({ preventScroll: true });
+      } else {
+        newScheduleButtonRef.current?.focus({ preventScroll: true });
+      }
+    });
+  }
+
+  function restoreDeleteTriggerFocus() {
+    const trigger = deleteTriggerRef.current;
+    window.requestAnimationFrame(() => {
+      if (trigger?.isConnected && !trigger.disabled) {
+        trigger.focus({ preventScroll: true });
+      } else {
+        focusScheduleRow(selectedId);
+      }
+    });
+  }
+
+  function closeDeleteDialog() {
+    setDeleteTarget(null);
+    restoreDeleteTriggerFocus();
+  }
+
+  function handleDeleteDialogKeyDown(event: React.KeyboardEvent<HTMLElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeDeleteDialog();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(
+      deleteDialogRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []
+    );
+    const nextIndex = wrappedDialogFocusIndex(
+      focusable.indexOf(document.activeElement as HTMLButtonElement),
+      focusable.length,
+      event.shiftKey ? -1 : 1
+    );
+    if (nextIndex === null) return;
+    event.preventDefault();
+    focusable[nextIndex]?.focus({ preventScroll: true });
+  }
+
+  async function confirmDeleteSchedule() {
+    if (!deleteTarget) return;
+    const scheduleId = deleteTarget.id;
+    const deletedIndex =
+      state?.schedules.findIndex((schedule) => schedule.id === scheduleId) ?? 0;
+    setDeleteTarget(null);
+    const next = await perform(`delete-${scheduleId}`, () => deleteSchedule(scheduleId));
+    if (!next) {
+      restoreDeleteTriggerFocus();
+      return;
+    }
+    const nextSchedule =
+      next.schedules[Math.min(Math.max(deletedIndex, 0), next.schedules.length - 1)];
+    const nextScheduleId = nextSchedule?.id ?? null;
+    setSelectedId(nextScheduleId);
+    onScheduleSelect(nextScheduleId);
+    deleteTriggerRef.current = null;
+    focusScheduleRow(nextScheduleId);
+  }
+
   const latestRun = selected?.runs[selected.runs.length - 1] ?? null;
   const activeRun = latestRun && activeRunStatuses.has(latestRun.status) ? latestRun : null;
 
@@ -318,6 +395,7 @@ export function ScheduleView({
         <button
           className="secondary-button schedule-new-button"
           type="button"
+          ref={newScheduleButtonRef}
           onClick={beginNew}
         >
           <Plus aria-hidden="true" />
@@ -353,6 +431,10 @@ export function ScheduleView({
                   className={`schedule-list-row ${selectedId === schedule.id ? "active" : ""}`}
                   type="button"
                   key={schedule.id}
+                  ref={(node) => {
+                    if (node) scheduleRowRefs.current.set(schedule.id, node);
+                    else scheduleRowRefs.current.delete(schedule.id);
+                  }}
                   onClick={() => {
                     setSelectedId(schedule.id);
                     onScheduleSelect(schedule.id);
@@ -672,7 +754,10 @@ export function ScheduleView({
                     aria-label="Delete schedule"
                     title="Delete"
                     disabled={Boolean(activeRun)}
-                    onClick={() => setDeleteTarget(selected)}
+                    onClick={(event) => {
+                      deleteTriggerRef.current = event.currentTarget;
+                      setDeleteTarget(selected);
+                    }}
                   >
                     <Trash2 aria-hidden="true" />
                   </button>
@@ -765,6 +850,8 @@ export function ScheduleView({
               aria-modal="true"
               aria-labelledby="delete-schedule-title"
               aria-describedby="delete-schedule-description"
+              ref={deleteDialogRef}
+              onKeyDown={handleDeleteDialogKeyDown}
             >
               <div className="delete-confirmation-copy">
                 <h2 id="delete-schedule-title">Delete “{deleteTarget.name}”?</h2>
@@ -773,22 +860,13 @@ export function ScheduleView({
                 </p>
               </div>
               <div className="delete-confirmation-actions">
-                <button type="button" onClick={() => setDeleteTarget(null)}>
+                <button type="button" ref={deleteCancelRef} onClick={closeDeleteDialog}>
                   Cancel
                 </button>
                 <button
                   className="danger"
                   type="button"
-                  onClick={() => {
-                    const scheduleId = deleteTarget.id;
-                    setDeleteTarget(null);
-                    void perform(`delete-${scheduleId}`, async () => {
-                      const next = await deleteSchedule(scheduleId);
-                      setSelectedId(next.schedules[0]?.id ?? null);
-                      onScheduleSelect(next.schedules[0]?.id ?? null);
-                      return next;
-                    });
-                  }}
+                  onClick={() => void confirmDeleteSchedule()}
                 >
                   Delete Schedule
                 </button>
