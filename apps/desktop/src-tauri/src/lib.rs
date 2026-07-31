@@ -218,4 +218,6 @@ mod prompt_workflow_execution_tests;
 #[cfg(test)]
 mod routing_learning_runtime_tests;
 #[cfg(test)]
+mod view_model_contract_tests;
+#[cfg(test)]
 mod tests;
