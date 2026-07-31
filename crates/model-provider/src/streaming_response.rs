@@ -1,9 +1,9 @@
 use super::{
-    collect_response_body, parse_model_response, parse_provider_error, DsmlStreamDeltaFilter,
-    ModelError, ModelResponse, HTTP_POLL_INTERVAL, MAX_MODEL_RESPONSE_BYTES,
-    MODEL_REQUEST_CANCELLED,
+    collect_response_body, parse_model_response, parse_provider_error, ModelError, ModelResponse,
+    HTTP_POLL_INTERVAL, MAX_MODEL_RESPONSE_BYTES, MODEL_REQUEST_CANCELLED,
 };
 use crate::response_parser::{normalize_dsml_tool_calls, serialize_tool_calls};
+use crate::stream_delta_aggregator::FilteredStreamDeltaEmitter;
 use crate::streaming_wire::{parse_stream_event, StreamingToolCall};
 use agent_core::{Message, MessageRole, Metadata};
 use futures_util::{Stream, StreamExt};
@@ -215,8 +215,7 @@ where
     let mut finish_reason = None;
     let mut usage = Metadata::new();
     let mut last_activity = Instant::now();
-    let mut dsml_filter = DsmlStreamDeltaFilter::default();
-    let mut filtered_on_delta = |delta: &str| dsml_filter.push(delta, on_delta);
+    let mut delta_stream = FilteredStreamDeltaEmitter::new(on_delta);
 
     loop {
         if should_cancel() {
@@ -228,7 +227,8 @@ where
                 hard_timeout.as_secs().max(1)
             )));
         }
-        match tokio::time::timeout(HTTP_POLL_INTERVAL, stream.next()).await {
+        let poll_interval = delta_stream.before_poll(Instant::now(), HTTP_POLL_INTERVAL);
+        match tokio::time::timeout(poll_interval, stream.next()).await {
             Ok(Some(Ok(chunk))) => {
                 last_activity = Instant::now();
                 let chunk = chunk.as_ref();
@@ -249,7 +249,7 @@ where
                         &mut streamed_tool_calls,
                         &mut finish_reason,
                         &mut usage,
-                        &mut filtered_on_delta,
+                        &mut |delta| delta_stream.push(delta, Instant::now()),
                     )
                 })?;
                 if parsed_event {
@@ -282,10 +282,10 @@ where
             &mut streamed_tool_calls,
             &mut finish_reason,
             &mut usage,
-            &mut filtered_on_delta,
+            &mut |delta| delta_stream.push(delta, Instant::now()),
         )
     })?;
-    dsml_filter.finish(on_delta);
+    delta_stream.finish(Instant::now());
     finish_streaming_response(
         if stream_protocol_seen {
             String::new()
@@ -380,6 +380,85 @@ pub(super) async fn consume_streaming_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn consume_immediate_test_stream(
+        chunks: Vec<Result<&'static str, ModelError>>,
+        on_delta: &mut impl FnMut(&str),
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<ModelResponse, ModelError> {
+        let hard_timeout = Duration::from_secs(1);
+        crate::run_http(consume_streaming_body(
+            futures_util::stream::iter(
+                chunks
+                    .into_iter()
+                    .map(|chunk| chunk.map(|value| value.as_bytes().to_vec())),
+            ),
+            "test-model",
+            "http://example.test/v1",
+            Duration::from_secs(1),
+            hard_timeout,
+            Instant::now() + hard_timeout,
+            on_delta,
+            should_cancel,
+        ))
+    }
+
+    #[test]
+    fn streaming_body_batches_callbacks_and_flushes_before_success() {
+        let mut emitted = Vec::new();
+        let response = consume_immediate_test_stream(
+            vec![
+                Ok("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n"),
+                Ok("data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n"),
+                Ok("data: {\"choices\":[{\"delta\":{\"content\":\"c\"}}]}\n"),
+            ],
+            &mut |delta| emitted.push(delta.to_string()),
+            &mut || false,
+        )
+        .expect("stream should complete");
+
+        assert_eq!(response.message.content, "abc");
+        assert_eq!(emitted, ["a", "bc"]);
+    }
+
+    #[test]
+    fn streaming_body_flushes_safe_text_before_read_error() {
+        let mut emitted = Vec::new();
+        let error = consume_immediate_test_stream(
+            vec![
+                Ok("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n"),
+                Ok("data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n"),
+                Err(ModelError::new("wire failed")),
+            ],
+            &mut |delta| emitted.push(delta.to_string()),
+            &mut || false,
+        )
+        .expect_err("stream should surface the read error");
+
+        assert!(error.message.contains("wire failed"));
+        assert_eq!(emitted, ["a", "b"]);
+    }
+
+    #[test]
+    fn streaming_body_flushes_safe_text_before_cancellation() {
+        let mut emitted = Vec::new();
+        let mut cancellation_checks = 0;
+        let error = consume_immediate_test_stream(
+            vec![
+                Ok("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n"),
+                Ok("data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n"),
+            ],
+            &mut |delta| emitted.push(delta.to_string()),
+            &mut || {
+                cancellation_checks += 1;
+                cancellation_checks >= 3
+            },
+        )
+        .expect_err("stream should cancel before polling again");
+
+        assert_eq!(error.message, MODEL_REQUEST_CANCELLED);
+        assert_eq!(emitted, ["a", "b"]);
+    }
 
     #[test]
     fn line_decoder_scans_an_eight_mib_event_once_across_one_kib_chunks() {

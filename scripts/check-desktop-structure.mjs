@@ -819,6 +819,7 @@ const modelProviderModuleBudgets = new Map([
   ["request_tool_calls.rs", 80],
   ["request_vision.rs", 400],
   ["response_parser.rs", 380],
+  ["stream_delta_aggregator.rs", 150],
   ["streaming_response.rs", 380],
   ["streaming_wire.rs", 160],
   ["usage.rs", 220],
