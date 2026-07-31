@@ -270,7 +270,7 @@ pub(crate) fn index_graph_at_path_cancellable(
     if cancelled || should_cancel() {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
-    Ok((graph_store.nodes().len(), graph_store.edges().len()))
+    Ok((graph_store.node_count(), graph_store.edge_count()))
 }
 
 fn knowledge_paths_in_root(

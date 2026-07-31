@@ -38,6 +38,7 @@ name = "agent-graph"
 version = "0.1.0"
 dependencies = [
  "agent-rag",
+ "aho-corasick",
 ]
 
 [[package]]

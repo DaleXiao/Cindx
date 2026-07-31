@@ -764,7 +764,7 @@ pub(crate) fn index_graph_chunks_cancellable(
         if cancelled || should_cancel() {
             return Err(MODEL_REQUEST_CANCELLED.to_string());
         }
-        let counts = (graph_store.nodes().len(), graph_store.edges().len());
+        let counts = (graph_store.node_count(), graph_store.edge_count());
         drop(graph_store);
         fs::rename(&temporary_path, &graph_path)
             .map_err(|error| format!("failed to replace graph store: {error}"))?;

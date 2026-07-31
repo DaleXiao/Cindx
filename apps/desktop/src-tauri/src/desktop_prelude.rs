@@ -9,7 +9,7 @@ pub(crate) use agent_core::{
     ToolArtifact, ToolContent, ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
 };
 pub(crate) use agent_graph::{
-    extract_graph_from_chunk, graph_direct_recall, graph_walk_recall, FileGraphStore, GraphStore,
+    extract_graph_from_chunk, graph_direct_recall, graph_walk_recall, FileGraphStore,
 };
 pub(crate) use agent_mcp::{McpCatalogService, McpServerConfig};
 pub(crate) use agent_memory::{
