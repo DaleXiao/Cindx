@@ -5273,10 +5273,14 @@ fn agent_state_reports_context_usage_and_hides_internal_drafts() {
 
 #[test]
 fn phase5_state_lists_tool_results() {
-    let mut store = SqliteStore::in_memory().expect("store should open");
+    let store = Mutex::new(SqliteStore::in_memory().expect("store should open"));
+    let execution_gate = Mutex::new(());
     let root = workspace_root();
-    execute_tool_invocation(
-        &mut store,
+    let registry = ToolRegistry::with_workspace_tools(root.clone());
+    execute_manual_tool_invocation(
+        &execution_gate,
+        &store,
+        &registry,
         ToolInvocation {
             id: agent_core::ToolCallId("tool-1".to_string()),
             task_id: phase5_task_id(),
@@ -5290,6 +5294,7 @@ fn phase5_state_lists_tool_results() {
     )
     .expect("tool should execute");
 
+    let store = store.lock().expect("store should lock");
     let state = phase5_state(&store, None, &root).expect("state should load");
 
     assert!(state.tools.iter().any(|tool| tool.name == "file.write"));

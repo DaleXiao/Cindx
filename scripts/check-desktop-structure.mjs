@@ -413,6 +413,14 @@ const toolRuntimeServiceSource = read(
 const toolExecutionSource = read(
   "apps/desktop/src-tauri/src/tool_execution.rs"
 );
+const manualToolExecutionSource = read(
+  "apps/desktop/src-tauri/src/manual_tool_execution.rs"
+);
+const appStateSource = read("apps/desktop/src-tauri/src/app_state.rs");
+const toolCommandsSource = read("apps/desktop/src-tauri/src/tool_commands.rs");
+const knowledgeCommandsSource = read(
+  "apps/desktop/src-tauri/src/knowledge_commands.rs"
+);
 const scheduleSource = read("apps/desktop/src-tauri/src/schedule.rs");
 const cargoToml = read("apps/desktop/src-tauri/Cargo.toml");
 const cargoLock = read("apps/desktop/src-tauri/Cargo.lock");
@@ -723,6 +731,7 @@ const criticalDesktopAgentModuleBudgets = new Map([
   ["knowledge_runtime.rs", 1_000],
   ["memory_projection_runtime.rs", 260],
   ["memory_runtime.rs", 950],
+  ["manual_tool_execution.rs", 180],
 ]);
 const criticalDesktopAgentModules = desktopRustModules.filter(({ entry }) =>
   criticalDesktopAgentModuleBudgets.has(entry)
@@ -1050,6 +1059,7 @@ for (const requiredModule of [
   "runtime_values.rs",
   "session_output_cache.rs",
   "sidecar_runtime.rs",
+  "manual_tool_execution.rs",
   "tool_execution.rs",
 ]) {
   assert(
@@ -1449,7 +1459,8 @@ assert(
     toolRuntimeServiceSource.includes("retryable_failure_is_not_replayed") &&
     agentToolRuntimeSource.includes("apply_tool_spec_runtime_metadata") &&
     desktopAgentToolRuntimeSource.includes("apply_tool_spec_runtime_metadata") &&
-    toolExecutionSource.match(/apply_tool_spec_runtime_metadata/g)?.length >= 2 &&
+    toolExecutionSource.includes("apply_tool_spec_runtime_metadata") &&
+    manualToolExecutionSource.includes("apply_tool_spec_runtime_metadata") &&
     toolsSource.includes("fn effect_spec(&self, _invocation: &ToolInvocation)") &&
     toolsSource.includes("fn meta_invoke_preserves_target_effect_semantics()") &&
     toolRuntimeServiceSource.includes(
@@ -1465,6 +1476,19 @@ assert(
     agentStorageSource.includes("event_scope_columns_v3") &&
     agentStorageSource.includes("event_queue_scope_v1"),
   "Tool execution must persist metrics and replay only exact non-retryable completed calls through an indexed journal"
+);
+assert(
+  rustLib.includes("mod manual_tool_execution;") &&
+    appStateSource.includes("manual_tool_execution_gate: Mutex<()>") &&
+    manualToolExecutionSource.includes("let _execution_gate = execution_gate") &&
+    manualToolExecutionSource.includes("fn prepare_manual_tool_execution(") &&
+    manualToolExecutionSource.includes("fn perform_manual_tool_execution(") &&
+    manualToolExecutionSource.includes("fn commit_manual_tool_execution(") &&
+    (toolCommandsSource.match(/execute_manual_tool_invocation\(/g)?.length ?? 0) === 2 &&
+    (knowledgeCommandsSource.match(/execute_manual_tool_invocation\(/g)?.length ?? 0) === 2 &&
+    !toolCommandsSource.includes("execute_tool_invocation(&mut store") &&
+    !knowledgeCommandsSource.includes("execute_tool_invocation(&mut store"),
+  "Manual Phase 5 and Phase 8 tools must execute outside the global store lock"
 );
 assert(
   rustLib.includes("fn prepare_run_knowledge_contexts(") &&

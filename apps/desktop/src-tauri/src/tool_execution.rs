@@ -70,16 +70,6 @@ pub(crate) fn phase5_state_with_error(
     phase5_state(&store, Some(message), &root).map_err(|error| error.to_string())
 }
 
-pub(crate) fn execute_tool_invocation(
-    store: &mut SqliteStore,
-    invocation: ToolInvocation,
-    workspace_root: &Path,
-    registry: Option<&ToolRegistry>,
-) -> Result<(), StorageError> {
-    execute_tool_invocation_with_result(store, invocation, workspace_root, registry, None)
-        .map(|_| ())
-}
-
 pub(crate) enum AgentToolInvocationOutcome {
     Completed(ToolResult),
     RestartAfterSteer,
@@ -717,114 +707,6 @@ fn preserve_primary_tool_artifact_version(
         snapshot_relative.display().to_string(),
     );
     Ok(())
-}
-
-pub(crate) fn execute_tool_invocation_with_result(
-    store: &mut SqliteStore,
-    mut invocation: ToolInvocation,
-    workspace_root: &Path,
-    registry: Option<&ToolRegistry>,
-    run_context: Option<&Metadata>,
-) -> Result<ToolResult, StorageError> {
-    let fallback_registry = registry
-        .is_none()
-        .then(|| ToolRegistry::with_workspace_tools(workspace_root.to_path_buf()));
-    let registry = registry
-        .or(fallback_registry.as_ref())
-        .expect("tool registry should be available");
-    if let Some(tool) = registry.get(&invocation.tool_name) {
-        let effect_spec = tool.effect_spec(&invocation);
-        agent_runtime::apply_tool_spec_runtime_metadata(&mut invocation, &effect_spec);
-    }
-    if let Some(result) = completed_tool_result(store, &invocation, workspace_root)? {
-        return Ok(result);
-    }
-    let invocation_context = tool_invocation_context(&invocation);
-    let event_context =
-        run_context.or_else(|| (!invocation_context.is_empty()).then_some(&invocation_context));
-    let metadata = tool_invocation_event_metadata(&invocation);
-    let metadata = match run_context {
-        Some(context) => metadata_with_context(metadata, context),
-        None => metadata,
-    };
-    append_event(
-        store,
-        &invocation.task_id,
-        EventKind::ToolCallStarted,
-        format!("Tool call started: {}", invocation.tool_name),
-        metadata,
-    )?;
-
-    let execution_started_at = Instant::now();
-    let task_id = invocation.task_id.clone();
-    let tool_call_id = invocation.id.0.clone();
-    let tool_name = invocation.tool_name.clone();
-    let input_fingerprint = tool_input_fingerprint(&tool_name, &invocation.input_json);
-    let Some(tool) = registry.get(&invocation.tool_name) else {
-        let mut result = ToolResult::failed(invocation.id, "unknown tool");
-        finalize_tool_result(
-            &mut result,
-            &agent_core::ToolCallId(tool_call_id.clone()),
-            &input_fingerprint,
-            execution_started_at.elapsed(),
-        );
-        append_tool_finished_event(
-            store,
-            &task_id,
-            &tool_call_id,
-            &tool_name,
-            "failed",
-            "unknown tool",
-            result.metadata.clone(),
-            event_context,
-        )?;
-        return Ok(result);
-    };
-
-    let result = match tool.execute(invocation) {
-        Ok(mut result) => {
-            finalize_tool_result(
-                &mut result,
-                &agent_core::ToolCallId(tool_call_id.clone()),
-                &input_fingerprint,
-                execution_started_at.elapsed(),
-            );
-            append_tool_finished_event(
-                store,
-                &task_id,
-                &tool_call_id,
-                &tool_name,
-                tool_outcome_label(&result.status),
-                &result.output,
-                result.metadata.clone(),
-                event_context,
-            )?;
-            result
-        }
-        Err(error) => {
-            let mut result =
-                failed_tool_result(agent_core::ToolCallId(tool_call_id.clone()), error);
-            finalize_tool_result(
-                &mut result,
-                &agent_core::ToolCallId(tool_call_id.clone()),
-                &input_fingerprint,
-                execution_started_at.elapsed(),
-            );
-            append_tool_finished_event(
-                store,
-                &task_id,
-                &tool_call_id,
-                &tool_name,
-                "failed",
-                &result.output,
-                result.metadata.clone(),
-                event_context,
-            )?;
-            result
-        }
-    };
-
-    Ok(result)
 }
 
 pub(crate) fn append_tool_proposed_event(

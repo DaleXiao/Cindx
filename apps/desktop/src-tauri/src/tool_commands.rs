@@ -85,8 +85,19 @@ pub(crate) fn run_tool(
         return phase5_state(&store, None, &root).map_err(|error| error.to_string());
     }
 
-    execute_tool_invocation(&mut store, invocation, &root, Some(&registry))
-        .map_err(|error| error.to_string())?;
+    drop(store);
+    execute_manual_tool_invocation(
+        &state.manual_tool_execution_gate,
+        &state.store,
+        &registry,
+        invocation,
+        &root,
+        None,
+    )?;
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
     phase5_state(&store, None, &root).map_err(|error| error.to_string())
 }
 
@@ -161,8 +172,20 @@ pub(crate) fn resolve_tool_permission(
             proposed_by_model: "local-user".to_string(),
             metadata: Metadata::new(),
         };
-        execute_tool_invocation(&mut store, invocation, &root, Some(&registry))
-            .map_err(|error| error.to_string())?;
+        drop(store);
+        execute_manual_tool_invocation(
+            &state.manual_tool_execution_gate,
+            &state.store,
+            &registry,
+            invocation,
+            &root,
+            None,
+        )?;
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        return phase5_state(&store, None, &root).map_err(|error| error.to_string());
     } else {
         append_event(
             &mut store,

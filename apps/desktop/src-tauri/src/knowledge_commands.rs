@@ -706,8 +706,19 @@ pub(crate) fn run_browser_tool(
         return phase8_state(&store, None).map_err(|error| error.to_string());
     }
 
-    execute_tool_invocation(&mut store, invocation, &root, Some(&registry))
-        .map_err(|error| error.to_string())?;
+    drop(store);
+    execute_manual_tool_invocation(
+        &state.manual_tool_execution_gate,
+        &state.store,
+        &registry,
+        invocation,
+        &root,
+        None,
+    )?;
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
     phase8_state(&store, None).map_err(|error| error.to_string())
 }
 
@@ -791,8 +802,20 @@ pub(crate) fn resolve_browser_permission(
             proposed_by_model: "local-user".to_string(),
             metadata: run_context,
         };
-        execute_tool_invocation(&mut store, invocation, &root, Some(&registry))
-            .map_err(|error| error.to_string())?;
+        drop(store);
+        execute_manual_tool_invocation(
+            &state.manual_tool_execution_gate,
+            &state.store,
+            &registry,
+            invocation,
+            &root,
+            None,
+        )?;
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        return phase8_state(&store, None).map_err(|error| error.to_string());
     } else {
         append_event(
             &mut store,
