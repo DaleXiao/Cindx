@@ -6,13 +6,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{Cursor, Read, Write};
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(test)]
+use std::io::Write;
+use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tools::{Tool, ToolError};
+use tools::{write_private_file_atomically, Tool, ToolError};
 
 const MAX_SKILL_INSTRUCTIONS: usize = 16_000;
 const MAX_SELECTED_SKILLS: usize = 2;
@@ -707,19 +707,8 @@ fn write_private_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String
     }
     let text = serde_json::to_string_pretty(value)
         .map_err(|error| format!("failed to encode skill preferences: {error}"))?;
-    let mut options = fs::OpenOptions::new();
-    options.create(true).write(true).truncate(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options
-        .open(path)
-        .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
-    file.write_all(text.as_bytes())
-        .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
-    #[cfg(unix)]
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|error| format!("failed to secure {}: {error}", path.display()))?;
-    Ok(())
+    write_private_file_atomically(path, text.as_bytes())
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))
 }
 
 #[cfg(test)]

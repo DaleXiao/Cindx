@@ -8,3 +8,4 @@ license.workspace = true
 agent-core = { path = "../agent-core" }
 model-provider = { path = "../model-provider" }
 serde_json = "1"
+tempfile = "3.27"

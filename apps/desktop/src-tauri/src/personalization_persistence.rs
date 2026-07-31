@@ -2,9 +2,7 @@ use crate::configuration_models::PersonalizationConfig;
 use crate::persistence_runtime::personalization_config_path;
 use crate::runtime_constants::PERSONALIZATION_MAX_NAME_CHARS;
 use std::fs;
-use std::io::Write;
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use tools::write_private_file_atomically;
 
 pub(crate) fn normalized_personalization_config(
     config: PersonalizationConfig,
@@ -87,15 +85,7 @@ pub(crate) fn save_personalization_config_to_disk(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut options = fs::OpenOptions::new();
-    options.create(true).write(true).truncate(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(&path)?;
     let payload = serde_json::to_vec_pretty(config)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    file.write_all(&payload)?;
-    #[cfg(unix)]
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
+    write_private_file_atomically(&path, &payload)
 }

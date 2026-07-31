@@ -20,6 +20,7 @@ mod file_search;
 mod file_tools;
 mod image_generation;
 mod meta_tools;
+mod private_file;
 mod process_control;
 mod shell;
 mod stream_capture;
@@ -35,6 +36,7 @@ pub use file_batch::ReadFilesTool;
 pub use file_search::SearchFilesTool;
 pub use file_tools::{ListDirectoryTool, ReadFileTool, WriteFileTool};
 pub use image_generation::ImageGenerationTool;
+pub use private_file::write_private_file_atomically;
 pub use shell::ShellRunTool;
 pub use web_search::WebSearchTool;
 

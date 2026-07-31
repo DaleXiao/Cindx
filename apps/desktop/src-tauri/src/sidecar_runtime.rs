@@ -6,13 +6,9 @@ use crate::{
 };
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
 };
-use tools::WebSearchConfig;
-
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use tools::{write_private_file_atomically, WebSearchConfig};
 
 pub(crate) fn load_sidecar_config() -> SidecarConfig {
     let mut config = SidecarConfig::default();
@@ -48,24 +44,13 @@ pub(crate) fn save_sidecar_config_to_disk(config: &SidecarConfig) -> Result<(), 
         fs::create_dir_all(parent)?;
     }
 
-    let mut options = fs::OpenOptions::new();
-    options.create(true).write(true).truncate(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(&path)?;
-    file.write_all(
-        format!(
-            "browser_path={}\ncomputer_path={}\nauto_configure={}\n",
-            sanitize_config_value(&config.browser_path),
-            sanitize_config_value(&config.computer_path),
-            config.auto_configure
-        )
-        .as_bytes(),
-    )?;
-    #[cfg(unix)]
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-
-    Ok(())
+    let payload = format!(
+        "browser_path={}\ncomputer_path={}\nauto_configure={}\n",
+        sanitize_config_value(&config.browser_path),
+        sanitize_config_value(&config.computer_path),
+        config.auto_configure
+    );
+    write_private_file_atomically(&path, payload.as_bytes())
 }
 
 pub(crate) fn load_web_search_config() -> WebSearchConfig {
@@ -93,22 +78,12 @@ pub(crate) fn save_web_search_config_to_disk(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut options = fs::OpenOptions::new();
-    options.create(true).write(true).truncate(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(&path)?;
-    file.write_all(
-        format!(
-            "endpoint={}\napi_key={}\n",
-            sanitize_config_value(&config.endpoint),
-            sanitize_config_value(&config.api_key)
-        )
-        .as_bytes(),
-    )?;
-    #[cfg(unix)]
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
+    let payload = format!(
+        "endpoint={}\napi_key={}\n",
+        sanitize_config_value(&config.endpoint),
+        sanitize_config_value(&config.api_key)
+    );
+    write_private_file_atomically(&path, payload.as_bytes())
 }
 
 pub(crate) fn apply_sidecar_env(config: &SidecarConfig) {
