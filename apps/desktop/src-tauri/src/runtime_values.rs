@@ -71,6 +71,10 @@ pub(crate) fn new_session_id() -> String {
     format!("sess_{}", uuid::Uuid::now_v7())
 }
 
+pub(crate) fn new_project_id(_name: &str) -> String {
+    format!("project-{}", uuid::Uuid::now_v7())
+}
+
 pub(crate) fn current_time_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

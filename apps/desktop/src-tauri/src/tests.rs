@@ -2446,7 +2446,10 @@ fn session_read_model_advances_from_only_new_events() {
         "Agent task started",
         metadata_with_context(
             [
-                ("agent_run_id".to_string(), "run-read-model-fast".to_string()),
+                (
+                    "agent_run_id".to_string(),
+                    "run-read-model-fast".to_string(),
+                ),
                 ("agent_effort".to_string(), "fast".to_string()),
                 ("prompt".to_string(), "Inspect another change".to_string()),
             ]
@@ -4121,6 +4124,29 @@ fn redacting_tool_call_metadata_preserves_nested_json() {
     assert_eq!(nested["api_key"], "[REDACTED]");
     assert!(nested["command"].as_str().is_some());
     assert!(!redacted["raw_tool_calls_json"].contains("secret-value"));
+}
+
+#[test]
+fn generated_project_ids_are_not_mistaken_for_prefixed_secrets() {
+    for name in ["SK Model", "AKIA Research"] {
+        let project_id = new_project_id(name);
+        let metadata = [
+            ("project_id".to_string(), project_id.clone()),
+            (
+                "content".to_string(),
+                "token=sk-abcdefghijklmnop".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let redacted = redact_metadata(&metadata);
+        assert_eq!(redacted.get("project_id"), Some(&project_id));
+        assert_eq!(
+            redacted.get("content").map(String::as_str),
+            Some("token=[REDACTED]")
+        );
+    }
 }
 
 #[test]

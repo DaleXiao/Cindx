@@ -1,0 +1,229 @@
+.memory-settings-panel {
+  min-width: 0;
+}
+
+.memory-settings-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.memory-settings-heading > .secondary-button {
+  flex: 0 0 auto;
+}
+
+.memory-settings-groups,
+.memory-settings-group,
+.memory-settings-list {
+  display: grid;
+  min-width: 0;
+}
+
+.memory-settings-groups {
+  gap: 18px;
+}
+
+.memory-settings-group {
+  gap: 6px;
+}
+
+.memory-settings-group h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.memory-settings-group h3 span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.memory-settings-list {
+  border-top: 1px solid var(--border);
+}
+
+.memory-settings-row {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px 14px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.memory-settings-main {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.memory-settings-main > p {
+  overflow: visible;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: pre-wrap;
+}
+
+.memory-settings-main > small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+}
+
+.memory-settings-main > .memory-settings-reason {
+  color: var(--text);
+}
+
+.memory-settings-meta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.memory-settings-meta span {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.memory-settings-meta span[data-emphasis="true"] {
+  color: var(--accent);
+}
+
+.memory-settings-actions {
+  display: flex;
+  max-width: 250px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.memory-settings-actions .secondary-button,
+.memory-settings-review .secondary-button,
+.memory-settings-confirm .secondary-button,
+.memory-settings-error .secondary-button {
+  min-height: 28px;
+  padding-inline: 8px;
+  font-size: 10px;
+}
+
+.memory-settings-actions svg,
+.memory-settings-review svg {
+  width: 13px;
+  height: 13px;
+}
+
+.memory-settings-delete,
+.memory-settings-delete-confirm {
+  color: var(--danger, #9f2d25);
+}
+
+:root[data-theme="dark"] .memory-settings-delete,
+:root[data-theme="dark"] .memory-settings-delete-confirm {
+  color: #fca5a5;
+}
+
+.memory-settings-review,
+.memory-settings-confirm {
+  display: grid;
+  min-width: 0;
+  grid-column: 1 / -1;
+  gap: 8px;
+  padding: 10px;
+  background: var(--surface-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--settings-element-radius);
+}
+
+.memory-settings-review label {
+  display: grid;
+  gap: 5px;
+}
+
+.memory-settings-review label > span,
+.memory-settings-review > p,
+.memory-settings-confirm > span {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.memory-settings-review > p {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.memory-settings-review textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 9px;
+  resize: vertical;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--form-control-radius);
+  outline: 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.memory-settings-review textarea:focus {
+  border-color: var(--accent);
+  box-shadow: var(--form-control-focus-ring);
+}
+
+.memory-settings-save {
+  color: #ffffff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.memory-settings-confirm {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+}
+
+.memory-settings-error {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.memory-settings-error > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+  .memory-settings-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .memory-settings-actions {
+    max-width: none;
+    justify-content: flex-start;
+  }
+
+  .memory-settings-confirm {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

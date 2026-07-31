@@ -29,15 +29,7 @@ pub(crate) fn create_project(
         .lock()
         .map_err(|error| format!("project session config lock poisoned: {error}"))?;
     let mut candidate = config.clone();
-    let project_id = unique_config_id(
-        "project",
-        &name,
-        &candidate
-            .projects
-            .iter()
-            .map(|project| project.id.clone())
-            .collect::<Vec<_>>(),
-    );
+    let project_id = new_project_id(&name);
     let session_id = new_session_id();
     let now = current_time_millis();
     candidate.projects.push(ProjectRecord {
@@ -209,10 +201,14 @@ pub(crate) fn delete_project(
     if let Err(error) = clear_session_runtime_state(&state, &deleted_session_ids) {
         cleanup_errors.push(error);
     }
-    if let Err(error) = delete_session_history(&state, &deleted_session_ids) {
+    if let Err(error) = delete_session_history(&state, &deleted_session_ids, None) {
         cleanup_errors.push(error);
     }
-    if let Err(error) = delete_project_memory(&state, &project_root, &input.project_id) {
+    if let Err(error) = crate::memory_management_runtime::delete_project_memory(
+        &state,
+        &project_root,
+        &input.project_id,
+    ) {
         cleanup_errors.push(error);
     }
     if let Err(error) = remove_staged_attachment_dirs(&attachment_dirs) {
@@ -665,7 +661,7 @@ pub(crate) fn delete_session(
     input: SessionActionInput,
 ) -> Result<ProjectSessionState, String> {
     let session_id = input.session_id;
-    let (attachment_dir, context_file, mut next_state) = {
+    let (project_id, project_root, attachment_dir, context_file, mut next_state) = {
         let mut config = state
             .project_session_config
             .lock()
@@ -682,26 +678,18 @@ pub(crate) fn delete_session(
             ));
         };
         let project_id = candidate.sessions[index].project_id.clone();
-        let attachment_dir = candidate
+        let project_root = candidate
             .projects
             .iter()
             .find(|project| project.id == project_id)
-            .map(|project| {
-                PathBuf::from(&project.root)
-                    .join(".cindx")
-                    .join("attachments")
-                    .join(slug_label(&session_id))
-            });
-        let context_file = candidate
-            .projects
-            .iter()
-            .find(|project| project.id == project_id)
-            .map(|project| {
-                context_checkpoint_path_for_session(
-                    Path::new(&project.root),
-                    Some(session_id.as_str()),
-                )
-            });
+            .map(|project| PathBuf::from(&project.root))
+            .ok_or_else(|| "project not found for session".to_string())?;
+        let attachment_dir = project_root
+            .join(".cindx")
+            .join("attachments")
+            .join(slug_label(&session_id));
+        let context_file =
+            context_checkpoint_path_for_session(&project_root, Some(session_id.as_str()));
         candidate.sessions.remove(index);
         if candidate.active_session_id == session_id {
             candidate.active_session_id =
@@ -709,6 +697,8 @@ pub(crate) fn delete_session(
         }
         commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
         (
+            project_id,
+            project_root,
             attachment_dir,
             context_file,
             project_session_state(&config, None),
@@ -719,18 +709,18 @@ pub(crate) fn delete_session(
     if let Err(error) = clear_session_runtime_state(&state, std::slice::from_ref(&session_id)) {
         cleanup_errors.push(error);
     }
-    if let Err(error) = delete_session_history(&state, std::slice::from_ref(&session_id)) {
+    if let Err(error) = delete_session_history(
+        &state,
+        std::slice::from_ref(&session_id),
+        Some((&project_id, &project_root)),
+    ) {
         cleanup_errors.push(error);
     }
-    if let Some(attachment_dir) = attachment_dir {
-        if let Err(error) = remove_staged_attachment_dirs(&[attachment_dir]) {
-            cleanup_errors.push(error);
-        }
+    if let Err(error) = remove_staged_attachment_dirs(&[attachment_dir]) {
+        cleanup_errors.push(error);
     }
-    if let Some(context_file) = context_file {
-        if let Err(error) = remove_session_context_files(&[context_file]) {
-            cleanup_errors.push(error);
-        }
+    if let Err(error) = remove_session_context_files(&[context_file]) {
+        cleanup_errors.push(error);
     }
     if !cleanup_errors.is_empty() {
         next_state.last_error = Some(format!(
@@ -792,6 +782,7 @@ pub(crate) fn clear_session_runtime_state(
 pub(crate) fn delete_session_history(
     state: &tauri::State<'_, AppState>,
     session_ids: &[String],
+    retained_memory_context: Option<(&str, &Path)>,
 ) -> Result<(), String> {
     if session_ids.is_empty() {
         return Ok(());
@@ -800,6 +791,22 @@ pub(crate) fn delete_session_history(
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
+    if let Some((project_id, _)) = retained_memory_context {
+        let ledger = load_project_memory_ledger(&mut store, project_id)
+            .map_err(|error| error.to_string())?;
+        crate::memory_record_persistence_runtime::retain_memory_records_for_deleted_sessions(
+            &mut store,
+            &ledger,
+            session_ids,
+        )
+        .map_err(|error| error.to_string())?;
+        crate::memory_record_persistence_runtime::persist_memory_session_retirements(
+            &mut store,
+            project_id,
+            session_ids,
+        )
+        .map_err(|error| error.to_string())?;
+    }
     for session_id in session_ids {
         store
             .delete_records_by_metadata("session_id", session_id)
@@ -811,6 +818,16 @@ pub(crate) fn delete_session_history(
             .delete_read_model(AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE, session_id)
             .map_err(|error| error.to_string())?;
     }
+    let rebuilt_memory = if let Some((project_id, workspace_root)) = retained_memory_context {
+        store
+            .delete_read_model(AGENT_MEMORY_READ_MODEL_NAMESPACE, project_id)
+            .map_err(|error| error.to_string())?;
+        let ledger = load_project_memory_ledger(&mut store, project_id)
+            .map_err(|error| error.to_string())?;
+        Some((workspace_root.to_path_buf(), ledger))
+    } else {
+        None
+    };
     store
         .delete_read_model(
             ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
@@ -823,29 +840,21 @@ pub(crate) fn delete_session_history(
             PROMPT_EVOLUTION_READ_MODEL_KEY,
         )
         .map_err(|error| error.to_string())?;
-    drop(store);
-    Ok(())
-}
-
-pub(crate) fn delete_project_memory(
-    state: &tauri::State<'_, AppState>,
-    workspace_root: &Path,
-    project_id: &str,
-) -> Result<(), String> {
-    state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?
-        .delete_read_model(AGENT_MEMORY_READ_MODEL_NAMESPACE, project_id)
-        .map_err(|error| error.to_string())?;
-    let vector_root = memory_lancedb_root_for(workspace_root, project_id);
-    if let Err(error) = fs::remove_dir_all(&vector_root) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            return Err(format!(
-                "failed to remove project memory vectors at {}: {error}",
-                vector_root.display()
-            ));
-        }
+    if let Some((workspace_root, mut ledger)) = rebuilt_memory {
+        ledger.vector_history_reset_required = true;
+        save_project_memory_ledger(&mut store, &ledger).map_err(|error| error.to_string())?;
+        purge_project_memory_vector_history(&workspace_root, &ledger)?;
+        ledger.vector_history_reset_required = false;
+        save_project_memory_ledger(&mut store, &ledger).map_err(|error| error.to_string())?;
+        drop(store);
+        let provider_config = state
+            .provider_config
+            .lock()
+            .map_err(|error| format!("provider config lock poisoned: {error}"))?
+            .clone();
+        schedule_project_memory_vector_refresh(workspace_root, provider_config, ledger);
+    } else {
+        drop(store);
     }
     Ok(())
 }

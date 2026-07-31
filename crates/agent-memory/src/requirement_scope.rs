@@ -80,6 +80,43 @@ pub(crate) fn exact_durable_user_requirement_span(
     matches.next().is_none().then_some(matched)
 }
 
+pub(crate) fn confirmed_user_requirement_span(content: &str) -> Option<UserRequirementSpan> {
+    let trimmed = trim_byte_range(content, 0, content.len())?;
+    let statement = content.get(trimmed.start_byte..trimmed.end_byte)?;
+    if statement.contains(['\n', '\r'])
+        || statement.chars().count() > MAX_DURABLE_REQUIREMENT_CHARS
+        || normalize_memory_text(statement).is_empty()
+        || has_embedded_sentence_terminal(statement)
+        || contains_instruction_override(statement)
+        || contains_sensitive_value(statement)
+    {
+        return None;
+    }
+
+    let mut statements = Vec::with_capacity(2);
+    let _ = visit_statement_byte_ranges(statement, |span| {
+        statements.push(span);
+        statements.len() < 2
+    });
+    let [only] = statements.as_slice() else {
+        return None;
+    };
+    (only.start_byte == 0 && only.end_byte == statement.len()).then_some(trimmed)
+}
+
+fn has_embedded_sentence_terminal(content: &str) -> bool {
+    content.char_indices().any(|(index, character)| {
+        let end = index + character.len_utf8();
+        end < content.len()
+            && (matches!(character, '!' | '?' | '。' | '！' | '？')
+                || (character == '.'
+                    && content
+                        .get(end..)
+                        .and_then(|suffix| suffix.chars().next())
+                        .is_some_and(char::is_uppercase)))
+    })
+}
+
 fn visit_statement_byte_ranges(
     content: &str,
     mut visit: impl FnMut(UserRequirementSpan) -> bool,
@@ -576,10 +613,22 @@ fn ascii_word_position(content: &str, target: &str) -> Option<usize> {
     })
 }
 
-fn contains_sensitive_value(content: &str) -> bool {
+pub(crate) fn contains_sensitive_value(content: &str) -> bool {
     let lower = content.to_lowercase();
     if lower.contains("-----begin private key-----")
         || lower.contains("-----begin rsa private key-----")
+    {
+        return true;
+    }
+    if [
+        ("github_pat_", 20_usize),
+        ("ghp_", 16_usize),
+        ("xoxb-", 16_usize),
+        ("sk-", 16_usize),
+        ("akia", 16_usize),
+    ]
+    .iter()
+    .any(|(prefix, minimum_length)| contains_prefixed_secret(&lower, prefix, *minimum_length))
     {
         return true;
     }
@@ -635,6 +684,8 @@ fn contains_sensitive_value(content: &str) -> bool {
         (token.starts_with("sk-") && token.len() >= 16)
             || (token.starts_with("ghp_") && token.len() >= 20)
             || (token.starts_with("github_pat_") && token.len() >= 20)
+            || (token.starts_with("xoxb-") && token.len() >= 16)
+            || (token.starts_with("akia") && token.len() >= 16)
             || (*token == "bearer"
                 && tokens
                     .get(index + 1)
@@ -656,6 +707,36 @@ fn contains_sensitive_value(content: &str) -> bool {
                 .or_else(|| token.strip_prefix("access_token="))
                 .is_some_and(plausible_secret_value)
     })
+}
+
+fn contains_prefixed_secret(value: &str, prefix: &str, minimum_length: usize) -> bool {
+    let mut cursor = 0;
+    while let Some(relative_start) = value[cursor..].find(prefix) {
+        let start = cursor + relative_start;
+        if value[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            cursor = start + prefix.len();
+            continue;
+        }
+        let mut end = start + prefix.len();
+        while end < value.len() {
+            let byte = value.as_bytes()[end];
+            if byte.is_ascii_whitespace()
+                || matches!(byte, b'\'' | b'"' | b',' | b';' | b')' | b']' | b'}')
+            {
+                break;
+            }
+            end += 1;
+        }
+        if end.saturating_sub(start) >= minimum_length {
+            return true;
+        }
+        cursor = end.max(start + prefix.len());
+    }
+    false
 }
 
 fn credential_value_after_label(content: &str, label: &str, allow_unseparated: bool) -> bool {
@@ -1016,6 +1097,8 @@ mod tests {
             "Remember: API key is abcdefghijklmnop",
             "Always use Bearer abcdefghijklmnop",
             "Always use PAT: github_pat_abcdefghijklmnop",
+            "Always use xoxb-abcdefghijklmnop",
+            "Always use AKIA1234567890ABCD",
             "Remember: PAT is abcdefghijklmnop",
             "Remember: database password: correcthorsebatterystaple",
             "Remember: password is VeryLongSecret123",
@@ -1038,6 +1121,8 @@ mod tests {
                 || content.contains("token")
                 || content.contains("密码")
                 || content.contains("Bearer")
+                || content.contains("xoxb-")
+                || content.contains("AKIA")
             {
                 assert!(
                     contains_sensitive_value(content),
@@ -1049,5 +1134,15 @@ mod tests {
                 "sensitive or quoted content was persisted: {content:?}"
             );
         }
+        assert!(!contains_sensitive_value(
+            "Always mask api_key: values in logs."
+        ));
+        assert!(!contains_sensitive_value(
+            "project-risk-management-019fa30e"
+        ));
+        assert!(!contains_sensitive_value(
+            "Always use a flask-based authentication service"
+        ));
+        assert!(contains_sensitive_value("token=sk-abcdefghijklmnop"));
     }
 }

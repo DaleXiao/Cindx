@@ -222,6 +222,8 @@ pub fn run() -> Result<(), String> {
             get_phase6_state,
             run_orchestration,
             get_phase7_state,
+            memory_management_runtime::get_project_memory_state,
+            memory_management_runtime::update_project_memory,
             ensure_workspace_knowledge,
             index_workspace_rag,
             search_rag,

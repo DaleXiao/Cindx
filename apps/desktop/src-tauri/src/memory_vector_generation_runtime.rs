@@ -110,7 +110,29 @@ pub(crate) fn memory_vector_projection_sha256(ledger: &MemoryLedger) -> String {
     let mut records = ledger
         .records
         .iter()
+        .filter(|record| ledger.record_is_active_for_recall(record))
         .map(|record| format!("{}:{}", record.id, record.fingerprint))
+        .collect::<Vec<_>>();
+    records.sort();
+    sha256_hex(format!("{}\n{}", ledger.project_id, records.join("\n")).as_bytes())
+}
+
+pub(crate) fn memory_recall_projection_sha256(ledger: &MemoryLedger) -> String {
+    let mut records = ledger
+        .records
+        .iter()
+        .map(|record| {
+            format!(
+                "{}:{}:{}:{}:{}:{}:{}",
+                record.id,
+                record.fingerprint,
+                record.importance,
+                record.provenance.sequence,
+                ledger.record_is_active_for_recall(record),
+                ledger.is_pinned(&record.id),
+                record.superseded_by.as_deref().unwrap_or_default(),
+            )
+        })
         .collect::<Vec<_>>();
     records.sort();
     sha256_hex(format!("{}\n{}", ledger.project_id, records.join("\n")).as_bytes())
@@ -126,6 +148,9 @@ pub(crate) fn memory_vector_manifest_matches(
         || manifest.projection_sha256 != projection_sha256
     {
         return false;
+    }
+    if manifest.record_count == 0 {
+        return true;
     }
     if config.is_ready() {
         let configured_model = config.model_for_role(&ModelRole::Embedder);

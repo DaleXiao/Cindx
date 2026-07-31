@@ -94,6 +94,15 @@ const settingsPageFileSource = read("apps/desktop/src/components/SettingsPage.ts
 const settingsModelsPanelSource = read(
   "apps/desktop/src/components/SettingsModelsPanel.tsx"
 );
+const settingsMemoryPanelSource = read(
+  "apps/desktop/src/components/SettingsMemoryPanel.tsx"
+);
+const memoryManagementModelSource = read(
+  "apps/desktop/src/memoryManagementModel.ts"
+);
+const memorySettingsControllerSource = read(
+  "apps/desktop/src/controllers/useMemorySettingsController.ts"
+);
 const providerModalityFieldsSource = read(
   "apps/desktop/src/components/ProviderModalityFields.tsx"
 );
@@ -113,6 +122,7 @@ const promptEvolutionPanelSource = read(
 const settingsPageSource = [
   settingsPageFileSource,
   settingsModelsImplementationSource,
+  settingsMemoryPanelSource,
   settingsPermissionsPanelSource,
   settingsToolsPanelSource,
   promptEvolutionPanelSource,
@@ -266,6 +276,7 @@ const styleModuleEntries = [
   "trace.css",
   "schedule.css",
   "settings.css",
+  "memory-settings.css",
   "inspector.css",
   "dark.css",
 ];
@@ -627,6 +638,8 @@ const extractedDesktopBoundaryBudgets = [
   ["SettingsModelsPanel.tsx", settingsModelsPanelSource, 320],
   ["ProviderModalityFields.tsx", providerModalityFieldsSource, 140],
   ["VoiceInputButton.tsx", voiceInputButtonSource, 80],
+  ["SettingsMemoryPanel.tsx", settingsMemoryPanelSource, 400],
+  ["useMemorySettingsController.ts", memorySettingsControllerSource, 180],
   ["SettingsPermissionsPanel.tsx", settingsPermissionsPanelSource, 220],
   ["SettingsToolsPanel.tsx", settingsToolsPanelSource, 420],
   ["SessionThreadArtifacts.tsx", sessionThreadArtifactsSource, 260],
@@ -3186,7 +3199,7 @@ assert(
   "Session outputs must survive restarts through revisioned reconstruction and invalidate with session runtime state"
 );
 assert(
-  agentMemorySource.includes('MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v5"') &&
+  agentMemorySource.includes('MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v6"') &&
     agentMemorySource.includes("USER_REQUIREMENT_EVIDENCE_SCHEMA") &&
     agentMemorySource.includes("user_requirement_evidence") &&
     agentMemorySource.includes("mod extraction;") &&
@@ -3224,6 +3237,27 @@ assert(
     rustLib.includes("delete_project_memory") &&
     settingsPageSource.includes('aria-label="Project memory stats"'),
   "Project memory must be durable, deduplicated, explainable, trust-scoped, and deleted with its project"
+);
+assert(
+  settingsPageFileSource.includes("<SettingsMemoryPanel") &&
+    settingsPageFileSource.includes("useMemorySettingsController") &&
+    settingsMemoryPanelSource.includes('title="Active"') &&
+    settingsMemoryPanelSource.includes('title="Disabled / inactive"') &&
+    settingsMemoryPanelSource.includes('title="Needs review"') &&
+    settingsMemoryPanelSource.includes("Save as project requirement") &&
+    settingsMemoryPanelSource.includes('role="alert"') &&
+    settingsMemoryPanelSource.includes("Pinning changes recall order only; it does not change trust") &&
+    memoryManagementModelSource.includes('| "superseded"') &&
+    memoryManagementModelSource.includes("expectedItemRevision") &&
+    memoryManagementModelSource.includes("expectedContentSha256") &&
+    memorySettingsControllerSource.includes("projectIdRef.current === targetProjectId") &&
+    tauriBridgeImplementation.includes(
+      'invoke<projectMemory.ProjectMemoryState>("get_project_memory_state", { projectId })'
+    ) &&
+    tauriBridgeImplementation.includes(
+      'invoke<projectMemory.ProjectMemoryState>("update_project_memory", { input })'
+    ),
+  "Project memory Settings must keep user controls scoped, reviewable, stale-safe, and trust preserving"
 );
 assert(
   rustLib.includes("WORKSPACE_KNOWLEDGE_CACHE_TTL") &&
