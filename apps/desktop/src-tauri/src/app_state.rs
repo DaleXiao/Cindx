@@ -8,6 +8,7 @@ use crate::{
 
 pub(crate) struct AppState {
     pub(crate) store: Mutex<SqliteStore>,
+    pub(crate) manual_tool_execution_gate: Mutex<()>,
     pub(crate) provider_config: Mutex<ProviderConfig>,
     pub(crate) provider_config_update: Mutex<()>,
     pub(crate) workspace_config: Mutex<WorkspaceConfig>,

@@ -58,6 +58,7 @@ mod knowledge_embedding_runtime;
 mod knowledge_generation_runtime;
 mod knowledge_runtime;
 mod learning_evidence_runtime;
+mod manual_tool_execution;
 mod memory_management_runtime;
 mod memory_measurement_runtime;
 mod memory_migration_runtime;
@@ -152,6 +153,7 @@ use event_projection::*;
 use event_security::*;
 use knowledge_commands::*;
 use knowledge_runtime::*;
+use manual_tool_execution::*;
 use memory_runtime::*;
 #[cfg(test)]
 use memory_vector_generation_runtime::*;
@@ -198,6 +200,8 @@ use session_title_service::*;
 
 #[cfg(test)]
 mod external_effect_eval_tests;
+#[cfg(test)]
+mod manual_tool_execution_tests;
 #[cfg(test)]
 mod prompt_workflow_execution_tests;
 #[cfg(test)]

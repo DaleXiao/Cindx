@@ -92,6 +92,7 @@ pub fn run() -> Result<(), String> {
     let app = tauri::Builder::default()
         .manage(AppState {
             store: Mutex::new(store),
+            manual_tool_execution_gate: Mutex::new(()),
             provider_config: Mutex::new(provider_config),
             provider_config_update: Mutex::new(()),
             workspace_config: Mutex::new(workspace_config),
