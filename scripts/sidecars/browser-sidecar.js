@@ -17,6 +17,10 @@ const SESSION_WATCH_INTERVAL_MS = 15_000;
 const SESSION_LOCK_NAME = ".action-lock.json";
 const MALFORMED_LOCK_GRACE_MS = 5_000;
 const MAX_STALE_SESSION_CLEANUPS_PER_ACTION = 128;
+const SESSION_RETIREMENT_SCHEMA = "cindx.browser-session-retirement.v1";
+const SESSION_RETIREMENT_MARKER_SCHEMA = "cindx.browser-session-retirement-marker.v1";
+const SESSION_RETIREMENT_ROOT = ".retired";
+const SESSION_RETIREMENT_MARKER = ".retirement.json";
 
 function debug(message) {
   if (process.env.CINDX_BROWSER_DEBUG === "1") {
@@ -172,6 +176,19 @@ function lockOwnerIsAlive(metadata) {
   return Boolean(command && command.includes(path.basename(__filename)));
 }
 
+function validSessionLockMetadata(metadata) {
+  return Boolean(
+    metadata &&
+      metadata.schema === "cindx.browser-session-lock.v1" &&
+      Number.isInteger(Number(metadata.pid)) &&
+      Number(metadata.pid) > 0 &&
+      typeof metadata.request_id === "string" &&
+      metadata.request_id.length > 0 &&
+      Number.isInteger(Number(metadata.acquired_at_ms)) &&
+      Number(metadata.acquired_at_ms) > 0
+  );
+}
+
 function sessionLockAgeMs(lockPath, metadata) {
   const acquiredAtMs = asNumber(metadata.acquired_at_ms, 0);
   if (acquiredAtMs > 0) return Math.max(0, Date.now() - acquiredAtMs);
@@ -182,7 +199,12 @@ function sessionLockAgeMs(lockPath, metadata) {
   }
 }
 
-async function acquireSessionLock(sessionDir, requestId, waitMs) {
+async function acquireSessionLock(
+  sessionDir,
+  requestId,
+  waitMs,
+  { failClosedOnMalformed = false } = {}
+) {
   const lockPath = path.join(sessionDir, SESSION_LOCK_NAME);
   const deadline = Date.now() + Math.max(0, waitMs);
   const owner = {
@@ -209,6 +231,9 @@ async function acquireSessionLock(sessionDir, requestId, waitMs) {
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
       const metadata = sessionLockMetadata(lockPath);
+      if (failClosedOnMalformed && !validSessionLockMetadata(metadata)) {
+        throw new Error(`browser session lock is malformed at ${lockPath}`);
+      }
       const ageMs = sessionLockAgeMs(lockPath, metadata);
       const hasOwner = Number.isInteger(Number(metadata.pid)) && Number(metadata.pid) > 0;
       if (
@@ -225,6 +250,224 @@ async function acquireSessionLock(sessionDir, requestId, waitMs) {
       await sleep(50);
     }
   }
+}
+
+function lstatIfPresent(targetPath) {
+  try {
+    return fs.lstatSync(targetPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function validatedRetirementTarget(candidate) {
+  if (!candidate || !path.isAbsolute(candidate)) {
+    throw new Error("browser session retirement requires an absolute session directory");
+  }
+  const sessionDir = path.resolve(candidate);
+  const sessionsRoot = path.dirname(sessionDir);
+  if (
+    path.basename(sessionsRoot) !== "browser-sessions" ||
+    path.dirname(sessionDir) !== sessionsRoot ||
+    sessionDir === sessionsRoot ||
+    path.basename(sessionDir) === SESSION_RETIREMENT_ROOT
+  ) {
+    throw new Error("browser session retirement target must be a direct child of browser-sessions");
+  }
+  const rootMetadata = lstatIfPresent(sessionsRoot);
+  if (rootMetadata && (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory())) {
+    throw new Error("browser session retirement root must be a regular directory");
+  }
+  const sessionMetadata = lstatIfPresent(sessionDir);
+  if (sessionMetadata && (sessionMetadata.isSymbolicLink() || !sessionMetadata.isDirectory())) {
+    throw new Error("browser session retirement target must be a regular directory");
+  }
+  const retirementRoot = path.join(sessionsRoot, SESSION_RETIREMENT_ROOT);
+  const retirementRootMetadata = lstatIfPresent(retirementRoot);
+  if (
+    retirementRootMetadata &&
+    (retirementRootMetadata.isSymbolicLink() || !retirementRootMetadata.isDirectory())
+  ) {
+    throw new Error("browser session retirement quarantine must be a regular directory");
+  }
+  const retiredPath = path.join(retirementRoot, path.basename(sessionDir));
+  const retiredMetadata = lstatIfPresent(retiredPath);
+  if (retiredMetadata && (retiredMetadata.isSymbolicLink() || !retiredMetadata.isDirectory())) {
+    throw new Error("retired browser session must be a regular directory");
+  }
+  return {
+    sessionDir,
+    sessionsRoot,
+    retirementRoot,
+    retiredPath,
+    exists: Boolean(sessionMetadata),
+    retiredExists: Boolean(retiredMetadata)
+  };
+}
+
+function removeTreeWithoutFollowingLinks(targetPath) {
+  const metadata = lstatIfPresent(targetPath);
+  if (!metadata) return;
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    fs.unlinkSync(targetPath);
+    return;
+  }
+  for (const entry of fs.readdirSync(targetPath)) {
+    removeTreeWithoutFollowingLinks(path.join(targetPath, entry));
+  }
+  fs.rmdirSync(targetPath);
+}
+
+function retirementMarker(target) {
+  return {
+    schema: SESSION_RETIREMENT_MARKER_SCHEMA,
+    session_dir: target.sessionDir,
+    session_name: path.basename(target.sessionDir)
+  };
+}
+
+function ensureRetirementRoot(target) {
+  try {
+    fs.mkdirSync(target.retirementRoot, { mode: 0o700 });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    const metadata = lstatIfPresent(target.retirementRoot);
+    if (!metadata || metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error("browser session retirement quarantine must be a regular directory");
+    }
+  }
+}
+
+function removeRetiredBrowserSession(target) {
+  const retiredMetadata = lstatIfPresent(target.retiredPath);
+  if (!retiredMetadata) return;
+  if (retiredMetadata.isSymbolicLink() || !retiredMetadata.isDirectory()) {
+    throw new Error("retired browser session must be a regular directory");
+  }
+  const markerPath = path.join(target.retiredPath, SESSION_RETIREMENT_MARKER);
+  const markerMetadata = lstatIfPresent(markerPath);
+  if (!markerMetadata) {
+    if (fs.readdirSync(target.retiredPath).length === 0) {
+      fs.rmdirSync(target.retiredPath);
+      return;
+    }
+    throw new Error("retired browser session is missing its ownership marker");
+  }
+  if (markerMetadata.isSymbolicLink() || !markerMetadata.isFile()) {
+    throw new Error("browser session retirement marker must be a regular file");
+  }
+  const marker = readJson(markerPath);
+  if (
+    marker.schema !== SESSION_RETIREMENT_MARKER_SCHEMA ||
+    marker.session_dir !== target.sessionDir ||
+    marker.session_name !== path.basename(target.sessionDir)
+  ) {
+    throw new Error("retired browser session ownership marker does not match its target");
+  }
+  for (const entry of fs.readdirSync(target.retiredPath)) {
+    if (entry !== SESSION_RETIREMENT_MARKER) {
+      removeTreeWithoutFollowingLinks(path.join(target.retiredPath, entry));
+    }
+  }
+  fs.unlinkSync(markerPath);
+  fs.rmdirSync(target.retiredPath);
+  try {
+    fs.rmdirSync(target.retirementRoot);
+  } catch (error) {
+    if (error?.code !== "ENOENT" && error?.code !== "ENOTEMPTY") throw error;
+  }
+}
+
+function stateIdentity(state) {
+  return JSON.stringify({
+    schema: state.schema ?? null,
+    session_id: state.session_id ?? null,
+    browser_pid: state.browser_pid ?? null,
+    watchdog_pid: state.watchdog_pid ?? null,
+    executable: state.executable ?? null,
+    profile_dir: state.profile_dir ?? null,
+    launch_token: state.launch_token ?? null
+  });
+}
+
+async function stopOwnedWatchdogForRetirement(state, statePath) {
+  const watchdogPid = Number(state.watchdog_pid);
+  if (!processIsAlive(watchdogPid)) return;
+  if (!watchdogProcessBelongsToSession(state, statePath)) {
+    throw new Error(`refusing to terminate unverified browser watchdog ${watchdogPid}`);
+  }
+  stopSessionWatchdog(state, statePath);
+  const gracefulDeadline = Date.now() + 1_000;
+  while (processIsAlive(watchdogPid) && Date.now() < gracefulDeadline) await sleep(25);
+  if (processIsAlive(watchdogPid)) {
+    if (!watchdogProcessBelongsToSession(state, statePath)) {
+      throw new Error(`browser watchdog ${watchdogPid} ownership changed during retirement`);
+    }
+    terminateProcessTree(watchdogPid, "SIGKILL");
+  }
+  const forcedDeadline = Date.now() + 1_000;
+  while (processIsAlive(watchdogPid) && Date.now() < forcedDeadline) await sleep(25);
+  if (processIsAlive(watchdogPid)) {
+    throw new Error(`browser watchdog ${watchdogPid} did not stop during retirement`);
+  }
+}
+
+async function retireBrowserSession(candidate) {
+  const target = validatedRetirementTarget(candidate);
+  if (!target.exists) {
+    removeRetiredBrowserSession(target);
+    return {
+      schema: SESSION_RETIREMENT_SCHEMA,
+      retired: true,
+      session_dir: target.sessionDir
+    };
+  }
+
+  let release = null;
+  try {
+    release = await acquireSessionLock(
+      target.sessionDir,
+      `retire-${process.pid}`,
+      0,
+      { failClosedOnMalformed: true }
+    );
+    const statePath = path.join(target.sessionDir, "session-state.json");
+    const profileDir = path.join(target.sessionDir, "profile");
+    const state = sessionState(statePath, { allowMissing: true });
+    const identity = stateIdentity(state);
+    const endpoint = endpointFromProfile(profileDir);
+
+    if (!state.browser_pid) {
+      if (await endpointIsAlive(endpoint)) {
+        throw new Error("refusing to retire a live browser endpoint without owned session state");
+      }
+    } else if (processIsAlive(Number(state.browser_pid)) || (await endpointIsAlive(endpoint))) {
+      await terminateOwnedBrowserSession(statePath, endpoint);
+    }
+    await stopOwnedWatchdogForRetirement(state, statePath);
+
+    const latest = sessionState(statePath, { allowMissing: true });
+    if (stateIdentity(latest) !== identity) {
+      throw new Error("browser session ownership changed during retirement");
+    }
+    if (processIsAlive(Number(state.browser_pid)) || processIsAlive(Number(state.watchdog_pid))) {
+      throw new Error("browser session processes remained alive after retirement");
+    }
+
+    if (target.retiredExists) removeRetiredBrowserSession(target);
+    ensureRetirementRoot(target);
+    writeJson(path.join(target.sessionDir, SESSION_RETIREMENT_MARKER), retirementMarker(target));
+    fs.renameSync(target.sessionDir, target.retiredPath);
+  } finally {
+    release?.();
+  }
+  removeRetiredBrowserSession(target);
+  return {
+    schema: SESSION_RETIREMENT_SCHEMA,
+    retired: true,
+    session_dir: target.sessionDir
+  };
 }
 
 function endpointFromProfile(profileDir) {
@@ -1041,6 +1284,11 @@ async function main() {
       throw new Error("browser session watchdog requires an absolute state path and launch token");
     }
     await watchBrowserSession(statePath, launchToken);
+    return;
+  }
+  if (process.argv[2] === "--retire-session") {
+    const result = await retireBrowserSession(process.argv[3]);
+    process.stdout.write(`${JSON.stringify(result)}\n`);
     return;
   }
   const requestPath = process.argv[2];

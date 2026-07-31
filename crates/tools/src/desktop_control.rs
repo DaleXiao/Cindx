@@ -1189,10 +1189,10 @@ fn try_native_screenshot(path: &Path) -> Result<bool, ToolError> {
     }
 }
 
-struct ControlledSidecarOutput {
-    stdout: String,
-    cancelled: bool,
-    timed_out: bool,
+pub(crate) struct ControlledSidecarOutput {
+    pub(crate) stdout: String,
+    pub(crate) cancelled: bool,
+    pub(crate) timed_out: bool,
 }
 
 const SIDECAR_STDOUT_MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -1201,6 +1201,20 @@ const SIDECAR_STDERR_MAX_BYTES: usize = 256 * 1024;
 fn run_json_sidecar_controlled(
     env_key: &str,
     request_path: &Path,
+    control: &ToolExecutionControl,
+    hard_timeout: Duration,
+) -> Result<ControlledSidecarOutput, ToolError> {
+    run_sidecar_controlled(
+        env_key,
+        &[request_path.as_os_str().to_os_string()],
+        control,
+        hard_timeout,
+    )
+}
+
+pub(crate) fn run_sidecar_controlled(
+    env_key: &str,
+    arguments: &[std::ffi::OsString],
     control: &ToolExecutionControl,
     hard_timeout: Duration,
 ) -> Result<ControlledSidecarOutput, ToolError> {
@@ -1230,7 +1244,7 @@ fn run_json_sidecar_controlled(
         command.process_group(0);
     }
     let mut child = command
-        .arg(request_path)
+        .args(arguments)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

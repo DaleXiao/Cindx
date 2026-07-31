@@ -4,6 +4,10 @@ use crate::{
     configuration_models::ProjectSessionConfig,
     event_persistence::append_event,
     event_projection::write_private_file_atomically,
+    managed_artifact_lifecycle::{
+        apply_managed_artifact_retirement, plan_managed_artifact_retirement,
+        retire_managed_browser_sessions,
+    },
     memory_projection_runtime::save_project_memory_ledger,
     memory_record_persistence_runtime::{
         persist_memory_session_retirements, retain_memory_records_for_deleted_sessions,
@@ -393,6 +397,10 @@ fn recover_project_lifecycle_operations_at(
                     })
                 };
                 if published {
+                    let retirement =
+                        plan_managed_artifact_retirement(store, project_root, session_ids)?;
+                    retire_managed_browser_sessions(&retirement)?;
+                    apply_managed_artifact_retirement(&retirement)?;
                     if let Some(ledger) = cleanup_published_delete(
                         store,
                         project_id,

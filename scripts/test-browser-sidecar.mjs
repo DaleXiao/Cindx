@@ -12,6 +12,131 @@ const sessionDir = path.join(root, "session");
 const outputDir = path.join(root, "artifacts");
 let requestCounter = 0;
 
+function retireSession(target) {
+  const result = spawnSync(process.execPath, [sidecar, "--retire-session", target], {
+    cwd: repoRoot,
+    encoding: "utf8"
+  });
+  return {
+    ...result,
+    response: result.status === 0 ? JSON.parse(result.stdout) : null
+  };
+}
+
+const retirementRoot = path.join(root, "browser-sessions");
+fs.mkdirSync(retirementRoot, { recursive: true });
+
+const absentRetirement = retireSession(path.join(retirementRoot, "absent"));
+assert(absentRetirement.status === 0, `absent retirement failed: ${absentRetirement.stderr}`);
+assert(
+  JSON.stringify(absentRetirement.response) ===
+    JSON.stringify({
+      schema: "cindx.browser-session-retirement.v1",
+      retired: true,
+      session_dir: path.join(retirementRoot, "absent")
+    }),
+  "retiring an absent browser session should be idempotent"
+);
+
+const interruptedSessionDir = path.join(retirementRoot, "interrupted");
+const interruptedRetiredDir = path.join(retirementRoot, ".retired", "interrupted");
+fs.mkdirSync(path.join(interruptedRetiredDir, "profile"), { recursive: true });
+fs.writeFileSync(path.join(interruptedRetiredDir, "profile", "partial-data"), "partial\n");
+fs.writeFileSync(
+  path.join(interruptedRetiredDir, ".retirement.json"),
+  `${JSON.stringify({
+    schema: "cindx.browser-session-retirement-marker.v1",
+    session_dir: interruptedSessionDir,
+    session_name: "interrupted"
+  })}\n`,
+  { mode: 0o600 }
+);
+const resumedRetirement = retireSession(interruptedSessionDir);
+assert(resumedRetirement.status === 0, `interrupted retirement retry failed: ${resumedRetirement.stderr}`);
+assert(!fs.existsSync(interruptedRetiredDir), "retirement retry should remove its deterministic quarantine");
+
+const unownedSessionDir = path.join(retirementRoot, "unowned");
+const unownedRetiredDir = path.join(retirementRoot, ".retired", "unowned");
+fs.mkdirSync(path.join(unownedRetiredDir, "profile"), { recursive: true });
+fs.writeFileSync(path.join(unownedRetiredDir, "profile", "keep"), "keep\n");
+const rejectedUnownedRetirement = retireSession(unownedSessionDir);
+assert(rejectedUnownedRetirement.status !== 0, "unmarked retirement quarantine should fail closed");
+assert(fs.existsSync(unownedRetiredDir), "unmarked retirement quarantine must remain untouched");
+
+const inactiveRetirementDir = path.join(retirementRoot, "inactive");
+const inactiveProfileDir = path.join(inactiveRetirementDir, "profile");
+fs.mkdirSync(inactiveProfileDir, { recursive: true });
+fs.writeFileSync(path.join(inactiveProfileDir, "sentinel"), "inactive-profile\n");
+const inactiveCreatedAt = Date.now() - 60_000;
+fs.writeFileSync(
+  path.join(inactiveRetirementDir, "session-state.json"),
+  `${JSON.stringify({
+    schema: "cindx.browser-session.v1",
+    session_id: "inactive",
+    browser_pid: 2_147_483_647,
+    watchdog_pid: null,
+    executable: "/nonexistent/cindx-test-browser",
+    profile_dir: inactiveProfileDir,
+    launch_token: "inactive-launch",
+    active_tab_id: null,
+    created_at_ms: inactiveCreatedAt,
+    last_used_at_ms: inactiveCreatedAt,
+    lease_expires_at_ms: inactiveCreatedAt + 1_000
+  })}\n`,
+  { mode: 0o600 }
+);
+const inactiveRetirement = retireSession(inactiveRetirementDir);
+assert(inactiveRetirement.status === 0, `inactive retirement failed: ${inactiveRetirement.stderr}`);
+assert(
+  JSON.stringify(inactiveRetirement.response) ===
+    JSON.stringify({
+      schema: "cindx.browser-session-retirement.v1",
+      retired: true,
+      session_dir: inactiveRetirementDir
+    }),
+  "inactive browser profile should return the retirement contract"
+);
+assert(!fs.existsSync(inactiveRetirementDir), "retirement should remove the inactive session directory");
+assert(
+  !fs.existsSync(path.join(retirementRoot, ".retired", "inactive")),
+  "successful retirement must not leave its deterministic quarantine"
+);
+
+const malformedLockDir = path.join(retirementRoot, "malformed-lock");
+fs.mkdirSync(path.join(malformedLockDir, "profile"), { recursive: true });
+const malformedLockPath = path.join(malformedLockDir, ".action-lock.json");
+const malformedLock = "{malformed-lock\n";
+fs.writeFileSync(malformedLockPath, malformedLock, { mode: 0o600 });
+const rejectedLockRetirement = retireSession(malformedLockDir);
+assert(rejectedLockRetirement.status !== 0, "malformed retirement lock should fail closed");
+assert(fs.existsSync(malformedLockDir), "malformed lock retirement must retain the session directory");
+assert(fs.readFileSync(malformedLockPath, "utf8") === malformedLock, "malformed lock must remain untouched");
+
+const malformedStateDir = path.join(retirementRoot, "malformed-state");
+fs.mkdirSync(path.join(malformedStateDir, "profile"), { recursive: true });
+const malformedStatePath = path.join(malformedStateDir, "session-state.json");
+const malformedState = "{malformed-state\n";
+fs.writeFileSync(malformedStatePath, malformedState, { mode: 0o600 });
+const rejectedStateRetirement = retireSession(malformedStateDir);
+assert(rejectedStateRetirement.status !== 0, "malformed retirement state should fail closed");
+assert(fs.existsSync(malformedStateDir), "malformed state retirement must retain the session directory");
+assert(fs.readFileSync(malformedStatePath, "utf8") === malformedState, "malformed state must remain untouched");
+
+const invalidRetirementDir = path.join(root, "not-browser-sessions", "session");
+fs.mkdirSync(invalidRetirementDir, { recursive: true });
+const rejectedInvalidRetirement = retireSession(invalidRetirementDir);
+assert(rejectedInvalidRetirement.status !== 0, "non-browser-sessions target should be rejected");
+assert(fs.existsSync(invalidRetirementDir), "invalid retirement target must remain untouched");
+
+const outsideProfile = path.join(root, "outside-profile");
+const linkedRetirementDir = path.join(retirementRoot, "linked-session");
+fs.mkdirSync(outsideProfile, { recursive: true });
+fs.writeFileSync(path.join(outsideProfile, "sentinel"), "outside\n");
+fs.symlinkSync(outsideProfile, linkedRetirementDir, "dir");
+const rejectedLinkedRetirement = retireSession(linkedRetirementDir);
+assert(rejectedLinkedRetirement.status !== 0, "symlinked retirement target should be rejected");
+assert(fs.readFileSync(path.join(outsideProfile, "sentinel"), "utf8") === "outside\n", "retirement must not follow symlink escapes");
+
 fs.mkdirSync(sessionDir, { recursive: true });
 const abandonedLockPath = path.join(sessionDir, ".action-lock.json");
 fs.writeFileSync(abandonedLockPath, "{}\n", { mode: 0o600 });

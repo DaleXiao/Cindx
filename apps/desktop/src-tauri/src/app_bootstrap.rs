@@ -62,6 +62,7 @@ pub fn run() -> Result<(), String> {
     let mcp_catalog = McpCatalogService::load(mcp_config_path(), mcp_catalog_cache_path());
     let mut workspace_config = load_workspace_config();
     let sidecar_config = load_sidecar_config();
+    apply_sidecar_env(&sidecar_config);
     let web_search_config = load_web_search_config();
     let project_session_config = load_project_session_config(&workspace_config.root);
     let recovered_memory_refreshes =
@@ -96,7 +97,6 @@ pub fn run() -> Result<(), String> {
             eprintln!("failed to redact {}: {error}", path.display());
         }
     }
-    apply_sidecar_env(&sidecar_config);
     if startup_probe_requested() {
         append_startup_log("startup probe completed");
         return Ok(());

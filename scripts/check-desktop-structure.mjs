@@ -834,6 +834,7 @@ const oversizedModelProviderModules = modelProviderModules.filter(({ entry, line
   return budget !== undefined && lines > budget;
 });
 const toolsModuleBudgets = new Map([
+  ["browser_session_retirement.rs", 100],
   ["desktop_control.rs", 1_350],
   ["file_batch.rs", 230],
   ["file_search.rs", 260],
