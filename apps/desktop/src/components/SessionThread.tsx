@@ -17,6 +17,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent
 } from "react";
 import { measureElement as measureVirtualElement, useVirtualizer } from "@tanstack/react-virtual";
+import { ThinkingOrb } from "thinking-orbs";
 import { getAgentSessionOutputs } from "../tauri";
 import type {
   AgentOutputArtifactView,
@@ -796,7 +797,15 @@ export const SessionThread = memo(function SessionThread({
       >
         {items.length === 0 && !streamAnswer && (
           <div className="session-thread-empty-state" aria-live="polite">
-            <span>{loading ? "Loading conversation" : "No messages yet"}</span>
+            {!loading && (
+              <ThinkingOrb
+                className="session-thread-empty-orb"
+                state="solving"
+                size={64}
+                aria-hidden="true"
+              />
+            )}
+            <span>{loading ? "Loading conversation" : "Cindx is ready for you."}</span>
           </div>
         )}
         <div className="thread-content" ref={threadContentRef}>
