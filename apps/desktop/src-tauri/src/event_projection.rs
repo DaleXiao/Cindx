@@ -288,14 +288,45 @@ pub(crate) fn phase6_state(
     })
 }
 
+pub(crate) fn graph_count_summary_for_index_events(
+    events: &[Event],
+    active_index_path: &Path,
+) -> GraphStateView {
+    let active_index_path = active_index_path.display().to_string();
+    events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.kind == EventKind::RetrievalPerformed
+                && event.metadata.get("action").map(String::as_str) == Some("index")
+                && event.metadata.get("index_path") == Some(&active_index_path)
+        })
+        .map(|event| GraphStateView {
+            total_nodes: event
+                .metadata
+                .get("graph_nodes")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            total_edges: event
+                .metadata
+                .get("graph_edges")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        })
+        .unwrap_or_else(empty_graph_state)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn phase7_state(
     store: &SqliteStore,
-    adapter: &FileRagAdapter,
+    stats: &RagIndexStats,
     memory: MemoryStatsView,
     sources: Vec<RagSourceView>,
     retrieval_trace: Option<RetrievalTraceView>,
     graph: GraphStateView,
+    graph_summary_index_path: Option<&Path>,
     answer: Option<String>,
     last_error: Option<String>,
 ) -> Result<Phase7State, StorageError> {
@@ -306,10 +337,13 @@ pub(crate) fn phase7_state(
         .map(|event| timeline_entry(event, &[]))
         .collect();
     let answer = answer.or_else(|| events.iter().rev().find_map(rag_answer_from_event));
+    let graph = graph_summary_index_path
+        .map(|path| graph_count_summary_for_index_events(&events, path))
+        .unwrap_or(graph);
 
     Ok(Phase7State {
         timeline,
-        stats: rag_stats_view(adapter.stats()),
+        stats: rag_stats_view(stats),
         memory,
         sources,
         retrieval_trace,

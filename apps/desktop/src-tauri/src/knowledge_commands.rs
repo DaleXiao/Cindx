@@ -8,22 +8,29 @@ use crate::knowledge_generation_runtime::{
 pub(crate) fn get_phase7_state(state: tauri::State<'_, AppState>) -> Result<Phase7State, String> {
     let root = active_workspace_root(&state)?;
     let project_id = active_project_id_for_memory(&state)?;
-    let snapshot = cached_workspace_knowledge_snapshot_for(&state, &root)?;
-    let graph = graph_state_for_snapshot(&snapshot, &[]);
+    let knowledge = active_workspace_knowledge_state_snapshot_for(&state, &root)?;
     let mut store = state
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let (graph, graph_summary_index_path) = match knowledge.full.as_ref() {
+        Some(snapshot) => (graph_state_for_snapshot(snapshot, &[]), None),
+        None => (
+            empty_graph_state(),
+            Some(knowledge.active_index_path.as_path()),
+        ),
+    };
     let memory = project_memory_stats(&mut store, project_id.as_deref())
         .map_err(|error| error.to_string())?;
 
     phase7_state(
         &store,
-        &snapshot.adapter,
+        &knowledge.stats,
         memory,
         Vec::new(),
         None,
         graph,
+        graph_summary_index_path,
         None,
         None,
     )
@@ -76,11 +83,12 @@ pub(crate) fn ensure_workspace_knowledge_blocking(
 
     phase7_state(
         &store,
-        &snapshot.adapter,
+        snapshot.adapter.stats(),
         memory,
         Vec::new(),
         None,
         graph,
+        None,
         None,
         None,
     )
@@ -273,11 +281,12 @@ fn index_workspace_rag_operation(
         .map_err(|error| error.to_string())?;
     phase7_state(
         &store,
-        &snapshot.adapter,
+        snapshot.adapter.stats(),
         memory,
         Vec::new(),
         None,
         graph,
+        None,
         None,
         None,
     )
@@ -385,11 +394,12 @@ fn phase7_state_with_operation_error(
             .map_err(|error| error.to_string())?;
         phase7_state(
             store,
-            &snapshot.adapter,
+            snapshot.adapter.stats(),
             memory,
             sources,
             None,
             graph,
+            None,
             answer,
             Some(message),
         )
@@ -456,11 +466,12 @@ fn search_rag_operation(
 
         phase7_state(
             store,
-            &snapshot.adapter,
+            snapshot.adapter.stats(),
             memory,
             retrieval.sources,
             Some(retrieval.trace),
             graph,
+            None,
             None,
             None,
         )
@@ -723,11 +734,12 @@ fn answer_with_rag_operation(
 
                 phase7_state(
                     store,
-                    &snapshot.adapter,
+                    snapshot.adapter.stats(),
                     memory,
                     sources,
                     Some(retrieval.trace),
                     graph,
+                    None,
                     Some(answer),
                     None,
                 )

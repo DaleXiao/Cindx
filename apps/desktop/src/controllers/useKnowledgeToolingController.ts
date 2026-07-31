@@ -114,7 +114,7 @@ export function useKnowledgeToolingController({
   const refreshWorkspaceKnowledge = useCallback(async (shouldApply?: () => boolean) => {
     const [nextPhase5, nextPhase7, nextPhase8, nextContext] = await Promise.all([
       getPhase5State(),
-      getPhase7State(),
+      knowledgeGraphOpen ? ensureWorkspaceKnowledge() : getPhase7State(),
       getPhase8State(),
       getContextState()
     ]);
@@ -123,7 +123,7 @@ export function useKnowledgeToolingController({
     setPhase7(nextPhase7);
     setPhase8(nextPhase8);
     setContextState(nextContext);
-  }, []);
+  }, [knowledgeGraphOpen]);
 
   const handleRunTool = useCallback(async () => {
     if (!selectedTool) return;

@@ -836,7 +836,7 @@ export function SettingsPage(props: SettingsPageProps) {
                           <div className="knowledge-graph-empty">Loading graph...</div>
                         }
                       >
-                        {ragBusy && (phase7?.graph.totalNodes ?? 0) === 0 ? (
+                        {ragBusy && (phase7?.graph.nodes.length ?? 0) === 0 ? (
                           <div className="knowledge-graph-empty">Indexing workspace text...</div>
                         ) : (
                           <KnowledgeGraph
