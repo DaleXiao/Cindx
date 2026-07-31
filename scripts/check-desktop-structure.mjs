@@ -1585,8 +1585,17 @@ assert(
 assert(
   appSource.includes("sessionLoadingId") &&
     appSource.includes("loading={sessionLoadingId === activeSession?.id && !activeAgentState}") &&
-    sessionThreadSource.includes('loading ? "Loading conversation" : "No messages yet"'),
-  "Cold session loads must show an explicit loading state instead of a blank thread"
+    sessionThreadSource.includes(
+      'loading ? "Loading conversation" : "Cindx is ready for you."'
+    ) &&
+    sessionThreadSource.includes('className="session-thread-empty-orb"') &&
+    sessionThreadSource.includes('state="solving"') &&
+    sessionThreadSource.includes("size={64}") &&
+    styles.includes(".session-thread-empty-orb") &&
+    styles.includes("flex: 0 0 64px") &&
+    styles.includes("min-width: 64px") &&
+    styles.includes("min-height: 64px"),
+  "Cold loads must stay explicit and ready empty sessions must show the 64px solving orb"
 );
 assert(
   sessionThreadSource.includes("export const SessionThread = memo(function SessionThread") &&
