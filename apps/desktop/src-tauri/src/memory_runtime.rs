@@ -1,4 +1,9 @@
 use crate::desktop_prelude::*;
+#[cfg(test)]
+pub(crate) use crate::memory_projection_runtime::is_memory_checkpoint_event;
+pub(crate) use crate::memory_projection_runtime::{
+    memory_events_for_terminal_steer_epoch, save_project_memory_ledger,
+};
 use crate::{
     agent_query_commands::append_agent_progress_event,
     app_state::AppState,
@@ -6,7 +11,9 @@ use crate::{
     event_persistence::append_event,
     event_projection::write_private_file_atomically,
     knowledge_runtime::{prepare_agent_knowledge_context, CloudRagEmbedder},
-    memory_measurement_runtime::replay_project_memory_measurement,
+    memory_projection_runtime::{
+        load_project_memory_ledger_inner, persist_project_memory_snapshot_if_current,
+    },
     memory_vector_generation_runtime::{
         memory_vector_manifest_matches, memory_vector_project_key, memory_vector_projection_sha256,
         open_memory_vector_snapshot, MemoryVectorManifest, PendingMemoryVectorGeneration,
@@ -14,174 +21,29 @@ use crate::{
     persistence_runtime::{open_app_read_store, skill_catalog_for_root},
     project_session_persistence::metadata_with_context,
     runtime_constants::{
-        AGENT_MEMORY_MAX_RECORDS, AGENT_MEMORY_READ_MODEL_NAMESPACE, AGENT_MEMORY_RECALL_LIMIT,
-        MEMORY_VECTOR_MANIFEST_SCHEMA, MEMORY_VECTOR_REFRESH_INFLIGHT,
+        AGENT_MEMORY_RECALL_LIMIT, MEMORY_VECTOR_MANIFEST_SCHEMA, MEMORY_VECTOR_REFRESH_INFLIGHT,
     },
-    runtime_values::{current_time_millis, phase16_task_id},
+    runtime_values::current_time_millis,
     view_models::MemoryStatsView,
 };
-use agent_core::EVENT_TYPE_METADATA_KEY;
 
 pub(crate) fn load_project_memory_ledger(
     store: &mut SqliteStore,
     project_id: &str,
 ) -> Result<MemoryLedger, StorageError> {
-    load_project_memory_ledger_inner(store, project_id, true)
+    let loaded = load_project_memory_ledger_inner(store, project_id)?;
+    if loaded.needs_persist {
+        save_project_memory_ledger(store, &loaded.ledger)?;
+    }
+    Ok(loaded.ledger)
 }
 
+#[cfg(test)]
 pub(crate) fn load_project_memory_ledger_snapshot(
     store: &mut SqliteStore,
     project_id: &str,
 ) -> Result<MemoryLedger, StorageError> {
-    load_project_memory_ledger_inner(store, project_id, false)
-}
-
-fn load_project_memory_ledger_inner(
-    store: &mut SqliteStore,
-    project_id: &str,
-    persist: bool,
-) -> Result<MemoryLedger, StorageError> {
-    let task_id = phase16_task_id();
-    let revision = store.event_revision_by_metadata(&task_id, "project_id", project_id)?;
-    let stored = store
-        .load_read_model(AGENT_MEMORY_READ_MODEL_NAMESPACE, project_id)?
-        .and_then(|stored| {
-            serde_json::from_str::<MemoryLedger>(&stored.payload)
-                .ok()
-                .filter(|ledger| {
-                    ledger.schema == MEMORY_LEDGER_SCHEMA
-                        && ledger.project_id == project_id
-                        && ledger.revision == stored.revision
-                        && ledger.revision <= revision.latest_sequence
-                        && ledger.event_count <= revision.event_count
-                })
-        });
-    let mut rebuilding = stored.is_none();
-    let mut changed = rebuilding;
-    let mut ledger = stored.unwrap_or_else(|| MemoryLedger::new(project_id));
-    let mut delta = store.list_by_task_and_metadata_after(
-        &task_id,
-        "project_id",
-        project_id,
-        ledger.revision,
-    )?;
-    changed |= !delta.is_empty();
-    if ledger.event_count.saturating_add(delta.len() as u64) != revision.event_count {
-        rebuilding = true;
-        changed = true;
-        ledger = MemoryLedger::new(project_id);
-        delta = store.list_by_task_and_metadata_after(&task_id, "project_id", project_id, 0)?;
-    }
-
-    let rebuilding_runs = if rebuilding {
-        let mut runs = BTreeMap::<String, Vec<Event>>::new();
-        for event in &delta {
-            if event.metadata.get("project_id").map(String::as_str) != Some(project_id) {
-                continue;
-            }
-            if let Some(run_id) = event.metadata.get("agent_run_id") {
-                runs.entry(run_id.clone()).or_default().push(event.clone());
-            }
-        }
-        Some(runs)
-    } else {
-        None
-    };
-    for event in &delta {
-        if event.metadata.get("project_id").map(String::as_str) != Some(project_id) {
-            continue;
-        }
-        if is_memory_checkpoint_event(event) {
-            let Some(run_id) = event
-                .metadata
-                .get("agent_run_id")
-                .filter(|run_id| !run_id.is_empty())
-            else {
-                continue;
-            };
-            let events = match rebuilding_runs.as_ref() {
-                Some(runs) => runs.get(run_id).cloned().unwrap_or_default(),
-                None => store.list_by_task_and_metadata(&task_id, "agent_run_id", run_id)?,
-            }
-            .into_iter()
-            .filter(|candidate| candidate.sequence <= event.sequence)
-            .filter(|candidate| {
-                candidate.metadata.get("project_id").map(String::as_str) == Some(project_id)
-            })
-            .collect::<Vec<_>>();
-            let events = memory_events_for_terminal_steer_epoch(events);
-            if let Some(session_id) = events
-                .iter()
-                .find_map(|candidate| candidate.metadata.get("session_id"))
-            {
-                merge_memory_records(
-                    &mut ledger,
-                    extract_durable_memories(&events, project_id, session_id),
-                    AGENT_MEMORY_MAX_RECORDS,
-                );
-            }
-        }
-        replay_project_memory_measurement(&mut ledger, event, project_id);
-    }
-    ledger.revision = revision.latest_sequence;
-    ledger.event_count = revision.event_count;
-    if persist && changed {
-        save_project_memory_ledger(store, &ledger)?;
-    }
-    Ok(ledger)
-}
-
-pub(crate) fn is_memory_checkpoint_event(event: &Event) -> bool {
-    AgentRunEvent::from_event(event)
-        .is_some_and(|event| event.status().is_terminal() || event == AgentRunEvent::Paused)
-        || (event.summary == "Semantic memory candidates accepted"
-            && !event.metadata.contains_key(EVENT_TYPE_METADATA_KEY))
-}
-
-pub(crate) fn memory_events_for_terminal_steer_epoch(mut events: Vec<Event>) -> Vec<Event> {
-    let terminal_epoch = events.iter().rev().find_map(|event| {
-        AgentRunEvent::from_event(event)
-            .is_some_and(|run_event| {
-                run_event.status().is_terminal() || run_event == AgentRunEvent::Paused
-            })
-            .then(|| {
-                event
-                    .metadata
-                    .get("steer_epoch")
-                    .and_then(|value| value.parse::<u64>().ok())
-            })
-            .flatten()
-    });
-    let Some(terminal_epoch) = terminal_epoch else {
-        return events;
-    };
-    events.retain(|event| {
-        let event_epoch = event
-            .metadata
-            .get("steer_epoch")
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or_default();
-        let accepted_user_intent = event.kind == EventKind::MessageAdded
-            && event.metadata.get("role").map(String::as_str) == Some("user")
-            && event.metadata.get("internal").map(String::as_str) != Some("true")
-            && event_epoch <= terminal_epoch;
-        accepted_user_intent || event_epoch == terminal_epoch
-    });
-    events
-}
-
-pub(crate) fn save_project_memory_ledger(
-    store: &mut SqliteStore,
-    ledger: &MemoryLedger,
-) -> Result<(), StorageError> {
-    let payload = serde_json::to_string(ledger)
-        .map_err(|error| StorageError::new(format!("memory serialization failed: {error}")))?;
-    store.save_read_model(
-        AGENT_MEMORY_READ_MODEL_NAMESPACE,
-        &ledger.project_id,
-        ledger.revision,
-        &payload,
-    )
+    Ok(load_project_memory_ledger_inner(store, project_id)?.ledger)
 }
 
 fn refresh_project_memory_ledger_revision(
@@ -424,6 +286,7 @@ pub(crate) fn memory_rag_index(ledger: &MemoryLedger) -> RagIndex {
     let chunks = ledger
         .records
         .iter()
+        .filter(|record| record.is_recall_eligible())
         .map(|record| {
             let embedding = local_query_embedding(&record.content);
             RagChunk {
@@ -663,11 +526,25 @@ pub(crate) fn recall_project_memory_for_prompt(
     let session_id = run_context.get("session_id").map(String::as_str);
     let started_at = Instant::now();
     let now_ms = current_time_millis();
-    let ledger = {
+    let loaded = {
         let mut store = open_app_read_store()?;
-        load_project_memory_ledger_snapshot(&mut store, project_id)
+        load_project_memory_ledger_inner(&mut store, project_id)
             .map_err(|error| error.to_string())?
     };
+    let ledger = loaded.ledger;
+    if loaded.needs_persist {
+        let persisted = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))
+            .and_then(|mut store| {
+                persist_project_memory_snapshot_if_current(&mut store, &ledger)
+                    .map_err(|error| error.to_string())
+            });
+        if let Err(error) = persisted {
+            eprintln!("failed to persist migrated project memory projection: {error}");
+        }
+    }
     if ledger.records.is_empty() {
         return Ok(None);
     }

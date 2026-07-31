@@ -8,37 +8,48 @@ pub fn merge_memory_records(
 ) -> MemoryMergeStats {
     let mut stats = MemoryMergeStats::default();
     for mut candidate in candidates {
+        if candidate.provenance.project_id != ledger.project_id || !candidate.is_recall_eligible() {
+            continue;
+        }
         if let Some(existing_index) = ledger
             .records
             .iter()
             .position(|record| record.fingerprint == candidate.fingerprint)
         {
-            let mut changed = false;
+            let changed;
             {
                 let existing = &mut ledger.records[existing_index];
-                let previous_source_count = existing.source_event_ids.len();
-                for event_id in &candidate.source_event_ids {
-                    if !existing.source_event_ids.contains(event_id) {
-                        existing.source_event_ids.push(event_id.clone());
-                    }
-                }
-                for session_id in &candidate.source_session_ids {
-                    if !existing.source_session_ids.contains(session_id) {
-                        existing.source_session_ids.push(session_id.clone());
-                    }
-                }
-                existing.source_event_ids.truncate(8);
-                existing.source_session_ids.truncate(8);
-                changed |= existing.source_event_ids.len() != previous_source_count;
-                existing.updated_at_ms = existing.updated_at_ms.max(candidate.updated_at_ms);
-                existing.importance = existing.importance.max(candidate.importance);
-                if record_order(&candidate) > record_order(existing) {
+                let before = existing.clone();
+                let candidate_wins = record_order(&candidate) > record_order(existing)
+                    || (!existing.is_recall_eligible() && candidate.is_recall_eligible());
+                if candidate_wins {
                     existing.provenance = candidate.provenance.clone();
                     existing.trust = candidate.trust;
                     existing.content = candidate.content.clone();
-                    changed |= existing.superseded_by.take().is_some();
-                    changed |= existing.superseded_at_ms.take().is_some();
+                    existing.superseded_by = None;
+                    existing.superseded_at_ms = None;
                 }
+                merge_unique_bounded(
+                    &mut existing.source_event_ids,
+                    &candidate.source_event_ids,
+                    candidate_wins,
+                    8,
+                );
+                merge_unique_bounded(
+                    &mut existing.source_session_ids,
+                    &candidate.source_session_ids,
+                    candidate_wins,
+                    8,
+                );
+                merge_unique_bounded(
+                    &mut existing.user_requirement_evidence,
+                    &candidate.user_requirement_evidence,
+                    candidate_wins,
+                    8,
+                );
+                existing.updated_at_ms = existing.updated_at_ms.max(candidate.updated_at_ms);
+                existing.importance = existing.importance.max(candidate.importance);
+                changed = *existing != before;
             }
             let active = ledger.records[existing_index].clone();
             let reconciled = reconcile_requirement_conflicts(
@@ -75,13 +86,40 @@ pub fn merge_memory_records(
     stats
 }
 
+fn merge_unique_bounded<T: Clone + PartialEq>(
+    existing: &mut Vec<T>,
+    incoming: &[T],
+    incoming_first: bool,
+    limit: usize,
+) {
+    let mut merged = Vec::with_capacity(limit);
+    let mut append = |values: &[T]| {
+        for value in values {
+            if merged.len() >= limit {
+                break;
+            }
+            if !merged.contains(value) {
+                merged.push(value.clone());
+            }
+        }
+    };
+    if incoming_first {
+        append(incoming);
+        append(existing);
+    } else {
+        append(existing);
+        append(incoming);
+    }
+    *existing = merged;
+}
+
 fn reconcile_requirement_conflicts(
     records: &mut [MemoryRecord],
     incoming: &mut MemoryRecord,
     incoming_index: Option<usize>,
     active: &MemoryRecord,
 ) -> usize {
-    if active.kind != MemoryKind::Requirement || active.trust != MemoryTrust::UserStated {
+    if !active.has_verified_user_requirement() {
         return 0;
     }
 
@@ -90,6 +128,7 @@ fn reconcile_requirement_conflicts(
         if Some(index) == incoming_index
             || record.kind != MemoryKind::Requirement
             || record.trust != MemoryTrust::UserStated
+            || !record.has_verified_user_requirement()
             || record.provenance.project_id != active.provenance.project_id
             || !requirements_conflict(&record.content, &active.content)
         {
@@ -115,6 +154,7 @@ fn reconcile_requirement_conflicts(
         if Some(index) == incoming_index
             || record.kind != MemoryKind::Requirement
             || record.trust != MemoryTrust::UserStated
+            || !record.has_verified_user_requirement()
             || record.provenance.project_id != active.provenance.project_id
             || record_order(record) > record_order(active)
             || !requirements_conflict(&record.content, &active.content)

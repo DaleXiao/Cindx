@@ -1,4 +1,5 @@
 use agent_core::Event;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 pub(crate) fn first_metadata_value<'a>(event: &'a Event, keys: &[&str]) -> Option<&'a str> {
@@ -28,6 +29,45 @@ pub(crate) fn normalize_memory_text(value: &str) -> String {
         .flat_map(char::to_lowercase)
         .filter(|character| character.is_alphanumeric())
         .collect()
+}
+
+pub(crate) fn sha256_hex(value: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(value))
+}
+
+pub(crate) fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn requirement_evidence_sha256(
+    schema: &str,
+    project_id: &str,
+    session_id: &str,
+    event_id: &str,
+    source_sha256: &str,
+    quote_start_byte: u64,
+    quote_end_byte: u64,
+    quote: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    for field in [
+        schema.as_bytes(),
+        project_id.as_bytes(),
+        session_id.as_bytes(),
+        event_id.as_bytes(),
+        source_sha256.as_bytes(),
+        &quote_start_byte.to_be_bytes(),
+        &quote_end_byte.to_be_bytes(),
+        quote.as_bytes(),
+    ] {
+        hasher.update((field.len() as u64).to_be_bytes());
+        hasher.update(field);
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 pub(crate) fn memory_terms(value: &str) -> BTreeSet<String> {

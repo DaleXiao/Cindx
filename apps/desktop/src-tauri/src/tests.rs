@@ -2743,7 +2743,7 @@ fn project_memory_feedback_keeps_project_scoped_revision() {
         &mut store,
         &phase16_task_id(),
         MessageRole::User,
-        "Keep memory feedback isolated by project",
+        "Always keep memory feedback isolated by project",
         project_a.clone(),
     )
     .expect("project A message should append");
@@ -2841,7 +2841,7 @@ fn project_memory_projection_persists_and_searches_real_lancedb_vectors() {
         &mut store,
         &phase16_task_id(),
         MessageRole::User,
-        "Keep the inspector frosted and translucent",
+        "Always keep the inspector frosted and translucent",
         context.clone(),
     )
     .expect("user requirement should append");
