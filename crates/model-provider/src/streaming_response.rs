@@ -42,35 +42,73 @@ fn apply_stream_line(
     Ok(false)
 }
 
-fn apply_complete_stream_lines(
-    pending: &mut Vec<u8>,
-    answer: &mut String,
-    streamed_tool_calls: &mut BTreeMap<usize, StreamingToolCall>,
-    finish_reason: &mut Option<String>,
-    usage: &mut Metadata,
-    on_delta: &mut impl FnMut(&str),
-) -> Result<bool, ModelError> {
-    let mut consumed = 0;
-    let mut parsed_event = false;
-    for index in 0..pending.len() {
-        if pending[index] != b'\n' {
-            continue;
+struct StreamingLineDecoder {
+    pending: Vec<u8>,
+    #[cfg(test)]
+    scanned_bytes: usize,
+}
+
+impl StreamingLineDecoder {
+    fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+            #[cfg(test)]
+            scanned_bytes: 0,
         }
-        let line = String::from_utf8_lossy(&pending[consumed..=index]);
-        parsed_event |= apply_stream_line(
-            &line,
-            answer,
-            streamed_tool_calls,
-            finish_reason,
-            usage,
-            on_delta,
-        )?;
-        consumed = index + 1;
     }
-    if consumed > 0 {
-        pending.drain(..consumed);
+
+    fn append_fragment(&mut self, fragment: &[u8]) -> Result<(), ModelError> {
+        if fragment.len() > MAX_STREAM_EVENT_BYTES.saturating_sub(self.pending.len()) {
+            return Err(ModelError::new(
+                "model stream event exceeded the 8 MB line limit",
+            ));
+        }
+        self.pending.extend_from_slice(fragment);
+        Ok(())
     }
-    Ok(parsed_event)
+
+    fn push_chunk(
+        &mut self,
+        chunk: &[u8],
+        mut apply_line: impl FnMut(&str) -> Result<bool, ModelError>,
+    ) -> Result<bool, ModelError> {
+        let mut offset = 0;
+        let mut parsed_event = false;
+        while offset < chunk.len() {
+            let remaining = &chunk[offset..];
+            let Some(newline) = remaining.iter().position(|byte| *byte == b'\n') else {
+                #[cfg(test)]
+                {
+                    self.scanned_bytes = self.scanned_bytes.saturating_add(remaining.len());
+                }
+                self.append_fragment(remaining)?;
+                break;
+            };
+            #[cfg(test)]
+            {
+                self.scanned_bytes = self.scanned_bytes.saturating_add(newline + 1);
+            }
+            self.append_fragment(&remaining[..newline])?;
+            let line = String::from_utf8_lossy(&self.pending);
+            parsed_event |= apply_line(&line)?;
+            self.pending.clear();
+            offset = offset.saturating_add(newline + 1);
+        }
+        Ok(parsed_event)
+    }
+
+    fn finish(
+        &mut self,
+        mut apply_line: impl FnMut(&str) -> Result<bool, ModelError>,
+    ) -> Result<bool, ModelError> {
+        if self.pending.is_empty() {
+            return Ok(false);
+        }
+        let line = String::from_utf8_lossy(&self.pending);
+        let parsed_event = apply_line(&line)?;
+        self.pending.clear();
+        Ok(parsed_event)
+    }
 }
 
 pub(super) fn finish_streaming_response(
@@ -171,7 +209,7 @@ where
     let mut fallback_truncated = false;
     let mut stream_protocol_seen = false;
     let mut received_bytes = 0usize;
-    let mut pending = Vec::new();
+    let mut line_decoder = StreamingLineDecoder::new();
     let mut answer = String::new();
     let mut streamed_tool_calls = BTreeMap::<usize, StreamingToolCall>::new();
     let mut finish_reason = None;
@@ -204,20 +242,16 @@ where
                     fallback_response.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
                     fallback_truncated |= chunk.len() > remaining;
                 }
-                pending.extend_from_slice(chunk);
-                let parsed_event = apply_complete_stream_lines(
-                    &mut pending,
-                    &mut answer,
-                    &mut streamed_tool_calls,
-                    &mut finish_reason,
-                    &mut usage,
-                    &mut filtered_on_delta,
-                )?;
-                if pending.len() > MAX_STREAM_EVENT_BYTES {
-                    return Err(ModelError::new(
-                        "model stream event exceeded the 8 MB line limit",
-                    ));
-                }
+                let parsed_event = line_decoder.push_chunk(chunk, |line| {
+                    apply_stream_line(
+                        line,
+                        &mut answer,
+                        &mut streamed_tool_calls,
+                        &mut finish_reason,
+                        &mut usage,
+                        &mut filtered_on_delta,
+                    )
+                })?;
                 if parsed_event {
                     stream_protocol_seen = true;
                     fallback_response.clear();
@@ -241,17 +275,16 @@ where
         }
     }
 
-    if !pending.is_empty() {
-        let line = String::from_utf8_lossy(&pending).into_owned();
-        stream_protocol_seen |= apply_stream_line(
-            &line,
+    stream_protocol_seen |= line_decoder.finish(|line| {
+        apply_stream_line(
+            line,
             &mut answer,
             &mut streamed_tool_calls,
             &mut finish_reason,
             &mut usage,
             &mut filtered_on_delta,
-        )?;
-    }
+        )
+    })?;
     dsml_filter.finish(on_delta);
     finish_streaming_response(
         if stream_protocol_seen {
@@ -342,4 +375,116 @@ pub(super) async fn consume_streaming_response(
         should_cancel,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line_decoder_scans_an_eight_mib_event_once_across_one_kib_chunks() {
+        let mut decoder = StreamingLineDecoder::new();
+        let chunk = [b'x'; 1024];
+        let mut completed_lines = 0;
+
+        for _ in 0..(MAX_STREAM_EVENT_BYTES / chunk.len()) {
+            decoder
+                .push_chunk(&chunk, |_| {
+                    completed_lines += 1;
+                    Ok(false)
+                })
+                .expect("an event at the configured limit should remain valid");
+        }
+        decoder
+            .push_chunk(b"\n", |_| {
+                completed_lines += 1;
+                Ok(false)
+            })
+            .expect("the line terminator should complete the bounded event");
+
+        assert_eq!(decoder.scanned_bytes, MAX_STREAM_EVENT_BYTES + 1);
+        assert_eq!(completed_lines, 1);
+        assert!(decoder.pending.is_empty());
+    }
+
+    #[test]
+    fn line_decoder_rejects_an_oversized_event_before_appending_it() {
+        let mut decoder = StreamingLineDecoder::new();
+        let chunk = [b'x'; 1024];
+        for _ in 0..(MAX_STREAM_EVENT_BYTES / chunk.len()) {
+            decoder
+                .push_chunk(&chunk, |_| Ok(false))
+                .expect("an event exactly at the limit should remain valid");
+        }
+
+        let error = decoder
+            .push_chunk(b"x\n", |_| panic!("an oversized line must not be parsed"))
+            .expect_err("the event should fail before the extra byte is appended");
+
+        assert_eq!(
+            error.message,
+            "model stream event exceeded the 8 MB line limit"
+        );
+        assert_eq!(decoder.pending.len(), MAX_STREAM_EVENT_BYTES);
+    }
+
+    #[test]
+    fn line_decoder_preserves_crlf_and_eof_stream_semantics_across_byte_chunks() {
+        let wire = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\r\n",
+            "\r\n",
+            "data: {\"choices\":[],\"usage\":{\"total_tokens\":7}}\r\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"file_read\",\"arguments\":\"{\\\"input\\\":\\\"path=\"}}]}}]}\r\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"README.md\\\"}\"}}]}}]}"
+        );
+        let mut decoder = StreamingLineDecoder::new();
+        let mut answer = String::new();
+        let mut visible = String::new();
+        let mut tool_calls = BTreeMap::new();
+        let mut finish_reason = None;
+        let mut usage = Metadata::new();
+        let mut parsed_event = false;
+
+        for byte in wire.as_bytes().chunks(1) {
+            parsed_event |= decoder
+                .push_chunk(byte, |line| {
+                    apply_stream_line(
+                        line,
+                        &mut answer,
+                        &mut tool_calls,
+                        &mut finish_reason,
+                        &mut usage,
+                        &mut |delta| visible.push_str(delta),
+                    )
+                })
+                .expect("split stream line should parse");
+        }
+        parsed_event |= decoder
+            .finish(|line| {
+                apply_stream_line(
+                    line,
+                    &mut answer,
+                    &mut tool_calls,
+                    &mut finish_reason,
+                    &mut usage,
+                    &mut |delta| visible.push_str(delta),
+                )
+            })
+            .expect("unterminated final data line should preserve EOF behavior");
+
+        let call = tool_calls
+            .remove(&0)
+            .and_then(|call| call.finish(0))
+            .expect("split tool call should be complete");
+
+        assert!(parsed_event);
+        assert_eq!(decoder.scanned_bytes, wire.len());
+        assert_eq!(answer, "hello");
+        assert_eq!(visible, "hello");
+        assert_eq!(usage.get("total_tokens").map(String::as_str), Some("7"));
+        assert_eq!(call.id, "call_1");
+        assert_eq!(call.name, "file_read");
+        assert_eq!(call.arguments_json, r#"{"input":"path=README.md"}"#);
+        assert!(finish_reason.is_none());
+    }
 }
