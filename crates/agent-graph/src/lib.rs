@@ -1,9 +1,16 @@
 use agent_rag::{RagChunk, RagSearchResult};
+use aho_corasick::AhoCorasickBuilder;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(test)]
+std::thread_local! {
+    static CLONING_NODES_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LABEL_FALLBACK_NODE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphError {
@@ -131,6 +138,23 @@ pub trait GraphStore {
     fn edges(&self) -> Vec<GraphEdge>;
     fn neighbors(&self, node_id: &str, limit: usize) -> Vec<GraphNode>;
     fn nodes_by_label(&self, label: &str) -> Vec<GraphNode>;
+
+    fn visit_nodes(&self, visitor: &mut dyn FnMut(&GraphNode)) {
+        for node in self.nodes() {
+            visitor(&node);
+        }
+    }
+
+    fn visit_nodes_matching_labels(&self, labels: &[String], visitor: &mut dyn FnMut(&GraphNode)) {
+        let mut visited = BTreeSet::new();
+        for label in labels {
+            for node in self.nodes_by_label(label) {
+                if visited.insert(node.id.clone()) {
+                    visitor(&node);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -334,6 +358,8 @@ impl GraphStore for FileGraphStore {
     }
 
     fn nodes(&self) -> Vec<GraphNode> {
+        #[cfg(test)]
+        CLONING_NODES_CALLS.with(|count| count.set(count.get().saturating_add(1)));
         self.nodes.values().cloned().collect()
     }
 
@@ -364,6 +390,50 @@ impl GraphStore for FileGraphStore {
             .filter(|node| node.label.to_ascii_lowercase().contains(&normalized))
             .cloned()
             .collect()
+    }
+
+    fn visit_nodes(&self, visitor: &mut dyn FnMut(&GraphNode)) {
+        for node in self.nodes.values() {
+            visitor(node);
+        }
+    }
+
+    fn visit_nodes_matching_labels(&self, labels: &[String], visitor: &mut dyn FnMut(&GraphNode)) {
+        let mut matching_ids = BTreeSet::new();
+        let mut missing_labels = BTreeSet::new();
+        let mut match_all = false;
+        for label in labels {
+            let normalized = label.to_ascii_lowercase();
+            if let Some(ids) = self.label_index.get(&normalized) {
+                matching_ids.extend(ids.iter().map(String::as_str));
+            } else if normalized.is_empty() {
+                match_all = true;
+            } else {
+                missing_labels.insert(normalized);
+            }
+        }
+
+        if match_all {
+            matching_ids.extend(self.nodes.keys().map(String::as_str));
+        } else if !missing_labels.is_empty() {
+            let matcher = AhoCorasickBuilder::new()
+                .ascii_case_insensitive(true)
+                .build(missing_labels.iter().map(String::as_str))
+                .expect("graph query token count should fit in a pattern identifier");
+            for node in self.nodes.values() {
+                #[cfg(test)]
+                LABEL_FALLBACK_NODE_VISITS.with(|count| count.set(count.get().saturating_add(1)));
+                if matcher.is_match(&node.label) {
+                    matching_ids.insert(node.id.as_str());
+                }
+            }
+        }
+
+        for id in matching_ids {
+            if let Some(node) = self.nodes.get(id) {
+                visitor(node);
+            }
+        }
     }
 }
 
@@ -444,23 +514,22 @@ pub fn graph_direct_recall(
 ) -> Vec<GraphRagSource> {
     let mut paths = BTreeSet::new();
     let normalized_query = query.to_lowercase();
-    for token in graph_tokens(query) {
-        for node in store.nodes_by_label(&token) {
+    let tokens = graph_tokens(query);
+    store.visit_nodes_matching_labels(&tokens, &mut |node| {
+        paths.insert(node.provenance.source_path.clone());
+        if node.kind == GraphNodeKind::File {
+            paths.insert(node.label.clone());
+        }
+    });
+    store.visit_nodes(&mut |node| {
+        let label = node.label.to_lowercase();
+        if label.chars().count() >= 2 && normalized_query.contains(&label) {
             paths.insert(node.provenance.source_path.clone());
             if node.kind == GraphNodeKind::File {
                 paths.insert(node.label.clone());
             }
         }
-    }
-    for node in store.nodes() {
-        let label = node.label.to_lowercase();
-        if label.chars().count() >= 2 && normalized_query.contains(&label) {
-            paths.insert(node.provenance.source_path.clone());
-            if node.kind == GraphNodeKind::File {
-                paths.insert(node.label);
-            }
-        }
-    }
+    });
     graph_sources_for_paths(paths, chunks, "graph_recall", 0.65, limit)
 }
 
@@ -714,6 +783,34 @@ mod tests {
         }
     }
 
+    fn legacy_graph_direct_recall(
+        query: &str,
+        chunks: &[RagChunk],
+        store: &dyn GraphStore,
+        limit: usize,
+    ) -> Vec<GraphRagSource> {
+        let mut paths = BTreeSet::new();
+        let normalized_query = query.to_lowercase();
+        for token in graph_tokens(query) {
+            for node in store.nodes_by_label(&token) {
+                paths.insert(node.provenance.source_path.clone());
+                if node.kind == GraphNodeKind::File {
+                    paths.insert(node.label.clone());
+                }
+            }
+        }
+        for node in store.nodes() {
+            let label = node.label.to_lowercase();
+            if label.chars().count() >= 2 && normalized_query.contains(&label) {
+                paths.insert(node.provenance.source_path.clone());
+                if node.kind == GraphNodeKind::File {
+                    paths.insert(node.label);
+                }
+            }
+        }
+        graph_sources_for_paths(paths, chunks, "graph_recall", 0.65, limit)
+    }
+
     #[test]
     fn extracts_file_tool_symbol_and_decision_nodes() {
         let extraction = extract_graph_from_chunk(&chunk(
@@ -784,6 +881,93 @@ mod tests {
 
         assert!(prompt.contains("[src/lib.rs:1-3"));
         assert!(prompt.contains("Do not invent facts"));
+    }
+
+    #[test]
+    fn batched_graph_direct_recall_preserves_legacy_results_and_ordering() {
+        let path = std::env::temp_dir().join(format!(
+            "agent-graph-direct-parity-{}-{}.tsv",
+            std::process::id(),
+            current_time_millis()
+        ));
+        let chunks = vec![
+            chunk("docs/exact.md", "Agent"),
+            chunk("docs/partial.md", "AgentRuntime"),
+            chunk("docs/tool.md", "file.read"),
+            chunk("docs/policy.md", "approved policy"),
+        ];
+        let mut store = FileGraphStore::open(&path).expect("store should open");
+        store
+            .upsert_all(chunks.iter().map(extract_graph_from_chunk))
+            .expect("graph should save");
+
+        for query in [
+            "Agent",
+            "runtime",
+            "please use FILE.READ",
+            "approved policy",
+            "AgentRuntime reference",
+            "unrelated",
+        ] {
+            assert_eq!(
+                graph_direct_recall(query, &chunks, &store, 8),
+                legacy_graph_direct_recall(query, &chunks, &store, 8),
+                "batched lookup changed recall for {query:?}"
+            );
+        }
+        let exact = graph_direct_recall("Agent", &chunks, &store, 8);
+        assert!(exact
+            .iter()
+            .any(|source| source.chunk.path == "docs/exact.md"));
+        assert!(!exact
+            .iter()
+            .any(|source| source.chunk.path == "docs/partial.md"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn graph_direct_recall_batches_many_index_misses_into_one_borrowed_node_pass() {
+        let path = std::env::temp_dir().join(format!(
+            "agent-graph-direct-scaling-{}-{}.tsv",
+            std::process::id(),
+            current_time_millis()
+        ));
+        let mut store = FileGraphStore::open(&path).expect("store should open");
+        for index in 0..10_000 {
+            let graph_node = node(
+                GraphNodeKind::Claim,
+                &format!("unrelated-{index:05}"),
+                GraphProvenance {
+                    source_path: format!("docs/{index:05}.md"),
+                    start_line: 1,
+                    end_line: 1,
+                    extractor: "scaling-test".to_string(),
+                    observed_at_ms: 0,
+                },
+            );
+            store.nodes.insert(graph_node.id.clone(), graph_node);
+        }
+        store.rebuild_indexes();
+        let query = (0..20)
+            .map(|index| format!("missing_{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        CLONING_NODES_CALLS.with(|count| count.set(0));
+        LABEL_FALLBACK_NODE_VISITS.with(|count| count.set(0));
+
+        let recalled = graph_direct_recall(&query, &[], &store, 8);
+
+        assert!(recalled.is_empty());
+        assert_eq!(
+            LABEL_FALLBACK_NODE_VISITS.with(std::cell::Cell::get),
+            store.node_count(),
+            "all label-index misses should share one node pass"
+        );
+        assert_eq!(
+            CLONING_NODES_CALLS.with(std::cell::Cell::get),
+            0,
+            "direct recall should not clone the full graph"
+        );
     }
 
     #[test]

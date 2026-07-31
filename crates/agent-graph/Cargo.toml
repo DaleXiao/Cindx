@@ -6,3 +6,4 @@ license.workspace = true
 
 [dependencies]
 agent-rag = { path = "../agent-rag" }
+aho-corasick = "1.1.4"
