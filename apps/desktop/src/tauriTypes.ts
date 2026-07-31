@@ -253,12 +253,6 @@ export type QueuedAgentMessageActionReceipt = {
   steerCommitted: boolean;
 };
 
-export type AttachmentUpload = {
-  name: string;
-  mimeType: string;
-  dataBase64: string;
-};
-
 export type ArtifactPreview = {
   kind: "image" | "html" | "markdown" | "text" | "file";
   mimeType: string;

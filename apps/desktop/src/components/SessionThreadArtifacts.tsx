@@ -1,47 +1,10 @@
 import { FileText, FolderOpen, Image as ImageIcon } from "lucide-react";
-import { useEffect, useState } from "react";
-import { openArtifact, readArtifactPreview } from "../tauri";
+import { useArtifactImagePreview } from "../controllers/useArtifactImagePreview";
+import { openArtifact } from "../tauri";
 import type { AgentAttachment, AgentOutputArtifactView } from "../tauri";
 
-const MESSAGE_ATTACHMENT_PREVIEW_CACHE_LIMIT = 8;
-const messageAttachmentPreviewCache = new Map<string, string>();
-
-function cacheMessageAttachmentPreview(path: string, dataUrl: string) {
-  messageAttachmentPreviewCache.delete(path);
-  messageAttachmentPreviewCache.set(path, dataUrl);
-  while (messageAttachmentPreviewCache.size > MESSAGE_ATTACHMENT_PREVIEW_CACHE_LIMIT) {
-    const oldestPath = messageAttachmentPreviewCache.keys().next().value;
-    if (!oldestPath) break;
-    messageAttachmentPreviewCache.delete(oldestPath);
-  }
-}
-
 function MessageAttachmentPreview({ attachment }: { attachment: AgentAttachment }) {
-  const [dataUrl, setDataUrl] = useState<string | null>(
-    () => messageAttachmentPreviewCache.get(attachment.path) ?? null
-  );
-
-  useEffect(() => {
-    const cached = messageAttachmentPreviewCache.get(attachment.path);
-    if (cached) {
-      setDataUrl(cached);
-      return;
-    }
-    let active = true;
-    setDataUrl(null);
-    void readArtifactPreview(attachment.path)
-      .then((preview) => {
-        if (!active || preview.kind !== "image" || !preview.dataUrl) return;
-        cacheMessageAttachmentPreview(attachment.path, preview.dataUrl);
-        setDataUrl(preview.dataUrl);
-      })
-      .catch(() => {
-        if (active) setDataUrl(null);
-      });
-    return () => {
-      active = false;
-    };
-  }, [attachment.path]);
+  const dataUrl = useArtifactImagePreview(attachment.path);
 
   if (dataUrl) {
     return <img src={dataUrl} alt={attachment.name} />;
@@ -106,31 +69,7 @@ function artifactDisplayPath(artifact: AgentOutputArtifactView) {
 }
 
 function ArtifactImagePreview({ artifact }: { artifact: AgentOutputArtifactView }) {
-  const [dataUrl, setDataUrl] = useState<string | null>(
-    () => messageAttachmentPreviewCache.get(artifact.path) ?? null
-  );
-
-  useEffect(() => {
-    const cached = messageAttachmentPreviewCache.get(artifact.path);
-    if (cached) {
-      setDataUrl(cached);
-      return;
-    }
-    let active = true;
-    setDataUrl(null);
-    void readArtifactPreview(artifact.path)
-      .then((preview) => {
-        if (!active || preview.kind !== "image" || !preview.dataUrl) return;
-        cacheMessageAttachmentPreview(artifact.path, preview.dataUrl);
-        setDataUrl(preview.dataUrl);
-      })
-      .catch(() => {
-        if (active) setDataUrl(null);
-      });
-    return () => {
-      active = false;
-    };
-  }, [artifact.path]);
+  const dataUrl = useArtifactImagePreview(artifact.path);
 
   if (dataUrl) return <img src={dataUrl} alt={artifactName(artifactDisplayPath(artifact))} />;
   return (

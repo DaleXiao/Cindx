@@ -15,7 +15,7 @@ import {
   X
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { readArtifactPreview } from "../tauri";
+import { useArtifactImagePreview } from "../controllers/useArtifactImagePreview";
 import type { AgentAttachment, AgentEffort, ToolApprovalView } from "../tauri";
 import type { VoiceInputStatus } from "../voice/voiceInputModel";
 import type { ProviderVoiceTransport } from "../providerProfiles";
@@ -68,25 +68,7 @@ const EFFORT_OPTIONS: Array<{
 
 function ComposerAttachmentPreview({ attachment }: { attachment: AgentAttachment }) {
   const isImage = attachment.mimeType.startsWith("image/");
-  const [dataUrl, setDataUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!isImage) {
-      setDataUrl(null);
-      return;
-    }
-    let active = true;
-    void readArtifactPreview(attachment.path)
-      .then((preview) => {
-        if (active && preview.kind === "image") setDataUrl(preview.dataUrl);
-      })
-      .catch(() => {
-        if (active) setDataUrl(null);
-      });
-    return () => {
-      active = false;
-    };
-  }, [attachment.path, isImage]);
+  const dataUrl = useArtifactImagePreview(isImage ? attachment.path : null);
 
   if (dataUrl) {
     return (

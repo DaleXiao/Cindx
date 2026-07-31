@@ -43,6 +43,7 @@ import {
   readArtifactPreview,
   revealArtifact
 } from "../tauri";
+import { useArtifactImagePreview } from "../controllers/useArtifactImagePreview";
 import type {
   AgentOutputArtifactView,
   AgentState,
@@ -330,8 +331,8 @@ function ArtifactPreviewPane({ path }: { path: string }) {
 
   if (error) return <div className="inspector-preview-message">{error}</div>;
   if (!preview) return <div className="inspector-preview-message">Loading preview</div>;
-  if (preview.kind === "image" && preview.dataUrl) {
-    return <img className="inspector-preview-image" src={preview.dataUrl} alt={artifactName(path)} />;
+  if (preview.kind === "image") {
+    return <ArtifactImagePreviewPane path={path} />;
   }
   if (preview.kind === "html" && preview.content != null) {
     return (
@@ -350,6 +351,12 @@ function ArtifactPreviewPane({ path }: { path: string }) {
     return <pre className="inspector-text-preview">{preview.content}</pre>;
   }
   return <div className="inspector-preview-message">Preview unavailable for this file type</div>;
+}
+
+function ArtifactImagePreviewPane({ path }: { path: string }) {
+  const url = useArtifactImagePreview(path);
+  if (!url) return <div className="inspector-preview-message">Loading preview</div>;
+  return <img className="inspector-preview-image" src={url} alt={artifactName(path)} />;
 }
 
 export function Inspector({

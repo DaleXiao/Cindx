@@ -222,17 +222,22 @@ pub(crate) struct AgentAttachmentView {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct AttachmentUploadInput {
+pub(crate) struct RawAttachmentUploadMetadata {
+    pub(crate) session_id: String,
+    pub(crate) batch_id: String,
     pub(crate) name: String,
     pub(crate) mime_type: String,
-    pub(crate) data_base64: String,
+    pub(crate) batch_file_count: usize,
+    pub(crate) batch_file_sizes: Vec<u64>,
+    pub(crate) batch_index: usize,
+    pub(crate) batch_total_bytes: u64,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct StageAgentAttachmentsInput {
+pub(crate) struct AbortAgentAttachmentBatchInput {
     pub(crate) session_id: String,
-    pub(crate) files: Vec<AttachmentUploadInput>,
+    pub(crate) batch_id: String,
 }
 
 #[derive(Debug, Deserialize)]

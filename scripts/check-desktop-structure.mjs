@@ -141,6 +141,13 @@ const appWorkspaceProjectionSource = read(
 const composerAttachmentsSource = read(
   "apps/desktop/src/controllers/useComposerAttachments.ts"
 );
+const attachmentIpcSource = read("apps/desktop/src/attachmentIpc.ts");
+const artifactImagePreviewHookSource = read(
+  "apps/desktop/src/controllers/useArtifactImagePreview.ts"
+);
+const artifactImagePreviewCacheSource = read(
+  "apps/desktop/src/utils/artifactImagePreviewCache.ts"
+);
 const composerDraftsSource = read(
   "apps/desktop/src/controllers/useComposerDrafts.ts"
 );
@@ -573,7 +580,12 @@ const frontendInvokeCommandNames = uniqueSortedNames(
 const frontendInvokeOwnershipViolations = listFrontendSourceFiles(
   desktopFrontendSourceDirectory
 )
-  .filter((file) => file !== path.join(desktopFrontendSourceDirectory, "tauri.ts"))
+  .filter(
+    (file) =>
+      !["tauri.ts", "attachmentIpc.ts"].includes(
+        path.relative(desktopFrontendSourceDirectory, file)
+      )
+  )
   .filter((file) => /\binvoke(?:<|\()/.test(fs.readFileSync(file, "utf8")))
   .map((file) => path.relative(desktopFrontendSourceDirectory, file));
 const rustCommandDefinitionNames = uniqueSortedNames(
@@ -624,6 +636,9 @@ const extractedDesktopBoundaryBudgets = [
   ["appShellModel.ts", appShellModelSource, 80],
   ["useAppWorkspaceProjection.ts", appWorkspaceProjectionSource, 200],
   ["useComposerAttachments.ts", composerAttachmentsSource, 140],
+  ["attachmentIpc.ts", attachmentIpcSource, 80],
+  ["useArtifactImagePreview.ts", artifactImagePreviewHookSource, 70],
+  ["artifactImagePreviewCache.ts", artifactImagePreviewCacheSource, 120],
   ["useComposerDrafts.ts", composerDraftsSource, 90],
   ["useVoiceInput.ts", voiceInputHookSource, 280],
   ["useOpenAiVoiceInput.ts", openAiVoiceInputHookSource, 290],
@@ -707,6 +722,8 @@ const oversizedProductionRustModules = desktopRustModules
   .map(({ entry, source }) => ({ entry, lines: source.split("\n").length }))
   .filter(({ lines }) => lines > 1_200);
 const criticalDesktopAgentModuleBudgets = new Map([
+  ["attachment_commands.rs", 190],
+  ["attachment_upload_batches.rs", 170],
   ["agent_run_engine.rs", 250],
   ["agent_conductor_runtime.rs", 140],
   ["agent_strategy_runtime.rs", 420],
@@ -1042,6 +1059,8 @@ assert(
     .join(", ")}`
 );
 for (const requiredModule of [
+  "attachment_commands.rs",
+  "attachment_upload_batches.rs",
   "agent_conductor_runtime.rs",
   "agent_loop_runtime.rs",
   "agent_runtime_snapshot.rs",
@@ -1919,7 +1938,7 @@ assert(
     composerSource.includes('item.type.startsWith("image/")') &&
     composerSource.includes("onPickAttachments(pastedImages)") &&
     composerSource.includes("function ComposerAttachmentPreview") &&
-    composerSource.includes("readArtifactPreview(attachment.path)") &&
+    composerSource.includes("useArtifactImagePreview(") &&
     composerSource.includes('className="composer-attachment-preview"') &&
     styles.includes('.composer-attachment[data-image="true"]') &&
     styles.includes(".composer-attachment-preview"),
@@ -2023,7 +2042,7 @@ assert(
     rustLib.includes("attachments: attachment_views_from_event(event)") &&
     sessionThreadSource.includes("function UserMessageAttachments") &&
     sessionThreadSource.includes('className="thread-message-attachments"') &&
-    sessionThreadSource.includes("readArtifactPreview(attachment.path)") &&
+    sessionThreadSource.includes("useArtifactImagePreview(attachment.path)") &&
     styles.includes('.thread-message-attachment[data-image="true"]'),
   "Sent attachments must persist with user messages and render as image or file bubbles"
 );
@@ -2752,11 +2771,17 @@ assert(
   "The debug drawer must open as one synchronized surface with a centered, state-correct trailing chevron"
 );
 assert(
-  tauriBridge.includes('invoke<string>("read_artifact_image"') &&
-    rustLib.includes("fn read_artifact_image") &&
+  tauriBridge.includes('invoke<ArrayBuffer>("read_artifact_image"') &&
+    rustLib.includes("async fn read_artifact_image") &&
+    rustLib.includes("read_artifact_image_bytes") &&
+    rustLib.includes("tauri::ipc::Response::new") &&
+    artifactImagePreviewHookSource.includes("URL.createObjectURL") &&
+    artifactImagePreviewHookSource.includes("readArtifactPreview") &&
+    artifactImagePreviewHookSource.includes('preview.kind !== "image"') &&
+    artifactImagePreviewCacheSource.includes("byteLimit") &&
     rustLib.includes("canonical_path.starts_with(&canonical_root)") &&
-    rustLib.includes("24 * 1024 * 1024"),
-  "Artifact image previews must stay inside the workspace and enforce a size limit"
+    rustLib.includes("MAX_ARTIFACT_IMAGE_BYTES"),
+  "Artifact image previews must use bounded raw IPC outside the command thread"
 );
 assert(
   tauriBridge.includes('invoke<void>("open_artifact"') &&
@@ -3613,10 +3638,19 @@ assert(rustLib.includes("fn rename_project("), "Project rename command is missin
 assert(rustLib.includes("fn rename_session("), "Session rename command is missing");
 assert(
   composerSource.includes('aria-label="Attach files"') &&
-    tauriBridge.includes('invoke<AgentAttachment[]>("stage_agent_attachments"') &&
-    rustLib.includes("fn stage_agent_attachments(") &&
+    tauriBridgeImplementation.includes('export { stageAgentAttachments } from "./attachmentIpc"') &&
+    attachmentIpcSource.includes('invoke<AgentAttachment>("stage_agent_attachment", bytes') &&
+    attachmentIpcSource.includes("file.arrayBuffer()") &&
+    attachmentIpcSource.includes("batchFileSizes") &&
+    attachmentIpcSource.includes('invoke<void>("abort_agent_attachment_batch"') &&
+    rustLib.includes("async fn stage_agent_attachment(") &&
+    rustLib.includes("tauri::ipc::InvokeBody::Raw(bytes)") &&
+    rustLib.includes("struct AttachmentUploadBatches") &&
+    rustLib.includes("attachment batch index was uploaded more than once") &&
+    rustLib.includes("cleanup_staged_attachment_paths(paths)") &&
+    rustLib.includes("stage_raw_agent_attachment") &&
     rustLib.includes("validated_attachment_path"),
-  "Composer attachments must be staged and validated inside the active project"
+  "Composer attachments must use bounded raw IPC and stage inside the active project"
 );
 assert(
   rustLib.includes("model_message_from_event") &&

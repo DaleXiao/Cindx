@@ -232,6 +232,65 @@ mod tests {
     }
 
     #[test]
+    fn prepared_snapshot_stays_stable_while_next_prepare_observes_replacement() {
+        let root = std::env::temp_dir().join(format!(
+            "cindx-provider-prepared-replacement-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let path = root.join(".cindx/vision.png");
+        let replacement = root.join(".cindx/replacement.png");
+        fs::create_dir_all(path.parent().expect("fixture should have a parent"))
+            .expect("fixture directory should write");
+        fs::write(&path, [1, 2, 3, 4]).expect("first image should write");
+        let request = ModelRequest {
+            role: ModelRole::Executor,
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: "Inspect replacement".to_string(),
+                metadata: [("image_paths".to_string(), path.display().to_string())]
+                    .into_iter()
+                    .collect(),
+            }],
+            tools: Vec::new(),
+            mode: ModelCallMode::Streaming,
+            metadata: Metadata::new(),
+        };
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url: "https://example.test/v1".to_string(),
+            api_key: "secret".to_string(),
+            model: "qwen-vl-max".to_string(),
+            embedding_model: String::new(),
+            timeout_seconds: 30,
+        });
+
+        let prepared = provider
+            .prepare_streaming_request(&request)
+            .expect("first request should prepare");
+        let original = prepared.encoded_parts().unwrap().0.clone();
+        let original_ptr = original.as_ptr();
+        fs::write(&replacement, [9, 8, 7, 6]).expect("replacement should write");
+        fs::remove_file(&path).expect("first image should remove");
+        fs::rename(&replacement, &path).expect("replacement should publish");
+
+        let next = provider
+            .prepare_streaming_request(&request)
+            .expect("replacement request should prepare");
+        let next_body = next.encoded_parts().unwrap().0;
+        let stable = prepared.encoded_parts().unwrap().0;
+        let stats = provider.image_cache.stats();
+        let _ = fs::remove_dir_all(root);
+
+        assert_eq!(stable.as_ptr(), original_ptr);
+        assert_eq!(stable.as_ref(), original.as_ref());
+        assert_ne!(next_body.as_ref(), original.as_ref());
+        assert_eq!(stats.misses, 2);
+        assert_eq!(stats.reads, 2);
+        assert_eq!(stats.encodes, 2);
+        assert_eq!(stats.invalidations, 1);
+    }
+
+    #[test]
     fn text_only_request_does_not_resolve_image_paths() {
         let mut resolve_count = 0usize;
         let body = build_chat_request_json_with_tools_output_limit_vision_and_images(
