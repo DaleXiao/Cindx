@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import desktopPackage from "../package.json" with { type: "json" };
 import { providerApiKeySetAfterSave, resolveProviderProfile } from "./providerProfiles.ts";
 import * as projectMemory from "./memoryManagementModel.ts";
+import { decodeNativeRuntimeStatus } from "./tauriRuntimeContract.ts";
 
 export const DESKTOP_VERSION = desktopPackage.version;
 
@@ -12,6 +13,7 @@ export type * from "./agentRunBudgetModel";
 export type * from "./memoryManagementModel";
 export { stageAgentAttachments } from "./attachmentIpc.ts";
 import type { AgentEffort } from "./agentRunBudgetModel";
+import type { NativeAgentHistoryPage, NativeAgentState, NativeAgentStateDelta } from "./tauriNativeTypes";
 import type {
   RuntimeStatus,
   PersonalizationConfig,
@@ -547,7 +549,7 @@ function browserRuntimeStatus(workspaceRoot: string): RuntimeStatus {
 
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {
   try {
-    return await invoke<RuntimeStatus>("get_runtime_status");
+    return decodeNativeRuntimeStatus(await invoke<unknown>("get_runtime_status"));
   } catch (error) {
     requireBrowserPreviewFallback(error);
     return browserRuntimeStatus(".");
@@ -577,7 +579,9 @@ export async function savePersonalizationConfig(
 
 export async function saveWorkspaceRoot(path: string): Promise<RuntimeStatus> {
   try {
-    return await invoke<RuntimeStatus>("save_workspace_root", { input: { path } });
+    return decodeNativeRuntimeStatus(
+      await invoke<unknown>("save_workspace_root", { input: { path } })
+    );
   } catch (error) {
     if (isTauriRuntime()) throw error;
     return browserRuntimeStatus(path);
@@ -1699,7 +1703,9 @@ export async function sendModelPrompt(prompt: string): Promise<Phase4State> {
 
 export async function getAgentState(sessionId?: string | null): Promise<AgentState> {
   try {
-    return await invoke<AgentState>("get_agent_state", { sessionId: sessionId ?? null });
+    return await invoke<NativeAgentState>("get_agent_state", {
+      sessionId: sessionId ?? null
+    });
   } catch (error) {
     if (isTauriRuntime()) throw error;
     return browserAgentState;
@@ -1726,7 +1732,7 @@ export async function getAgentStateDelta(
   afterSequence: number
 ): Promise<AgentStateDelta> {
   try {
-    return await invoke<AgentStateDelta>("get_agent_state_delta", {
+    return await invoke<NativeAgentStateDelta>("get_agent_state_delta", {
       sessionId,
       afterSequence
     });
@@ -1748,7 +1754,7 @@ export async function getAgentHistoryPage(
   limit = 360
 ): Promise<AgentHistoryPage> {
   try {
-    return await invoke<AgentHistoryPage>("get_agent_history_page", {
+    return await invoke<NativeAgentHistoryPage>("get_agent_history_page", {
       sessionId,
       beforeSequence,
       limit
@@ -1817,7 +1823,7 @@ export async function runAgentTask(
   effort: AgentEffort = "auto"
 ): Promise<AgentState> {
   try {
-    return await invoke<AgentState>("run_agent_task", {
+    return await invoke<NativeAgentState>("run_agent_task", {
       input: { prompt, sessionId, currentTime: currentAgentTimeContext(), effort, attachments }
     });
   } catch (error) {
@@ -1984,7 +1990,7 @@ export async function steerQueuedAgentMessage(
 
 export async function runNextQueuedAgentMessage(sessionId: string): Promise<AgentState | null> {
   try {
-    return await invoke<AgentState | null>("run_next_queued_agent_message", {
+    return await invoke<NativeAgentState | null>("run_next_queued_agent_message", {
       input: { sessionId }
     });
   } catch (error) {
@@ -2019,7 +2025,7 @@ export async function runNextQueuedAgentMessage(sessionId: string): Promise<Agen
 
 export async function cancelAgentTask(sessionId: string): Promise<AgentState> {
   try {
-    return await invoke<AgentState>("cancel_agent_task", { input: { sessionId } });
+    return await invoke<NativeAgentState>("cancel_agent_task", { input: { sessionId } });
   } catch (error) {
     if (isTauriRuntime()) throw error;
     const now = Date.now();
@@ -2048,7 +2054,7 @@ export async function cancelAgentTask(sessionId: string): Promise<AgentState> {
 
 export async function retryAgentTask(sessionId: string): Promise<AgentState> {
   try {
-    return await invoke<AgentState>("retry_agent_task", { input: { sessionId } });
+    return await invoke<NativeAgentState>("retry_agent_task", { input: { sessionId } });
   } catch (error) {
     if (isTauriRuntime()) throw error;
     const now = Date.now();
@@ -2080,7 +2086,7 @@ export async function resolveAgentPermission(
   sessionId: string
 ): Promise<AgentState> {
   try {
-    return await invoke<AgentState>("resolve_agent_permission", {
+    return await invoke<NativeAgentState>("resolve_agent_permission", {
       requestId,
       decision,
       sessionId

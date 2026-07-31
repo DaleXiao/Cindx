@@ -1,0 +1,485 @@
+{
+  "schema": "cindx.desktop-dto-contract.v1",
+  "cases": [
+    {
+      "name": "RuntimeStatus",
+      "tsType": "NativeRuntimeStatus",
+      "tsModule": "tauriNativeTypes",
+      "direction": "rust_to_ts",
+      "values": [
+        {
+          "appVersion": "0.1.contract",
+          "kernelStatus": "online",
+          "providerReady": true,
+          "workspaceRoot": "/contract/workspace",
+          "orchestrationModes": ["single", "auto_router"],
+          "registeredTools": ["file.read", "shell.run"],
+          "agentRunBudgets": {
+            "fast": { "maxDurationMs": 300000, "maxModelCalls": 24, "maxToolCalls": 48 },
+            "auto": { "maxDurationMs": 2700000, "maxModelCalls": 128, "maxToolCalls": 256 },
+            "pro": { "maxDurationMs": 14400000, "maxModelCalls": 384, "maxToolCalls": 768 }
+          }
+        }
+      ]
+    },
+    {
+      "name": "ProjectSessionState",
+      "tsType": "ProjectSessionState",
+      "direction": "rust_to_ts",
+      "values": [
+        {
+          "projects": [
+            {
+              "id": "project-a",
+              "name": "Project A",
+              "root": "/contract/workspace",
+              "detail": "Contract project",
+              "status": "Ready",
+              "active": true,
+              "createdAtMs": 10,
+              "updatedAtMs": 20
+            }
+          ],
+          "sessions": [
+            {
+              "id": "session-a",
+              "projectId": "project-a",
+              "name": "Session A",
+              "titleState": "automatic",
+              "detail": "Contract session",
+              "effort": "auto",
+              "status": "Ready",
+              "activity": "idle",
+              "attentionReason": null,
+              "unseenResult": false,
+              "latestSequence": 7,
+              "active": true,
+              "archived": false,
+              "archivedAtMs": null,
+              "createdAtMs": 10,
+              "updatedAtMs": 20
+            },
+            {
+              "id": "session-b",
+              "projectId": "project-a",
+              "name": "Session B",
+              "titleState": "manual",
+              "detail": "Archived contract session",
+              "effort": "pro",
+              "status": "Complete",
+              "activity": "attention",
+              "attentionReason": "Unread result",
+              "unseenResult": true,
+              "latestSequence": 8,
+              "active": false,
+              "archived": true,
+              "archivedAtMs": 21,
+              "createdAtMs": 11,
+              "updatedAtMs": 21
+            }
+          ],
+          "activeProjectId": "project-a",
+          "activeSessionId": "session-a",
+          "lastError": null
+        },
+        {
+          "projects": [],
+          "sessions": [],
+          "activeProjectId": "",
+          "activeSessionId": "",
+          "lastError": "contract failure"
+        }
+      ]
+    },
+    {
+      "name": "PermissionReviewState",
+      "tsType": "PermissionReviewState",
+      "direction": "rust_to_ts",
+      "values": [
+        {
+          "pending": [
+            {
+              "requestId": "permission-a",
+              "action": "shell.run",
+              "risk": "execute",
+              "reason": "Contract permission",
+              "scope": "/contract/workspace",
+              "source": "agent",
+              "projectId": "project-a",
+              "projectName": "Project A",
+              "sessionId": "session-a",
+              "sessionName": "Session A",
+              "input": "echo contract",
+              "requestedAtMs": 30,
+              "canAllowSession": true
+            },
+            {
+              "requestId": "permission-b",
+              "action": "file.write",
+              "risk": "write",
+              "reason": "Contract nullable context",
+              "scope": ".",
+              "source": "tool",
+              "projectId": null,
+              "projectName": null,
+              "sessionId": null,
+              "sessionName": null,
+              "input": "",
+              "requestedAtMs": 31,
+              "canAllowSession": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ProviderConfigState",
+      "tsType": "ProviderConfigState",
+      "direction": "rust_to_ts",
+      "values": [
+        {
+          "providerId": "openai",
+          "providerResource": "",
+          "baseUrl": "https://api.openai.com/v1",
+          "model": "gpt-contract",
+          "conductorModel": "gpt-contract",
+          "plannerModel": "gpt-contract",
+          "executorModel": "gpt-contract",
+          "reviewerModel": "gpt-contract",
+          "summarizerModel": "gpt-contract",
+          "embeddingModel": "text-embedding-contract",
+          "imageModel": "image-contract",
+          "imageEndpoint": "",
+          "voiceModel": "voice-contract",
+          "collaborationPolicy": "auto_router",
+          "promptEvolutionEnabled": true,
+          "contextWindowTokens": 128000,
+          "agentSystemPrompt": "Contract prompt",
+          "ready": true,
+          "apiKeySet": true,
+          "authVerified": true,
+          "authVerifiedAtMs": 40
+        },
+        {
+          "providerId": "custom",
+          "providerResource": "",
+          "baseUrl": "https://example.test/v1",
+          "model": "custom-contract",
+          "conductorModel": "custom-contract",
+          "plannerModel": "custom-contract",
+          "executorModel": "custom-contract",
+          "reviewerModel": "custom-contract",
+          "summarizerModel": "custom-contract",
+          "embeddingModel": "embedding-contract",
+          "imageModel": "",
+          "imageEndpoint": "",
+          "voiceModel": "",
+          "collaborationPolicy": "single",
+          "promptEvolutionEnabled": false,
+          "contextWindowTokens": 4096,
+          "agentSystemPrompt": "",
+          "ready": false,
+          "apiKeySet": false,
+          "authVerified": false,
+          "authVerifiedAtMs": null
+        }
+      ]
+    },
+    {
+      "name": "ProviderConfigInput",
+      "tsType": "ProviderConfigInput",
+      "direction": "ts_to_rust",
+      "values": [
+        {
+          "providerId": "azure_openai",
+          "providerResource": "contract-resource",
+          "baseUrl": "https://contract-resource.openai.azure.com",
+          "apiKey": "contract-key",
+          "model": "deployment-contract",
+          "conductorModel": "deployment-contract",
+          "plannerModel": "deployment-contract",
+          "executorModel": "deployment-contract",
+          "reviewerModel": "deployment-contract",
+          "summarizerModel": "deployment-contract",
+          "embeddingModel": "embedding-contract",
+          "imageModel": "image-contract",
+          "imageEndpoint": "",
+          "voiceModel": "voice-contract",
+          "collaborationPolicy": "auto_router",
+          "promptEvolutionEnabled": true,
+          "contextWindowTokens": 64000,
+          "agentSystemPrompt": "Contract prompt"
+        }
+      ]
+    },
+    {
+      "name": "AgentState",
+      "tsType": "NativeAgentState",
+      "tsModule": "tauriNativeTypes",
+      "direction": "rust_to_ts",
+      "values": [
+        {
+          "taskId": "phase-16-agent-loop",
+          "projectId": "project-a",
+          "projectName": "Project A",
+          "sessionId": "session-a",
+          "sessionName": "Session A",
+          "status": "waiting_for_permission",
+          "turnCount": 2,
+          "maxTurns": 8,
+          "transcriptMessages": 4,
+          "contextTokensUsed": 1024,
+          "contextWindowTokens": 128000,
+          "contextRemainingPercent": 99.2,
+          "contextUsageEstimated": false,
+          "runStartedAtMs": 50,
+          "runBudgetMs": 2700000,
+          "runModelCallBudget": 128,
+          "runToolCallBudget": 256,
+          "canCancel": true,
+          "canRetry": false,
+          "canContinue": false,
+          "eventCount": 9,
+          "latestSequence": 9,
+          "oldestSequence": 1,
+          "hasOlderHistory": false,
+          "timeline": [
+            {
+              "sequence": 7,
+              "label": "Tool proposed",
+              "detail": "shell.run",
+              "kind": "tool",
+              "toolName": "shell.run",
+              "state": "pending",
+              "timestampMs": 51,
+              "workflowProgress": {
+                "completedSteps": 1,
+                "totalSteps": 2,
+                "currentStepId": "step-2",
+                "stepStatus": "running",
+                "continuations": 0,
+                "recoverable": true
+              }
+            },
+            {
+              "sequence": 8,
+              "label": "Permission requested",
+              "detail": "Awaiting approval",
+              "kind": "permission",
+              "state": "pending",
+              "timestampMs": 52
+            },
+            {
+              "sequence": 9,
+              "label": "Workflow checkpoint",
+              "detail": "Contract nullable workflow fields",
+              "kind": "model",
+              "state": "idle",
+              "timestampMs": 53,
+              "workflowProgress": {
+                "completedSteps": 2,
+                "totalSteps": 2,
+                "currentStepId": null,
+                "stepStatus": null,
+                "continuations": 1,
+                "recoverable": false
+              }
+            }
+          ],
+          "messages": [
+            {
+              "sequence": 1,
+              "role": "user",
+              "content": "Run the contract",
+              "timestampMs": 50,
+              "runId": "run-a",
+              "queueId": "queue-a",
+              "attachments": [
+                {
+                  "id": "attachment-a",
+                  "name": "contract.txt",
+                  "path": "/contract/contract.txt",
+                  "mimeType": "text/plain",
+                  "sizeBytes": 8
+                }
+              ]
+            },
+            {
+              "sequence": 2,
+              "role": "assistant",
+              "content": "Waiting",
+              "timestampMs": 51,
+              "runId": null,
+              "queueId": null,
+              "attachments": []
+            }
+          ],
+          "pendingApprovals": [
+            {
+              "requestId": "permission-a",
+              "invocationId": "invoke-a",
+              "toolName": "shell.run",
+              "risk": "execute",
+              "reason": "Contract permission",
+              "scope": "/contract/workspace",
+              "input": "echo contract",
+              "requestedAtMs": 52,
+              "canAllowSession": true
+            }
+          ],
+          "queuedMessages": [
+            {
+              "id": "queue-a",
+              "sessionId": "session-a",
+              "prompt": "Continue contract",
+              "attachments": [
+                {
+                  "id": "queue-attachment",
+                  "name": "queued.txt",
+                  "path": "/contract/queued.txt",
+                  "mimeType": "text/plain",
+                  "sizeBytes": 6
+                }
+              ],
+              "effort": "auto",
+              "mode": "queue",
+              "createdAtMs": 53,
+              "updatedAtMs": 53
+            }
+          ],
+          "latestAnswer": "Waiting",
+          "lastError": null
+        },
+        {
+          "taskId": "phase-16-agent-loop",
+          "projectId": null,
+          "projectName": null,
+          "sessionId": null,
+          "sessionName": null,
+          "status": "idle",
+          "turnCount": 0,
+          "maxTurns": 0,
+          "transcriptMessages": 0,
+          "contextTokensUsed": 0,
+          "contextWindowTokens": 0,
+          "contextRemainingPercent": 100.0,
+          "contextUsageEstimated": true,
+          "runStartedAtMs": 0,
+          "runBudgetMs": 0,
+          "runModelCallBudget": 0,
+          "runToolCallBudget": 0,
+          "canCancel": false,
+          "canRetry": false,
+          "canContinue": false,
+          "eventCount": 0,
+          "latestSequence": 0,
+          "oldestSequence": 0,
+          "hasOlderHistory": false,
+          "timeline": [],
+          "messages": [],
+          "pendingApprovals": [],
+          "queuedMessages": [],
+          "latestAnswer": null,
+          "lastError": "contract failure"
+        }
+      ]
+    },
+    {
+      "name": "ModelStreamDelta",
+      "tsType": "ModelStreamDelta",
+      "direction": "rust_to_ts",
+      "values": [
+        {
+          "taskId": "phase-16-agent-loop",
+          "requestId": "request-a",
+          "sessionId": "session-a",
+          "delta": "contract",
+          "done": false,
+          "reset": false,
+          "error": null
+        },
+        {
+          "taskId": "phase-16-agent-loop",
+          "requestId": "request-b",
+          "sessionId": null,
+          "delta": "",
+          "done": true,
+          "reset": true,
+          "error": "contract failure"
+        }
+      ]
+    },
+    {
+      "name": "QueuedAgentMessageReceipt",
+      "tsType": "QueuedAgentMessageReceipt",
+      "direction": "rust_to_ts",
+      "values": [
+        {
+          "message": {
+            "id": "queue-a",
+            "sessionId": "session-a",
+            "prompt": "Continue contract",
+            "attachments": [
+              {
+                "id": "queue-attachment",
+                "name": "queued.txt",
+                "path": "/contract/queued.txt",
+                "mimeType": "text/plain",
+                "sizeBytes": 6
+              }
+            ],
+            "effort": "auto",
+            "mode": "queue",
+            "createdAtMs": 53,
+            "updatedAtMs": 53
+          },
+          "eventCount": 10,
+          "latestSequence": 10,
+          "latestTimestampMs": 54
+        }
+      ]
+    },
+    {
+      "name": "QueuedAgentMessageActionReceipt",
+      "tsType": "QueuedAgentMessageActionReceipt",
+      "direction": "rust_to_ts",
+      "values": [
+        {
+          "queueId": "queue-a",
+          "message": {
+            "id": "queue-a",
+            "sessionId": "session-a",
+            "prompt": "Continue contract",
+            "attachments": [
+              {
+                "id": "queue-attachment",
+                "name": "queued.txt",
+                "path": "/contract/queued.txt",
+                "mimeType": "text/plain",
+                "sizeBytes": 6
+              }
+            ],
+            "effort": "auto",
+            "mode": "steer",
+            "createdAtMs": 53,
+            "updatedAtMs": 55
+          },
+          "eventCount": 11,
+          "latestSequence": 11,
+          "latestTimestampMs": 55,
+          "cancelledActiveRun": true,
+          "steerCommitted": true
+        },
+        {
+          "queueId": "queue-b",
+          "message": null,
+          "eventCount": 12,
+          "latestSequence": 12,
+          "latestTimestampMs": 56,
+          "cancelledActiveRun": false,
+          "steerCommitted": false
+        }
+      ]
+    }
+  ]
+}

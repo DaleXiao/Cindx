@@ -297,10 +297,11 @@ const styles = [
 ].join("\n");
 const tauriBridgeImplementation = read("apps/desktop/src/tauri.ts");
 const tauriTypesSource = read("apps/desktop/src/tauriTypes.ts");
+const tauriNativeTypesSource = read("apps/desktop/src/tauriNativeTypes.ts");
 const agentRunBudgetModelSource = read(
   "apps/desktop/src/agentRunBudgetModel.ts"
 );
-const tauriBridge = `${tauriBridgeImplementation}\n${tauriTypesSource}\n${agentRunBudgetModelSource}`;
+const tauriBridge = `${tauriBridgeImplementation}\n${tauriTypesSource}\n${tauriNativeTypesSource}\n${agentRunBudgetModelSource}`;
 const desktopControllerEntries = [
   "useAppWorkspaceProjection.ts",
   "useComposerAttachments.ts",
@@ -471,6 +472,13 @@ const benchmarkBaseline = JSON.parse(read("benchmarks/agent/core-v1-baseline.jso
 const memoryBenchmarkSuite = JSON.parse(read("benchmarks/agent/memory-v1.json"));
 const qualityGateManifest = JSON.parse(
   read("benchmarks/system/quality-gates-v1.json")
+);
+const desktopDtoContract = JSON.parse(
+  read("apps/desktop/contracts/tauri-dto-v1.json")
+);
+const desktopDtoContractRunner = read("scripts/check-desktop-dto-contract.mjs");
+const desktopDtoContractRustTest = read(
+  "apps/desktop/src-tauri/src/view_model_contract_tests.rs"
 );
 const shippingPerformanceGateIds = [
   "session-projection-scaling",
@@ -684,6 +692,7 @@ const oversizedDesktopControllers = desktopControllers
   .filter(({ lines }) => lines > 500);
 const tauriBridgeImplementationLineCount = tauriBridgeImplementation.split("\n").length;
 const tauriTypesLineCount = tauriTypesSource.split("\n").length;
+const tauriNativeTypesLineCount = tauriNativeTypesSource.split("\n").length;
 const unguardedTauriFallbacks = tauriBridgeImplementation
   .split("\n")
   .flatMap((line, index, lines) => {
@@ -1017,6 +1026,7 @@ assert(
     oversizedExtractedDesktopBoundaries.length === 0 &&
     tauriBridgeImplementationLineCount <= 2_620 &&
     tauriTypesLineCount <= 800 &&
+    tauriNativeTypesLineCount <= 80 &&
     oversizedDesktopControllers.length === 0 &&
     desktopControllerEntries.every((entry) =>
       appSource.includes(`./controllers/${entry.replace(/\.ts$/, "")}`)
@@ -1047,7 +1057,7 @@ assert(
     !appSource.includes('className="settings-sidebar"'),
   `Desktop boundaries regressed (App=${appLineCount}, useState=${appUseStateCount}, Settings=${settingsPageLineCount}, SessionThread=${sessionThreadLineCount}, Inspector=${inspectorLineCount}, extracted=${oversizedExtractedDesktopBoundaries
     .map(([entry, source, budget]) => `${entry}:${source.split("\n").length}/${budget}`)
-    .join(",")}, Tauri=${tauriBridgeImplementationLineCount}, Types=${tauriTypesLineCount}, controllers=${oversizedDesktopControllers
+    .join(",")}, Tauri=${tauriBridgeImplementationLineCount}, Types=${tauriTypesLineCount}, NativeTypes=${tauriNativeTypesLineCount}, controllers=${oversizedDesktopControllers
     .map(({ entry, lines }) => `${entry}:${lines}`)
     .join(",")}, unguarded catches=${unguardedTauriFallbacks.join(",")})`
 );
@@ -1101,6 +1111,30 @@ assert(
     qualityGateManifest.profiles["ci-contract"].includes("frontend-test") &&
     qualityGateManifest.profiles.full.includes("frontend-test"),
   "Frontend behavior tests must run locally, in CI, and before release"
+);
+assert(
+  desktopDtoContract.schema === "cindx.desktop-dto-contract.v1" &&
+    desktopDtoContract.cases.length >= 9 &&
+    new Set(desktopDtoContract.cases.map((entry) => entry.name)).size ===
+      desktopDtoContract.cases.length &&
+    qualityGateById.get("desktop-dto-contract")?.command.join(" ") ===
+      "node scripts/check-desktop-dto-contract.mjs" &&
+    qualityGateById
+      .get("desktop-dto-contract")
+      ?.required_output.includes("cindx.desktop-dto-contract.v1") &&
+    ["ci-contract", "control-plane", "full"].every((profile) =>
+      qualityGateManifest.profiles[profile].includes("desktop-dto-contract")
+    ) &&
+    releaseWorkflow.includes("node scripts/check-desktop-dto-contract.mjs") &&
+    desktopDtoContractRunner.includes("ContractMatches") &&
+    desktopDtoContractRunner.includes("--typescript-only") &&
+    desktopDtoContract.cases.some(
+      (entry) => entry.name === "RuntimeStatus" && entry.tsModule === "tauriNativeTypes"
+    ) &&
+    desktopDtoContractRustTest.includes(
+      "desktop_dto_contract_matches_committed_wire_values"
+    ),
+  "Critical Rust and TypeScript desktop DTOs must share a fail-closed release contract"
 );
 assert(packageJson.scripts.build.includes("vite build"), "desktop build script must build Vite");
 assert(
@@ -3146,7 +3180,10 @@ assert(
   "Composer effort must persist per session, default independently, and survive retries and traces"
 );
 assert(
-  tauriTypesSource.includes("agentRunBudgets: AgentRunBudgets | null") &&
+  tauriNativeTypesSource.includes("export type NativeRuntimeStatus = {") &&
+    tauriNativeTypesSource.includes("agentRunBudgets: AgentRunBudgets;") &&
+    tauriTypesSource.includes("export type RuntimeStatus = {") &&
+    tauriTypesSource.includes("agentRunBudgets: AgentRunBudgets | null") &&
     agentRunBudgetModelSource.includes("budgets?.[effort]") &&
     appSource.includes(
       "optimisticRunBudgetPatch(runtime?.agentRunBudgets, agentEffort)"
@@ -3548,11 +3585,13 @@ assert(
 );
 
 assert(
-  tauriBridge.includes('invoke<RuntimeStatus>("get_runtime_status")'),
+  tauriBridge.includes('invoke<unknown>("get_runtime_status")') &&
+    tauriBridge.includes("decodeNativeRuntimeStatus("),
   "Frontend bridge must invoke get_runtime_status"
 );
 assert(
-  tauriBridge.includes('invoke<RuntimeStatus>("save_workspace_root"'),
+  tauriBridge.includes('invoke<unknown>("save_workspace_root"') &&
+    tauriBridge.includes("decodeNativeRuntimeStatus("),
   "Frontend bridge must invoke save_workspace_root"
 );
 assert(
@@ -3660,7 +3699,7 @@ assert(rustLib.includes("fn rename_project("), "Project rename command is missin
 assert(rustLib.includes("fn rename_session("), "Session rename command is missing");
 assert(
   composerSource.includes('aria-label="Attach files"') &&
-    tauriBridgeImplementation.includes('export { stageAgentAttachments } from "./attachmentIpc"') &&
+    tauriBridgeImplementation.includes('export { stageAgentAttachments } from "./attachmentIpc.ts"') &&
     attachmentIpcSource.includes('invoke<AgentAttachment>("stage_agent_attachment", bytes') &&
     attachmentIpcSource.includes("file.arrayBuffer()") &&
     attachmentIpcSource.includes("batchFileSizes") &&

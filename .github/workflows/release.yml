@@ -53,6 +53,7 @@ jobs:
         run: |
           cargo test --workspace --locked
           cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+          node scripts/check-desktop-dto-contract.mjs
           npm --prefix apps/desktop test
           node scripts/check-desktop-structure.mjs
 

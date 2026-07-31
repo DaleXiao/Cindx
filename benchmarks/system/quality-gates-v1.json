@@ -23,6 +23,7 @@
       "version-contract",
       "desktop-layout",
       "desktop-structure",
+      "desktop-dto-contract",
       "performance-comparator-contract",
       "paired-performance-contract",
       "routing-contract",
@@ -32,6 +33,7 @@
       "frontend-test"
     ],
     "control-plane": [
+      "desktop-dto-contract",
       "routing-contract",
       "evaluation-foundation",
       "agent-arena-contract",
@@ -68,6 +70,7 @@
       "version-contract",
       "desktop-layout",
       "desktop-structure",
+      "desktop-dto-contract",
       "performance-comparator-contract",
       "paired-performance-contract",
       "browser-sidecar",
@@ -103,6 +106,12 @@
       "id": "desktop-structure",
       "category": "ux_and_architecture",
       "command": ["node", "scripts/check-desktop-structure.mjs"]
+    },
+    {
+      "id": "desktop-dto-contract",
+      "category": "architecture",
+      "command": ["node", "scripts/check-desktop-dto-contract.mjs"],
+      "required_output": ["cindx.desktop-dto-contract.v1"]
     },
     {
       "id": "performance-comparator-contract",
