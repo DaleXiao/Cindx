@@ -11,6 +11,7 @@ import {
   Settings,
   X
 } from "lucide-react";
+import type { WorkspaceView } from "../appShellModel";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { Menu } from "@tauri-apps/api/menu";
 import { useEffect, useState } from "react";
@@ -63,7 +64,7 @@ function SessionStatusIndicator({
   );
 }
 
-export type WorkspaceView = "timeline" | "schedule" | "settings";
+export type { WorkspaceView } from "../appShellModel";
 
 type SidebarProps = {
   activeView: WorkspaceView;

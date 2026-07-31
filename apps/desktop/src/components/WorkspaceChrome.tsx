@@ -6,7 +6,7 @@ import {
   PanelRightClose,
   PanelRightOpen
 } from "lucide-react";
-import type { WorkspaceView } from "./Sidebar";
+import type { WorkspaceView } from "../appShellModel";
 
 type WorkspaceChromeProps = {
   activeView: WorkspaceView;

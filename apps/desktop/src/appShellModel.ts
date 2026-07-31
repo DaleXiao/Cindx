@@ -1,5 +1,7 @@
 import type { AgentEffort } from "./tauri";
 
+export type WorkspaceView = "timeline" | "schedule" | "settings";
+
 export const DEBUG_ALWAYS_VISIBLE_STORAGE_KEY = "cindx.debug.always-visible";
 export const IGNORED_PERMISSION_REVIEWS_STORAGE_KEY = "cindx.permissions.ignored";
 export const FOREGROUND_AGENT_POLL_INTERVAL_MS = 1_000;

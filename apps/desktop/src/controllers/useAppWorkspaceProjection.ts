@@ -5,8 +5,7 @@ import type {
   ChatMessageView,
   ProjectSessionState
 } from "../tauri";
-import type { WorkspaceView } from "../components/Sidebar";
-import { normalizedSessionEffort } from "../appShellModel";
+import { normalizedSessionEffort, type WorkspaceView } from "../appShellModel";
 import {
   SESSION_STATE_CACHE_LIMIT,
   messagesWithOptimisticUserMessages

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import ts from "../apps/desktop/node_modules/typescript/lib/typescript.js";
 import {
   inspectDesktopIntegrationBoundary,
   rustCodeWithoutCommentsAndLiterals,
@@ -9,6 +10,29 @@ const root = process.cwd();
 
 const read = (relativePath) =>
   fs.readFileSync(path.join(root, relativePath), "utf8");
+
+const countIdentifierCalls = (source, fileName, identifier) => {
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    fileName.endsWith("x") ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+  );
+  let count = 0;
+  const visit = (node) => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === identifier
+    ) {
+      count += 1;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return count;
+};
 
 const readRustSourceTree = (sourceDirectory) =>
   fs
@@ -135,6 +159,10 @@ const sessionRuntimeModelSource = read(
   "apps/desktop/src/sessionRuntimeModel.ts"
 );
 const appShellModelSource = read("apps/desktop/src/appShellModel.ts");
+const appShellStateModelSource = read("apps/desktop/src/appShellStateModel.ts");
+const appShellControllerSource = read(
+  "apps/desktop/src/controllers/useAppShellController.ts"
+);
 const appWorkspaceProjectionSource = read(
   "apps/desktop/src/controllers/useAppWorkspaceProjection.ts"
 );
@@ -303,6 +331,7 @@ const agentRunBudgetModelSource = read(
 );
 const tauriBridge = `${tauriBridgeImplementation}\n${tauriTypesSource}\n${tauriNativeTypesSource}\n${agentRunBudgetModelSource}`;
 const desktopControllerEntries = [
+  "useAppShellController.ts",
   "useAppWorkspaceProjection.ts",
   "useComposerAttachments.ts",
   "useComposerDrafts.ts",
@@ -637,12 +666,23 @@ const registeredCommandsMissingDefinitions = namesMissingFrom(
 
 const rustCompositionRootLineCount = rustCompositionRoot.split("\n").length;
 const appLineCount = appSource.split("\n").length;
-const appUseStateCount = (appSource.match(/useState\(/g) ?? []).length;
+const appUseStateCount = countIdentifierCalls(appSource, "App.tsx", "useState");
+const appUseStateCounterProbe = countIdentifierCalls(
+  `function Probe() {
+    useState(0);
+    useState<string>("");
+    useState<Set<string>>(() => new Set());
+  }`,
+  "hook-counter-probe.tsx",
+  "useState"
+);
 const settingsPageLineCount = settingsPageFileSource.split("\n").length;
 const sessionThreadLineCount = sessionThreadFileSource.split("\n").length;
 const inspectorLineCount = inspectorSource.split("\n").length;
 const extractedDesktopBoundaryBudgets = [
   ["appShellModel.ts", appShellModelSource, 80],
+  ["appShellStateModel.ts", appShellStateModelSource, 160],
+  ["useAppShellController.ts", appShellControllerSource, 100],
   ["useAppWorkspaceProjection.ts", appWorkspaceProjectionSource, 200],
   ["useComposerAttachments.ts", composerAttachmentsSource, 140],
   ["attachmentIpc.ts", attachmentIpcSource, 80],
@@ -1018,8 +1058,9 @@ assert(
   "Offline topology learning must remain isolated from the online router with explicit dependencies"
 );
 assert(
-  appLineCount <= 2_400 &&
-    appUseStateCount <= 30 &&
+  appLineCount <= 2_360 &&
+    appUseStateCount <= 25 &&
+    appUseStateCounterProbe === 3 &&
     settingsPageLineCount <= 1_400 &&
     sessionThreadLineCount <= 1_150 &&
     inspectorLineCount <= 1_350 &&
@@ -1033,6 +1074,7 @@ assert(
     ) &&
     appSource.includes('./appShellModel') &&
     appSource.includes('./controllers/useAppWorkspaceProjection') &&
+    appSource.includes('./controllers/useAppShellController') &&
     appSource.includes('./controllers/useComposerAttachments') &&
     appSource.includes('./controllers/useComposerDrafts') &&
     appSource.includes('./controllers/useLatestAsyncSelection') &&
@@ -1050,6 +1092,13 @@ assert(
     sessionThreadSource.includes('./SessionMinimap') &&
     sessionThreadSource.includes('./useSessionMinimapInteraction') &&
     tauriBridgeImplementation.includes('export type * from "./tauriTypes";') &&
+    appShellStateModelSource.includes("transitionAppShellView") &&
+    appShellControllerSource.includes("useReducer(") &&
+    !appShellControllerSource.includes("useEffect") &&
+    !appShellControllerSource.includes("invoke(") &&
+    !appSource.includes("setWorkspaceViewBeforeSettings") &&
+    !appSource.includes("setInspectorOpenBeforeSettings") &&
+    !appSource.includes("setInspectorOpenBeforeSchedule") &&
     unguardedTauriFallbacks.length === 0 &&
     appSource.includes('import("./components/SettingsPage")') &&
     appSource.includes("<SettingsPage") &&
@@ -1812,11 +1861,12 @@ assert(
   "Inspector must use one stable toggle instead of duplicate controls"
 );
 assert(
-  appSource.includes('const [inspectorOpen, setInspectorOpen] = useState(false)') &&
-    appSource.includes('const [inspectorOpenBeforeSettings, setInspectorOpenBeforeSettings] = useState(false)') &&
+  appShellStateModelSource.includes('inspectorOpen: false') &&
+    appShellStateModelSource.includes('inspectorOpenBeforeSettings: false') &&
     appSource.includes("onArtifactInspect={(path) =>") &&
-    appSource.includes("setInspectorOutputRequest({ sessionId, path, nonce: Date.now() })") &&
-    appSource.includes("setInspectorOpen(true)"),
+    appSource.includes("showInspectorOutput({ sessionId, path, nonce: Date.now() })") &&
+    appShellStateModelSource.includes('type: "show_output"') &&
+    appShellStateModelSource.includes("inspectorOpen: true, inspectorOutputRequest"),
   "Inspector must start closed and open only when the user inspects an in-thread output"
 );
 assert(
@@ -1846,9 +1896,11 @@ assert(
   "The custom titlebar must expose a native drag region without blocking pane controls"
 );
 assert(
-  appSource.includes("workspaceViewBeforeSettings") &&
-    appSource.includes('if (activeView === "settings")') &&
-    appSource.includes("showWorkspaceView(workspaceViewBeforeSettings)"),
+  appShellStateModelSource.includes('if (state.activeView === "settings")') &&
+    appShellStateModelSource.includes(
+      "return showWorkspaceView(state, state.workspaceViewBeforeSettings);"
+    ) &&
+    appShellControllerSource.includes("handleWorkspaceViewChange"),
   "Settings must toggle back to the previous workspace view"
 );
 assert(
@@ -2887,7 +2939,7 @@ assert(
       composerSource.indexOf("onSend(prompt)") &&
     composerSource.indexOf("onSend(prompt)") < composerSource.indexOf('onChange("")') &&
     composerSource.includes("Configure Models") &&
-    appSource.includes('setSettingsCategory("models")') &&
+    appSource.includes('openSettingsCategory("models")') &&
     settingsModelsPanelSource.includes("providerSettingsError") &&
     settingsModelsPanelSource.includes('role="alert"') &&
     settingsModelsPanelSource.includes("handleReloadProviderState") &&
