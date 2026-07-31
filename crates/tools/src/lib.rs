@@ -14,6 +14,7 @@ use agent_core::{
     Metadata, PermissionRequest, PermissionRequestId, PermissionRisk, TaskId, ToolCallId,
     ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
 };
+mod browser_session_retirement;
 mod desktop_control;
 mod file_batch;
 mod file_search;
@@ -26,6 +27,7 @@ mod shell;
 mod stream_capture;
 mod web_search;
 
+pub use browser_session_retirement::retire_browser_session;
 #[cfg(test)]
 use desktop_control::{
     browser_request_json, BrowserToolKind, BROWSER_CONTROL_REQUEST_SCHEMA,
@@ -1575,6 +1577,84 @@ mod tests {
         assert!(result.output.contains("sidecar-test-ok"));
         assert!(result.metadata.contains_key("trace_path"));
         env::remove_var("CINDX_BROWSER_SIDECAR");
+    }
+
+    #[test]
+    fn browser_session_retirement_is_path_scoped_and_contract_checked() {
+        let _guard = ENV_LOCK.lock().expect("env lock should be available");
+        let root = temp_workspace();
+        let session_relative = PathBuf::from(".cindx/browser-sessions/session-retire");
+        let session_dir = root.join(&session_relative);
+        fs::create_dir_all(session_dir.join("profile")).expect("session profile should exist");
+        let sidecar = root.join("browser-retirement-test.sh");
+        let trace = root.join("browser-retirement-args.txt");
+        fs::write(
+            &sidecar,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n%s\\n' \"$1\" \"$2\" > '{}'\nprintf '%s\\n' '{}'\n",
+                trace.display(),
+                serde_json::json!({
+                    "schema": "cindx.browser-session-retirement.v1",
+                    "retired": true,
+                    "session_dir": session_dir.display().to_string(),
+                })
+            ),
+        )
+        .expect("sidecar should write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o700))
+                .expect("sidecar should be executable");
+        }
+        env::set_var("CINDX_BROWSER_SIDECAR", &sidecar);
+
+        retire_browser_session(&root, &session_relative).expect("retirement should succeed");
+
+        let arguments = fs::read_to_string(&trace).expect("sidecar arguments should be recorded");
+        assert_eq!(
+            arguments.lines().collect::<Vec<_>>(),
+            [
+                "--retire-session",
+                session_dir.to_str().expect("path should encode")
+            ]
+        );
+        let resumed_relative = PathBuf::from(".cindx/browser-sessions/session-resume");
+        fs::create_dir_all(root.join(".cindx/browser-sessions/.retired/session-resume"))
+            .expect("interrupted quarantine should exist");
+        retire_browser_session(&root, &resumed_relative)
+            .expect("interrupted retirement should invoke the sidecar");
+        let resumed_arguments =
+            fs::read_to_string(&trace).expect("resumed sidecar arguments should be recorded");
+        assert_eq!(
+            resumed_arguments.lines().collect::<Vec<_>>(),
+            [
+                "--retire-session",
+                root.join(&resumed_relative)
+                    .to_str()
+                    .expect("path should encode")
+            ]
+        );
+        let error = retire_browser_session(
+            &root,
+            Path::new(".cindx/browser-sessions/session-retire/nested"),
+        )
+        .expect_err("nested retirement must be rejected");
+        assert!(error.message.contains("direct"));
+        let reserved = retire_browser_session(&root, Path::new(".cindx/browser-sessions/.retired"))
+            .expect_err("retirement quarantine must be reserved");
+        assert!(reserved.message.contains("direct"));
+        env::remove_var("CINDX_BROWSER_SIDECAR");
+    }
+
+    #[test]
+    fn absent_browser_session_retirement_is_idempotent_without_a_sidecar() {
+        let _guard = ENV_LOCK.lock().expect("env lock should be available");
+        env::remove_var("CINDX_BROWSER_SIDECAR");
+        let root = temp_workspace();
+
+        retire_browser_session(&root, Path::new(".cindx/browser-sessions/already-absent"))
+            .expect("absent session retirement should be idempotent");
     }
 
     #[test]

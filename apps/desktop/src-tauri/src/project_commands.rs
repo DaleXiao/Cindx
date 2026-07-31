@@ -1,5 +1,41 @@
 use super::*;
 use crate::desktop_event_sink::DesktopEventSink;
+use crate::managed_artifact_lifecycle::{
+    apply_managed_artifact_retirement, plan_managed_artifact_retirement,
+    retire_managed_browser_sessions,
+};
+use agent_memory::MemoryLedger;
+
+fn cleanup_published_delete_with_managed_artifacts(
+    state: &tauri::State<'_, AppState>,
+    project_id: &str,
+    project_root: &Path,
+    session_ids: &[String],
+    delete_project: bool,
+) -> Result<Option<MemoryLedger>, String> {
+    let initial_retirement = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        plan_managed_artifact_retirement(&store, project_root, session_ids)?
+    };
+    retire_managed_browser_sessions(&initial_retirement)?;
+
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let retirement = plan_managed_artifact_retirement(&store, project_root, session_ids)?;
+    apply_managed_artifact_retirement(&retirement)?;
+    cleanup_published_delete(
+        &mut store,
+        project_id,
+        project_root,
+        session_ids,
+        delete_project,
+    )
+}
 
 pub(crate) fn acknowledged_event_sequence(
     latest_sequence: u64,
@@ -197,20 +233,14 @@ pub(crate) fn delete_project(
     };
 
     let runtime_cleanup_error = clear_session_runtime_state(&state, &deleted_session_ids).err();
-    let durable_cleanup = (|| {
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|error| format!("store lock poisoned: {error}"))?;
-        cleanup_published_delete(
-            &mut store,
-            &input.project_id,
-            &project_root,
-            &deleted_session_ids,
-            true,
-        )
-        .map(|_| ())
-    })();
+    let durable_cleanup = cleanup_published_delete_with_managed_artifacts(
+        &state,
+        &input.project_id,
+        &project_root,
+        &deleted_session_ids,
+        true,
+    )
+    .map(|_| ());
     match durable_cleanup {
         Err(error) => {
             let error = runtime_cleanup_error
@@ -734,19 +764,13 @@ pub(crate) fn delete_session(
 
     let runtime_cleanup_error =
         clear_session_runtime_state(&state, std::slice::from_ref(&session_id)).err();
-    let durable_cleanup = (|| {
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|error| format!("store lock poisoned: {error}"))?;
-        cleanup_published_delete(
-            &mut store,
-            &project_id,
-            &project_root,
-            std::slice::from_ref(&session_id),
-            false,
-        )
-    })();
+    let durable_cleanup = cleanup_published_delete_with_managed_artifacts(
+        &state,
+        &project_id,
+        &project_root,
+        std::slice::from_ref(&session_id),
+        false,
+    );
     match durable_cleanup {
         Ok(Some(ledger)) => match state.provider_config.lock() {
             Ok(provider_config) => {

@@ -61,6 +61,7 @@ mod knowledge_generation_runtime;
 mod knowledge_runtime;
 mod learning_evidence_runtime;
 mod manual_tool_execution;
+mod managed_artifact_lifecycle;
 mod memory_management_runtime;
 mod memory_measurement_runtime;
 mod memory_migration_runtime;

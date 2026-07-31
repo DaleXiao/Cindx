@@ -759,6 +759,16 @@ fn published_fork_recovery_keeps_history_and_only_clears_journal() {
 fn published_session_delete_recovery_removes_context_manifest_and_resource_snapshot() {
     let data = tempdir().expect("data tempdir should exist");
     let workspace = tempdir().expect("workspace tempdir should exist");
+    let historical_output = workspace
+        .path()
+        .join(".cindx/output-history/deleted/version/result.md");
+    fs::create_dir_all(
+        historical_output
+            .parent()
+            .expect("output parent should exist"),
+    )
+    .expect("output directory should exist");
+    fs::write(&historical_output, b"retired output").expect("output should write");
     let mut store = SqliteStore::in_memory().expect("store should open");
     append_test_event(
         &mut store,
@@ -768,6 +778,10 @@ fn published_session_delete_recovery_removes_context_manifest_and_resource_snaps
             ("session_id".to_string(), "deleted".to_string()),
             ("project_id".to_string(), "project-cindx".to_string()),
             ("role".to_string(), "user".to_string()),
+            (
+                "result_artifact_path".to_string(),
+                historical_output.display().to_string(),
+            ),
         ]
         .into_iter()
         .collect(),
@@ -813,6 +827,7 @@ fn published_session_delete_recovery_removes_context_manifest_and_resource_snaps
     assert!(!attachment.exists());
     assert!(!context.exists());
     assert!(!manifest.exists());
+    assert!(!historical_output.exists());
     assert_eq!(
         load_project_lifecycle_journals_at(data.path())
             .expect("journal should load")
@@ -825,6 +840,70 @@ fn published_session_delete_recovery_removes_context_manifest_and_resource_snaps
     assert!(load_project_lifecycle_journals_at(data.path())
         .expect("journal should load")
         .is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn published_delete_recovery_keeps_journal_and_events_when_artifact_root_is_unsafe() {
+    use std::os::unix::fs::symlink;
+
+    let data = tempdir().expect("data tempdir should exist");
+    let workspace = tempdir().expect("workspace tempdir should exist");
+    let outside = tempdir().expect("outside tempdir should exist");
+    fs::write(outside.path().join("keep.md"), b"keep").expect("outside file should write");
+    fs::create_dir_all(workspace.path().join(".cindx")).expect("cindx root should exist");
+    symlink(
+        outside.path(),
+        workspace.path().join(".cindx/output-history"),
+    )
+    .expect("unsafe managed root should link");
+
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    append_test_event(
+        &mut store,
+        EventKind::MessageAdded,
+        "deleted session",
+        [
+            ("session_id".to_string(), "deleted".to_string()),
+            ("project_id".to_string(), "project-cindx".to_string()),
+            (
+                "result_artifact_path".to_string(),
+                ".cindx/output-history/keep.md".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let config = session_config(workspace.path(), &["retained"]);
+    let journal = ProjectLifecycleJournal::delete(
+        config.projects[0].id.clone(),
+        workspace.path().to_path_buf(),
+        vec!["deleted".to_string()],
+        false,
+    );
+    persist_project_lifecycle_journal_at(data.path(), &journal).expect("journal should persist");
+
+    let error = recover_project_lifecycle_operations_at(data.path(), &mut store, &config)
+        .expect_err("unsafe root must fail closed");
+
+    assert!(error.contains("symbolic link"));
+    assert_eq!(
+        store
+            .list_by_task_and_metadata(&phase16_task_id(), "session_id", "deleted")
+            .expect("deleted events should remain")
+            .len(),
+        1
+    );
+    assert_eq!(
+        load_project_lifecycle_journals_at(data.path())
+            .expect("journal should remain")
+            .len(),
+        1
+    );
+    assert_eq!(
+        fs::read(outside.path().join("keep.md")).expect("outside file should remain"),
+        b"keep"
+    );
 }
 
 #[test]
