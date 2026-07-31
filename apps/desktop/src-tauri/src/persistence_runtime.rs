@@ -512,6 +512,8 @@ pub(crate) fn agent_trace_export_path_for(workspace_root: &Path) -> PathBuf {
 }
 
 pub(crate) fn open_rag_adapter_for(workspace_root: &Path) -> Result<FileRagAdapter, String> {
+    #[cfg(test)]
+    RAG_ADAPTER_OPEN_COUNT.with(|count| count.set(count.get().saturating_add(1)));
     open_active_knowledge_adapter(workspace_root)
 }
 
@@ -527,6 +529,13 @@ pub(crate) struct WorkspaceKnowledgeSnapshot {
     pub(crate) adapter: FileRagAdapter,
     pub(crate) graph_store: Option<Arc<FileGraphStore>>,
     pub(crate) cache_hit: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkspaceKnowledgeStateSnapshot {
+    pub(crate) active_index_path: PathBuf,
+    pub(crate) stats: RagIndexStats,
+    pub(crate) full: Option<WorkspaceKnowledgeSnapshot>,
 }
 
 impl WorkspaceKnowledgeCacheEntry {
@@ -547,6 +556,7 @@ impl WorkspaceKnowledgeCacheEntry {
 #[cfg(test)]
 std::thread_local! {
     static GRAPH_STORE_OPEN_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static RAG_ADAPTER_OPEN_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn open_graph_store_at_path(graph_path: &Path) -> Result<FileGraphStore, String> {
@@ -563,6 +573,16 @@ pub(crate) fn reset_graph_store_open_count() {
 #[cfg(test)]
 pub(crate) fn graph_store_open_count() -> u64 {
     GRAPH_STORE_OPEN_COUNT.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_rag_adapter_open_count() {
+    RAG_ADAPTER_OPEN_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn rag_adapter_open_count() -> u64 {
+    RAG_ADAPTER_OPEN_COUNT.with(std::cell::Cell::get)
 }
 
 fn graph_store_for_adapter(
@@ -609,6 +629,48 @@ pub(crate) fn cached_workspace_knowledge_snapshot_for(
         adapter,
         graph_store,
         cache_hit: false,
+    })
+}
+
+pub(crate) fn active_workspace_knowledge_state_snapshot_for(
+    state: &tauri::State<'_, AppState>,
+    workspace_root: &Path,
+) -> Result<WorkspaceKnowledgeStateSnapshot, String> {
+    active_workspace_knowledge_state_snapshot_in(&state.workspace_knowledge_cache, workspace_root)
+}
+
+pub(crate) fn active_workspace_knowledge_state_snapshot_in(
+    cache: &Mutex<BTreeMap<String, WorkspaceKnowledgeCacheEntry>>,
+    workspace_root: &Path,
+) -> Result<WorkspaceKnowledgeStateSnapshot, String> {
+    with_workspace_generation_read(workspace_root, || {
+        let active_index_path = active_knowledge_paths(workspace_root).rag_index;
+        let full = cache
+            .lock()
+            .map_err(|error| format!("workspace knowledge cache lock poisoned: {error}"))?
+            .get(&workspace_knowledge_cache_key(workspace_root))
+            .and_then(|entry| entry.snapshot_if_current(&active_index_path));
+        let stats = match full.as_ref() {
+            Some(snapshot) => snapshot.adapter.stats().clone(),
+            None => match read_file_rag_stats(&active_index_path)
+                .map_err(|error| error.to_string())?
+            {
+                Some(stats) => stats,
+                None => {
+                    #[cfg(test)]
+                    RAG_ADAPTER_OPEN_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+                    FileRagAdapter::open(&active_index_path)
+                        .map_err(|error| error.to_string())?
+                        .stats()
+                        .clone()
+                }
+            },
+        };
+        Ok(WorkspaceKnowledgeStateSnapshot {
+            active_index_path,
+            stats,
+            full,
+        })
     })
 }
 

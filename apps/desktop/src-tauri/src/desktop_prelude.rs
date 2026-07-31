@@ -26,7 +26,7 @@ pub(crate) use agent_rag::{
     apply_embeddings_to_index_cancellable, build_grounded_answer_prompt,
     export_lancedb_records_jsonl_cancellable,
     fuse_retrieval_channels_for_query as fuse_rag_retrieval_channels_for_query,
-    index_workspace_cancellable, lancedb_index_exists, local_query_embedding,
+    index_workspace_cancellable, lancedb_index_exists, local_query_embedding, read_file_rag_stats,
     remove_file_rag_generation_if_unleased, replace_lancedb_index_cancellable,
     retrieval_ranges_overlap, search_chunks_literal, search_lancedb_index,
     workspace_index_is_fresh, EmbeddingBatch, FileRagAdapter, IndexOptions, RagChunk, RagEmbedder,

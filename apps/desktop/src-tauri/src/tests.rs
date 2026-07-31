@@ -5443,11 +5443,12 @@ fn phase7_state_reports_rag_stats() {
 
     let state = phase7_state(
         &store,
-        &adapter,
+        adapter.stats(),
         MemoryStatsView::default(),
         Vec::new(),
         None,
         empty_graph_state(),
+        None,
         None,
         None,
     )
@@ -5459,6 +5460,56 @@ fn phase7_state_reports_rag_stats() {
         .timeline
         .iter()
         .any(|entry| entry.label == "Retrieval"));
+}
+
+#[test]
+fn phase7_graph_counts_bind_to_the_latest_exact_index_path() {
+    let root = temp_test_root("phase7-graph-count-summary");
+    let active_path = root.join("generation-new").join("rag-index.tsv");
+    let stale_path = root.join("generation-old").join("rag-index.tsv");
+    let other_workspace_path = root.join("other-workspace").join("rag-index.tsv");
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    for (path, nodes, edges) in [
+        (&active_path, 3, 2),
+        (&other_workspace_path, 99, 88),
+        (&active_path, 7, 6),
+        (&stale_path, 55, 44),
+    ] {
+        append_event(
+            &mut store,
+            &phase7_task_id(),
+            EventKind::RetrievalPerformed,
+            "Workspace indexed for RAG",
+            [
+                ("action".to_string(), "index".to_string()),
+                ("index_path".to_string(), path.display().to_string()),
+                ("graph_nodes".to_string(), nodes.to_string()),
+                ("graph_edges".to_string(), edges.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        )
+        .expect("index event should append");
+    }
+    let events = store
+        .list_by_task(&phase7_task_id())
+        .expect("phase 7 events should load");
+
+    let graph = graph_count_summary_for_index_events(&events, &active_path);
+
+    assert_eq!(graph.total_nodes, 7);
+    assert_eq!(graph.total_edges, 6);
+    assert!(graph.nodes.is_empty());
+    assert!(graph.edges.is_empty());
+    assert_eq!(
+        graph_count_summary_for_index_events(
+            &events,
+            &root.join("never-indexed").join("rag-index.tsv")
+        )
+        .total_nodes,
+        0
+    );
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -9320,6 +9371,85 @@ fn workspace_knowledge_snapshot_preserves_ttl_and_generation_validation() {
         .is_none());
     entry.validated_at = Instant::now() - WORKSPACE_KNOWLEDGE_CACHE_TTL - Duration::from_millis(1);
     assert!(entry.snapshot_if_current(adapter.path()).is_none());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn cold_knowledge_state_reads_stats_without_opening_the_adapter_or_graph() {
+    let root = temp_test_root("phase7-lightweight-cold-state");
+    fs::create_dir_all(&root).expect("temp root should exist");
+    fs::write(root.join("notes.md"), "LightweightColdStateMarker").expect("fixture should write");
+    let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+    let expected_stats = index.stats.clone();
+    index_graph_chunks(&root, &index.chunks).expect("graph should build");
+    let mut adapter = FileRagAdapter::open(root.join(".cindx").join("rag-index.tsv"))
+        .expect("adapter should open");
+    adapter.replace_all(index).expect("index should persist");
+    let cache = Mutex::new(BTreeMap::new());
+
+    reset_rag_adapter_open_count();
+    reset_graph_store_open_count();
+    let cold = active_workspace_knowledge_state_snapshot_in(&cache, &root)
+        .expect("cold state should load lightweight stats");
+
+    assert!(cold.full.is_none());
+    assert_eq!(cold.active_index_path, adapter.path());
+    assert_eq!(cold.stats, expected_stats);
+    assert_eq!(rag_adapter_open_count(), 0);
+    assert_eq!(graph_store_open_count(), 0);
+
+    let entry = workspace_knowledge_cache_entry(&adapter).expect("full cache entry should build");
+    cache
+        .lock()
+        .expect("cache should lock")
+        .insert(workspace_knowledge_cache_key(&root), entry);
+    reset_rag_adapter_open_count();
+    reset_graph_store_open_count();
+    let warm = active_workspace_knowledge_state_snapshot_in(&cache, &root)
+        .expect("warm state should reuse the exact active generation");
+
+    assert_eq!(warm.active_index_path, adapter.path());
+    assert_eq!(
+        warm.full
+            .as_ref()
+            .expect("warm state should retain the full snapshot")
+            .adapter
+            .path(),
+        adapter.path()
+    );
+    assert_eq!(warm.stats, expected_stats);
+    assert_eq!(rag_adapter_open_count(), 0);
+    assert_eq!(graph_store_open_count(), 0);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn malformed_lightweight_header_falls_back_to_full_adapter_stats_without_graph_open() {
+    let root = temp_test_root("phase7-lightweight-stats-fallback");
+    fs::create_dir_all(&root).expect("temp root should exist");
+    fs::write(root.join("notes.md"), "LegacyStatsFallbackMarker").expect("fixture should write");
+    let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+    let expected_chunks = index.chunks.len();
+    let index_path = root.join(".cindx").join("rag-index.tsv");
+    let mut adapter = FileRagAdapter::open(&index_path).expect("adapter should open");
+    adapter.replace_all(index).expect("index should persist");
+    let persisted = fs::read_to_string(&index_path).expect("index fixture should read");
+    let (_, tail) = persisted
+        .split_once('\n')
+        .expect("non-empty index should have a chunk tail");
+    fs::write(&index_path, format!("legacy-stats-header\n{tail}"))
+        .expect("legacy header fixture should write");
+    let cache = Mutex::new(BTreeMap::new());
+
+    reset_rag_adapter_open_count();
+    reset_graph_store_open_count();
+    let state = active_workspace_knowledge_state_snapshot_in(&cache, &root)
+        .expect("legacy stats should fall back to the full adapter");
+
+    assert!(state.full.is_none());
+    assert_eq!(state.stats.chunks_indexed, expected_chunks);
+    assert_eq!(rag_adapter_open_count(), 1);
+    assert_eq!(graph_store_open_count(), 0);
     let _ = fs::remove_dir_all(root);
 }
 

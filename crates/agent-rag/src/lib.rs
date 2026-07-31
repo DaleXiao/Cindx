@@ -43,6 +43,7 @@ const DEFAULT_EMBEDDING_BATCH_SIZE: usize = 20;
 const FILE_SEARCH_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const FILE_SEARCH_MAX_FILES: usize = 20_000;
 const FILE_SEARCH_CONTEXT_LINES: usize = 2;
+const FILE_RAG_STATS_HEADER_MAX_BYTES: u64 = 256;
 static STAGING_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static FILE_RAG_PATH_LEASES: OnceLock<Mutex<BTreeMap<PathBuf, Weak<()>>>> = OnceLock::new();
 #[cfg(feature = "lancedb-store")]
@@ -104,7 +105,7 @@ pub struct RagSearchResult {
     pub score: f32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RagIndexStats {
     pub files_indexed: usize,
     pub chunks_indexed: usize,
@@ -795,6 +796,53 @@ impl FileRagAdapter {
         self.index = Arc::new(index);
         Ok(self.index.stats.clone())
     }
+}
+
+pub fn read_file_rag_stats(path: impl AsRef<Path>) -> Result<Option<RagIndexStats>, RagError> {
+    let file = match fs::File::open(path.as_ref()) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Some(RagIndexStats::default()));
+        }
+        Err(error) => {
+            return Err(RagError::new(format!(
+                "failed to read RAG index stats: {error}"
+            )));
+        }
+    };
+    let mut header = Vec::new();
+    let mut reader = BufReader::new(file).take(FILE_RAG_STATS_HEADER_MAX_BYTES);
+    reader
+        .read_until(b'\n', &mut header)
+        .map_err(|error| RagError::new(format!("failed to read RAG index stats: {error}")))?;
+    if header.len() as u64 == FILE_RAG_STATS_HEADER_MAX_BYTES && !header.ends_with(b"\n") {
+        return Ok(None);
+    }
+    while matches!(header.last(), Some(b'\n' | b'\r')) {
+        header.pop();
+    }
+    let Ok(header) = std::str::from_utf8(&header) else {
+        return Ok(None);
+    };
+    let mut parts = header.split('\t');
+    if parts.next() != Some("stats") {
+        return Ok(None);
+    }
+    let (Some(files), Some(chunks), Some(indexed_at), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Ok(None);
+    };
+    let (Ok(files_indexed), Ok(chunks_indexed), Ok(indexed_at_ms)) =
+        (files.parse(), chunks.parse(), indexed_at.parse())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(RagIndexStats {
+        files_indexed,
+        chunks_indexed,
+        indexed_at_ms,
+    }))
 }
 
 fn acquire_file_rag_path_lease(path: &Path) -> Result<Arc<()>, RagError> {
@@ -2287,6 +2335,49 @@ mod tests {
         ));
         fs::create_dir_all(&path).expect("workspace should be created");
         path
+    }
+
+    #[test]
+    fn lightweight_stats_reader_ignores_a_large_invalid_tail() {
+        let root = temp_workspace();
+        let index_path = root.join("rag-index.tsv");
+        let mut file = fs::File::create(&index_path).expect("index fixture should create");
+        file.write_all(b"stats\t7\t19\t1234\n")
+            .expect("stats header should write");
+        file.write_all(&vec![0xff; 1024 * 1024])
+            .expect("invalid tail should write");
+        drop(file);
+
+        let stats = read_file_rag_stats(&index_path)
+            .expect("stats read should succeed")
+            .expect("valid header should produce stats");
+
+        assert_eq!(
+            stats,
+            RagIndexStats {
+                files_indexed: 7,
+                chunks_indexed: 19,
+                indexed_at_ms: 1234,
+            }
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lightweight_stats_reader_distinguishes_missing_and_malformed_headers() {
+        let root = temp_workspace();
+        let missing = read_file_rag_stats(root.join("missing.tsv"))
+            .expect("missing index should be a zero state");
+        assert_eq!(missing, Some(RagIndexStats::default()));
+
+        let malformed_path = root.join("malformed.tsv");
+        fs::write(&malformed_path, b"chunk\tnot-a-stats-header\n")
+            .expect("malformed fixture should write");
+        assert_eq!(
+            read_file_rag_stats(&malformed_path).expect("malformed header should be non-fatal"),
+            None
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]
