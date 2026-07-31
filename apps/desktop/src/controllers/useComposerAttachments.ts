@@ -4,7 +4,6 @@ import {
   removeAgentAttachment,
   stageAgentAttachments
 } from "../tauri";
-import { fileDataBase64 } from "../utils/fileDataBase64";
 
 type ComposerAttachmentsInput = {
   reportError: (message: string | null) => void;
@@ -32,14 +31,7 @@ export function useComposerAttachments({
       setBusySessionIds((current) => new Set(current).add(sessionId));
       reportError(null);
       try {
-        const uploads = await Promise.all(
-          files.map(async (file) => ({
-            name: file.name,
-            mimeType: file.type || "application/octet-stream",
-            dataBase64: await fileDataBase64(file)
-          }))
-        );
-        const staged = await stageAgentAttachments(sessionId, uploads);
+        const staged = await stageAgentAttachments(sessionId, files);
         setDrafts((current) => ({
           ...current,
           [sessionId]: [...(current[sessionId] ?? []), ...staged]

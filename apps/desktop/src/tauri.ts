@@ -9,6 +9,7 @@ export const DESKTOP_VERSION = desktopPackage.version;
 export type * from "./tauriTypes";
 export type * from "./agentRunBudgetModel";
 export type * from "./memoryManagementModel";
+export { stageAgentAttachments } from "./attachmentIpc";
 import type { AgentEffort } from "./agentRunBudgetModel";
 import type {
   RuntimeStatus,
@@ -36,7 +37,6 @@ import type {
   QueuedAgentMessage,
   QueuedAgentMessageReceipt,
   QueuedAgentMessageActionReceipt,
-  AttachmentUpload,
   ArtifactPreview,
   TimelineEntry,
   PermissionAudit,
@@ -1229,15 +1229,6 @@ export async function generateSessionTitle(
     requireBrowserPreviewFallback(error);
     return await getProjectSessionState();
   }
-}
-
-export async function stageAgentAttachments(
-  sessionId: string,
-  files: AttachmentUpload[]
-): Promise<AgentAttachment[]> {
-  return invoke<AgentAttachment[]>("stage_agent_attachments", {
-    input: { sessionId, files }
-  });
 }
 
 export async function removeAgentAttachment(sessionId: string, path: string): Promise<void> {
@@ -2536,8 +2527,9 @@ export async function subscribeToSessionTitleUpdates(
   }
 }
 
-export async function readArtifactImage(path: string): Promise<string> {
-  return invoke<string>("read_artifact_image", { path });
+export async function readArtifactImage(path: string): Promise<Uint8Array> {
+  const bytes = await invoke<ArrayBuffer>("read_artifact_image", { path });
+  return new Uint8Array(bytes);
 }
 
 export async function readArtifactPreview(path: string): Promise<ArtifactPreview> {

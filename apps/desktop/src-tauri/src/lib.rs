@@ -37,6 +37,8 @@ mod agent_strategy_runtime;
 mod agent_tool_runtime;
 mod app_bootstrap;
 mod app_state;
+mod attachment_commands;
+mod attachment_upload_batches;
 mod background_work_runtime;
 mod collaboration_execution;
 mod collaboration_models;
@@ -140,6 +142,8 @@ use agent_run_engine::continue_agent_loop;
 pub use app_bootstrap::run;
 use app_bootstrap::QuitConfirmation;
 use app_state::*;
+use attachment_commands::*;
+use attachment_upload_batches::*;
 use collaboration_execution::*;
 use collaboration_models::*;
 use collaboration_stage_runtime::*;
@@ -202,6 +206,8 @@ use session_title_service::*;
 mod external_effect_eval_tests;
 #[cfg(test)]
 mod manual_tool_execution_tests;
+#[cfg(test)]
+mod media_ipc_tests;
 #[cfg(test)]
 mod prompt_workflow_execution_tests;
 #[cfg(test)]

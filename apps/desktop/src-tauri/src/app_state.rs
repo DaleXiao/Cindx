@@ -1,5 +1,6 @@
 use crate::desktop_prelude::*;
 use crate::{
+    attachment_upload_batches::AttachmentUploadBatches,
     collaboration_service::AgentCollaboration,
     conductor_health_runtime::ConductorHealthLedger,
     configuration_models::{ProjectSessionConfig, ProviderConfig, SidecarConfig, WorkspaceConfig},
@@ -8,6 +9,7 @@ use crate::{
 
 pub(crate) struct AppState {
     pub(crate) store: Mutex<SqliteStore>,
+    pub(crate) attachment_upload_batches: Mutex<AttachmentUploadBatches>,
     pub(crate) manual_tool_execution_gate: Mutex<()>,
     pub(crate) provider_config: Mutex<ProviderConfig>,
     pub(crate) provider_config_update: Mutex<()>,

@@ -92,6 +92,7 @@ pub fn run() -> Result<(), String> {
     let app = tauri::Builder::default()
         .manage(AppState {
             store: Mutex::new(store),
+            attachment_upload_batches: Mutex::new(AttachmentUploadBatches::default()),
             manual_tool_execution_gate: Mutex::new(()),
             provider_config: Mutex::new(provider_config),
             provider_config_update: Mutex::new(()),
@@ -175,7 +176,8 @@ pub fn run() -> Result<(), String> {
             rename_session,
             set_session_effort,
             generate_session_title,
-            stage_agent_attachments,
+            stage_agent_attachment,
+            abort_agent_attachment_batch,
             remove_agent_attachment,
             fork_session,
             archive_session,

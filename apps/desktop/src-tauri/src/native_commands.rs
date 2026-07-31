@@ -1,4 +1,7 @@
 use super::*;
+use std::io::Read;
+
+pub(crate) const MAX_ARTIFACT_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
 
 pub(crate) fn confirm_application_exit(app_handle: &tauri::AppHandle) -> bool {
     let state = app_handle.state::<AppState>();
@@ -213,44 +216,54 @@ pub(crate) fn show_native_delete_confirmation(_kind: &str, _name: &str) -> bool 
 }
 
 #[tauri::command]
-pub(crate) fn read_artifact_image(
+pub(crate) async fn read_artifact_image(
     state: tauri::State<'_, AppState>,
     path: String,
-) -> Result<String, String> {
+) -> Result<tauri::ipc::Response, String> {
     let canonical_path = validated_workspace_artifact_path(&state, &path)?;
-    let metadata = fs::metadata(&canonical_path)
-        .map_err(|error| format!("failed to inspect artifact image: {error}"))?;
-    if metadata.len() > 24 * 1024 * 1024 {
-        return Err("artifact image exceeds the 24 MB preview limit".to_string());
-    }
-
-    let extension = canonical_path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let mime = match extension.as_str() {
-        "avif" => "image/avif",
-        "bmp" => "image/bmp",
-        "gif" => "image/gif",
-        "jpeg" | "jpg" => "image/jpeg",
-        "png" => "image/png",
-        "webp" => "image/webp",
-        _ => return Err("artifact is not a supported preview image".to_string()),
-    };
-    let bytes = fs::read(&canonical_path)
-        .map_err(|error| format!("failed to read artifact image: {error}"))?;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-    Ok(format!("data:{mime};base64,{encoded}"))
+    tauri::async_runtime::spawn_blocking(move || {
+        read_artifact_image_bytes(&canonical_path).map(tauri::ipc::Response::new)
+    })
+    .await
+    .map_err(|error| format!("artifact image task failed: {error}"))?
 }
 
 #[tauri::command]
-pub(crate) fn read_artifact_preview(
+pub(crate) async fn read_artifact_preview(
     state: tauri::State<'_, AppState>,
     path: String,
 ) -> Result<ArtifactPreviewView, String> {
     let canonical_path = validated_workspace_artifact_path(&state, &path)?;
-    let metadata = fs::metadata(&canonical_path)
+    tauri::async_runtime::spawn_blocking(move || read_artifact_preview_path(&canonical_path))
+        .await
+        .map_err(|error| format!("artifact preview task failed: {error}"))?
+}
+
+pub(crate) fn read_artifact_image_bytes(canonical_path: &Path) -> Result<Vec<u8>, String> {
+    if artifact_image_mime(canonical_path).is_none() {
+        return Err("artifact is not a supported preview image".to_string());
+    }
+    let metadata = fs::metadata(canonical_path)
+        .map_err(|error| format!("failed to inspect artifact image: {error}"))?;
+    if metadata.len() > MAX_ARTIFACT_IMAGE_BYTES {
+        return Err("artifact image exceeds the 24 MB preview limit".to_string());
+    }
+    let file = fs::File::open(canonical_path)
+        .map_err(|error| format!("failed to read artifact image: {error}"))?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_ARTIFACT_IMAGE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read artifact image: {error}"))?;
+    if bytes.len() as u64 > MAX_ARTIFACT_IMAGE_BYTES {
+        return Err("artifact image exceeds the 24 MB preview limit".to_string());
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn read_artifact_preview_path(
+    canonical_path: &Path,
+) -> Result<ArtifactPreviewView, String> {
+    let metadata = fs::metadata(canonical_path)
         .map_err(|error| format!("failed to inspect artifact: {error}"))?;
     if metadata.is_dir() {
         return Ok(ArtifactPreviewView {
@@ -266,27 +279,16 @@ pub(crate) fn read_artifact_preview(
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let image_mime = match extension.as_str() {
-        "avif" => Some("image/avif"),
-        "bmp" => Some("image/bmp"),
-        "gif" => Some("image/gif"),
-        "jpeg" | "jpg" => Some("image/jpeg"),
-        "png" => Some("image/png"),
-        "webp" => Some("image/webp"),
-        _ => None,
-    };
+    let image_mime = artifact_image_mime(canonical_path);
     if let Some(mime_type) = image_mime {
-        if metadata.len() > 24 * 1024 * 1024 {
+        if metadata.len() > MAX_ARTIFACT_IMAGE_BYTES {
             return Err("artifact image exceeds the 24 MB preview limit".to_string());
         }
-        let bytes = fs::read(&canonical_path)
-            .map_err(|error| format!("failed to read artifact image: {error}"))?;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
         return Ok(ArtifactPreviewView {
             kind: "image".to_string(),
             mime_type: mime_type.to_string(),
             content: None,
-            data_url: Some(format!("data:{mime_type};base64,{encoded}")),
+            data_url: None,
             size_bytes: metadata.len(),
         });
     }
@@ -313,7 +315,7 @@ pub(crate) fn read_artifact_preview(
     if metadata.len() > 2 * 1024 * 1024 {
         return Err("text artifact exceeds the 2 MB preview limit".to_string());
     }
-    let content = fs::read_to_string(&canonical_path)
+    let content = fs::read_to_string(canonical_path)
         .map_err(|error| format!("failed to read text artifact: {error}"))?;
     Ok(ArtifactPreviewView {
         kind: kind.to_string(),
@@ -322,6 +324,24 @@ pub(crate) fn read_artifact_preview(
         data_url: None,
         size_bytes: metadata.len(),
     })
+}
+
+fn artifact_image_mime(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "avif" => Some("image/avif"),
+        "bmp" => Some("image/bmp"),
+        "gif" => Some("image/gif"),
+        "jpeg" | "jpg" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
 }
 
 #[tauri::command]
