@@ -2,6 +2,11 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      performance_baseline_ref:
+        description: Git ref to compare against (defaults to the previous commit)
+        required: false
+        type: string
   pull_request:
   push:
     branches:
@@ -23,6 +28,34 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve performance baseline
+        id: performance-baseline
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          REQUESTED_BASELINE: ${{ inputs.performance_baseline_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            BASELINE_SHA="$PR_BASE_SHA"
+          elif [ "$EVENT_NAME" = "push" ] && [ -n "$PUSH_BEFORE_SHA" ] && ! printf '%s' "$PUSH_BEFORE_SHA" | grep -Eq '^0+$'; then
+            BASELINE_SHA="$PUSH_BEFORE_SHA"
+          elif [ -n "$REQUESTED_BASELINE" ]; then
+            BASELINE_SHA="$(git rev-parse --verify --end-of-options "${REQUESTED_BASELINE}^{commit}")"
+          else
+            BASELINE_SHA="$(git rev-parse --verify HEAD^)"
+          fi
+          echo "sha=$BASELINE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Check out performance baseline
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.performance-baseline.outputs.sha }}
+          path: .performance-baseline
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -39,9 +72,19 @@ jobs:
       - name: Install native build tools
         run: brew install protobuf
 
+      - name: Install baseline frontend dependencies
+        working-directory: .performance-baseline/apps/desktop
+        run: npm ci
+
       - name: Install frontend dependencies
         working-directory: apps/desktop
         run: npm ci
+
+      - name: Run paired same-machine performance regression
+        timeout-minutes: 15
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: node scripts/run-paired-performance.mjs --baseline-root .performance-baseline --candidate-root . --output-dir target/performance-regression
 
       - name: Stamp build version
         run: node scripts/stamp-build-version.mjs "$GITHUB_RUN_NUMBER"
@@ -76,6 +119,9 @@ jobs:
           path: |
             target/quality-gate-report.json
             target/shipping-performance-report.json
+            target/performance-regression/baseline.json
+            target/performance-regression/candidate.json
+            target/performance-regression/comparison.json
             target/agent-benchmark-report.json
             target/evaluation-v2-foundation.json
             target/memory-evaluation.json
