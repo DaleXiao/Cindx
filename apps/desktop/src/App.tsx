@@ -10,21 +10,20 @@ import {
   type CSSProperties
 } from "react";
 import { CheckCircle2 } from "lucide-react";
-import { Inspector, type InspectorTab } from "./components/Inspector";
+import { Inspector } from "./components/Inspector";
 import { Composer } from "./components/Composer";
 import { QueuedMessages } from "./components/QueuedMessages";
-import { Sidebar, type WorkspaceView } from "./components/Sidebar";
-import type { SettingsCategory } from "./components/SettingsPage";
+import { Sidebar } from "./components/Sidebar";
 import { WorkspaceChrome } from "./components/WorkspaceChrome";
 import {
   BACKGROUND_AGENT_POLL_INTERVAL_MS,
   FOREGROUND_AGENT_POLL_INTERVAL_MS,
-  loadDebugAlwaysVisible,
   queuedMessageClientId
 } from "./appShellModel";
 import { optimisticRunBudgetPatch } from "./agentRunBudgetModel";
 import { providerReadinessMessage, providerStatusText } from "./providerReadinessModel";
 import { useAppWorkspaceProjection } from "./controllers/useAppWorkspaceProjection";
+import { useAppShellController } from "./controllers/useAppShellController";
 import { useComposerAttachments } from "./controllers/useComposerAttachments";
 import { useComposerDrafts } from "./controllers/useComposerDrafts";
 import { usePreferencesController } from "./controllers/usePreferencesController";
@@ -120,18 +119,37 @@ const SettingsPage = lazy(() =>
 
 export function App() {
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
-  const [activeView, setActiveView] = useState<WorkspaceView>("timeline");
-  const [selectedScheduleId, setSelectedScheduleId] = useState<string | null>(null);
-  const [workspaceViewBeforeSettings, setWorkspaceViewBeforeSettings] =
-    useState<Exclude<WorkspaceView, "settings">>("timeline");
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const {
+    activeView,
+    debugAlwaysVisible,
+    handleWorkspaceViewChange,
+    inspectorOpen,
+    inspectorOutputRequest,
+    inspectorResizing,
+    inspectorTab,
+    inspectorWidth,
+    openSettingsCategory,
+    selectedScheduleId,
+    setDebugAlwaysVisible,
+    setInspectorOpen,
+    setInspectorResizing,
+    setInspectorTab,
+    setInspectorWidth,
+    setSelectedScheduleId,
+    setSettingsCategory,
+    setSidebarOpen,
+    settingsCategory,
+    showInspector,
+    showInspectorOutput,
+    showTimelineView,
+    sidebarOpen
+  } = useAppShellController();
   const {
     beginResize: beginSidebarResize,
     handleResizeKeyDown: handleSidebarResizeKeyDown,
     resizing: sidebarResizing,
     width: sidebarWidth
   } = useSidebarResize();
-  const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>("runtime");
   const {
     appearanceMode,
     flushPersonalization,
@@ -145,18 +163,6 @@ export function App() {
     showSettingsSaved,
     updatePersonalizationDraft
   } = usePreferencesController();
-  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("details");
-  const [inspectorOpen, setInspectorOpen] = useState(false);
-  const [inspectorOutputRequest, setInspectorOutputRequest] = useState<{
-    sessionId: string;
-    path: string;
-    nonce: number;
-  } | null>(null);
-  const [inspectorOpenBeforeSettings, setInspectorOpenBeforeSettings] = useState(false);
-  const [inspectorOpenBeforeSchedule, setInspectorOpenBeforeSchedule] = useState(false);
-  const [inspectorWidth, setInspectorWidth] = useState(320);
-  const [inspectorResizing, setInspectorResizing] = useState(false);
-  const [debugAlwaysVisible, setDebugAlwaysVisible] = useState(loadDebugAlwaysVisible);
   const {
     activeReviews: activePermissionReviews,
     ignoreReview: handleIgnorePermissionReview,
@@ -213,10 +219,6 @@ export function App() {
     (message: string | null) => setComposerError(message),
     []
   );
-  const showInspector = useCallback((tab: InspectorTab) => {
-    setInspectorTab(tab);
-    setInspectorOpen(true);
-  }, []);
   const {
     canUseConfiguredKey,
     collaborationModelCount,
@@ -1076,44 +1078,6 @@ export function App() {
       agentStateRevisionsRef.current.delete(sessionId);
       sessionRuntimeCache.forget(sessionId);
     });
-  }
-
-  function showWorkspaceView(view: Exclude<WorkspaceView, "settings">) {
-    const leavingSettings = activeView === "settings";
-    const leavingSchedule = activeView === "schedule" && view === "timeline";
-    const enteringSchedule = activeView !== "schedule" && view === "schedule";
-    if (enteringSchedule) {
-      if (activeView === "timeline") setInspectorOpenBeforeSchedule(inspectorOpen);
-      setInspectorOpen(false);
-    }
-    setWorkspaceViewBeforeSettings(view);
-    setActiveView(view);
-    if (leavingSettings && view === "timeline") {
-      setInspectorOpen(inspectorOpenBeforeSettings);
-    } else if (leavingSchedule) {
-      setInspectorOpen(inspectorOpenBeforeSchedule);
-    }
-  }
-
-  function showTimelineView() {
-    showWorkspaceView("timeline");
-  }
-
-  function handleWorkspaceViewChange(view: WorkspaceView) {
-    if (view === "settings") {
-      if (activeView === "settings") {
-        showWorkspaceView(workspaceViewBeforeSettings);
-        return;
-      }
-      setWorkspaceViewBeforeSettings(activeView);
-      setInspectorOpenBeforeSettings(
-        activeView === "schedule" ? inspectorOpenBeforeSchedule : inspectorOpen
-      );
-      setActiveView("settings");
-      setInspectorOpen(false);
-      return;
-    }
-    showWorkspaceView(view);
   }
 
   async function handleCreateProject() {
@@ -2147,8 +2111,7 @@ export function App() {
               onArtifactInspect={(path) => {
                 const sessionId = activeSession?.id;
                 if (!sessionId) return;
-                setInspectorOutputRequest({ sessionId, path, nonce: Date.now() });
-                setInspectorOpen(true);
+                showInspectorOutput({ sessionId, path, nonce: Date.now() });
               }}
               onLinkOpenError={setComposerError}
               onStreamDone={handleAgentStreamDone}
@@ -2189,8 +2152,7 @@ export function App() {
                 onVoiceError={(message) => setComposerError(message)}
                 onProviderRequired={(readiness) => setComposerError(providerReadinessMessage(readiness))}
                 onConfigureProvider={() => {
-                  setSettingsCategory("models");
-                  handleWorkspaceViewChange("settings");
+                  openSettingsCategory("models");
                   void loadProviderState();
                 }}
                 onSend={(value) => void handleSendPrompt(value)}
@@ -2374,11 +2336,7 @@ export function App() {
         onResizeStart={() => setInspectorResizing(true)}
         onResizeEnd={() => setInspectorResizing(false)}
         onReview={() => {
-          if (activeView !== "settings") setWorkspaceViewBeforeSettings(activeView);
-          setInspectorOpenBeforeSettings(inspectorOpen);
-          setActiveView("settings");
-          setSettingsCategory("permissions");
-          setInspectorOpen(false);
+          openSettingsCategory("permissions");
         }}
       />
       {settingsToast && (
