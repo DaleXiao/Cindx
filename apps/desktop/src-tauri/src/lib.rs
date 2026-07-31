@@ -59,6 +59,7 @@ mod knowledge_generation_runtime;
 mod knowledge_runtime;
 mod learning_evidence_runtime;
 mod memory_measurement_runtime;
+mod memory_projection_runtime;
 mod memory_runtime;
 mod memory_vector_generation_runtime;
 mod model_resource_runtime;

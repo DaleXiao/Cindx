@@ -366,6 +366,9 @@ const agentRuntimeSnapshotSource = read(
 const sessionOutputCacheSource = read(
   "apps/desktop/src-tauri/src/session_output_cache.rs"
 );
+const memoryProjectionRuntimeSource = read(
+  "apps/desktop/src-tauri/src/memory_projection_runtime.rs"
+);
 const promptEvolutionWorkerSource = read(
   "apps/desktop/src-tauri/src/prompt_evolution_worker.rs"
 );
@@ -703,6 +706,7 @@ const criticalDesktopAgentModuleBudgets = new Map([
   ["semantic_memory_runtime.rs", 260],
   ["semantic_memory_worker.rs", 240],
   ["knowledge_runtime.rs", 1_000],
+  ["memory_projection_runtime.rs", 260],
   ["memory_runtime.rs", 950],
 ]);
 const criticalDesktopAgentModules = desktopRustModules.filter(({ entry }) =>
@@ -3182,10 +3186,13 @@ assert(
   "Session outputs must survive restarts through revisioned reconstruction and invalidate with session runtime state"
 );
 assert(
-  agentMemorySource.includes('MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v4"') &&
+  agentMemorySource.includes('MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v5"') &&
+    agentMemorySource.includes("USER_REQUIREMENT_EVIDENCE_SCHEMA") &&
+    agentMemorySource.includes("user_requirement_evidence") &&
     agentMemorySource.includes("mod extraction;") &&
     agentMemorySource.includes("mod ledger;") &&
     agentMemorySource.includes("mod recall;") &&
+    agentMemorySource.includes("mod requirement_scope;") &&
     agentMemorySource.includes("mod semantic;") &&
     agentMemorySource.includes("superseded_by") &&
     agentMemorySource.includes("extract_durable_memories") &&
@@ -3200,6 +3207,8 @@ assert(
     rustLib.includes("recall_project_memory_for_prompt") &&
     rustLib.includes("schedule_project_memory_vector_refresh") &&
     rustLib.includes("memory_lancedb_database_path_for") &&
+    memoryProjectionRuntimeSource.includes("memory_ledger_is_intrinsically_valid") &&
+    !memoryProjectionRuntimeSource.includes(".event_by_id(") &&
     rustLib.includes("MemoryStatsView") &&
     rustLib.includes('"Project memory recalled"') &&
     rustLib.includes('"Project memory utilization measured"') &&
@@ -3863,12 +3872,27 @@ assert(
 );
 assert(
   memoryBenchmarkSuite.schema === "cindx.memory-evaluation.v1" &&
-    memoryBenchmarkSuite.cases.length >= 8 &&
+    memoryBenchmarkSuite.version === 5 &&
+    memoryBenchmarkSuite.cases.length === 18 &&
+    [
+      "task-local-no-code",
+      "task-local-english-multiline",
+      "task-local-chinese-multiline",
+      "quoted-durable-example",
+      "credential-api-key",
+      "temporal-after-workflow",
+    ].every((id) =>
+      memoryBenchmarkSuite.cases.some(
+        (entry) => entry.id === id && entry.security === true
+      )
+    ) &&
     memoryEvaluationLabSource.includes("top_1_correct") &&
     memoryEvaluationLabSource.includes("recall_at_3_correct") &&
     memoryEvaluationLabSource.includes("trust_violations") &&
     memoryEvaluationLabSource.includes("dedup_failures") &&
     memoryEvaluationLabSource.includes("supersession_failures") &&
+    memoryEvaluationLabSource.includes("independently_verify_requirement") &&
+    memoryEvaluationLabSource.includes("semantic_laundering_failures") &&
     qualityGateManifest.profiles["ci-contract"].includes("memory-contract") &&
     agentEvaluationDoc.includes("Project Memory Gate"),
   "Project memory must have a versioned deterministic recall and trust-boundary gate"

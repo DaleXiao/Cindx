@@ -14,10 +14,9 @@ pub(crate) use agent_graph::{
 pub(crate) use agent_mcp::{McpCatalogService, McpServerConfig};
 pub(crate) use agent_memory::{
     build_restore_context_pack, build_session_checkpoint_at, conversation_memory_to_markdown,
-    extract_durable_memories, fuse_memory_recalls_at, memory_recalls_to_markdown,
-    merge_memory_records, recall_memories_at, record_memory_observed_uses, record_memory_recalls,
-    CheckpointOptions, MemoryKind, MemoryLedger, RestoreContextPack, SessionCheckpoint,
-    MEMORY_LEDGER_SCHEMA,
+    fuse_memory_recalls_at, memory_recalls_to_markdown, recall_memories_at,
+    record_memory_observed_uses, record_memory_recalls, CheckpointOptions, MemoryKind,
+    MemoryLedger, RestoreContextPack, SessionCheckpoint,
 };
 #[cfg(test)]
 pub(crate) use agent_rag::RagAdapter;

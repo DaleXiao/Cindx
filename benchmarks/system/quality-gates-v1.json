@@ -199,7 +199,13 @@
         { "path": "recall_at_3_correct", "equals_path": "cases" },
         { "path": "trust_violations", "equals": 0 },
         { "path": "dedup_failures", "equals": 0 },
-        { "path": "supersession_failures", "equals": 0 }
+        { "path": "supersession_failures", "equals": 0 },
+        { "path": "false_positive_failures", "equals": 0 },
+        { "path": "false_persistence_failures", "equals": 0 },
+        { "path": "verbatim_evidence_failures", "equals": 0 },
+        { "path": "semantic_laundering_failures", "equals": 0 },
+        { "path": "security_cases", "equals": 6 },
+        { "path": "security_case_failures", "equals": 0 }
       ]
     },
     {

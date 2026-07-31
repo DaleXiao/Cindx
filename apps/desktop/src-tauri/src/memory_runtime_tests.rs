@@ -1,34 +1,32 @@
 use super::*;
+use crate::{
+    runtime_constants::AGENT_MEMORY_READ_MODEL_NAMESPACE, runtime_values::phase16_task_id,
+};
+use agent_memory::{extract_durable_memories, MEMORY_LEDGER_SCHEMA};
 
 fn prepared_recall(project_id: &str) -> (MemoryLedger, PreparedMemoryRecall) {
-    let record = agent_memory::MemoryRecord {
-        id: "memory-preparation-atomic".to_string(),
-        fingerprint: "memory-preparation-atomic-fingerprint".to_string(),
-        kind: agent_memory::MemoryKind::Requirement,
-        trust: agent_memory::MemoryTrust::UserStated,
-        content: "Keep preparation persistence atomic".to_string(),
-        importance: 5,
-        provenance: agent_memory::MemoryProvenance {
-            project_id: project_id.to_string(),
-            session_id: "session-preparation-atomic".to_string(),
-            event_id: "event-preparation-atomic".to_string(),
-            agent_run_id: Some("run-preparation-atomic".to_string()),
-            sequence: 1,
-            timestamp_ms: 1,
-        },
-        source_event_ids: vec!["event-preparation-atomic".to_string()],
-        source_session_ids: vec!["session-preparation-atomic".to_string()],
-        created_at_ms: 1,
-        updated_at_ms: 1,
-        recall_count: 0,
-        last_recalled_at_ms: None,
-        observed_use_count: 0,
-        last_observed_use_at_ms: None,
-        superseded_by: None,
-        superseded_at_ms: None,
+    let content = "Always keep preparation persistence atomic";
+    let source = Event {
+        id: EventId("event-preparation-atomic".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 1,
+        timestamp_ms: 1,
+        kind: EventKind::MessageAdded,
+        summary: "user message".to_string(),
+        metadata: durable_requirement_metadata(
+            project_id,
+            "session-preparation-atomic",
+            "run-preparation-atomic",
+            content,
+        ),
     };
+    let mut record =
+        extract_durable_memories(&[source], project_id, "session-preparation-atomic").remove(0);
+    record.importance = 5;
     let mut ledger = MemoryLedger::new(project_id);
     ledger.records.push(record.clone());
+    ledger.revision = 1;
+    ledger.event_count = 1;
     let prepared = PreparedMemoryRecall {
         project_id: project_id.to_string(),
         ledger_projection_sha256: memory_vector_projection_sha256(&ledger),
@@ -50,6 +48,57 @@ fn prepared_recall(project_id: &str) -> (MemoryLedger, PreparedMemoryRecall) {
     (ledger, prepared)
 }
 
+fn append_prepared_recall_source(store: &mut SqliteStore, project_id: &str) {
+    append_durable_memory_event_at(
+        store,
+        "event-preparation-atomic",
+        1,
+        EventKind::MessageAdded,
+        "user message",
+        durable_requirement_metadata(
+            project_id,
+            "session-preparation-atomic",
+            "run-preparation-atomic",
+            "Always keep preparation persistence atomic",
+        ),
+    );
+}
+
+#[test]
+fn memory_rag_index_excludes_unverified_and_invalid_trust_records() {
+    let (mut ledger, _) = prepared_recall("project-memory-rag-trust");
+    let valid = ledger.records[0].clone();
+    let mut missing_evidence = valid.clone();
+    missing_evidence.id = "memory-missing-evidence".to_string();
+    missing_evidence.fingerprint = "fingerprint-missing-evidence".to_string();
+    missing_evidence.user_requirement_evidence.clear();
+    let mut task_local = valid.clone();
+    task_local.id = "memory-task-local".to_string();
+    task_local.fingerprint = "fingerprint-task-local".to_string();
+    task_local.user_requirement_evidence[0].scope = agent_memory::MemoryRequirementScope::TaskLocal;
+    let mut paraphrased = valid.clone();
+    paraphrased.id = "memory-model-paraphrase".to_string();
+    paraphrased.fingerprint = "fingerprint-model-paraphrase".to_string();
+    paraphrased.user_requirement_evidence[0].origin =
+        agent_memory::MemoryClaimOrigin::ModelParaphrased;
+    let mut invalid_kind = valid.clone();
+    invalid_kind.id = "memory-invalid-kind".to_string();
+    invalid_kind.fingerprint = "fingerprint-invalid-kind".to_string();
+    invalid_kind.kind = MemoryKind::Evidence;
+    ledger.records = vec![
+        valid.clone(),
+        missing_evidence,
+        task_local,
+        paraphrased,
+        invalid_kind,
+    ];
+
+    let index = memory_rag_index(&ledger);
+    assert_eq!(index.stats.chunks_indexed, 1);
+    assert_eq!(index.chunks.len(), 1);
+    assert_eq!(index.chunks[0].id, valid.id);
+}
+
 #[test]
 fn preparation_transaction_commits_or_rolls_back_progress_recall_and_ledger_together() {
     let mut store = SqliteStore::in_memory().expect("store should open");
@@ -69,6 +118,7 @@ fn preparation_transaction_commits_or_rolls_back_progress_recall_and_ledger_toge
     .into_iter()
     .collect::<Metadata>();
     let (ledger, prepared) = prepared_recall(project_id);
+    append_prepared_recall_source(&mut store, project_id);
     save_project_memory_ledger(&mut store, &ledger).expect("memory ledger should seed");
 
     let failed = store.with_immediate_transaction(|transaction| {
@@ -83,10 +133,13 @@ fn preparation_transaction_commits_or_rolls_back_progress_recall_and_ledger_toge
         Err::<(), _>(StorageError::new("injected preparation failure"))
     });
     assert!(failed.is_err());
-    assert!(store
-        .list_by_task(&task_id)
-        .expect("events should load")
-        .is_empty());
+    assert_eq!(
+        store
+            .list_by_task(&task_id)
+            .expect("events should load")
+            .len(),
+        1
+    );
     assert_eq!(
         load_project_memory_ledger(&mut store, project_id)
             .expect("memory ledger should load")
@@ -110,12 +163,12 @@ fn preparation_transaction_commits_or_rolls_back_progress_recall_and_ledger_toge
     let events = store
         .list_by_task(&task_id)
         .expect("events should load after commit");
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[0].summary, "Starting execution");
-    assert_eq!(events[1].summary, "Project memory recalled");
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[1].summary, "Starting execution");
+    assert_eq!(events[2].summary, "Project memory recalled");
     let committed = load_project_memory_ledger(&mut store, project_id)
         .expect("committed memory ledger should load");
-    assert_eq!(committed.revision, events[1].sequence);
+    assert_eq!(committed.revision, events[2].sequence);
     assert_eq!(
         committed
             .records
@@ -139,6 +192,7 @@ fn preparation_rejects_a_memory_snapshot_that_changed_before_handoff() {
     .into_iter()
     .collect::<Metadata>();
     let (mut ledger, prepared) = prepared_recall(project_id);
+    append_prepared_recall_source(&mut store, project_id);
     save_project_memory_ledger(&mut store, &ledger).expect("memory ledger should seed");
     let mut runtime = start_agent_loop(
         task_id.clone(),
@@ -154,9 +208,16 @@ fn preparation_rejects_a_memory_snapshot_that_changed_before_handoff() {
     let control = AgentRunControl::new("pro");
     assert!(control.begin_preparation());
 
-    ledger.records[0].content = "A newer requirement replaced this memory".to_string();
-    ledger.records[0].fingerprint = "newer-memory-fingerprint".to_string();
-    save_project_memory_ledger(&mut store, &ledger).expect("newer ledger should persist");
+    let newer_content = "Always keep the newer preparation requirement active";
+    append_durable_requirement_run(
+        &mut store,
+        project_id,
+        "session-preparation-newer",
+        "run-preparation-newer",
+        newer_content,
+    );
+    ledger = load_project_memory_ledger(&mut store, project_id)
+        .expect("newer authoritative ledger should persist");
 
     let result = control.commit_preparation_with(0, || {
         store.with_immediate_transaction(|transaction| {
@@ -182,12 +243,16 @@ fn preparation_rejects_a_memory_snapshot_that_changed_before_handoff() {
     assert!(store
         .list_by_task(&task_id)
         .expect("rolled back events should load")
-        .is_empty());
+        .iter()
+        .all(|event| event.summary != "Starting execution"
+            && event.summary != "Project memory recalled"));
     assert_eq!(
         load_project_memory_ledger(&mut store, project_id)
             .expect("newer ledger should remain")
-            .records[0]
-            .recall_count,
+            .records
+            .iter()
+            .map(|record| record.recall_count)
+            .sum::<u64>(),
         0
     );
 
@@ -225,7 +290,7 @@ fn preparation_rejects_a_memory_snapshot_that_changed_before_handoff() {
     assert!(runtime
         .messages
         .iter()
-        .any(|message| { message.content == "A newer requirement replaced this memory" }));
+        .any(|message| { message.content == newer_content }));
 }
 
 fn append_durable_memory_event_at(
@@ -296,9 +361,11 @@ fn append_durable_requirement_run(
     run_id: &str,
     content: &str,
 ) {
+    let requirement_event_id = format!("event-memory-requirement-{run_id}");
+    let completed_event_id = format!("event-memory-completed-{run_id}");
     append_durable_memory_event_at(
         store,
-        "event-memory-requirement",
+        &requirement_event_id,
         100,
         EventKind::MessageAdded,
         "user message",
@@ -306,7 +373,7 @@ fn append_durable_requirement_run(
     );
     append_durable_memory_event_at(
         store,
-        "event-memory-completed",
+        &completed_event_id,
         200,
         EventKind::TaskStatusChanged,
         "Agent task completed",
@@ -318,6 +385,164 @@ fn append_durable_requirement_run(
         ]
         .into_iter()
         .collect(),
+    );
+}
+
+#[test]
+fn semantic_checkpoint_cannot_reintroduce_task_local_memory() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let project_id = "project-task-local-memory";
+    let session_id = "session-task-local-memory";
+    let run_id = "run-task-local-memory";
+    let content = "本次只做评审，不要修改任何代码";
+    append_durable_memory_event_at(
+        &mut store,
+        "event-task-local-user",
+        100,
+        EventKind::MessageAdded,
+        "user message",
+        durable_requirement_metadata(project_id, session_id, run_id, content),
+    );
+    append_durable_memory_event_at(
+        &mut store,
+        "event-task-local-completed",
+        200,
+        EventKind::TaskStatusChanged,
+        "Agent task completed",
+        [
+            ("project_id".to_string(), project_id.to_string()),
+            ("session_id".to_string(), session_id.to_string()),
+            ("agent_run_id".to_string(), run_id.to_string()),
+            ("steer_epoch".to_string(), "0".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+
+    let terminal_ledger = load_project_memory_ledger(&mut store, project_id)
+        .expect("terminal memory projection should load");
+    assert!(terminal_ledger.records.is_empty());
+
+    let candidates = serde_json::json!({
+        "schema": agent_memory::SEMANTIC_MEMORY_BATCH_SCHEMA,
+        "candidates": [{
+            "kind": "requirement",
+            "content": content,
+            "importance": 100,
+            "source_event_ids": ["event-task-local-user"],
+        }],
+    })
+    .to_string();
+    append_durable_memory_event_at(
+        &mut store,
+        "event-task-local-semantic",
+        300,
+        EventKind::TaskStatusChanged,
+        "Semantic memory candidates accepted",
+        [
+            ("project_id".to_string(), project_id.to_string()),
+            ("session_id".to_string(), session_id.to_string()),
+            ("agent_run_id".to_string(), run_id.to_string()),
+            ("steer_epoch".to_string(), "0".to_string()),
+            ("memory_candidates_json".to_string(), candidates),
+        ]
+        .into_iter()
+        .collect(),
+    );
+
+    let semantic_ledger = load_project_memory_ledger(&mut store, project_id)
+        .expect("semantic memory projection should load");
+    assert!(semantic_ledger.records.is_empty());
+}
+
+#[test]
+fn legacy_v4_read_model_rebuilds_without_unverified_requirements() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let project_id = "project-memory-v4-trust-rebuild";
+    let session_id = "session-v4-unverified";
+    let durable_content = "Always preserve explicit deletion confirmation";
+    append_durable_requirement_run(
+        &mut store,
+        project_id,
+        session_id,
+        "run-v4-durable",
+        durable_content,
+    );
+    append_durable_requirement_run(
+        &mut store,
+        project_id,
+        session_id,
+        "run-v4-task-local",
+        "For this task, do not modify files",
+    );
+    let mut legacy = load_project_memory_ledger(&mut store, project_id)
+        .expect("current ledger should seed from authoritative events");
+    assert_eq!(legacy.records.len(), 1);
+    legacy.schema = "cindx.memory-ledger.v4".to_string();
+    legacy.records[0].user_requirement_evidence.clear();
+    save_project_memory_ledger(&mut store, &legacy).expect("legacy read model should seed");
+
+    let rebuilt = load_project_memory_ledger_inner(&mut store, project_id)
+        .expect("legacy read model should rebuild safely");
+    assert!(rebuilt.needs_persist);
+    assert_eq!(rebuilt.ledger.schema, MEMORY_LEDGER_SCHEMA);
+    assert_eq!(rebuilt.ledger.records.len(), 1);
+    assert_eq!(rebuilt.ledger.records[0].content, durable_content);
+    assert!(rebuilt.ledger.records[0].has_verified_user_requirement());
+    assert!(
+        persist_project_memory_snapshot_if_current(&mut store, &rebuilt.ledger)
+            .expect("migrated ledger should persist")
+    );
+
+    let cached = load_project_memory_ledger_inner(&mut store, project_id)
+        .expect("migrated read model should load from cache");
+    assert!(!cached.needs_persist);
+    assert_eq!(cached.ledger.records.len(), 1);
+}
+
+#[test]
+fn cached_requirement_sources_cannot_cross_projects_or_trust_kinds() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    append_durable_requirement_run(
+        &mut store,
+        "project-source-a",
+        "session-source-a",
+        "run-source-a",
+        "Always keep project A exports local",
+    );
+    append_durable_requirement_run(
+        &mut store,
+        "project-source-b",
+        "session-source-b",
+        "run-source-b",
+        "Always keep project B exports encrypted",
+    );
+    let source = load_project_memory_ledger(&mut store, "project-source-a")
+        .expect("source ledger should load");
+    let expected = load_project_memory_ledger(&mut store, "project-source-b")
+        .expect("target ledger should load");
+
+    let mut copied = expected.clone();
+    copied.records = source.records.clone();
+    save_project_memory_ledger(&mut store, &copied).expect("copied cache should seed");
+    let rebuilt = load_project_memory_ledger(&mut store, "project-source-b")
+        .expect("cross-project cache should rebuild");
+    assert_eq!(rebuilt.records.len(), 1);
+    assert_eq!(
+        rebuilt.records[0].content,
+        "Always keep project B exports encrypted"
+    );
+
+    let mut invalid_kind = rebuilt.clone();
+    invalid_kind.records[0].kind = MemoryKind::Evidence;
+    save_project_memory_ledger(&mut store, &invalid_kind).expect("invalid cache should seed");
+    let repaired = load_project_memory_ledger(&mut store, "project-source-b")
+        .expect("invalid kind/trust cache should rebuild");
+    assert_eq!(repaired.records.len(), 1);
+    assert_eq!(repaired.records[0].kind, MemoryKind::Requirement);
+    assert_eq!(
+        repaired.records[0].trust,
+        agent_memory::MemoryTrust::UserStated
     );
 }
 

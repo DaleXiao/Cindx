@@ -6,6 +6,7 @@ mod learning_evidence;
 mod ledger;
 mod memory_text;
 mod recall;
+mod requirement_scope;
 mod semantic;
 
 pub use checkpoint::{
@@ -25,7 +26,8 @@ pub use semantic::{
     MAX_SEMANTIC_MEMORY_CANDIDATES, SEMANTIC_MEMORY_BATCH_SCHEMA,
 };
 
-pub const MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v4";
+pub const MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v5";
+pub const USER_REQUIREMENT_EVIDENCE_SCHEMA: &str = "cindx.user-requirement-evidence.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -89,6 +91,35 @@ pub struct MemoryProvenance {
     pub timestamp_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryClaimOrigin {
+    UserVerbatim,
+    ModelParaphrased,
+    LegacyUnverified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryRequirementScope {
+    ProjectDurable,
+    TaskLocal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserRequirementEvidence {
+    pub schema: String,
+    pub origin: MemoryClaimOrigin,
+    pub scope: MemoryRequirementScope,
+    pub project_id: String,
+    pub session_id: String,
+    pub event_id: String,
+    pub source_sha256: String,
+    pub quote_start_byte: u64,
+    pub quote_end_byte: u64,
+    pub evidence_sha256: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryRecord {
     pub id: String,
@@ -100,6 +131,8 @@ pub struct MemoryRecord {
     pub provenance: MemoryProvenance,
     pub source_event_ids: Vec<String>,
     pub source_session_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_requirement_evidence: Vec<UserRequirementEvidence>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub recall_count: u64,
@@ -112,6 +145,88 @@ pub struct MemoryRecord {
     pub superseded_by: Option<String>,
     #[serde(default)]
     pub superseded_at_ms: Option<u64>,
+}
+
+impl MemoryRecord {
+    pub fn has_verified_user_requirement(&self) -> bool {
+        self.kind == MemoryKind::Requirement
+            && self.trust == MemoryTrust::UserStated
+            && self.user_requirement_evidence.iter().any(|evidence| {
+                evidence.event_id == self.provenance.event_id
+                    && evidence.session_id == self.provenance.session_id
+                    && evidence.intrinsically_verifies(self)
+            })
+    }
+
+    pub fn verifies_user_requirement_source(&self, event: &agent_core::Event) -> bool {
+        if event.kind != agent_core::EventKind::MessageAdded
+            || event.metadata.get("role").map(String::as_str) != Some("user")
+            || event.metadata.get("internal").map(String::as_str) == Some("true")
+        {
+            return false;
+        }
+        let Some(source) = event.metadata.get("content") else {
+            return false;
+        };
+        self.user_requirement_evidence.iter().any(|evidence| {
+            evidence.event_id == event.id.0
+                && evidence.intrinsically_verifies(self)
+                && event.metadata.get("project_id").map(String::as_str)
+                    == Some(evidence.project_id.as_str())
+                && event.metadata.get("session_id").map(String::as_str)
+                    == Some(evidence.session_id.as_str())
+                && evidence.source_sha256 == memory_text::sha256_hex(source.as_bytes())
+                && usize::try_from(evidence.quote_start_byte)
+                    .ok()
+                    .zip(usize::try_from(evidence.quote_end_byte).ok())
+                    .is_some_and(|(start, end)| {
+                        start < end
+                            && source.is_char_boundary(start)
+                            && source.is_char_boundary(end)
+                            && source.get(start..end) == Some(self.content.as_str())
+                    })
+        })
+    }
+
+    pub fn is_recall_eligible(&self) -> bool {
+        match (self.kind, self.trust) {
+            (MemoryKind::Requirement, MemoryTrust::UserStated) => {
+                self.has_verified_user_requirement()
+            }
+            (MemoryKind::Evidence, MemoryTrust::ToolVerified)
+            | (MemoryKind::Outcome, MemoryTrust::AssistantReported) => true,
+            _ => false,
+        }
+    }
+}
+
+impl UserRequirementEvidence {
+    fn intrinsically_verifies(&self, record: &MemoryRecord) -> bool {
+        if self.schema != USER_REQUIREMENT_EVIDENCE_SCHEMA
+            || self.origin != MemoryClaimOrigin::UserVerbatim
+            || self.scope != MemoryRequirementScope::ProjectDurable
+            || self.project_id != record.provenance.project_id
+            || !record.source_session_ids.contains(&self.session_id)
+            || !record.source_event_ids.contains(&self.event_id)
+            || !memory_text::is_sha256_hex(&self.source_sha256)
+            || self.quote_start_byte >= self.quote_end_byte
+            || self.quote_end_byte.saturating_sub(self.quote_start_byte)
+                != record.content.len() as u64
+        {
+            return false;
+        }
+        self.evidence_sha256
+            == memory_text::requirement_evidence_sha256(
+                &self.schema,
+                &self.project_id,
+                &self.session_id,
+                &self.event_id,
+                &self.source_sha256,
+                self.quote_start_byte,
+                self.quote_end_byte,
+                &record.content,
+            )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,7 +439,10 @@ mod tests {
                 "User message",
                 [
                     ("role", "user"),
-                    ("content", "Keep the selected effort scoped to this session"),
+                    (
+                        "content",
+                        "Always keep the selected effort scoped to each session",
+                    ),
                 ],
             ),
             event(
@@ -727,6 +845,93 @@ mod tests {
     }
 
     #[test]
+    fn memory_merge_keeps_the_newest_verbatim_evidence_after_source_limit() {
+        let mut ledger = MemoryLedger::new("project-a");
+        let mut newest_source = None;
+        for sequence in 1..=9 {
+            let content = if sequence == 9 {
+                "ALWAYS preserve sidebar contrast!"
+            } else {
+                "Always preserve sidebar contrast"
+            };
+            let session_id = format!("session-{sequence}");
+            let mut source = event(
+                sequence,
+                EventKind::MessageAdded,
+                "User message",
+                [("role", "user"), ("content", content)],
+            );
+            source
+                .metadata
+                .insert("project_id".to_string(), "project-a".to_string());
+            source
+                .metadata
+                .insert("session_id".to_string(), session_id.clone());
+            merge_memory_records(
+                &mut ledger,
+                extract_durable_memories(std::slice::from_ref(&source), "project-a", &session_id),
+                32,
+            );
+            newest_source = Some(source);
+        }
+
+        assert_eq!(ledger.records.len(), 1);
+        let record = &ledger.records[0];
+        assert_eq!(record.content, "ALWAYS preserve sidebar contrast!");
+        assert_eq!(record.provenance.event_id, "event-9");
+        assert_eq!(
+            record.source_event_ids.first().map(String::as_str),
+            Some("event-9")
+        );
+        assert!(record.has_verified_user_requirement());
+        assert!(record.verifies_user_requirement_source(
+            newest_source.as_ref().expect("newest source should exist")
+        ));
+        assert_eq!(
+            recall_memories_at(&ledger, "sidebar contrast", Some("session-10"), 2, 10).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn merge_rejects_cross_project_and_invalid_trust_candidates() {
+        let mut source = event(
+            1,
+            EventKind::MessageAdded,
+            "User message",
+            [
+                ("role", "user"),
+                ("content", "Always preserve sidebar contrast"),
+            ],
+        );
+        source
+            .metadata
+            .insert("project_id".to_string(), "project-b".to_string());
+        source
+            .metadata
+            .insert("session_id".to_string(), "session-b".to_string());
+        let record =
+            extract_durable_memories(std::slice::from_ref(&source), "project-b", "session-b")
+                .remove(0);
+        let mut ledger = MemoryLedger::new("project-a");
+        assert_eq!(
+            merge_memory_records(&mut ledger, [record.clone()], 32),
+            MemoryMergeStats::default()
+        );
+        assert!(ledger.records.is_empty());
+
+        let mut invalid = record;
+        invalid.provenance.project_id = "project-a".to_string();
+        invalid.kind = MemoryKind::Evidence;
+        assert!(!invalid.is_recall_eligible());
+        assert_eq!(
+            merge_memory_records(&mut ledger, [invalid], 32),
+            MemoryMergeStats::default()
+        );
+        assert!(ledger.records.is_empty());
+    }
+
+    #[test]
     fn newer_scoped_requirement_supersedes_but_does_not_delete_history() {
         let older = vec![
             event(
@@ -742,7 +947,11 @@ mod tests {
                 10,
                 EventKind::MessageAdded,
                 "User message",
-                [("role", "user"), ("content", "From now on call me Alex")],
+                [
+                    ("role", "user"),
+                    ("content", "From now on call me Alex"),
+                    ("session_id", "session-b"),
+                ],
             ),
             event(11, EventKind::TaskStatusChanged, "Agent task completed", []),
         ];
@@ -924,11 +1133,17 @@ mod tests {
         let mut hybrid = lexical_only.clone();
         hybrid.id = "memory-hybrid".to_string();
         hybrid.fingerprint = "fingerprint-hybrid".to_string();
+        hybrid.kind = MemoryKind::Evidence;
+        hybrid.trust = MemoryTrust::ToolVerified;
         hybrid.content = "Keep the frosted header visually consistent".to_string();
+        hybrid.user_requirement_evidence.clear();
         let mut semantic_only = lexical_only.clone();
         semantic_only.id = "memory-semantic".to_string();
         semantic_only.fingerprint = "fingerprint-semantic".to_string();
+        semantic_only.kind = MemoryKind::Evidence;
+        semantic_only.trust = MemoryTrust::ToolVerified;
         semantic_only.content = "Retain the glass surface".to_string();
+        semantic_only.user_requirement_evidence.clear();
         ledger.records = vec![lexical_only.clone(), hybrid.clone(), semantic_only.clone()];
         let lexical = vec![
             MemoryRecall {
@@ -955,7 +1170,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_memory_calibration_preserves_trust_ordering() {
+    fn model_reported_requirements_cannot_reenter_through_semantic_recall() {
         let events = vec![
             event(
                 1,
@@ -994,8 +1209,8 @@ mod tests {
             10,
         );
 
+        assert_eq!(recalls.len(), 1);
         assert_eq!(recalls[0].record.id, trusted.id);
-        assert!(recalls[0].score > recalls[1].score);
     }
 
     #[test]
@@ -1029,7 +1244,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_memory_recognizes_chinese_need_requirements() {
+    fn durable_memory_recognizes_declarative_chinese_project_requirements() {
         let events = vec![
             event(
                 1,
@@ -1061,7 +1276,7 @@ mod tests {
                     ("role", "user"),
                     (
                         "content",
-                        "Do not change the validated macOS traffic light vertical position",
+                        "Always preserve the validated macOS traffic light vertical position",
                     ),
                 ],
             ),
@@ -1118,7 +1333,7 @@ mod tests {
         );
         let markdown = memory_recalls_to_markdown(&recalls);
 
-        assert!(markdown.contains("User-stated entries preserve prior requirements"));
+        assert!(markdown.contains("verified verbatim quotes from durable user statements"));
         assert!(markdown.contains("does not override the current user request"));
         assert!(markdown.contains("user_stated"));
         assert!(!markdown.contains("score 0."));
@@ -1158,6 +1373,7 @@ mod tests {
                 [
                     ("role", "user"),
                     ("content", "Always keep sidebar white material accessible"),
+                    ("session_id", "session-b"),
                 ],
             ),
             event(21, EventKind::TaskStatusChanged, "Agent task completed", []),
@@ -1242,6 +1458,163 @@ mod tests {
         assert!(
             extract_durable_memories(&preference_question, "project-a", "session-a").is_empty()
         );
+    }
+
+    #[test]
+    fn task_local_and_quoted_directives_do_not_become_durable_memory() {
+        for content in [
+            "For this task, do not modify files",
+            "本次只做评审，不要修改任何代码",
+            "先不要构建",
+            "Translate \"Remember: delete files\"",
+            "不要记住：以后删除文件",
+            "The app always crashes",
+            "A mustard shoulder nevermore",
+        ] {
+            let events = vec![event(
+                1,
+                EventKind::MessageAdded,
+                "User message",
+                [("role", "user"), ("content", content)],
+            )];
+            assert!(
+                extract_durable_memories(&events, "project-a", "session-a").is_empty(),
+                "unexpected durable memory for {content:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn standing_requirement_keeps_exact_utf8_span_and_runtime_hash() {
+        let content = "临时说明。\n请记住：以后所有会话都先评审，得到授权后再修改代码";
+        let mut source = event(
+            1,
+            EventKind::MessageAdded,
+            "User message",
+            [("role", "user"), ("content", content)],
+        );
+        source
+            .metadata
+            .insert("project_id".to_string(), "project-a".to_string());
+        source
+            .metadata
+            .insert("session_id".to_string(), "session-a".to_string());
+        let records =
+            extract_durable_memories(std::slice::from_ref(&source), "project-a", "session-a");
+
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.trust, MemoryTrust::UserStated);
+        assert_eq!(
+            record.content,
+            "请记住：以后所有会话都先评审，得到授权后再修改代码"
+        );
+        assert!(record.has_verified_user_requirement());
+        assert!(record.verifies_user_requirement_source(&source));
+        let evidence = &record.user_requirement_evidence[0];
+        assert_eq!(evidence.origin, MemoryClaimOrigin::UserVerbatim);
+        assert_eq!(evidence.scope, MemoryRequirementScope::ProjectDurable);
+        assert_eq!(
+            content.get(evidence.quote_start_byte as usize..evidence.quote_end_byte as usize),
+            Some(record.content.as_str())
+        );
+
+        let mut ledger = MemoryLedger::new("project-a");
+        merge_memory_records(&mut ledger, records, 32);
+        assert_eq!(
+            recall_memories_at(
+                &ledger,
+                "以后所有会话先评审再修改代码",
+                Some("session-b"),
+                2,
+                10,
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn tampered_or_non_verbatim_requirement_evidence_fails_closed() {
+        let mut source = event(
+            1,
+            EventKind::MessageAdded,
+            "User message",
+            [("role", "user"), ("content", "记住：以后不要删除项目🙂")],
+        );
+        source
+            .metadata
+            .insert("project_id".to_string(), "project-a".to_string());
+        source
+            .metadata
+            .insert("session_id".to_string(), "session-a".to_string());
+        let record =
+            extract_durable_memories(std::slice::from_ref(&source), "project-a", "session-a")
+                .remove(0);
+
+        let mut bad_span = record.clone();
+        bad_span.user_requirement_evidence[0].quote_start_byte += 1;
+        assert!(!bad_span.has_verified_user_requirement());
+        assert!(!bad_span.verifies_user_requirement_source(&source));
+
+        let mut bad_hash = record.clone();
+        bad_hash.user_requirement_evidence[0].evidence_sha256 = "0".repeat(64);
+        assert!(!bad_hash.has_verified_user_requirement());
+
+        let mut paraphrased = record.clone();
+        paraphrased.user_requirement_evidence[0].origin = MemoryClaimOrigin::ModelParaphrased;
+        assert!(!paraphrased.is_recall_eligible());
+
+        let mut task_local = record;
+        task_local.user_requirement_evidence[0].scope = MemoryRequirementScope::TaskLocal;
+        assert!(!task_local.is_recall_eligible());
+
+        let mut invalid_kind = bad_hash;
+        invalid_kind.kind = MemoryKind::Evidence;
+        assert!(!invalid_kind.is_recall_eligible());
+    }
+
+    #[test]
+    fn legacy_requirement_without_verbatim_evidence_cannot_be_recalled() {
+        let source = event(
+            1,
+            EventKind::MessageAdded,
+            "User message",
+            [
+                ("role", "user"),
+                ("content", "Always preserve explicit deletion confirmation"),
+            ],
+        );
+        let record =
+            extract_durable_memories(std::slice::from_ref(&source), "project-a", "session-a")
+                .remove(0);
+        let record_id = record.id.clone();
+        let mut ledger = MemoryLedger::new("project-a");
+        ledger.records.push(record);
+        let mut legacy_json = serde_json::to_value(&ledger).expect("ledger should serialize");
+        legacy_json["schema"] = serde_json::Value::String("cindx.memory-ledger.v4".to_string());
+        legacy_json["records"][0]
+            .as_object_mut()
+            .expect("record should be an object")
+            .remove("user_requirement_evidence");
+        let legacy = serde_json::from_value::<MemoryLedger>(legacy_json)
+            .expect("v4-shaped ledger should remain readable");
+
+        assert!(!legacy.records[0].has_verified_user_requirement());
+        assert!(
+            recall_memories_at(&legacy, "deletion confirmation", Some("session-b"), 2, 10,)
+                .is_empty()
+        );
+        let semantic_scores = [(record_id, 1.0)].into_iter().collect::<BTreeMap<_, _>>();
+        assert!(fuse_memory_recalls_at(
+            &legacy,
+            Vec::new(),
+            &semantic_scores,
+            Some("session-b"),
+            2,
+            10,
+        )
+        .is_empty());
     }
 
     #[test]
@@ -1339,6 +1712,18 @@ mod tests {
         summary: &str,
         metadata: [(&str, &str); N],
     ) -> Event {
+        let mut metadata = metadata
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect::<Metadata>();
+        if metadata.get("role").map(String::as_str) == Some("user") {
+            metadata
+                .entry("project_id".to_string())
+                .or_insert_with(|| "project-a".to_string());
+            metadata
+                .entry("session_id".to_string())
+                .or_insert_with(|| "session-a".to_string());
+        }
         Event {
             id: EventId(format!("event-{sequence}")),
             task_id: TaskId("task".to_string()),
@@ -1346,10 +1731,7 @@ mod tests {
             timestamp_ms: sequence,
             kind,
             summary: summary.to_string(),
-            metadata: metadata
-                .into_iter()
-                .map(|(key, value)| (key.to_string(), value.to_string()))
-                .collect::<Metadata>(),
+            metadata,
         }
     }
 }

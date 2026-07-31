@@ -1,9 +1,18 @@
 use crate::learning_evidence::{
     is_completed_agent_event, trusted_outcome_evidence, TrustedOutcomeEvidence,
 };
-use crate::memory_text::{first_metadata_value, normalize_memory_text, sanitize_line, truncate};
+use crate::memory_text::{
+    first_metadata_value, normalize_memory_text, requirement_evidence_sha256, sanitize_line,
+    sha256_hex, truncate,
+};
+use crate::requirement_scope::{
+    contains_instruction_override, durable_user_requirement_spans, UserRequirementSpan,
+};
 use crate::semantic::{parse_semantic_memory_batch, validate_semantic_memory_batch};
-use crate::{MemoryKind, MemoryProvenance, MemoryRecord, MemoryTrust};
+use crate::{
+    MemoryClaimOrigin, MemoryKind, MemoryProvenance, MemoryRecord, MemoryRequirementScope,
+    MemoryTrust, UserRequirementEvidence, USER_REQUIREMENT_EVIDENCE_SCHEMA,
+};
 use agent_core::{Event, EventKind, EVENT_TYPE_METADATA_KEY};
 
 pub fn extract_durable_memories(
@@ -21,23 +30,22 @@ pub fn extract_durable_memories(
         if matches!(event.kind, EventKind::MessageAdded)
             && event.metadata.get("role").map(String::as_str) == Some("user")
             && event.metadata.get("internal").map(String::as_str) != Some("true")
+            && event.metadata.get("project_id").map(String::as_str) == Some(project_id)
+            && event.metadata.get("session_id").map(String::as_str) == Some(session_id)
         {
-            if let Some(content) = event
-                .metadata
-                .get("content")
-                .map(|content| truncate(&sanitize_line(content), 1_200))
-                .filter(|content| is_durable_requirement_content(content))
-            {
-                records.push(memory_record(
-                    MemoryKind::Requirement,
-                    MemoryTrust::UserStated,
-                    content,
-                    100,
-                    event,
-                    project_id,
-                    session_id,
-                    vec![event.id.0.clone()],
-                ));
+            if let Some(source) = event.metadata.get("content") {
+                let source_sha256 = sha256_hex(source.as_bytes());
+                for span in durable_user_requirement_spans(source) {
+                    records.push(user_requirement_memory_record_with_source_sha256(
+                        event,
+                        project_id,
+                        session_id,
+                        source,
+                        &source_sha256,
+                        span,
+                        100,
+                    ));
+                }
             }
         }
     }
@@ -170,6 +178,7 @@ pub(crate) fn memory_record(
         },
         source_event_ids,
         source_session_ids: vec![session_id.to_string()],
+        user_requirement_evidence: Vec::new(),
         created_at_ms: event.timestamp_ms,
         updated_at_ms: event.timestamp_ms,
         recall_count: 0,
@@ -179,6 +188,80 @@ pub(crate) fn memory_record(
         superseded_by: None,
         superseded_at_ms: None,
     }
+}
+
+pub(crate) fn user_requirement_memory_record(
+    event: &Event,
+    project_id: &str,
+    session_id: &str,
+    source: &str,
+    span: UserRequirementSpan,
+    importance: u8,
+) -> MemoryRecord {
+    let source_sha256 = sha256_hex(source.as_bytes());
+    user_requirement_memory_record_with_source_sha256(
+        event,
+        project_id,
+        session_id,
+        source,
+        &source_sha256,
+        span,
+        importance,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn user_requirement_memory_record_with_source_sha256(
+    event: &Event,
+    project_id: &str,
+    session_id: &str,
+    source: &str,
+    source_sha256: &str,
+    span: UserRequirementSpan,
+    importance: u8,
+) -> MemoryRecord {
+    let content = source
+        .get(span.start_byte..span.end_byte)
+        .expect("validated user requirement span must be a UTF-8 boundary")
+        .to_string();
+    let quote_start_byte = span.start_byte as u64;
+    let quote_end_byte = span.end_byte as u64;
+    let evidence_sha256 = requirement_evidence_sha256(
+        USER_REQUIREMENT_EVIDENCE_SCHEMA,
+        project_id,
+        session_id,
+        &event.id.0,
+        source_sha256,
+        quote_start_byte,
+        quote_end_byte,
+        &content,
+    );
+    let mut record = memory_record(
+        MemoryKind::Requirement,
+        MemoryTrust::UserStated,
+        content,
+        importance,
+        event,
+        project_id,
+        session_id,
+        vec![event.id.0.clone()],
+    );
+    record
+        .user_requirement_evidence
+        .push(UserRequirementEvidence {
+            schema: USER_REQUIREMENT_EVIDENCE_SCHEMA.to_string(),
+            origin: MemoryClaimOrigin::UserVerbatim,
+            scope: MemoryRequirementScope::ProjectDurable,
+            project_id: project_id.to_string(),
+            session_id: session_id.to_string(),
+            event_id: event.id.0.clone(),
+            source_sha256: source_sha256.to_string(),
+            quote_start_byte,
+            quote_end_byte,
+            evidence_sha256,
+        });
+    debug_assert!(record.verifies_user_requirement_source(event));
+    record
 }
 
 fn durable_tool_memory(event: &Event) -> Option<String> {
@@ -206,67 +289,6 @@ fn is_successful_tool_event(event: &Event) -> bool {
         && event.metadata.get("status").map(String::as_str) == Some("succeeded")
 }
 
-fn is_durable_requirement_content(content: &str) -> bool {
-    let normalized = normalize_memory_text(content);
-    if normalized.chars().count() < 6 {
-        return false;
-    }
-    if matches!(
-        normalized.as_str(),
-        "hello" | "hi" | "hey" | "你好" | "您好" | "在吗" | "谢谢" | "thanks"
-    ) {
-        return false;
-    }
-    let lower = content.to_lowercase();
-    let is_question = content.trim_end().ends_with(['?', '？']);
-    let has_explicit_memory_directive = [
-        "remember that",
-        "remember to",
-        "from now on call me",
-        "记住",
-        "以后叫我",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker));
-    if is_question && !has_explicit_memory_directive {
-        return false;
-    }
-    [
-        "remember",
-        "always",
-        "never",
-        "must",
-        "should",
-        "prefer",
-        "keep ",
-        "do not",
-        "don't",
-        "from now on",
-        "call me",
-        "my name",
-        "requirement",
-        "constraint",
-        "记住",
-        "以后",
-        "始终",
-        "一直",
-        "必须",
-        "不要",
-        "不能",
-        "不允许",
-        "偏好",
-        "称呼",
-        "叫我",
-        "我的名字",
-        "务必",
-        "保持",
-        "要求",
-        "需要",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
-}
-
 fn is_durable_outcome_content(
     content: &str,
     terminal_evidence: TrustedOutcomeEvidence,
@@ -285,24 +307,6 @@ fn is_durable_outcome_content(
     !normalize_memory_text(content).is_empty()
 }
 
-pub(crate) fn contains_instruction_override(content: &str) -> bool {
-    let lower = content.to_lowercase();
-    [
-        "ignore previous instruction",
-        "ignore all previous",
-        "ignore the system message",
-        "reveal the system prompt",
-        "developer message says",
-        "忽略之前的指令",
-        "忽略所有之前",
-        "忽略系统消息",
-        "泄露系统提示",
-        "显示系统提示词",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
-}
-
 fn memory_fingerprint(kind: MemoryKind, content: &str) -> String {
     let value = format!("{}:{}", kind.label(), normalize_memory_text(content));
     let mut hash = 0xcbf29ce484222325u64;
@@ -311,4 +315,100 @@ fn memory_fingerprint(kind: MemoryKind, content: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{hash:016x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::{EventId, Metadata, TaskId};
+
+    #[test]
+    fn trusted_extraction_requires_matching_project_and_session_metadata() {
+        let event = |project_id: Option<&str>, session_id: Option<&str>| {
+            let mut metadata = [
+                ("role".to_string(), "user".to_string()),
+                (
+                    "content".to_string(),
+                    "Always preserve explicit deletion confirmation".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect::<Metadata>();
+            if let Some(project_id) = project_id {
+                metadata.insert("project_id".to_string(), project_id.to_string());
+            }
+            if let Some(session_id) = session_id {
+                metadata.insert("session_id".to_string(), session_id.to_string());
+            }
+            Event {
+                id: EventId("event-scope".to_string()),
+                task_id: TaskId("task-scope".to_string()),
+                sequence: 1,
+                timestamp_ms: 1,
+                kind: EventKind::MessageAdded,
+                summary: "user message".to_string(),
+                metadata,
+            }
+        };
+
+        for source in [
+            event(None, None),
+            event(Some("project-a"), None),
+            event(Some("project-b"), Some("session-a")),
+            event(Some("project-a"), Some("session-b")),
+        ] {
+            assert!(extract_durable_memories(&[source], "project-a", "session-a").is_empty());
+        }
+
+        let source = event(Some("project-a"), Some("session-a"));
+        let records =
+            extract_durable_memories(std::slice::from_ref(&source), "project-a", "session-a");
+        assert_eq!(records.len(), 1);
+        assert!(records[0].verifies_user_requirement_source(&source));
+    }
+
+    #[test]
+    fn multi_span_extraction_reuses_one_source_digest_without_changing_evidence() {
+        let content = concat!(
+            "Long-term requirements:\n",
+            "1. The sidebar must remain stable.\n",
+            "2. The composer must remain responsive.\n",
+            "3. The session list must preserve unread state.\n",
+            "4. The model picker must remain accessible.\n",
+            "5. The knowledge graph must remain searchable.\n",
+            "6. Release builds must remain reproducible."
+        );
+        let source = Event {
+            id: EventId("event-multi-span".to_string()),
+            task_id: TaskId("task-multi-span".to_string()),
+            sequence: 1,
+            timestamp_ms: 1,
+            kind: EventKind::MessageAdded,
+            summary: "user message".to_string(),
+            metadata: [
+                ("role".to_string(), "user".to_string()),
+                ("content".to_string(), content.to_string()),
+                ("project_id".to_string(), "project-a".to_string()),
+                ("session_id".to_string(), "session-a".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let records =
+            extract_durable_memories(std::slice::from_ref(&source), "project-a", "session-a");
+        assert_eq!(records.len(), 6);
+        assert!(records
+            .iter()
+            .all(|record| record.verifies_user_requirement_source(&source)));
+        assert_eq!(
+            records
+                .iter()
+                .flat_map(|record| &record.user_requirement_evidence)
+                .map(|evidence| evidence.source_sha256.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            1
+        );
+    }
 }
