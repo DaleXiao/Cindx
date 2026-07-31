@@ -7,6 +7,7 @@ import * as projectMemory from "./memoryManagementModel";
 export const DESKTOP_VERSION = desktopPackage.version;
 
 export type * from "./tauriTypes";
+export type * from "./ragOperationModel";
 export type * from "./agentRunBudgetModel";
 export type * from "./memoryManagementModel";
 export { stageAgentAttachments } from "./attachmentIpc";
@@ -82,6 +83,7 @@ import type {
   AgentOutputArtifactView,
   ModelStreamDelta, VoiceSessionAnswer
 } from "./tauriTypes";
+import type { RagOperationProgress } from "./ragOperationModel";
 
 let browserPhase3State: Phase3State = {
   timeline: [],
@@ -2276,9 +2278,9 @@ export const ensureWorkspaceKnowledge = (): Promise<Phase7State> =>
   invoke<Phase7State>("ensure_workspace_knowledge").catch((error) => {
     requireBrowserPreviewFallback(error); return browserPhase7State;
   });
-export async function indexWorkspaceRag(): Promise<Phase7State> {
+export async function indexWorkspaceRag(operationId: string): Promise<Phase7State> {
   try {
-    return await invoke<Phase7State>("index_workspace_rag");
+    return await invoke<Phase7State>("index_workspace_rag", { input: { operationId } });
   } catch (error) {
     if (isTauriRuntime()) throw error;
     const now = Date.now();
@@ -2305,9 +2307,9 @@ export async function indexWorkspaceRag(): Promise<Phase7State> {
   }
 }
 
-export async function searchRag(query: string, limit = 6): Promise<Phase7State> {
+export async function searchRag(operationId: string, query: string, limit = 6): Promise<Phase7State> {
   try {
-    return await invoke<Phase7State>("search_rag", { input: { query, limit } });
+    return await invoke<Phase7State>("search_rag", { input: { operationId, query, limit } });
   } catch (error) {
     if (isTauriRuntime()) throw error;
     const now = Date.now();
@@ -2341,9 +2343,11 @@ export async function searchRag(query: string, limit = 6): Promise<Phase7State> 
   }
 }
 
-export async function answerWithRag(query: string, limit = 6): Promise<Phase7State> {
+export async function answerWithRag(operationId: string, query: string, limit = 6): Promise<Phase7State> {
   try {
-    return await invoke<Phase7State>("answer_with_rag", { input: { query, limit } });
+    return await invoke<Phase7State>("answer_with_rag", {
+      input: { operationId, query, limit }
+    });
   } catch (error) {
     if (isTauriRuntime()) throw error;
     const now = Date.now();
@@ -2363,6 +2367,15 @@ export async function answerWithRag(query: string, limit = 6): Promise<Phase7Sta
       lastError: "Browser preview cannot call the configured RAG answer model."
     };
     return browserPhase7State;
+  }
+}
+
+export async function cancelRagOperation(operationId: string): Promise<boolean> {
+  try {
+    return await invoke<boolean>("cancel_rag_operation", { operationId });
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
+    return false;
   }
 }
 
@@ -2507,6 +2520,17 @@ export async function subscribeToModelStream(
   try {
     return await listen<ModelStreamDelta>("model-stream-delta", (event) => {
       onDelta(event.payload);
+    });
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
+    return () => {};
+  }
+}
+
+export async function subscribeToRagOperationProgress(onProgress: (payload: RagOperationProgress) => void): Promise<() => void> {
+  try {
+    return await listen<RagOperationProgress>("rag-operation-progress", (event) => {
+      onProgress(event.payload);
     });
   } catch (error) {
     requireBrowserPreviewFallback(error);

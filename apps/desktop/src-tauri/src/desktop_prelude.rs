@@ -19,13 +19,13 @@ pub(crate) use agent_memory::{
     MemoryLedger, RestoreContextPack, SessionCheckpoint,
 };
 #[cfg(test)]
-pub(crate) use agent_rag::replace_lancedb_index;
+pub(crate) use agent_rag::{index_workspace, replace_lancedb_index};
 #[cfg(test)]
 pub(crate) use agent_rag::RagAdapter;
 pub(crate) use agent_rag::{
     apply_embeddings_to_index_cancellable, build_grounded_answer_prompt,
     export_lancedb_records_jsonl_cancellable,
-    fuse_retrieval_channels_for_query as fuse_rag_retrieval_channels_for_query, index_workspace,
+    fuse_retrieval_channels_for_query as fuse_rag_retrieval_channels_for_query,
     index_workspace_cancellable, lancedb_index_exists, local_query_embedding,
     remove_file_rag_generation_if_unleased, replace_lancedb_index_cancellable,
     retrieval_ranges_overlap, search_chunks_literal, search_lancedb_index,

@@ -319,51 +319,6 @@ pub(crate) fn phase7_state(
     })
 }
 
-pub(crate) fn phase7_state_with_error(
-    state: &tauri::State<'_, AppState>,
-    message: impl Into<String>,
-    sources: Vec<RagSourceView>,
-    answer: Option<String>,
-) -> Result<Phase7State, String> {
-    let message = message.into();
-    let root = active_workspace_root(state)?;
-    let project_id = active_project_id_for_memory(state)?;
-    let snapshot = cached_workspace_knowledge_snapshot_for(state, &root)?;
-    let focus_paths = sources
-        .iter()
-        .map(|source| source.path.clone())
-        .collect::<Vec<_>>();
-    let graph = graph_state_for_snapshot(&snapshot, &focus_paths);
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    append_event(
-        &mut store,
-        &phase7_task_id(),
-        EventKind::Error,
-        "RAG request failed",
-        [("error".to_string(), message.clone())]
-            .into_iter()
-            .collect(),
-    )
-    .map_err(|error| error.to_string())?;
-    let memory = project_memory_stats(&mut store, project_id.as_deref())
-        .map_err(|error| error.to_string())?;
-
-    phase7_state(
-        &store,
-        &snapshot.adapter,
-        memory,
-        sources,
-        None,
-        graph,
-        answer,
-        Some(message),
-    )
-    .map_err(|error| error.to_string())
-}
-
 pub(crate) fn phase8_state(
     store: &SqliteStore,
     last_error: Option<String>,

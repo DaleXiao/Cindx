@@ -48,6 +48,8 @@ import {
   type Phase7State,
   type ProjectSessionState,
   type ProviderConfigInput,
+  type RagOperationKind,
+  type RagOperationProgress,
   type RagSourceView,
   type RagStatsView,
   type RuntimeStatus,
@@ -106,6 +108,7 @@ type SidecarDraft = {
 };
 
 export type SettingsPageProps = {
+  activeRagOperation: { id: string; kind: RagOperationKind } | null;
   canUseConfiguredKey: boolean;
   activePermissionReviews: PermissionReviewItem[];
   appearanceMode: AppearanceMode;
@@ -122,6 +125,7 @@ export type SettingsPageProps = {
   flushPersonalization: (notify: boolean) => Promise<void>;
   handleAddMcpServer: () => Promise<void>;
   handleAnswerWithRag: () => Promise<void>;
+  handleCancelRag: () => Promise<void>;
   handleAppearanceModeChange: (mode: AppearanceMode) => void;
   handleCompactContext: () => Promise<void>;
   handleIgnorePermissionReview: (requestId: string) => void;
@@ -176,6 +180,8 @@ export type SettingsPageProps = {
   providerModelsRefreshTurn: number;
   providerSettingsError: string | null;
   ragBusy: boolean;
+  ragCancelling: boolean;
+  ragProgress: RagOperationProgress | null;
   ragQuery: string;
   ragSources: RagSourceView[];
   ragStats: RagStatsView;
@@ -256,6 +262,7 @@ function SettingsChevron({ action = false }: { action?: boolean }) {
 
 export function SettingsPage(props: SettingsPageProps) {
   const {
+    activeRagOperation,
     canUseConfiguredKey,
     activePermissionReviews,
     appearanceMode,
@@ -272,6 +279,7 @@ export function SettingsPage(props: SettingsPageProps) {
     flushPersonalization,
     handleAddMcpServer,
     handleAnswerWithRag,
+    handleCancelRag,
     handleAppearanceModeChange,
     handleCompactContext,
     handleIgnorePermissionReview,
@@ -323,6 +331,8 @@ export function SettingsPage(props: SettingsPageProps) {
     providerModelsRefreshTurn,
     providerSettingsError,
     ragBusy,
+    ragCancelling,
+    ragProgress,
     ragQuery,
     ragSources,
     ragStats,
@@ -768,8 +778,45 @@ export function SettingsPage(props: SettingsPageProps) {
                     onClick={handleIndexRag}
                   >
                     <Database size={17} aria-hidden="true" />
-                    <span>{ragBusy ? "Working" : "Index workspace"}</span>
+                    <span>
+                      {activeRagOperation?.kind === "index"
+                        ? "Indexing"
+                        : ragBusy
+                          ? "Working"
+                          : "Index workspace"}
+                    </span>
                   </button>
+                  {activeRagOperation && ragBusy && (
+                    <div className="rag-operation-status">
+                      <div role="status" aria-live="polite" aria-atomic="true">
+                        <strong>
+                          {activeRagOperation.kind === "index"
+                            ? "Indexing workspace"
+                            : activeRagOperation.kind === "search"
+                              ? "Searching workspace"
+                              : "Answering with workspace knowledge"}
+                        </strong>
+                        <span>
+                          {ragCancelling
+                            ? "Cancelling..."
+                            : ragProgress?.detail || "Starting..."}
+                          {ragProgress && ragProgress.totalSteps > 0
+                            ? ` · ${ragProgress.completedSteps}/${ragProgress.totalSteps}`
+                            : ""}
+                        </span>
+                      </div>
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        disabled={
+                          ragCancelling || !ragProgress || ragProgress.status !== "running"
+                        }
+                        onClick={handleCancelRag}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
                   <details
                     className="advanced-settings knowledge-graph-details"
                     onToggle={(event) => setKnowledgeGraphOpen(event.currentTarget.open)}

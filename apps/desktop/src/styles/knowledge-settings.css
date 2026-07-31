@@ -1,0 +1,34 @@
+.rag-operation-status {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 9px;
+  background: var(--surface-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.rag-operation-status > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.rag-operation-status strong {
+  font-size: 11px;
+}
+
+.rag-operation-status span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rag-operation-status > .secondary-button {
+  min-height: 26px;
+  flex: 0 0 auto;
+}

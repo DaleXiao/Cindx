@@ -9422,6 +9422,7 @@ fn empty_workspace_knowledge_generation_is_reused() {
         &cancellation,
         expected_epoch,
         None,
+        None,
     )
     .expect("empty generation should publish");
     assert_eq!(
@@ -9441,6 +9442,7 @@ fn empty_workspace_knowledge_generation_is_reused() {
         &ProviderConfig::default(),
         &cancellation,
         expected_epoch,
+        None,
         None,
     )
     .expect("fresh empty generation should validate");

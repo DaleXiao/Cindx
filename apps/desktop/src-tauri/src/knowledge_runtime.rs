@@ -7,13 +7,15 @@ use crate::{
     event_persistence::append_event,
     event_security::redact_sensitive_text,
     knowledge_generation_runtime::{
-        build_and_publish_knowledge_generation_cancellable, knowledge_paths_for_rag_index,
-        with_workspace_knowledge_index_lock,
+        build_and_publish_knowledge_generation_cancellable,
+        build_and_publish_knowledge_generation_with_commit, knowledge_paths_for_rag_index,
+        with_workspace_knowledge_index_lock_cancellable,
     },
     persistence_runtime::{
         cache_rag_adapter, cached_workspace_knowledge_snapshot_for, open_rag_adapter_for,
     },
     project_session_persistence::metadata_with_context,
+    rag_operation_runtime::RagOperationControl,
     runtime_values::phase7_task_id,
     tool_execution::{AutomaticKnowledgeIndexResult, ParallelRetrievalResult},
     view_models::{
@@ -57,6 +59,7 @@ pub(crate) fn prepare_agent_knowledge_context(
         cancellation,
         expected_epoch,
         Some(&resource_checkpoint),
+        None,
     )?;
     if workspace_knowledge_cache_needs_refresh(index_cache_hit, auto_indexed.is_some()) {
         cache_rag_adapter(state, workspace_root, &snapshot.adapter)?;
@@ -215,6 +218,7 @@ pub(crate) fn ensure_workspace_knowledge_index(
     cancellation: &Arc<AgentRunControl>,
     expected_epoch: u64,
     resource_checkpoint: Option<&(dyn Fn(&AgentRunControl) -> Result<(), String> + Sync)>,
+    rag_operation: Option<&RagOperationControl>,
 ) -> Result<Option<AutomaticKnowledgeIndexResult>, String> {
     if knowledge_preparation_should_interrupt(cancellation, expected_epoch) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
@@ -222,84 +226,101 @@ pub(crate) fn ensure_workspace_knowledge_index(
     if cache_hit && knowledge_snapshot_is_complete(adapter) {
         return Ok(None);
     }
-    with_workspace_knowledge_index_lock(workspace_root, || {
-        if knowledge_preparation_should_interrupt(cancellation, expected_epoch) {
-            return Err(MODEL_REQUEST_CANCELLED.to_string());
-        }
-        *adapter = open_rag_adapter_for(workspace_root)?;
-        let options = IndexOptions::default();
-        let snapshot_paths = knowledge_paths_for_rag_index(adapter.path());
-        let embedding_profile_matches = (adapter.chunks().is_empty()
-            && snapshot_paths.generation_id.is_some())
-            || adapter
-                .embedding_profile()
-                .is_some_and(|(provider, model, _)| {
-                    if config.is_ready() {
-                        provider != "local" && model == config.model_for_role(&ModelRole::Embedder)
-                    } else {
-                        provider == "local"
-                    }
-                });
-        let index_is_fresh = embedding_profile_matches
-            && workspace_index_is_fresh(workspace_root, adapter.chunks(), options.clone(), || {
-                knowledge_preparation_should_interrupt(cancellation, expected_epoch)
-            })
-            .map_err(rag_index_error_for_agent)?;
-        if index_is_fresh && knowledge_snapshot_is_complete(adapter) {
-            return Ok(None);
-        }
+    with_workspace_knowledge_index_lock_cancellable(
+        workspace_root,
+        || knowledge_preparation_should_interrupt(cancellation, expected_epoch),
+        || {
+            if knowledge_preparation_should_interrupt(cancellation, expected_epoch) {
+                return Err(MODEL_REQUEST_CANCELLED.to_string());
+            }
+            *adapter = open_rag_adapter_for(workspace_root)?;
+            let options = IndexOptions::default();
+            let snapshot_paths = knowledge_paths_for_rag_index(adapter.path());
+            let embedding_profile_matches = (adapter.chunks().is_empty()
+                && snapshot_paths.generation_id.is_some())
+                || adapter
+                    .embedding_profile()
+                    .is_some_and(|(provider, model, _)| {
+                        if config.is_ready() {
+                            provider != "local"
+                                && model == config.model_for_role(&ModelRole::Embedder)
+                        } else {
+                            provider == "local"
+                        }
+                    });
+            let index_is_fresh = embedding_profile_matches
+                && workspace_index_is_fresh(
+                    workspace_root,
+                    adapter.chunks(),
+                    options.clone(),
+                    || knowledge_preparation_should_interrupt(cancellation, expected_epoch),
+                )
+                .map_err(rag_index_error_for_agent)?;
+            if index_is_fresh && knowledge_snapshot_is_complete(adapter) {
+                return Ok(None);
+            }
 
-        let (index, embedding_backend, embedding_model, fallback_error) = if index_is_fresh {
-            let (backend, model) = adapter
-                .embedding_profile()
-                .map(|(provider, model, _)| (provider.to_string(), model.to_string()))
-                .unwrap_or_else(|| ("local".to_string(), "local-hash".to_string()));
-            (
-                adapter.index().clone(),
-                format!("{backend}-generation-migration"),
-                model,
-                None,
-            )
-        } else if config.is_ready() {
-            let configured_model = config.model_for_role(&ModelRole::Embedder);
-            let mut embedder = CloudRagEmbedder {
-                config: config.clone(),
-                cancellation: Some(cancellation.clone()),
-                expected_steer_epoch: Some(expected_epoch),
-                resource_checkpoint,
+            let (index, embedding_backend, embedding_model, fallback_error) = if index_is_fresh {
+                let (backend, model) = adapter
+                    .embedding_profile()
+                    .map(|(provider, model, _)| (provider.to_string(), model.to_string()))
+                    .unwrap_or_else(|| ("local".to_string(), "local-hash".to_string()));
+                (
+                    adapter.index().clone(),
+                    format!("{backend}-generation-migration"),
+                    model,
+                    None,
+                )
+            } else if config.is_ready() {
+                let configured_model = config.model_for_role(&ModelRole::Embedder);
+                let mut embedder = CloudRagEmbedder {
+                    config: config.clone(),
+                    cancellation: Some(cancellation.clone()),
+                    expected_steer_epoch: Some(expected_epoch),
+                    resource_checkpoint,
+                };
+                index_workspace_with_cloud_fallback_cancellable(
+                    workspace_root,
+                    options,
+                    &mut embedder,
+                    &configured_model,
+                    || knowledge_preparation_should_interrupt(cancellation, expected_epoch),
+                )?
+            } else {
+                let index = index_workspace_cancellable(workspace_root, options, || {
+                    knowledge_preparation_should_interrupt(cancellation, expected_epoch)
+                })
+                .map_err(rag_index_error_for_agent)?;
+                let model = index
+                    .chunks
+                    .first()
+                    .map(|chunk| chunk.embedding_model.clone())
+                    .unwrap_or_else(|| "local-hash".to_string());
+                (index, "local".to_string(), model, None)
             };
-            index_workspace_with_cloud_fallback_cancellable(
-                workspace_root,
-                options,
-                &mut embedder,
-                &configured_model,
-                || knowledge_preparation_should_interrupt(cancellation, expected_epoch),
-            )?
-        } else {
-            let index = index_workspace_cancellable(workspace_root, options, || {
-                knowledge_preparation_should_interrupt(cancellation, expected_epoch)
-            })
-            .map_err(rag_index_error_for_agent)?;
-            let model = index
-                .chunks
-                .first()
-                .map(|chunk| chunk.embedding_model.clone())
-                .unwrap_or_else(|| "local-hash".to_string());
-            (index, "local".to_string(), model, None)
-        };
-        let published =
-            build_and_publish_knowledge_generation_cancellable(workspace_root, index, || {
-                knowledge_preparation_should_interrupt(cancellation, expected_epoch)
-            })?;
-        let stats = published.adapter.stats().clone();
-        *adapter = published.adapter;
-        Ok(Some(AutomaticKnowledgeIndexResult {
-            stats,
-            embedding_backend,
-            embedding_model,
-            fallback_error,
-        }))
-    })
+            let published = if let Some(operation) = rag_operation {
+                build_and_publish_knowledge_generation_with_commit(
+                    workspace_root,
+                    index,
+                    || knowledge_preparation_should_interrupt(cancellation, expected_epoch),
+                    || operation.begin_commit_window(),
+                    |window| window.resume(),
+                )?
+            } else {
+                build_and_publish_knowledge_generation_cancellable(workspace_root, index, || {
+                    knowledge_preparation_should_interrupt(cancellation, expected_epoch)
+                })?
+            };
+            let stats = published.adapter.stats().clone();
+            *adapter = published.adapter;
+            Ok(Some(AutomaticKnowledgeIndexResult {
+                stats,
+                embedding_backend,
+                embedding_model,
+                fallback_error,
+            }))
+        },
+    )
 }
 
 fn knowledge_snapshot_is_complete(adapter: &FileRagAdapter) -> bool {
