@@ -1,23 +1,27 @@
 import { spawn, spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const manifestPath = path.join(
-  repoRoot,
-  "benchmarks",
-  "system",
-  "quality-gates-v1.json"
-);
-const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+const harnessRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
 
 function option(name, fallback) {
   const index = args.indexOf(name);
   return index >= 0 ? args[index + 1] : fallback;
 }
+
+const repoRoot = path.resolve(option("--repo-root", harnessRoot));
+const manifestRoot = path.resolve(option("--manifest-root", repoRoot));
+const manifestPath = path.join(
+  manifestRoot,
+  "benchmarks",
+  "system",
+  "quality-gates-v1.json"
+);
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 
 const profileName = option("--profile", "quick");
 const reportPath = path.resolve(
@@ -38,6 +42,10 @@ const selectedGates = selectedIds.map((id) => {
   if (!gate) throw new Error(`Profile ${profileName} references missing gate ${id}`);
   return gate;
 });
+const profileFingerprint = crypto
+  .createHash("sha256")
+  .update(JSON.stringify(selectedGates))
+  .digest("hex");
 
 const rustPath = path.join(
   os.homedir(),
@@ -55,6 +63,41 @@ const env = {
 const outputTailLimit = 16 * 1024;
 const diagnosticLineLimit = 64 * 1024;
 const diagnosticRecordLimit = 128;
+
+function performanceEnvironment() {
+  const cpus = os.cpus();
+  const rustc = spawnSync("rustc", ["-Vv"], { env, encoding: "utf8" });
+  const identity = {
+    platform: process.platform,
+    arch: process.arch,
+    os_release: os.release(),
+    hostname: os.hostname(),
+    cpu_model: cpus[0]?.model ?? "unknown",
+    logical_cpus: cpus.length,
+    node_version: process.version,
+    rustc_version: rustc.status === 0 ? rustc.stdout.trim() : null,
+    runner_image:
+      [process.env.ImageOS, process.env.ImageVersion].filter(Boolean).join("-") || null,
+    build_profile: process.env.CINDX_PERFORMANCE_BUILD_PROFILE?.trim() || "test"
+  };
+  return {
+    schema: "cindx.performance-environment.v1",
+    machine_fingerprint: crypto
+      .createHash("sha256")
+      .update(JSON.stringify(identity))
+      .digest("hex"),
+    platform: identity.platform,
+    arch: identity.arch,
+    os_release: identity.os_release,
+    cpu_model: identity.cpu_model,
+    logical_cpus: identity.logical_cpus,
+    node_version: identity.node_version,
+    rustc_version: identity.rustc_version,
+    runner_image: identity.runner_image,
+    build_profile: identity.build_profile,
+    pair_id: process.env.CINDX_PERFORMANCE_PAIR_ID?.trim() || null
+  };
+}
 
 function appendTail(current, chunk) {
   const next = `${current}${chunk}`;
@@ -217,10 +260,15 @@ function runGate(gate) {
   });
 }
 
-const commit = spawnSync("git", ["rev-parse", "HEAD"], {
-  cwd: repoRoot,
-  encoding: "utf8"
-}).stdout?.trim();
+function gitCommit(root) {
+  return spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8"
+  }).stdout?.trim();
+}
+
+const commit = gitCommit(repoRoot);
+const manifestCommit = gitCommit(manifestRoot);
 const startedAt = new Date().toISOString();
 const results = [];
 for (const gate of selectedGates) results.push(await runGate(gate));
@@ -228,13 +276,16 @@ const report = {
   schema: "cindx.quality-gate-report.v1",
   manifest_id: manifest.id,
   manifest_version: manifest.version,
+  manifest_commit: manifestCommit || null,
   profile: profileName,
+  profile_fingerprint: profileFingerprint,
   commit: commit || null,
   started_at: startedAt,
   finished_at: new Date().toISOString(),
   passed: results.every((result) => result.passed),
   priority_order: manifest.priority_order,
   limitations: manifest.limitations,
+  performance_environment: performanceEnvironment(),
   diagnostics: results.flatMap((result) =>
     result.diagnostics.map((diagnostic) => ({ gate_id: result.id, ...diagnostic }))
   ),

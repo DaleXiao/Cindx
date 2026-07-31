@@ -1,11 +1,19 @@
 {
   "schema": "cindx.performance-policy.v1",
-  "id": "same-machine-foundation",
+  "id": "paired-same-machine-foundation",
   "same_hardware_only": true,
+  "same_measurement_pair_only": true,
+  "same_profile_contract_only": true,
+  "required_profile": "paired-performance",
   "workloads": [
     {
       "schema": "cindx.session-projection-diagnostic.v1",
-      "identity": ["initial_events", "delta_events_read", "warm_sample_count"],
+      "identity": [
+        "initial_events",
+        "unrelated_events",
+        "delta_events_read",
+        "warm_sample_count"
+      ],
       "metrics": [
         {
           "field": "warm_p95_micros",
@@ -16,7 +24,7 @@
     },
     {
       "schema": "cindx.context-governor-diagnostic.v1",
-      "identity": ["history_messages", "sample_count"],
+      "identity": ["history_messages", "history_payload_bytes", "sample_count"],
       "metrics": [
         {
           "field": "p95_micros",
@@ -27,7 +35,7 @@
     },
     {
       "schema": "cindx.rag-search-diagnostic.v1",
-      "identity": ["chunks", "dimensions", "sample_count"],
+      "identity": ["chunks", "dimensions", "estimated_payload_bytes", "sample_count"],
       "metrics": [
         {
           "field": "semantic_p95_micros",
@@ -38,29 +46,6 @@
           "field": "literal_p95_micros",
           "max_regression_percent": 8,
           "absolute_tolerance_micros": 4000
-        }
-      ]
-    },
-    {
-      "schema": "cindx.conductor-health-diagnostic.v1",
-      "identity": [
-        "models",
-        "max_health_keys",
-        "max_observations_per_key",
-        "warmup_rounds",
-        "sample_count",
-        "hedge"
-      ],
-      "metrics": [
-        {
-          "field": "cold_path_p95_micros",
-          "max_regression_percent": 5,
-          "absolute_tolerance_micros": 50
-        },
-        {
-          "field": "warm_evidence_p95_micros",
-          "max_regression_percent": 5,
-          "absolute_tolerance_micros": 50
         }
       ]
     }

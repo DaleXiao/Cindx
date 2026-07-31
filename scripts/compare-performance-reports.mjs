@@ -22,8 +22,17 @@ function positiveNumber(name, fallback) {
   return value;
 }
 
-function loadReport(reportPath) {
+function loadReport(reportPath, requireQualityGateContract = false) {
   const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+  if (
+    requireQualityGateContract &&
+    report.schema !== "cindx.quality-gate-report.v1"
+  ) {
+    throw new Error(`${reportPath} is not a Cindx quality-gate report`);
+  }
+  if (requireQualityGateContract && report.passed !== true) {
+    throw new Error(`${reportPath} did not pass its source quality gates`);
+  }
   if (!Array.isArray(report.diagnostics)) {
     throw new Error(`${reportPath} does not contain structured diagnostics`);
   }
@@ -43,7 +52,14 @@ function loadPolicy(policyPath) {
 }
 
 function diagnosticMap(report) {
-  return new Map(report.diagnostics.map((diagnostic) => [diagnostic.schema, diagnostic]));
+  const diagnostics = new Map();
+  for (const diagnostic of report.diagnostics) {
+    if (diagnostics.has(diagnostic.schema)) {
+      throw new Error(`duplicate diagnostic schema: ${diagnostic.schema}`);
+    }
+    diagnostics.set(diagnostic.schema, diagnostic);
+  }
+  return diagnostics;
 }
 
 const defaultWorkloads = [
@@ -72,9 +88,91 @@ const absoluteToleranceMicros = positiveNumber("--absolute-tolerance-micros", 1_
 const policyPath = option("--policy");
 const policy = loadPolicy(policyPath ? path.resolve(policyPath) : null);
 const workloads = policy?.workloads ?? defaultWorkloads;
-const baseline = diagnosticMap(loadReport(baselinePath));
-const candidate = diagnosticMap(loadReport(candidatePath));
+const baselineReport = loadReport(baselinePath, Boolean(policy));
+const candidateReport = loadReport(candidatePath, Boolean(policy));
+const baseline = diagnosticMap(baselineReport);
+const candidate = diagnosticMap(candidateReport);
 const comparisons = [];
+
+function comparisonCompatibility(before, after) {
+  if (!policy) return { passed: true, errors: [] };
+  const errors = [];
+  if (policy.required_profile) {
+    if (before.profile !== policy.required_profile) {
+      errors.push(
+        `baseline profile must be ${policy.required_profile}, got ${before.profile ?? "missing"}`
+      );
+    }
+    if (after.profile !== policy.required_profile) {
+      errors.push(
+        `candidate profile must be ${policy.required_profile}, got ${after.profile ?? "missing"}`
+      );
+    }
+  }
+  if (policy.same_profile_contract_only) {
+    const beforeFingerprint = before.profile_fingerprint;
+    const afterFingerprint = after.profile_fingerprint;
+    if (
+      typeof beforeFingerprint !== "string" ||
+      beforeFingerprint.length === 0 ||
+      typeof afterFingerprint !== "string" ||
+      afterFingerprint.length === 0
+    ) {
+      errors.push("profile fingerprint is required for a paired comparison");
+    } else if (beforeFingerprint !== afterFingerprint) {
+      errors.push("baseline and candidate profile fingerprints differ");
+    }
+    if (
+      typeof before.manifest_commit !== "string" ||
+      before.manifest_commit.length === 0 ||
+      typeof after.manifest_commit !== "string" ||
+      after.manifest_commit.length === 0
+    ) {
+      errors.push("manifest commit is required for a paired comparison");
+    } else if (before.manifest_commit !== after.manifest_commit) {
+      errors.push("baseline and candidate manifest commits differ");
+    }
+  }
+  const beforeEnvironment = before.performance_environment;
+  const afterEnvironment = after.performance_environment;
+  if (policy.same_hardware_only) {
+    if (beforeEnvironment?.schema !== "cindx.performance-environment.v1") {
+      errors.push("baseline performance environment is missing or unsupported");
+    }
+    if (afterEnvironment?.schema !== "cindx.performance-environment.v1") {
+      errors.push("candidate performance environment is missing or unsupported");
+    }
+    const beforeFingerprint = beforeEnvironment?.machine_fingerprint;
+    const afterFingerprint = afterEnvironment?.machine_fingerprint;
+    if (
+      typeof beforeFingerprint !== "string" ||
+      beforeFingerprint.length === 0 ||
+      typeof afterFingerprint !== "string" ||
+      afterFingerprint.length === 0
+    ) {
+      errors.push("machine fingerprint is required for a same-hardware comparison");
+    } else if (beforeFingerprint !== afterFingerprint) {
+      errors.push("baseline and candidate machine fingerprints differ");
+    }
+  }
+  if (policy.same_measurement_pair_only) {
+    const beforePair = beforeEnvironment?.pair_id;
+    const afterPair = afterEnvironment?.pair_id;
+    if (
+      typeof beforePair !== "string" ||
+      beforePair.length === 0 ||
+      typeof afterPair !== "string" ||
+      afterPair.length === 0
+    ) {
+      errors.push("measurement pair id is required for a paired comparison");
+    } else if (beforePair !== afterPair) {
+      errors.push("baseline and candidate measurement pair ids differ");
+    }
+  }
+  return { passed: errors.length === 0, errors };
+}
+
+const compatibility = comparisonCompatibility(baselineReport, candidateReport);
 
 for (const workload of workloads) {
   const before = baseline.get(workload.schema);
@@ -136,7 +234,8 @@ const result = {
   policy: policyPath ? path.resolve(policyPath) : null,
   max_regression_percent: maxRegressionPercent,
   absolute_tolerance_micros: absoluteToleranceMicros,
-  passed: comparisons.every((comparison) => comparison.passed),
+  compatibility,
+  passed: compatibility.passed && comparisons.every((comparison) => comparison.passed),
   comparisons
 };
 const serialized = `${JSON.stringify(result, null, 2)}\n`;

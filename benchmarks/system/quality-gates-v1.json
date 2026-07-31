@@ -24,6 +24,7 @@
       "desktop-layout",
       "desktop-structure",
       "performance-comparator-contract",
+      "paired-performance-contract",
       "routing-contract",
       "evaluation-foundation",
       "agent-arena-contract",
@@ -50,6 +51,11 @@
       "conductor-health-scaling",
       "rag-search-scaling"
     ],
+    "paired-performance": [
+      "session-projection-scaling",
+      "context-governor-scaling",
+      "rag-search-scaling"
+    ],
     "shipping-performance": [
       "session-projection-scaling",
       "agent-runtime-snapshot-scaling",
@@ -63,6 +69,7 @@
       "desktop-layout",
       "desktop-structure",
       "performance-comparator-contract",
+      "paired-performance-contract",
       "browser-sidecar",
       "computer-sidecar",
       "routing-contract",
@@ -101,6 +108,11 @@
       "id": "performance-comparator-contract",
       "category": "performance",
       "command": ["node", "--test", "scripts/performance-comparison.test.mjs"]
+    },
+    {
+      "id": "paired-performance-contract",
+      "category": "performance",
+      "command": ["node", "--test", "scripts/paired-performance.test.mjs"]
     },
     {
       "id": "browser-sidecar",

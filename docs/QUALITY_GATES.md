@@ -12,7 +12,12 @@ does not claim Fugu Ultra equivalence.
   behavior.
 - `control-plane`: deterministic agent contracts plus Rust workspace and desktop tests.
 - `performance`: long-session incremental projection, bounded context governance,
-  graph/request reuse, frontend streaming, and 20k-chunk RAG diagnostics.
+  graph/request reuse, frontend streaming, conductor health, and 20k-chunk RAG
+  diagnostics.
+- `paired-performance`: the stable Session, context, and RAG P95 diagnostics. CI
+  applies one current manifest to base and head sequentially on the same runner
+  before applying the versioned policy. Sub-microsecond conductor routing remains a
+  capacity diagnostic because scheduler noise is larger than a useful hard limit.
 - `shipping-performance`: resource-bounded hard gates for incremental Session and
   runtime snapshots, shared graph parsing, prepared image/request reuse, retry
   reuse, and linear frontend streaming Markdown work. It uses operation counts and
@@ -37,21 +42,23 @@ records emitted by performance tests are collected in the top-level `diagnostics
 array of the quality-gate report, including repeated-sample P50/P95 timings where
 available.
 
-Compare two reports captured on the same hardware and build profile before accepting
-an optimization:
+Create a fail-closed comparison from two clean, distinct checkouts after installing
+each checkout's locked frontend dependencies. The wrapper gives both measurements one
+pair ID and uses the same process, machine, toolchain, and test profile:
 
 ```bash
-node scripts/compare-performance-reports.mjs \
-  --baseline target/performance-before.json \
-  --candidate target/performance-after.json \
-  --policy benchmarks/system/performance-policy-v1.json \
-  --report target/performance-comparison.json
+node scripts/run-paired-performance.mjs \
+  --baseline-root ../cindx-base \
+  --candidate-root . \
+  --output-dir target/performance-regression
 ```
 
-The versioned same-machine policy applies workload-specific P95 tolerances to Session
-projection, context governance, and RAG search. Without `--policy`, the comparator
-retains its compatible 25% relative or 1ms absolute allowance. Cross-machine
-comparisons remain diagnostic only.
+The versioned policy applies workload-specific P95 tolerances to Session projection,
+context governance, and RAG search. It rejects failed producer
+reports, duplicate diagnostics, different profile contracts, missing pair metadata,
+or a different machine/toolchain fingerprint before reading latency. The low-level
+comparator remains available for non-policy diagnostics, but policy comparisons must
+come from the paired wrapper. Cross-machine comparisons are never release evidence.
 
 ## Required Invariants
 
@@ -71,12 +78,11 @@ comparisons remain diagnostic only.
 ## Evidence Boundary
 
 Gate duration and local memory recall time are diagnostics, not portable latency
-thresholds. The performance profile records current local timings while enforcing
-scaling invariants such as reading one warm Session delta regardless of unrelated
-events. CI, release, and normal local production builds run the separate
-`shipping-performance` profile and retain its report; this evidence guards resource
-growth only. Provider-backed completion quality, long-horizon success, and GEPA
-promotion require the hidden feedback, Pareto, and test datasets described in
+thresholds. The paired CI run compares base and head on one temporary host; ordinary
+CI, release, and normal local production builds still run the separate
+`shipping-performance` profile and retain its report to guard resource growth without
+flaky wall-clock limits. Provider-backed completion quality, long-horizon success,
+and GEPA promotion require the hidden feedback, Pareto, and test datasets described in
 `AGENT_EVALUATION.md`. Missing provider evidence must remain explicit and must never
 be converted into a synthetic green result.
 
