@@ -284,6 +284,7 @@ const styleModuleEntries = [
   "trace.css",
   "schedule.css",
   "settings.css",
+  "knowledge-settings.css",
   "memory-settings.css",
   "inspector.css",
   "dark.css",
@@ -2931,10 +2932,12 @@ assert(
 assert(
     settingsPageSource.includes("Knowledge sources") &&
     settingsPageSource.includes("knowledge-results") &&
-    desktopControllerSource.includes("ensureKnowledgeIndex") &&
+    desktopControllerSource.includes("runRagOperation") &&
     desktopControllerSource.includes("ensureWorkspaceKnowledge()") &&
     tauriBridge.includes('invoke<Phase7State>("ensure_workspace_knowledge")') &&
     rustLib.includes("fn ensure_workspace_knowledge") &&
+    rustLib.includes("fn prepare_manual_rag_snapshot") &&
+    rustLib.includes("ensure_workspace_knowledge_index(") &&
     !settingsPageSource.includes("Test retrieval") &&
     tauriBridge.includes("if (isTauriRuntime()) throw error"),
   "Knowledge search must auto-index, expose results inline, and surface real Tauri errors"

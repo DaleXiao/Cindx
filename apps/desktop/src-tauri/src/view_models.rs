@@ -709,9 +709,28 @@ pub(crate) struct Phase7State {
     pub(crate) last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RagOperationProgress {
+    pub(crate) operation_id: String,
+    pub(crate) operation_kind: String,
+    pub(crate) stage: String,
+    pub(crate) completed_steps: usize,
+    pub(crate) total_steps: usize,
+    pub(crate) detail: String,
+    pub(crate) status: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RagOperationInput {
+    pub(crate) operation_id: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RagSearchInput {
+    pub(crate) operation_id: String,
     pub(crate) query: String,
     pub(crate) limit: Option<usize>,
 }

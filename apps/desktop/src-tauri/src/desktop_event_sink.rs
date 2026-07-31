@@ -1,11 +1,14 @@
-use crate::view_models::ModelStreamDelta;
+use crate::view_models::{ModelStreamDelta, RagOperationProgress};
 use tauri::Emitter;
 
 const MODEL_STREAM_DELTA_EVENT: &str = "model-stream-delta";
+const RAG_OPERATION_PROGRESS_EVENT: &str = "rag-operation-progress";
 const SESSION_TITLE_UPDATED_EVENT: &str = "session-title-updated";
 
 pub(crate) trait DesktopEventSink: Send + Sync {
     fn emit_model_stream_delta(&self, payload: ModelStreamDelta);
+
+    fn emit_rag_operation_progress(&self, payload: RagOperationProgress);
 
     fn emit_session_title_updated(&self, session_id: String);
 }
@@ -13,6 +16,10 @@ pub(crate) trait DesktopEventSink: Send + Sync {
 impl DesktopEventSink for tauri::AppHandle {
     fn emit_model_stream_delta(&self, payload: ModelStreamDelta) {
         let _ = self.emit(MODEL_STREAM_DELTA_EVENT, payload);
+    }
+
+    fn emit_rag_operation_progress(&self, payload: RagOperationProgress) {
+        let _ = self.emit(RAG_OPERATION_PROGRESS_EVENT, payload);
     }
 
     fn emit_session_title_updated(&self, session_id: String) {
@@ -54,6 +61,7 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum RecordedDesktopEvent {
         ModelStreamDelta(RecordedModelStreamDelta),
+        RagOperationProgress(RagOperationProgress),
         SessionTitleUpdated(String),
     }
 
@@ -68,6 +76,13 @@ mod tests {
                 .lock()
                 .expect("recording event sink lock should remain available")
                 .push(RecordedDesktopEvent::ModelStreamDelta(payload.into()));
+        }
+
+        fn emit_rag_operation_progress(&self, payload: RagOperationProgress) {
+            self.events
+                .lock()
+                .expect("recording event sink lock should remain available")
+                .push(RecordedDesktopEvent::RagOperationProgress(payload));
         }
 
         fn emit_session_title_updated(&self, session_id: String) {

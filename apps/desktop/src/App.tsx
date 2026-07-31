@@ -279,7 +279,7 @@ export function App() {
     showSaved: showSettingsSaved
   });
   const {
-    browserApprovals,
+    activeRagOperation, browserApprovals,
     browserBusy,
     browserObservations,
     browserTarget,
@@ -288,7 +288,7 @@ export function App() {
     contextBusy,
     contextCheckpoint,
     contextState,
-    handleAnswerWithRag,
+    handleAnswerWithRag, handleCancelRag,
     handleCompactContext,
     handleIndexRag,
     handleResolveBrowserPermission,
@@ -301,7 +301,7 @@ export function App() {
     loadKnowledgeState,
     phase5,
     phase7,
-    ragBusy,
+    ragBusy, ragCancelling, ragProgress,
     ragQuery,
     ragSources,
     ragStats,
@@ -2220,7 +2220,7 @@ export function App() {
           <Suspense fallback={<section className="settings-view" aria-busy="true" />}>
             <SettingsPage
             {...{
-              activePermissionReviews,
+              activeRagOperation, activePermissionReviews,
               appearanceMode,
               archivedSessions,
               browserBusy,
@@ -2234,7 +2234,7 @@ export function App() {
               debugAlwaysVisible,
               flushPersonalization,
               handleAddMcpServer,
-              handleAnswerWithRag,
+              handleAnswerWithRag, handleCancelRag,
               handleAppearanceModeChange,
               handleCompactContext,
               handleIgnorePermissionReview,
@@ -2286,7 +2286,7 @@ export function App() {
               providerModelsRefreshTurn,
               providerSettingsError,
               canUseConfiguredKey,
-              ragBusy,
+              ragBusy, ragCancelling, ragProgress,
               ragQuery,
               ragSources,
               ragStats,

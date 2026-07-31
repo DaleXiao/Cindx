@@ -1,7 +1,8 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { InspectorTab } from "../components/Inspector";
 import {
   answerWithRag,
+  cancelRagOperation,
   compactContext,
   ensureWorkspaceKnowledge,
   getContextState,
@@ -14,11 +15,23 @@ import {
   runBrowserTool,
   runTool,
   searchRag,
+  subscribeToRagOperationProgress,
   type ContextState,
   type Phase5State,
   type Phase7State,
-  type Phase8State
+  type Phase8State,
+  type RagOperationKind,
+  type RagOperationProgress
 } from "../tauri";
+import {
+  acceptRagOperationProgress,
+  clearRagCancelAttemptIfCurrent,
+  createRagCancelAttempt,
+  createRagOperationId,
+  shouldApplyRagOperationResult,
+  waitForRagCancelOutcome,
+  type RagCancelAttempt
+} from "../ragOperationModel";
 
 type KnowledgeToolingControllerOptions = {
   reportError: (message: string | null) => void;
@@ -42,9 +55,40 @@ export function useKnowledgeToolingController({
   const [browserText, setBrowserText] = useState("hello");
   const [toolBusy, setToolBusy] = useState(false);
   const [ragBusy, setRagBusy] = useState(false);
+  const [ragCancelling, setRagCancelling] = useState(false);
+  const [activeRagOperation, setActiveRagOperation] = useState<{
+    id: string;
+    kind: RagOperationKind;
+  } | null>(null);
+  const [ragProgress, setRagProgress] = useState<RagOperationProgress | null>(null);
   const [browserBusy, setBrowserBusy] = useState(false);
   const [contextBusy, setContextBusy] = useState(false);
   const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
+  const activeRagOperationIdRef = useRef<string | null>(null);
+  const ragCancelAttemptRef = useRef<RagCancelAttempt | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    let unsubscribe: (() => void) | null = null;
+    void subscribeToRagOperationProgress((progress) => {
+      if (disposed) return;
+      setRagProgress((current) =>
+        acceptRagOperationProgress(activeRagOperationIdRef.current, current, progress)
+      );
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unsubscribe = unlisten;
+    });
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+      const operationId = activeRagOperationIdRef.current;
+      activeRagOperationIdRef.current = null;
+      ragCancelAttemptRef.current?.settle({ accepted: true, signalError: null });
+      ragCancelAttemptRef.current = null;
+      if (operationId) void cancelRagOperation(operationId).catch(() => {});
+    };
+  }, []);
 
   const loadKnowledgeState = useCallback(() => {
     void getPhase5State()
@@ -110,27 +154,10 @@ export function useKnowledgeToolingController({
     [reportError]
   );
 
-  const ensureKnowledgeIndex = useCallback(async () => {
-    const indexed = await ensureWorkspaceKnowledge();
-    setPhase7(indexed);
-    if (indexed.lastError) {
-      reportError(indexed.lastError);
-      return false;
-    }
-    if (indexed.stats.chunksIndexed > 0) return true;
-    const message =
-      indexed.stats.indexedAtMs > 0
-        ? "No indexable workspace text was found."
-        : "Workspace text knowledge has not been indexed yet.";
-    setKnowledgeError(message);
-    reportError(message);
-    return false;
-  }, [reportError]);
-
   const setKnowledgeGraphOpen = useCallback(
     (open: boolean) => {
       setKnowledgeGraphOpenState(open);
-      if (!open) return;
+      if (!open || activeRagOperationIdRef.current) return;
       setRagBusy(true);
       setKnowledgeError(null);
       void ensureWorkspaceKnowledge()
@@ -151,50 +178,124 @@ export function useKnowledgeToolingController({
     [reportError]
   );
 
-  const handleIndexRag = useCallback(async () => {
+  const runRagOperation = useCallback(async (
+    kind: RagOperationKind,
+    operation: (operationId: string) => Promise<Phase7State>
+  ) => {
+    if (activeRagOperationIdRef.current) return;
+    const operationId = createRagOperationId(kind);
+    activeRagOperationIdRef.current = operationId;
+    ragCancelAttemptRef.current = null;
+    setActiveRagOperation({ id: operationId, kind });
+    setRagProgress(null);
+    setRagCancelling(false);
     setRagBusy(true);
     setKnowledgeError(null);
     reportError(null);
     try {
-      const next = await indexWorkspaceRag();
+      const next = await operation(operationId);
+      const cancelOutcome = await waitForRagCancelOutcome(
+        operationId,
+        ragCancelAttemptRef.current
+      );
+      if (
+        !shouldApplyRagOperationResult(
+          activeRagOperationIdRef.current,
+          operationId,
+          cancelOutcome
+        )
+      ) {
+        return;
+      }
       setPhase7(next);
       showInspector("artifacts");
-      reportError(next.lastError);
+      if (cancelOutcome.signalError) {
+        setKnowledgeError(cancelOutcome.signalError);
+        reportError(cancelOutcome.signalError);
+      } else {
+        reportError(next.lastError);
+      }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const cancelOutcome = await waitForRagCancelOutcome(
+        operationId,
+        ragCancelAttemptRef.current
+      );
+      if (
+        !shouldApplyRagOperationResult(
+          activeRagOperationIdRef.current,
+          operationId,
+          cancelOutcome
+        )
+      ) {
+        return;
+      }
+      const message = cancelOutcome.signalError ??
+        (error instanceof Error ? error.message : String(error));
       setKnowledgeError(message);
       reportError(message);
     } finally {
-      setRagBusy(false);
+      if (activeRagOperationIdRef.current === operationId) {
+        activeRagOperationIdRef.current = null;
+        ragCancelAttemptRef.current = null;
+        setActiveRagOperation(null);
+        setRagProgress(null);
+        setRagCancelling(false);
+        setRagBusy(false);
+      }
     }
   }, [reportError, showInspector]);
 
+  const handleIndexRag = useCallback(
+    () => runRagOperation("index", (operationId) => indexWorkspaceRag(operationId)),
+    [runRagOperation]
+  );
+
   const runRagQuery = useCallback(
     async (mode: "search" | "answer") => {
-      if (!ragQuery.trim()) return;
-      setRagBusy(true);
-      setKnowledgeError(null);
-      reportError(null);
-      try {
-        if (!(await ensureKnowledgeIndex())) return;
-        const next =
-          mode === "search" ? await searchRag(ragQuery, 6) : await answerWithRag(ragQuery, 6);
-        setPhase7(next);
-        showInspector("artifacts");
-        reportError(next.lastError);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        setKnowledgeError(message);
-        reportError(message);
-      } finally {
-        setRagBusy(false);
-      }
+      const query = ragQuery.trim();
+      if (!query) return;
+      await runRagOperation(mode, (operationId) =>
+        mode === "search"
+          ? searchRag(operationId, query, 6)
+          : answerWithRag(operationId, query, 6)
+      );
     },
-    [ensureKnowledgeIndex, ragQuery, reportError, showInspector]
+    [ragQuery, runRagOperation]
   );
 
   const handleSearchRag = useCallback(() => runRagQuery("search"), [runRagQuery]);
   const handleAnswerWithRag = useCallback(() => runRagQuery("answer"), [runRagQuery]);
+
+  const handleCancelRag = useCallback(async () => {
+    const operationId = activeRagOperationIdRef.current;
+    if (!operationId || !ragProgress || ragProgress.status !== "running") return;
+    if (ragCancelAttemptRef.current?.operationId === operationId) return;
+    const attempt = createRagCancelAttempt(operationId);
+    ragCancelAttemptRef.current = attempt;
+    setRagCancelling(true);
+    try {
+      const signalled = await cancelRagOperation(operationId);
+      attempt.settle({ accepted: signalled, signalError: null });
+      if (activeRagOperationIdRef.current === operationId && !signalled) {
+        ragCancelAttemptRef.current = clearRagCancelAttemptIfCurrent(
+          ragCancelAttemptRef.current,
+          attempt
+        );
+        setRagCancelling(false);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      attempt.settle({ accepted: false, signalError: message });
+      if (activeRagOperationIdRef.current !== operationId) return;
+      ragCancelAttemptRef.current = clearRagCancelAttemptIfCurrent(
+        ragCancelAttemptRef.current,
+        attempt
+      );
+      setRagCancelling(false);
+      setKnowledgeError(message);
+      reportError(message);
+    }
+  }, [ragProgress, reportError]);
 
   const handleCompactContext = useCallback(async () => {
     setContextBusy(true);
@@ -276,6 +377,7 @@ export function useKnowledgeToolingController({
     contextCheckpoint,
     contextState,
     handleAnswerWithRag,
+    handleCancelRag,
     handleCompactContext,
     handleIndexRag,
     handleResolveBrowserPermission,
@@ -289,7 +391,10 @@ export function useKnowledgeToolingController({
     phase5,
     phase7,
     phase8,
+    activeRagOperation,
     ragBusy,
+    ragCancelling,
+    ragProgress,
     ragQuery,
     ragSources,
     ragStats,

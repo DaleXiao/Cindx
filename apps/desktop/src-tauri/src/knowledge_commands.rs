@@ -1,7 +1,7 @@
 use super::*;
 use crate::knowledge_generation_runtime::{
-    build_and_publish_knowledge_generation_cancellable, with_workspace_knowledge_index_lock,
-    PublishedKnowledgeGeneration,
+    build_and_publish_knowledge_generation_with_commit,
+    with_workspace_knowledge_index_lock_cancellable, PublishedKnowledgeGeneration,
 };
 
 #[tauri::command]
@@ -59,6 +59,7 @@ pub(crate) fn ensure_workspace_knowledge_blocking(
         &cancellation,
         expected_epoch,
         None,
+        None,
     )?;
     if workspace_knowledge_cache_needs_refresh(cache_hit, indexed.is_some()) {
         cache_rag_adapter(&state, &root, &snapshot.adapter)?;
@@ -86,6 +87,7 @@ pub(crate) fn ensure_workspace_knowledge_blocking(
     .map_err(|error| error.to_string())
 }
 
+#[cfg(test)]
 pub(crate) fn index_workspace_with_cloud_fallback(
     root: &Path,
     options: IndexOptions,
@@ -119,51 +121,86 @@ pub(crate) fn index_workspace_with_cloud_fallback(
 }
 
 #[tauri::command]
-pub(crate) async fn index_workspace_rag(app: tauri::AppHandle) -> Result<Phase7State, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        index_workspace_rag_blocking(app.state::<AppState>())
-    })
-    .await
-    .map_err(|error| format!("workspace indexing failed to join: {error}"))?
+pub(crate) async fn index_workspace_rag(
+    app: tauri::AppHandle,
+    input: RagOperationInput,
+) -> Result<Phase7State, String> {
+    tauri::async_runtime::spawn_blocking(move || index_workspace_rag_blocking(&app, input))
+        .await
+        .map_err(|error| format!("workspace indexing failed to join: {error}"))?
 }
 
 pub(crate) fn index_workspace_rag_blocking(
-    state: tauri::State<'_, AppState>,
+    app: &tauri::AppHandle,
+    input: RagOperationInput,
 ) -> Result<Phase7State, String> {
-    let root = active_workspace_root(&state)?;
-    let project_id = active_project_id_for_memory(&state)?;
-    let config = clone_provider_config(&state)?;
+    let state = app.state::<AppState>();
+    run_rag_operation(
+        &state.rag_operation_controls,
+        app,
+        &input.operation_id,
+        "index",
+        4,
+        |cancellation, progress| index_workspace_rag_operation(&state, cancellation, progress),
+        |output| output.last_error.clone(),
+    )
+}
+
+fn index_workspace_rag_operation(
+    state: &tauri::State<'_, AppState>,
+    cancellation: &Arc<RagOperationControl>,
+    progress: &mut RagOperationProgressReporter<'_>,
+) -> Result<Phase7State, String> {
+    let root = active_workspace_root(state)?;
+    let project_id = active_project_id_for_memory(state)?;
+    let config = clone_provider_config(state)?;
+    let expected_epoch = cancellation.agent().steer_epoch();
     let (published, embedding_backend, embedding_model, embedding_fallback_error) =
-        with_workspace_knowledge_index_lock(&root, || {
-            let (index, backend, model, fallback_error) = if config.is_ready() {
-                let configured_model = config.model_for_role(&ModelRole::Embedder);
-                let mut embedder = CloudRagEmbedder {
-                    config: config.clone(),
-                    cancellation: None,
-                    expected_steer_epoch: None,
-                    resource_checkpoint: None,
+        with_workspace_knowledge_index_lock_cancellable(
+            &root,
+            || cancellation.should_cancel(),
+            || {
+                rag_operation_checkpoint(cancellation)?;
+                progress.advance("indexing", 0, "Indexing workspace knowledge");
+                let (index, backend, model, fallback_error) = if config.is_ready() {
+                    let configured_model = config.model_for_role(&ModelRole::Embedder);
+                    let mut embedder = CloudRagEmbedder {
+                        config: config.clone(),
+                        cancellation: Some(Arc::clone(cancellation.agent())),
+                        expected_steer_epoch: Some(expected_epoch),
+                        resource_checkpoint: None,
+                    };
+                    index_workspace_with_cloud_fallback_cancellable(
+                        &root,
+                        IndexOptions::default(),
+                        &mut embedder,
+                        &configured_model,
+                        || cancellation.should_cancel(),
+                    )?
+                } else {
+                    let index = index_workspace_cancellable(&root, IndexOptions::default(), || {
+                        cancellation.should_cancel()
+                    })
+                    .map_err(rag_index_error_for_agent)?;
+                    let model = index
+                        .chunks
+                        .first()
+                        .map(|chunk| chunk.embedding_model.clone())
+                        .unwrap_or_else(|| "local-hash".to_string());
+                    (index, "local".to_string(), model, None)
                 };
-                index_workspace_with_cloud_fallback(
+                progress.advance("publishing", 1, "Workspace indexed; publishing knowledge");
+                let published = build_and_publish_knowledge_generation_with_commit(
                     &root,
-                    IndexOptions::default(),
-                    &mut embedder,
-                    &configured_model,
-                )
-                .map_err(|error| error.to_string())?
-            } else {
-                let index = index_workspace(&root, IndexOptions::default())
-                    .map_err(|error| error.to_string())?;
-                let model = index
-                    .chunks
-                    .first()
-                    .map(|chunk| chunk.embedding_model.clone())
-                    .unwrap_or_else(|| "local-hash".to_string());
-                (index, "local".to_string(), model, None)
-            };
-            let published =
-                build_and_publish_knowledge_generation_cancellable(&root, index, || false)?;
-            Ok((published, backend, model, fallback_error))
-        })?;
+                    index,
+                    || cancellation.should_cancel(),
+                    || cancellation.begin_commit_window(),
+                    |window| window.finalize(),
+                )?;
+                progress.advance("persisting", 2, "Knowledge generation published");
+                Ok((published, backend, model, fallback_error))
+            },
+        )?;
     let PublishedKnowledgeGeneration {
         paths,
         adapter,
@@ -175,8 +212,8 @@ pub(crate) fn index_workspace_rag_blocking(
     let stats = adapter.stats().clone();
     let lancedb_export_path = paths.lancedb_export.clone();
     let lancedb_path = paths.lancedb_database.clone();
-    cache_rag_adapter(&state, &root, &adapter)?;
-    let snapshot = cached_workspace_knowledge_snapshot_for(&state, &root)?;
+    cache_rag_adapter(state, &root, &adapter)?;
+    let snapshot = cached_workspace_knowledge_snapshot_for(state, &root)?;
     let mut store = state
         .store
         .lock()
@@ -229,6 +266,7 @@ pub(crate) fn index_workspace_rag_blocking(
         index_metadata,
     )
     .map_err(|error| error.to_string())?;
+    progress.advance("projecting", 3, "Knowledge index is ready");
 
     let graph = graph_state_for_snapshot(&snapshot, &[]);
     let memory = project_memory_stats(&mut store, project_id.as_deref())
@@ -247,21 +285,143 @@ pub(crate) fn index_workspace_rag_blocking(
 }
 
 #[tauri::command]
-pub(crate) fn search_rag(
-    state: tauri::State<'_, AppState>,
+pub(crate) async fn search_rag(
+    app: tauri::AppHandle,
     input: RagSearchInput,
 ) -> Result<Phase7State, String> {
-    let root = active_workspace_root(&state)?;
-    let project_id = active_project_id_for_memory(&state)?;
+    tauri::async_runtime::spawn_blocking(move || search_rag_blocking(&app, input))
+        .await
+        .map_err(|error| format!("RAG search failed to join: {error}"))?
+}
+
+fn search_rag_blocking(
+    app: &tauri::AppHandle,
+    input: RagSearchInput,
+) -> Result<Phase7State, String> {
+    let state = app.state::<AppState>();
+    let operation_id = input.operation_id.clone();
+    run_rag_operation(
+        &state.rag_operation_controls,
+        app,
+        &operation_id,
+        "search",
+        4,
+        |cancellation, progress| search_rag_operation(&state, input, cancellation, progress),
+        |output| output.last_error.clone(),
+    )
+}
+
+fn prepare_manual_rag_snapshot(
+    state: &tauri::State<'_, AppState>,
+    root: &Path,
+    config: &ProviderConfig,
+    cancellation: &Arc<RagOperationControl>,
+    progress: &mut RagOperationProgressReporter<'_>,
+) -> Result<WorkspaceKnowledgeSnapshot, String> {
+    progress.advance("preparing_knowledge", 0, "Refreshing workspace knowledge");
+    let mut snapshot = cached_workspace_knowledge_snapshot_for(state, root)?;
+    let cache_hit = snapshot.cache_hit;
+    let expected_epoch = cancellation.agent().steer_epoch();
+    let indexed = ensure_workspace_knowledge_index(
+        root,
+        &mut snapshot.adapter,
+        cache_hit,
+        config,
+        cancellation.agent(),
+        expected_epoch,
+        None,
+        Some(cancellation),
+    )?;
+    if workspace_knowledge_cache_needs_refresh(cache_hit, indexed.is_some()) {
+        cache_rag_adapter(state, root, &snapshot.adapter)?;
+        snapshot = cached_workspace_knowledge_snapshot_for(state, root)?;
+    }
+    rag_operation_checkpoint(cancellation)?;
+    progress.advance("knowledge_ready", 1, "Workspace knowledge is ready");
+    Ok(snapshot)
+}
+
+fn empty_manual_rag_error(snapshot: &WorkspaceKnowledgeSnapshot) -> Option<&'static str> {
+    (snapshot.adapter.stats().chunks_indexed == 0).then_some(
+        if snapshot.adapter.stats().indexed_at_ms > 0 {
+            "No indexable workspace text was found."
+        } else {
+            "Workspace text knowledge has not been indexed yet."
+        },
+    )
+}
+
+fn phase7_state_with_operation_error(
+    state: &tauri::State<'_, AppState>,
+    operation: &RagOperationControl,
+    message: impl Into<String>,
+    sources: Vec<RagSourceView>,
+    answer: Option<String>,
+) -> Result<Phase7State, String> {
+    let message = message.into();
+    if rag_operation_was_cancelled(operation, &message) {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
+    let root = active_workspace_root(state)?;
+    let project_id = active_project_id_for_memory(state)?;
+    let snapshot = cached_workspace_knowledge_snapshot_for(state, &root)?;
+    let focus_paths = sources
+        .iter()
+        .map(|source| source.path.clone())
+        .collect::<Vec<_>>();
+    let graph = graph_state_for_snapshot(&snapshot, &focus_paths);
+    with_finalizing_cancellable_mutex(&state.store, operation, "store", |store| {
+        append_event(
+            store,
+            &phase7_task_id(),
+            EventKind::Error,
+            "RAG request failed",
+            [("error".to_string(), message.clone())]
+                .into_iter()
+                .collect(),
+        )
+        .map_err(|error| error.to_string())?;
+        let memory = project_memory_stats(store, project_id.as_deref())
+            .map_err(|error| error.to_string())?;
+        phase7_state(
+            store,
+            &snapshot.adapter,
+            memory,
+            sources,
+            None,
+            graph,
+            answer,
+            Some(message),
+        )
+        .map_err(|error| error.to_string())
+    })
+}
+
+fn search_rag_operation(
+    state: &tauri::State<'_, AppState>,
+    input: RagSearchInput,
+    cancellation: &Arc<RagOperationControl>,
+    progress: &mut RagOperationProgressReporter<'_>,
+) -> Result<Phase7State, String> {
+    let root = active_workspace_root(state)?;
+    let project_id = active_project_id_for_memory(state)?;
     let query = input.query.trim().to_string();
     if query.is_empty() {
-        return phase7_state_with_error(&state, "RAG query is empty", Vec::new(), None);
+        return phase7_state_with_operation_error(
+            state,
+            cancellation,
+            "RAG query is empty",
+            Vec::new(),
+            None,
+        );
     }
 
-    let snapshot = cached_workspace_knowledge_snapshot_for(&state, &root)?;
+    let config = clone_provider_config(state)?;
+    let snapshot = prepare_manual_rag_snapshot(state, &root, &config, cancellation, progress)?;
+    if let Some(message) = empty_manual_rag_error(&snapshot) {
+        return phase7_state_with_operation_error(state, cancellation, message, Vec::new(), None);
+    }
     let index_cache_hit = snapshot.cache_hit;
-    let config = clone_provider_config(&state)?;
-    let cancellation = Arc::new(AgentRunControl::new("auto"));
     let mut retrieval = run_parallel_retrieval(
         &root,
         &snapshot.adapter,
@@ -270,9 +430,10 @@ pub(crate) fn search_rag(
         input.limit.unwrap_or(6),
         "four_way_parallel",
         snapshot.graph_store.as_deref(),
-        &cancellation,
+        cancellation.agent(),
         None,
     )?;
+    progress.advance("retrieving", 2, "Relevant sources retrieved");
     retrieval.trace.index_cache_hit = index_cache_hit;
     let focus_paths = retrieval
         .sources
@@ -280,50 +441,85 @@ pub(crate) fn search_rag(
         .map(|source| source.path.clone())
         .collect::<Vec<_>>();
     let graph = graph_state_for_snapshot(&snapshot, &focus_paths);
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    append_rag_retrieval_event(
-        &mut store,
-        "search",
-        &query,
-        &retrieval.results,
-        Some(&retrieval.trace),
-    )
-    .map_err(|error| error.to_string())?;
-    let memory = project_memory_stats(&mut store, project_id.as_deref())
+    with_finalizing_cancellable_mutex(&state.store, cancellation, "store", |store| {
+        append_rag_retrieval_event(
+            store,
+            "search",
+            &query,
+            &retrieval.results,
+            Some(&retrieval.trace),
+        )
         .map_err(|error| error.to_string())?;
+        let memory = project_memory_stats(store, project_id.as_deref())
+            .map_err(|error| error.to_string())?;
+        progress.advance("projecting", 3, "Search result is ready");
 
-    phase7_state(
-        &store,
-        &snapshot.adapter,
-        memory,
-        retrieval.sources,
-        Some(retrieval.trace),
-        graph,
-        None,
-        None,
-    )
-    .map_err(|error| error.to_string())
+        phase7_state(
+            store,
+            &snapshot.adapter,
+            memory,
+            retrieval.sources,
+            Some(retrieval.trace),
+            graph,
+            None,
+            None,
+        )
+        .map_err(|error| error.to_string())
+    })
 }
 
 #[tauri::command]
-pub(crate) fn answer_with_rag(
-    state: tauri::State<'_, AppState>,
+pub(crate) async fn answer_with_rag(
+    app: tauri::AppHandle,
     input: RagSearchInput,
 ) -> Result<Phase7State, String> {
-    let root = active_workspace_root(&state)?;
-    let project_id = active_project_id_for_memory(&state)?;
+    tauri::async_runtime::spawn_blocking(move || answer_with_rag_blocking(&app, input))
+        .await
+        .map_err(|error| format!("RAG answer failed to join: {error}"))?
+}
+
+fn answer_with_rag_blocking(
+    app: &tauri::AppHandle,
+    input: RagSearchInput,
+) -> Result<Phase7State, String> {
+    let state = app.state::<AppState>();
+    let operation_id = input.operation_id.clone();
+    run_rag_operation(
+        &state.rag_operation_controls,
+        app,
+        &operation_id,
+        "answer",
+        5,
+        |cancellation, progress| answer_with_rag_operation(&state, input, cancellation, progress),
+        |output| output.last_error.clone(),
+    )
+}
+
+fn answer_with_rag_operation(
+    state: &tauri::State<'_, AppState>,
+    input: RagSearchInput,
+    cancellation: &Arc<RagOperationControl>,
+    progress: &mut RagOperationProgressReporter<'_>,
+) -> Result<Phase7State, String> {
+    let root = active_workspace_root(state)?;
+    let project_id = active_project_id_for_memory(state)?;
     let query = input.query.trim().to_string();
     if query.is_empty() {
-        return phase7_state_with_error(&state, "RAG query is empty", Vec::new(), None);
+        return phase7_state_with_operation_error(
+            state,
+            cancellation,
+            "RAG query is empty",
+            Vec::new(),
+            None,
+        );
     }
 
-    let snapshot = cached_workspace_knowledge_snapshot_for(&state, &root)?;
+    let config = clone_provider_config(state)?;
+    let snapshot = prepare_manual_rag_snapshot(state, &root, &config, cancellation, progress)?;
+    if let Some(message) = empty_manual_rag_error(&snapshot) {
+        return phase7_state_with_operation_error(state, cancellation, message, Vec::new(), None);
+    }
     let index_cache_hit = snapshot.cache_hit;
-    let config = clone_provider_config(&state)?;
-    let cancellation = Arc::new(AgentRunControl::new("auto"));
     let mut retrieval = run_parallel_retrieval(
         &root,
         &snapshot.adapter,
@@ -332,9 +528,10 @@ pub(crate) fn answer_with_rag(
         input.limit.unwrap_or(6),
         "four_way_parallel",
         snapshot.graph_store.as_deref(),
-        &cancellation,
+        cancellation.agent(),
         None,
     )?;
+    progress.advance("retrieving", 2, "Grounding sources retrieved");
     retrieval.trace.index_cache_hit = index_cache_hit;
     let selected_results = retrieval.results.clone();
     let sources = retrieval.sources.clone();
@@ -344,33 +541,35 @@ pub(crate) fn answer_with_rag(
         .collect::<Vec<_>>();
     let graph = graph_state_for_snapshot(&snapshot, &focus_paths);
 
-    {
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|error| format!("store lock poisoned: {error}"))?;
+    with_cancellable_mutex(&state.store, cancellation, "store", |store| {
         append_rag_retrieval_event(
-            &mut store,
+            store,
             "answer",
             &query,
             &selected_results,
             Some(&retrieval.trace),
         )
-        .map_err(|error| error.to_string())?;
-    }
+        .map_err(|error| error.to_string())
+    })?;
 
     if selected_results.is_empty() {
-        return phase7_state_with_error(
-            &state,
+        return phase7_state_with_operation_error(
+            state,
+            cancellation,
             "No indexed sources matched the RAG query",
             sources,
             None,
         );
     }
 
-    let config = clone_provider_config(&state)?;
     if !config.is_ready() {
-        return phase7_state_with_error(&state, "Provider config is incomplete", sources, None);
+        return phase7_state_with_operation_error(
+            state,
+            cancellation,
+            "Provider config is incomplete",
+            sources,
+            None,
+        );
     }
 
     let prompt = build_grounded_answer_prompt(&query, &selected_results);
@@ -379,13 +578,9 @@ pub(crate) fn answer_with_rag(
     let task_id = phase7_task_id();
     let started_at_ms = current_time_millis();
 
-    {
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|error| format!("store lock poisoned: {error}"))?;
+    with_cancellable_mutex(&state.store, cancellation, "store", |store| {
         append_event(
-            &mut store,
+            store,
             &task_id,
             EventKind::ModelRequestStarted,
             format!("RAG answer request started for {model}"),
@@ -404,8 +599,8 @@ pub(crate) fn answer_with_rag(
             .into_iter()
             .collect(),
         )
-        .map_err(|error| error.to_string())?;
-    }
+        .map_err(|error| error.to_string())
+    })?;
 
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
         base_url: config.base_url.clone(),
@@ -425,111 +620,138 @@ pub(crate) fn answer_with_rag(
         mode: ModelCallMode::Streaming,
         metadata: Metadata::new(),
     };
-    if let Err(reason) = cancellation.begin_stage_model_call("rag_answer", RunStageClass::Finalizer)
+    rag_operation_checkpoint(cancellation)?;
+    if let Err(reason) = cancellation
+        .agent()
+        .begin_stage_model_call("rag_answer", RunStageClass::Finalizer)
     {
-        return phase7_state_with_error(
-            &state,
+        return phase7_state_with_operation_error(
+            state,
+            cancellation,
             format!("RAG answer budget unavailable: {}", reason.code()),
             sources,
             None,
         );
     }
     let model_attempt = match crate::model_resource_runtime::ControlledModelAttempt::reserve_at(
-        &cancellation,
-        cancellation.steer_epoch(),
+        cancellation.agent(),
+        cancellation.agent().steer_epoch(),
         &model,
         &request,
         RunStageClass::Finalizer,
     ) {
         Ok(Some(attempt)) => attempt,
         Ok(None) => {
-            cancellation.finish_model_call();
-            return phase7_state_with_error(
-                &state,
+            cancellation.agent().finish_model_call();
+            return phase7_state_with_operation_error(
+                state,
+                cancellation,
                 "RAG answer request was superseded".to_string(),
                 sources,
                 None,
             );
         }
         Err(reason) => {
-            cancellation.finish_model_call();
-            return phase7_state_with_error(
-                &state,
+            cancellation.agent().finish_model_call();
+            return phase7_state_with_operation_error(
+                state,
+                cancellation,
                 format!("RAG answer budget unavailable: {}", reason.code()),
                 sources,
                 None,
             );
         }
     };
+    progress.advance("requesting", 3, "Requesting grounded answer");
 
-    match provider.complete_streaming(request, |_| {}) {
+    let mut receiving = false;
+    match provider.complete_streaming_cancellable(
+        request,
+        |delta| {
+            if !receiving && !delta.is_empty() {
+                receiving = true;
+                progress.advance("receiving", 4, "Receiving grounded answer");
+            }
+        },
+        || cancellation.should_cancel(),
+    ) {
         Ok(response) => {
             let _ = model_attempt.settle_response(&response);
-            cancellation.finish_model_call();
+            cancellation.agent().finish_model_call();
+            rag_operation_checkpoint(cancellation)?;
             let answer = response.message.content;
             let latency_ms = current_time_millis().saturating_sub(started_at_ms);
-            let mut store = state
-                .store
-                .lock()
-                .map_err(|error| format!("store lock poisoned: {error}"))?;
-            let mut metadata = [
-                ("request_id".to_string(), request_id),
-                ("provider".to_string(), config.provider_id.clone()),
-                ("model".to_string(), model.clone()),
-                ("latency_ms".to_string(), latency_ms.to_string()),
-                (
-                    "source_count".to_string(),
-                    selected_results.len().to_string(),
-                ),
-                ("answer".to_string(), answer.clone()),
-                ("output_length".to_string(), answer.len().to_string()),
-            ]
-            .into_iter()
-            .collect::<Metadata>();
-            for key in [
-                "prompt_tokens",
-                "completion_tokens",
-                "total_tokens",
-                "usage_source",
-            ] {
-                if let Some(value) = response.metadata.get(key) {
-                    metadata.insert(key.to_string(), value.clone());
+            with_finalizing_cancellable_mutex(&state.store, cancellation, "store", |store| {
+                let mut metadata = [
+                    ("request_id".to_string(), request_id),
+                    ("provider".to_string(), config.provider_id.clone()),
+                    ("model".to_string(), model.clone()),
+                    ("latency_ms".to_string(), latency_ms.to_string()),
+                    (
+                        "source_count".to_string(),
+                        selected_results.len().to_string(),
+                    ),
+                    ("answer".to_string(), answer.clone()),
+                    ("output_length".to_string(), answer.len().to_string()),
+                ]
+                .into_iter()
+                .collect::<Metadata>();
+                for key in [
+                    "prompt_tokens",
+                    "completion_tokens",
+                    "total_tokens",
+                    "usage_source",
+                ] {
+                    if let Some(value) = response.metadata.get(key) {
+                        metadata.insert(key.to_string(), value.clone());
+                    }
                 }
-            }
-            crate::model_resource_runtime::add_model_resource_metadata(
-                &mut metadata,
-                &cancellation,
-            );
-            append_event(
-                &mut store,
-                &task_id,
-                EventKind::ModelRequestFinished,
-                format!("RAG answer received from {model}"),
-                metadata,
-            )
-            .map_err(|error| error.to_string())?;
-            let memory = project_memory_stats(&mut store, project_id.as_deref())
+                crate::model_resource_runtime::add_model_resource_metadata(
+                    &mut metadata,
+                    cancellation.agent(),
+                );
+                append_event(
+                    store,
+                    &task_id,
+                    EventKind::ModelRequestFinished,
+                    format!("RAG answer received from {model}"),
+                    metadata,
+                )
                 .map_err(|error| error.to_string())?;
+                let memory = project_memory_stats(store, project_id.as_deref())
+                    .map_err(|error| error.to_string())?;
 
-            phase7_state(
-                &store,
-                &snapshot.adapter,
-                memory,
-                sources,
-                Some(retrieval.trace),
-                graph,
-                Some(answer),
-                None,
-            )
-            .map_err(|error| error.to_string())
+                phase7_state(
+                    store,
+                    &snapshot.adapter,
+                    memory,
+                    sources,
+                    Some(retrieval.trace),
+                    graph,
+                    Some(answer),
+                    None,
+                )
+                .map_err(|error| error.to_string())
+            })
         }
         Err(error) => {
             let _ = model_attempt.settle_unknown();
-            cancellation.finish_model_call();
+            cancellation.agent().finish_model_call();
+            if error.is_cancelled() {
+                return Err(MODEL_REQUEST_CANCELLED.to_string());
+            }
             let message = error.to_string();
-            phase7_state_with_error(&state, message, sources, None)
+            phase7_state_with_operation_error(state, cancellation, message, sources, None)
         }
     }
+}
+
+#[tauri::command]
+pub(crate) fn cancel_rag_operation(
+    state: tauri::State<'_, AppState>,
+    operation_id: String,
+) -> Result<bool, String> {
+    cancel_rag_operation_control(&state.rag_operation_controls, operation_id.trim())
 }
 
 #[tauri::command]

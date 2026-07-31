@@ -93,8 +93,17 @@ pub(crate) fn published_knowledge_paths(workspace_root: &Path) -> Option<Knowled
     knowledge_manifest_is_complete(&paths).then_some(paths)
 }
 
+#[cfg(test)]
 pub(crate) fn with_workspace_knowledge_index_lock<T>(
     workspace_root: &Path,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    with_workspace_knowledge_index_lock_cancellable(workspace_root, || false, operation)
+}
+
+pub(crate) fn with_workspace_knowledge_index_lock_cancellable<T>(
+    workspace_root: &Path,
+    mut should_cancel: impl FnMut() -> bool,
     operation: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     let key = fs::canonicalize(workspace_root)
@@ -115,9 +124,23 @@ pub(crate) fn with_workspace_knowledge_index_lock<T>(
             lock
         }
     };
-    let _guard = lock
-        .lock()
-        .map_err(|error| format!("workspace index lock poisoned: {error}"))?;
+    let _guard = loop {
+        if should_cancel() {
+            return Err(MODEL_REQUEST_CANCELLED.to_string());
+        }
+        match lock.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                std::thread::park_timeout(Duration::from_millis(20));
+            }
+            Err(std::sync::TryLockError::Poisoned(error)) => {
+                return Err(format!("workspace index lock poisoned: {error}"));
+            }
+        }
+    };
+    if should_cancel() {
+        return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
     operation()
 }
 
@@ -157,7 +180,23 @@ pub(crate) fn with_workspace_generation_read<T>(
 pub(crate) fn build_and_publish_knowledge_generation_cancellable(
     workspace_root: &Path,
     index: RagIndex,
+    should_cancel: impl FnMut() -> bool,
+) -> Result<PublishedKnowledgeGeneration, String> {
+    build_and_publish_knowledge_generation_with_commit(
+        workspace_root,
+        index,
+        should_cancel,
+        || Ok(()),
+        |()| {},
+    )
+}
+
+pub(crate) fn build_and_publish_knowledge_generation_with_commit<G>(
+    workspace_root: &Path,
+    index: RagIndex,
     mut should_cancel: impl FnMut() -> bool,
+    begin_commit: impl FnOnce() -> Result<G, String>,
+    commit_succeeded: impl FnOnce(G),
 ) -> Result<PublishedKnowledgeGeneration, String> {
     if should_cancel() {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
@@ -197,7 +236,9 @@ pub(crate) fn build_and_publish_knowledge_generation_cancellable(
     if should_cancel() {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
+    let commit = begin_commit()?;
     pending.publish(lancedb_records)?;
+    commit_succeeded(commit);
     Ok(PublishedKnowledgeGeneration {
         paths: pending.paths.clone(),
         adapter,

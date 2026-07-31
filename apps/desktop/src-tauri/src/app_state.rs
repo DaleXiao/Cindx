@@ -1,4 +1,5 @@
 use crate::desktop_prelude::*;
+use crate::rag_operation_runtime::RagOperationControl;
 use crate::{
     attachment_upload_batches::AttachmentUploadBatches,
     collaboration_service::AgentCollaboration,
@@ -24,6 +25,7 @@ pub(crate) struct AppState {
     pub(crate) session_output_cache: Mutex<BTreeMap<String, SessionOutputCacheEntry>>,
     pub(crate) agent_run_controls: Mutex<BTreeMap<String, Arc<AgentRunControl>>>,
     pub(crate) prompt_evaluation_controls: Mutex<BTreeMap<String, Arc<AgentRunControl>>>,
+    pub(crate) rag_operation_controls: Mutex<BTreeMap<String, Arc<RagOperationControl>>>,
     pub(crate) queue_dispatching_sessions: Mutex<BTreeSet<String>>,
     pub(crate) session_title_refinement_sessions: Mutex<BTreeSet<String>>,
     pub(crate) workspace_knowledge_cache: Mutex<BTreeMap<String, WorkspaceKnowledgeCacheEntry>>,
