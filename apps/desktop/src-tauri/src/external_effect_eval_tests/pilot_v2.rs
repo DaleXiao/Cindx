@@ -730,16 +730,9 @@ fn write_pilot_checkpoint(
         sources,
         runs,
     };
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent).expect("Pilot output directory should exist");
-    }
-    let temporary_path = output_path.with_extension("json.tmp");
-    fs::write(
-        &temporary_path,
-        serde_json::to_vec_pretty(&report).expect("Pilot report should serialize"),
-    )
-    .expect("Pilot checkpoint should write");
-    fs::rename(&temporary_path, output_path).expect("Pilot checkpoint should publish");
+    let encoded = serde_json::to_vec_pretty(&report).expect("Pilot report should serialize");
+    write_private_file_atomically(output_path, &encoded, "Pilot checkpoint")
+        .expect("Pilot checkpoint should publish");
 }
 
 #[test]

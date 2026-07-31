@@ -1,0 +1,135 @@
+{
+  "schema": "cindx.provider-baseline-contract.v1",
+  "id": "gpqa-diamond-provider-baseline-v1",
+  "app_version": "0.1.78",
+  "benchmark": "gpqa_diamond",
+  "source": {
+    "url": "https://github.com/idavidrein/gpqa",
+    "revision": "56686c06f5e19865c153de0fdb11be3890014df7",
+    "file_sha256": "41d1213cd7a4998605a26c2798500652572007161b3a92817ba46b35befcd305",
+    "protocol": "EvalScope-compatible zero-shot multiple choice; deterministic option shuffle; no tools; exact answer parsing."
+  },
+  "sampling": {
+    "selection_seed": "gpqa-sample-v1",
+    "option_shuffle_seed": "cindx-fugu-effect-pilot-v1",
+    "ordered_manifest_sha256": "203d665f53e6ecdd1e07fb325792bd4a48c6ac954a4a144b3114f26a4efea02d",
+    "cases_per_domain": 4,
+    "total_cases": 12,
+    "cases": [
+      {
+        "id": "recypVp2NmPlBKVTp",
+        "domain": "Biology",
+        "input_sha256": "a451e44fb843f24522148fed95b141d9ee9739dd2128270b31ed61f245a4c957",
+        "expected_sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd"
+      },
+      {
+        "id": "recw4rROcnHKNZhtK",
+        "domain": "Biology",
+        "input_sha256": "80539286c7d7d4a3a99ef25bc1c4124b97c330f9bdfdfa2b56d98d6d293fb60a",
+        "expected_sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd"
+      },
+      {
+        "id": "recYt8xx80OTyDsL0",
+        "domain": "Biology",
+        "input_sha256": "fb22a6cbee7625a2328db3b8acd2ca0fb28451bfed9f2753313f648308d6268c",
+        "expected_sha256": "3f39d5c348e5b79d06e842c114e6cc571583bbf44e4b0ebfda1a01ec05745d43"
+      },
+      {
+        "id": "recD8oX1KevFbl7bL",
+        "domain": "Biology",
+        "input_sha256": "bed9941d46e38537f3080d6ccd957eef0c99d75394541443567c7f7d4f55686f",
+        "expected_sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd"
+      },
+      {
+        "id": "reckEnrOPFT9Ru7tW",
+        "domain": "Chemistry",
+        "input_sha256": "25a2d0e7182bc95b950cf9c4927c5b7b2f5a00ae0e97f8337ba0b65a30e41299",
+        "expected_sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd"
+      },
+      {
+        "id": "recZt4x514UQNnsgy",
+        "domain": "Chemistry",
+        "input_sha256": "7a8d582ae64445e57ab649810d954fe21159e7e722fdbfd2e531037b524c299b",
+        "expected_sha256": "df7e70e5021544f4834bbee64a9e3789febc4be81470df629cad6ddb03320a5c"
+      },
+      {
+        "id": "recK9F5aqdaybl8bb",
+        "domain": "Chemistry",
+        "input_sha256": "b5767ce56f39335cbfd46d97a8bfe4d78c1dcfd3c11906f259e0a3cb8e3945f7",
+        "expected_sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd"
+      },
+      {
+        "id": "reck4G4xxv3YnpbtQ",
+        "domain": "Chemistry",
+        "input_sha256": "db963e895ef3d5d981a08eae07a341557c1dc879653bb703113ae9c1911cbd12",
+        "expected_sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd"
+      },
+      {
+        "id": "recINGR1z01Fh1Z3A",
+        "domain": "Physics",
+        "input_sha256": "cbcfcdfb398c7d49e4f88a2de99a3c999ebe94b90dce10d728529896c69e755b",
+        "expected_sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd"
+      },
+      {
+        "id": "recqGD3fxPCI59vPQ",
+        "domain": "Physics",
+        "input_sha256": "99d879b3d668c203a027d9aafb4481aa20252916d8f1bfae88f7cbe8ecb7e7a1",
+        "expected_sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd"
+      },
+      {
+        "id": "recIMcQfaQNa6vzsT",
+        "domain": "Physics",
+        "input_sha256": "f50d406bfc1d17ae77311f8da814f198b97b56947403ade6782242fc9adeca30",
+        "expected_sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd"
+      },
+      {
+        "id": "rec6sE2CRtD4drtHg",
+        "domain": "Physics",
+        "input_sha256": "629596a3a89d24f5227eff319a8a209f765b9c49263abf24d4a7bc5426358daf",
+        "expected_sha256": "6b23c0d5f35d1b11f9b683f0b0a617355deb11277d91ae091d399c655b87940d"
+      }
+    ]
+  },
+  "treatments": [
+    {
+      "id": "direct_default",
+      "product_treatment": false,
+      "prompt_profile": "gpqa-direct-baseline-v1",
+      "prompt_profile_origin": "fixed_protocol",
+      "prompt_profile_sha256": "e5ec8624aeaeb02021e6e6db4cc00ab97af1793af3a6e051094a1583fe2d6443",
+      "gepa_frozen": false,
+      "boundary": "Configured default model, fixed GPQA prompt, one no-tools call; excludes Cindx routing and orchestration."
+    },
+    {
+      "id": "cindx_auto",
+      "product_treatment": true,
+      "prompt_profile": "seed-auto-v1",
+      "prompt_profile_origin": "built_in_seed",
+      "prompt_profile_sha256": "be58315c193ef1544b1bea4bc0cfd8c666f27f82447699cb5c5f975a67bdd68a",
+      "gepa_frozen": false,
+      "boundary": "Shipping Cindx Auto router and workflow with configured role models; benchmark tools remain disabled."
+    },
+    {
+      "id": "cindx_pro",
+      "product_treatment": true,
+      "prompt_profile": "seed-pro-v1",
+      "prompt_profile_origin": "built_in_seed",
+      "prompt_profile_sha256": "f6f7df16306550cfc54dbbad3ed834df9d4253e7e7c7bfb8bb303fd4c7db7697",
+      "gepa_frozen": false,
+      "boundary": "Shipping Cindx Pro Conductor best-of-three workflow with configured role models; benchmark tools remain disabled."
+    }
+  ],
+  "matrix": {
+    "case_count": 12,
+    "treatment_count": 3,
+    "expected_runs": 36,
+    "unique_key": ["case_id", "treatment"],
+    "treatment_positions": [0, 1, 2],
+    "runs_per_treatment_position": 4
+  },
+  "evaluation_limits": {
+    "model_call_timeout_seconds": 180,
+    "treatment_deadline_seconds": 300,
+    "max_output_tokens_per_call": 4096
+  }
+}

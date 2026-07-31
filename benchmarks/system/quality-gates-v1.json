@@ -3,7 +3,7 @@
   "id": "foundation",
   "version": 1,
   "priority_order": [
-    "agent_quality",
+    "evaluation_contract",
     "correctness_and_recovery",
     "performance",
     "cost_observability_only"
@@ -114,7 +114,7 @@
     },
     {
       "id": "routing-contract",
-      "category": "agent_quality",
+      "category": "evaluation_contract",
       "command": [
         "cargo",
         "run",
@@ -157,7 +157,7 @@
     },
     {
       "id": "agent-arena-contract",
-      "category": "agent_quality",
+      "category": "evaluation_contract",
       "command": [
         "cargo",
         "run",

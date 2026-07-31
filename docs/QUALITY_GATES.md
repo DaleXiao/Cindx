@@ -8,7 +8,8 @@ does not claim Fugu Ultra equivalence.
 
 - `quick`: version, desktop layout, and structural UX contracts.
 - `ci-contract`: quick checks plus routing, Evaluation v2 foundation, the
-  120-case arena contract, memory, and frontend state behavior.
+  120-case arena schema/evidence-ingestion contract, memory, and frontend state
+  behavior.
 - `control-plane`: deterministic agent contracts plus Rust workspace and desktop tests.
 - `performance`: long-session incremental projection, bounded context governance,
   graph/request reuse, frontend streaming, and 20k-chunk RAG diagnostics.
@@ -58,7 +59,8 @@ comparisons remain diagnostic only.
 - Auto routing passes all 72 versioned cases without over- or under-orchestration.
 - Evaluation v2 remains bound to its frozen pre-GEPA routing baseline.
 - The Agent Arena validates all 120 versioned cases and remains explicitly
-  unmeasured until all 1,440 provider-backed paired runs exist.
+  `not_observed` until all 1,440 provider-backed paired runs exist. This is an
+  evaluation-contract result, not an Agent-quality pass.
 - Memory recall is 100% at top-1 and recall@3 with no trust or dedup failures.
 - Queue, steer, permission suspension, recovery, and session projections pass the
   desktop Rust control-plane tests.
@@ -77,3 +79,8 @@ growth only. Provider-backed completion quality, long-horizon success, and GEPA
 promotion require the hidden feedback, Pareto, and test datasets described in
 `AGENT_EVALUATION.md`. Missing provider evidence must remain explicit and must never
 be converted into a synthetic green result.
+
+The bounded provider baseline runner documented in `AGENT_EVALUATION.md` is an
+explicit, billable operation and is never launched by an ordinary quality-gate
+profile. Its default mode performs only dataset, Git, and output-boundary preflight;
+only `--execute` reaches the configured provider.
