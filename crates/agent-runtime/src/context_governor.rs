@@ -5,6 +5,10 @@ use crate::context_projection::{
     build_omitted_context_digest, fit_message_to_budget, fit_message_to_budget_with_estimate,
     CONTEXT_GOVERNOR_SCHEMA,
 };
+use crate::context_token_ledger::{
+    add_context_source_tokens, context_source_token_ledger_for_indices,
+    context_source_token_ledger_for_projection,
+};
 use agent_core::{Message, MessageRole, Metadata, ToolSpec};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -219,6 +223,31 @@ pub(crate) fn govern_model_messages_with_overlays(
     context_window_tokens: u64,
     max_output_tokens: u64,
 ) -> (Vec<Message>, ContextGovernorReport) {
+    let state_message_tokens = state_messages
+        .iter()
+        .map(estimate_model_message_tokens)
+        .collect::<Vec<_>>();
+    govern_model_messages_with_overlays_and_estimates(
+        state_messages,
+        &state_message_tokens,
+        system_prompt,
+        context_overlays,
+        tools,
+        context_window_tokens,
+        max_output_tokens,
+    )
+}
+
+pub(crate) fn govern_model_messages_with_overlays_and_estimates(
+    state_messages: &[Message],
+    state_message_tokens: &[u64],
+    system_prompt: String,
+    context_overlays: &[Message],
+    tools: &[ToolSpec],
+    context_window_tokens: u64,
+    max_output_tokens: u64,
+) -> (Vec<Message>, ContextGovernorReport) {
+    debug_assert_eq!(state_messages.len(), state_message_tokens.len());
     let context_window_tokens = context_window_tokens.max(4_096);
     let input_budget_tokens = input_budget_tokens(context_window_tokens, max_output_tokens);
     let system_message = Message {
@@ -231,10 +260,6 @@ pub(crate) fn govern_model_messages_with_overlays(
         .iter()
         .map(estimate_model_message_tokens)
         .sum::<u64>();
-    let state_message_tokens = state_messages
-        .iter()
-        .map(estimate_model_message_tokens)
-        .collect::<Vec<_>>();
     let tool_tokens = estimate_tool_tokens(tools);
     let estimated_original_tokens = system_tokens
         .saturating_add(overlay_tokens)
@@ -246,7 +271,13 @@ pub(crate) fn govern_model_messages_with_overlays(
         messages.extend(context_overlays.iter().cloned());
         messages.extend(state_messages.iter().cloned());
         let selected_context_sources = context_source_labels(&messages);
-        let selected_source_tokens = context_source_token_ledger(&messages);
+        let selected_source_tokens = context_source_token_ledger_for_projection(
+            context_overlays,
+            state_messages,
+            state_message_tokens,
+            None,
+            &BTreeMap::new(),
+        );
         let current_request_preserved = current_request_preserved(state_messages, &messages);
         let protected_sources_satisfied = protected_sources_satisfied(state_messages, &messages);
         let tool_round_integrity_satisfied = tool_round_integrity_satisfied(&messages);
@@ -281,18 +312,18 @@ pub(crate) fn govern_model_messages_with_overlays(
                         .unwrap_or_default(),
                     protected_context_tokens: selected_system_context_tokens(
                         state_messages,
-                        &state_message_tokens,
+                        state_message_tokens,
                         true,
                     )
                     .saturating_add(overlay_tokens),
                     supplemental_context_tokens: selected_system_context_tokens(
                         state_messages,
-                        &state_message_tokens,
+                        state_message_tokens,
                         false,
                     ),
                     recent_conversation_tokens: conversation_tokens_except_current(
                         state_messages,
-                        &state_message_tokens,
+                        state_message_tokens,
                     ),
                     archive_digest_tokens: 0,
                     unused_tokens: input_budget_tokens.saturating_sub(estimated_original_tokens),
@@ -303,7 +334,7 @@ pub(crate) fn govern_model_messages_with_overlays(
             state_messages,
             &system_message,
             context_overlays,
-            &state_message_tokens,
+            state_message_tokens,
             system_tokens,
             overlay_tokens,
             tool_tokens,
@@ -339,7 +370,11 @@ pub(crate) fn govern_model_messages_with_overlays(
         });
         if let Some((message, truncated)) = fitted {
             selected.insert(index);
-            selected_conversation_tokens = estimate_model_message_tokens(&message);
+            selected_conversation_tokens = if truncated {
+                estimate_model_message_tokens(&message)
+            } else {
+                state_message_tokens[index]
+            };
             if truncated {
                 replacements.insert(index, message);
                 truncated_messages += 1;
@@ -352,7 +387,7 @@ pub(crate) fn govern_model_messages_with_overlays(
         .min(available_tokens.saturating_mul(35) / 100);
     select_system_contexts(
         state_messages,
-        &state_message_tokens,
+        state_message_tokens,
         system_context_budget,
         current_user_index.map(|index| state_messages[index].content.as_str()),
         &mut selected,
@@ -378,14 +413,14 @@ pub(crate) fn govern_model_messages_with_overlays(
     if let Some(current_user_index) = current_user_index {
         select_recent_current_turn_rounds(
             state_messages,
-            &state_message_tokens,
+            state_message_tokens,
             current_user_index,
             &mut recent_budget,
             &mut selected,
         );
         select_prior_user_turns(
             state_messages,
-            &state_message_tokens,
+            state_message_tokens,
             current_user_index,
             &mut recent_budget,
             &mut selected,
@@ -393,7 +428,7 @@ pub(crate) fn govern_model_messages_with_overlays(
     } else {
         select_recent_messages(
             state_messages,
-            &state_message_tokens,
+            state_message_tokens,
             &mut recent_budget,
             &mut selected,
         );
@@ -413,6 +448,10 @@ pub(crate) fn govern_model_messages_with_overlays(
         .filter(|index| !selected.contains(index))
         .collect::<Vec<_>>();
     let digest = build_omitted_context_digest(state_messages, &omitted_indices, digest_budget);
+    let digest_tokens = digest
+        .as_ref()
+        .map(estimate_model_message_tokens)
+        .unwrap_or_default();
 
     let mut messages = Vec::with_capacity(
         selected.len() + context_overlays.len() + usize::from(digest.is_some()) + 1,
@@ -447,10 +486,24 @@ pub(crate) fn govern_model_messages_with_overlays(
         }
     }
 
-    let estimated_projected_tokens =
-        estimate_messages_tokens(&messages).saturating_add(tool_tokens);
+    let estimated_projected_tokens = system_tokens
+        .saturating_add(overlay_tokens)
+        .saturating_add(selected_tokens)
+        .saturating_add(digest_tokens)
+        .saturating_add(tool_tokens);
     let selected_context_sources = context_source_labels(&messages);
-    let selected_source_tokens = context_source_token_ledger(&messages);
+    let mut selected_source_tokens = context_source_token_ledger_for_projection(
+        context_overlays,
+        state_messages,
+        state_message_tokens,
+        Some(&selected),
+        &replacements,
+    );
+    if let Some(digest) = messages.iter().find(|message| {
+        message.metadata.get("kind").map(String::as_str) == Some("context_governor_digest")
+    }) {
+        add_context_source_tokens(&mut selected_source_tokens, digest, digest_tokens);
+    }
     let omitted_context_sources = omitted_indices
         .iter()
         .filter_map(|index| state_messages.get(*index))
@@ -462,24 +515,28 @@ pub(crate) fn govern_model_messages_with_overlays(
         .collect();
     let omitted_source_tokens = context_source_token_ledger_for_indices(
         state_messages,
-        &state_message_tokens,
+        state_message_tokens,
         &omitted_indices,
     );
     let current_request_preserved = current_request_preserved(state_messages, &messages);
     let protected_sources_satisfied = protected_sources_satisfied(state_messages, &messages);
     let tool_round_integrity_satisfied = tool_round_integrity_satisfied(&messages);
-    let archive_digest_tokens = messages
-        .iter()
-        .find(|message| {
-            message.metadata.get("kind").map(String::as_str) == Some("context_governor_digest")
-        })
-        .map(estimate_model_message_tokens)
-        .unwrap_or_default();
-    let protected_context_tokens =
-        selected_context_tokens_by_protection(state_messages, &selected, &replacements, true)
-            .saturating_add(overlay_tokens);
-    let supplemental_context_tokens =
-        selected_context_tokens_by_protection(state_messages, &selected, &replacements, false);
+    let archive_digest_tokens = digest_tokens;
+    let protected_context_tokens = selected_context_tokens_by_protection(
+        state_messages,
+        state_message_tokens,
+        &selected,
+        &replacements,
+        true,
+    )
+    .saturating_add(overlay_tokens);
+    let supplemental_context_tokens = selected_context_tokens_by_protection(
+        state_messages,
+        state_message_tokens,
+        &selected,
+        &replacements,
+        false,
+    );
     let recent_conversation_tokens = selected
         .iter()
         .filter(|index| Some(**index) != current_user_index)
@@ -525,7 +582,7 @@ pub(crate) fn govern_model_messages_with_overlays(
         state_messages,
         &system_message,
         context_overlays,
-        &state_message_tokens,
+        state_message_tokens,
         system_tokens,
         overlay_tokens,
         tool_tokens,
@@ -651,7 +708,11 @@ fn repair_context_projection(
                     )
                 })
         }?;
-        let tokens = estimate_model_message_tokens(&fitted.0);
+        let tokens = if fitted.1 {
+            estimate_model_message_tokens(&fitted.0)
+        } else {
+            state_message_tokens[index]
+        };
         if tokens > remaining {
             return None;
         }
@@ -709,6 +770,10 @@ fn repair_context_projection(
         .collect::<Vec<_>>();
     let digest_budget = available_tokens.saturating_sub(selected_tokens);
     let digest = build_omitted_context_digest(state_messages, &omitted_indices, digest_budget);
+    let digest_tokens = digest
+        .as_ref()
+        .map(estimate_model_message_tokens)
+        .unwrap_or_default();
 
     let mut messages = Vec::with_capacity(
         selected.len() + context_overlays.len() + usize::from(digest.is_some()) + 1,
@@ -733,10 +798,24 @@ fn repair_context_projection(
         false,
     );
 
-    let estimated_projected_tokens =
-        estimate_messages_tokens(&messages).saturating_add(tool_tokens);
+    let estimated_projected_tokens = system_tokens
+        .saturating_add(overlay_tokens)
+        .saturating_add(selected_tokens)
+        .saturating_add(digest_tokens)
+        .saturating_add(tool_tokens);
     let selected_context_sources = context_source_labels(&messages);
-    let selected_source_tokens = context_source_token_ledger(&messages);
+    let mut selected_source_tokens = context_source_token_ledger_for_projection(
+        context_overlays,
+        state_messages,
+        state_message_tokens,
+        Some(&selected),
+        &replacements,
+    );
+    if let Some(digest) = messages.iter().find(|message| {
+        message.metadata.get("kind").map(String::as_str) == Some("context_governor_digest")
+    }) {
+        add_context_source_tokens(&mut selected_source_tokens, digest, digest_tokens);
+    }
     let omitted_context_sources = omitted_indices
         .iter()
         .filter_map(|index| state_messages.get(*index))
@@ -751,13 +830,7 @@ fn repair_context_projection(
         state_message_tokens,
         &omitted_indices,
     );
-    let archive_digest_tokens = messages
-        .iter()
-        .find(|message| {
-            message.metadata.get("kind").map(String::as_str) == Some("context_governor_digest")
-        })
-        .map(estimate_model_message_tokens)
-        .unwrap_or_default();
+    let archive_digest_tokens = digest_tokens;
     let current_request_tokens = current_user_index
         .filter(|index| selected.contains(index))
         .map(|index| {
@@ -767,11 +840,21 @@ fn repair_context_projection(
             )
         })
         .unwrap_or_default();
-    let protected_context_tokens =
-        selected_context_tokens_by_protection(state_messages, &selected, &replacements, true)
-            .saturating_add(overlay_tokens);
-    let supplemental_context_tokens =
-        selected_context_tokens_by_protection(state_messages, &selected, &replacements, false);
+    let protected_context_tokens = selected_context_tokens_by_protection(
+        state_messages,
+        state_message_tokens,
+        &selected,
+        &replacements,
+        true,
+    )
+    .saturating_add(overlay_tokens);
+    let supplemental_context_tokens = selected_context_tokens_by_protection(
+        state_messages,
+        state_message_tokens,
+        &selected,
+        &replacements,
+        false,
+    );
     let recent_conversation_tokens = selected
         .iter()
         .filter(|index| Some(**index) != current_user_index)
@@ -900,10 +983,6 @@ fn input_budget_tokens(context_window_tokens: u64, requested_output_tokens: u64)
         .max(1_024)
 }
 
-fn estimate_messages_tokens(messages: &[Message]) -> u64 {
-    messages.iter().map(estimate_model_message_tokens).sum()
-}
-
 fn estimate_tool_tokens(tools: &[ToolSpec]) -> u64 {
     tools
         .iter()
@@ -937,37 +1016,6 @@ fn fixed_core_tokens(system_tokens: u64, tool_tokens: u64) -> u64 {
     system_tokens.saturating_add(tool_tokens)
 }
 
-fn context_source_token_ledger(messages: &[Message]) -> BTreeMap<String, u64> {
-    let mut ledger = BTreeMap::new();
-    for message in messages.iter().skip(1) {
-        let Some(source) = ContextSourceKind::from_message(message) else {
-            continue;
-        };
-        let entry = ledger.entry(source.as_str().to_string()).or_insert(0u64);
-        *entry = (*entry).saturating_add(estimate_model_message_tokens(message));
-    }
-    ledger
-}
-
-fn context_source_token_ledger_for_indices(
-    messages: &[Message],
-    message_tokens: &[u64],
-    indices: &[usize],
-) -> BTreeMap<String, u64> {
-    let mut ledger = BTreeMap::new();
-    for index in indices {
-        let Some(message) = messages.get(*index) else {
-            continue;
-        };
-        let Some(source) = ContextSourceKind::from_message(message) else {
-            continue;
-        };
-        let entry = ledger.entry(source.as_str().to_string()).or_insert(0u64);
-        *entry = (*entry).saturating_add(message_tokens.get(*index).copied().unwrap_or_default());
-    }
-    ledger
-}
-
 fn selected_system_context_tokens(
     messages: &[Message],
     message_tokens: &[u64],
@@ -985,6 +1033,7 @@ fn selected_system_context_tokens(
 
 fn selected_context_tokens_by_protection(
     messages: &[Message],
+    message_tokens: &[u64],
     selected: &BTreeSet<usize>,
     replacements: &BTreeMap<usize, Message>,
     protected: bool,
@@ -995,10 +1044,9 @@ fn selected_context_tokens_by_protection(
             let message = messages.get(*index)?;
             let source = ContextSourceKind::from_message(message)?;
             (source.is_protected() == protected).then(|| {
-                replacements.get(index).map_or_else(
-                    || estimate_model_message_tokens(message),
-                    estimate_model_message_tokens,
-                )
+                replacements
+                    .get(index)
+                    .map_or_else(|| message_tokens[*index], estimate_model_message_tokens)
             })
         })
         .sum()
@@ -1897,15 +1945,29 @@ mod tests {
             .iter()
             .map(|entry| entry.content.len())
             .sum::<usize>();
-        let canonical_messages = history.len();
+        let mut state = crate::resume_agent_loop_from_messages(
+            agent_core::TaskId("context-governor-diagnostic".to_string()),
+            "current goal: preserve UX and complete the verified task",
+            history,
+            crate::AgentRuntimeConfig::default(),
+        );
+        let canonical_messages = state.messages.len();
         let mut samples = Vec::with_capacity(11);
         let mut projected_messages = 0usize;
         let mut estimated_original_tokens = 0u64;
         let mut estimated_projected_tokens = 0u64;
         for _ in 0..11 {
             let started_at = std::time::Instant::now();
-            let (projected, report) =
-                govern_model_messages(&history, "system".to_string(), &[tool()], 32_768, 4_096);
+            state.context_token_ledger.synchronize(&state.messages);
+            let (projected, report) = govern_model_messages_with_overlays_and_estimates(
+                &state.messages,
+                state.context_token_ledger.tokens(),
+                "system".to_string(),
+                &[],
+                &[tool()],
+                32_768,
+                4_096,
+            );
             samples.push(started_at.elapsed().as_micros());
             assert!(report.applied);
             assert!(report.hard_limit_satisfied);
@@ -1916,7 +1978,7 @@ mod tests {
             estimated_original_tokens = report.estimated_original_tokens;
             estimated_projected_tokens = report.estimated_projected_tokens;
         }
-        assert_eq!(history.len(), canonical_messages);
+        assert_eq!(state.messages.len(), canonical_messages);
         assert!(projected_messages < canonical_messages / 10);
         samples.sort_unstable();
         let percentile = |value: usize| samples[(samples.len().saturating_sub(1) * value) / 100];

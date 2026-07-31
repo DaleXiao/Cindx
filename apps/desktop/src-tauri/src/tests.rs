@@ -5813,7 +5813,7 @@ fn context_governor_preserves_canonical_history_and_latest_tool_round() {
     let canonical_history = runtime.messages.clone();
 
     let (request, report) =
-        model_request_for_turn_with_context_budget(&runtime, &tools, None, None, 16_384, 2_048);
+        model_request_for_turn_with_context_budget(&mut runtime, &tools, None, None, 16_384, 2_048);
 
     assert!(report.applied);
     assert!(report.hard_limit_satisfied);

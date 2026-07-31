@@ -14,6 +14,7 @@ mod anytime_parallel;
 mod context_engine;
 mod context_governor;
 mod context_projection;
+mod context_token_ledger;
 mod control;
 mod control_steer;
 mod execution;
@@ -135,6 +136,17 @@ pub struct AgentLoopState {
     pub verified_interactions: usize,
     pub interaction_verification_gate_requests: usize,
     pub task_contract: AgentTaskContract,
+    context_token_ledger: context_token_ledger::ContextTokenLedger,
+}
+
+impl AgentLoopState {
+    /// Invalidates cached token estimates after an in-place mutation to an
+    /// estimator-relevant message field (`content`, `raw_tool_calls_json`, or
+    /// `image_paths`). Structural replacements are detected automatically.
+    pub fn invalidate_context_token_estimates_from(&mut self, first_changed_message: usize) {
+        self.context_token_ledger
+            .invalidate_from(first_changed_message);
+    }
 }
 
 #[derive(
@@ -314,6 +326,7 @@ pub fn start_agent_loop(
         verified_interactions: 0,
         interaction_verification_gate_requests: 0,
         task_contract: AgentTaskContract::default(),
+        context_token_ledger: Default::default(),
     }
 }
 
@@ -344,6 +357,7 @@ pub fn start_agent_loop_with_history(
         verified_interactions: 0,
         interaction_verification_gate_requests: 0,
         task_contract: AgentTaskContract::default(),
+        context_token_ledger: Default::default(),
     }
 }
 
@@ -385,6 +399,7 @@ pub fn resume_agent_loop_from_messages(
         verified_interactions: 0,
         interaction_verification_gate_requests: 0,
         task_contract: AgentTaskContract::default(),
+        context_token_ledger: Default::default(),
     };
     rebuild_interaction_verification_state(&mut state);
     state
@@ -430,7 +445,7 @@ pub fn model_request_for_turn_with_context(
 }
 
 pub fn model_request_for_turn_with_context_budget(
-    state: &AgentLoopState,
+    state: &mut AgentLoopState,
     tools: &[ToolSpec],
     user_instructions: Option<&str>,
     runtime_context: Option<&str>,
@@ -449,7 +464,7 @@ pub fn model_request_for_turn_with_context_budget(
 }
 
 pub fn model_request_for_turn_with_context_budget_and_overlays(
-    state: &AgentLoopState,
+    state: &mut AgentLoopState,
     tools: &[ToolSpec],
     user_instructions: Option<&str>,
     runtime_context: Option<&str>,
@@ -458,8 +473,10 @@ pub fn model_request_for_turn_with_context_budget_and_overlays(
     max_output_tokens: u64,
 ) -> (ModelRequest, ContextGovernorReport) {
     let system_prompt = agent_system_prompt_with_context(tools, user_instructions, runtime_context);
-    let (messages, report) = context_governor::govern_model_messages_with_overlays(
+    state.context_token_ledger.synchronize(&state.messages);
+    let (messages, report) = context_governor::govern_model_messages_with_overlays_and_estimates(
         &state.messages,
+        state.context_token_ledger.tokens(),
         system_prompt,
         context_overlays,
         tools,
