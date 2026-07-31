@@ -332,6 +332,17 @@ mod tests {
         }
     }
 
+    fn runtime_with_messages(prompt: &str, messages: Vec<Message>) -> AgentLoopState {
+        let mut runtime = agent_runtime::start_agent_loop(
+            TaskId("task".to_string()),
+            prompt,
+            agent_runtime::AgentRuntimeConfig { max_turns: 1 },
+        );
+        runtime.messages = messages;
+        runtime.verified_after_last_mutation = true;
+        runtime
+    }
+
     #[test]
     fn trusted_tool_evidence_requires_success_provenance_and_current_epoch() {
         let valid = tool_message([
@@ -361,10 +372,9 @@ mod tests {
 
     #[test]
     fn unverified_read_only_tool_is_grounding_not_verification() {
-        let mut runtime = AgentLoopState {
-            task_id: TaskId("task".to_string()),
-            user_prompt: "inspect".to_string(),
-            messages: vec![tool_message([
+        let mut runtime = runtime_with_messages(
+            "inspect",
+            vec![tool_message([
                 ("tool_evidence_schema", TOOL_EVIDENCE_SCHEMA),
                 ("tool_evidence_provenance", TOOL_EVIDENCE_PROVENANCE),
                 ("tool_status", "succeeded"),
@@ -373,18 +383,7 @@ mod tests {
                 ("tool_source", "built_in"),
                 ("contract_evidence_sequence", "1"),
             ])],
-            turn: 0,
-            max_turns: 1,
-            failed_tool_signatures: Default::default(),
-            consecutive_empty_responses: 0,
-            successful_mutations: 0,
-            verified_after_last_mutation: true,
-            verification_gate_requests: 0,
-            pending_interaction_verifications: Default::default(),
-            verified_interactions: 0,
-            interaction_verification_gate_requests: 0,
-            task_contract: Default::default(),
-        };
+        );
         let evidence = completion_tool_evidence(&runtime, 3);
         assert_eq!(evidence.grounded_count, 1);
         assert_eq!(evidence.verified_postcondition_count, 0);
@@ -400,22 +399,7 @@ mod tests {
 
     #[test]
     fn matching_runtime_postcondition_is_verified() {
-        let mut runtime = AgentLoopState {
-            task_id: TaskId("task".to_string()),
-            user_prompt: "change and test".to_string(),
-            messages: Vec::new(),
-            turn: 0,
-            max_turns: 1,
-            failed_tool_signatures: Default::default(),
-            consecutive_empty_responses: 0,
-            successful_mutations: 0,
-            verified_after_last_mutation: true,
-            verification_gate_requests: 0,
-            pending_interaction_verifications: Default::default(),
-            verified_interactions: 0,
-            interaction_verification_gate_requests: 0,
-            task_contract: Default::default(),
-        };
+        let mut runtime = runtime_with_messages("change and test", Vec::new());
         agent_runtime::record_tool_outcome_with_risk(
             &mut runtime,
             "file.write",
@@ -456,22 +440,7 @@ mod tests {
 
     #[test]
     fn interaction_observation_only_verifies_the_call_that_closed_a_pending_action() {
-        let mut runtime = AgentLoopState {
-            task_id: TaskId("task".to_string()),
-            user_prompt: "interact".to_string(),
-            messages: Vec::new(),
-            turn: 0,
-            max_turns: 1,
-            failed_tool_signatures: Default::default(),
-            consecutive_empty_responses: 0,
-            successful_mutations: 0,
-            verified_after_last_mutation: true,
-            verification_gate_requests: 0,
-            pending_interaction_verifications: Default::default(),
-            verified_interactions: 0,
-            interaction_verification_gate_requests: 0,
-            task_contract: Default::default(),
-        };
+        let mut runtime = runtime_with_messages("interact", Vec::new());
         agent_runtime::record_tool_outcome_with_risk(
             &mut runtime,
             "browser.click",
@@ -512,22 +481,7 @@ mod tests {
 
     #[test]
     fn same_tool_name_cannot_reuse_verification_from_an_older_sequence() {
-        let mut runtime = AgentLoopState {
-            task_id: TaskId("task".to_string()),
-            user_prompt: "change and verify".to_string(),
-            messages: Vec::new(),
-            turn: 0,
-            max_turns: 1,
-            failed_tool_signatures: Default::default(),
-            consecutive_empty_responses: 0,
-            successful_mutations: 0,
-            verified_after_last_mutation: true,
-            verification_gate_requests: 0,
-            pending_interaction_verifications: Default::default(),
-            verified_interactions: 0,
-            interaction_verification_gate_requests: 0,
-            task_contract: Default::default(),
-        };
+        let mut runtime = runtime_with_messages("change and verify", Vec::new());
         for (tool, input, risk) in [
             (
                 "file.write",

@@ -99,7 +99,7 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
     }
 
     pub fn prepare_model_turn(
-        &self,
+        &mut self,
         user_instructions: Option<&str>,
         runtime_context: Option<&str>,
         context_window_tokens: u64,
@@ -116,7 +116,7 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
     }
 
     pub fn prepare_model_turn_with_contract(
-        &self,
+        &mut self,
         user_instructions: Option<&str>,
         runtime_context: Option<&str>,
         workspace_verification_required: bool,
@@ -137,7 +137,7 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
     }
 
     fn prepare_model_turn_with_context(
-        &self,
+        &mut self,
         user_instructions: Option<&str>,
         runtime_context: Option<&str>,
         contract_context: Option<String>,

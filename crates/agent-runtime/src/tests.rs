@@ -100,6 +100,255 @@ fn empty_custom_instructions_do_not_add_a_user_layer() {
 }
 
 #[test]
+fn context_token_ledger_matches_fresh_governor_and_scales_with_changed_suffix() {
+    let tools = vec![tool("file.read", "path=<workspace-relative-path>")];
+    let mut tool_call = Message {
+        role: MessageRole::Assistant,
+        content: "我会读取证据".to_string(),
+        metadata: Metadata::new(),
+    };
+    tool_call.metadata.insert(
+        "raw_tool_calls_json".to_string(),
+        r#"[{"id":"call-1","type":"function","function":{"name":"file_read","arguments":"{\"path\":\"README.md\"}"}}]"#
+            .to_string(),
+    );
+    let mut image_request = Message {
+        role: MessageRole::User,
+        content: "Compare both images and preserve every constraint".to_string(),
+        metadata: Metadata::new(),
+    };
+    image_request.metadata.insert(
+        "image_paths".to_string(),
+        "/tmp/reference-a.png\n/tmp/reference-b.png".to_string(),
+    );
+    let history = vec![
+        Message {
+            role: MessageRole::System,
+            content: "Restore the verified task objective and historical constraints".to_string(),
+            metadata: [("kind".to_string(), "context_restore_pack".to_string())]
+                .into_iter()
+                .collect(),
+        },
+        Message {
+            role: MessageRole::User,
+            content: "Inspect the workspace".to_string(),
+            metadata: Metadata::new(),
+        },
+        tool_call,
+        Message {
+            role: MessageRole::Tool,
+            content: "direct evidence ".repeat(600),
+            metadata: [("tool_call_id".to_string(), "call-1".to_string())]
+                .into_iter()
+                .collect(),
+        },
+        image_request,
+        Message {
+            role: MessageRole::Assistant,
+            content: "older result ".repeat(1_200),
+            metadata: Metadata::new(),
+        },
+        Message {
+            role: MessageRole::User,
+            content: "Finish the current verified task without regressions".to_string(),
+            metadata: Metadata::new(),
+        },
+    ];
+    let mut state = resume_agent_loop_from_messages(
+        TaskId("ledger-parity".to_string()),
+        "Finish the current verified task without regressions",
+        history,
+        AgentRuntimeConfig::default(),
+    );
+    let mut overlay = Message {
+        role: MessageRole::Reviewer,
+        content: "grounded overlay".to_string(),
+        metadata: Metadata::new(),
+    };
+    overlay
+        .metadata
+        .insert("internal".to_string(), "true".to_string());
+    overlay
+        .metadata
+        .insert("kind".to_string(), "knowledge_context".to_string());
+    overlay.metadata.insert(
+        "context_source_schema".to_string(),
+        CONTEXT_SOURCE_SCHEMA.to_string(),
+    );
+    let overlays = vec![overlay];
+
+    let assert_parity = |state: &mut AgentLoopState, context_window_tokens| {
+        let system_prompt = agent_system_prompt_with_context(&tools, None, None);
+        let expected = context_governor::govern_model_messages_with_overlays(
+            &state.messages,
+            system_prompt,
+            &overlays,
+            &tools,
+            context_window_tokens,
+            1_024,
+        );
+        let actual = model_request_for_turn_with_context_budget_and_overlays(
+            state,
+            &tools,
+            None,
+            None,
+            &overlays,
+            context_window_tokens,
+            1_024,
+        );
+        assert_eq!(actual.0.messages, expected.0);
+        assert_eq!(actual.1, expected.1);
+    };
+
+    let initial_messages = state.messages.len();
+    assert_parity(&mut state, 4_096);
+    assert_eq!(
+        state.context_token_ledger.estimate_count(),
+        initial_messages
+    );
+    assert_parity(&mut state, 65_536);
+    assert_eq!(
+        state.context_token_ledger.estimate_count(),
+        initial_messages,
+        "an unchanged transcript must not be re-estimated"
+    );
+
+    state.messages.push(Message {
+        role: MessageRole::Assistant,
+        content: "new suffix 中文".to_string(),
+        metadata: Metadata::new(),
+    });
+    assert_parity(&mut state, 4_096);
+    assert_eq!(
+        state.context_token_ledger.estimate_count(),
+        initial_messages + 1,
+        "append-only turns estimate only the appended suffix"
+    );
+
+    state.messages.truncate(initial_messages - 1);
+    assert_parity(&mut state, 4_096);
+    assert_eq!(
+        state.context_token_ledger.estimate_count(),
+        initial_messages + 1,
+        "truncate reuses the retained prefix"
+    );
+
+    let replacement_index = 2;
+    state.messages[replacement_index] = Message {
+        role: MessageRole::Tool,
+        content: "replacement evidence".to_string(),
+        metadata: [("tool_call_id".to_string(), "call-1".to_string())]
+            .into_iter()
+            .collect(),
+    };
+    let before_replacement = state.context_token_ledger.estimate_count();
+    assert_parity(&mut state, 4_096);
+    assert_eq!(
+        state.context_token_ledger.estimate_count() - before_replacement,
+        state.messages.len() - replacement_index,
+        "a structural replacement rebuilds only its suffix"
+    );
+
+    let insert_index = 1;
+    state.messages.insert(
+        insert_index,
+        Message {
+            role: MessageRole::Assistant,
+            content: "inserted context".to_string(),
+            metadata: Metadata::new(),
+        },
+    );
+    let before_insert = state.context_token_ledger.estimate_count();
+    assert_parity(&mut state, 4_096);
+    assert_eq!(
+        state.context_token_ledger.estimate_count() - before_insert,
+        state.messages.len() - insert_index,
+        "an insertion rebuilds only its shifted suffix"
+    );
+
+    let in_place_index = 0;
+    let original_capacity = state.messages[in_place_index].content.capacity();
+    state.messages[in_place_index]
+        .content
+        .replace_range(..7, "Examine");
+    assert_eq!(
+        state.messages[in_place_index].content.capacity(),
+        original_capacity
+    );
+    state.invalidate_context_token_estimates_from(in_place_index);
+    let before_in_place = state.context_token_ledger.estimate_count();
+    assert_parity(&mut state, 4_096);
+    assert_eq!(
+        state.context_token_ledger.estimate_count() - before_in_place,
+        state.messages.len(),
+        "explicit invalidation covers same-allocation in-place edits"
+    );
+
+    let mut cloned = state.clone();
+    assert_eq!(cloned, state, "the cache must not affect semantic equality");
+    assert_eq!(cloned.context_token_ledger.estimate_count(), 0);
+    assert_parity(&mut cloned, 4_096);
+    assert_eq!(
+        cloned.context_token_ledger.estimate_count(),
+        cloned.messages.len(),
+        "a cloned state rebuilds allocation identities once"
+    );
+
+    let snapshot = AgentTaskStateSnapshot::capture(&state);
+    let mut restored = snapshot
+        .restore(state.user_prompt.clone(), state.messages.clone())
+        .expect("matching transcript restores");
+    assert_eq!(restored.context_token_ledger.estimate_count(), 0);
+    assert_parity(&mut restored, 4_096);
+    assert_eq!(
+        restored.context_token_ledger.estimate_count(),
+        restored.messages.len(),
+        "restoration starts with a cold non-persisted ledger"
+    );
+}
+
+#[test]
+fn cached_context_governor_matches_fresh_repair_projection() {
+    let tools = vec![tool("file.read", "path=<workspace-relative-path>")];
+    let history = vec![
+        Message {
+            role: MessageRole::Tool,
+            content: "orphaned historical observation".to_string(),
+            metadata: [("tool_call_id".to_string(), "orphan-call".to_string())]
+                .into_iter()
+                .collect(),
+        },
+        Message {
+            role: MessageRole::User,
+            content: "Repair the tight projection and continue safely".to_string(),
+            metadata: Metadata::new(),
+        },
+    ];
+    let mut state = resume_agent_loop_from_messages(
+        TaskId("ledger-repair-parity".to_string()),
+        "Repair the tight projection and continue safely",
+        history,
+        AgentRuntimeConfig::default(),
+    );
+    let system_prompt = agent_system_prompt_with_context(&tools, None, None);
+    let expected = context_governor::govern_model_messages_with_overlays(
+        &state.messages,
+        system_prompt,
+        &[],
+        &tools,
+        4_096,
+        1_024,
+    );
+    assert!(expected.1.repair_attempted);
+
+    let actual =
+        model_request_for_turn_with_context_budget(&mut state, &tools, None, None, 4_096, 1_024);
+
+    assert_eq!(actual.0.messages, expected.0);
+    assert_eq!(actual.1, expected.1);
+}
+
+#[test]
 fn core_prompt_exposes_session_diagram_capabilities() {
     let prompt = compose_base_agent_system_prompt(None);
 
