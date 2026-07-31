@@ -20,6 +20,7 @@ mod request_builder;
 mod request_tool_calls;
 mod request_vision;
 mod response_parser;
+mod stream_delta_aggregator;
 mod streaming_response;
 mod streaming_wire;
 mod usage;
