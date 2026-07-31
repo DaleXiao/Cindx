@@ -1,8 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import desktopPackage from "../package.json";
-import { providerApiKeySetAfterSave, resolveProviderProfile } from "./providerProfiles";
-import * as projectMemory from "./memoryManagementModel";
+import desktopPackage from "../package.json" with { type: "json" };
+import { providerApiKeySetAfterSave, resolveProviderProfile } from "./providerProfiles.ts";
+import * as projectMemory from "./memoryManagementModel.ts";
 
 export const DESKTOP_VERSION = desktopPackage.version;
 
@@ -10,7 +10,7 @@ export type * from "./tauriTypes";
 export type * from "./ragOperationModel";
 export type * from "./agentRunBudgetModel";
 export type * from "./memoryManagementModel";
-export { stageAgentAttachments } from "./attachmentIpc";
+export { stageAgentAttachments } from "./attachmentIpc.ts";
 import type { AgentEffort } from "./agentRunBudgetModel";
 import type {
   RuntimeStatus,
