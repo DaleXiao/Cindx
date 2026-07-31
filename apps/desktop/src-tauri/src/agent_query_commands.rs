@@ -266,13 +266,7 @@ pub(crate) fn begin_agent_run_control_for_effort<'a>(
             .map(AgentRunControl::from_snapshot)
             .unwrap_or_else(|| AgentRunControl::new(effort)),
     );
-    RegisteredRunControl::register(
-        &state.agent_run_controls,
-        session_id,
-        control,
-        "agent run control",
-        "agent run is already active for this session",
-    )
+    register_agent_run_control_for_session(state, session_id, control)
 }
 
 pub(crate) fn begin_agent_run_control_for_continuation<'a>(
@@ -285,13 +279,7 @@ pub(crate) fn begin_agent_run_control_for_continuation<'a>(
         AgentRunControl::from_snapshot_for_continuation(snapshot)
             .map_err(|reason| format!("agent run cannot continue after {}", reason.code()))?,
     );
-    RegisteredRunControl::register(
-        &state.agent_run_controls,
-        session_id,
-        control,
-        "agent run control",
-        "agent run is already active for this session",
-    )
+    register_agent_run_control_for_session(state, session_id, control)
 }
 
 pub(crate) fn begin_agent_run_control_at_steer_epoch<'a>(
@@ -301,12 +289,10 @@ pub(crate) fn begin_agent_run_control_at_steer_epoch<'a>(
     applied_epoch: u64,
 ) -> Result<RegisteredRunControl<'a>, String> {
     cancel_background_prompt_evaluations(state)?;
-    RegisteredRunControl::register(
-        &state.agent_run_controls,
+    register_agent_run_control_for_session(
+        state,
         session_id,
         Arc::new(AgentRunControl::new_at_steer_epoch(effort, applied_epoch)),
-        "agent run control",
-        "agent run is already active for this session",
     )
 }
 
@@ -328,10 +314,23 @@ pub(crate) fn begin_agent_run_control_from_persisted_resources<'a>(
     } else {
         AgentRunControl::new_at_steer_epoch_with_resource_snapshot(effort, applied_epoch, resources)
     };
+    register_agent_run_control_for_session(state, session_id, Arc::new(control))
+}
+
+fn register_agent_run_control_for_session<'a>(
+    state: &'a tauri::State<'_, AppState>,
+    session_id: &str,
+    control: Arc<AgentRunControl>,
+) -> Result<RegisteredRunControl<'a>, String> {
+    let _lifecycle = state
+        .session_lifecycle_gate
+        .lock()
+        .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
+    project_session_metadata_for_session(state, Some(session_id))?;
     RegisteredRunControl::register(
         &state.agent_run_controls,
         session_id,
-        Arc::new(control),
+        control,
         "agent run control",
         "agent run is already active for this session",
     )

@@ -18,6 +18,7 @@ pub(crate) struct AppState {
     pub(crate) sidecar_config: Mutex<SidecarConfig>,
     pub(crate) web_search_config: Mutex<WebSearchConfig>,
     pub(crate) project_session_config: Mutex<ProjectSessionConfig>,
+    pub(crate) session_lifecycle_gate: Mutex<()>,
     pub(crate) schedule_config: Mutex<ScheduleConfig>,
     pub(crate) schedule_last_error: Mutex<Option<String>>,
     pub(crate) mcp_catalog: Mutex<McpCatalogService>,

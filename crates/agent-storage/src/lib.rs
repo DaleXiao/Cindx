@@ -33,6 +33,7 @@ unsafe extern "C" {
         z_vfs: *const c_char,
     ) -> c_int;
     fn sqlite3_close(db: *mut sqlite3) -> c_int;
+    fn sqlite3_get_autocommit(db: *mut sqlite3) -> c_int;
     fn sqlite3_exec(
         db: *mut sqlite3,
         sql: *const c_char,
@@ -897,48 +898,57 @@ impl SqliteStore {
         key: &str,
         value: &str,
     ) -> Result<(), StorageError> {
+        self.with_immediate_transaction(|transaction| {
+            transaction.delete_records_by_metadata_in_transaction(key, value)
+        })
+    }
+
+    /// Deletes event and permission rows for one metadata scope inside the
+    /// caller's active transaction.
+    ///
+    /// This is the transaction-composable counterpart to
+    /// [`Self::delete_records_by_metadata`]. It rejects calls made outside a
+    /// transaction so a multi-table delete cannot accidentally be partially
+    /// committed.
+    pub fn delete_records_by_metadata_in_transaction(
+        &mut self,
+        key: &str,
+        value: &str,
+    ) -> Result<(), StorageError> {
+        if unsafe { sqlite3_get_autocommit(self.connection) } != 0 {
+            return Err(StorageError::new(
+                "scoped record deletion requires an active transaction",
+            ));
+        }
         let row = format!(
             "{}\t{}",
             hex_encode(key.as_bytes()),
             hex_encode(value.as_bytes())
         );
-        self.exec_batch("begin immediate transaction")?;
+        let metadata_predicate =
+            "instr(char(10) || metadata_text || char(10), char(10) || ?1 || char(10)) > 0";
+        let (permission_predicate, permission_value) = permission_scope_column(key)
+            .map(|column| (format!("{column} = ?1"), value.to_string()))
+            .unwrap_or_else(|| (metadata_predicate.to_string(), row.clone()));
+        let mut delete_resolutions = self.prepare(&format!(
+            "delete from permission_resolutions where request_id in (select id from permission_requests where {permission_predicate})"
+        ))?;
+        delete_resolutions.bind_text(1, &permission_value)?;
+        delete_resolutions.expect_done()?;
 
-        let result = (|| {
-            let metadata_predicate =
-                "instr(char(10) || metadata_text || char(10), char(10) || ?1 || char(10)) > 0";
-            let (permission_predicate, permission_value) = permission_scope_column(key)
-                .map(|column| (format!("{column} = ?1"), value.to_string()))
-                .unwrap_or_else(|| (metadata_predicate.to_string(), row.clone()));
-            let mut delete_resolutions = self.prepare(&format!(
-                "delete from permission_resolutions where request_id in (select id from permission_requests where {permission_predicate})"
-            ))?;
-            delete_resolutions.bind_text(1, &permission_value)?;
-            delete_resolutions.expect_done()?;
+        let mut delete_requests = self.prepare(&format!(
+            "delete from permission_requests where {permission_predicate}"
+        ))?;
+        delete_requests.bind_text(1, &permission_value)?;
+        delete_requests.expect_done()?;
 
-            let mut delete_requests = self.prepare(&format!(
-                "delete from permission_requests where {permission_predicate}"
-            ))?;
-            delete_requests.bind_text(1, &permission_value)?;
-            delete_requests.expect_done()?;
-
-            let (event_predicate, event_value) = event_scope_column(key)
-                .map(|column| (format!("{column} = ?1"), value.to_string()))
-                .unwrap_or_else(|| (metadata_predicate.to_string(), row.clone()));
-            let mut delete_events =
-                self.prepare(&format!("delete from events where {event_predicate}"))?;
-            delete_events.bind_text(1, &event_value)?;
-            delete_events.expect_done()?;
-            Ok(())
-        })();
-
-        match result {
-            Ok(()) => self.exec_batch("commit"),
-            Err(error) => {
-                let _ = self.exec_batch("rollback");
-                Err(error)
-            }
-        }
+        let (event_predicate, event_value) = event_scope_column(key)
+            .map(|column| (format!("{column} = ?1"), value.to_string()))
+            .unwrap_or_else(|| (metadata_predicate.to_string(), row));
+        let mut delete_events =
+            self.prepare(&format!("delete from events where {event_predicate}"))?;
+        delete_events.bind_text(1, &event_value)?;
+        delete_events.expect_done()
     }
 
     pub fn delete_events_by_ids(&mut self, event_ids: &[String]) -> Result<(), StorageError> {
@@ -2651,10 +2661,74 @@ mod tests {
                 })
                 .expect("event should append");
         }
+        for (request_id, session_id) in [("perm-a", "session-a"), ("perm-b", "session-b")] {
+            store
+                .save_permission_request(
+                    PermissionRequest {
+                        id: PermissionRequestId(request_id.to_string()),
+                        task_id: task_id.clone(),
+                        risk: PermissionRisk::Write,
+                        action: "file.write".to_string(),
+                        reason: "test".to_string(),
+                        scope: ".".to_string(),
+                        metadata: [("session_id".to_string(), session_id.to_string())]
+                            .into_iter()
+                            .collect(),
+                    },
+                    200,
+                )
+                .expect("permission should save");
+        }
+        store
+            .resolve_permission(PermissionResolution {
+                request_id: PermissionRequestId("perm-a".to_string()),
+                decision: PermissionDecision::AllowOnce,
+                resolved_at_ms: 210,
+                resolved_by: "user".to_string(),
+            })
+            .expect("permission should resolve");
+
+        store
+            .delete_records_by_metadata("session_id", "session-a")
+            .expect("session records should delete");
+
+        let events = store.list_by_task(&task_id).expect("events should load");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].metadata.get("session_id").map(String::as_str),
+            Some("session-b")
+        );
+        let audits = store.list_permission_audits().expect("audits should load");
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].request.id.0, "perm-b");
+    }
+
+    #[test]
+    fn transaction_scoped_delete_rolls_back_events_permissions_and_read_models_together() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("delete-transaction-task".to_string());
+        for (event_id, session_id) in [
+            ("delete-event-a", "session-a"),
+            ("keep-event-b", "session-b"),
+        ] {
+            store
+                .append_next_event(
+                    EventId(event_id.to_string()),
+                    task_id.clone(),
+                    100,
+                    EventKind::MessageAdded,
+                    "message".to_string(),
+                    [("session_id".to_string(), session_id.to_string())]
+                        .into_iter()
+                        .collect(),
+                )
+                .expect("event should append");
+        }
+        let request_id = PermissionRequestId("delete-permission-a".to_string());
         store
             .save_permission_request(
                 PermissionRequest {
-                    id: PermissionRequestId("perm-a".to_string()),
+                    id: request_id.clone(),
                     task_id: task_id.clone(),
                     risk: PermissionRisk::Write,
                     action: "file.write".to_string(),
@@ -2667,21 +2741,43 @@ mod tests {
                 200,
             )
             .expect("permission should save");
-
         store
-            .delete_records_by_metadata("session_id", "session-a")
-            .expect("session records should delete");
+            .resolve_permission(PermissionResolution {
+                request_id,
+                decision: PermissionDecision::AllowOnce,
+                resolved_at_ms: 210,
+                resolved_by: "user".to_string(),
+            })
+            .expect("permission should resolve");
+        store
+            .save_read_model("session-snapshot", "session-a", 1, "snapshot")
+            .expect("read model should save");
+
+        let outside_transaction = store
+            .delete_records_by_metadata_in_transaction("session_id", "session-a")
+            .expect_err("composable delete must require a transaction");
+        assert!(outside_transaction.message.contains("active transaction"));
+
+        let rolled_back = store.with_immediate_transaction(|transaction| {
+            transaction.delete_records_by_metadata_in_transaction("session_id", "session-a")?;
+            transaction.delete_read_model("session-snapshot", "session-a")?;
+            Err::<(), _>(StorageError::new("injected lifecycle failure"))
+        });
+        assert!(rolled_back.is_err());
 
         let events = store.list_by_task(&task_id).expect("events should load");
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         assert_eq!(
-            events[0].metadata.get("session_id").map(String::as_str),
-            Some("session-b")
+            store
+                .list_permission_audits()
+                .expect("permission audits should load")
+                .len(),
+            1
         );
         assert!(store
-            .list_permission_audits()
-            .expect("audits should load")
-            .is_empty());
+            .load_read_model("session-snapshot", "session-a")
+            .expect("read model should load")
+            .is_some());
     }
 
     #[test]
@@ -3234,6 +3330,71 @@ mod tests {
             .load_read_model("transaction-test", "rolled-back")
             .expect("read model should load")
             .is_none());
+    }
+
+    #[test]
+    fn immediate_transaction_atomically_copies_selected_session_events_in_order() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("fork-transaction-task".to_string());
+        for (event_id, session_id, summary) in [
+            ("source-first", "source-session", "first"),
+            ("other-middle", "other-session", "other"),
+            ("source-second", "source-session", "second"),
+        ] {
+            store
+                .append_next_event(
+                    EventId(event_id.to_string()),
+                    task_id.clone(),
+                    100,
+                    EventKind::MessageAdded,
+                    summary.to_string(),
+                    [("session_id".to_string(), session_id.to_string())]
+                        .into_iter()
+                        .collect(),
+                )
+                .expect("source event should append");
+        }
+
+        let rollback = store.with_immediate_transaction(|transaction| {
+            let source =
+                transaction.list_by_task_and_metadata(&task_id, "session_id", "source-session")?;
+            assert_eq!(
+                source
+                    .iter()
+                    .map(|event| event.summary.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["first", "second"]
+            );
+            for (index, event) in source.into_iter().enumerate() {
+                let mut metadata = event.metadata;
+                metadata.insert("session_id".to_string(), "fork-session".to_string());
+                metadata.insert(
+                    "forked_from_session_id".to_string(),
+                    "source-session".to_string(),
+                );
+                transaction.append_next_event(
+                    EventId(format!("rolled-back-fork-{index}")),
+                    task_id.clone(),
+                    200,
+                    event.kind,
+                    event.summary,
+                    metadata,
+                )?;
+            }
+            Err::<(), _>(StorageError::new("injected fork failure"))
+        });
+        assert!(rollback.is_err());
+        assert!(store
+            .list_by_task_and_metadata(&task_id, "session_id", "fork-session")
+            .expect("fork events should load")
+            .is_empty());
+        assert_eq!(
+            store
+                .list_by_task_and_metadata(&task_id, "session_id", "other-session")
+                .expect("unrelated events should load")
+                .len(),
+            1
+        );
     }
 
     #[test]

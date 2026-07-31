@@ -18,6 +18,10 @@ pub(crate) fn enqueue_agent_message_inner(
     state: &tauri::State<'_, AppState>,
     input: QueueAgentMessageInput,
 ) -> Result<(QueuedAgentMessageReceipt, String), String> {
+    let _lifecycle = state
+        .session_lifecycle_gate
+        .lock()
+        .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
     let run_context = project_session_metadata_for_session(state, Some(&input.session_id))?;
     let root = run_context
         .get("project_root")
@@ -169,6 +173,10 @@ pub(crate) fn edit_queued_agent_message_blocking(
     state: &tauri::State<'_, AppState>,
     input: EditQueuedAgentMessageInput,
 ) -> Result<QueuedAgentMessageActionReceipt, String> {
+    let _lifecycle = state
+        .session_lifecycle_gate
+        .lock()
+        .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
     let run_context = project_session_metadata_for_session(state, Some(&input.session_id))?;
     let mut store = state
         .store
@@ -239,6 +247,10 @@ pub(crate) fn delete_queued_agent_message_blocking(
     state: &tauri::State<'_, AppState>,
     input: QueuedAgentMessageActionInput,
 ) -> Result<QueuedAgentMessageActionReceipt, String> {
+    let _lifecycle = state
+        .session_lifecycle_gate
+        .lock()
+        .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
     let run_context = project_session_metadata_for_session(state, Some(&input.session_id))?;
     let mut store = state
         .store
@@ -293,6 +305,10 @@ pub(crate) fn steer_queued_agent_message_blocking(
     state: &tauri::State<'_, AppState>,
     input: QueuedAgentMessageActionInput,
 ) -> Result<QueuedAgentMessageActionReceipt, String> {
+    let _lifecycle = state
+        .session_lifecycle_gate
+        .lock()
+        .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
     let run_context = project_session_metadata_for_session(state, Some(&input.session_id))?;
     let control = active_agent_run_control(state, Some(&input.session_id))?;
     let load_current = || {
@@ -390,6 +406,11 @@ pub(crate) fn begin_queue_dispatch<'a>(
     state: &'a tauri::State<'_, AppState>,
     session_id: &str,
 ) -> Result<Option<ExclusiveKeyLease<'a>>, String> {
+    let _lifecycle = state
+        .session_lifecycle_gate
+        .lock()
+        .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
+    project_session_metadata_for_session(state, Some(session_id))?;
     ExclusiveKeyLease::try_acquire(
         &state.queue_dispatching_sessions,
         session_id,
@@ -402,6 +423,14 @@ pub(crate) fn run_next_queued_agent_message_blocking_inner(
     state: tauri::State<'_, AppState>,
     input: SessionActionInput,
 ) -> Result<Option<AgentState>, String> {
+    if !state
+        .queue_dispatching_sessions
+        .lock()
+        .map_err(|error| format!("queue dispatch lock poisoned: {error}"))?
+        .contains(&input.session_id)
+    {
+        return Err("queue dispatch lease is required".to_string());
+    }
     let run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
     let queued = {
         let mut store = state

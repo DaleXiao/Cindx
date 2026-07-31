@@ -2,12 +2,11 @@ use crate::{
     app_state::AppState,
     event_persistence::{append_event, append_message_event_with_metadata},
     memory_runtime::{
-        delete_project_memory_vector_index, load_project_memory_ledger,
-        load_project_memory_ledger_with_status, purge_project_memory_vector_history,
-        save_project_memory_ledger, schedule_project_memory_vector_refresh,
+        load_project_memory_ledger, load_project_memory_ledger_with_status,
+        purge_project_memory_vector_history, save_project_memory_ledger,
+        schedule_project_memory_vector_refresh,
     },
     memory_vector_generation_runtime::memory_vector_projection_sha256,
-    runtime_constants::AGENT_MEMORY_READ_MODEL_NAMESPACE,
     runtime_values::{phase16_task_id, unique_id},
 };
 use agent_core::{Event, EventKind, MessageRole, Metadata};
@@ -18,26 +17,7 @@ use agent_memory::{
 };
 use agent_storage::{SqliteStore, StorageError};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
-
-pub(crate) fn delete_project_memory(
-    state: &tauri::State<'_, AppState>,
-    workspace_root: &Path,
-    project_id: &str,
-) -> Result<(), String> {
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    store
-        .delete_records_by_metadata("project_id", project_id)
-        .map_err(|error| error.to_string())?;
-    store
-        .delete_read_model(AGENT_MEMORY_READ_MODEL_NAMESPACE, project_id)
-        .map_err(|error| error.to_string())?;
-    drop(store);
-    delete_project_memory_vector_index(workspace_root, project_id)
-}
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

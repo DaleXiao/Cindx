@@ -214,6 +214,10 @@ pub(crate) fn cancel_agent_task(
     input: SessionActionInput,
 ) -> Result<AgentState, String> {
     let state = app.state::<AppState>();
+    let _lifecycle = state
+        .session_lifecycle_gate
+        .lock()
+        .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
     let active_run_cancelled = request_agent_run_cancel(&state, &input.session_id)?;
     clear_suspended_agent_run(&state, &input.session_id)?;
     let run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
