@@ -19,6 +19,9 @@ const INTEGRATION_COMMAND_HANDLERS = [
   "install_skill_url",
 ];
 
+const ROOT_GLOB_IMPORT_BUDGET = 76;
+const PRODUCTION_SUPER_GLOB_MODULE_BUDGET = 57;
+
 const LEGACY_DESKTOP_PRELUDE_GLOB_MODULES = new Set([
   "agent_collaboration_runtime.rs",
   "agent_grounding_policy.rs",
@@ -203,6 +206,12 @@ export const inspectDesktopIntegrationBoundary = (root) => {
     "apps/desktop/src-tauri/src/integration_commands.rs"
   );
   const desktopPrelude = read("apps/desktop/src-tauri/src/desktop_prelude.rs");
+  const adaptiveConductor = read(
+    "apps/desktop/src-tauri/src/adaptive_conductor_runtime.rs"
+  );
+  const conductorFallback = read(
+    "apps/desktop/src-tauri/src/conductor_fallback_runtime.rs"
+  );
 
   const integrationFiles = rustFiles.filter(
     ({ entry }) =>
@@ -223,6 +232,24 @@ export const inspectDesktopIntegrationBoundary = (root) => {
   const appIntegrationImports = rustUseStatements(appBootstrap)
     .filter((statement) => /\bintegration_commands\b/.test(statement))
     .map(normalizedRustUseStatement);
+  const rootGlobImports = rustGlobImports(compositionRoot);
+  const rootConductorFallbackImports = rustUseStatements(compositionRoot).filter(
+    (statement) => /\bconductor_fallback_runtime\b/.test(statement)
+  );
+  const adaptiveConductorFallbackImports = rustUseStatements(adaptiveConductor)
+    .filter((statement) => /\bconductor_fallback_runtime\b/.test(statement))
+    .map(normalizedRustUseStatement);
+  const conductorFallbackGlobs = rustGlobImports(conductorFallback);
+  const conductorFallbackCode = rustCodeWithoutCommentsAndLiterals(conductorFallback);
+  const productionSuperGlobModules = rustFiles
+    .filter(
+      ({ entry }) =>
+        entry !== "tests.rs" &&
+        !/(?:^|[\\/])[^\\/]*_tests(?:\.rs|[\\/])/.test(entry)
+    )
+    .filter(({ source }) =>
+      /^use\s+super\s*::\s*\*\s*;/m.test(rustCodeWithoutCommentsAndLiterals(source))
+    );
 
   const integrationDefinitions = uniqueSortedNames(
     capturedNames(
@@ -292,12 +319,22 @@ export const inspectDesktopIntegrationBoundary = (root) => {
     !sameNames(INTEGRATION_COMMAND_HANDLERS, registeredIntegrationHandlers) &&
       "command_registration",
     unexpectedPreludeGlobs.length > 0 && "new_prelude_consumer",
+    conductorFallbackGlobs.length > 0 && "conductor_fallback_glob",
+    rootConductorFallbackImports.length > 0 && "conductor_fallback_root_reexport",
+    !sameNames(adaptiveConductorFallbackImports, [
+      "use crate::conductor_fallback_runtime::deterministic_conductor_fallback;",
+    ]) && "conductor_fallback_implicit_consumer",
+    /\b(?:AppState|tauri\s*::\s*State)\b/.test(conductorFallbackCode) &&
+      "conductor_fallback_app_state",
+    rootGlobImports.length > ROOT_GLOB_IMPORT_BUDGET && "root_glob_budget",
+    productionSuperGlobModules.length > PRODUCTION_SUPER_GLOB_MODULE_BUDGET &&
+      "production_super_glob_budget",
   ].filter(Boolean);
 
   return {
     ok: failures.length === 0,
     message: `Desktop integration boundary regressed: ${failures.join(",") || "none"}; integration_globs=${integrationGlobs.length}, source_overrides=${integrationSourceOverrides.length}, root_imports=${rootIntegrationImports.length}, definitions=${integrationDefinitions.length}, registered=${registeredIntegrationHandlers.length}, unexpected_prelude_globs=${unexpectedPreludeGlobs
       .map(({ entry }) => entry)
-      .join(",")}`,
+      .join(",")}; root_globs=${rootGlobImports.length}/${ROOT_GLOB_IMPORT_BUDGET}, production_super_globs=${productionSuperGlobModules.length}/${PRODUCTION_SUPER_GLOB_MODULE_BUDGET}`,
   };
 };
