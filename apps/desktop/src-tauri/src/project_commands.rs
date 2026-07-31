@@ -1122,6 +1122,7 @@ pub(crate) fn show_native_workspace_folder_picker(
 pub(crate) fn runtime_status(state: &tauri::State<'_, AppState>) -> Result<RuntimeStatus, String> {
     let root = active_workspace_root(state)?;
     let mut status = runtime_status_for_root(root.clone());
+    status.provider_ready = clone_provider_config(state)?.is_ready();
     let registry = tool_registry_for_state(state, &root)?;
     status.registered_tools = registry
         .specs()
@@ -1142,6 +1143,7 @@ pub(crate) fn runtime_status_for_root(root: PathBuf) -> RuntimeStatus {
     RuntimeStatus {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         kernel_status: "kernel bridge online".to_string(),
+        provider_ready: false,
         workspace_root: root.display().to_string(),
         orchestration_modes: vec![
             OrchestrationPolicy::Single.label().to_string(),

@@ -9,6 +9,7 @@ import {
   Plus,
   RotateCcw,
   Send,
+  Settings2,
   ShieldCheck,
   Square,
   X
@@ -18,6 +19,10 @@ import { readArtifactPreview } from "../tauri";
 import type { AgentAttachment, AgentEffort, ToolApprovalView } from "../tauri";
 import type { VoiceInputStatus } from "../voice/voiceInputModel";
 import type { ProviderVoiceTransport } from "../providerProfiles";
+import {
+  providerSubmissionPreflight,
+  type ProviderReadiness
+} from "../providerReadinessModel";
 import { VoiceInputButton } from "./VoiceInputButton";
 
 const COMPOSER_TEXTAREA_MIN_HEIGHT = 58;
@@ -112,10 +117,13 @@ type ComposerProps = {
   sessionId: string | null;
   voiceConfigured: boolean;
   voiceTransport: ProviderVoiceTransport;
+  providerReadiness: ProviderReadiness;
   onChange: (value: string) => void;
   onEffortChange: (effort: AgentEffort) => void;
   onVoiceTranscript: (sessionId: string, text: string) => void;
   onVoiceError: (message: string) => void;
+  onProviderRequired: (readiness: ProviderReadiness) => void;
+  onConfigureProvider: () => void;
   onSend: (prompt: string) => void;
   onPickAttachments: (files: File[]) => void;
   onRemoveAttachment: (attachment: AgentAttachment) => void;
@@ -144,10 +152,13 @@ export function Composer({
   sessionId,
   voiceConfigured,
   voiceTransport,
+  providerReadiness,
   onChange,
   onEffortChange,
   onVoiceTranscript,
   onVoiceError,
+  onProviderRequired,
+  onConfigureProvider,
   onSend,
   onPickAttachments,
   onRemoveAttachment,
@@ -172,6 +183,7 @@ export function Composer({
   const canSend = !pendingApproval && !attachmentBusy && !voiceBusy && hasInput;
   const canRetryError = canRetry && Boolean(error) && !working && !canStop && !pendingApproval;
   const canContinueRun = canContinue && !working && !canStop && !pendingApproval;
+  const providerPreflight = providerSubmissionPreflight(providerReadiness);
   const activeEffort = EFFORT_OPTIONS.find((option) => option.value === effort)!;
   const approvalInput = approvalInputSummary(pendingApproval);
 
@@ -226,8 +238,12 @@ export function Composer({
     if (composingRef.current || voiceBusy) return;
     const prompt = (textareaRef.current?.value ?? value).trim();
     if (pendingApproval || attachmentBusy || (!prompt && attachments.length === 0)) return;
+    if (!providerPreflight.allowSubmit) {
+      onProviderRequired(providerReadiness);
+      return;
+    }
     onSend(prompt);
-    onChange("");
+    if (providerPreflight.clearDraft) onChange("");
   }
 
   return (
@@ -507,6 +523,12 @@ export function Composer({
               <button type="button" onClick={onRetry}>
                 <RotateCcw aria-hidden="true" />
                 <span>Retry</span>
+              </button>
+            )}
+            {providerPreflight.showModelsCta && (
+              <button type="button" onClick={onConfigureProvider}>
+                <Settings2 aria-hidden="true" />
+                <span>Configure Models</span>
               </button>
             )}
             <button

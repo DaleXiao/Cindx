@@ -2284,6 +2284,7 @@ fn runtime_status_exposes_expected_modes() {
     let status = runtime_status_for_root(workspace_root());
 
     assert_eq!(status.app_version, env!("CARGO_PKG_VERSION"));
+    assert!(!status.provider_ready);
     assert!(status
         .orchestration_modes
         .contains(&"plan_execute_review".to_string()));
@@ -4039,7 +4040,9 @@ fn phase4_state_includes_provider_config_and_messages() {
 
     let state = phase4_state(&mut store, &config, None).expect("state should load");
 
+    assert!(state.provider.ready);
     assert!(state.provider.api_key_set);
+    assert!(!provider_config_state(&ProviderConfig::default()).ready);
     assert_eq!(state.messages.len(), 1);
     assert_eq!(state.messages[0].content, "hello model");
 }

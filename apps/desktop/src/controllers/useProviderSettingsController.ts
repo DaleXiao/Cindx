@@ -20,6 +20,10 @@ import {
   providerSupportsModelDiscovery,
   providerVoiceTransport
 } from "../providerProfiles";
+import {
+  resolveProviderReadiness,
+  type ProviderReadiness
+} from "../providerReadinessModel";
 
 function normalizedEffortPolicy(policy: string) {
   if (policy === "single" || policy === "best_of_n") return policy;
@@ -50,12 +54,12 @@ function providerDraftFromState(provider: ProviderConfigState): ProviderConfigIn
 }
 
 type ProviderSettingsControllerOptions = {
-  reportError: (message: string | null) => void;
+  runtimeProviderReady: boolean | null;
   showSaved: (message?: string) => void;
 };
 
 export function useProviderSettingsController({
-  reportError,
+  runtimeProviderReady,
   showSaved
 }: ProviderSettingsControllerOptions) {
   const [phase4, setPhase4] = useState<Phase4State | null>(null);
@@ -81,22 +85,33 @@ export function useProviderSettingsController({
   const [providerModelsBusy, setProviderModelsBusy] = useState(false);
   const [providerModelsRefreshTurn, setProviderModelsRefreshTurn] = useState(0);
   const [providerModelsError, setProviderModelsError] = useState<string | null>(null);
+  const [providerSettingsError, setProviderSettingsError] = useState<string | null>(null);
   const [imageEndpointValidation, setImageEndpointValidation] = useState<
     "idle" | "checking" | "valid" | "invalid"
   >("idle");
   const imageEndpointValidationRequestRef = useRef(0);
   const modelCatalogRequestRef = useRef(0);
+  const providerStateRequestRef = useRef(0);
   const previousProviderApiKeyRef = useRef("");
   const preserveNextApiKeyMaskRef = useRef(false);
   const providerConnectInFlightRef = useRef(false);
 
   const loadProviderState = useCallback(async () => {
-    const state = await getPhase4State();
-    setPhase4(state);
-    setProviderDraft(providerDraftFromState(state.provider));
-    reportError(state.lastError);
-    return state;
-  }, [reportError]);
+    const requestId = providerStateRequestRef.current + 1;
+    providerStateRequestRef.current = requestId;
+    try {
+      const state = await getPhase4State();
+      if (providerStateRequestRef.current !== requestId) return null;
+      setPhase4(state);
+      setProviderDraft(providerDraftFromState(state.provider));
+      setProviderSettingsError(state.lastError);
+      return state;
+    } catch (error) {
+      if (providerStateRequestRef.current !== requestId) return null;
+      setProviderSettingsError(error instanceof Error ? error.message : String(error));
+      return null;
+    }
+  }, []);
 
   useEffect(() => {
     const requestId = imageEndpointValidationRequestRef.current + 1;
@@ -221,7 +236,7 @@ export function useProviderSettingsController({
     : 0;
 
   const refreshProviderModels = useCallback(
-    async (draft: ProviderConfigInput, reportFailure: boolean) => {
+    async (draft: ProviderConfigInput) => {
       const requestId = modelCatalogRequestRef.current + 1;
       modelCatalogRequestRef.current = requestId;
       setProviderModelsRefreshTurn((current) => current + 1);
@@ -253,19 +268,19 @@ export function useProviderSettingsController({
         setProviderModelsCatalogIdentity(null);
         setProviderModelsCatalogApiKey(null);
         setProviderModelsError(message);
-        if (reportFailure) reportError(message);
       } finally {
         if (modelCatalogRequestRef.current === requestId) setProviderModelsBusy(false);
       }
     },
-    [reportError]
+    []
   );
 
   const handleSaveProviderConfig = useCallback(async () => {
     if (!providerDraft || providerConnectInFlightRef.current) return;
+    providerStateRequestRef.current += 1;
     providerConnectInFlightRef.current = true;
     setProviderBusy(true);
-    reportError(null);
+    setProviderSettingsError(null);
     try {
       const next = await saveProviderConfig(providerDraft);
       const savedDraft = providerDraftFromState(next.provider);
@@ -277,37 +292,41 @@ export function useProviderSettingsController({
       }
       setPhase4(next);
       setProviderDraft(savedDraft);
+      setProviderSettingsError(next.lastError);
       showSaved("Provider verified and configured");
       if (providerSupportsModelDiscovery(savedDraft.providerId)) {
-        void refreshProviderModels(savedDraft, false);
+        void refreshProviderModels(savedDraft);
       }
     } catch (error) {
-      reportError(error instanceof Error ? error.message : String(error));
+      setProviderSettingsError(error instanceof Error ? error.message : String(error));
     } finally {
       providerConnectInFlightRef.current = false;
       setProviderBusy(false);
     }
-  }, [providerDraft, refreshProviderModels, reportError, showSaved]);
+  }, [providerDraft, refreshProviderModels, showSaved]);
 
   const handlePromptEvolutionToggle = useCallback(
     async (enabled: boolean) => {
       if (!providerDraft || providerBusy) return;
+      providerStateRequestRef.current += 1;
       const previous = providerDraft.promptEvolutionEnabled;
       setProviderDraft({ ...providerDraft, promptEvolutionEnabled: enabled });
       setProviderBusy(true);
+      setProviderSettingsError(null);
       try {
         const next = await setPromptEvolutionEnabled(enabled);
         setPhase4(next);
         setProviderDraft(providerDraftFromState(next.provider));
+        setProviderSettingsError(next.lastError);
         showSaved(enabled ? "Prompt evolution enabled" : "Prompt evolution disabled");
       } catch (error) {
         setProviderDraft({ ...providerDraft, promptEvolutionEnabled: previous });
-        reportError(error instanceof Error ? error.message : String(error));
+        setProviderSettingsError(error instanceof Error ? error.message : String(error));
       } finally {
         setProviderBusy(false);
       }
     },
-    [providerBusy, providerDraft, reportError, showSaved]
+    [providerBusy, providerDraft, showSaved]
   );
 
   const handleLoadProviderModels = useCallback(async () => {
@@ -318,7 +337,7 @@ export function useProviderSettingsController({
     ) {
       return;
     }
-    await refreshProviderModels(providerDraft, true);
+    await refreshProviderModels(providerDraft);
   }, [providerDraft, providerModelsBusy, refreshProviderModels]);
 
   const savedProvider = phase4?.provider ?? null;
@@ -330,6 +349,11 @@ export function useProviderSettingsController({
   const voiceTransport = phase4
     ? providerVoiceTransport(phase4.provider.providerId, phase4.provider.baseUrl)
     : "none";
+  const providerReadiness: ProviderReadiness = resolveProviderReadiness(
+    phase4?.provider ?? null,
+    runtimeProviderReady,
+    Boolean(providerSettingsError && !phase4)
+  );
 
   return {
     collaborationModelCount,
@@ -346,6 +370,8 @@ export function useProviderSettingsController({
     providerModelsBusy,
     providerModelsError,
     providerModelsRefreshTurn,
+    providerReadiness,
+    providerSettingsError,
     canUseConfiguredKey,
     setProviderDraft,
     voiceTransport,
