@@ -840,6 +840,10 @@ pub(crate) fn delete_queue_message_by_id(
     session_id: &str,
     queue_id: &str,
 ) -> Result<(), String> {
+    let _lifecycle = state
+        .session_lifecycle_gate
+        .lock()
+        .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
     let run_context = project_session_metadata_for_session(state, Some(session_id))?;
     let mut store = state
         .store

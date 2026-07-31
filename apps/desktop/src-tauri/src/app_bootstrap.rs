@@ -58,15 +58,28 @@ pub fn run() -> Result<(), String> {
             Err(error) => eprintln!("failed to redact persisted Cindx history: {error}"),
         }
     }
-    if let Err(error) = reconcile_interrupted_agent_runs(&mut store) {
-        append_startup_log(&format!("interrupted run recovery failed: {error}"));
-    }
     let provider_config = load_provider_config();
     let mcp_catalog = McpCatalogService::load(mcp_config_path(), mcp_catalog_cache_path());
     let mut workspace_config = load_workspace_config();
     let sidecar_config = load_sidecar_config();
     let web_search_config = load_web_search_config();
     let project_session_config = load_project_session_config(&workspace_config.root);
+    let recovered_memory_refreshes =
+        match recover_project_lifecycle_operations(&mut store, &project_session_config) {
+            Ok(refreshes) => refreshes,
+            Err(error) => {
+                let message =
+                    format!("project lifecycle recovery failed; startup aborted: {error}");
+                append_startup_log(&format!("fatal startup: {message}"));
+                if !startup_probe_requested() {
+                    show_native_startup_failure(&message);
+                }
+                return Err(message);
+            }
+        };
+    if let Err(error) = reconcile_interrupted_agent_runs(&mut store) {
+        append_startup_log(&format!("interrupted run recovery failed: {error}"));
+    }
     let (schedule_config, schedule_last_error) = match schedule::load(&schedule_config_path()) {
         Ok(config) => (config, None),
         Err(error) => {
@@ -89,6 +102,7 @@ pub fn run() -> Result<(), String> {
         return Ok(());
     }
 
+    let lifecycle_refresh_provider_config = provider_config.clone();
     let app = tauri::Builder::default()
         .manage(AppState {
             store: Mutex::new(store),
@@ -100,6 +114,7 @@ pub fn run() -> Result<(), String> {
             sidecar_config: Mutex::new(sidecar_config),
             web_search_config: Mutex::new(web_search_config),
             project_session_config: Mutex::new(project_session_config),
+            session_lifecycle_gate: Mutex::new(()),
             schedule_config: Mutex::new(schedule_config),
             schedule_last_error: Mutex::new(schedule_last_error),
             mcp_catalog: Mutex::new(mcp_catalog),
@@ -117,7 +132,19 @@ pub fn run() -> Result<(), String> {
             allow_exit: AtomicBool::new(false),
             quit_prompt_active: AtomicBool::new(false),
         })
-        .setup(|app| {
+        .setup(move |app| {
+            for refresh in recovered_memory_refreshes {
+                schedule_project_memory_vector_refresh(
+                    refresh.project_root,
+                    lifecycle_refresh_provider_config.clone(),
+                    refresh.ledger,
+                );
+                if let Err(error) = complete_project_lifecycle_journal(&refresh.journal) {
+                    append_startup_log(&format!(
+                        "recovered project lifecycle journal remains pending: {error}"
+                    ));
+                }
+            }
             if let Some(window) = app.get_webview_window("main") {
                 if let Err(error) = install_macos_sidebar_material(&window) {
                     append_startup_log(&error);

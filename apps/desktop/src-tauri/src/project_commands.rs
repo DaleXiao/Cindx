@@ -144,7 +144,11 @@ pub(crate) fn delete_project(
     state: tauri::State<'_, AppState>,
     input: ProjectActionInput,
 ) -> Result<ProjectSessionState, String> {
-    let (deleted_session_ids, attachment_dirs, context_files, project_root, mut next_state) = {
+    let (deleted_session_ids, project_root, journal, mut next_state) = {
+        let _lifecycle = state
+            .session_lifecycle_gate
+            .lock()
+            .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
         let mut workspace_config = state
             .workspace_config
             .lock()
@@ -162,66 +166,75 @@ pub(crate) fn delete_project(
                 Some("project not found".to_string()),
             ));
         };
-        let attachment_dirs = deleted_session_ids
-            .iter()
-            .map(|session_id| {
-                PathBuf::from(&project.root)
-                    .join(".cindx")
-                    .join("attachments")
-                    .join(slug_label(session_id))
-            })
-            .collect::<Vec<_>>();
-        let context_files = deleted_session_ids
-            .iter()
-            .map(|session_id| {
-                context_checkpoint_path_for_session(
-                    Path::new(&project.root),
-                    Some(session_id.as_str()),
-                )
-            })
-            .collect::<Vec<_>>();
+        if let Some(reason) = session_deletion_block_reason(&state, &deleted_session_ids)? {
+            return Ok(project_session_state(&config, Some(reason)));
+        }
 
         let next_workspace_root = candidate
             .active_project()
             .map(|active_project| PathBuf::from(&active_project.root));
-        commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
+        let project_root = PathBuf::from(&project.root);
+        let journal = ProjectLifecycleJournal::delete(
+            input.project_id.clone(),
+            project_root.clone(),
+            deleted_session_ids.clone(),
+            true,
+        );
+        persist_project_lifecycle_journal(&journal)?;
+        if let Err(error) = commit_project_session_config(&mut config, candidate) {
+            let _ = complete_project_lifecycle_journal(&journal);
+            return Err(error.to_string());
+        }
         if let Some(root) = next_workspace_root {
             publish_workspace_config_cache(&mut workspace_config, WorkspaceConfig { root });
         }
         (
             deleted_session_ids,
-            attachment_dirs,
-            context_files,
-            PathBuf::from(&project.root),
+            project_root,
+            journal,
             project_session_state(&config, None),
         )
     };
 
-    let mut cleanup_errors = Vec::new();
-    if let Err(error) = clear_session_runtime_state(&state, &deleted_session_ids) {
-        cleanup_errors.push(error);
-    }
-    if let Err(error) = delete_session_history(&state, &deleted_session_ids, None) {
-        cleanup_errors.push(error);
-    }
-    if let Err(error) = crate::memory_management_runtime::delete_project_memory(
-        &state,
-        &project_root,
-        &input.project_id,
-    ) {
-        cleanup_errors.push(error);
-    }
-    if let Err(error) = remove_staged_attachment_dirs(&attachment_dirs) {
-        cleanup_errors.push(error);
-    }
-    if let Err(error) = remove_session_context_files(&context_files) {
-        cleanup_errors.push(error);
-    }
-    if !cleanup_errors.is_empty() {
-        next_state.last_error = Some(format!(
-            "Project deleted, but some related data could not be cleaned up: {}",
-            cleanup_errors.join("; ")
-        ));
+    let runtime_cleanup_error = clear_session_runtime_state(&state, &deleted_session_ids).err();
+    let durable_cleanup = (|| {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        cleanup_published_delete(
+            &mut store,
+            &input.project_id,
+            &project_root,
+            &deleted_session_ids,
+            true,
+        )
+        .map(|_| ())
+    })();
+    match durable_cleanup {
+        Err(error) => {
+            let error = runtime_cleanup_error
+                .map(|runtime_error| format!("{runtime_error}; {error}"))
+                .unwrap_or(error);
+            next_state.last_error = Some(format!(
+                "Project deleted, but some related data could not be cleaned up: {error}"
+            ));
+        }
+        Ok(()) => {
+            let journal_error = complete_project_lifecycle_journal(&journal).err();
+            next_state.last_error = match (runtime_cleanup_error, journal_error) {
+                (Some(runtime_error), Some(journal_error)) => Some(format!(
+                    "Project deleted, but runtime cleanup failed ({runtime_error}) and its recovery journal could not be cleared: {journal_error}"
+                )),
+                (Some(runtime_error), None) => Some(format!(
+                    "Project deleted, but temporary runtime state could not be cleared: {runtime_error}"
+                )),
+                (None, Some(journal_error)) => Some(format!(
+                    "Project deleted, but its recovery journal could not be cleared: {journal_error}"
+                )),
+                (None, None) => None,
+            };
+        }
     }
     Ok(next_state)
 }
@@ -437,12 +450,11 @@ pub(crate) fn fork_session(
     input: SessionActionInput,
 ) -> Result<ProjectSessionState, String> {
     let (source, project, fork) = {
-        let mut config = state
+        let config = state
             .project_session_config
             .lock()
             .map_err(|error| format!("project session config lock poisoned: {error}"))?;
-        let mut candidate = config.clone();
-        let Some(source) = candidate
+        let Some(source) = config
             .sessions
             .iter()
             .find(|session| session.id == input.session_id)
@@ -453,7 +465,7 @@ pub(crate) fn fork_session(
                 Some("session not found".to_string()),
             ));
         };
-        let Some(project) = candidate
+        let Some(project) = config
             .projects
             .iter()
             .find(|project| project.id == source.project_id)
@@ -464,7 +476,7 @@ pub(crate) fn fork_session(
                 Some("session project not found".to_string()),
             ));
         };
-        let name = unique_fork_name(&candidate, &source);
+        let name = unique_fork_name(&config, &source);
         let id = new_session_id();
         let now = current_time_millis();
         let fork = SessionRecord {
@@ -479,44 +491,118 @@ pub(crate) fn fork_session(
             updated_at_ms: now,
             archived_at_ms: None,
         };
-        candidate.sessions.push(fork.clone());
-        candidate.active_project_id = source.project_id.clone();
-        candidate.active_session_id = id;
-        commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
         (source, project, fork)
     };
 
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let events = store
-        .list_by_task_and_metadata_or_unscoped(&phase16_task_id(), "session_id", &source.id)
-        .map_err(|error| error.to_string())?;
-    for event in agent_session_events(&events, &source.id) {
-        let mut metadata = event.metadata;
-        metadata.insert("session_id".to_string(), fork.id.clone());
-        metadata.insert("session_name".to_string(), fork.name.clone());
-        metadata.insert("project_id".to_string(), project.id.clone());
-        metadata.insert("project_name".to_string(), project.name.clone());
-        metadata.insert("project_root".to_string(), project.root.clone());
-        metadata.insert("forked_from_session_id".to_string(), source.id.clone());
-        append_event(
-            &mut store,
-            &phase16_task_id(),
-            event.kind,
-            event.summary,
-            metadata,
-        )
-        .map_err(|error| error.to_string())?;
+    let project_root = PathBuf::from(&project.root);
+    let source_attachment_dir = project_root
+        .join(".cindx")
+        .join("attachments")
+        .join(slug_label(&source.id));
+    let target_attachment_dir = project_root
+        .join(".cindx")
+        .join("attachments")
+        .join(slug_label(&fork.id));
+    let mut events = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        load_forkable_session_events(&store, &source.id).map_err(|error| error.to_string())?
+    };
+    let journal = ProjectLifecycleJournal::fork(
+        project.id.clone(),
+        project_root.clone(),
+        source.id.clone(),
+        fork.id.clone(),
+    );
+    persist_project_lifecycle_journal(&journal)?;
+    let prepared = clone_fork_attachments_and_rewrite_events(
+        &mut events,
+        &source_attachment_dir,
+        &target_attachment_dir,
+    )
+    .and_then(|()| {
+        let fork_metadata = [
+            ("session_id".to_string(), fork.id.clone()),
+            ("session_name".to_string(), fork.name.clone()),
+            ("project_id".to_string(), project.id.clone()),
+            ("project_name".to_string(), project.name.clone()),
+            ("project_root".to_string(), project.root.clone()),
+            ("forked_from_session_id".to_string(), source.id.clone()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        persist_fork_events(&mut store, &events, &fork_metadata, &source.id)
+            .map_err(|error| error.to_string())
+    });
+    if let Err(error) = prepared {
+        return abort_unpublished_fork(&state, &journal, &project_root, &fork.id, error);
+    }
+
+    let published = {
+        let _lifecycle = state
+            .session_lifecycle_gate
+            .lock()
+            .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
+        let mut config = state
+            .project_session_config
+            .lock()
+            .map_err(|error| format!("project session config lock poisoned: {error}"))?;
+        let source_is_current = config
+            .sessions
+            .iter()
+            .any(|session| session.id == source.id && session.project_id == project.id);
+        let project_is_current = config
+            .projects
+            .iter()
+            .any(|candidate| candidate.id == project.id && candidate.root == project.root);
+        if !source_is_current || !project_is_current {
+            false
+        } else {
+            let mut candidate = config.clone();
+            candidate.sessions.push(fork.clone());
+            candidate.active_project_id = source.project_id.clone();
+            candidate.active_session_id = fork.id.clone();
+            if let Err(error) = commit_project_session_config(&mut config, candidate) {
+                drop(config);
+                drop(_lifecycle);
+                return abort_unpublished_fork(
+                    &state,
+                    &journal,
+                    &project_root,
+                    &fork.id,
+                    error.to_string(),
+                );
+            }
+            true
+        }
+    };
+    if !published {
+        return abort_unpublished_fork(
+            &state,
+            &journal,
+            &project_root,
+            &fork.id,
+            "session changed while the fork was being prepared".to_string(),
+        );
     }
 
     let config = state
         .project_session_config
         .lock()
-        .map_err(|error| format!("project session config lock poisoned: {error}"))?
-        .clone();
-    Ok(project_session_state(&config, None))
+        .map_err(|error| format!("project session config lock poisoned: {error}"))?;
+    let mut next_state = project_session_state(&config, None);
+    if let Err(error) = complete_project_lifecycle_journal(&journal) {
+        next_state.last_error = Some(format!(
+            "Session forked, but its recovery journal could not be cleared: {error}"
+        ));
+    }
+    Ok(next_state)
 }
 
 #[tauri::command]
@@ -590,7 +676,11 @@ pub(crate) fn delete_session(
     input: SessionActionInput,
 ) -> Result<ProjectSessionState, String> {
     let session_id = input.session_id;
-    let (project_id, project_root, attachment_dir, context_file, mut next_state) = {
+    let (project_id, project_root, journal, mut next_state) = {
+        let _lifecycle = state
+            .session_lifecycle_gate
+            .lock()
+            .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
         let mut config = state
             .project_session_config
             .lock()
@@ -613,207 +703,121 @@ pub(crate) fn delete_session(
             .find(|project| project.id == project_id)
             .map(|project| PathBuf::from(&project.root))
             .ok_or_else(|| "project not found for session".to_string())?;
-        let attachment_dir = project_root
-            .join(".cindx")
-            .join("attachments")
-            .join(slug_label(&session_id));
-        let context_file =
-            context_checkpoint_path_for_session(&project_root, Some(session_id.as_str()));
+        if let Some(reason) =
+            session_deletion_block_reason(&state, std::slice::from_ref(&session_id))?
+        {
+            return Ok(project_session_state(&config, Some(reason)));
+        }
         candidate.sessions.remove(index);
         if candidate.active_session_id == session_id {
             candidate.active_session_id =
                 ensure_open_session_for_project(&mut candidate, &project_id);
         }
-        commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
+        let journal = ProjectLifecycleJournal::delete(
+            project_id.clone(),
+            project_root.clone(),
+            vec![session_id.clone()],
+            false,
+        );
+        persist_project_lifecycle_journal(&journal)?;
+        if let Err(error) = commit_project_session_config(&mut config, candidate) {
+            let _ = complete_project_lifecycle_journal(&journal);
+            return Err(error.to_string());
+        }
         (
             project_id,
             project_root,
-            attachment_dir,
-            context_file,
+            journal,
             project_session_state(&config, None),
         )
     };
 
-    let mut cleanup_errors = Vec::new();
-    if let Err(error) = clear_session_runtime_state(&state, std::slice::from_ref(&session_id)) {
-        cleanup_errors.push(error);
-    }
-    if let Err(error) = delete_session_history(
-        &state,
-        std::slice::from_ref(&session_id),
-        Some((&project_id, &project_root)),
-    ) {
-        cleanup_errors.push(error);
-    }
-    if let Err(error) = remove_staged_attachment_dirs(&[attachment_dir]) {
-        cleanup_errors.push(error);
-    }
-    if let Err(error) = remove_session_context_files(&[context_file]) {
-        cleanup_errors.push(error);
-    }
-    if !cleanup_errors.is_empty() {
-        next_state.last_error = Some(format!(
-            "Session deleted, but some related data could not be cleaned up: {}",
-            cleanup_errors.join("; ")
-        ));
+    let runtime_cleanup_error =
+        clear_session_runtime_state(&state, std::slice::from_ref(&session_id)).err();
+    let durable_cleanup = (|| {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        cleanup_published_delete(
+            &mut store,
+            &project_id,
+            &project_root,
+            std::slice::from_ref(&session_id),
+            false,
+        )
+    })();
+    match durable_cleanup {
+        Ok(Some(ledger)) => match state.provider_config.lock() {
+            Ok(provider_config) => {
+                schedule_project_memory_vector_refresh(
+                    project_root,
+                    provider_config.clone(),
+                    ledger,
+                );
+                let journal_error = complete_project_lifecycle_journal(&journal).err();
+                next_state.last_error = match (runtime_cleanup_error, journal_error) {
+                    (Some(runtime_error), Some(journal_error)) => Some(format!(
+                        "Session deleted, but runtime cleanup failed ({runtime_error}) and its recovery journal could not be cleared: {journal_error}"
+                    )),
+                    (Some(runtime_error), None) => Some(format!(
+                        "Session deleted, but temporary runtime state could not be cleared: {runtime_error}"
+                    )),
+                    (None, Some(journal_error)) => Some(format!(
+                        "Session deleted, but its recovery journal could not be cleared: {journal_error}"
+                    )),
+                    (None, None) => None,
+                };
+            }
+            Err(error) => {
+                next_state.last_error = Some(format!(
+                    "Session deleted, but its memory refresh could not be scheduled: {error}"
+                ));
+            }
+        },
+        Ok(None) => {
+            if let Err(error) = complete_project_lifecycle_journal(&journal) {
+                next_state.last_error = Some(format!(
+                    "Session deleted, but its recovery journal could not be cleared: {error}"
+                ));
+            }
+        }
+        Err(error) => {
+            let error = runtime_cleanup_error
+                .map(|runtime_error| format!("{runtime_error}; {error}"))
+                .unwrap_or(error);
+            next_state.last_error = Some(format!(
+                "Session deleted, but some related data could not be cleaned up: {error}"
+            ));
+        }
     }
     Ok(next_state)
 }
 
-pub(crate) fn clear_session_runtime_state(
+fn abort_unpublished_fork(
     state: &tauri::State<'_, AppState>,
-    session_ids: &[String],
-) -> Result<(), String> {
-    if session_ids.is_empty() {
-        return Ok(());
-    }
-    {
-        let mut controls = state
-            .agent_run_controls
-            .lock()
-            .map_err(|error| format!("agent run control lock poisoned: {error}"))?;
-        for session_id in session_ids {
-            if let Some(control) = controls.remove(session_id) {
-                control.request_cancel();
-            }
-        }
-    }
-    {
-        let mut suspended = state
-            .suspended_agent_runs
-            .lock()
-            .map_err(|error| format!("suspended agent runs lock poisoned: {error}"))?;
-        for session_id in session_ids {
-            suspended.remove(session_id);
-        }
-    }
-    {
-        let mut outputs = state
-            .session_output_cache
-            .lock()
-            .map_err(|error| format!("session output cache lock poisoned: {error}"))?;
-        for session_id in session_ids {
-            outputs.remove(session_id);
-        }
-    }
-    {
-        let mut dispatching = state
-            .queue_dispatching_sessions
-            .lock()
-            .map_err(|error| format!("queue dispatch lock poisoned: {error}"))?;
-        for session_id in session_ids {
-            dispatching.remove(session_id);
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn delete_session_history(
-    state: &tauri::State<'_, AppState>,
-    session_ids: &[String],
-    retained_memory_context: Option<(&str, &Path)>,
-) -> Result<(), String> {
-    if session_ids.is_empty() {
-        return Ok(());
-    }
-    let mut store = state
+    journal: &ProjectLifecycleJournal,
+    project_root: &Path,
+    session_id: &str,
+    error: String,
+) -> Result<ProjectSessionState, String> {
+    let cleanup = state
         .store
         .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    if let Some((project_id, _)) = retained_memory_context {
-        let ledger = load_project_memory_ledger(&mut store, project_id)
-            .map_err(|error| error.to_string())?;
-        crate::memory_record_persistence_runtime::retain_memory_records_for_deleted_sessions(
-            &mut store,
-            &ledger,
-            session_ids,
-        )
-        .map_err(|error| error.to_string())?;
-        crate::memory_record_persistence_runtime::persist_memory_session_retirements(
-            &mut store,
-            project_id,
-            session_ids,
-        )
-        .map_err(|error| error.to_string())?;
+        .map_err(|lock_error| format!("store lock poisoned: {lock_error}"))
+        .and_then(|mut store| rollback_unpublished_fork(&mut store, project_root, session_id));
+    if cleanup.is_ok() {
+        let _ = complete_project_lifecycle_journal(journal);
     }
-    for session_id in session_ids {
-        store
-            .delete_records_by_metadata("session_id", session_id)
-            .map_err(|error| error.to_string())?;
-        store
-            .delete_read_model(AGENT_SESSION_READ_MODEL_NAMESPACE, session_id)
-            .map_err(|error| error.to_string())?;
-        store
-            .delete_read_model(AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE, session_id)
-            .map_err(|error| error.to_string())?;
-    }
-    let rebuilt_memory = if let Some((project_id, workspace_root)) = retained_memory_context {
-        store
-            .delete_read_model(AGENT_MEMORY_READ_MODEL_NAMESPACE, project_id)
-            .map_err(|error| error.to_string())?;
-        let ledger = load_project_memory_ledger(&mut store, project_id)
-            .map_err(|error| error.to_string())?;
-        Some((workspace_root.to_path_buf(), ledger))
-    } else {
-        None
-    };
-    store
-        .delete_read_model(
-            ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
-            ROUTING_TELEMETRY_READ_MODEL_KEY,
-        )
-        .map_err(|error| error.to_string())?;
-    store
-        .delete_read_model(
-            PROMPT_EVOLUTION_READ_MODEL_NAMESPACE,
-            PROMPT_EVOLUTION_READ_MODEL_KEY,
-        )
-        .map_err(|error| error.to_string())?;
-    if let Some((workspace_root, mut ledger)) = rebuilt_memory {
-        ledger.vector_history_reset_required = true;
-        save_project_memory_ledger(&mut store, &ledger).map_err(|error| error.to_string())?;
-        purge_project_memory_vector_history(&workspace_root, &ledger)?;
-        ledger.vector_history_reset_required = false;
-        save_project_memory_ledger(&mut store, &ledger).map_err(|error| error.to_string())?;
-        drop(store);
-        let provider_config = state
-            .provider_config
-            .lock()
-            .map_err(|error| format!("provider config lock poisoned: {error}"))?
-            .clone();
-        schedule_project_memory_vector_refresh(workspace_root, provider_config, ledger);
-    } else {
-        drop(store);
-    }
-    Ok(())
-}
-
-pub(crate) fn remove_staged_attachment_dirs(paths: &[PathBuf]) -> Result<(), String> {
-    for path in paths {
-        if let Err(error) = fs::remove_dir_all(path) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                return Err(format!(
-                    "failed to remove staged attachments at {}: {error}",
-                    path.display()
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn remove_session_context_files(paths: &[PathBuf]) -> Result<(), String> {
-    for path in paths {
-        if let Err(error) = fs::remove_file(path) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                return Err(format!(
-                    "failed to remove session context at {}: {error}",
-                    path.display()
-                ));
-            }
-        }
-    }
-    Ok(())
+    project_session_state_with_error(
+        state,
+        cleanup
+            .err()
+            .map(|cleanup_error| {
+                format!("{error}; incomplete fork cleanup will be retried: {cleanup_error}")
+            })
+            .unwrap_or(error),
+    )
 }
 
 #[tauri::command]
