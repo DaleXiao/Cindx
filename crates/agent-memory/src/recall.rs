@@ -20,8 +20,7 @@ pub fn recall_memories_at(
     let mut recalls = ledger
         .records
         .iter()
-        .filter(|record| record.superseded_by.is_none())
-        .filter(|record| record.is_recall_eligible())
+        .filter(|record| ledger.record_is_active_for_recall(record))
         .filter_map(|record| {
             let terms = memory_terms(&record.content);
             let overlap = query_terms.intersection(&terms).count();
@@ -52,6 +51,10 @@ pub fn recall_memories_at(
             if cross_session {
                 reasons.push("cross_session".to_string());
             }
+            let pinned = ledger.is_pinned(&record.id);
+            if pinned {
+                reasons.push("pinned".to_string());
+            }
             reasons.push(format!("trust:{}", record.trust.label()));
             let age_days = now_ms
                 .saturating_sub(record.updated_at_ms)
@@ -59,16 +62,16 @@ pub fn recall_memories_at(
                 .unwrap_or_default()
                 .min(365) as f64;
             let recency = 1.0 / (1.0 + age_days / 30.0);
-            let score = (overlap_score * 0.68 + if exact { 0.32 } else { 0.0 })
+            let relevance_score = (overlap_score * 0.68 + if exact { 0.32 } else { 0.0 })
                 * record.kind.recall_weight()
                 * record.trust.recall_weight()
                 * memory_usefulness_weight(record)
                 * (0.8 + recency * 0.2)
                 * (0.85 + f64::from(record.importance) / 100.0 * 0.15)
                 * if cross_session { 1.08 } else { 0.92 };
-            (score >= 0.1).then(|| MemoryRecall {
+            (relevance_score >= 0.1).then(|| MemoryRecall {
                 record: record.clone(),
-                score,
+                score: relevance_score * if pinned { 1.08 } else { 1.0 },
                 reasons,
             })
         })
@@ -116,7 +119,7 @@ pub fn fuse_memory_recalls_at(
 ) -> Vec<MemoryRecall> {
     let lexical_recalls = lexical_recalls
         .into_iter()
-        .filter(|recall| recall.record.is_recall_eligible())
+        .filter(|recall| ledger.record_is_active_for_recall(&recall.record))
         .collect::<Vec<_>>();
     let lexical_scores = calibrated_memory_channel_scores(
         lexical_recalls
@@ -131,7 +134,7 @@ pub fn fuse_memory_recalls_at(
     let mut semantic_candidates = Vec::new();
 
     for record in &ledger.records {
-        if record.superseded_by.is_some() || !record.is_recall_eligible() {
+        if !ledger.record_is_active_for_recall(record) {
             continue;
         }
         let Some(semantic_score) = semantic_scores
@@ -159,14 +162,19 @@ pub fn fuse_memory_recalls_at(
             * memory_usefulness_weight(record)
             * (0.8 + recency * 0.2)
             * (0.85 + f64::from(record.importance) / 100.0 * 0.15)
-            * if cross_session { 1.08 } else { 0.92 };
+            * if cross_session { 1.08 } else { 0.92 }
+            * if ledger.is_pinned(&record.id) {
+                1.08
+            } else {
+                1.0
+            };
 
         semantic_candidates.push((record.id.clone(), semantic_score));
     }
     let semantic_scores = calibrated_memory_channel_scores(semantic_candidates);
 
     for record in &ledger.records {
-        if record.superseded_by.is_some() || !record.is_recall_eligible() {
+        if !ledger.record_is_active_for_recall(record) {
             continue;
         }
         let lexical_score = lexical_scores.get(&record.id).copied();
@@ -204,6 +212,11 @@ pub fn fuse_memory_recalls_at(
             {
                 existing.reasons.push("hybrid_consensus".to_string());
             }
+            if ledger.is_pinned(&record.id)
+                && !existing.reasons.iter().any(|reason| reason == "pinned")
+            {
+                existing.reasons.push("pinned".to_string());
+            }
         } else if let Some(semantic_score) = semantic_score {
             let mut reasons = vec![
                 "semantic_vector".to_string(),
@@ -211,6 +224,9 @@ pub fn fuse_memory_recalls_at(
             ];
             if cross_session {
                 reasons.push("cross_session".to_string());
+            }
+            if ledger.is_pinned(&record.id) {
+                reasons.push("pinned".to_string());
             }
             fused.insert(
                 record.id.clone(),
@@ -288,12 +304,20 @@ pub fn record_memory_recalls(
     recalls: &[MemoryRecall],
     recalled_at_ms: u64,
 ) {
-    let recalled = recalls
+    let recalled_ids = recalls
         .iter()
         .map(|recall| recall.record.id.as_str())
         .collect::<BTreeSet<_>>();
+    let recalled = ledger
+        .records
+        .iter()
+        .filter(|record| {
+            recalled_ids.contains(record.id.as_str()) && ledger.record_is_active_for_recall(record)
+        })
+        .map(|record| record.id.clone())
+        .collect::<BTreeSet<_>>();
     for record in &mut ledger.records {
-        if recalled.contains(record.id.as_str()) {
+        if recalled.contains(&record.id) {
             record.recall_count = record.recall_count.saturating_add(1);
             record.last_recalled_at_ms = Some(recalled_at_ms);
         }
@@ -312,9 +336,15 @@ pub fn record_memory_observed_uses(
         .collect::<BTreeSet<_>>();
     let output_terms = memory_terms(output);
     let normalized_output = normalize_memory_text(output);
+    let active = ledger
+        .records
+        .iter()
+        .filter(|record| ledger.record_is_active_for_recall(record))
+        .map(|record| record.id.clone())
+        .collect::<BTreeSet<_>>();
     let mut used = Vec::new();
     for record in &mut ledger.records {
-        if !recalled.contains(record.id.as_str()) {
+        if !recalled.contains(record.id.as_str()) || !active.contains(&record.id) {
             continue;
         }
         let record_terms = memory_terms(&record.content);

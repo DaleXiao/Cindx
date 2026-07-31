@@ -1,8 +1,18 @@
 use super::*;
 use crate::{
-    runtime_constants::AGENT_MEMORY_READ_MODEL_NAMESPACE, runtime_values::phase16_task_id,
+    event_projection::write_private_file_atomically,
+    memory_vector_generation_runtime::PendingMemoryVectorGeneration,
+    memory_vector_refresh_generation::{
+        prepare_project_memory_vector_refresh, publish_prepared_memory_vector_refresh,
+    },
+    persistence_runtime::memory_lancedb_root_for,
+    runtime_constants::{
+        AGENT_MEMORY_READ_MODEL_NAMESPACE, MEMORY_VECTOR_MANIFEST_SCHEMA,
+        MEMORY_VECTOR_REFRESH_INFLIGHT,
+    },
+    runtime_values::{phase16_task_id, unique_id},
 };
-use agent_memory::{extract_durable_memories, MEMORY_LEDGER_SCHEMA};
+use agent_memory::{extract_durable_memories, MemoryControlAction, MEMORY_LEDGER_SCHEMA};
 
 fn prepared_recall(project_id: &str) -> (MemoryLedger, PreparedMemoryRecall) {
     let content = "Always keep preparation persistence atomic";
@@ -29,7 +39,7 @@ fn prepared_recall(project_id: &str) -> (MemoryLedger, PreparedMemoryRecall) {
     ledger.event_count = 1;
     let prepared = PreparedMemoryRecall {
         project_id: project_id.to_string(),
-        ledger_projection_sha256: memory_vector_projection_sha256(&ledger),
+        recall_projection_sha256: memory_recall_projection_sha256(&ledger),
         recalled_at_ms: 2,
         recalls: vec![agent_memory::MemoryRecall {
             record,
@@ -62,6 +72,57 @@ fn append_prepared_recall_source(store: &mut SqliteStore, project_id: &str) {
             "Always keep preparation persistence atomic",
         ),
     );
+}
+
+fn publish_legacy_unsafe_memory_vector(
+    root: &Path,
+    project_id: &str,
+    content: &str,
+) -> Result<(), String> {
+    let embedding = local_query_embedding(content);
+    let index = RagIndex {
+        stats: RagIndexStats {
+            files_indexed: 1,
+            chunks_indexed: 1,
+            indexed_at_ms: 1,
+        },
+        chunks: vec![RagChunk {
+            id: "legacy-unsafe-memory".to_string(),
+            path: format!("memory://{project_id}/evidence/legacy-unsafe-memory"),
+            file_hash: "legacy-unsafe-memory".to_string(),
+            modified_time_ms: 1,
+            start_line: 1,
+            end_line: 1,
+            indexed_at_ms: 1,
+            text: content.to_string(),
+            embedding_dimensions: embedding.len(),
+            embedding,
+            embedding_provider: "local".to_string(),
+            embedding_model: "local-hash".to_string(),
+        }],
+    };
+    let mut pending = PendingMemoryVectorGeneration::create(root, project_id)?;
+    replace_lancedb_index(&pending.database_path, &index).map_err(|error| error.to_string())?;
+    pending.acquire_lease()?;
+    let manifest = MemoryVectorManifest {
+        schema: MEMORY_VECTOR_MANIFEST_SCHEMA.to_string(),
+        generation_id: pending.generation_id.clone(),
+        projection_sha256: "legacy-unsafe-projection".to_string(),
+        record_count: 1,
+        embedding_backend: "local".to_string(),
+        embedding_provider: "local".to_string(),
+        embedding_model: "local-hash".to_string(),
+        embedding_dimensions: index.chunks[0].embedding_dimensions,
+        generated_at_ms: 1,
+    };
+    let payload = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| format!("legacy unsafe manifest encode failed: {error}"))?;
+    write_private_file_atomically(
+        &pending.manifest_path,
+        &payload,
+        "legacy unsafe memory vector manifest",
+    )?;
+    pending.publish()
 }
 
 #[test]
@@ -257,7 +318,7 @@ fn preparation_rejects_a_memory_snapshot_that_changed_before_handoff() {
     );
 
     let mut replayed = prepared.clone();
-    replayed.ledger_projection_sha256 = memory_vector_projection_sha256(&ledger);
+    replayed.recall_projection_sha256 = memory_recall_projection_sha256(&ledger);
     replayed.recalls[0].record = ledger.records[0].clone();
     replayed.message.content = ledger.records[0].content.clone();
     let mut replay_history = base_history.to_vec();
@@ -669,7 +730,7 @@ fn rebuild_preserves_runtime_measurement_counts_and_exact_timestamps() {
     .collect::<Metadata>();
     let prepared = PreparedMemoryRecall {
         project_id: project_id.to_string(),
-        ledger_projection_sha256: memory_vector_projection_sha256(&ledger),
+        recall_projection_sha256: memory_recall_projection_sha256(&ledger),
         recalled_at_ms: 225,
         recalls: vec![agent_memory::MemoryRecall {
             record: record.clone(),
@@ -730,4 +791,294 @@ fn rebuild_preserves_runtime_measurement_counts_and_exact_timestamps() {
         rebuilt_record.last_observed_use_at_ms,
         before_record.last_observed_use_at_ms
     );
+}
+
+#[test]
+fn project_deletion_cancels_inflight_and_future_memory_vector_publication() {
+    let root = std::env::temp_dir().join(unique_id("memory-vector-delete-race"));
+    let project_id = "project-memory-vector-delete-race";
+    let ledger = MemoryLedger::new(project_id);
+    let key = memory_vector_project_key(&root, project_id);
+    let gate = memory_vector_refresh_gate(&key).expect("refresh gate should exist");
+    let guard = gate.lock().expect("refresh gate should lock");
+
+    schedule_project_memory_vector_refresh(root.clone(), ProviderConfig::default(), ledger.clone());
+    let delete_root = root.clone();
+    let delete_thread = std::thread::spawn(move || {
+        delete_project_memory_vector_index(&delete_root, project_id)
+            .expect("project vector deletion should succeed");
+    });
+    while !memory_vector_project_is_deleted(&key) {
+        std::thread::yield_now();
+    }
+    drop(guard);
+    delete_thread
+        .join()
+        .expect("project vector deletion should join");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT
+            .get_or_init(|| Mutex::new(BTreeSet::new()))
+            .lock()
+            .expect("refresh registry should lock")
+            .contains(&key);
+        if !inflight {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "cancelled vector refresh should release its lease"
+        );
+        std::thread::yield_now();
+    }
+
+    schedule_project_memory_vector_refresh(root.clone(), ProviderConfig::default(), ledger);
+    assert!(!memory_lancedb_root_for(&root, project_id).exists());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn project_deletion_does_not_wait_for_an_embedding_inflight_lease() {
+    let root = std::env::temp_dir().join(unique_id("memory-vector-delete-inflight"));
+    let project_id = "project-memory-vector-delete-inflight";
+    let key = memory_vector_project_key(&root, project_id);
+    let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT.get_or_init(|| Mutex::new(BTreeSet::new()));
+    let lease = ExclusiveKeyLease::try_acquire(inflight, key, "memory vector delete inflight test")
+        .expect("inflight registry should lock")
+        .expect("test should acquire the inflight lease");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let delete_root = root.clone();
+    let delete_thread = std::thread::spawn(move || {
+        let result = delete_project_memory_vector_index(&delete_root, project_id);
+        let _ = sender.send(result);
+    });
+
+    let result = receiver.recv_timeout(std::time::Duration::from_secs(1));
+    drop(lease);
+    delete_thread
+        .join()
+        .expect("project vector deletion should join");
+    result
+        .expect("project deletion must not wait for cloud embedding")
+        .expect("project vector deletion should succeed");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn same_name_project_recreation_uses_a_fresh_vector_identity_and_can_publish() {
+    let root = std::env::temp_dir().join(unique_id("memory-vector-project-recreate"));
+    let first_project_id = crate::runtime_values::new_project_id("Memory Project");
+    assert!(first_project_id.starts_with("project-"));
+    delete_project_memory_vector_index(&root, &first_project_id)
+        .expect("first project vector identity should retire");
+
+    let recreated_project_id = crate::runtime_values::new_project_id("Memory Project");
+    assert_ne!(recreated_project_id, first_project_id);
+    let mut recreated = MemoryLedger::new(&recreated_project_id);
+    recreated.revision = 1;
+    schedule_project_memory_vector_refresh(root.clone(), ProviderConfig::default(), recreated);
+
+    let key = memory_vector_project_key(&root, &recreated_project_id);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT
+            .get_or_init(|| Mutex::new(BTreeSet::new()))
+            .lock()
+            .expect("refresh registry should lock")
+            .contains(&key);
+        if !inflight {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "recreated project vector refresh should finish"
+        );
+        std::thread::yield_now();
+    }
+    let snapshot = open_memory_vector_snapshot(&root, &recreated_project_id)
+        .expect("recreated project vector generation should open");
+    assert_eq!(
+        snapshot
+            .manifest
+            .as_ref()
+            .map(|manifest| manifest.record_count),
+        Some(0)
+    );
+    drop(snapshot);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn session_retirement_removes_legacy_sensitive_vectors_before_safe_rebuild() {
+    let root = std::env::temp_dir().join(unique_id("memory-vector-sensitive-retirement"));
+    let project_id = "project-memory-vector-sensitive-retirement";
+    let secret = "xoxb-abcdefghijklmnop";
+    publish_legacy_unsafe_memory_vector(&root, project_id, secret)
+        .expect("legacy unsafe vector should seed");
+    let unsafe_snapshot = open_memory_vector_snapshot(&root, project_id)
+        .expect("legacy unsafe vector generation should open");
+    let unsafe_results = search_lancedb_index(
+        &unsafe_snapshot.database_path,
+        &local_query_embedding(secret),
+        1,
+    )
+    .expect("legacy unsafe vector should be searchable before retirement");
+    assert_eq!(
+        unsafe_results
+            .first()
+            .map(|result| result.chunk.text.as_str()),
+        Some(secret)
+    );
+    drop(unsafe_snapshot);
+
+    let mut rebuilt = MemoryLedger::new(project_id);
+    rebuilt.revision = 2;
+    rebuilt.event_count = 2;
+    rebuilt.vector_history_reset_required = true;
+    assert!(purge_project_memory_vector_history(&root, &rebuilt)
+        .expect("sensitive vector history purge should succeed"));
+    assert!(!memory_lancedb_root_for(&root, project_id).exists());
+
+    rebuilt.vector_history_reset_required = false;
+    refresh_project_memory_vector_index(&root, &ProviderConfig::default(), &rebuilt)
+        .expect("safe empty vector generation should publish");
+    let safe_snapshot = open_memory_vector_snapshot(&root, project_id)
+        .expect("safe empty vector generation should open");
+    let safe_manifest = safe_snapshot
+        .manifest
+        .as_ref()
+        .expect("safe empty vector manifest should exist");
+    assert_eq!(safe_manifest.record_count, 0);
+    assert_eq!(
+        safe_manifest.projection_sha256,
+        memory_vector_projection_sha256(&rebuilt)
+    );
+    let safe_generation = safe_snapshot.generation_id.clone();
+    drop(safe_snapshot);
+    assert!(
+        !invalidate_stale_project_memory_vector_index(&root, &rebuilt)
+            .expect("current safe vector should not be invalidated")
+    );
+    assert_eq!(
+        open_memory_vector_snapshot(&root, project_id)
+            .expect("current safe vector generation should reopen")
+            .generation_id,
+        safe_generation
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn older_invalidation_cannot_delete_a_registered_and_published_newer_generation() {
+    let root = std::env::temp_dir().join(unique_id("memory-vector-invalidation-race"));
+    let project_id = "project-memory-vector-invalidation-race";
+    let (older, _) = prepared_recall(project_id);
+    refresh_project_memory_vector_index(&root, &ProviderConfig::default(), &older)
+        .expect("older vector generation should publish");
+    let mut newer = older.clone();
+    let memory_id = newer.records[0].id.clone();
+    agent_memory::apply_memory_control(&mut newer, MemoryControlAction::Delete, &memory_id, 2, 2)
+        .expect("newer ledger should delete the memory");
+    newer.revision = 2;
+    newer.event_count = 2;
+
+    let key = memory_vector_project_key(&root, project_id);
+    let gate = memory_vector_refresh_gate(&key).expect("refresh gate should exist");
+    let guard = gate.lock().expect("refresh gate should lock");
+    let invalidation_root = root.clone();
+    let invalidation = std::thread::spawn(move || {
+        invalidate_stale_project_memory_vector_index(&invalidation_root, &older)
+    });
+    schedule_project_memory_vector_refresh(root.clone(), ProviderConfig::default(), newer.clone());
+    let prepared = prepare_project_memory_vector_refresh(&root, &ProviderConfig::default(), &newer)
+        .expect("newer vector generation should prepare")
+        .expect("newer projection should require publication");
+    publish_prepared_memory_vector_refresh(&root, &newer, prepared)
+        .expect("newer vector generation should publish outside the coordinator gate");
+    drop(guard);
+    assert!(!invalidation
+        .join()
+        .expect("older invalidation should join")
+        .expect("older invalidation should not fail"));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT
+            .get_or_init(|| Mutex::new(BTreeSet::new()))
+            .lock()
+            .expect("refresh registry should lock")
+            .contains(&key);
+        if !inflight {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "newer vector refresh should finish"
+        );
+        std::thread::yield_now();
+    }
+    let expected_projection = memory_vector_projection_sha256(&newer);
+    let snapshot = open_memory_vector_snapshot(&root, project_id)
+        .expect("newer vector generation should survive older invalidation");
+    assert_eq!(
+        snapshot
+            .manifest
+            .as_ref()
+            .map(|manifest| manifest.projection_sha256.as_str()),
+        Some(expected_projection.as_str())
+    );
+    drop(snapshot);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn stale_vector_refresh_cannot_overwrite_a_newer_empty_generation() {
+    let root = std::env::temp_dir().join(unique_id("memory-vector-stale-revision"));
+    let project_id = "project-memory-vector-stale-revision";
+    let (older, _) = prepared_recall(project_id);
+    let mut newer = older.clone();
+    let memory_id = newer.records[0].id.clone();
+    agent_memory::apply_memory_control(&mut newer, MemoryControlAction::Delete, &memory_id, 2, 2)
+        .expect("newer ledger should delete the memory");
+    newer.revision = 2;
+    newer.event_count = 2;
+    let key = memory_vector_project_key(&root, project_id);
+    let gate = memory_vector_refresh_gate(&key).expect("refresh gate should exist");
+    let guard = gate.lock().expect("refresh gate should lock");
+
+    schedule_project_memory_vector_refresh(root.clone(), ProviderConfig::default(), newer.clone());
+    schedule_project_memory_vector_refresh(root.clone(), ProviderConfig::default(), older);
+    drop(guard);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT
+            .get_or_init(|| Mutex::new(BTreeSet::new()))
+            .lock()
+            .expect("refresh registry should lock")
+            .contains(&key);
+        if !inflight {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "newer vector refresh should finish"
+        );
+        std::thread::yield_now();
+    }
+
+    let snapshot = open_memory_vector_snapshot(&root, project_id)
+        .expect("newer empty vector generation should open");
+    let manifest = snapshot
+        .manifest
+        .as_ref()
+        .expect("newer empty vector generation should publish a manifest");
+    assert_eq!(manifest.record_count, 0);
+    assert_eq!(
+        manifest.projection_sha256,
+        memory_vector_projection_sha256(&newer)
+    );
+    drop(snapshot);
+    let _ = std::fs::remove_dir_all(root);
 }

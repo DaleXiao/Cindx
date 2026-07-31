@@ -59,6 +59,18 @@ pub(crate) fn redact_metadata(metadata: &Metadata) -> Metadata {
         .map(|(key, value)| {
             let redacted = if is_sensitive_assignment_key(key) {
                 "[REDACTED]".to_string()
+            } else if key == "memory_record_json" {
+                serde_json::from_str::<agent_memory::MemoryRecord>(value)
+                    .ok()
+                    .filter(|record| {
+                        serde_json::to_string(record).is_ok_and(|encoded| encoded == *value)
+                            && !record.contains_sensitive_persisted_value()
+                    })
+                    .map(|_| value.clone())
+                    .unwrap_or_else(|| {
+                        redact_structured_json(value)
+                            .unwrap_or_else(|| redact_sensitive_text(value))
+                    })
             } else if key == "raw_tool_calls_json" {
                 redact_structured_json(value).unwrap_or_else(|| redact_sensitive_text(value))
             } else {

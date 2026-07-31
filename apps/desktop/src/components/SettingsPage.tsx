@@ -58,7 +58,9 @@ import {
   type WebSearchConfigState
 } from "../tauri";
 import { DEBUG_ALWAYS_VISIBLE_STORAGE_KEY } from "../appShellModel";
+import { useMemorySettingsController } from "../controllers/useMemorySettingsController";
 import type { ProviderModelGroups } from "../providerProfiles";
+import { SettingsMemoryPanel } from "./SettingsMemoryPanel";
 import { SettingsModelsPanel } from "./SettingsModelsPanel";
 import { SettingsPermissionsPanel } from "./SettingsPermissionsPanel";
 import { SettingsToolsPanel, type WebSearchDraft } from "./SettingsToolsPanel";
@@ -360,6 +362,11 @@ export function SettingsPage(props: SettingsPageProps) {
     workspaceDraft,
     workspacePickerBusy
   } = props;
+  const memorySettings = useMemorySettingsController({
+    enabled: settingsCategory === "knowledge",
+    projectId: projectSessionState?.activeProjectId || null,
+    showSaved: showSettingsSaved
+  });
 
   return (
     <section
@@ -600,6 +607,13 @@ export function SettingsPage(props: SettingsPageProps) {
                   </button>
                 </section>
                 )}
+
+                {settingsCategory === "knowledge" && (
+                  <SettingsMemoryPanel
+                    key={projectSessionState?.activeProjectId || "no-project"}
+                    {...memorySettings}
+                  />
+                )}
     
                 {settingsCategory === "sessions" && (
                 <section className="settings-section" data-settings-group="sessions">
@@ -739,24 +753,6 @@ export function SettingsPage(props: SettingsPageProps) {
                     <div>
                       <strong>4-way fusion</strong>
                       <span>Retrieval</span>
-                    </div>
-                  </div>
-                  <div className="rag-stats" aria-label="Project memory stats">
-                    <div>
-                      <strong>{phase7?.memory.records ?? 0}</strong>
-                      <span>Memories</span>
-                    </div>
-                    <div>
-                      <strong>{phase7?.memory.requirements ?? 0}</strong>
-                      <span>Requirements</span>
-                    </div>
-                    <div>
-                      <strong>{phase7?.memory.evidence ?? 0}</strong>
-                      <span>Evidence</span>
-                    </div>
-                    <div>
-                      <strong>{phase7?.memory.recalls ?? 0} / {phase7?.memory.observedUses ?? 0}</strong>
-                      <span>Recall / use</span>
                     </div>
                   </div>
                   <button

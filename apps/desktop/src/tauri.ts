@@ -2,11 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import desktopPackage from "../package.json";
 import { providerApiKeySetAfterSave, resolveProviderProfile } from "./providerProfiles";
+import * as projectMemory from "./memoryManagementModel";
 
 export const DESKTOP_VERSION = desktopPackage.version;
 
 export type * from "./tauriTypes";
 export type * from "./agentRunBudgetModel";
+export type * from "./memoryManagementModel";
 import type { AgentEffort } from "./agentRunBudgetModel";
 import type {
   RuntimeStatus,
@@ -2296,6 +2298,11 @@ export async function getPhase7State(): Promise<Phase7State> {
   }
 }
 
+export const getProjectMemoryState = (projectId: string) =>
+  invoke<projectMemory.ProjectMemoryState>("get_project_memory_state", { projectId }).catch((error) => { requireBrowserPreviewFallback(error); return projectMemory.getBrowserProjectMemoryState(projectId); });
+
+export const updateProjectMemory = (input: projectMemory.UpdateProjectMemoryInput) =>
+  invoke<projectMemory.ProjectMemoryState>("update_project_memory", { input }).catch((error) => { requireBrowserPreviewFallback(error); return projectMemory.updateBrowserProjectMemory(input); });
 export const ensureWorkspaceKnowledge = (): Promise<Phase7State> =>
   invoke<Phase7State>("ensure_workspace_knowledge").catch((error) => {
     requireBrowserPreviewFallback(error); return browserPhase7State;
