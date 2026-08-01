@@ -152,6 +152,10 @@ run. Candidate genomes are evaluated outside the active loop and promoted only
 through the configured evidence gates. A promoted immutable profile may
 configure a future conductor/workflow run.
 
+The evolution read model scopes learned genomes, observations, offline
+datasets, and rollout state by project. Records without a durable scope are
+rebuilt from canonical events before they can participate in selection.
+
 Prompt evolution is not the conductor, task graph, or run loop. It cannot alter
 active permissions, transcripts, tool observations, or budgets.
 

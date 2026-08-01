@@ -505,3 +505,76 @@ fn explicit_pairwise_evaluation_observations_remain_unchanged() {
         vec![("pro".to_string(), observation)]
     );
 }
+
+#[test]
+fn learned_prompt_genomes_are_isolated_by_project_scope() {
+    let mut project_a = ConductorPromptGenome::seed_for_effort("auto")
+        .mutations()
+        .into_iter()
+        .next()
+        .expect("seed should provide a candidate");
+    project_a.custom_directive = "project-a evidence".to_string();
+    let mut project_b = project_a.clone();
+    project_b.custom_directive = "project-b evidence".to_string();
+    let mutation_event = |sequence: u64, project_id: &str, genome: &ConductorPromptGenome| {
+        event(
+            sequence,
+            EventKind::TaskStatusChanged,
+            "Conductor prompt mutation generated",
+            [
+                ("project_id".to_string(), project_id.to_string()),
+                ("prompt_effort".to_string(), "auto".to_string()),
+                (
+                    "prompt_genome".to_string(),
+                    serde_json::to_string(genome).expect("serialize genome"),
+                ),
+                (
+                    "mutation_strategy".to_string(),
+                    "gepa_reflection".to_string(),
+                ),
+            ],
+        )
+    };
+    let model = build_prompt_evolution_read_model(
+        &[
+            mutation_event(1, "project-a", &project_a),
+            mutation_event(2, "project-b", &project_b),
+        ],
+        2,
+        2,
+    );
+
+    assert_eq!(model.genomes.len(), 2);
+    let scoped_a = prompt_evolution_read_model_for_scope(&model, "project-a");
+    let scoped_b = prompt_evolution_read_model_for_scope(&model, "project-b");
+    assert_eq!(scoped_a.genomes.len(), 1);
+    assert_eq!(scoped_b.genomes.len(), 1);
+    assert_eq!(
+        scoped_a.genomes[0].genome.custom_directive,
+        "project-a evidence"
+    );
+    assert_eq!(
+        scoped_b.genomes[0].genome.custom_directive,
+        "project-b evidence"
+    );
+}
+
+#[test]
+fn legacy_unscoped_prompt_genomes_force_a_read_model_rebuild() {
+    let model = PromptEvolutionReadModel {
+        schema: PROMPT_EVOLUTION_READ_MODEL_NAMESPACE.to_string(),
+        revision: 1,
+        event_count: 1,
+        genomes: vec![PromptGenomeRecord {
+            scope: String::new(),
+            effort: "auto".to_string(),
+            genome: ConductorPromptGenome::seed_for_effort("auto"),
+            evolution_method: None,
+        }],
+        observations: Vec::new(),
+        rollouts: BTreeMap::new(),
+        datasets: BTreeMap::new(),
+    };
+
+    assert!(!prompt_genome_scopes_are_valid(&model));
+}

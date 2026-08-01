@@ -205,7 +205,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
             .list_by_task_and_metadata(task_id, "project_id", project_id)
             .map_err(|error| error.to_string())?;
         let rollout = scoped_model.rollouts.get(effort).cloned();
-        let known_profiles = model
+        let known_profiles = scoped_model
             .genomes
             .iter()
             .filter(|record| record.effort == effort)

@@ -81,6 +81,10 @@ completed evidence, evaluates candidates against paired and holdout gates, and
 can promote a frozen profile for future runs. It cannot mutate an in-flight
 transcript, tool result, permission, or budget.
 
+Learned genomes, datasets, observations, and rollout state are isolated by
+project. A reflective mutation produced from one project's evidence cannot
+enter another project's candidate population, evaluation, or rollout.
+
 The current live baseline recorded `auto_gepa=false` and `pro_gepa=false`.
 There is no current evidence that an evolved profile improves external product
 quality.

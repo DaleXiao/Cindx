@@ -3750,6 +3750,7 @@ fn completed_gepa_canary_persists_a_verified_frozen_profile() {
         revision: 0,
         event_count: 0,
         genomes: vec![PromptGenomeRecord {
+            scope: "global".to_string(),
             effort: "auto".to_string(),
             genome: candidate.clone(),
             evolution_method: Some(PromptEvolutionMethod::GepaReflectivePaired),
@@ -3959,6 +3960,7 @@ fn stable_prompt_rollout_uses_the_evidence_bound_frozen_genome() {
         revision: 0,
         event_count: 0,
         genomes: vec![PromptGenomeRecord {
+            scope: "global".to_string(),
             effort: "auto".to_string(),
             genome: mutable_copy,
             evolution_method: Some(PromptEvolutionMethod::GepaReflectivePaired),
