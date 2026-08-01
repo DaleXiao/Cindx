@@ -14,5 +14,6 @@ Installed builds store state under:
 ```
 
 If Cindx does not open, inspect `startup.log` in that directory. The application
-falls back to in-memory state when its persistent SQLite database cannot be
-opened, so a storage error should no longer terminate the process.
+requires persistent SQLite state. If that database cannot be opened safely,
+Cindx aborts startup and records `persistent state unavailable; startup aborted`
+instead of silently running with an in-memory substitute.

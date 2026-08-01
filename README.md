@@ -1,118 +1,98 @@
 # Cindx
 
-Desktop-first local agent runtime for macOS.
+Cindx is a macOS desktop agent runtime. Cloud models provide reasoning; the
+local application owns tool execution, permissions, durable state, retrieval,
+memory, browser/computer control, and the audit trail.
 
-The product goal is a trusted local execution environment: cloud models do
-reasoning, while the local app owns tools, permissions, memory, retrieval,
-browser automation, and audit logs.
+## Documentation Baseline
 
-## Download
+Start with these documents instead of inferring the product from historical
+reports:
 
-Current macOS builds are published through GitHub:
+- [Current product baseline](docs/CURRENT.md)
+- [Current architecture and module relationships](docs/ARCHITECTURE.md)
+- [Agent evaluation policy and current evidence](docs/AGENT_EVALUATION.md)
+- [Documentation index and maintenance rules](docs/README.md)
 
-- [Latest Cindx prerelease](https://github.com/DaleXiao/Cindx/releases)
-- [Installation and troubleshooting notes](releases/README.md)
-- [Automated builds and releases](docs/RELEASING.md)
+Historical evaluation reports are evidence for their recorded versions only.
+They are indexed under [docs/evaluations](docs/evaluations/README.md) and do not
+describe the current implementation unless a current document cites them.
 
-Tagged releases are Universal macOS bundles for Apple Silicon and Intel Macs.
-Signing and notarization depend on the repository Apple secrets documented in
-the release guide.
+## Current Product
 
-## Current Status
+The current desktop application provides:
 
-This repository has a runnable desktop MVP:
+- A Tauri 2 macOS application with persistent projects, sessions, messages,
+  artifacts, trace inspection, queue/steer controls, and scheduled tasks.
+- OpenAI-compatible model configuration and streamed model responses.
+- A single interactive agent loop with cancellation, typed budgets, recovery,
+  permission suspension/resume, and durable event-backed state.
+- Fast mode as a direct single-model path. Auto and Pro use a conductor to
+  choose a validated direct or bounded workflow decision for each run.
+- Permission-gated file, shell, web, MCP, browser, computer-use, and image
+  tools. Session grants are scoped by request attributes rather than acting as
+  blanket approval.
+- Workspace retrieval across semantic, file-search, graph-direct, and
+  graph-walk channels, with source provenance.
+- Durable memory production and lexical/semantic recall, kept separate from
+  workspace knowledge indexing.
+- Background, evidence-gated prompt evolution. No checked-in evaluation proves
+  that the current GEPA profile improves product quality.
 
-- Tauri macOS app with a Rust command bridge.
-- OpenAI-compatible cloud model config and streaming chat.
-- SQLite event log and permission audit trail.
-- Permission-gated file, shell, web, browser, and computer-use tools.
-- Bundled browser/computer sidecar shims with Settings health checks and
-  automatic tool environment configuration.
-- Persistent desktop projects and sessions with real left-sidebar selection.
-- Multi-model orchestration with manual policies and `auto_router`.
-- A real agent loop that lets models request local tools and resumes after
-  permission review with canonical assistant/tool transcript recovery.
-- Structured agent trace observability with turn/step inspection and JSONL
-  export.
-- Workspace-selectable RAG with cloud embeddings, LanceDB-ready export, graph
-  extraction, graph+RAG walk, and source provenance.
-- Event-log context checkpoints with local restore pack preview and manual
-  compaction.
-
-Known machine gate:
-
-- Rust is installed through Homebrew `rustup` and the stable toolchain.
-- Node, npm, Python, Git, SQLite, Homebrew, and Apple Command Line Tools are
-  already present on the target machine.
-- Homebrew's formula for the Rust installer is `rustup`, not `rustup-init`.
-- Because Homebrew `rustup` is keg-only, use `scripts/check.sh` or add the Rust
-  paths from [docs/SETUP.md](docs/SETUP.md) to your shell.
-
-## MVP
-
-The MVP is intentionally narrow:
-
-- Tauri desktop shell.
-- Rust agent kernel.
-- Cloud model provider abstraction.
-- Multi-model orchestration v0.
-- Permission-managed file and shell tools.
-- SQLite event log.
-- LanceDB-backed RAG sidecar.
-- Browser tool v0.
-
-See [docs/MVP_SPEC.md](docs/MVP_SPEC.md).
-See [docs/SETUP.md](docs/SETUP.md) for local setup gates.
+The current evidence does **not** establish that Auto or Pro outperform the
+direct baseline, or that Cindx matches Fugu Ultra. See
+[docs/CURRENT.md](docs/CURRENT.md) for the exact claim boundary.
 
 ## Repository Layout
 
 ```text
-apps/
-  desktop/              Tauri desktop app.
-crates/
-  agent-core/           Shared domain types and contracts.
-  agent-graph/          Graph extraction and graph+RAG traversal.
-  agent-memory/         Event-log checkpoints and restore context packs.
-  agent-mcp/            MCP transports, catalog cache, and remote tools.
-  agent-rag/            Local RAG adapter, indexing, and search.
-  agent-runtime/        Model-tool-observation agent loop.
-  agent-skills/         Skill discovery, trust, and progressive loading.
-  agent-storage/        Event log and state persistence.
-  model-provider/       Cloud model provider abstraction.
-  orchestrator/         Routing, learned router, and workflow planning.
-  tools/                Local, web, browser, and computer tool registry.
-docs/
-  adr/                  Architecture decision records.
+apps/desktop/           React frontend and Tauri integration adapter
+crates/agent-core/      Shared domain contracts
+crates/agent-runtime/   Model/tool loop, run control, budgets, context governor
+crates/agent-harness/   Active-run and exclusive-work registries
+crates/orchestrator/    Run decisions, workflows, task graph, verification, GEPA
+crates/agent-memory/    Durable memory production and recall
+crates/agent-rag/       Workspace indexing, file adapter, and LanceDB storage
+crates/agent-graph/     Graph extraction and graph-guided retrieval
+crates/agent-storage/   SQLite event and state persistence
+crates/model-provider/  Provider request, response, and streaming boundary
+crates/tools/           Built-in and delegated tool contracts
+crates/agent-mcp/       MCP transport and catalog adapter
+crates/agent-skills/    Skill discovery, trust, and loading
+crates/agent-application/ Thin application-level projections
+crates/orchestrator-eval/ Non-shipping evaluation harness
+benchmarks/             Versioned deterministic evaluation contracts
+docs/                   Current documentation and historical evidence
+scripts/                Checks, local builds, sidecars, and release helpers
 ```
 
-## Development Sequence
+The desktop crate remains the composition root for provider calls, permission
+UI, tool side effects, persistence, and Tauri commands. The Rust crates own the
+portable contracts and algorithms. The precise ownership boundaries are in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-1. Install Rust.
-2. Validate the Rust kernel workspace and desktop structure with `scripts/check.sh`.
-3. Scaffold the Tauri desktop app.
-4. Implement SQLite event log.
-5. Implement model provider v0.
-6. Implement file and shell tools behind permissions.
-7. Add LanceDB sidecar and retrieval tool.
-8. Add browser tool v0.
-9. Add cloud embeddings, graph extraction, graph+RAG, browser/computer action
-   protocols, and learned routing.
-10. Add event-log context compaction and restore pack previews.
-11. Add the real model-tool-observation agent loop.
-12. Persist canonical agent transcripts and add cancel/retry controls.
-13. Add structured agent trace observability and JSONL export.
-14. Add bundled sidecar configuration and health checks for browser/computer
-    control.
-15. Add persistent project/session state and bind agent runs to the active
-    desktop context.
-16. Rename the product, desktop bundle, runtime namespace, and local data
-    directory to Cindx.
+## Development
 
-Desktop checks require npm dependencies:
+Prerequisites and first-time setup are documented in
+[docs/SETUP.md](docs/SETUP.md).
+
+Run the repository checks with:
 
 ```sh
-scripts/install-desktop-deps-ipv4.sh
+scripts/check.sh
 scripts/check-frontend.sh
-scripts/fetch-desktop-rust-deps.sh
 scripts/check-desktop.sh
 ```
+
+Run the versioned quality-gate profiles as described in
+[docs/QUALITY_GATES.md](docs/QUALITY_GATES.md). Provider-backed evaluations are
+explicit, billable operations and are never implied by an ordinary green build.
+
+## Releases
+
+- [GitHub releases](https://github.com/DaleXiao/Cindx/releases)
+- [Installation and startup diagnostics](releases/README.md)
+- [Release process](docs/RELEASING.md)
+
+Tagged builds are Universal macOS applications. Signing and notarization depend
+on the repository secrets described in the release guide.

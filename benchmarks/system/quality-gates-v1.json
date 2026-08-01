@@ -15,11 +15,13 @@
   ],
   "profiles": {
     "quick": [
+      "documentation-contract",
       "version-contract",
       "desktop-layout",
       "desktop-structure"
     ],
     "ci-contract": [
+      "documentation-contract",
       "version-contract",
       "desktop-layout",
       "desktop-structure",
@@ -33,6 +35,7 @@
       "frontend-test"
     ],
     "control-plane": [
+      "documentation-contract",
       "desktop-dto-contract",
       "routing-contract",
       "evaluation-foundation",
@@ -67,6 +70,7 @@
       "frontend-streaming-markdown-scaling"
     ],
     "full": [
+      "documentation-contract",
       "version-contract",
       "desktop-layout",
       "desktop-structure",
@@ -92,6 +96,11 @@
     ]
   },
   "gates": [
+    {
+      "id": "documentation-contract",
+      "category": "documentation",
+      "command": ["node", "scripts/check-docs.mjs"]
+    },
     {
       "id": "version-contract",
       "category": "release",

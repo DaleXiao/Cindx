@@ -17,18 +17,24 @@ function lockedPackageVersion(lock) {
   return lock.match(/\[\[package\]\]\nname = "cindx-desktop"\nversion = "([^"]+)"/)?.[1] ?? null;
 }
 
+function documentedVersion(markdown) {
+  return markdown.match(/^Current application version: `([^`]+)`$/m)?.[1] ?? null;
+}
+
 const packageJson = readJson("apps/desktop/package.json");
 const packageLock = readJson("apps/desktop/package-lock.json");
 const tauriConfig = readJson("apps/desktop/src-tauri/tauri.conf.json");
 const cargoToml = fs.readFileSync(path.join(desktopRoot, "src-tauri", "Cargo.toml"), "utf8");
 const cargoLock = fs.readFileSync(path.join(desktopRoot, "src-tauri", "Cargo.lock"), "utf8");
+const currentDoc = fs.readFileSync(path.join(repoRoot, "docs", "CURRENT.md"), "utf8");
 const version = tauriConfig.version;
 const versions = new Map([
   ["package.json", packageJson.version],
   ["package-lock.json", packageLock.version],
   ["package-lock root package", packageLock.packages?.[""]?.version],
   ["Cargo.toml", packageVersion(cargoToml)],
-  ["Cargo.lock", lockedPackageVersion(cargoLock)]
+  ["Cargo.lock", lockedPackageVersion(cargoLock)],
+  ["docs/CURRENT.md", documentedVersion(currentDoc)]
 ]);
 
 const mismatches = [...versions].filter(([, candidate]) => candidate !== version);

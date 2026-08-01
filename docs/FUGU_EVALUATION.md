@@ -1,4 +1,6 @@
-# Cindx Fugu v1 Evaluation
+# Cindx Fugu v1 Evaluation Protocol
+
+Status: frozen comparison protocol, **not** a parity result.
 
 This evaluation freezes the public Fugu Ultra benchmark contract from
 Technical Report v1. It is designed to answer three different questions
@@ -8,16 +10,21 @@ without mixing their evidence:
 2. Does adaptive orchestration beat the configured worker models and a fixed ensemble?
 3. Which Cindx subsystem causes a measured gain or regression?
 
-The first provider-backed internal mechanism report is
-[`Cindx Scientific Evaluation Card: Pilot v1`](evaluations/CINDX_SCIENTIFIC_PILOT_V1.md).
+The first provider-backed internal mechanism report is archived as
+[`Cindx Scientific Evaluation Card: Pilot v1`](evaluations/archive/2026-07/CINDX_SCIENTIFIC_PILOT_V1.md).
 It validates bounded read-only evidence grounding but deliberately does not
 claim completion of the external Fugu matrix described below.
 
-The first provider-backed external-effect pilot is
-[`Cindx Fugu External Effect Pilot V1`](evaluations/CINDX_FUGU_EXTERNAL_EFFECT_PILOT_V1.md).
+The first provider-backed external-effect pilot is archived as
+[`Cindx Fugu External Effect Pilot V1`](evaluations/archive/2026-07/CINDX_FUGU_EXTERNAL_EFFECT_PILOT_V1.md).
 It applies fixed GPQA-Diamond and MRCR v2 samples to the configured direct,
 Auto, and Pro paths, preserves failures in the denominator, and publishes only
 sanitized hashes, scores, latency, and routing evidence.
+
+The current product decision baseline is
+[`Cindx Agent Real-World Lite 0.1.80`](evaluations/CINDX_AGENT_REALWORLD_LITE_0.1.80_2026-08-01.md).
+It is not protocol-equivalent to the matrix below and records a `NO-GO` for an
+Agent-intelligence uplift claim.
 
 The frozen source is [Fugu: A Model Family for Agentic Intelligence, v1](https://arxiv.org/html/2606.21228v1), Table 1 and Appendix A. The v1 LiveCodeBench score is 92.0. Later values on the product page are not silently substituted.
 
@@ -67,7 +74,7 @@ The manifest also records Fugu's AutoResearch, Rubik, blindfold chess, trading, 
 Run the offline contract smoke test and emit a non-executable matrix:
 
 ```bash
-cargo run -p orchestrator --example fugu_evaluation_lab --locked -- \
+cargo run -p orchestrator-eval --example fugu_evaluation_lab --locked -- \
   --run-plan target/fugu-v1-run-plan.json \
   --report target/fugu-v1-report.json \
   --card target/fugu-v1-evaluation-card.md
@@ -78,7 +85,7 @@ This produces 759 planned runs and a blocked report with unmeasured scores. That
 After separately approved adapters have produced provider-backed observations in isolated sandboxes, validate the complete matrix:
 
 ```bash
-cargo run -p orchestrator --example fugu_evaluation_lab --locked -- \
+cargo run -p orchestrator-eval --example fugu_evaluation_lab --locked -- \
   --observations /path/to/fugu-v1-observations.jsonl \
   --report target/fugu-v1-report.json \
   --card target/fugu-v1-evaluation-card.md \

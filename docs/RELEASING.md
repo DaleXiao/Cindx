@@ -2,8 +2,8 @@
 
 ## Continuous integration
 
-Every push to `main` and every pull request runs the Rust, Tauri bridge,
-frontend, and desktop structure checks. Pushes to `main` also produce an
+Every push to `main` and every pull request runs the documentation baseline,
+Rust, Tauri bridge, frontend, and desktop structure checks. Pushes to `main` also produce an
 Apple Silicon test ZIP in the workflow run. The artifact is retained for seven
 days and is not committed to Git history.
 
@@ -14,16 +14,17 @@ that the user-scoped SQLite state can be created before an artifact is uploaded.
 ## Tagged releases
 
 A tag matching the committed application version starts the Release workflow.
-For example, version `0.0.5` must be committed before pushing tag `v0.0.5`.
+Read the version from the committed Tauri configuration before creating the tag.
 
 ```sh
-node scripts/check-release-version.mjs v0.0.5
-git tag v0.0.5
-git push origin v0.0.5
+VERSION="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+node scripts/check-release-version.mjs "v$VERSION"
+git tag "v$VERSION"
+git push origin "v$VERSION"
 ```
 
-The workflow builds `universal-apple-darwin`, creates a prerelease named
-`Cindx v0.0.5`, and uploads the archived `.app` bundle to GitHub Releases. The
+The workflow builds `universal-apple-darwin`, creates a matching prerelease, and
+uploads the archived `.app` bundle to GitHub Releases. The
 Universal application runs on Apple Silicon and Intel Macs. DMG generation is
 deliberately disabled because it adds a separate macOS scripting failure point
 without improving internal testing.
@@ -35,6 +36,11 @@ at the selected commit when it does not already exist.
 CI invokes Tauri directly and never increments source versions. Local
 `npm run tauri -- build` still uses `scripts/run-tauri.mjs` and increments the
 patch version before a successful local build.
+
+Before tagging, `docs/CURRENT.md` must carry the same application version and
+`node scripts/check-docs.mjs` must pass. Provider-backed evaluation is not run
+implicitly by the release workflow; any quality claim needs a separately
+versioned report under `docs/evaluations/`.
 
 ## Optional Apple signing and notarization
 

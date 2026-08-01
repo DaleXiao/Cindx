@@ -1,0 +1,119 @@
+# Current Product Baseline
+
+Current application version: `0.1.80`
+
+Last code-fact review: `2026-08-01`
+
+This document describes the current source tree. Evaluation reports describe
+only the revision recorded in each report.
+
+## Execution Modes
+
+- **Fast** bypasses the conductor and runs one configured model through the
+  shared interactive agent loop.
+- **Auto** asks the configured conductor for a typed `AgentRunDecision`, with a
+  maximum requested parallelism of two. The decision may remain direct or
+  select a bounded workflow.
+- **Pro** uses the same decision contract with a maximum requested parallelism
+  of three and a larger workflow budget.
+- An invalid conductor response receives bounded repair. Exhausted conductor
+  attempts produce an explicit degraded fallback rather than an unvalidated
+  workflow.
+
+All three modes ultimately use the same `AgentKernel`, run-control contract,
+tool permission path, persistence path, and completion transaction. They differ
+in planning and collaboration policy, not in separate product loops.
+
+## Agent Run
+
+A new run currently follows this sequence:
+
+1. The Tauri command validates the session, provider configuration, workspace,
+   attachments, and current-time context.
+2. The desktop adapter appends the user message and task-start event to SQLite.
+3. `AgentRunControl` establishes cancellation, steer, turn, stage, and deadline
+   budgets; `agent-harness` prevents duplicate active work for the same key.
+4. Session history is bounded and projected for the current objective.
+5. Fast chooses a direct decision. Auto and Pro request a validated conductor
+   decision.
+6. Durable memory recall and workspace retrieval are prepared without mutating
+   canonical conversation history. Independent retrieval channels may execute
+   in parallel; graph walk expands from selected seeds.
+7. A workflow decision can run a bounded task graph and inject its grounded
+   handoff into the interactive loop. A direct decision skips collaboration.
+8. `AgentKernel` alternates model turns, admitted tool batches, observations,
+   contract checks, and terminal delivery until completion or typed suspension.
+9. The completion transaction persists the result, artifacts, lifecycle state,
+   learning evidence, and cleanup. Semantic memory refresh and prompt evolution
+   are background work.
+
+## Data, Memory, and Retrieval
+
+- SQLite is the durable product state. Startup fails closed when the persistent
+  store cannot be opened; the application does not silently continue with an
+  in-memory substitute.
+- Durable memory is produced from completed or explicitly eligible run
+  evidence. Recall combines lexical and semantic evidence with trust,
+  deduplication, supersession, and session-diversity controls.
+- Workspace knowledge is separate from memory. The current retrieval adapter
+  supports file indexing, provider embeddings, local file persistence, and a
+  production-enabled LanceDB store.
+- Requested retrieval can combine semantic search, file search, graph-direct
+  lookup, and graph walk. Results retain source provenance.
+- A passing deterministic memory benchmark proves the frozen recall contract;
+  it does not prove that every live agent run requests and uses the right
+  memory.
+
+## Prompt Evolution
+
+Prompt evolution is outside the active agent loop. It consumes redacted,
+completed evidence, evaluates candidates against paired and holdout gates, and
+can promote a frozen profile for future runs. It cannot mutate an in-flight
+transcript, tool result, permission, or budget.
+
+The current live baseline recorded `auto_gepa=false` and `pro_gepa=false`.
+There is no current evidence that an evolved profile improves external product
+quality.
+
+## Current Evidence Boundary
+
+The latest tool-using Agent pilot is
+[Cindx Agent Real-World Lite 0.1.80](evaluations/CINDX_AGENT_REALWORLD_LITE_0.1.80_2026-08-01.md).
+It found:
+
+- Direct completed `3/3` cases.
+- Fast completed `0/3` cases despite returning visible responses.
+- Auto completed `2/3` cases.
+- Pro completed `2/3` cases.
+- Fast persistently exhausted evidence/finalization capacity on multi-file work.
+- Auto produced a correct reviewer result but delivered a stale weaker result
+  in the contradiction case.
+
+The latest matched GPQA diagnostic is version `0.1.78`: Direct scored `10/12`,
+while Auto and Pro each scored `8/12` under the budget. The sample is too small
+for broad conclusions, but it does not demonstrate orchestration uplift.
+
+Therefore the current claim is:
+
+- The control plane, local memory contract, permission boundary, and
+  deterministic quality gates have substantial automated coverage.
+- Auto and Pro can help gather multi-file evidence, but they are not proven to
+  outperform the direct path in quality, latency, or tokens.
+- Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.
+
+## Known Structural Limits
+
+- The Tauri crate remains a large composition root. Portable contracts exist in
+  dedicated crates, but provider calls, permission UI, tool side effects,
+  persistence coordination, and several workflow adapters still meet in the
+  desktop integration layer.
+- `agent-rag` and parts of the desktop adapter remain large modules. Structure
+  checks prevent some regressions but do not prove ideal boundaries.
+- `agent-application` is currently a thin application-level boundary rather
+  than the sole owner of all use cases.
+- Provider-backed real-world coverage is small and read-only. Code editing,
+  browser/computer tasks, interruption/resume, steering, and cross-session
+  memory still need a matched repeated external-effect suite.
+
+These are current constraints, not roadmap promises. A later change may remove
+them only with code and verification evidence in the same revision.

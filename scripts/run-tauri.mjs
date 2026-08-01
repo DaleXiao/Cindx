@@ -11,7 +11,8 @@ const paths = {
   cargoToml: path.join(desktopRoot, "src-tauri", "Cargo.toml"),
   packageJson: path.join(desktopRoot, "package.json"),
   packageLock: path.join(desktopRoot, "package-lock.json"),
-  tauriConfig: path.join(desktopRoot, "src-tauri", "tauri.conf.json")
+  tauriConfig: path.join(desktopRoot, "src-tauri", "tauri.conf.json"),
+  currentDoc: path.join(repoRoot, "docs", "CURRENT.md")
 };
 
 function packageVersion(toml) {
@@ -36,6 +37,17 @@ function replaceLockedPackageVersion(lock, version) {
   );
 }
 
+function documentedVersion(markdown) {
+  return markdown.match(/^Current application version: `([^`]+)`$/m)?.[1] ?? null;
+}
+
+function replaceDocumentedVersion(markdown, version) {
+  return markdown.replace(
+    /^Current application version: `[^`]+`$/m,
+    `Current application version: \`${version}\``
+  );
+}
+
 function nextPatchVersion(version) {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
   if (!match) throw new Error(`Unsupported Cindx version: ${version}`);
@@ -57,7 +69,8 @@ function bumpDesktopVersion() {
     packageLock.version,
     packageLock.packages?.[""]?.version,
     packageVersion(cargoToml),
-    lockedPackageVersion(cargoLock)
+    lockedPackageVersion(cargoLock),
+    documentedVersion(originals.currentDoc)
   ];
   if (versions.some((version) => version !== current)) {
     throw new Error(`Cindx version files are out of sync: ${[current, ...versions].join(", ")}`);
@@ -73,6 +86,7 @@ function bumpDesktopVersion() {
   fs.writeFileSync(paths.tauriConfig, `${JSON.stringify(tauriConfig, null, 2)}\n`);
   fs.writeFileSync(paths.cargoToml, replacePackageVersion(cargoToml, next));
   fs.writeFileSync(paths.cargoLock, replaceLockedPackageVersion(cargoLock, next));
+  fs.writeFileSync(paths.currentDoc, replaceDocumentedVersion(originals.currentDoc, next));
   process.stdout.write(`Cindx build version ${next}\n`);
   return () => {
     Object.entries(paths).forEach(([name, filePath]) => {
@@ -84,6 +98,22 @@ function bumpDesktopVersion() {
 
 const args = process.argv.slice(2);
 const rollbackDesktopVersion = args[0] === "build" ? bumpDesktopVersion() : null;
+
+if (rollbackDesktopVersion) {
+  const documentationCheck = spawnSync(
+    process.execPath,
+    [path.join(repoRoot, "scripts", "check-docs.mjs")],
+    { cwd: repoRoot, stdio: "inherit" }
+  );
+  if (documentationCheck.error) {
+    rollbackDesktopVersion();
+    throw documentationCheck.error;
+  }
+  if ((documentationCheck.status ?? 1) !== 0) {
+    rollbackDesktopVersion();
+    process.exit(documentationCheck.status ?? 1);
+  }
+}
 
 const executable = path.join(
   desktopRoot,
