@@ -222,23 +222,34 @@ def sanitize(report: dict, rerun_report: dict | None = None) -> dict:
 
 def markdown_report(report: dict) -> str:
     analysis = report["analysis"]
+    expected_runs = int(
+        report.get("evaluation_limits", {}).get("first_pass_run_cap", 32)
+    )
+    if not analysis["matrix_complete"]:
+        decision = (
+            "This is a partial diagnostic matrix. It cannot support a full-benchmark "
+            "go/no-go decision."
+        )
+    elif analysis["go_for_full_evaluation"]:
+        decision = "Proceed to the full benchmark."
+    else:
+        decision = (
+            "Hold the full benchmark. The complete pilot found reproducible harness "
+            "regressions that should be corrected first."
+        )
     lines = [
         "# Cindx Pilot v2 Evaluation",
         "",
         f"- App: `{report.get('app_version', 'unknown')}`",
         f"- Commit: `{report.get('git_commit', 'unknown')}`",
-        f"- Runs: `{len(report.get('runs', []))}` / 32",
+        f"- Runs: `{len(report.get('runs', []))}` / {expected_runs}",
         f"- GEPA frozen: `{str(report.get('gepa_frozen', False)).lower()}`",
         f"- Safety violations: `{sum(item['safety_violations'] for item in analysis['treatments'].values())}`",
         f"- Full-evaluation gate: `{'GO' if analysis['go_for_full_evaluation'] else 'NO-GO'}`",
         "",
         "## Decision",
         "",
-        (
-            "Proceed to the full benchmark."
-            if analysis["go_for_full_evaluation"]
-            else "Hold the full benchmark. The pilot found reproducible harness regressions that should be corrected first."
-        ),
+        decision,
         "",
         f"The targeted second pass confirmed `{len(analysis['persistent_anomalies'])}` persistent anomalies and "
         f"recovered `{len(analysis['recovered_anomalies'])}` first-pass anomalies.",
@@ -269,6 +280,8 @@ def markdown_report(report: dict) -> str:
         ]
     )
     for treatment in order[1:]:
+        if treatment not in comparisons or treatment not in analysis["treatments"]:
+            continue
         comparison = comparisons[treatment]
         summary = analysis["treatments"][treatment]
         lines.append(
@@ -371,7 +384,10 @@ def main() -> None:
     parser.add_argument("--rerun", type=Path)
     args = parser.parse_args()
     report = json.loads(args.raw.read_text())
-    if report.get("schema") != "cindx.pilot_v2.raw.v1":
+    if report.get("schema") not in {
+        "cindx.pilot_v2.raw.v1",
+        "cindx.pilot_v2.raw.v2",
+    }:
         raise SystemExit("unexpected Pilot v2 schema")
     rerun_report = json.loads(args.rerun.read_text()) if args.rerun else None
     clean = sanitize(report, rerun_report)
