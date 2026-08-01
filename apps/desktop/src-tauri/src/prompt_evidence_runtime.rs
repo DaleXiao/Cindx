@@ -23,6 +23,27 @@ pub(crate) fn prompt_profile_evidence_counts(
     )
 }
 
+pub(crate) fn prompt_profile_training_evidence_count(
+    observations: &[PromptEvolutionObservation],
+    profile_id: &str,
+) -> usize {
+    let Some(dataset_sha256) =
+        orchestrator::latest_scientific_training_dataset_digest(observations)
+    else {
+        return 0;
+    };
+    observations
+        .iter()
+        .filter(|observation| observation.profile_id == profile_id)
+        .filter(|observation| observation.split == PromptEvaluationSplit::Train)
+        .filter(|observation| observation.mode == PromptEvaluationMode::PairedExecution)
+        .filter(|observation| observation.is_scientific_evidence())
+        .filter(|observation| observation.provenance.dataset_sha256 == dataset_sha256)
+        .map(PromptEvolutionObservation::evidence_identity)
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
 pub(crate) fn prompt_direct_profile_evidence_counts(
     observations: &[PromptEvolutionObservation],
     profile_id: &str,

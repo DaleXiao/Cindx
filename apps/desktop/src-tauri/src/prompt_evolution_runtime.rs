@@ -62,6 +62,11 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
         PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
         PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS,
     )?;
+    let search_archive = PromptSearchArchive::build(
+        &active_population,
+        &active_observations,
+        PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
+    )?;
     let convergence = evaluate_prompt_convergence(
         &active_population,
         &active_observations,
@@ -92,19 +97,24 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
     let split_counts = known_population
         .iter()
         .map(|genome| {
+            let (_, holdout) = prompt_profile_evidence_counts(&observations, &genome.id);
             (
                 genome.id.clone(),
-                prompt_profile_evidence_counts(&observations, &genome.id),
+                (
+                    prompt_profile_training_evidence_count(&observations, &genome.id),
+                    holdout,
+                ),
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let profile_complete = |genome: &ConductorPromptGenome| {
-        let (train, holdout) = split_counts.get(&genome.id).copied().unwrap_or_default();
-        train >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS && holdout >= PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS
+    let profile_search_complete = |genome: &ConductorPromptGenome| {
+        split_counts
+            .get(&genome.id)
+            .is_some_and(|(train, _)| *train >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS)
     };
     let aggregate_breeding_parent = if let Some(generation) = active_population
         .iter()
-        .filter(|genome| profile_complete(genome))
+        .filter(|genome| profile_search_complete(genome))
         .map(|genome| genome.generation)
         .max()
     {
@@ -122,11 +132,10 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
             .filter(|observation| generation_ids.contains(observation.profile_id.as_str()))
             .cloned()
             .collect::<Vec<_>>();
-        PromptParetoArchive::build(
+        PromptSearchArchive::build(
             &generation_genomes,
             &generation_observations,
             PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
-            PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS,
         )?
         .champion()
         .map(|candidate| candidate.genome.clone())
@@ -134,7 +143,7 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
         None
     };
     let instance_breeding_parent = instance_archive
-        .select_for_mutation(observations.len() as u64)
+        .select_for_mutation(instance_scores.len() as u64)
         .and_then(|candidate| {
             active_population
                 .iter()
@@ -143,16 +152,13 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
         });
     let breeding_parent = instance_breeding_parent.or(aggregate_breeding_parent);
     let mut population = Vec::new();
-    if let Some(champion) = convergence.champion.as_ref() {
-        population.push(champion.genome.clone());
-    }
     population.extend(
         known_population
             .iter()
-            .filter(|genome| proposal_is_active(genome) && !profile_complete(genome))
+            .filter(|genome| proposal_is_active(genome) && !profile_search_complete(genome))
             .cloned(),
     );
-    if archive.candidates.is_empty() {
+    if search_archive.candidates.is_empty() {
         population.extend(
             known_population
                 .iter()
@@ -163,7 +169,7 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
         if let Some(parent) = breeding_parent.as_ref() {
             population.extend(parent.mutations());
         }
-        population.extend(archive.next_generation(PROMPT_EVOLUTION_POPULATION_LIMIT));
+        population.extend(search_archive.next_generation(PROMPT_EVOLUTION_POPULATION_LIMIT));
     }
     if let Some(merged) = prompt_instance_merge_candidate(&instance_archive, &known_population) {
         population.push(merged);
@@ -177,11 +183,13 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
         let (train, holdout) = split_counts.get(&genome.id).copied().unwrap_or_default();
         let complete = train >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS
             && holdout >= PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS;
-        let priority = if champion.is_some_and(|candidate| candidate.genome.id == genome.id) {
-            0
-        } else if (genome.id.starts_with("learned-") || genome.id.starts_with("merge-"))
-            && !complete
+        let search_complete = train >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS;
+        let priority = if (genome.id.starts_with("learned-")
+            || genome.id.starts_with("merge-"))
+            && !search_complete
         {
+            0
+        } else if !search_complete {
             1
         } else if !complete {
             2
@@ -201,14 +209,17 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
         .min_by_key(|genome| {
             let (train, holdout) = split_counts.get(&genome.id).copied().unwrap_or_default();
             let runs = train + holdout;
-            let complete = train >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS
+            let search_complete = train >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS;
+            let complete = search_complete
                 && holdout >= PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS;
-            let priority = if !complete && runs > 0 {
+            let priority = if !search_complete && runs > 0 {
                 0
-            } else if !complete {
+            } else if !search_complete {
                 1
-            } else {
+            } else if !complete {
                 2
+            } else {
+                3
             };
             (priority, runs, genome.generation, genome.id.clone())
         })
@@ -247,7 +258,7 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
     let pending_evolved_profile = population.iter().any(|genome| {
         (genome.id.starts_with("learned-") || genome.id.starts_with("merge-"))
             && proposal_is_active(genome)
-            && !profile_complete(genome)
+            && !profile_search_complete(genome)
     });
     let learned_child_exists = breeding_parent.as_ref().is_some_and(|parent| {
         known_population.iter().any(|genome| {

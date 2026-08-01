@@ -1,8 +1,8 @@
+use super::fitness::summarize;
 use super::*;
 use crate::{AgentEvaluationCaseScore, AgentEvaluationSplit};
 use std::collections::{BTreeMap, BTreeSet};
 
-const FITNESS_WINDOW_PER_SPLIT: usize = 12;
 const PROMOTION_WILSON_Z: f64 = 1.96;
 pub(super) const PROMOTION_MIN_LOWER_BOUND: f64 = 0.55;
 
@@ -100,38 +100,6 @@ impl PromptParetoArchive {
             candidates,
             rejected_profiles,
         })
-    }
-
-    pub fn next_generation(&self, population_limit: usize) -> Vec<ConductorPromptGenome> {
-        if population_limit == 0 {
-            return Vec::new();
-        }
-        let mut population = self
-            .candidates
-            .iter()
-            .map(|candidate| candidate.genome.clone())
-            .collect::<Vec<_>>();
-        for pair in self.candidates.windows(2) {
-            if let Ok(child) = ConductorPromptGenome::crossover(
-                format!(
-                    "cross-g{}-{}-{}",
-                    pair[0].genome.generation.max(pair[1].genome.generation) + 1,
-                    pair[0].genome.id,
-                    pair[1].genome.id
-                ),
-                &pair[0].genome,
-                &pair[1].genome,
-            ) {
-                population.push(child);
-            }
-        }
-        for candidate in &self.candidates {
-            population.extend(candidate.genome.mutations());
-        }
-        let mut ids = BTreeSet::new();
-        population.retain(|genome| ids.insert(genome.id.clone()));
-        population.truncate(population_limit);
-        population
     }
 
     pub fn champion(&self) -> Option<&PromptParetoCandidate> {
@@ -607,13 +575,24 @@ pub fn evaluate_prompt_convergence(
     minimum_improvement: f64,
     maximum_generation: u32,
 ) -> Result<PromptEvolutionConvergence, String> {
-    let full_archive = PromptParetoArchive::build(
-        genomes,
-        observations,
-        minimum_train_runs,
-        minimum_holdout_runs,
-    )?;
-    let champion = full_archive.champion().cloned();
+    let search_archive = PromptSearchArchive::build(genomes, observations, minimum_train_runs)?;
+    let champion = if let Some(nominee) = search_archive.champion() {
+        let nominee_observations = observations
+            .iter()
+            .filter(|observation| observation.profile_id == nominee.genome.id)
+            .cloned()
+            .collect::<Vec<_>>();
+        PromptParetoArchive::build(
+            std::slice::from_ref(&nominee.genome),
+            &nominee_observations,
+            minimum_train_runs,
+            minimum_holdout_runs,
+        )?
+        .champion()
+        .cloned()
+    } else {
+        None
+    };
     let mut generation_scores = Vec::new();
     let generations = genomes
         .iter()
@@ -634,11 +613,10 @@ pub fn evaluate_prompt_convergence(
             .filter(|observation| generation_ids.contains(observation.profile_id.as_str()))
             .cloned()
             .collect::<Vec<_>>();
-        let archive = PromptParetoArchive::build(
+        let archive = PromptSearchArchive::build(
             &generation_genomes,
             &generation_observations,
             minimum_train_runs,
-            minimum_holdout_runs,
         )?;
         if !archive.candidates.is_empty() {
             generation_scores.push((generation, archive.frontier_score()));
@@ -678,73 +656,6 @@ pub fn evaluate_prompt_convergence(
         stagnant_generations,
         evaluated_generations: generation_scores.len(),
     })
-}
-
-fn summarize<'a>(
-    observations: impl Iterator<Item = &'a PromptEvolutionObservation>,
-) -> PromptFitness {
-    let mut seen = BTreeSet::new();
-    let mut entries = observations.collect::<Vec<_>>();
-    entries.reverse();
-    entries.retain(|observation| seen.insert(observation.evidence_identity()));
-    entries.reverse();
-    if entries.len() > FITNESS_WINDOW_PER_SPLIT {
-        entries = entries.split_off(entries.len() - FITNESS_WINDOW_PER_SPLIT);
-    }
-    let runs = entries.len();
-    let divisor = runs.max(1) as f64;
-    let paired = entries
-        .iter()
-        .filter(|entry| entry.mode != PromptEvaluationMode::Live)
-        .collect::<Vec<_>>();
-    let paired_divisor = paired.len().max(1) as f64;
-    let step_credits = entries
-        .iter()
-        .flat_map(|entry| entry.step_credits.iter())
-        .map(|step| step.credit.clamp(0.0, 1.0))
-        .collect::<Vec<_>>();
-    PromptFitness {
-        runs,
-        paired_runs: paired.len(),
-        replay_runs: entries
-            .iter()
-            .filter(|entry| entry.mode.is_replay())
-            .count(),
-        execution_runs: entries
-            .iter()
-            .filter(|entry| entry.mode.is_execution())
-            .count(),
-        average_reward: entries.iter().map(|entry| entry.reward()).sum::<f64>() / divisor,
-        average_relative_reward: paired
-            .iter()
-            .map(|entry| entry.group_relative_reward())
-            .sum::<f64>()
-            / paired_divisor,
-        average_step_credit: step_credits.iter().sum::<f64>() / step_credits.len().max(1) as f64,
-        format_valid_rate: entries.iter().filter(|entry| entry.format_valid).count() as f64
-            / divisor,
-        success_rate: entries.iter().filter(|entry| entry.succeeded).count() as f64 / divisor,
-        average_quality: entries
-            .iter()
-            .map(|entry| entry.quality_score.clamp(0.0, 1.0))
-            .sum::<f64>()
-            / divisor,
-        average_latency_ms: entries.iter().map(|entry| entry.latency_ms).sum::<u64>() as f64
-            / divisor,
-        average_total_tokens: entries.iter().map(|entry| entry.total_tokens).sum::<u64>() as f64
-            / divisor,
-        average_cost_microusd: entries
-            .iter()
-            .map(|entry| entry.estimated_cost_microusd)
-            .sum::<u64>() as f64
-            / divisor,
-        safety_violations: entries.iter().map(|entry| entry.safety_violations).sum(),
-        task_class_coverage: entries
-            .iter()
-            .map(|entry| entry.task_class.as_str())
-            .collect::<BTreeSet<_>>()
-            .len(),
-    }
 }
 
 fn dominates(left: &PromptParetoCandidate, right: &PromptParetoCandidate) -> bool {

@@ -1,6 +1,8 @@
+mod fitness;
 mod genome;
 mod observation;
 mod pareto;
+mod search;
 mod snapshot;
 
 pub use genome::*;
@@ -422,7 +424,7 @@ mod tests {
                     provenance: scientific_provenance(profile_id, "challenger"),
                 }
             };
-        let observations = vec![
+        let mut observations = vec![
             observation(
                 "feedback-1",
                 PromptEvaluationSplit::Train,
@@ -460,6 +462,14 @@ mod tests {
                 Some(packet("feedback-2", profile_id)),
             ),
         ];
+        let mut newer_holdout = observation(
+            "newer-holdout-dataset",
+            PromptEvaluationSplit::Holdout,
+            PromptEvaluationMode::ReplayExecution,
+            Some(packet("newer-holdout-dataset", profile_id)),
+        );
+        newer_holdout.provenance.dataset_sha256 = "holdout-only-dataset".to_string();
+        observations.push(newer_holdout);
 
         let selected = prompt_reflection_packets(&observations, profile_id, 6);
 
@@ -753,7 +763,8 @@ mod tests {
         assert!(ids.contains(fast.id.as_str()));
         assert!(ids.contains(pro.id.as_str()));
         assert!(!ids.contains(dominated.id.as_str()));
-        assert!(!archive.next_generation(8).is_empty());
+        let search_archive = PromptSearchArchive::build(&genomes, &observations, 2).unwrap();
+        assert!(!search_archive.next_generation(8).is_empty());
     }
 
     #[test]
@@ -783,6 +794,130 @@ mod tests {
 
         assert!(ids.contains(compact.id.as_str()));
         assert!(ids.contains(expansive.id.as_str()));
+    }
+
+    #[test]
+    fn holdout_changes_promotion_but_never_search_or_offspring() {
+        let stronger_train = ConductorPromptGenome::seed_for_effort("auto");
+        let weaker_train = ConductorPromptGenome {
+            id: "weaker-train".to_string(),
+            ..ConductorPromptGenome::seed_for_effort("auto")
+        };
+        let genomes = vec![stronger_train.clone(), weaker_train.clone()];
+        let training = (0..2)
+            .flat_map(|_| {
+                [
+                    observation(
+                        &stronger_train.id,
+                        PromptEvaluationSplit::Train,
+                        0.90,
+                        1_000,
+                        1_000,
+                    ),
+                    observation(
+                        &weaker_train.id,
+                        PromptEvaluationSplit::Train,
+                        0.86,
+                        1_000,
+                        1_000,
+                    ),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let with_holdout = |stronger_quality: f64, weaker_quality: f64| {
+            let mut observations = training.clone();
+            for _ in 0..6 {
+                observations.push(observation(
+                    &stronger_train.id,
+                    PromptEvaluationSplit::Holdout,
+                    stronger_quality,
+                    1_000,
+                    1_000,
+                ));
+                observations.push(observation(
+                    &weaker_train.id,
+                    PromptEvaluationSplit::Holdout,
+                    weaker_quality,
+                    1_000,
+                    1_000,
+                ));
+            }
+            observations
+        };
+        let first = with_holdout(0.95, 0.86);
+        let reversed = with_holdout(0.86, 0.95);
+
+        let first_search = PromptSearchArchive::build(&genomes, &first, 2).unwrap();
+        let reversed_search = PromptSearchArchive::build(&genomes, &reversed, 2).unwrap();
+        assert_eq!(
+            first_search
+                .champion()
+                .map(|candidate| &candidate.genome.id),
+            Some(&stronger_train.id)
+        );
+        assert_eq!(first_search, reversed_search);
+        assert_eq!(
+            first_search.next_generation(16),
+            reversed_search.next_generation(16)
+        );
+        let mut newer_holdout_dataset = first.clone();
+        let mut holdout_only = observation(
+            &weaker_train.id,
+            PromptEvaluationSplit::Holdout,
+            1.0,
+            1_000,
+            1_000,
+        );
+        holdout_only.provenance.dataset_sha256 = "holdout-only-dataset".to_string();
+        newer_holdout_dataset.push(holdout_only);
+        assert_eq!(
+            first_search,
+            PromptSearchArchive::build(&genomes, &newer_holdout_dataset, 2).unwrap()
+        );
+        assert_eq!(
+            first_search.next_generation(16),
+            PromptSearchArchive::build(&genomes, &newer_holdout_dataset, 2)
+                .unwrap()
+                .next_generation(16)
+        );
+
+        let first_promotion = PromptParetoArchive::build(&genomes, &first, 2, 6).unwrap();
+        let reversed_promotion = PromptParetoArchive::build(&genomes, &reversed, 2, 6).unwrap();
+        assert_eq!(
+            first_promotion
+                .champion()
+                .map(|candidate| &candidate.genome.id),
+            Some(&stronger_train.id)
+        );
+        assert_eq!(
+            reversed_promotion
+                .champion()
+                .map(|candidate| &candidate.genome.id),
+            Some(&weaker_train.id)
+        );
+
+        let first_convergence =
+            evaluate_prompt_convergence(&genomes, &first, 2, 6, 3, 0.02, 12).unwrap();
+        let reversed_convergence =
+            evaluate_prompt_convergence(&genomes, &reversed, 2, 6, 3, 0.02, 12).unwrap();
+        assert_eq!(
+            first_convergence
+                .champion
+                .as_ref()
+                .map(|candidate| &candidate.genome.id),
+            Some(&stronger_train.id)
+        );
+        assert_eq!(
+            reversed_convergence
+                .champion
+                .as_ref()
+                .map(|candidate| &candidate.genome.id),
+            Some(&stronger_train.id)
+        );
+        let rejected_nominee = with_holdout(0.70, 0.95);
+        let rejected_convergence =
+            evaluate_prompt_convergence(&genomes, &rejected_nominee, 2, 6, 3, 0.02, 12).unwrap();
+        assert!(rejected_convergence.champion.is_none());
     }
 
     #[test]
