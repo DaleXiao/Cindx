@@ -75,6 +75,7 @@ mod tests {
             effort: "auto".to_string(),
             policy: "best_of_n".to_string(),
             conductor_model: "planner".to_string(),
+            primary_model: "worker-a".to_string(),
             worker_models: vec!["worker-a".to_string(), "worker-b".to_string()],
             role_hints: ConductorRoleHints {
                 planner: "worker-a".to_string(),

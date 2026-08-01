@@ -110,6 +110,11 @@ pub(super) fn plan_adaptive_workflow(
         effort: effort.to_string(),
         policy: policy.to_string(),
         conductor_model: conductor_model.to_string(),
+        primary_model: run_context
+            .get("agent_model")
+            .filter(|model| models.contains(model))
+            .cloned()
+            .unwrap_or_else(|| role_hints.executor.clone()),
         worker_models: models.to_vec(),
         role_hints: role_hints.clone(),
         budget: WorkflowBudget {

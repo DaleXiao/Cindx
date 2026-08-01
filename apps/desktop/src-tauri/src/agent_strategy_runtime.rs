@@ -189,7 +189,6 @@ pub(crate) fn plan_agent_run(
             .map_err(CollaborationStageError::Failed)?;
         return Ok(planned);
     }
-
     let max_parallelism = if effort == AgentEffort::Pro { 3 } else { 2 };
     let configured_conductor_models = conductor_model_sequence(config);
     let (provider_scope, health_generation, conductor_models) =
@@ -210,6 +209,7 @@ pub(crate) fn plan_agent_run(
             .cloned()
             .unwrap_or_else(|| config.model_for_conductor()),
         allowed_models: allowed_models.clone(),
+        model_candidates: candidates.clone(),
         max_parallelism,
         evolved_directive: profile.conductor_directive(),
         historical_evidence,

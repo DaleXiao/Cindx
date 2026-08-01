@@ -110,16 +110,6 @@ fn anytime_step_kind(step: &WorkflowPlanStep, is_delivery: bool) -> AnytimeCandi
     }
 }
 
-fn workflow_contribution_signature(step: &WorkflowPlanStep) -> String {
-    let normalized_subtask = step
-        .subtask
-        .split_whitespace()
-        .flat_map(str::chars)
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    format!("{}:{}:{normalized_subtask}", step.model, step.role)
-}
-
 fn refresh_snapshot_contract(
     snapshot: &mut AnytimeControllerSnapshot,
     contract: &ConductorExecutionContract,
@@ -159,7 +149,7 @@ pub fn restore_anytime_controller(
             controller.annotate_candidate(
                 &step.id,
                 anytime_step_kind(step, is_delivery),
-                Some(workflow_contribution_signature(step)),
+                Some(step.independent_contribution_key()),
                 is_delivery,
             )?;
         }
@@ -181,7 +171,7 @@ pub fn restore_anytime_controller(
             .min(10_000);
         let mut candidate = AnytimeCandidate::workflow(&step.id, step.access.clone(), uplift)
             .with_kind(anytime_step_kind(step, is_delivery))
-            .with_contribution_signature(workflow_contribution_signature(step));
+            .with_contribution_signature(step.independent_contribution_key());
         if !is_delivery {
             candidate = candidate.as_intermediate();
         }

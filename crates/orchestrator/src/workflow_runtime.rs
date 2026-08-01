@@ -146,6 +146,16 @@ pub struct WorkflowPlanStep {
     pub contract: WorkflowStepContract,
 }
 
+impl WorkflowPlanStep {
+    pub fn independent_contribution_key(&self) -> String {
+        self.subtask
+            .split_whitespace()
+            .flat_map(str::chars)
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowPlanIr {
     pub schema: String,

@@ -40,7 +40,9 @@ A new run currently follows this sequence:
    canonical conversation history. Independent retrieval channels may execute
    in parallel; graph walk expands from selected seeds.
 7. A workflow decision can run a bounded task graph and inject its grounded
-   handoff into the interactive loop. A direct decision skips collaboration.
+   handoff into the interactive loop. Contributions must represent different
+   work, while model reuse or diversity is selected dynamically from capability
+   fit and supported evidence. A direct decision skips collaboration.
 8. `agent-application` owns the only run/reprepare driver. Each prepared epoch
    uses `AgentKernel` for model turns, admitted tool batches, observations,
    contract checks, and terminal delivery. A committed steer returns through

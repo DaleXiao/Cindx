@@ -39,6 +39,7 @@ fn test_prompt_evaluation_provenance(
 
 fn test_conductor_harness(models: Vec<String>, agent_budget: usize) -> ConductorHarness {
     let routing = RoutingContext::from_prompt("Test the conductor", Vec::new());
+    let primary_model = models.first().cloned().unwrap_or_default();
     ConductorHarness::new(ConductorRequest {
         workflow_id: "test-workflow".to_string(),
         objective: "Test the conductor".to_string(),
@@ -46,6 +47,7 @@ fn test_conductor_harness(models: Vec<String>, agent_budget: usize) -> Conductor
         effort: "pro".to_string(),
         policy: "best_of_n".to_string(),
         conductor_model: "conductor-model".to_string(),
+        primary_model,
         worker_models: models,
         role_hints: ConductorRoleHints {
             planner: "planner-a".to_string(),
@@ -721,6 +723,7 @@ fn goal2_execution_steer_replans_and_feeds_terminal_epoch_learning() {
             effort: "auto".to_string(),
             conductor_model: "deterministic-test-conductor".to_string(),
             allowed_models: models.clone(),
+            model_candidates: Vec::new(),
             max_parallelism: 2,
             evolved_directive: String::new(),
             historical_evidence: String::new(),
@@ -4839,6 +4842,33 @@ fn ensemble_uses_distinct_role_models_in_stable_order() {
 }
 
 #[test]
+fn role_hints_preserve_configured_model_reuse() {
+    let config = ProviderConfig {
+        model: "frontier".to_string(),
+        planner_model: "frontier".to_string(),
+        executor_model: "frontier".to_string(),
+        reviewer_model: "reviewer".to_string(),
+        summarizer_model: "frontier".to_string(),
+        ..ProviderConfig::default()
+    };
+    let worker_models = collaboration_candidate_models(&config, 3);
+    let hints = collaboration_role_hints(&config, &worker_models);
+
+    assert_eq!(hints.planner, "frontier");
+    assert_eq!(hints.executor, "frontier");
+    assert_eq!(hints.reviewer, "reviewer");
+    assert_eq!(hints.synthesizer, "frontier");
+}
+
+#[test]
+fn collaboration_pool_preserves_the_run_conductors_primary_model() {
+    let mut models = vec!["planner".to_string(), "reviewer".to_string()];
+    prioritize_collaboration_model(&mut models, Some("frontier"), 2);
+
+    assert_eq!(models, vec!["frontier".to_string(), "planner".to_string()]);
+}
+
+#[test]
 fn pro_role_budget_does_not_collapse_when_roles_share_one_model() {
     let models = vec!["shared-frontier-model".to_string()];
     let budget = collaboration_agent_budget(3);
@@ -8061,6 +8091,7 @@ fn conductor_evaluation_repairs_invalid_structure_before_scoring() {
         effort: "fast".to_string(),
         policy: "direct".to_string(),
         conductor_model: "planner".to_string(),
+        primary_model: "worker-a".to_string(),
         worker_models: vec!["worker-a".to_string()],
         role_hints: ConductorRoleHints {
             planner: "worker-a".to_string(),
@@ -8133,6 +8164,7 @@ fn conductor_evaluation_uses_a_collaborative_fallback_after_failed_repair() {
         effort: "auto".to_string(),
         policy: "best_of_n".to_string(),
         conductor_model: "planner".to_string(),
+        primary_model: "worker-a".to_string(),
         worker_models: vec!["worker-a".to_string(), "worker-b".to_string()],
         role_hints: ConductorRoleHints {
             planner: "worker-a".to_string(),

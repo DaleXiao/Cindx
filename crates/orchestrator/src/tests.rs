@@ -211,6 +211,7 @@ fn conductor_request() -> ConductorRequest {
         effort: "pro".to_string(),
         policy: "best_of_n".to_string(),
         conductor_model: "conductor-only".to_string(),
+        primary_model: "planner".to_string(),
         worker_models: vec!["planner".to_string(), "reviewer".to_string()],
         role_hints: ConductorRoleHints {
             planner: "planner".to_string(),
@@ -769,8 +770,8 @@ fn conductor_harness_builds_context_and_parses_a_valid_plan() {
     assert!(prompt.contains("Allowed worker pool:\n- planner\n- reviewer"));
     assert!(prompt.contains("Prefer two independent branches"));
     assert!(!prompt.contains("conductor-only"));
-    assert!(prompt.contains(r#""model":"planner""#));
-    assert!(prompt.contains(r#""model":"reviewer""#));
+    assert!(prompt.matches(r#""model":"planner""#).count() >= 3);
+    assert!(!prompt.contains(r#""model":"reviewer""#));
     assert!(prompt.contains(r#""role":"thinker""#));
     assert!(prompt.contains(r#""role":"worker""#));
 
@@ -780,6 +781,24 @@ fn conductor_harness_builds_context_and_parses_a_valid_plan() {
     assert_eq!(plan.coordinator_model, "conductor-only");
     assert_eq!(plan.steps.len(), 3);
     assert_eq!(plan.schema, WORKFLOW_IR_SCHEMA);
+}
+
+#[test]
+fn conductor_schema_keeps_required_branches_when_only_one_model_is_available() {
+    let mut request = conductor_request();
+    request.worker_models = vec!["planner".to_string()];
+    request.role_hints = ConductorRoleHints {
+        planner: "planner".to_string(),
+        executor: "planner".to_string(),
+        reviewer: "planner".to_string(),
+        synthesizer: "planner".to_string(),
+    };
+    request.budget.max_models = 1;
+    let prompt = ConductorHarness::new(request).planning_prompt();
+
+    assert!(prompt.contains(r#""id":"approach_a""#));
+    assert!(prompt.contains(r#""id":"approach_b""#));
+    assert!(prompt.matches(r#""model":"planner""#).count() >= 3);
 }
 
 #[test]
@@ -813,7 +832,7 @@ fn deterministic_pro_fallback_preserves_independent_review_and_synthesis() {
         .filter(|step| step.access.is_empty())
         .collect::<Vec<_>>();
     assert_eq!(roots.len(), 2);
-    assert_ne!(roots[0].model, roots[1].model);
+    assert!(roots.iter().all(|root| root.model == "planner"));
     let verifier = plan
         .steps
         .iter()
@@ -871,17 +890,16 @@ fn deterministic_auto_fallback_compares_two_independent_branches() {
 }
 
 #[test]
-fn conductor_harness_requires_diverse_root_branches_and_complete_review() {
+fn conductor_harness_requires_distinct_work_but_not_distinct_models() {
     let mut request = conductor_request();
     request.budget.max_steps = 5;
     request.execution_contract.verification_required = true;
     let harness = ConductorHarness::new(request);
-    let same_model = harness
+    harness
             .parse_plan(
                 r#"{"steps":[{"id":"a","role":"thinker","model":"planner","subtask":"primary analysis","access":[]},{"id":"b","role":"worker","model":"planner","subtask":"independent implementation","access":[]},{"id":"verify","role":"verifier","model":"reviewer","subtask":"audit both","access":["a","b"]},{"id":"final","role":"synthesizer","model":"planner","subtask":"merge","access":["a","b","verify"]}]}"#,
             )
-            .expect_err("distinct models should cover independent branches");
-    assert!(same_model.contains("distinct models"), "{same_model}");
+            .expect("one capable model may perform genuinely different root tasks");
 
     let duplicate_subtask = harness
             .parse_plan(
@@ -1011,7 +1029,7 @@ fn conductor_harness_applies_evolved_topology_and_role_strategies() {
     let flexible = ConductorHarness::new(flexible_request);
     flexible
             .parse_plan(
-                r#"{"steps":[{"id":"a","role":"worker","model":"planner","subtask":"same","access":[]},{"id":"b","role":"worker","model":"reviewer","subtask":"same","access":[]},{"id":"verify","role":"verifier","model":"reviewer","subtask":"audit","access":["a","b"]},{"id":"final","role":"synthesizer","model":"planner","subtask":"report","access":["a","b","verify"]}]}"#,
+                r#"{"steps":[{"id":"a","role":"worker","model":"planner","subtask":"derive the primary design","access":[]},{"id":"b","role":"worker","model":"reviewer","subtask":"test an alternative design","access":[]},{"id":"verify","role":"verifier","model":"reviewer","subtask":"audit","access":["a","b"]},{"id":"final","role":"synthesizer","model":"planner","subtask":"report","access":["a","b","verify"]}]}"#,
             )
             .expect("flexible roles should allow repeated worker roles across models");
 

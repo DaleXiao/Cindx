@@ -5,6 +5,7 @@ use crate::{
     app_state::AppState,
     collaboration_execution::{
         collaboration_candidate_models, collaboration_run_should_interrupt,
+        prioritize_collaboration_model,
         record_collaboration_stage_started, CollaborationCandidateSpec,
     },
     collaboration_stage_runtime::{record_collaboration_stage_finished, run_collaboration_stage},
@@ -353,7 +354,12 @@ pub(crate) fn prepare_agent_collaboration(
     };
     let id = unique_id("collab");
     let agent_budget = collaboration_agent_budget(*candidates);
-    let models = collaboration_candidate_models(config, agent_budget);
+    let mut models = collaboration_candidate_models(config, agent_budget);
+    prioritize_collaboration_model(
+        &mut models,
+        run_context.get("agent_model").map(String::as_str),
+        agent_budget,
+    );
     let fallback_models = collaboration_fallback_models(&models, agent_budget);
     let bounded = run_context.get("collaboration_profile").map(String::as_str) == Some("bounded");
     let effort = run_context

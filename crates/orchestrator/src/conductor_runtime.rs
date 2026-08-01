@@ -16,6 +16,7 @@ pub struct ConductorRequest {
     pub effort: String,
     pub policy: String,
     pub conductor_model: String,
+    pub primary_model: String,
     pub worker_models: Vec<String>,
     pub role_hints: ConductorRoleHints,
     pub budget: WorkflowBudget,
@@ -88,10 +89,10 @@ impl ConductorHarness {
                 "- Assign the smallest useful root roles; model and role reuse is allowed when it reduces waste."
             }
             PromptRoleStrategy::Specialists => {
-                "- Give independent root branches non-overlapping subtasks and use distinct models when the pool permits."
+                "- Give independent root branches non-overlapping specialist subtasks. Select each model by capability fit and supported evidence; model reuse is allowed."
             }
             PromptRoleStrategy::DiverseSpecialists => {
-                "- Give independent root branches non-overlapping subtasks, distinct models when possible, and complementary domain-specific roles."
+                "- Give independent root branches non-overlapping subtasks and complementary domain-specific roles. Model diversity is optional; never assign a weaker model solely for diversity."
             }
         };
         format!(
@@ -107,6 +108,8 @@ impl ConductorHarness {
                 "- tool_policy must be exactly none, read_only_evidence, or read_only_exploration. Never request effectful tools here.\n",
                 "- Preserve listed order: access may reference only earlier step ids.\n",
                 "- The task contract requires {required_contributions} independent contribution(s). This is the only minimum branch count. The evolved profile controls preferences and upper bounds; it must not force decorative agents when the task requires zero or one branch.\n",
+                "- The direct baseline selected by the run conductor is {primary_model}. Preserve it as the default worker unless another configured model has a better role fit or supported prior.\n",
+                "- Contribution independence comes from non-overlapping work and evidence lineage, not different model names. The same strong model may own multiple independent branches.\n",
                 "- Require a verifier only when contract verification_required=true; otherwise add one only when it resolves a concrete uncertainty.\n",
                 "- Keep workers isolated and expose an earlier result only through access.\n",
                 "{branch_role_constraint}\n",
@@ -130,6 +133,7 @@ impl ConductorHarness {
             contract_quorum = request.execution_contract.min_successful_branches,
             contract_verification = request.execution_contract.verification_required,
             required_contributions = request.execution_contract.min_distinct_contributions,
+            primary_model = request.primary_model,
             terminal_reserve = request.execution_contract.terminal_model_call_reserve,
             stop_policy = request.execution_contract.stop_policy,
             fallback_policy = request.execution_contract.fallback_policy,
@@ -217,9 +221,17 @@ impl ConductorHarness {
             self.request.prompt_genome.validate()?;
         }
         let mut worker_models = Vec::new();
-        for model in &self.request.worker_models {
+        for model in std::iter::once(&self.request.primary_model).chain(&self.request.worker_models)
+        {
             let model = model.trim();
-            if !model.is_empty() && !worker_models.iter().any(|selected| selected == model) {
+            if !model.is_empty()
+                && self
+                    .request
+                    .worker_models
+                    .iter()
+                    .any(|allowed| allowed == model)
+                && !worker_models.iter().any(|selected| selected == model)
+            {
                 worker_models.push(model.to_string());
             }
         }
@@ -239,7 +251,6 @@ impl ConductorHarness {
             .budget
             .max_steps
             .saturating_sub(reserved_steps)
-            .min(self.request.budget.max_models)
             .min(self.request.execution_contract.max_parallelism)
             .min(
                 self.request
@@ -254,31 +265,13 @@ impl ConductorHarness {
         }
         let branch_count = required_branches;
 
-        let hinted_models = [
-            &self.request.role_hints.planner,
-            &self.request.role_hints.executor,
-            &self.request.role_hints.reviewer,
-        ];
-        let mut used_root_models = BTreeSet::new();
+        let primary_model = worker_models
+            .iter()
+            .find(|model| model.as_str() == self.request.primary_model)
+            .unwrap_or(&worker_models[0])
+            .clone();
         let mut steps = Vec::new();
         for index in 0..branch_count {
-            let hinted = hinted_models
-                .get(index)
-                .and_then(|hint| {
-                    worker_models
-                        .iter()
-                        .find(|model| model.as_str() == hint.as_str())
-                })
-                .filter(|model| !used_root_models.contains(model.as_str()));
-            let model = hinted
-                .or_else(|| {
-                    worker_models
-                        .iter()
-                        .find(|model| !used_root_models.contains(model.as_str()))
-                })
-                .unwrap_or_else(|| &worker_models[index % worker_models.len()])
-                .clone();
-            used_root_models.insert(model.clone());
             let (id, role, subtask) = match index {
                 0 => (
                     "approach_a".to_string(),
@@ -301,7 +294,7 @@ impl ConductorHarness {
             steps.push(AdaptiveWorkflowStep {
                 id,
                 role,
-                model,
+                model: primary_model.clone(),
                 subtask,
                 access: Vec::new(),
             });
@@ -465,7 +458,6 @@ impl ConductorHarness {
             }
         };
         let branch_limit = evolved_branch_limit
-            .min(self.request.budget.max_models)
             .min(self.request.execution_contract.max_parallelism)
             .min(root_step_capacity);
         let required_branches = self.request.execution_contract.min_distinct_contributions;
@@ -483,40 +475,20 @@ impl ConductorHarness {
                 "conductor workflow exceeds the selected prompt profile's {branch_limit}-branch limit"
             ));
         }
-        if self.request.prompt_genome.role_strategy != PromptRoleStrategy::Flexible {
-            let distinct_available_models = self
-                .request
-                .worker_models
-                .iter()
-                .collect::<BTreeSet<_>>()
-                .len();
-            let required_branch_models = required_branches.min(distinct_available_models);
-            let distinct_branch_models = independent_branches
-                .iter()
-                .map(|step| step.model.as_str())
-                .collect::<BTreeSet<_>>()
-                .len();
-            if required_branch_models >= 2 && distinct_branch_models < required_branch_models {
-                return Err(format!(
-                    "conductor workflow requires {required_branch_models} distinct models across independent branches"
-                ));
-            }
-            let distinct_branch_subtasks = independent_branches
-                .iter()
-                .map(|step| {
-                    step.subtask
-                        .split_whitespace()
-                        .flat_map(str::chars)
-                        .flat_map(char::to_lowercase)
-                        .collect::<String>()
-                })
-                .collect::<BTreeSet<_>>()
-                .len();
-            if independent_branches.len() >= 2
-                && distinct_branch_subtasks < independent_branches.len()
-            {
-                return Err("conductor independent branches repeat the same subtask".to_string());
-            }
+        let distinct_branch_subtasks = independent_branches
+            .iter()
+            .map(|step| {
+                step.subtask
+                    .split_whitespace()
+                    .flat_map(str::chars)
+                    .flat_map(char::to_lowercase)
+                    .collect::<String>()
+            })
+            .collect::<BTreeSet<_>>()
+            .len();
+        if independent_branches.len() >= 2 && distinct_branch_subtasks < independent_branches.len()
+        {
+            return Err("conductor independent branches repeat the same subtask".to_string());
         }
         if self.request.prompt_genome.role_strategy == PromptRoleStrategy::DiverseSpecialists
             && independent_branches.len() >= 2
@@ -545,7 +517,6 @@ impl ConductorHarness {
 
 fn conductor_schema_example(request: &ConductorRequest) -> String {
     let max_steps = request.budget.max_steps;
-    let max_models = request.budget.max_models;
     let max_parallel_branches = request.prompt_genome.max_parallel_branches;
     let graph_depth = request.prompt_genome.graph_depth;
     let verification = request.prompt_genome.verification;
@@ -553,14 +524,8 @@ fn conductor_schema_example(request: &ConductorRequest) -> String {
     let required_branches = request.execution_contract.min_distinct_contributions;
     let verification_required = request.execution_contract.verification_required;
     let role_hints = &request.role_hints;
-    let branch_executor = if role_hints.executor != role_hints.planner {
-        &role_hints.executor
-    } else if role_hints.reviewer != role_hints.planner {
-        &role_hints.reviewer
-    } else {
-        &role_hints.executor
-    };
-    let root_capacity = max_steps.saturating_sub(1).min(max_models);
+    let primary_model = &request.primary_model;
+    let root_capacity = max_steps.saturating_sub(1);
     let branch_limit = match topology_strategy {
         PromptTopologyStrategy::Serial => root_capacity.min(1),
         PromptTopologyStrategy::AdaptiveDag | PromptTopologyStrategy::ParallelDeliberation => {
@@ -595,7 +560,7 @@ fn conductor_schema_example(request: &ConductorRequest) -> String {
                 {
                     "id": "approach",
                     "role": "thinker",
-                    "model": role_hints.planner,
+                    "model": primary_model,
                     "subtask": "analyze the request and produce the strongest approach",
                     "access": [],
                 },
@@ -614,14 +579,14 @@ fn conductor_schema_example(request: &ConductorRequest) -> String {
                     {
                         "id": "approach_a",
                         "role": "thinker",
-                        "model": role_hints.planner,
+                        "model": primary_model,
                         "subtask": "analyze assumptions and the strongest approach",
                         "access": [],
                     },
                     {
                         "id": "approach_b",
                         "role": "worker",
-                        "model": branch_executor,
+                        "model": primary_model,
                         "subtask": "develop a concrete independent implementation path",
                         "access": [],
                     },
@@ -644,14 +609,14 @@ fn conductor_schema_example(request: &ConductorRequest) -> String {
                     {
                         "id": "approach_a",
                         "role": "thinker",
-                        "model": role_hints.planner,
+                        "model": primary_model,
                         "subtask": "analyze assumptions and the strongest approach",
                         "access": [],
                     },
                     {
                         "id": "approach_b",
                         "role": "worker",
-                        "model": branch_executor,
+                        "model": primary_model,
                         "subtask": "develop a concrete independent implementation path",
                         "access": [],
                     },
@@ -677,14 +642,14 @@ fn conductor_schema_example(request: &ConductorRequest) -> String {
                 {
                     "id": "approach_a",
                     "role": "thinker",
-                    "model": role_hints.planner,
+                    "model": primary_model,
                     "subtask": "analyze assumptions and the strongest approach",
                     "access": [],
                 },
                 {
                     "id": "approach_b",
                     "role": "worker",
-                    "model": branch_executor,
+                    "model": primary_model,
                     "subtask": "develop a concrete independent implementation path",
                     "access": [],
                 },
