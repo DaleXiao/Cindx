@@ -883,6 +883,8 @@ pub(crate) struct WorkflowTelemetryReadModel {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PromptGenomeRecord {
+    #[serde(default)]
+    pub(crate) scope: String,
     pub(crate) effort: String,
     pub(crate) genome: ConductorPromptGenome,
     #[serde(default)]

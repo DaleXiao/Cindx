@@ -315,10 +315,19 @@ pub(crate) fn prompt_genome_records_from_event(event: &Event) -> Vec<PromptGenom
         Some("gepa_reflection") => Some(PromptEvolutionMethod::GepaReflectivePaired),
         _ => None,
     };
+    let scope = event
+        .metadata
+        .get("project_id")
+        .or_else(|| event.metadata.get("prompt_rollout_scope"))
+        .map(|scope| scope.trim())
+        .filter(|scope| !scope.is_empty())
+        .unwrap_or("global")
+        .to_string();
     genomes
         .into_iter()
         .filter(|genome| genome.validate().is_ok())
         .map(|genome| PromptGenomeRecord {
+            scope: scope.clone(),
             effort: effort.clone(),
             genome,
             evolution_method,
@@ -454,6 +463,7 @@ pub(crate) fn prompt_evolution_read_model_for_scope(
     scope: &str,
 ) -> PromptEvolutionReadModel {
     let mut scoped = model.clone();
+    scoped.genomes.retain(|record| record.scope == scope);
     scoped
         .observations
         .retain(|(_, observation)| prompt_observation_matches_scope(observation, scope));
@@ -573,7 +583,11 @@ pub(crate) fn upsert_prompt_genome(
 ) {
     if let Some(existing) = records
         .iter_mut()
-        .find(|existing| existing.effort == record.effort && existing.genome.id == record.genome.id)
+        .find(|existing| {
+            existing.scope == record.scope
+                && existing.effort == record.effort
+                && existing.genome.id == record.genome.id
+        })
     {
         *existing = record;
     } else {
@@ -645,6 +659,7 @@ pub(crate) fn load_prompt_evolution_read_model(
                         && model.revision == stored.revision
                         && model.revision <= revision.latest_sequence
                         && model.event_count <= revision.event_count
+                        && prompt_genome_scopes_are_valid(model)
                 })
         });
     let had_stored_model = stored.is_some();
@@ -727,6 +742,13 @@ pub(crate) fn load_prompt_evolution_read_model(
     Ok(model)
 }
 
+fn prompt_genome_scopes_are_valid(model: &PromptEvolutionReadModel) -> bool {
+    model
+        .genomes
+        .iter()
+        .all(|record| !record.scope.trim().is_empty())
+}
+
 pub(crate) fn save_prompt_evolution_read_model(
     store: &mut SqliteStore,
     model: &PromptEvolutionReadModel,
@@ -756,6 +778,7 @@ pub(crate) fn prompt_evolution_profile_events(model: &PromptEvolutionReadModel) 
                 kind: EventKind::TaskStatusChanged,
                 summary: "Conductor prompt profile indexed".to_string(),
                 metadata: [
+                    ("project_id".to_string(), record.scope.clone()),
                     ("prompt_effort".to_string(), record.effort.clone()),
                     (
                         "prompt_genome".to_string(),
