@@ -545,17 +545,12 @@ pub(crate) fn complete_prompt_evaluation_worker(
                                     || control.stage_should_stop(stage_class)
                             }
                         });
-                        match registry.get(&call.tool_name) {
-                            Some(tool) if tool.spec().risk == ToolRisk::ReadOnly => {
-                                match tool.execute_with_control(invocation, &tool_control) {
-                                    Ok(result) => (result.status, result.output),
-                                    Err(error) => (ToolOutcomeStatus::Failed, error.message),
-                                }
-                            }
-                            _ => (
-                                ToolOutcomeStatus::Denied,
-                                "Evaluation sandbox rejected a non-read-only tool.".to_string(),
-                            ),
+                        match registry.permissionless_read_tool(&invocation) {
+                            Ok(tool) => match tool.execute_with_control(invocation, &tool_control) {
+                                Ok(result) => (result.status, result.output),
+                                Err(error) => (ToolOutcomeStatus::Failed, error.message),
+                            },
+                            Err(error) => (ToolOutcomeStatus::Denied, error.message),
                         }
                     };
                     evidence.push(CollaborationEvidence {
