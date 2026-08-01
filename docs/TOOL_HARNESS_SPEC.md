@@ -18,13 +18,17 @@ The harness has one lifecycle owner per concern:
 - `agent-runtime` owns `AgentLoopState`, `AgentRunControl`, run budgets,
   cancellation, no-progress detection, repeated-action detection, and typed turn
   budget exhaustion.
+- `agent-application` owns the single run/reprepare driver and the typed run
+  lifecycle vocabulary. A steer may request a fresh prepared epoch, but it
+  cannot create a second production loop.
 - `orchestrator` owns the validated run-decision schema and portable workflow
   semantics: task-graph state, role assignment contracts, verification,
   frontier selection, recovery policy, and prompt evaluation.
 - The desktop adapter owns side effects: provider calls, permission prompts, tool
   execution, event persistence, Tauri commands, and the execution adapters that
-  drive conductor and worker model calls. It does not define a second
-  run-control policy or a second task graph.
+  drive conductor and worker model calls. It implements the application driver
+  boundary; it does not define a second run-control policy, run/reprepare loop,
+  or task graph.
 - `queue_service` and `session_projection` own queue reduction and the versioned
   per-session read model. Interactive commands use compact receipts and indexed
   session deltas instead of rebuilding complete application state.

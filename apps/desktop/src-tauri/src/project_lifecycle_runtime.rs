@@ -21,7 +21,6 @@ use crate::{
         context_checkpoint_path_for_session, secure_directory,
     },
     queue_service::{pending_queued_agent_messages, QueuedAgentMessagePayload},
-    run_lifecycle::AgentRunStatus,
     runtime_constants::{
         AGENT_MEMORY_READ_MODEL_NAMESPACE, AGENT_RESOURCE_SNAPSHOT_READ_MODEL_NAMESPACE,
         AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE, AGENT_SESSION_READ_MODEL_NAMESPACE,
@@ -31,6 +30,7 @@ use crate::{
     runtime_values::{phase16_task_id, unique_id},
     session_projection::load_agent_session_read_model_snapshot,
 };
+use agent_application::AgentRunStatus;
 use agent_core::{insert_event_type_v1, Event, EventKind, EventTypeV1, Metadata};
 use agent_memory::MemoryLedger;
 use agent_storage::{EventStore, SqliteStore, StorageError};

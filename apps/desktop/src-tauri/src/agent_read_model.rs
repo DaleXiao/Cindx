@@ -160,7 +160,7 @@ pub(crate) fn agent_state_from_events(
         .clamp(0.0, 100.0);
     let turn_count = active_events
         .iter()
-        .filter(|event| crate::run_lifecycle::is_agent_model_turn_finished(event))
+        .filter(|event| agent_application::is_agent_model_turn_finished(event))
         .count();
     let run_start = active_events
         .iter()

@@ -252,7 +252,9 @@ pub(super) fn finalize_adaptive_collaboration(
     };
     let selected_candidate_kind = anytime_controller
         .candidate(&selected_candidate_id)
-        .map(|candidate| match candidate.kind {
+        .map(|candidate| candidate.kind);
+    let selected_candidate_kind_label = selected_candidate_kind
+        .map(|kind| match kind {
             AnytimeCandidateKind::DirectAnchor => "direct_anchor",
             AnytimeCandidateKind::Workflow => "workflow",
             AnytimeCandidateKind::Verification => "verification",
@@ -268,6 +270,40 @@ pub(super) fn finalize_adaptive_collaboration(
     let native_effort_success = selection_assessment
         .as_ref()
         .is_some_and(|assessment| assessment.native_effort_success);
+    let selected_is_final_synthesis = selected_candidate_id == final_step_id
+        && workflow_checkpoint
+            .plan
+            .steps
+            .last()
+            .is_some_and(|step| step.contract.output_kind == WorkflowOutputKind::Synthesis);
+    let selected_deliverable = selected_verified
+        && (selected_is_final_synthesis
+            || matches!(
+                selected_candidate_kind,
+                Some(AnytimeCandidateKind::DirectAnchor | AnytimeCandidateKind::Synthesis)
+            ));
+    if let Some(control) = cancellation {
+        let quality = if selected_is_final_synthesis
+            || selected_candidate_kind == Some(AnytimeCandidateKind::Synthesis)
+        {
+            ResultQuality::Synthesized
+        } else if selected_verified {
+            ResultQuality::Verified
+        } else {
+            ResultQuality::Grounded
+        };
+        control.record_best_known_result_at(
+            run_context_steer_epoch(run_context),
+            &format!("anytime_selected_{selected_candidate_kind_label}"),
+            &final_output,
+            quality,
+            selected_verdict
+                .as_ref()
+                .map_or(evidence_count, |verdict| verdict.evidence_count),
+            selected_verified,
+            selected_deliverable,
+        );
+    }
     let completion_status = if native_effort_success {
         "completed"
     } else {
@@ -396,7 +432,10 @@ pub(super) fn finalize_adaptive_collaboration(
                         "anytime_selected_candidate".to_string(),
                         selected_candidate_id.clone(),
                     ),
-                    ("anytime_selected_kind".to_string(), selected_candidate_kind),
+                    (
+                        "anytime_selected_kind".to_string(),
+                        selected_candidate_kind_label,
+                    ),
                     (
                         "anytime_selected_verified".to_string(),
                         selected_verified.to_string(),

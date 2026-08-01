@@ -219,7 +219,7 @@ fn apply_event_to_agent_session_read_model(model: &mut AgentSessionReadModel, ev
         }
     }
 
-    if crate::run_lifecycle::is_agent_model_turn_finished(event) {
+    if agent_application::is_agent_model_turn_finished(event) {
         model.state.turn_count = model.state.turn_count.saturating_add(1);
     }
 

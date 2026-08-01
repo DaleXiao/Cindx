@@ -111,20 +111,20 @@ fn bounded_result_content(content: &str) -> String {
         .unwrap_or_else(|| content.to_string())
 }
 
-fn result_rank(result: &BestKnownResult) -> (bool, ResultQuality, bool, usize, usize) {
+fn result_rank(result: &BestKnownResult) -> (bool, bool, ResultQuality, usize, usize) {
     (
         result.deliverable,
-        result.quality,
         result.verified,
+        result.quality,
         result.evidence_count,
         result.content.chars().count(),
     )
 }
 
-fn guidance_rank(result: &BestKnownResult) -> (ResultQuality, bool, usize, bool, usize) {
+fn guidance_rank(result: &BestKnownResult) -> (bool, ResultQuality, usize, bool, usize) {
     (
-        result.quality,
         result.verified,
+        result.quality,
         result.evidence_count,
         result.deliverable,
         result.content.chars().count(),
@@ -157,6 +157,29 @@ mod tests {
 
         assert_eq!(frontier.best_known().unwrap().stage, "draft");
         assert_eq!(frontier.best_guidance().unwrap().stage, "review");
+    }
+
+    #[test]
+    fn verified_delivery_is_not_replaced_by_unverified_synthesis() {
+        let mut frontier = ResultFrontier::default();
+        assert!(frontier.record(
+            "workflow_synthesis",
+            "Verified grounded answer.",
+            ResultQuality::Verified,
+            3,
+            true,
+            true,
+        ));
+        assert!(!frontier.record(
+            "terminal_synthesizer",
+            "Newer but unverified answer.",
+            ResultQuality::Synthesized,
+            0,
+            false,
+            true,
+        ));
+
+        assert_eq!(frontier.best_known().unwrap().stage, "workflow_synthesis");
     }
 
     #[test]
