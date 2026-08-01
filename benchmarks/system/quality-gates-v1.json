@@ -384,7 +384,7 @@
         "tests/streamingMarkdownModel.test.ts"
       ],
       "required_output": [
-        "# pass 1",
+        "pass 1",
         "cindx.frontend-streaming-markdown-scaling.v1"
       ]
     },

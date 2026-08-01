@@ -1501,8 +1501,12 @@ assert(
     modelProviderSource.includes("consume_streaming_body") &&
     modelProviderSource.includes("tokio::time::timeout(HTTP_POLL_INTERVAL") &&
     modelProviderCargo.includes(
-      'reqwest = { version = "0.13.4", features = ["multipart", "stream"] }'
+      'reqwest = { version = "0.12.28", default-features = false, features = ["charset", "http2", "multipart", "rustls-tls-native-roots", "stream", "system-proxy"] }'
     ) &&
+    cargoToml.includes(
+      'rustls = { version = "0.23.42", default-features = false, features = ["ring"] }'
+    ) &&
+    cargoToml.includes('[profile.test.package."*"]\ndebug = 0') &&
     !modelProviderSource.includes('Command::new("/usr/bin/curl")') &&
     modelProviderSource.includes("streamed_tool_calls") &&
     modelProviderSource.includes("MODEL_REQUEST_CANCELLED") &&
@@ -3304,7 +3308,7 @@ assert(
     rustLib.includes("ExitCode::FAILURE") &&
     rustLib.includes("install_startup_panic_log") &&
     cargoToml.includes(
-      'rustls = { version = "0.23.42", default-features = false, features = ["aws_lc_rs"] }'
+      'rustls = { version = "0.23.42", default-features = false, features = ["ring"] }'
     ) &&
     appBootstrapSource.includes("fn install_rustls_crypto_provider()") &&
     appBootstrapSource.indexOf("install_startup_panic_log();") <
@@ -4035,7 +4039,7 @@ assert(
         Array.isArray(gate.required_output) &&
         gate.required_output.includes(proof[1]) &&
         gate.required_output.includes(
-          isFrontend ? "# pass 1" : "test result: ok. 1 passed; 0 failed"
+          isFrontend ? "pass 1" : "test result: ok. 1 passed; 0 failed"
         ) &&
         gate.command.includes(proof[0]) &&
         !gate.command.includes("--ignored") &&

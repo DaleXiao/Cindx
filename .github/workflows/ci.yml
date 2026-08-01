@@ -98,6 +98,9 @@ jobs:
       - name: Test Computer Control
         run: node scripts/test-computer-sidecar.mjs
 
+      - name: Check desktop dependency policy
+        run: node scripts/check-desktop-dependency-policy.mjs
+
       - name: Test Rust workspace
         run: cargo test --workspace --locked
 

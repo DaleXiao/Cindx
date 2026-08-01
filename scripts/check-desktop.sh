@@ -5,6 +5,7 @@ export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.rustup/toolchains/stable-aarch6
 
 node scripts/check-desktop-structure.mjs
 node scripts/check-desktop-layout.mjs
+node scripts/check-desktop-dependency-policy.mjs
 
 if [ ! -d "apps/desktop/node_modules" ]; then
   echo "apps/desktop/node_modules is missing. Run npm install in apps/desktop first." >&2

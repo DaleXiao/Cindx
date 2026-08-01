@@ -8,7 +8,7 @@ const PERSISTENT_STORE_STARTUP_FAILURE: &str = "persistent state unavailable; st
 
 fn install_rustls_crypto_provider() {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let _ = rustls::crypto::ring::default_provider().install_default();
     }
     debug_assert!(rustls::crypto::CryptoProvider::get_default().is_some());
 }
