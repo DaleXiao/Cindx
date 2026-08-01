@@ -35,7 +35,7 @@ export function VoiceInputButton({
   const active = status !== "idle";
   const disabled = voiceInputButtonDisabled(configured, transport, sessionId, status);
   const title = !configured
-    ? "Configure a full-duplex voice model in Settings"
+    ? "Configure a speech recognition model in Settings"
     : !sessionId
       ? "Open a session to use voice input"
       : status === "finishing"

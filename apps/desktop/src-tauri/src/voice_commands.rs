@@ -51,7 +51,7 @@ pub(crate) async fn negotiate_voice_session(
             ));
         }
         if !config.voice_is_ready() {
-            return Err("Configure a full-duplex voice model before using voice input".to_string());
+            return Err("Configure a speech recognition model before using voice input".to_string());
         }
         let provider = OpenAiCompatibleRealtimeProvider::new(OpenAiCompatibleRealtimeConfig {
             base_url: config.base_url,
@@ -82,12 +82,12 @@ pub(crate) async fn transcribe_voice_audio(
         let config = clone_provider_config(&state)?;
         if config.voice_transport() != ProviderVoiceTransport::DashScopeWebSocket {
             return Err(
-                "The configured voice provider does not use DashScope realtime".to_string(),
+                "The configured voice provider does not use a DashScope ASR adapter".to_string(),
             );
         }
         if !config.voice_is_ready() {
             return Err(
-                "Configure and verify a realtime voice model before using voice input".to_string(),
+                "Configure and verify a speech recognition model before using voice input".to_string(),
             );
         }
         let pcm = base64::engine::general_purpose::STANDARD

@@ -63,7 +63,7 @@ const EFFORT_OPTIONS: Array<{
   {
     value: "pro",
     label: "Cindx Pro",
-    description: "Multi-model collaboration for hard tasks"
+    description: "Learns from Auto and continuously improves"
   }
 ];
 

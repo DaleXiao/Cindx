@@ -188,7 +188,7 @@ test("selecting a provider atomically applies every built-in modality default", 
   assert.equal(alibaba.summarizerModel, "qwen3.7-flash");
   assert.equal(alibaba.embeddingModel, "text-embedding-v4");
   assert.equal(alibaba.imageModel, "qwen-image-3.0-pro");
-  assert.equal(alibaba.voiceModel, "qwen3.5-omni-flash-realtime");
+  assert.equal(alibaba.voiceModel, "qwen3-asr-flash-realtime");
   assert.equal(alibaba.contextWindowTokens, 1000000);
 });
 
@@ -324,7 +324,7 @@ test("model catalogs are separated by capability without dropping configured val
   assert.deepEqual(groups.multimodal, ["gpt-4.1-mini", "gpt-4o"]);
   assert.deepEqual(groups.embedding, ["private-embedding-deployment", "text-embedding-3-small"]);
   assert.deepEqual(groups.image, ["gpt-image-1", "private-image-deployment"]);
-  assert.deepEqual(groups.voice, ["gpt-realtime", "private-voice-deployment"]);
+  assert.deepEqual(groups.voice, ["gpt-realtime", "private-voice-deployment", "whisper-1"]);
   assert.equal(providerSupportsWebRtcVoice("alibaba_cn", ALIBABA_CN_BASE_URL), false);
   assert.equal(providerSupportsWebRtcVoice("openai", OPENAI_BASE_URL), true);
   assert.equal(providerVoiceTransport("alibaba_cn", ALIBABA_CN_BASE_URL), "dashscope_websocket");
@@ -341,7 +341,11 @@ test("built-in catalogs explicitly separate multimodal and generation capabiliti
   assert.equal(alibaba.multimodal.includes("qwen3.7-plus"), true);
   assert.deepEqual(alibaba.embedding, ["text-embedding-v4"]);
   assert.deepEqual(alibaba.image, ["qwen-image-3.0-pro"]);
-  assert.deepEqual(alibaba.voice, ["qwen3.5-omni-flash-realtime"]);
+  assert.deepEqual(alibaba.voice, [
+    "qwen3-asr-flash-realtime",
+    "fun-asr-realtime",
+    "qwen3.5-omni-flash-realtime"
+  ]);
   assert.equal(providerModelContextWindow("openai", "gpt-4.1"), 1047576);
   assert.equal(providerModelContextWindow("alibaba_cn", "qwen3.7-plus"), 1000000);
 });

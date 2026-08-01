@@ -199,6 +199,36 @@ pub(crate) struct PromptReplayCase {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PromptAutoTeacherStep {
+    pub(crate) id: String,
+    pub(crate) role: String,
+    pub(crate) model: String,
+    pub(crate) attempts: usize,
+    pub(crate) status: WorkflowStepStatus,
+    pub(crate) output: String,
+    pub(crate) errors: Vec<String>,
+    pub(crate) latency_ms: u64,
+    pub(crate) total_tokens: u64,
+    pub(crate) evidence_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PromptAutoTeacherCase {
+    pub(crate) source_run_id: String,
+    pub(crate) profile_id: String,
+    pub(crate) profile_sha256: String,
+    pub(crate) output_sha256: String,
+    pub(crate) genome: ConductorPromptGenome,
+    pub(crate) plan: WorkflowPlanIr,
+    pub(crate) steps: Vec<PromptAutoTeacherStep>,
+    pub(crate) final_output: String,
+    pub(crate) participant_models: Vec<String>,
+    pub(crate) quality_score_bps: u16,
+    pub(crate) latency_ms: u64,
+    pub(crate) total_tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PromptOfflineCase {
     pub(crate) id: String,
     pub(crate) objective: String,
@@ -206,4 +236,5 @@ pub(crate) struct PromptOfflineCase {
     pub(crate) project_id: String,
     pub(crate) source_run_id: String,
     pub(crate) split: PromptEvaluationSplit,
+    pub(crate) auto_teacher: Option<PromptAutoTeacherCase>,
 }

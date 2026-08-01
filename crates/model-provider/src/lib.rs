@@ -7,6 +7,8 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
+mod dashscope_asr_task_provider;
+mod dashscope_realtime_config;
 mod dashscope_realtime_guard;
 mod dashscope_realtime_provider;
 mod error;

@@ -63,16 +63,17 @@ export function ProviderModalityFields({
           onChange={(embeddingModel) => setProviderDraft({ ...providerDraft, embeddingModel })}
         />
         <ModelSelect
-          label="Full-duplex voice"
+          label="Speech recognition"
           value={providerDraft.voiceModel}
           options={providerModelOptions.voice}
           emptyLabel={voiceSupported ? "Not configured" : "Not supported by this adapter"}
           disabled={providerBusy || !voiceSupported}
           status={{
             available: voiceModelAvailable,
-            label: "Voice model available through the latest authenticated provider connection",
+            label:
+              "Speech recognition model available through the latest authenticated provider connection",
             title:
-              "The selected voice model is present in the latest authenticated model catalog and its realtime transport is available"
+              "The selected speech recognition model is present in the latest authenticated model catalog and its ASR transport is available"
           }}
           onChange={(voiceModel) => setProviderDraft({ ...providerDraft, voiceModel })}
         />
@@ -121,7 +122,7 @@ export function ProviderModalityFields({
       </div>
       {!voiceSupported && (
         <p className="provider-auto-note">
-          Full-duplex voice is disabled because this provider needs a different realtime transport
+          Speech recognition is disabled because this provider needs a different ASR transport
           adapter.
         </p>
       )}

@@ -1,5 +1,22 @@
 use super::*;
 
+pub(crate) fn prompt_mutation_reflection_packets(
+    observations: &[PromptEvolutionObservation],
+    profile_id: &str,
+    effort: &str,
+) -> Vec<AgentEvaluationReflectionPacket> {
+    let mut transfer = (effort == "pro")
+        .then(|| prompt_transfer_reflection_packets(observations, profile_id, 3))
+        .unwrap_or_default();
+    let ordinary_limit = if transfer.is_empty() { 6 } else { 3 };
+    let mut packets = prompt_reflection_packets(observations, profile_id, ordinary_limit);
+    packets.append(&mut transfer);
+    let mut seen = BTreeSet::new();
+    packets.retain(|packet| seen.insert((packet.run_id.clone(), packet.case_id.clone())));
+    packets.truncate(6);
+    packets
+}
+
 #[cfg(test)]
 pub(crate) fn evaluate_prompt_evolution(
     events: &[Event],
@@ -279,7 +296,7 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
         .filter(|genome| genome.generation < PROMPT_EVOLUTION_MAX_GENERATION);
     let mutation_trajectories = mutation_candidate
         .as_ref()
-        .map(|parent| prompt_reflection_packets(&observations, &parent.id, 6))
+        .map(|parent| prompt_mutation_reflection_packets(&observations, &parent.id, effort))
         .unwrap_or_default();
     let mutation_parent = mutation_candidate.filter(|_| !mutation_trajectories.is_empty());
     Ok(PromptEvolutionEvaluation {

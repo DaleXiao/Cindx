@@ -1,3 +1,5 @@
+use super::dashscope_realtime_config::DashScopeAsrProtocol;
+pub use super::dashscope_realtime_config::DashScopeRealtimeTranscriptionConfig;
 use super::dashscope_realtime_guard::{
     enforce_transcript_limit, sanitized_socket_error, server_error, validate_pcm,
 };
@@ -6,7 +8,6 @@ use super::dashscope_realtime_guard::{MAX_PCM_BYTES, MAX_TRANSCRIPT_BYTES};
 use super::{run_http, ModelError};
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
-use reqwest::Url;
 use serde_json::{json, Value};
 use std::{future::Future, time::Duration};
 use tokio::time::timeout;
@@ -22,53 +23,6 @@ use tokio_tungstenite::{
 const AUDIO_CHUNK_BYTES: usize = 32 * 1024;
 const DASHSCOPE_TRANSCRIPTION_MODEL: &str = "qwen3-asr-flash-realtime";
 const SOCKET_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DashScopeRealtimeTranscriptionConfig {
-    pub base_url: String,
-    pub api_key: String,
-    pub model: String,
-    pub connect_timeout_seconds: u64,
-    pub finish_timeout_seconds: u64,
-}
-
-impl DashScopeRealtimeTranscriptionConfig {
-    pub fn websocket_url(&self) -> Result<String, ModelError> {
-        let mut url = Url::parse(self.base_url.trim())
-            .map_err(|_| ModelError::new("DashScope realtime base URL is invalid"))?;
-        let scheme = match url.scheme() {
-            "https" | "wss" => "wss",
-            "http" | "ws" => "ws",
-            _ => {
-                return Err(ModelError::new(
-                    "DashScope realtime base URL must use HTTP or HTTPS",
-                ))
-            }
-        };
-        url.set_scheme(scheme)
-            .map_err(|_| ModelError::new("DashScope realtime WebSocket scheme is invalid"))?;
-        url.set_path("/api-ws/v1/realtime");
-        url.set_query(None);
-        url.set_fragment(None);
-        url.query_pairs_mut()
-            .append_pair("model", self.model.trim());
-        Ok(url.to_string())
-    }
-
-    fn validate(&self) -> Result<(), ModelError> {
-        if self.api_key.trim().is_empty() || self.model.trim().is_empty() {
-            return Err(ModelError::new(
-                "DashScope realtime API key and voice model are required",
-            ));
-        }
-        if self.model.len() > 256 {
-            return Err(ModelError::new(
-                "DashScope realtime voice model is too long",
-            ));
-        }
-        self.websocket_url().map(|_| ())
-    }
-}
 
 pub struct DashScopeRealtimeTranscriptionProvider {
     config: DashScopeRealtimeTranscriptionConfig,
@@ -100,36 +54,64 @@ async fn transcribe(
         .map_err(|error| sanitized_socket_error(&error.to_string(), &config.api_key))?;
 
     let session_timeout = Duration::from_secs(config.finish_timeout_seconds.clamp(5, 60));
+    let protocol = config.protocol();
     let session_result = bounded_wait(session_timeout, async {
-        let mut event_sequence = 0_u64;
-        wait_until_session_ready(
-            &mut socket,
-            connect_timeout,
-            &config.api_key,
-            &mut event_sequence,
-        )
-        .await?;
-        for chunk in pcm.chunks(AUDIO_CHUNK_BYTES) {
-            let audio = base64::engine::general_purpose::STANDARD.encode(chunk);
-            send_event(
-                &mut socket,
-                &mut event_sequence,
-                json!({ "type": "input_audio_buffer.append", "audio": audio }),
-            )
-            .await?;
+        match protocol {
+            DashScopeAsrProtocol::RealtimeSession => {
+                transcribe_realtime_session(
+                    &mut socket,
+                    &pcm,
+                    connect_timeout,
+                    session_timeout,
+                    &config.api_key,
+                )
+                .await
+            }
+            DashScopeAsrProtocol::InferenceTask => {
+                super::dashscope_asr_task_provider::transcribe_inference_task(
+                    &mut socket,
+                    &pcm,
+                    &config.model,
+                    connect_timeout,
+                    &config.api_key,
+                )
+                .await
+            }
         }
-        send_event(
-            &mut socket,
-            &mut event_sequence,
-            json!({ "type": "input_audio_buffer.commit" }),
-        )
-        .await?;
-
-        collect_transcript(&mut socket, session_timeout, &config.api_key).await
     })
     .await;
     let _ = bounded_wait(SOCKET_CLOSE_TIMEOUT, socket.close(None)).await;
     session_result.map_err(|_| ModelError::new("DashScope realtime transcription timed out"))?
+}
+
+async fn transcribe_realtime_session<S>(
+    socket: &mut tokio_tungstenite::WebSocketStream<S>,
+    pcm: &[u8],
+    connect_timeout: Duration,
+    session_timeout: Duration,
+    api_key: &str,
+) -> Result<String, ModelError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut event_sequence = 0_u64;
+    wait_until_session_ready(socket, connect_timeout, api_key, &mut event_sequence).await?;
+    for chunk in pcm.chunks(AUDIO_CHUNK_BYTES) {
+        let audio = base64::engine::general_purpose::STANDARD.encode(chunk);
+        send_event(
+            socket,
+            &mut event_sequence,
+            json!({ "type": "input_audio_buffer.append", "audio": audio }),
+        )
+        .await?;
+    }
+    send_event(
+        socket,
+        &mut event_sequence,
+        json!({ "type": "input_audio_buffer.commit" }),
+    )
+    .await?;
+    collect_transcript(socket, session_timeout, api_key).await
 }
 
 async fn bounded_wait<T>(
@@ -242,7 +224,7 @@ where
         .map_err(|error| ModelError::new(format!("DashScope realtime send failed: {error}")))
 }
 
-fn text_message_value(
+pub(crate) fn text_message_value(
     message: Result<Message, tokio_tungstenite::tungstenite::Error>,
     api_key: &str,
 ) -> Result<Value, ModelError> {
@@ -283,6 +265,23 @@ mod tests {
         assert_eq!(
             config.websocket_url().expect("URL should resolve"),
             "wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model=qwen3.5-omni-flash-realtime"
+        );
+    }
+
+    #[test]
+    fn fun_asr_uses_the_inference_task_endpoint_without_a_model_query() {
+        let config = DashScopeRealtimeTranscriptionConfig {
+            base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+            api_key: "secret".to_string(),
+            model: "fun-asr-realtime".to_string(),
+            connect_timeout_seconds: 8,
+            finish_timeout_seconds: 45,
+        };
+
+        assert_eq!(config.protocol(), DashScopeAsrProtocol::InferenceTask);
+        assert_eq!(
+            config.websocket_url().expect("URL should resolve"),
+            "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
         );
     }
 

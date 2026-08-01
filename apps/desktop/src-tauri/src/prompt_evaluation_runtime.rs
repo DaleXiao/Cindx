@@ -728,3 +728,71 @@ pub(crate) fn append_prompt_pairwise_observations(
     )
     .map_err(|error| error.to_string())
 }
+
+pub(crate) fn append_prompt_transfer_observations(
+    state: &tauri::State<'_, AppState>,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    effort: &str,
+    mode: PromptEvaluationMode,
+    observations: [&PromptEvolutionObservation; 2],
+) -> Result<(), String> {
+    let encoded_observations = serde_json::to_string(&observations)
+        .map_err(|error| format!("prompt transfer serialization failed: {error}"))?;
+    let transfer = observations[0]
+        .provenance
+        .transfer
+        .as_ref()
+        .ok_or_else(|| "prompt transfer observation is missing provenance".to_string())?;
+    if observations[1].provenance.transfer.as_ref() != Some(transfer) {
+        return Err("prompt transfer pair has mismatched provenance".to_string());
+    }
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    append_event(
+        &mut store,
+        task_id,
+        EventKind::TaskStatusChanged,
+        "Conductor Auto transfer evaluation",
+        metadata_with_context(
+            [
+                ("background_evaluation".to_string(), "true".to_string()),
+                (
+                    "evaluation_id".to_string(),
+                    observations[0].evaluation_id.clone(),
+                ),
+                ("prompt_effort".to_string(), effort.to_string()),
+                (
+                    "prompt_profile".to_string(),
+                    observations[0].profile_id.clone(),
+                ),
+                (
+                    "auto_teacher_profile".to_string(),
+                    transfer.source_profile_id.clone(),
+                ),
+                (
+                    "auto_teacher_run_id".to_string(),
+                    transfer.source_run_id.clone(),
+                ),
+                (
+                    "evaluation_mode".to_string(),
+                    match mode {
+                        PromptEvaluationMode::PairedExecution => "paired_execution",
+                        PromptEvaluationMode::ReplayExecution => "replay_execution",
+                        PromptEvaluationMode::PairedShadow => "paired_shadow",
+                        PromptEvaluationMode::ReplayHoldout => "replay_holdout",
+                        PromptEvaluationMode::Live => "live",
+                    }
+                    .to_string(),
+                ),
+                ("prompt_observations".to_string(), encoded_observations),
+            ]
+            .into_iter()
+            .collect(),
+            run_context,
+        ),
+    )
+    .map_err(|error| error.to_string())
+}

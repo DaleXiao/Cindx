@@ -103,16 +103,69 @@ pub fn evaluate_prompt_promotion_gate(
     stable_id: &str,
     config: PromptPromotionGateConfig,
 ) -> PromptPromotionGateResult {
+    evaluate_prompt_pair_gate(
+        observations,
+        candidate_id,
+        stable_id,
+        config,
+        PromptEvolutionObservation::is_scientific_evidence,
+        |_, _| true,
+    )
+}
+
+pub fn evaluate_prompt_auto_transfer_gate(
+    observations: &[PromptEvolutionObservation],
+    candidate_id: &str,
+    auto_profile_id: &str,
+    auto_profile_sha256: &str,
+    config: PromptPromotionGateConfig,
+) -> PromptPromotionGateResult {
+    evaluate_prompt_pair_gate(
+        observations,
+        candidate_id,
+        auto_profile_id,
+        config,
+        |observation| {
+            observation.is_scientific_transfer_evidence()
+                && observation
+                    .provenance
+                    .transfer
+                    .as_ref()
+                    .is_some_and(|transfer| {
+                        transfer.source_profile_id == auto_profile_id
+                            && transfer.source_profile_sha256 == auto_profile_sha256
+                    })
+        },
+        |candidate, auto| candidate.provenance.transfer == auto.provenance.transfer,
+    )
+}
+
+fn evaluate_prompt_pair_gate<Accept, ValidatePair>(
+    observations: &[PromptEvolutionObservation],
+    candidate_id: &str,
+    stable_id: &str,
+    config: PromptPromotionGateConfig,
+    accept: Accept,
+    validate_pair: ValidatePair,
+) -> PromptPromotionGateResult
+where
+    Accept: Fn(&PromptEvolutionObservation) -> bool,
+    ValidatePair: Fn(&PromptEvolutionObservation, &PromptEvolutionObservation) -> bool,
+{
     let mut blockers = BTreeSet::new();
     let mut candidate_by_pair = BTreeMap::new();
     let mut stable_by_pair = BTreeMap::new();
     let mut candidate_seen = BTreeSet::new();
     let mut stable_seen = BTreeSet::new();
-    let active_dataset_sha256 = crate::latest_scientific_dataset_digest(observations);
+    let active_dataset_sha256 = observations
+        .iter()
+        .rev()
+        .find(|observation| accept(observation))
+        .map(|observation| observation.provenance.dataset_sha256.as_str());
 
     for observation in observations
         .iter()
-        .filter(|observation| observation.is_scientific_evidence())
+        .filter(|observation| accept(observation))
         .filter(|observation| {
             active_dataset_sha256
                 .is_some_and(|digest| observation.provenance.dataset_sha256 == digest)
@@ -169,7 +222,10 @@ pub fn evaluate_prompt_promotion_gate(
                 == stable.provenance.protocol
                 && candidate.provenance.evaluator_models == stable.provenance.evaluator_models
                 && candidate.provenance.participant_models == stable.provenance.participant_models;
-            if !mirrored_prompt_lineage || !same_evaluator_protocol {
+            if !mirrored_prompt_lineage
+                || !same_evaluator_protocol
+                || !validate_pair(candidate, stable)
+            {
                 blockers.insert(PromptPromotionBlocker::InvalidEvidenceShape);
                 return None;
             }
@@ -402,6 +458,93 @@ mod tests {
         .collect()
     }
 
+    fn transfer_pair(
+        evaluation_id: &str,
+        case_id: &str,
+        task_class: &str,
+        split: PromptEvaluationSplit,
+        candidate_reward: f64,
+    ) -> [PromptEvolutionObservation; 2] {
+        let auto_profile_sha256 = crate::sha256_hex(b"auto-stable-genome");
+        let transfer = crate::PromptTransferProvenance::auto_to_pro(
+            format!("source-{evaluation_id}"),
+            "auto-stable",
+            auto_profile_sha256.clone(),
+            crate::sha256_hex(format!("output-{case_id}").as_bytes()),
+        );
+        let mut candidate = observation(
+            "candidate",
+            "auto-stable",
+            evaluation_id,
+            case_id,
+            task_class,
+            split,
+            candidate_reward,
+        );
+        candidate.provenance = crate::PromptEvaluationProvenance::blind_pairwise_swap(
+            vec!["independent-judge".to_string()],
+            vec!["candidate-worker".to_string(), "auto-worker".to_string()],
+            "f".repeat(64),
+            crate::sha256_hex(b"candidate"),
+            auto_profile_sha256.clone(),
+        )
+        .with_transfer(transfer.clone());
+        let mut auto = observation(
+            "auto-stable",
+            "candidate",
+            evaluation_id,
+            case_id,
+            task_class,
+            split,
+            -candidate_reward,
+        );
+        auto.provenance = crate::PromptEvaluationProvenance::blind_pairwise_swap(
+            vec!["independent-judge".to_string()],
+            vec!["candidate-worker".to_string(), "auto-worker".to_string()],
+            "f".repeat(64),
+            auto_profile_sha256,
+            crate::sha256_hex(b"candidate"),
+        )
+        .with_transfer(transfer);
+        [candidate, auto]
+    }
+
+    fn complete_transfer_evidence() -> Vec<PromptEvolutionObservation> {
+        [
+            transfer_pair(
+                "transfer-train-1",
+                "train-a",
+                "coding",
+                PromptEvaluationSplit::Train,
+                0.3,
+            ),
+            transfer_pair(
+                "transfer-train-2",
+                "train-b",
+                "research",
+                PromptEvaluationSplit::Train,
+                0.3,
+            ),
+            transfer_pair(
+                "transfer-holdout-1",
+                "holdout-a",
+                "coding",
+                PromptEvaluationSplit::Holdout,
+                0.3,
+            ),
+            transfer_pair(
+                "transfer-holdout-2",
+                "holdout-b",
+                "research",
+                PromptEvaluationSplit::Holdout,
+                0.3,
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
     #[test]
     fn complete_diverse_paired_evidence_is_eligible() {
         let result =
@@ -518,5 +661,64 @@ mod tests {
         assert!(result
             .blockers
             .contains(&PromptPromotionBlocker::HoldoutTaskClassRegression));
+    }
+
+    #[test]
+    fn pro_candidate_requires_complete_evidence_against_the_active_auto_profile() {
+        let evidence = complete_transfer_evidence();
+        let result = evaluate_prompt_auto_transfer_gate(
+            &evidence,
+            "candidate",
+            "auto-stable",
+            &crate::sha256_hex(b"auto-stable-genome"),
+            config(),
+        );
+
+        assert!(result.eligible, "{:?}", result.blockers);
+        assert_eq!(result.train_runs, 2);
+        assert_eq!(result.holdout_runs, 2);
+    }
+
+    #[test]
+    fn stale_auto_profile_evidence_cannot_promote_pro() {
+        let result = evaluate_prompt_auto_transfer_gate(
+            &complete_transfer_evidence(),
+            "candidate",
+            "auto-stable",
+            &crate::sha256_hex(b"new-auto-genome"),
+            config(),
+        );
+
+        assert!(!result.eligible);
+        assert!(result
+            .blockers
+            .contains(&PromptPromotionBlocker::InsufficientHoldoutRuns));
+    }
+
+    #[test]
+    fn mismatched_auto_source_pair_is_rejected() {
+        let mut evidence = complete_transfer_evidence();
+        let auto = evidence
+            .iter_mut()
+            .find(|observation| observation.profile_id == "auto-stable")
+            .expect("Auto counterpart exists");
+        auto.provenance
+            .transfer
+            .as_mut()
+            .expect("transfer provenance exists")
+            .source_output_sha256 = crate::sha256_hex(b"different-output");
+
+        let result = evaluate_prompt_auto_transfer_gate(
+            &evidence,
+            "candidate",
+            "auto-stable",
+            &crate::sha256_hex(b"auto-stable-genome"),
+            config(),
+        );
+
+        assert!(!result.eligible);
+        assert!(result
+            .blockers
+            .contains(&PromptPromotionBlocker::InvalidEvidenceShape));
     }
 }

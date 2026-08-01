@@ -28,6 +28,7 @@ pub(crate) fn schedule_prompt_pairwise_evaluation(
 fn prompt_evaluation_model_partition(
     config: &ProviderConfig,
     worker_models: &[String],
+    additionally_excluded: &BTreeSet<String>,
 ) -> (Vec<String>, Vec<String>) {
     let conductor_model = config.model_for_conductor();
     let mut reviewer_candidates = Vec::new();
@@ -40,6 +41,7 @@ fn prompt_evaluation_model_partition(
     ] {
         if !model.trim().is_empty()
             && model != conductor_model
+            && !additionally_excluded.contains(&model)
             && !reviewer_candidates
                 .iter()
                 .any(|existing| existing == &model)
@@ -84,10 +86,127 @@ fn prompt_candidate_models(candidates: [&PromptExecutionCandidate; 2]) -> BTreeS
     models
 }
 
-fn prompt_genome_sha256(genome: &ConductorPromptGenome) -> Result<String, String> {
-    serde_json::to_vec(genome)
-        .map(|encoded| sha256_hex(&encoded))
-        .map_err(|error| format!("prompt genome serialization failed: {error}"))
+fn prompt_auto_teacher_candidate(teacher: &PromptAutoTeacherCase) -> PromptExecutionCandidate {
+    PromptExecutionCandidate {
+        plan: PromptPlanCandidate {
+            genome: teacher.genome.clone(),
+            plan: Some(teacher.plan.clone()),
+            raw_output: String::new(),
+            latency_ms: 0,
+            total_tokens: 0,
+        },
+        execution: PromptWorkflowExecution {
+            succeeded: true,
+            quality_gate_met: true,
+            final_output: teacher.final_output.clone(),
+            steps: teacher
+                .steps
+                .iter()
+                .map(|step| PromptExecutionStep {
+                    id: step.id.clone(),
+                    role: step.role.clone(),
+                    model: step.model.clone(),
+                    prompt: String::new(),
+                    attempts: step.attempts,
+                    status: step.status.clone(),
+                    output: step.output.clone(),
+                    tool_calls: Vec::new(),
+                    errors: step.errors.clone(),
+                    latency_ms: step.latency_ms,
+                    total_tokens: step.total_tokens,
+                    evidence_count: step.evidence_count,
+                })
+                .collect(),
+            latency_ms: teacher.latency_ms,
+            total_tokens: teacher.total_tokens,
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_prompt_auto_transfer_pair(
+    config: &ProviderConfig,
+    reviewer_model: &str,
+    objective: &str,
+    candidate: &PromptExecutionCandidate,
+    teacher: &PromptAutoTeacherCase,
+    evaluation_id: &str,
+    task_class: &str,
+    split: PromptEvaluationSplit,
+    mode: PromptEvaluationMode,
+    dataset_sha256: &str,
+    control: &Arc<AgentRunControl>,
+) -> Result<[PromptEvolutionObservation; 2], String> {
+    let teacher_candidate = prompt_auto_teacher_candidate(teacher);
+    let participant_models = prompt_candidate_models([candidate, &teacher_candidate])
+        .into_iter()
+        .collect::<Vec<_>>();
+    if participant_models.iter().any(|model| model == reviewer_model) {
+        return Err("Auto transfer reviewer is not independent of the compared workflows".to_string());
+    }
+    let judge = prompt_evaluation_feedback::evaluate_prompt_candidate_pair_position_balanced(
+        config,
+        reviewer_model,
+        objective,
+        candidate,
+        &teacher_candidate,
+        evaluation_id,
+        control,
+    )?;
+    let candidate_sha256 = prompt_genome_sha256(&candidate.plan.genome)?;
+    let transfer = PromptTransferProvenance::auto_to_pro(
+        teacher.source_run_id.clone(),
+        teacher.profile_id.clone(),
+        teacher.profile_sha256.clone(),
+        teacher.output_sha256.clone(),
+    );
+    let candidate_observation = prompt_evaluation_feedback::prompt_pairwise_observation(
+        candidate,
+        &teacher_candidate,
+        objective,
+        evaluation_id,
+        task_class,
+        split,
+        mode,
+        judge.score_a,
+        judge.score_b,
+        judge.safety_violations_a,
+        &judge.step_scores_a,
+        judge.feedback_a,
+        std::slice::from_ref(&config.api_key),
+        PromptEvaluationProvenance::blind_pairwise_swap(
+            vec![reviewer_model.to_string()],
+            participant_models.clone(),
+            dataset_sha256.to_string(),
+            candidate_sha256.clone(),
+            teacher.profile_sha256.clone(),
+        )
+        .with_transfer(transfer.clone()),
+    );
+    let teacher_observation = prompt_evaluation_feedback::prompt_pairwise_observation(
+        &teacher_candidate,
+        candidate,
+        objective,
+        evaluation_id,
+        task_class,
+        split,
+        mode,
+        judge.score_b,
+        judge.score_a,
+        judge.safety_violations_b,
+        &judge.step_scores_b,
+        judge.feedback_b,
+        std::slice::from_ref(&config.api_key),
+        PromptEvaluationProvenance::blind_pairwise_swap(
+            vec![reviewer_model.to_string()],
+            participant_models,
+            dataset_sha256.to_string(),
+            teacher.profile_sha256.clone(),
+            candidate_sha256,
+        )
+        .with_transfer(transfer),
+    );
+    Ok([candidate_observation, teacher_observation])
 }
 
 fn prompt_pairwise_campaign_snapshot(
@@ -180,11 +299,6 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
     if worker_models.is_empty() {
         return Ok(false);
     }
-    let (evaluation_worker_models, reserved_evaluator_models) =
-        prompt_evaluation_model_partition(config, worker_models);
-    if reserved_evaluator_models.is_empty() {
-        return Ok(false);
-    }
     let Some(project_id) = run_context.get("project_id") else {
         return Ok(false);
     };
@@ -193,7 +307,14 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         .map(|root| validate_workspace_root(root))
         .transpose()?
         .unwrap_or(active_workspace_root(state)?);
-    let (evaluation, discovered_dataset, rollout, known_profiles, previous_dataset) = {
+    let (
+        evaluation,
+        discovered_dataset,
+        rollout,
+        known_profiles,
+        previous_dataset,
+        auto_stable_profile,
+    ) = {
         let mut store = state
             .store
             .lock()
@@ -221,6 +342,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
             rollout,
             known_profiles,
             previous_dataset,
+            stable_prompt_profile_fingerprint(&scoped_model, "auto").ok(),
         )
     };
     let campaign_generation = evaluation
@@ -384,15 +506,69 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         }
         PromptEvaluationSplit::Train
     };
-    let Some(selected_case) = select_prompt_offline_case(
-        &dataset,
-        &evaluation.observations,
-        &current_profile.id,
-        &challenger.id,
-        split,
-    ) else {
+    let transfer_case = (effort == "pro")
+        .then(|| {
+            let (auto_profile, auto_profile_sha256) = auto_stable_profile.as_ref()?;
+            let current_gate = evaluate_prompt_auto_transfer_gate(
+                &evaluation.observations,
+                &current_profile.id,
+                &auto_profile.id,
+                auto_profile_sha256,
+                prompt_promotion_gate_config(),
+            );
+            let challenger_gate = evaluate_prompt_auto_transfer_gate(
+                &evaluation.observations,
+                &challenger.id,
+                &auto_profile.id,
+                auto_profile_sha256,
+                prompt_promotion_gate_config(),
+            );
+            (!current_gate.eligible || !challenger_gate.eligible)
+                .then(|| {
+                    select_prompt_auto_transfer_case(
+                        &dataset,
+                        &evaluation.observations,
+                        [&current_profile.id, &challenger.id],
+                        &auto_profile.id,
+                        auto_profile_sha256,
+                        split,
+                    )
+                })
+                .flatten()
+        })
+        .flatten();
+    let selected_case = transfer_case.or_else(|| {
+        select_prompt_offline_case(
+            &dataset,
+            &evaluation.observations,
+            &current_profile.id,
+            &challenger.id,
+            split,
+        )
+    });
+    let Some(selected_case) = selected_case else {
         return Ok(false);
     };
+    let auto_teacher = (effort == "pro")
+        .then(|| {
+            let (auto_profile, auto_profile_sha256) = auto_stable_profile.as_ref()?;
+            selected_case.auto_teacher.as_ref().filter(|teacher| {
+                teacher.profile_id == auto_profile.id
+                    && teacher.profile_sha256 == *auto_profile_sha256
+            })
+        })
+        .flatten();
+    let excluded_reviewer_models = auto_teacher
+        .map(|teacher| teacher.participant_models.iter().cloned().collect())
+        .unwrap_or_default();
+    let (evaluation_worker_models, reserved_evaluator_models) = prompt_evaluation_model_partition(
+        config,
+        worker_models,
+        &excluded_reviewer_models,
+    );
+    if reserved_evaluator_models.is_empty() {
+        return Ok(false);
+    }
     append_prompt_offline_dataset_snapshot(
         state,
         task_id,
@@ -525,59 +701,15 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         .cloned()
         .unwrap_or_else(|| config.model_for_role(&ModelRole::Reviewer));
     let participant_models = participant_models.into_iter().collect::<Vec<_>>();
-    let objective_ref = objective.as_str();
-    let forward_reviewer_model = reviewer_model.clone();
-    let reverse_reviewer_model = reviewer_model.clone();
-    let (forward, reverse) = std::thread::scope(|scope| {
-        let forward_id = format!("{evaluation_id}-forward");
-        let reverse_id = format!("{evaluation_id}-reverse");
-        let forward = scope.spawn(move || {
-            prompt_evaluation_feedback::evaluate_prompt_candidate_pair(
-                config,
-                &forward_reviewer_model,
-                objective_ref,
-                candidate_a,
-                candidate_b,
-                &forward_id,
-                control,
-            )
-        });
-        let reverse = scope.spawn(move || {
-            prompt_evaluation_feedback::evaluate_prompt_candidate_pair(
-                config,
-                &reverse_reviewer_model,
-                objective_ref,
-                candidate_b,
-                candidate_a,
-                &reverse_id,
-                control,
-            )
-        });
-        (
-            forward
-                .join()
-                .unwrap_or_else(|_| Err("forward pairwise reviewer panicked".to_string())),
-            reverse
-                .join()
-                .unwrap_or_else(|_| Err("reverse pairwise reviewer panicked".to_string())),
-        )
-    });
-    let (forward, reverse) = match (forward, reverse) {
-        (Ok(forward), Ok(reverse)) => (forward, reverse_prompt_pairwise_payload(reverse)),
-        (Err(forward), Err(reverse)) => {
-            return Err(format!(
-                "both pairwise reviewers failed: forward={forward}; reverse={reverse}"
-            ));
-        }
-        (Err(error), Ok(_)) => {
-            return Err(format!("forward pairwise reviewer failed: {error}"));
-        }
-        (Ok(_), Err(error)) => {
-            return Err(format!("reverse pairwise reviewer failed: {error}"));
-        }
-    };
-    validate_prompt_pairwise_agreement(&forward, &reverse)?;
-    let judge = aggregate_prompt_pairwise_payloads(forward, reverse);
+    let judge = prompt_evaluation_feedback::evaluate_prompt_candidate_pair_position_balanced(
+        config,
+        &reviewer_model,
+        &objective,
+        candidate_a,
+        candidate_b,
+        &evaluation_id,
+        control,
+    )?;
     if control.should_stop() {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
@@ -629,7 +761,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         judge.feedback_b,
         std::slice::from_ref(&config.api_key),
         PromptEvaluationProvenance::blind_pairwise_swap(
-            vec![reviewer_model],
+            vec![reviewer_model.clone()],
             participant_models,
             dataset_sha256,
             prompt_sha_b,
@@ -645,6 +777,57 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         [&observation_a, &observation_b],
         [&candidate_a.plan.genome, &candidate_b.plan.genome],
     )?;
+    if let (Some(teacher), Some((auto_profile, auto_profile_sha256))) =
+        (auto_teacher, auto_stable_profile.as_ref())
+    {
+        if let Some(transfer_dataset_sha256) = prompt_auto_transfer_dataset_digest(
+            &dataset,
+            &auto_profile.id,
+            auto_profile_sha256,
+        ) {
+            for (label, candidate) in [("current", candidate_a), ("challenger", candidate_b)] {
+                if control.should_stop() {
+                    return Err(MODEL_REQUEST_CANCELLED.to_string());
+                }
+                let transfer_evaluation_id = format!("{evaluation_id}-auto-{label}");
+                match evaluate_prompt_auto_transfer_pair(
+                    config,
+                    &reviewer_model,
+                    &objective,
+                    candidate,
+                    teacher,
+                    &transfer_evaluation_id,
+                    &task_class,
+                    split,
+                    mode,
+                    &transfer_dataset_sha256,
+                    control,
+                ) {
+                    Ok(observations) => append_prompt_transfer_observations(
+                        state,
+                        task_id,
+                        run_context,
+                        effort,
+                        mode,
+                        [&observations[0], &observations[1]],
+                    )?,
+                    Err(error) if error == MODEL_REQUEST_CANCELLED => return Err(error),
+                    Err(error) => append_prompt_evaluation_status(
+                        state,
+                        task_id,
+                        run_context,
+                        "Conductor Auto transfer evaluation failed closed",
+                        &transfer_evaluation_id,
+                        effort,
+                        mode,
+                        &candidate.plan.genome.id,
+                        &teacher.profile_id,
+                        Some(&error),
+                    )?,
+                }
+            }
+        }
+    }
     let next_evaluation = {
         let mut store = state
             .store

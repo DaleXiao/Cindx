@@ -93,7 +93,7 @@ pub(crate) fn next_prompt_canary_stage(current: u8) -> u8 {
     }
 }
 
-fn prompt_promotion_gate_config() -> PromptPromotionGateConfig {
+pub(crate) fn prompt_promotion_gate_config() -> PromptPromotionGateConfig {
     PromptPromotionGateConfig {
         minimum_train_runs: PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
         minimum_holdout_runs: PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS,
@@ -105,6 +105,40 @@ fn prompt_promotion_gate_config() -> PromptPromotionGateConfig {
         maximum_generalization_gap: 0.15,
         maximum_holdout_task_class_regression: 0.05,
     }
+}
+
+pub(crate) fn stable_prompt_profile_fingerprint(
+    model: &PromptEvolutionReadModel,
+    effort: &str,
+) -> Result<(ConductorPromptGenome, String), String> {
+    let default = ConductorPromptGenome::seed_for_effort(effort);
+    let stable_id = model
+        .rollouts
+        .get(effort)
+        .map(|rollout| rollout.stable_profile_id.clone())
+        .unwrap_or_else(|| default.id.clone());
+    let frozen = model
+        .rollouts
+        .get(effort)
+        .and_then(|rollout| rollout.frozen_profile.as_ref())
+        .filter(|snapshot| {
+            snapshot.validate().is_ok()
+                && snapshot.effort == effort
+                && snapshot.genome.id == stable_id
+        })
+        .map(|snapshot| snapshot.genome.clone());
+    let genome = frozen
+        .or_else(|| {
+            model
+                .genomes
+                .iter()
+                .find(|record| record.effort == effort && record.genome.id == stable_id)
+                .map(|record| record.genome.clone())
+        })
+        .or_else(|| (default.id == stable_id).then_some(default))
+        .ok_or_else(|| format!("stable {effort} prompt profile {stable_id} is unavailable"))?;
+    let fingerprint = prompt_genome_sha256(&genome)?;
+    Ok((genome, fingerprint))
 }
 
 fn frozen_prompt_profile_for_promotion(
@@ -180,14 +214,75 @@ fn frozen_prompt_profile_for_promotion(
         &serde_json::to_vec(&evidence)
             .map_err(|error| format!("promotion evidence serialization failed: {error}"))?,
     );
-    FrozenPromptProfileSnapshot::new_gepa(
+    let snapshot = FrozenPromptProfileSnapshot::new_gepa(
         effort,
         record.genome.clone(),
         stable_profile_id,
         dataset_sha256,
         paired_evidence_sha256,
-    )
-    .map(Some)
+    )?;
+    if effort != "pro" {
+        return Ok(Some(snapshot));
+    }
+
+    let (auto_profile, auto_profile_sha256) = stable_prompt_profile_fingerprint(model, "auto")?;
+    let transfer_observations = model
+        .observations
+        .iter()
+        .filter(|(observed_effort, observation)| {
+            observed_effort == effort
+                && observation.is_scientific_transfer_evidence()
+                && ((observation.profile_id == candidate_id
+                    && observation.opponent_profile_id.as_deref()
+                        == Some(auto_profile.id.as_str()))
+                    || (observation.profile_id == auto_profile.id
+                        && observation.opponent_profile_id.as_deref() == Some(candidate_id)))
+        })
+        .map(|(_, observation)| observation.clone())
+        .collect::<Vec<_>>();
+    let transfer_gate = evaluate_prompt_auto_transfer_gate(
+        &transfer_observations,
+        candidate_id,
+        &auto_profile.id,
+        &auto_profile_sha256,
+        prompt_promotion_gate_config(),
+    );
+    if !transfer_gate.eligible {
+        let blockers = transfer_gate
+            .blockers
+            .iter()
+            .map(|blocker| blocker.label())
+            .collect::<Vec<_>>()
+            .join(",");
+        return Err(format!(
+            "cannot freeze GEPA Pro profile before the Auto transfer gate passes: {blockers}"
+        ));
+    }
+    let transfer_dataset_sha256 = transfer_observations
+        .iter()
+        .rev()
+        .find(|observation| observation.is_scientific_transfer_evidence())
+        .map(|observation| observation.provenance.dataset_sha256.clone())
+        .ok_or_else(|| "Auto transfer evidence has no active dataset".to_string())?;
+    let mut transfer_evidence = transfer_observations
+        .into_iter()
+        .filter(|observation| observation.provenance.dataset_sha256 == transfer_dataset_sha256)
+        .collect::<Vec<_>>();
+    transfer_evidence.sort_by_key(PromptEvolutionObservation::evidence_identity);
+    let transfer_evidence_sha256 = sha256_hex(
+        &serde_json::to_vec(&transfer_evidence)
+            .map_err(|error| format!("Auto transfer evidence serialization failed: {error}"))?,
+    );
+    snapshot
+        .with_auto_teacher_evidence(FrozenPromptTransferEvidence {
+            source_effort: "auto".to_string(),
+            source_profile_id: auto_profile.id,
+            source_profile_sha256: auto_profile_sha256,
+            dataset_sha256: transfer_dataset_sha256,
+            paired_evidence_sha256: transfer_evidence_sha256,
+            promotion_gate_protocol: orchestrator::PROMPT_AUTO_TRANSFER_GATE_PROTOCOL.to_string(),
+        })
+        .map(Some)
 }
 
 pub(crate) fn reconcile_prompt_rollout(
@@ -250,6 +345,55 @@ pub(crate) fn reconcile_prompt_rollout(
         }
         model.rollouts.insert(effort.to_string(), rollout.clone());
         return rollout;
+    }
+
+    let transfer_gate = if effort == "pro" {
+        let (auto_profile, auto_profile_sha256) =
+            match stable_prompt_profile_fingerprint(model, "auto") {
+                Ok(profile) => profile,
+                Err(error) => {
+                    rollout.status = "evaluating".to_string();
+                    rollout.last_reason = Some(format!("auto_transfer_gate_pending:{error}"));
+                    model.rollouts.insert(effort.to_string(), rollout.clone());
+                    return rollout;
+                }
+            };
+        Some(evaluate_prompt_auto_transfer_gate(
+            &effort_observations,
+            candidate_id,
+            &auto_profile.id,
+            &auto_profile_sha256,
+            prompt_promotion_gate_config(),
+        ))
+    } else {
+        None
+    };
+    if let Some(transfer_gate) = transfer_gate.as_ref() {
+        rollout.promotion_confidence = Some(
+            confidence
+                .wilson_lower_bound
+                .min(transfer_gate.confidence.wilson_lower_bound),
+        );
+        if !transfer_gate.eligible {
+            let blocker = transfer_gate
+                .blockers
+                .first()
+                .map(|blocker| blocker.label())
+                .unwrap_or("unknown");
+            if rollout.canary_profile_id.as_deref() == Some(candidate_id) {
+                rollout.canary_profile_id = None;
+                rollout.canary_percent = 0;
+                rollout.rollback_count = rollout.rollback_count.saturating_add(1);
+                rollout.status = "rolled_back".to_string();
+                rollout.last_reason =
+                    Some(format!("auto_transfer_gate_regressed:{blocker}"));
+            } else {
+                rollout.status = "evaluating".to_string();
+                rollout.last_reason = Some(format!("auto_transfer_gate_pending:{blocker}"));
+            }
+            model.rollouts.insert(effort.to_string(), rollout.clone());
+            return rollout;
+        }
     }
 
     if rollout.canary_profile_id.as_deref() != Some(candidate_id) {
