@@ -246,6 +246,20 @@ pub fn latest_scientific_dataset_digest(
         .map(|observation| observation.provenance.dataset_sha256.as_str())
 }
 
+pub fn latest_scientific_training_dataset_digest(
+    observations: &[PromptEvolutionObservation],
+) -> Option<&str> {
+    observations
+        .iter()
+        .rev()
+        .find(|observation| {
+            observation.split == PromptEvaluationSplit::Train
+                && observation.mode == PromptEvaluationMode::PairedExecution
+                && observation.is_scientific_evidence()
+        })
+        .map(|observation| observation.provenance.dataset_sha256.as_str())
+}
+
 pub fn prompt_reflection_packets(
     observations: &[PromptEvolutionObservation],
     profile_id: &str,
@@ -255,7 +269,8 @@ pub fn prompt_reflection_packets(
         return Vec::new();
     }
 
-    let Some(active_dataset_sha256) = latest_scientific_dataset_digest(observations) else {
+    let Some(active_dataset_sha256) = latest_scientific_training_dataset_digest(observations)
+    else {
         return Vec::new();
     };
     let mut seen_runs = BTreeSet::new();
@@ -350,6 +365,18 @@ pub struct PromptParetoCandidate {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromptParetoArchive {
     pub candidates: Vec<PromptParetoCandidate>,
+    pub rejected_profiles: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptSearchCandidate {
+    pub genome: ConductorPromptGenome,
+    pub train: PromptFitness,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptSearchArchive {
+    pub candidates: Vec<PromptSearchCandidate>,
     pub rejected_profiles: Vec<String>,
 }
 

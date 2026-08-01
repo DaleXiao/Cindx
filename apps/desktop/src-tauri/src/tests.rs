@@ -3472,6 +3472,14 @@ fn prompt_evolution_evidence_counts_ignore_legacy_plan_only_modes() {
         prompt_profile_evidence_counts(&observations, profile_id),
         (1, 1)
     );
+    let mut newer_holdout = observation("newer-holdout", PromptEvaluationMode::ReplayExecution);
+    newer_holdout.provenance.dataset_sha256 = "holdout-only-dataset".to_string();
+    let mut observations_with_newer_holdout = observations;
+    observations_with_newer_holdout.push(newer_holdout);
+    assert_eq!(
+        prompt_profile_training_evidence_count(&observations_with_newer_holdout, profile_id),
+        1
+    );
 }
 
 #[test]
@@ -3518,8 +3526,8 @@ fn prompt_instance_pareto_seeds_are_stable_across_event_order() {
         case_id: case_id.to_string(),
         opponent_profile_id: Some("challenger".to_string()),
         task_class: "coding".to_string(),
-        split: PromptEvaluationSplit::Holdout,
-        mode: PromptEvaluationMode::ReplayExecution,
+        split: PromptEvaluationSplit::Train,
+        mode: PromptEvaluationMode::PairedExecution,
         format_valid: true,
         succeeded: true,
         quality_score: 0.9,
@@ -3533,8 +3541,8 @@ fn prompt_instance_pareto_seeds_are_stable_across_event_order() {
         provenance: test_prompt_evaluation_provenance(&genome.id, "challenger"),
     };
     let forward = vec![
-        observation("replay-a", "case-a"),
-        observation("replay-b", "case-b"),
+        observation("train-a", "case-a"),
+        observation("train-b", "case-b"),
     ];
     let reversed = forward.iter().rev().cloned().collect::<Vec<_>>();
     let seeds = |observations: &[PromptEvolutionObservation]| {
@@ -3545,7 +3553,7 @@ fn prompt_instance_pareto_seeds_are_stable_across_event_order() {
     };
 
     assert_eq!(seeds(&forward), seeds(&reversed));
-    assert_ne!(seeds(&forward)["replay-a"], seeds(&forward)["replay-b"]);
+    assert_ne!(seeds(&forward)["train-a"], seeds(&forward)["train-b"]);
 }
 
 #[test]
@@ -6741,7 +6749,7 @@ fn workflow_checkpoint_resume_is_scoped_to_the_latest_user_turn_and_terminal_sna
 }
 
 #[test]
-fn prompt_evolution_uses_holdout_results_to_select_a_new_generation() {
+fn prompt_evolution_uses_training_results_to_select_a_new_generation() {
     let seed = ConductorPromptGenome::seed_for_effort("auto");
     let genome_json = serde_json::to_string(&seed).expect("genome should serialize");
     let mut events = Vec::new();

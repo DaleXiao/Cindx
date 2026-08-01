@@ -87,6 +87,7 @@ pub(crate) use orchestrator::{
     PromptEvaluationMode, PromptEvaluationProvenance, PromptEvaluationSplit,
     PromptEvolutionCampaignInput, PromptEvolutionCampaignSnapshot, PromptEvolutionMethod,
     PromptEvolutionObservation, PromptInstanceParetoArchive, PromptParetoArchive,
+    PromptSearchArchive,
     PromptPromotionConfidence, PromptPromotionGateConfig, PromptProposalMinibatchDecision,
     PromptRetryPolicy, PromptStepCredit, PromptVerification, RoutingContext, RoutingDecision,
     RoutingOutcome, RoutingTelemetry, RuleBasedRouter, TaskClass, TeamAnchorComparison, UpliftGap,
