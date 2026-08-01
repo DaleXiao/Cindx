@@ -196,6 +196,28 @@ impl WorkflowRevisionHarness {
         }) {
             return Err("workflow revision selected a model outside the allowed pool".to_string());
         }
+        if revision.replacement_steps.len() == 1 {
+            let failed = self
+                .request
+                .plan
+                .steps
+                .iter()
+                .find(|step| step.id == self.request.failed_step_id)
+                .ok_or_else(|| "workflow revision target is no longer in the plan".to_string())?;
+            let replacement = &revision.replacement_steps[0];
+            let same_strategy = replacement.role.trim() == failed.role.trim()
+                && replacement.model.trim() == failed.model.trim()
+                && replacement.subtask.trim() == failed.subtask.trim()
+                && replacement.access == failed.access
+                && replacement.tool_policy == failed.tool_policy
+                && replacement.output_kind == failed.contract.output_kind;
+            if same_strategy {
+                return Err(
+                    "workflow revision repeats the failed strategy without changing its work, model, dependencies, or tool contract"
+                        .to_string(),
+                );
+            }
+        }
         Ok(revision)
     }
 }
@@ -507,5 +529,38 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.contains("resolved step"));
+    }
+
+    #[test]
+    fn revision_harness_rejects_a_renamed_copy_of_the_failed_strategy() {
+        let checkpoint = checkpoint();
+        let harness = WorkflowRevisionHarness::new(WorkflowRevisionRequest {
+            plan: checkpoint.plan.clone(),
+            failed_step_id: "inspect".to_string(),
+            failure: "provider rejected the request".to_string(),
+            preserved_outputs: Vec::new(),
+            allowed_models: vec!["model-a".to_string(), "model-b".to_string()],
+        });
+
+        let error = harness
+            .parse_revision(
+                r#"{
+                    "schema":"cindx.workflow.revision.v1",
+                    "target_step_id":"inspect",
+                    "rationale":"try the same thing again",
+                    "replacement_steps":[{
+                        "id":"inspect-again",
+                        "role":"inspect",
+                        "model":"model-a",
+                        "subtask":"inspect",
+                        "access":[],
+                        "tool_policy":"none",
+                        "output_kind":"evidence"
+                    }]
+                }"#,
+            )
+            .unwrap_err();
+
+        assert!(error.contains("repeats the failed strategy"));
     }
 }

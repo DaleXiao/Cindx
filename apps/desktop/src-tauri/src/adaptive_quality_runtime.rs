@@ -450,6 +450,22 @@ pub(crate) fn compare_team_guidance_with_anchor(
                         "anchor_safety_violations".to_string(),
                         comparison.anchor_safety_violations.to_string(),
                     ),
+                    (
+                        "team_unsupported_claims".to_string(),
+                        comparison.team_unsupported_claims.to_string(),
+                    ),
+                    (
+                        "anchor_unsupported_claims".to_string(),
+                        comparison.anchor_unsupported_claims.to_string(),
+                    ),
+                    (
+                        "team_unmet_requirements".to_string(),
+                        comparison.team_unmet_requirements.to_string(),
+                    ),
+                    (
+                        "anchor_unmet_requirements".to_string(),
+                        comparison.anchor_unmet_requirements.to_string(),
+                    ),
                 ]
                 .into_iter()
                 .collect(),

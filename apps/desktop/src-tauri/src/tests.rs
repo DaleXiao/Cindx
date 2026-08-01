@@ -19,8 +19,8 @@ use crate::conductor_health_runtime::{
 use crate::semantic_memory_runtime::contains_completed_agent_run;
 use agent_core::{EventTypeV1, EVENT_TYPE_METADATA_KEY};
 use orchestrator::{
-    AdaptiveWorkflow, AdaptiveWorkflowStep, AgentRunDecisionHarness, AgentRunDecisionRequest,
-    AgentVerificationPolicy,
+    AdaptiveWorkflow, AdaptiveWorkflowStep, AgentExecutionMode, AgentRunDecisionHarness,
+    AgentRunDecisionRequest, AgentVerificationPolicy,
 };
 use tools::encode_input;
 
@@ -95,13 +95,16 @@ fn test_planned_agent_run(decision: AgentRunDecision, effort: AgentEffort) -> Pl
 fn conductor_verification_policies_reach_the_persistent_task_contract() {
     let mut none = AgentRunDecision::direct("executor");
     none.verification = AgentVerificationPolicy::None;
-    let independent = AgentRunDecision::degraded_conductor_fallback(
-        "executor",
-        "pro",
-        2,
-        2,
-        "test conductor failure",
-    );
+    let mut independent = AgentRunDecision::direct("executor");
+    independent.execution = AgentExecutionMode::Workflow;
+    independent.verification = AgentVerificationPolicy::Independent;
+    independent.max_parallelism = 2;
+    independent.min_successful_branches = 2;
+    independent.distinct_contributions = 2;
+    independent.estimated_steps = 3;
+    independent.expected_uplift_bps = 2_500;
+    independent.confidence_bps = 7_000;
+    independent.stop_policy = ConductorStopPolicy::Quorum;
     independent
         .validate(&["executor".to_string(), "reviewer".to_string()], 2)
         .expect("independent fallback should remain valid");
@@ -174,6 +177,19 @@ fn collaboration_candidate_quorum_matches_effort_contract() {
     assert_eq!(
         collaboration_candidate_quorum_grace("pro"),
         Duration::from_millis(1_500)
+    );
+}
+
+#[test]
+fn memory_recall_policy_controls_the_context_budget() {
+    assert_eq!(memory_recall_limit(MemoryRecallPolicy::None), 0);
+    assert!(
+        memory_recall_limit(MemoryRecallPolicy::Relevant)
+            < memory_recall_limit(MemoryRecallPolicy::Comprehensive)
+    );
+    assert_eq!(
+        memory_recall_limit(MemoryRecallPolicy::Comprehensive),
+        crate::runtime_constants::AGENT_MEMORY_RECALL_LIMIT
     );
 }
 
@@ -708,6 +724,7 @@ fn goal2_execution_steer_replans_and_feeds_terminal_epoch_learning() {
             max_parallelism: 2,
             evolved_directive: String::new(),
             historical_evidence: String::new(),
+            matched_collaboration_evidence: Vec::new(),
         });
         assert!(harness.planning_prompt().contains(objective));
         let response = serde_json::to_string(&expected).expect("decision should serialize");
@@ -6482,18 +6499,50 @@ fn workflow_telemetry_restores_versioned_plan_and_quality() {
         Event {
             id: EventId("completed".to_string()),
             task_id: phase16_task_id(),
-            sequence: 4,
+            sequence: 5,
             timestamp_ms: 500,
             kind: EventKind::TaskStatusChanged,
             summary: "Collaboration workflow completed".to_string(),
             metadata: metadata_with_context(
-                [("fallback_used".to_string(), "false".to_string())]
+                [
+                    ("fallback_used".to_string(), "false".to_string()),
+                    ("anytime_team_score_bps".to_string(), "7400".to_string()),
+                    (
+                        "anytime_anchor_score_bps".to_string(),
+                        "8000".to_string(),
+                    ),
+                    ("anytime_team_uplift_bps".to_string(), "-600".to_string()),
+                    (
+                        "anytime_selected_kind".to_string(),
+                        "direct_anchor".to_string(),
+                    ),
+                ]
                     .into_iter()
                     .collect(),
                 &context,
             ),
         },
     ];
+    events.insert(
+        events.len() - 1,
+        Event {
+            id: EventId("anchor".to_string()),
+            task_id: phase16_task_id(),
+            sequence: 4,
+            timestamp_ms: 350,
+            kind: EventKind::ModelRequestFinished,
+            summary: "Collaboration direct_anchor finished".to_string(),
+            metadata: metadata_with_context(
+                [
+                    ("stage".to_string(), "direct_anchor".to_string()),
+                    ("latency_ms".to_string(), "120".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                &context,
+            ),
+        },
+    );
 
     let telemetry = workflow_execution_telemetry_from_events(&events, &models);
 
@@ -6504,6 +6553,11 @@ fn workflow_telemetry_restores_versioned_plan_and_quality() {
     assert_eq!(telemetry[0].latency_ms, 400);
     assert_eq!(telemetry[0].total_tokens, 640);
     assert_eq!(telemetry[0].tool_calls, 1);
+    assert_eq!(telemetry[0].paired_team_score_bps, Some(7_400));
+    assert_eq!(telemetry[0].paired_anchor_score_bps, Some(8_000));
+    assert_eq!(telemetry[0].paired_uplift_bps, Some(-600));
+    assert!(telemetry[0].selected_anchor);
+    assert_eq!(telemetry[0].anchor_latency_ms, Some(120));
     assert_eq!(
         telemetry[0].successful_tools_by_step.get("first"),
         Some(&vec!["file.search".to_string()])

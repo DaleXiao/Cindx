@@ -199,6 +199,8 @@ pub(crate) fn plan_agent_run(
             &configured_conductor_models,
             run_context,
         );
+    let (historical_evidence, matched_collaboration_evidence) =
+        conductor_historical_evidence(state, &allowed_models).unwrap_or_default();
     let base_request = AgentRunDecisionRequest {
         objective: prompt.to_string(),
         recent_context: collaboration_recent_context(history),
@@ -210,8 +212,8 @@ pub(crate) fn plan_agent_run(
         allowed_models: allowed_models.clone(),
         max_parallelism,
         evolved_directive: profile.conductor_directive(),
-        historical_evidence: conductor_historical_evidence(state, &allowed_models)
-            .unwrap_or_default(),
+        historical_evidence,
+        matched_collaboration_evidence,
     };
     let decision_id = format!(
         "{}-run-decision",

@@ -214,6 +214,7 @@ pub(crate) fn prepare_run_knowledge_contexts(
                     workspace_root,
                     config,
                     &decision.memory.query,
+                    decision.memory.policy,
                     cancellation,
                     expected_epoch,
                 )
@@ -387,6 +388,7 @@ pub(crate) fn recall_project_memory_for_prompt(
     workspace_root: &Path,
     config: &ProviderConfig,
     prompt: &str,
+    policy: MemoryRecallPolicy,
     cancellation: &Arc<AgentRunControl>,
     expected_epoch: u64,
 ) -> Result<Option<PreparedMemoryRecall>, String> {
@@ -397,6 +399,10 @@ pub(crate) fn recall_project_memory_for_prompt(
         return Ok(None);
     };
     let session_id = run_context.get("session_id").map(String::as_str);
+    let recall_limit = memory_recall_limit(policy);
+    if recall_limit == 0 {
+        return Ok(None);
+    }
     let started_at = Instant::now();
     let now_ms = current_time_millis();
     let loaded = {
@@ -466,7 +472,7 @@ pub(crate) fn recall_project_memory_for_prompt(
         &ledger,
         prompt,
         session_id,
-        AGENT_MEMORY_RECALL_LIMIT.saturating_mul(2),
+        recall_limit.saturating_mul(2),
         now_ms,
     );
     if !cancellation.preparation_epoch_is_current(expected_epoch) {
@@ -498,7 +504,7 @@ pub(crate) fn recall_project_memory_for_prompt(
         lexical_recalls,
         &semantic_scores,
         session_id,
-        AGENT_MEMORY_RECALL_LIMIT.saturating_mul(2),
+        recall_limit.saturating_mul(2),
         now_ms,
     );
     if let Some(session_id) = session_id {
@@ -510,7 +516,7 @@ pub(crate) fn recall_project_memory_for_prompt(
                 .any(|source| source != session_id)
         });
     }
-    recalls.truncate(AGENT_MEMORY_RECALL_LIMIT);
+    recalls.truncate(recall_limit);
     if !cancellation.preparation_epoch_is_current(expected_epoch) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
@@ -530,6 +536,10 @@ pub(crate) fn recall_project_memory_for_prompt(
             .to_string(),
         ),
         ("selected_count".to_string(), recalls.len().to_string()),
+        (
+            "memory_policy".to_string(),
+            format!("{policy:?}").to_ascii_lowercase(),
+        ),
         (
             "semantic_candidate_count".to_string(),
             semantic_scores.len().to_string(),
@@ -604,6 +614,14 @@ pub(crate) fn recall_project_memory_for_prompt(
         event_metadata: metadata,
         message,
     }))
+}
+
+pub(crate) fn memory_recall_limit(policy: MemoryRecallPolicy) -> usize {
+    match policy {
+        MemoryRecallPolicy::None => 0,
+        MemoryRecallPolicy::Relevant => AGENT_MEMORY_RECALL_LIMIT.div_ceil(2),
+        MemoryRecallPolicy::Comprehensive => AGENT_MEMORY_RECALL_LIMIT,
+    }
 }
 
 pub(crate) fn commit_prepared_memory_recall(

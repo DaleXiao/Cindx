@@ -166,6 +166,10 @@ fn restored_uplift_repair(
                 team_uplift_bps: uplift,
                 team_safety_violations: verdict.safety_violations,
                 anchor_safety_violations: 0,
+                team_unsupported_claims: 0,
+                anchor_unsupported_claims: 0,
+                team_unmet_requirements: 0,
+                anchor_unmet_requirements: 0,
             }),
     })
 }
