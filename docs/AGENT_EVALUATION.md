@@ -8,7 +8,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 
 | Evidence | Version | Scope | Current conclusion |
 | --- | --- | --- | --- |
-| [Agent Real-World Lite](evaluations/CINDX_AGENT_REALWORLD_LITE_0.1.80_2026-08-01.md) | `0.1.80` | 3 read-only workspace tasks, Direct/Fast/Auto/Pro, 12 first-pass runs plus 5 targeted reruns | `NO-GO` for Agent-intelligence uplift |
+| [Agent Real-World Lite Goal 6](evaluations/CINDX_AGENT_REALWORLD_LITE_G6_0.1.80_2026-08-01.md) | `0.1.80` | 3 read-only workspace tasks, direct ceiling/Fast/Auto/Pro, 12 matched first-pass runs | Auto matched the direct ceiling but Fast and Pro regressed; `NO-GO` for collaboration uplift |
 | [Matched provider baseline](evaluations/CINDX_PROVIDER_BASELINE_0.1.78_2026-07-31.md) | `0.1.78` | 12 frozen GPQA-Diamond questions, 36 matched treatments | Direct `10/12`; Auto and Pro `8/12`; no orchestration uplift shown |
 | Deterministic quality gates | current source | Runtime, memory, queue/steer, permission, recovery, projection, performance contracts | Control-plane evidence only |
 
@@ -74,17 +74,22 @@ reports are immutable and live under `evaluations/archive/`.
 
 ## Current Real-World Findings
 
-The `0.1.80` pilot found two integration failures that deterministic component
-tests and GPQA did not expose:
+The latest `0.1.80` matrix was captured after the run-driver, result-selection,
+task-graph, context, retrieval, memory, GEPA-boundary, and build-boundary work in
+Goals 1-5. Auto answered all three cases completely, including the prior stale
+terminal-selection case. That is a positive integration signal, but this single
+replicate cannot establish causality or generalize beyond the three fixtures.
 
-1. Fast spent its evidence budget before reading decisive files, then finalized
-   with an incomplete answer.
-2. Auto produced a correct downstream reviewer result but selected stale weaker
-   text for terminal delivery.
+Fast remained incomplete on multi-file synthesis and contradiction resolution.
+Pro omitted required evidence in all three cases and consumed `73.43x` the
+direct tokens at `12.83x` its median latency. Auto consumed `55.76x` the direct
+tokens at `7.83x` its median latency. No provider error or safety violation
+occurred, so the quality failures are product behavior rather than missing
+deliveries. Neither collaborative mode had a frozen GEPA profile.
 
-It also found that Auto and Pro completed multi-file synthesis but used much
-more time and tokens than the direct ceiling. These observations reject a broad
-uplift claim; they do not prove that collaboration has no value.
+These observations reject a broad collaboration-uplift claim. They do not prove
+that collaboration has no value, but they require dynamic orchestration to beat
+an equal tool-using baseline before a larger parity claim is credible.
 
 ## Next Product Gate
 

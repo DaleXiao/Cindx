@@ -22,7 +22,7 @@ Auto, and Pro paths, preserves failures in the denominator, and publishes only
 sanitized hashes, scores, latency, and routing evidence.
 
 The current product decision baseline is
-[`Cindx Agent Real-World Lite 0.1.80`](evaluations/CINDX_AGENT_REALWORLD_LITE_0.1.80_2026-08-01.md).
+[`Cindx Agent Real-World Lite Goal 6 0.1.80`](evaluations/CINDX_AGENT_REALWORLD_LITE_G6_0.1.80_2026-08-01.md).
 It is not protocol-equivalent to the matrix below and records a `NO-GO` for an
 Agent-intelligence uplift claim.
 

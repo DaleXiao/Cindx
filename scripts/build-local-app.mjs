@@ -16,9 +16,12 @@ const ephemeralTarget = args.has("--ephemeral-target");
 if (args.has("--source-version")) {
   throw new Error("--source-version is no longer supported; every local build advances the source version");
 }
+const configuredTargetRoot = process.env.CARGO_TARGET_DIR?.trim();
 const targetRoot = ephemeralTarget
   ? fs.mkdtempSync(path.join(os.tmpdir(), "cindx-build-target-"))
-  : path.join(tauriRoot, "target");
+  : configuredTargetRoot
+    ? path.resolve(repoRoot, configuredTargetRoot)
+    : path.join(tauriRoot, "target");
 const versionPaths = [
   path.join(desktopRoot, "package.json"),
   path.join(desktopRoot, "package-lock.json"),

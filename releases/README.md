@@ -2,6 +2,8 @@
 
 Download current builds from [GitHub Releases](https://github.com/DaleXiao/Cindx/releases).
 
+Current source release: [0.1.81](0.1.81.md).
+
 Build archives belong in GitHub Actions or GitHub Releases and must not be
 committed to this directory.
 
