@@ -133,6 +133,19 @@ pub(crate) fn collaboration_candidate_models(
     models
 }
 
+pub(crate) fn prioritize_collaboration_model(
+    models: &mut Vec<String>,
+    primary_model: Option<&str>,
+    candidates: usize,
+) {
+    let Some(primary_model) = primary_model.map(str::trim).filter(|model| !model.is_empty()) else {
+        return;
+    };
+    models.retain(|model| model != primary_model);
+    models.insert(0, primary_model.to_string());
+    models.truncate(candidates.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS));
+}
+
 pub(crate) fn collaboration_role_hints(
     config: &ProviderConfig,
     worker_models: &[String],
@@ -149,25 +162,11 @@ pub(crate) fn collaboration_role_hints(
         }
     };
     let planner = fallback(config.model_for_role(&ModelRole::Planner), 0);
-    let mut executor = fallback(config.model_for_role(&ModelRole::Executor), 1);
-    if executor == planner {
-        executor = worker_models
-            .iter()
-            .find(|model| *model != &planner)
-            .cloned()
-            .unwrap_or(executor);
-    }
-    let mut reviewer = fallback(
+    let executor = fallback(config.model_for_role(&ModelRole::Executor), 1);
+    let reviewer = fallback(
         config.model_for_role(&ModelRole::Reviewer),
         worker_models.len().saturating_sub(1),
     );
-    if reviewer == planner || reviewer == executor {
-        reviewer = worker_models
-            .iter()
-            .find(|model| *model != &planner && *model != &executor)
-            .cloned()
-            .unwrap_or(reviewer);
-    }
     ConductorRoleHints {
         planner: planner.clone(),
         executor,

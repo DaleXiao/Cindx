@@ -341,10 +341,10 @@ impl ConductorPromptGenome {
                 "Assign the fewest useful roles; generalists are acceptable."
             }
             PromptRoleStrategy::Specialists => {
-                "Give each independent root a distinct specialist subtask and model when available."
+                "Give each independent root a distinct specialist subtask. Select models by capability fit and evidence; reuse is allowed."
             }
             PromptRoleStrategy::DiverseSpecialists => {
-                "Use cross-functional independent roots: include both analytical and implementation roles, with distinct subtasks and models when available."
+                "Use cross-functional independent roots with complementary roles and distinct subtasks. Do not force model diversity without evidence of benefit."
             }
         };
         let commit = match self.commit_strategy {

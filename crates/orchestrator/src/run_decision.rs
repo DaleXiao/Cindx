@@ -290,18 +290,6 @@ impl AgentRunDecision {
                             .to_string(),
                     );
                 }
-                let configured_model_count = allowed_models
-                    .iter()
-                    .map(|model| model.trim())
-                    .filter(|model| !model.is_empty())
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .len();
-                if self.distinct_contributions > configured_model_count {
-                    return Err(format!(
-                        "workflow requests {} distinct contributions but only {configured_model_count} distinct configured model(s) are available",
-                        self.distinct_contributions
-                    ));
-                }
                 if self.stop_policy == ConductorStopPolicy::FirstVerified
                     && self.min_successful_branches != 1
                 {
@@ -515,6 +503,7 @@ pub struct AgentRunDecisionRequest {
     pub effort: String,
     pub conductor_model: String,
     pub allowed_models: Vec<String>,
+    pub model_candidates: Vec<ModelCandidate>,
     pub max_parallelism: usize,
     pub evolved_directive: String,
     pub historical_evidence: String,
@@ -536,7 +525,38 @@ impl AgentRunDecisionHarness {
         let models = request
             .allowed_models
             .iter()
-            .map(|model| format!("- {model}"))
+            .map(|model| {
+                let candidates = request
+                    .model_candidates
+                    .iter()
+                    .filter(|candidate| candidate.name.trim() == model.trim())
+                    .collect::<Vec<_>>();
+                let roles = candidates
+                    .iter()
+                    .map(|candidate| match candidate.role {
+                        ModelRole::Planner => "planner",
+                        ModelRole::Executor => "executor",
+                        ModelRole::Reviewer => "reviewer",
+                        ModelRole::Summarizer => "summarizer",
+                        ModelRole::Embedder => "embedder",
+                    })
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let supports_tools = candidates.iter().any(|candidate| candidate.supports_tools);
+                let supports_vision = candidates.iter().any(|candidate| candidate.supports_vision);
+                format!(
+                    "- {model} | configured_roles={} | tools={} | vision={}",
+                    if roles.is_empty() {
+                        "unassigned"
+                    } else {
+                        &roles
+                    },
+                    supports_tools,
+                    supports_vision,
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let context = if request.recent_context.trim().is_empty() {
@@ -555,7 +575,7 @@ impl AgentRunDecisionHarness {
                 "Treat the strongest configured single-model direct answer as the baseline. Choose workflow only when independent work, verification, or decomposition is likely to improve correctness enough to justify coordination latency and correlated-error risk. Pro prioritizes correctness but is not automatically multi-model. Auto balances correctness and latency.\n",
                 "Choose retrieval from semantic, file_search, graph_direct, graph_walk only when the answer needs workspace evidence not already present. Choose memory only when prior user/project decisions are materially relevant. Do not retrieve merely because the prompt is long, mentions code, or asks a question.\n",
                 "Graph walk must have semantic, file_search, or graph_direct as a seed channel. Keep focused retrieval and memory queries under {query_limit} characters. Use only exact configured model strings.\n",
-                "For direct execution use max_parallelism=1, min_successful_branches=1, distinct_contributions=0, stop_policy=first_verified, and verification none or self_check. For workflow use 1..={max_parallelism} branches. Independent contributions must perform genuinely different work and, when more than one distinct configured model is available, must use different model strings; never count duplicate calls to one model as model diversity. Never request more distinct contributions than the distinct configured model pool can supply.\n",
+                "For direct execution use max_parallelism=1, min_successful_branches=1, distinct_contributions=0, stop_policy=first_verified, and verification none or self_check. For workflow use 1..={max_parallelism} branches. Independent contributions must perform genuinely different work. Model identity does not make two contributions independent: reuse the strongest suitable model when that is best, and diversify models only when capability fit or supported evidence predicts an advantage.\n",
                 "expected_uplift_bps and confidence_bps are calibrated estimates from 0 to 10000, not advocacy. The harness will reject inconsistent budgets.\n",
                 "Workflow admission is enforced after parsing: Auto requires at least {auto_uplift_floor}bps expected uplift and {auto_confidence_floor}bps confidence; Pro requires at least {pro_uplift_floor}bps expected uplift over the direct anchor. If you cannot justify those estimates, choose direct.\n",
                 "Historical evidence is observational, not a routing command. matched_direct_team rows compare team and direct anchor on the same run and are stronger than independent route_observation rows. Use evidence only when its task class and execution shape fit the current request; support=insufficient, low-sample, or mismatched evidence must not override current reasoning. Ready matched evidence with negative average uplift or frequent anchor selection is evidence against collaboration unless this request has a concrete independent-work or verification need absent from those observations:\n{historical_evidence}\n\n",
@@ -633,6 +653,7 @@ mod tests {
             effort: "auto".to_string(),
             conductor_model: "planner".to_string(),
             allowed_models: vec!["executor".to_string(), "reviewer".to_string()],
+            model_candidates: Vec::new(),
             max_parallelism: 3,
             evolved_directive: String::new(),
             historical_evidence: String::new(),
@@ -678,6 +699,39 @@ mod tests {
                 .min_distinct_contributions,
             2
         );
+    }
+
+    #[test]
+    fn one_capable_model_can_supply_multiple_independent_contributions() {
+        let mut request = request();
+        request.allowed_models = vec!["executor".to_string()];
+        let harness = AgentRunDecisionHarness::new(request);
+        let decision = harness
+            .parse(
+                r#"{
+                    "schema":"cindx.agent-run-decision.v1",
+                    "task_class":"research",
+                    "execution":"workflow",
+                    "primary_model":"executor",
+                    "tool_requirement":"none",
+                    "vision_required":false,
+                    "risk_level":"low",
+                    "retrieval":{"query":"","channels":[],"max_results":8},
+                    "memory":{"policy":"none","query":""},
+                    "verification":"self_check",
+                    "max_parallelism":2,
+                    "min_successful_branches":2,
+                    "distinct_contributions":2,
+                    "estimated_steps":3,
+                    "expected_uplift_bps":3200,
+                    "confidence_bps":7200,
+                    "stop_policy":"quorum",
+                    "rationale":"two different solution paths from the strongest model"
+                }"#,
+            )
+            .expect("contribution count must not be capped by model count");
+
+        assert_eq!(decision.distinct_contributions, 2);
     }
 
     #[test]

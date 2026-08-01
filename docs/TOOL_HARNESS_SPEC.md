@@ -53,6 +53,11 @@ Together they can plan bounded parallel branches, authorize dependency outputs,
 reserve terminal delivery, recover a failed worker, and resume from a
 checkpoint.
 
+Branch independence is a semantic contract over different assignments and
+evidence lineage. It is not inferred from different model names. The conductor
+preserves the selected direct model as the baseline and introduces another model
+only when its configured role or supported prior predicts a useful contribution.
+
 GEPA is an optimizer outside the active loop. It consumes redacted completed or
 replay trajectories, reflects on paired outcomes, and proposes a versioned prompt
 genome. Promotion requires independent evaluation and holdout evidence. A selected

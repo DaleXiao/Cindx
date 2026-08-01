@@ -230,26 +230,16 @@ impl ConductorExecutionContract {
                     && step.access.is_empty()
             })
             .collect::<Vec<_>>();
-        let distinct_contributors = contributors.len();
+        let distinct_contributors = contributors
+            .iter()
+            .map(|step| step.independent_contribution_key())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
         if distinct_contributors < self.min_distinct_contributions {
             return Err(format!(
                 "collaboration workflow has {distinct_contributors} independent contribution(s), but {} are required by the task",
                 self.min_distinct_contributions
             ));
-        }
-        if self.min_distinct_contributions >= 2 {
-            let distinct_models = contributors
-                .iter()
-                .map(|step| step.model.trim())
-                .filter(|model| !model.is_empty())
-                .collect::<std::collections::BTreeSet<_>>()
-                .len();
-            if distinct_models < self.min_distinct_contributions {
-                return Err(format!(
-                    "collaboration workflow has {distinct_models} distinct contributor model(s), but {} are required by the task",
-                    self.min_distinct_contributions
-                ));
-            }
         }
         if self.requires_synthesis {
             let Some(final_step) = plan.steps.last() else {
@@ -447,6 +437,18 @@ mod tests {
         );
         contract.max_parallelism = 2;
         assert!(contract.validate_plan(&plan).is_ok());
+
+        let mut one_model_plan = plan.clone();
+        one_model_plan.steps[0].model = "worker".into();
+        assert!(contract.validate_plan(&one_model_plan).is_ok());
+
+        let mut duplicate_plan = one_model_plan;
+        duplicate_plan.steps[1].subtask = "a".into();
+        let error = contract
+            .validate_plan(&duplicate_plan)
+            .expect_err("duplicate assignments are not independent contributions");
+        assert!(error.contains("1 independent contribution"), "{error}");
+
         contract.max_parallelism = 1;
         assert!(contract.validate_plan(&plan).is_err());
     }

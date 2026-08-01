@@ -23,6 +23,12 @@ pub(crate) fn evaluate_conductor_prompt_profile(
         effort: effort.to_string(),
         policy: policy.to_string(),
         conductor_model: conductor_model.clone(),
+        primary_model: worker_models
+            .iter()
+            .find(|model| **model == config.model_for_role(&ModelRole::Executor))
+            .cloned()
+            .or_else(|| worker_models.first().cloned())
+            .unwrap_or_default(),
         worker_models: worker_models.to_vec(),
         role_hints: collaboration_role_hints(config, worker_models),
         budget: WorkflowBudget {

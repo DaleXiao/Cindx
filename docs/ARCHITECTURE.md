@@ -116,6 +116,10 @@ branch quorum, estimated steps, expected uplift, confidence, and stop policy.
 - A direct decision enters the interactive loop without collaboration.
 - A workflow decision creates a bounded adaptive workflow. The task graph owns
   dependency order and runnable/resumable/degraded/exhausted states.
+- Independent workflow contributions are defined by non-overlapping task and
+  evidence lineage, not by model identity. The conductor may reuse the selected
+  direct-baseline model across different branches or choose another configured
+  model when role capability or supported historical evidence justifies it.
 - Workflow output is a grounded handoff to the interactive loop; it does not
   bypass the final tool, permission, persistence, or terminal contracts.
 
