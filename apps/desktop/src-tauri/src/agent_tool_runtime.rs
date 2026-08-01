@@ -1,6 +1,7 @@
 use super::*;
 use crate::agent_runtime_snapshot::persist_runtime_append_and_snapshot;
 use crate::agent_runtime_snapshot_cursor::AgentRuntimeSnapshotCursor;
+use crate::suspended_run_runtime::{remember_suspended_agent_run, SuspendedAgentRun};
 
 pub(crate) enum AgentToolBatchOutcome {
     Continue,

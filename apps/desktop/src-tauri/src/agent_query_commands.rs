@@ -1,5 +1,8 @@
 use super::*;
 use crate::desktop_event_sink::DesktopEventSink;
+use crate::session_output_cache::cached_agent_output_artifacts;
+use crate::suspended_run_runtime::clear_suspended_agent_run_for_context;
+use agent_harness::RegisteredRun;
 
 #[tauri::command]
 pub(crate) async fn get_agent_state(
@@ -254,12 +257,12 @@ pub(crate) fn export_agent_trace_jsonl(
         .map_err(|error| error.to_string())
 }
 
-pub(crate) fn begin_agent_run_control_for_effort<'a>(
-    state: &'a tauri::State<'_, AppState>,
+pub(crate) fn begin_agent_run_control_for_effort(
+    state: &tauri::State<'_, AppState>,
     session_id: &str,
     effort: &str,
     snapshot: Option<RunControlSnapshot>,
-) -> Result<RegisteredRunControl<'a>, String> {
+) -> Result<RegisteredRun, String> {
     cancel_background_prompt_evaluations(state)?;
     let control = Arc::new(
         snapshot
@@ -269,11 +272,11 @@ pub(crate) fn begin_agent_run_control_for_effort<'a>(
     register_agent_run_control_for_session(state, session_id, control)
 }
 
-pub(crate) fn begin_agent_run_control_for_continuation<'a>(
-    state: &'a tauri::State<'_, AppState>,
+pub(crate) fn begin_agent_run_control_for_continuation(
+    state: &tauri::State<'_, AppState>,
     session_id: &str,
     snapshot: RunControlSnapshot,
-) -> Result<RegisteredRunControl<'a>, String> {
+) -> Result<RegisteredRun, String> {
     cancel_background_prompt_evaluations(state)?;
     let control = Arc::new(
         AgentRunControl::from_snapshot_for_continuation(snapshot)
@@ -282,12 +285,12 @@ pub(crate) fn begin_agent_run_control_for_continuation<'a>(
     register_agent_run_control_for_session(state, session_id, control)
 }
 
-pub(crate) fn begin_agent_run_control_at_steer_epoch<'a>(
-    state: &'a tauri::State<'_, AppState>,
+pub(crate) fn begin_agent_run_control_at_steer_epoch(
+    state: &tauri::State<'_, AppState>,
     session_id: &str,
     effort: &str,
     applied_epoch: u64,
-) -> Result<RegisteredRunControl<'a>, String> {
+) -> Result<RegisteredRun, String> {
     cancel_background_prompt_evaluations(state)?;
     register_agent_run_control_for_session(
         state,
@@ -296,14 +299,14 @@ pub(crate) fn begin_agent_run_control_at_steer_epoch<'a>(
     )
 }
 
-pub(crate) fn begin_agent_run_control_from_persisted_resources<'a>(
-    state: &'a tauri::State<'_, AppState>,
+pub(crate) fn begin_agent_run_control_from_persisted_resources(
+    state: &tauri::State<'_, AppState>,
     session_id: &str,
     effort: &str,
     applied_epoch: u64,
     resources: RunResourceSnapshot,
     start_new_segment: bool,
-) -> Result<RegisteredRunControl<'a>, String> {
+) -> Result<RegisteredRun, String> {
     cancel_background_prompt_evaluations(state)?;
     let control = if start_new_segment {
         AgentRunControl::new_for_continuation_at_steer_epoch_with_resource_snapshot(
@@ -317,36 +320,30 @@ pub(crate) fn begin_agent_run_control_from_persisted_resources<'a>(
     register_agent_run_control_for_session(state, session_id, Arc::new(control))
 }
 
-fn register_agent_run_control_for_session<'a>(
-    state: &'a tauri::State<'_, AppState>,
+fn register_agent_run_control_for_session(
+    state: &tauri::State<'_, AppState>,
     session_id: &str,
     control: Arc<AgentRunControl>,
-) -> Result<RegisteredRunControl<'a>, String> {
+) -> Result<RegisteredRun, String> {
     let _lifecycle = state
         .session_lifecycle_gate
         .lock()
         .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
     project_session_metadata_for_session(state, Some(session_id))?;
-    RegisteredRunControl::register(
-        &state.agent_run_controls,
-        session_id,
-        control,
-        "agent run control",
-        "agent run is already active for this session",
-    )
+    state
+        .agent_run_controls
+        .register(session_id, control)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "agent run is already active for this session".to_string())
 }
 
 pub(crate) fn cancel_background_prompt_evaluations(
     state: &tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    let controls = state
+    state
         .prompt_evaluation_controls
-        .lock()
-        .map_err(|error| format!("prompt evaluation control lock poisoned: {error}"))?;
-    for control in controls.values() {
-        control.request_cancel();
-    }
-    Ok(())
+        .cancel_all()
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn active_agent_run_control(
@@ -356,12 +353,10 @@ pub(crate) fn active_agent_run_control(
     let Some(session_id) = session_id else {
         return Ok(None);
     };
-    Ok(state
+    state
         .agent_run_controls
-        .lock()
-        .map_err(|error| format!("agent run control lock poisoned: {error}"))?
         .get(session_id)
-        .cloned())
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn request_agent_run_cancel(

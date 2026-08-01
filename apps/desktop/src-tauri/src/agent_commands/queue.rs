@@ -402,20 +402,19 @@ pub(crate) fn run_next_queued_agent_message_blocking(
     run_next_queued_agent_message_blocking_inner(app, state.clone(), input)
 }
 
-pub(crate) fn begin_queue_dispatch<'a>(
-    state: &'a tauri::State<'_, AppState>,
+pub(crate) fn begin_queue_dispatch(
+    state: &tauri::State<'_, AppState>,
     session_id: &str,
-) -> Result<Option<ExclusiveKeyLease<'a>>, String> {
+) -> Result<Option<agent_harness::ExclusiveKeyLease>, String> {
     let _lifecycle = state
         .session_lifecycle_gate
         .lock()
         .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
     project_session_metadata_for_session(state, Some(session_id))?;
-    ExclusiveKeyLease::try_acquire(
-        &state.queue_dispatching_sessions,
-        session_id,
-        "queue dispatch",
-    )
+    state
+        .queue_dispatching_sessions
+        .try_acquire(session_id)
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn run_next_queued_agent_message_blocking_inner(
@@ -425,9 +424,8 @@ pub(crate) fn run_next_queued_agent_message_blocking_inner(
 ) -> Result<Option<AgentState>, String> {
     if !state
         .queue_dispatching_sessions
-        .lock()
-        .map_err(|error| format!("queue dispatch lock poisoned: {error}"))?
         .contains(&input.session_id)
+        .map_err(|error| error.to_string())?
     {
         return Err("queue dispatch lease is required".to_string());
     }

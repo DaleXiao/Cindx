@@ -456,8 +456,7 @@ pub(crate) fn prompt_evolution_state(
     let mut reflection_packets = 0usize;
     let mut learned_profiles = 0usize;
     let inflight_efforts = prompt_evaluation_inflight()
-        .lock()
-        .map(|inflight| inflight.clone())
+        .snapshot()
         .unwrap_or_default();
     for effort in ["fast", "auto", "pro"] {
         let evaluation =

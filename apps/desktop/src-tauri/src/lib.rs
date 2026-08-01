@@ -110,6 +110,7 @@ mod semantic_memory_runtime;
 mod semantic_memory_worker;
 mod session_context_service;
 mod session_output_cache;
+mod session_output_cache_store;
 mod session_projection;
 mod session_title_service;
 mod settings_commands;
@@ -190,7 +191,6 @@ use runtime_values::*;
 use schedule_commands::*;
 use settings_commands::*;
 use sidecar_runtime::*;
-use suspended_run_runtime::*;
 use tool_commands::*;
 use tool_execution::*;
 use view_models::*;
@@ -203,7 +203,6 @@ use agent_recovery_service::*;
 use agent_resource_snapshot::*;
 use agent_runtime_snapshot::*;
 use session_context_service::*;
-use session_output_cache::*;
 use session_title_service::*;
 
 #[cfg(test)]

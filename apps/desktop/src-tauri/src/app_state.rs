@@ -2,11 +2,13 @@ use crate::desktop_prelude::*;
 use crate::rag_operation_runtime::RagOperationControl;
 use crate::{
     attachment_upload_batches::AttachmentUploadBatches,
-    collaboration_service::AgentCollaboration,
     conductor_health_runtime::ConductorHealthLedger,
     configuration_models::{ProjectSessionConfig, ProviderConfig, SidecarConfig, WorkspaceConfig},
     schedule::ScheduleConfig,
+    session_output_cache_store::SessionOutputCache,
+    suspended_run_runtime::SuspendedRunStore,
 };
+use agent_harness::{ExclusiveKeyRegistry, RunRegistry};
 
 pub(crate) struct AppState {
     pub(crate) store: Mutex<SqliteStore>,
@@ -22,13 +24,13 @@ pub(crate) struct AppState {
     pub(crate) schedule_config: Mutex<ScheduleConfig>,
     pub(crate) schedule_last_error: Mutex<Option<String>>,
     pub(crate) mcp_catalog: Mutex<McpCatalogService>,
-    pub(crate) suspended_agent_runs: Mutex<BTreeMap<String, SuspendedAgentRun>>,
-    pub(crate) session_output_cache: Mutex<BTreeMap<String, SessionOutputCacheEntry>>,
-    pub(crate) agent_run_controls: Mutex<BTreeMap<String, Arc<AgentRunControl>>>,
-    pub(crate) prompt_evaluation_controls: Mutex<BTreeMap<String, Arc<AgentRunControl>>>,
+    pub(crate) suspended_agent_runs: SuspendedRunStore,
+    pub(crate) session_output_cache: SessionOutputCache,
+    pub(crate) agent_run_controls: RunRegistry,
+    pub(crate) prompt_evaluation_controls: RunRegistry,
     pub(crate) rag_operation_controls: Mutex<BTreeMap<String, Arc<RagOperationControl>>>,
-    pub(crate) queue_dispatching_sessions: Mutex<BTreeSet<String>>,
-    pub(crate) session_title_refinement_sessions: Mutex<BTreeSet<String>>,
+    pub(crate) queue_dispatching_sessions: ExclusiveKeyRegistry,
+    pub(crate) session_title_refinement_sessions: ExclusiveKeyRegistry,
     pub(crate) workspace_knowledge_cache: Mutex<BTreeMap<String, WorkspaceKnowledgeCacheEntry>>,
     pub(crate) tool_registry_cache: Mutex<ToolRegistryCache>,
     pub(crate) conductor_health: Mutex<ConductorHealthLedger>,
@@ -90,25 +92,6 @@ pub(crate) struct WorkspaceKnowledgeCacheEntry {
     pub(crate) adapter: FileRagAdapter,
     pub(crate) graph_store: Option<Arc<FileGraphStore>>,
     pub(crate) validated_at: Instant,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct SuspendedAgentRun {
-    pub(crate) runtime: agent_runtime::AgentLoopState,
-    pub(crate) prompt: String,
-    pub(crate) run_context: Metadata,
-    pub(crate) workspace_root: PathBuf,
-    pub(crate) collaboration: Option<AgentCollaboration>,
-    pub(crate) run_control: RunControlSnapshot,
-    pub(crate) last_touched_at_ms: u64,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct SessionOutputCacheEntry {
-    pub(crate) event_count: u64,
-    pub(crate) latest_sequence: u64,
-    pub(crate) outputs: Vec<AgentOutputArtifactView>,
-    pub(crate) last_accessed_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

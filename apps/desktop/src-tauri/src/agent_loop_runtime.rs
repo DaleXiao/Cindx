@@ -15,7 +15,7 @@ use crate::{
     agent_runtime_snapshot_cursor::AgentRuntimeSnapshotCursor,
     agent_steer_runtime::{apply_pending_agent_steers_with_cursor, AgentSteerApplication},
     agent_tool_runtime::{execute_agent_tool_batch, AgentToolBatchOutcome},
-    app_state::{AppState, SuspendedAgentRun},
+    app_state::AppState,
     configuration_models::ProviderConfig,
     persistence_runtime::tool_registry_for_state,
     runtime_constants::AGENT_MAX_OUTPUT_TOKENS,
@@ -23,7 +23,9 @@ use crate::{
         agent_runtime_context_for_run, current_time_millis, effective_agent_objective,
         run_context_steer_epoch,
     },
-    suspended_run_runtime::{clear_suspended_agent_run_for_context, remember_suspended_agent_run},
+    suspended_run_runtime::{
+        clear_suspended_agent_run_for_context, remember_suspended_agent_run, SuspendedAgentRun,
+    },
     view_models::AgentState,
 };
 

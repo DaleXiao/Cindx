@@ -1,0 +1,8 @@
+[package]
+name = "agent-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agent-runtime = { path = "../agent-runtime" }

@@ -1,7 +1,8 @@
 use crate::{
     agent_read_model::agent_events_for_session,
-    app_state::{AppState, SessionOutputCacheEntry},
+    app_state::AppState,
     runtime_values::{current_time_millis, phase16_task_id},
+    session_output_cache_store::SessionOutputCacheLookup,
 };
 use agent_application::{
     project_agent_artifacts as agent_output_artifacts_from_events,
@@ -10,8 +11,6 @@ use agent_application::{
 use agent_core::Event;
 use agent_storage::SqliteStore;
 use std::collections::BTreeMap;
-
-const SESSION_OUTPUT_CACHE_LIMIT: usize = 32;
 
 pub(crate) fn cached_agent_output_artifacts(
     state: &tauri::State<'_, AppState>,
@@ -22,36 +21,36 @@ pub(crate) fn cached_agent_output_artifacts(
         .event_revision_by_metadata(&phase16_task_id(), "session_id", session_id)
         .map_err(|error| error.to_string())?;
     let now_ms = current_time_millis();
-    let cached = {
-        let mut cache = state
-            .session_output_cache
-            .lock()
-            .map_err(|error| format!("session output cache lock poisoned: {error}"))?;
-        if let Some(entry) = cache.get_mut(session_id) {
-            if entry.event_count == revision.event_count
-                && entry.latest_sequence == revision.latest_sequence
-            {
-                entry.last_accessed_at_ms = now_ms;
-                return Ok(entry.outputs.clone());
-            }
-        }
-        cache.remove(session_id)
+    let cached = match state.session_output_cache.lookup(
+        session_id,
+        revision.event_count,
+        revision.latest_sequence,
+        now_ms,
+    )? {
+        SessionOutputCacheLookup::Hit(outputs) => return Ok(outputs),
+        SessionOutputCacheLookup::Miss {
+            event_count,
+            latest_sequence,
+            outputs,
+        } => Some((event_count, latest_sequence, outputs)),
+        SessionOutputCacheLookup::Empty => None,
     };
 
-    let outputs = if let Some(cached) = cached.filter(|entry| {
-        entry.event_count <= revision.event_count
-            && entry.latest_sequence <= revision.latest_sequence
-    }) {
+    let outputs = if let Some((event_count, latest_sequence, outputs)) = cached.filter(
+        |(event_count, latest_sequence, _)| {
+            *event_count <= revision.event_count && *latest_sequence <= revision.latest_sequence
+        },
+    ) {
         let delta = store
             .list_by_task_and_metadata_after(
                 &phase16_task_id(),
                 "session_id",
                 session_id,
-                cached.latest_sequence,
+                latest_sequence,
             )
             .map_err(|error| error.to_string())?;
-        if cached.event_count.saturating_add(delta.len() as u64) == revision.event_count {
-            merge_agent_output_delta(cached.outputs, &delta)
+        if event_count.saturating_add(delta.len() as u64) == revision.event_count {
+            merge_agent_output_delta(outputs, &delta)
         } else {
             rebuild_agent_output_artifacts(store, session_id)?
         }
@@ -59,28 +58,13 @@ pub(crate) fn cached_agent_output_artifacts(
         rebuild_agent_output_artifacts(store, session_id)?
     };
 
-    let mut cache = state
-        .session_output_cache
-        .lock()
-        .map_err(|error| format!("session output cache lock poisoned: {error}"))?;
-    if !cache.contains_key(session_id) && cache.len() >= SESSION_OUTPUT_CACHE_LIMIT {
-        if let Some(oldest_session_id) = cache
-            .iter()
-            .min_by_key(|(_, entry)| entry.last_accessed_at_ms)
-            .map(|(session_id, _)| session_id.clone())
-        {
-            cache.remove(&oldest_session_id);
-        }
-    }
-    cache.insert(
-        session_id.to_string(),
-        SessionOutputCacheEntry {
-            event_count: revision.event_count,
-            latest_sequence: revision.latest_sequence,
-            outputs: outputs.clone(),
-            last_accessed_at_ms: now_ms,
-        },
-    );
+    state.session_output_cache.store(
+        session_id,
+        revision.event_count,
+        revision.latest_sequence,
+        outputs.clone(),
+        now_ms,
+    )?;
     Ok(outputs)
 }
 

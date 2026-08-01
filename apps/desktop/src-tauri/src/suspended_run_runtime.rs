@@ -1,65 +1,131 @@
-use super::*;
+use crate::{
+    agent_query_commands::active_agent_run_control,
+    app_state::{AppState, ResolvedToolObservation},
+    collaboration_service::AgentCollaboration,
+    runtime_values::current_time_millis,
+    tool_execution::append_visual_reference_message,
+};
+use agent_core::Metadata;
+use agent_runtime::{AgentKernel, RunControlSnapshot};
+use std::{collections::BTreeMap, path::PathBuf, sync::Mutex};
 
 const SUSPENDED_AGENT_RUN_LIMIT: usize = 16;
 const SUSPENDED_AGENT_RUN_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
 
-fn purge_expired_suspended_agent_runs(runs: &mut BTreeMap<String, SuspendedAgentRun>, now_ms: u64) {
-    runs.retain(|_, run| {
-        now_ms.saturating_sub(run.last_touched_at_ms) <= SUSPENDED_AGENT_RUN_TTL_MS
-    });
+#[derive(Debug, Clone)]
+pub(crate) struct SuspendedAgentRun {
+    pub(crate) runtime: agent_runtime::AgentLoopState,
+    pub(crate) prompt: String,
+    pub(crate) run_context: Metadata,
+    pub(crate) workspace_root: PathBuf,
+    pub(crate) collaboration: Option<AgentCollaboration>,
+    pub(crate) run_control: RunControlSnapshot,
+    pub(crate) last_touched_at_ms: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct SuspendedRunStore {
+    runs: Mutex<BTreeMap<String, SuspendedAgentRun>>,
+}
+
+impl SuspendedRunStore {
+    fn with_runs<T>(
+        &self,
+        operation: impl FnOnce(&mut BTreeMap<String, SuspendedAgentRun>) -> T,
+    ) -> Result<T, String> {
+        let mut runs = self
+            .runs
+            .lock()
+            .map_err(|error| format!("suspended agent runs lock poisoned: {error}"))?;
+        Ok(operation(&mut runs))
+    }
+
+    fn purge_expired(runs: &mut BTreeMap<String, SuspendedAgentRun>, now_ms: u64) {
+        runs.retain(|_, run| {
+            now_ms.saturating_sub(run.last_touched_at_ms) <= SUSPENDED_AGENT_RUN_TTL_MS
+        });
+    }
+
+    fn remember(&self, mut run: SuspendedAgentRun, now_ms: u64) -> Result<(), String> {
+        let Some(session_id) = run.run_context.get("session_id").cloned() else {
+            return Ok(());
+        };
+        run.last_touched_at_ms = now_ms;
+        self.with_runs(|runs| {
+            Self::purge_expired(runs, now_ms);
+            if !runs.contains_key(&session_id) && runs.len() >= SUSPENDED_AGENT_RUN_LIMIT {
+                if let Some(oldest_session_id) = runs
+                    .iter()
+                    .min_by_key(|(_, run)| run.last_touched_at_ms)
+                    .map(|(session_id, _)| session_id.clone())
+                {
+                    runs.remove(&oldest_session_id);
+                }
+            }
+            runs.insert(session_id, run);
+        })
+    }
+
+    fn take(&self, session_id: &str, now_ms: u64) -> Result<Option<SuspendedAgentRun>, String> {
+        self.with_runs(|runs| {
+            Self::purge_expired(runs, now_ms);
+            runs.remove(session_id)
+        })
+    }
+
+    fn control_snapshot(
+        &self,
+        session_id: &str,
+        now_ms: u64,
+    ) -> Result<Option<RunControlSnapshot>, String> {
+        self.with_runs(|runs| {
+            Self::purge_expired(runs, now_ms);
+            runs.get(session_id).map(|run| run.run_control.clone())
+        })
+    }
+
+    pub(crate) fn contains_any(&self, session_ids: &[String]) -> Result<bool, String> {
+        let now_ms = current_time_millis();
+        self.with_runs(|runs| {
+            Self::purge_expired(runs, now_ms);
+            session_ids.iter().any(|session_id| runs.contains_key(session_id))
+        })
+    }
+
+    pub(crate) fn remove_many(&self, session_ids: &[String]) -> Result<(), String> {
+        self.with_runs(|runs| {
+            for session_id in session_ids {
+                runs.remove(session_id);
+            }
+        })
+    }
 }
 
 pub(crate) fn remember_suspended_agent_run(
     state: &tauri::State<'_, AppState>,
-    mut run: SuspendedAgentRun,
+    run: SuspendedAgentRun,
 ) -> Result<(), String> {
-    let Some(session_id) = run.run_context.get("session_id").cloned() else {
-        return Ok(());
-    };
-    let now_ms = current_time_millis();
-    run.last_touched_at_ms = now_ms;
-    let mut runs = state
+    state
         .suspended_agent_runs
-        .lock()
-        .map_err(|error| format!("suspended agent runs lock poisoned: {error}"))?;
-    purge_expired_suspended_agent_runs(&mut runs, now_ms);
-    if !runs.contains_key(&session_id) && runs.len() >= SUSPENDED_AGENT_RUN_LIMIT {
-        if let Some(oldest_session_id) = runs
-            .iter()
-            .min_by_key(|(_, run)| run.last_touched_at_ms)
-            .map(|(session_id, _)| session_id.clone())
-        {
-            runs.remove(&oldest_session_id);
-        }
-    }
-    runs.insert(session_id, run);
-    Ok(())
+        .remember(run, current_time_millis())
 }
 
 pub(crate) fn take_suspended_agent_run(
     state: &tauri::State<'_, AppState>,
     session_id: &str,
 ) -> Result<Option<SuspendedAgentRun>, String> {
-    let now_ms = current_time_millis();
-    let mut runs = state
+    state
         .suspended_agent_runs
-        .lock()
-        .map_err(|error| format!("suspended agent runs lock poisoned: {error}"))?;
-    purge_expired_suspended_agent_runs(&mut runs, now_ms);
-    Ok(runs.remove(session_id))
+        .take(session_id, current_time_millis())
 }
 
 pub(crate) fn suspended_agent_run_control_snapshot(
     state: &tauri::State<'_, AppState>,
     session_id: &str,
 ) -> Result<Option<RunControlSnapshot>, String> {
-    let now_ms = current_time_millis();
-    let mut runs = state
+    state
         .suspended_agent_runs
-        .lock()
-        .map_err(|error| format!("suspended agent runs lock poisoned: {error}"))?;
-    purge_expired_suspended_agent_runs(&mut runs, now_ms);
-    Ok(runs.get(session_id).map(|run| run.run_control.clone()))
+        .control_snapshot(session_id, current_time_millis())
 }
 
 pub(crate) fn clear_suspended_agent_run(

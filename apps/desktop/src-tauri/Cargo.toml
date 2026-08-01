@@ -15,6 +15,7 @@ tauri-build = { version = "2", features = [] }
 agent-application = { path = "../../../crates/agent-application" }
 agent-core = { path = "../../../crates/agent-core" }
 agent-graph = { path = "../../../crates/agent-graph" }
+agent-harness = { path = "../../../crates/agent-harness" }
 agent-memory = { path = "../../../crates/agent-memory" }
 agent-mcp = { path = "../../../crates/agent-mcp" }
 agent-rag = { path = "../../../crates/agent-rag", features = ["lancedb-store"] }

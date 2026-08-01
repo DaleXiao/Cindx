@@ -24,11 +24,11 @@ pub(crate) fn wait_for_foreground_agent_idle(
 }
 
 pub(crate) fn foreground_agent_active(state: &tauri::State<'_, AppState>) -> Result<bool, String> {
-    Ok(!state
+    state
         .agent_run_controls
-        .lock()
-        .map_err(|error| format!("agent run control lock poisoned: {error}"))?
-        .is_empty())
+        .is_empty()
+        .map(|empty| !empty)
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn foreground_agent_should_preempt(state: &tauri::State<'_, AppState>) -> bool {

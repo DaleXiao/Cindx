@@ -7,12 +7,13 @@ pub(super) struct SessionTitleTurn {
     pub(super) answer: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct SessionTitleRefinement {
     session_id: String,
     turns: Vec<SessionTitleTurn>,
     expected_title: String,
     expected_updated_at_ms: u64,
+    _lease: agent_harness::ExclusiveKeyLease,
 }
 
 fn completed_session_title_turns(messages: &[ChatMessageView]) -> Vec<SessionTitleTurn> {
@@ -64,13 +65,13 @@ pub(super) fn persist_completed_conversation_title(
         return Ok(None);
     }
     let turns = meaningful_turns.iter().take(2).cloned().collect::<Vec<_>>();
-    let mut refinement_sessions = state
+    let Some(refinement_lease) = state
         .session_title_refinement_sessions
-        .lock()
-        .map_err(|error| format!("session title refinement lock poisoned: {error}"))?;
-    if refinement_sessions.contains(session_id) {
+        .try_acquire(session_id)
+        .map_err(|error| error.to_string())?
+    else {
         return Ok(None);
-    }
+    };
     let mut config = state
         .project_session_config
         .lock()
@@ -103,12 +104,12 @@ pub(super) fn persist_completed_conversation_title(
         project.updated_at_ms = expected_updated_at_ms;
     }
     commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
-    refinement_sessions.insert(session_id.to_string());
     Ok(Some(SessionTitleRefinement {
         session_id: session_id.to_string(),
         turns,
         expected_title,
         expected_updated_at_ms,
+        _lease: refinement_lease,
     }))
 }
 
@@ -160,9 +161,6 @@ pub(super) fn spawn_semantic_session_title_refinement(
             Ok(true)
         })();
 
-        if let Ok(mut sessions) = state.session_title_refinement_sessions.lock() {
-            sessions.remove(&refinement.session_id);
-        }
         match result {
             Ok(true) => {
                 app.emit_session_title_updated(refinement.session_id);
