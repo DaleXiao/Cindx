@@ -1,7 +1,7 @@
 use agent_core::{decode_event_type, DecodedEventType, Event, EventKind, EventTypeV1};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentRunStatus {
+pub enum AgentRunStatus {
     Idle,
     Running,
     WaitingForPermission,
@@ -12,7 +12,7 @@ pub(crate) enum AgentRunStatus {
 }
 
 impl AgentRunStatus {
-    pub(crate) fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Idle => "idle",
             Self::Running => "running",
@@ -24,7 +24,7 @@ impl AgentRunStatus {
         }
     }
 
-    pub(crate) fn parse(value: &str) -> Self {
+    pub fn parse(value: &str) -> Self {
         match value {
             "running" => Self::Running,
             "waiting_for_permission" => Self::WaitingForPermission,
@@ -36,15 +36,15 @@ impl AgentRunStatus {
         }
     }
 
-    pub(crate) fn is_terminal(self) -> bool {
+    pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
 
-    pub(crate) fn can_cancel(self) -> bool {
+    pub fn can_cancel(self) -> bool {
         matches!(self, Self::Running | Self::WaitingForPermission)
     }
 
-    pub(crate) fn can_retry(self, has_user_prompt: bool) -> bool {
+    pub fn can_retry(self, has_user_prompt: bool) -> bool {
         has_user_prompt
             && matches!(
                 self,
@@ -52,15 +52,11 @@ impl AgentRunStatus {
             )
     }
 
-    pub(crate) fn can_continue(self, partial_completion: bool) -> bool {
+    pub fn can_continue(self, partial_completion: bool) -> bool {
         self == Self::Paused || (self == Self::Completed && partial_completion)
     }
 
-    pub(crate) fn from_events(
-        events: &[Event],
-        has_pending_approval: bool,
-        has_error: bool,
-    ) -> Self {
+    pub fn from_events(events: &[Event], has_pending_approval: bool, has_error: bool) -> Self {
         if has_error {
             return Self::Failed;
         }
@@ -95,7 +91,7 @@ impl AgentRunStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentRunEvent {
+pub enum AgentRunEvent {
     Started,
     RetryStarted,
     WaitingForPermission,
@@ -107,11 +103,11 @@ pub(crate) enum AgentRunEvent {
 }
 
 impl AgentRunEvent {
-    pub(crate) fn from_event(event: &Event) -> Option<Self> {
+    pub fn from_event(event: &Event) -> Option<Self> {
         Self::try_from_event(event).ok().flatten()
     }
 
-    pub(crate) fn try_from_event(event: &Event) -> Result<Option<Self>, ()> {
+    pub fn try_from_event(event: &Event) -> Result<Option<Self>, ()> {
         if !matches!(&event.kind, EventKind::TaskStatusChanged | EventKind::Error) {
             return Ok(None);
         }
@@ -149,7 +145,7 @@ impl AgentRunEvent {
         Self::from_summary(&event.summary)
     }
 
-    pub(crate) fn from_summary(summary: &str) -> Option<Self> {
+    pub fn from_summary(summary: &str) -> Option<Self> {
         match summary {
             "Agent task started" => Some(Self::Started),
             "Agent task retry started" => Some(Self::RetryStarted),
@@ -163,7 +159,7 @@ impl AgentRunEvent {
         }
     }
 
-    pub(crate) fn status(self) -> AgentRunStatus {
+    pub fn status(self) -> AgentRunStatus {
         match self {
             Self::Started | Self::RetryStarted | Self::ResumedAfterPermission => {
                 AgentRunStatus::Running
@@ -176,7 +172,7 @@ impl AgentRunEvent {
         }
     }
 
-    pub(crate) fn is_start(self) -> bool {
+    pub fn is_start(self) -> bool {
         matches!(self, Self::Started | Self::RetryStarted)
     }
 }
@@ -197,7 +193,7 @@ fn is_agent_model_turn_event(
     }
 }
 
-pub(crate) fn is_agent_model_turn_started(event: &Event) -> bool {
+pub fn is_agent_model_turn_started(event: &Event) -> bool {
     is_agent_model_turn_event(
         event,
         EventKind::ModelRequestStarted,
@@ -206,7 +202,7 @@ pub(crate) fn is_agent_model_turn_started(event: &Event) -> bool {
     )
 }
 
-pub(crate) fn is_agent_model_turn_finished(event: &Event) -> bool {
+pub fn is_agent_model_turn_finished(event: &Event) -> bool {
     is_agent_model_turn_event(
         event,
         EventKind::ModelRequestFinished,
@@ -407,5 +403,4 @@ mod tests {
         assert!(!AgentRunStatus::Failed.can_retry(false));
         assert!(AgentRunStatus::Completed.is_terminal());
     }
-
 }

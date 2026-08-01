@@ -45,7 +45,9 @@ pub(crate) fn finalize_agent_completion(
         true,
     );
 
-    let (final_answer, synthesized) = if let Some(collaboration) = collaboration {
+    let (mut final_answer, synthesized, delivery_request_id) = if let Some(collaboration) =
+        collaboration
+    {
         let synthesis_objective = effective_agent_objective(run_context, prompt);
         match synthesize_agent_answer(
             app,
@@ -58,7 +60,7 @@ pub(crate) fn finalize_agent_completion(
             collaboration,
             cancellation,
         ) {
-            Ok(answer) => (answer, true),
+            Ok(answer) => (answer.content, true, answer.stream_request_id),
             Err(_)
                 if !cancellation.execution_epoch_lease_is_current(epoch_lease)
                     && !agent_run_should_stop(cancellation) =>
@@ -83,14 +85,14 @@ pub(crate) fn finalize_agent_completion(
             Err(_) => {
                 emit_agent_stream_delta(app, request_id, session_id, "", false, true, None);
                 emit_agent_stream_delta(app, request_id, session_id, &answer, false, false, None);
-                (answer.clone(), false)
+                (answer.clone(), false, request_id.to_string())
             }
         }
     } else {
         if !streamed_output && !answer.trim().is_empty() {
             emit_agent_stream_delta(app, request_id, session_id, &answer, false, false, None);
         }
-        (answer.clone(), false)
+        (answer.clone(), false, request_id.to_string())
     };
 
     cancellation.record_best_known_result_at(
@@ -118,6 +120,30 @@ pub(crate) fn finalize_agent_completion(
         tool_evidence.verified_postcondition_count > 0,
         true,
     );
+    let terminal_selection = cancellation
+        .best_known_result()
+        .filter(|candidate| candidate.deliverable);
+    let terminal_selection_override = terminal_selection
+        .as_ref()
+        .is_some_and(|candidate| candidate.content.trim() != final_answer.trim());
+    let terminal_selected_stage = terminal_selection
+        .as_ref()
+        .map(|candidate| candidate.stage.clone())
+        .unwrap_or_else(|| "executor".to_string());
+    let persist_selected_terminal_message = synthesized || terminal_selection_override;
+    if let Some(selected) = terminal_selection.filter(|_| terminal_selection_override) {
+        final_answer = selected.content;
+        emit_agent_stream_delta(app, &delivery_request_id, session_id, "", false, true, None);
+        emit_agent_stream_delta(
+            app,
+            &delivery_request_id,
+            session_id,
+            &final_answer,
+            false,
+            false,
+            None,
+        );
+    }
 
     let completion_progress = cancellation.progress();
     let completion_resources = cancellation.resource_usage();
@@ -130,7 +156,7 @@ pub(crate) fn finalize_agent_completion(
             .map_err(|error| format!("store lock poisoned: {error}"))?;
         store
             .with_immediate_transaction(|store| {
-                if synthesized {
+                if persist_selected_terminal_message {
                     append_message_event_with_metadata(
                         store,
                         &runtime.task_id,
@@ -138,10 +164,26 @@ pub(crate) fn finalize_agent_completion(
                         &final_answer,
                         metadata_with_context(
                             [
-                                ("collaboration_final".to_string(), "true".to_string()),
+                                (
+                                    "collaboration_final".to_string(),
+                                    collaboration.is_some().to_string(),
+                                ),
+                                ("terminal_selected".to_string(), "true".to_string()),
                                 (
                                     "model".to_string(),
-                                    config.model_for_role(&ModelRole::Summarizer),
+                                    if terminal_selection_override {
+                                        "result-frontier".to_string()
+                                    } else {
+                                        config.model_for_role(&ModelRole::Summarizer)
+                                    },
+                                ),
+                                (
+                                    "terminal_selected_stage".to_string(),
+                                    terminal_selected_stage.clone(),
+                                ),
+                                (
+                                    "terminal_selection_override".to_string(),
+                                    terminal_selection_override.to_string(),
                                 ),
                             ]
                             .into_iter()
@@ -178,6 +220,14 @@ pub(crate) fn finalize_agent_completion(
                     (
                         "collaboration_synthesized".to_string(),
                         synthesized.to_string(),
+                    ),
+                    (
+                        "terminal_selected_stage".to_string(),
+                        terminal_selected_stage.clone(),
+                    ),
+                    (
+                        "terminal_selection_override".to_string(),
+                        terminal_selection_override.to_string(),
                     ),
                     (
                         "elapsed_ms".to_string(),
@@ -306,7 +356,7 @@ pub(crate) fn finalize_agent_completion(
     let completed_state = match terminal_commit {
         agent_runtime::RunTerminalCommit::Committed(state) => state,
         agent_runtime::RunTerminalCommit::RestartAfterSteer => {
-            emit_agent_stream_delta(app, request_id, session_id, "", false, true, None);
+            emit_agent_stream_delta(app, &delivery_request_id, session_id, "", false, true, None);
             return Ok(AgentCompletionOutcome::RestartAfterSteer);
         }
         agent_runtime::RunTerminalCommit::Stopped(_) => {
@@ -334,7 +384,7 @@ pub(crate) fn finalize_agent_completion(
     if let Err(error) = clear_suspended_agent_run_for_context(state, run_context) {
         eprintln!("completed agent suspended-run cleanup unavailable: {error}");
     }
-    emit_agent_stream_delta(app, request_id, session_id, "", true, false, None);
+    emit_agent_stream_delta(app, &delivery_request_id, session_id, "", true, false, None);
     crate::semantic_memory_worker::schedule_semantic_memory_refresh(
         app.clone(),
         workspace_root.to_path_buf(),

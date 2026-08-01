@@ -187,7 +187,7 @@ pub(crate) fn synthesize_agent_answer(
     run_context: &Metadata,
     collaboration: &AgentCollaboration,
     cancellation: &Arc<AgentRunControl>,
-) -> Result<String, String> {
+) -> Result<SynthesizedAgentAnswer, String> {
     let evidence = runtime
         .messages
         .iter()
@@ -298,8 +298,16 @@ pub(crate) fn synthesize_agent_answer(
         emit_agent_stream_delta(app, &stream_request_id, session_id, "", false, true, None);
         Err("synthesizer returned an empty answer".to_string())
     } else {
-        Ok(answer)
+        Ok(SynthesizedAgentAnswer {
+            content: answer,
+            stream_request_id,
+        })
     }
+}
+
+pub(crate) struct SynthesizedAgentAnswer {
+    pub(crate) content: String,
+    pub(crate) stream_request_id: String,
 }
 
 pub(crate) fn collaboration_result_frontier_brief(

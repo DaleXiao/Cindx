@@ -438,7 +438,14 @@ const permissionServiceSource = read(
   "apps/desktop/src-tauri/src/permission_service.rs"
 );
 const queueServiceSource = read("apps/desktop/src-tauri/src/queue_service.rs");
-const runLifecycleSource = read("apps/desktop/src-tauri/src/run_lifecycle.rs");
+const agentRunEngineSource = read(
+  "apps/desktop/src-tauri/src/agent_run_engine.rs"
+);
+const agentCompletionRuntimeSource = read(
+  "apps/desktop/src-tauri/src/agent_completion_runtime.rs"
+);
+const runExecutionSource = read("crates/agent-application/src/run_execution.rs");
+const runLifecycleSource = read("crates/agent-application/src/run_lifecycle.rs");
 const sessionProjectionSource = read(
   "apps/desktop/src-tauri/src/session_projection.rs"
 );
@@ -1692,7 +1699,7 @@ assert(
     rustLib.includes("mod collaboration_service") &&
     rustLib.includes("mod permission_service") &&
     rustLib.includes("mod queue_service") &&
-    rustLib.includes("mod run_lifecycle") &&
+    !rustLib.includes("mod run_lifecycle") &&
     rustLib.includes("mod session_projection") &&
     queueServiceSource.includes("struct QueuedAgentMessagePayload") &&
     runLifecycleSource.includes("enum AgentRunStatus") &&
@@ -1704,6 +1711,16 @@ assert(
     appSource.includes("mergeAgentStateDelta") &&
     appSource.includes("getAgentStateDelta(sessionId"),
   "Active session polling must use indexed event deltas and a persistent read model"
+);
+assert(
+  runExecutionSource.includes("pub trait AgentRunExecutor") &&
+    runExecutionSource.includes("pub fn execute_agent_run") &&
+    agentRunEngineSource.includes("execute_agent_run(&mut executor, prepared)") &&
+    !agentRunEngineSource.includes("loop {\n            let agent_model") &&
+    agentCompletionRuntimeSource.includes("delivery_request_id") &&
+    agentCompletionRuntimeSource.includes("terminal_selection_override") &&
+    agentCompletionRuntimeSource.includes("persist_selected_terminal_message"),
+  "Production execution must keep one application run driver and one terminal delivery stream"
 );
 assert(
   agentStorageSource.includes("pragma journal_mode = WAL") &&
@@ -3889,7 +3906,7 @@ assert(
     rustLib.includes("let completed_state = match terminal_commit") &&
     rustLib.includes("RunTerminalCommit::Committed(state) => state") &&
     rustLib.includes(
-      'emit_agent_stream_delta(app, request_id, session_id, "", true, false, None);'
+      'emit_agent_stream_delta(app, &delivery_request_id, session_id, "", true, false, None);'
     ) &&
     rustLib.includes("Ok(AgentCompletionOutcome::Completed(completed_state))") &&
     /AgentCompletionOutcome::Completed\(agent_state\)\s*=>\s*\{\s*return Ok\(AgentLoopExecutionOutcome::Finished\(agent_state\)\)/.test(
@@ -4001,8 +4018,8 @@ assert(
     benchmarkBaseline.minimum_auto_contract_pass_rate === 1 &&
     evaluationLabSource.includes("Cindx agent benchmark") &&
     evaluationLabSource.includes("quality=not_observed") &&
-    agentEvaluationDoc.includes("Versioned Contract Suite") &&
-    agentEvaluationDoc.includes("Real Run Observations") &&
+    agentEvaluationDoc.includes("## Evidence Levels") &&
+    agentEvaluationDoc.includes("## Current Real-World Findings") &&
     qualityGateManifest.schema === "cindx.quality-gates.v1" &&
     qualityGateManifest.profiles["ci-contract"].includes("routing-contract") &&
     qualityGateRunner.includes("cindx.quality-gate-report.v1") &&
@@ -4128,7 +4145,7 @@ assert(
     memoryEvaluationLabSource.includes("independently_verify_requirement") &&
     memoryEvaluationLabSource.includes("semantic_laundering_failures") &&
     qualityGateManifest.profiles["ci-contract"].includes("memory-contract") &&
-    agentEvaluationDoc.includes("Project Memory Gate"),
+    qualityGateDoc.includes("Memory recall is 100% at top-1 and recall@3"),
   "Project memory must have a versioned deterministic recall and trust-boundary gate"
 );
 assert(

@@ -41,9 +41,14 @@ A new run currently follows this sequence:
    in parallel; graph walk expands from selected seeds.
 7. A workflow decision can run a bounded task graph and inject its grounded
    handoff into the interactive loop. A direct decision skips collaboration.
-8. `AgentKernel` alternates model turns, admitted tool batches, observations,
-   contract checks, and terminal delivery until completion or typed suspension.
-9. The completion transaction persists the result, artifacts, lifecycle state,
+8. `agent-application` owns the only run/reprepare driver. Each prepared epoch
+   uses `AgentKernel` for model turns, admitted tool batches, observations,
+   contract checks, and terminal delivery. A committed steer returns through
+   the same driver before another epoch can begin.
+9. Terminal delivery selects the strongest verified deliverable known to the
+   run; a later unverified synthesis cannot replace it. The stream completion
+   event belongs to the same request stream that delivered the selected text.
+10. The completion transaction persists the result, artifacts, lifecycle state,
    learning evidence, and cleanup. Semantic memory refresh and prompt evolution
    are background work.
 
@@ -109,8 +114,9 @@ Therefore the current claim is:
   desktop integration layer.
 - `agent-rag` and parts of the desktop adapter remain large modules. Structure
   checks prevent some regressions but do not prove ideal boundaries.
-- `agent-application` is currently a thin application-level boundary rather
-  than the sole owner of all use cases.
+- `agent-application` owns the portable run/reprepare and lifecycle contracts,
+  but several use cases and all product side-effect adapters still live in the
+  desktop composition root.
 - Provider-backed real-world coverage is small and read-only. Code editing,
   browser/computer tasks, interruption/resume, steering, and cross-session
   memory still need a matched repeated external-effect suite.

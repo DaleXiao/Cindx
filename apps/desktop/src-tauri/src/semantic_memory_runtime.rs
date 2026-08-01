@@ -7,8 +7,8 @@ use crate::memory_runtime::{
     schedule_project_memory_vector_refresh,
 };
 use crate::project_session_persistence::metadata_with_context;
-use crate::run_lifecycle::{AgentRunEvent, AgentRunStatus};
 use crate::runtime_values::phase16_task_id;
+use agent_application::{AgentRunEvent, AgentRunStatus};
 use agent_core::{Event, EventKind, Message, MessageRole, Metadata, ModelRole};
 use agent_memory::{
     parse_semantic_memory_batch, semantic_memory_extraction_prompt, validate_semantic_memory_batch,

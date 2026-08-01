@@ -10,7 +10,9 @@ multiple agents do not infer different systems from historical reports.
 React UI
   -> typed Tauri commands and event subscriptions
 Tauri desktop adapter
-  -> application/session lifecycle, persistence, provider and tool side effects
+  -> persistence, provider and tool side effects
+Application layer
+  -> run/reprepare driver, typed run lifecycle, session projections
 Agent runtime + harness
   -> one interactive loop, run control, budgets, context, cancellation
 Orchestrator
@@ -45,11 +47,13 @@ run_agent_task
        -> select skills and tools
        -> optional bounded workflow/task graph
        -> append grounded workflow handoff
-  -> continue_agent_loop
-       -> model request
-       -> admitted tool batch
-       -> permission suspension/resume when needed
-       -> observations and contract checks
+  -> execute_agent_run
+       -> execute one prepared loop epoch
+            -> model request
+            -> admitted tool batch
+            -> permission suspension/resume when needed
+            -> observations and contract checks
+       -> reprepare after a committed steer, or finish at a typed control boundary
        -> terminal result or typed interruption
   -> completion transaction
        -> events, messages, artifacts, lifecycle, learning evidence, cleanup
@@ -75,7 +79,7 @@ the same run-control and lifecycle vocabulary. They are not independent loops.
 | `tools` | Built-in tool specifications, validation, local/delegated execution contracts | Permission decisions or UI |
 | `agent-mcp` | MCP transports, catalog cache, and tool adaptation | Permission bypass or agent policy |
 | `agent-skills` | Skill discovery, trust, selection, and loading | Privileged script execution |
-| `agent-application` | Thin application projections and session-level contracts | The complete desktop use-case layer today |
+| `agent-application` | Run/reprepare driver, typed run lifecycle, application projections, and session-level contracts | Provider construction, Tauri state, persistence, or tool side effects |
 | `orchestrator-eval` | Non-shipping benchmark and evaluation harnesses | Product runtime behavior |
 
 The root workspace excludes `orchestrator-eval` from default members so the
@@ -92,8 +96,8 @@ touch Tauri or product state:
 - Permission prompts, scoped session-grant lookup, and continuation.
 - SQLite-backed project/session projections and runtime snapshots.
 - Browser/computer sidecar process integration.
-- Conductor/workflow adapters that translate product state into portable
-  runtime and orchestrator contracts.
+- Execution adapters that translate product state into the portable
+  application driver, runtime, and orchestrator contracts.
 - Background memory refresh, session-title refinement, and prompt evaluation.
 
 This concentration is a known structural limit. New portable policy must not be

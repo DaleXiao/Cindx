@@ -145,7 +145,7 @@ pub(crate) use crate::queue_service::{
     PendingQueuedAgentMessage, QueuedAgentMessageActionReceipt, QueuedAgentMessagePayload,
     QueuedAgentMessageReceipt, QueuedAgentMessageView,
 };
-pub(crate) use crate::run_lifecycle::{AgentRunEvent, AgentRunStatus};
+pub(crate) use agent_application::{AgentRunEvent, AgentRunStatus};
 pub(crate) use crate::schedule::{
     initial_next_run_at_ms, next_occurrence_after_ms, normalized_weekly_days,
     timestamp_ms_from_local, ScheduleCadence, ScheduleConfig, ScheduleRecord, ScheduleRunRecord,

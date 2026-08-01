@@ -181,14 +181,14 @@ pub(super) fn effective_context_usage_from_event(event: &Event) -> Option<(u64, 
         return Some((tokens, estimated));
     }
 
-    if crate::run_lifecycle::is_agent_model_turn_started(event) {
+    if agent_application::is_agent_model_turn_started(event) {
         return event
             .metadata
             .get("context_projected_tokens")
             .and_then(|value| value.parse().ok())
             .map(|tokens| (tokens, true));
     }
-    if crate::run_lifecycle::is_agent_model_turn_finished(event) {
+    if agent_application::is_agent_model_turn_finished(event) {
         return event
             .metadata
             .get("prompt_tokens")

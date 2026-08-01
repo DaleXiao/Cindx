@@ -6,10 +6,10 @@ use crate::{
         seed_legacy_memory_quarantine,
     },
     memory_record_persistence_runtime::replay_project_memory_record,
-    run_lifecycle::AgentRunEvent,
     runtime_constants::{AGENT_MEMORY_MAX_RECORDS, AGENT_MEMORY_READ_MODEL_NAMESPACE},
     runtime_values::phase16_task_id,
 };
+use agent_application::AgentRunEvent;
 use agent_core::{Event, EventKind, EVENT_TYPE_METADATA_KEY};
 use agent_memory::{
     extract_durable_memories, is_memory_user_confirmation_event, merge_memory_records, MemoryLedger,

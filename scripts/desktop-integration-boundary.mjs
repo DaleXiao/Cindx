@@ -207,7 +207,7 @@ export const inspectDesktopIntegrationBoundary = (root) => {
   );
   const desktopPrelude = read("apps/desktop/src-tauri/src/desktop_prelude.rs");
   const appState = read("apps/desktop/src-tauri/src/app_state.rs");
-  const runLifecycle = read("apps/desktop/src-tauri/src/run_lifecycle.rs");
+  const runLifecycle = read("crates/agent-application/src/run_lifecycle.rs");
   const desktopCargo = read("apps/desktop/src-tauri/Cargo.toml");
   const workspaceCargo = read("Cargo.toml");
   const workspaceDefaultMembers =

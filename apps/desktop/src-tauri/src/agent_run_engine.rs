@@ -9,6 +9,7 @@ use crate::collaboration_service::AgentCollaboration;
 use crate::configuration_models::{agent_model_for_run, AgentEffort, ProviderConfig};
 use crate::runtime_constants::AGENT_MODEL_RECOVERY_WINDOW_SECONDS;
 use crate::view_models::AgentState;
+use agent_application::{execute_agent_run, AgentRunEpoch, AgentRunExecutor, AgentRunPreparation};
 use agent_core::{Message, Metadata, ModelRole, TaskId};
 use agent_runtime::{AgentLoopState, AgentRunControl, RunStageClass};
 use model_provider::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
@@ -79,97 +80,129 @@ impl<'app, 'state> AgentExecutionService<'app, 'state> {
         effort: AgentEffort,
         cancellation: &Arc<AgentRunControl>,
     ) -> Result<AgentState, String> {
-        let base_run_context = prepared.base_run_context;
-        let mut run_context = prepared.run_context;
-        let mut runtime = prepared.runtime;
-        let mut prompt = prepared.prompt;
-        let mut collaboration = prepared.collaboration;
+        let mut executor = DesktopAgentRunExecutor {
+            app: self.app,
+            state: self.state,
+            config,
+            workspace_root,
+            effort,
+            cancellation,
+            base_run_context: prepared.base_run_context.clone(),
+        };
+        execute_agent_run(&mut executor, prepared)
+    }
+}
 
-        loop {
-            let agent_model = agent_model_for_run(config, &run_context);
-            let provider_timeout = if collaboration.is_some() {
-                cancellation
-                    .stage_model_call_timeout_with_recovery(
-                        RunStageClass::Finalizer,
-                        1,
-                        Duration::from_secs(AGENT_MODEL_RECOVERY_WINDOW_SECONDS),
-                    )
-                    .as_secs()
-                    .max(1)
-            } else {
-                cancellation.model_call_timeout_seconds()
-            };
-            let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
-                base_url: config.base_url.clone(),
-                api_key: config.api_key.clone(),
-                model: agent_model.clone(),
-                embedding_model: config.model_for_role(&ModelRole::Embedder),
-                timeout_seconds: provider_timeout,
-            });
+struct AgentRunReprepare {
+    runtime: AgentLoopState,
+    prompt: String,
+}
 
-            match execute_agent_loop_epoch_with_provider(
-                self.app,
-                self.state,
-                config,
-                workspace_root,
-                runtime,
-                prompt,
-                run_context,
-                collaboration.as_ref(),
-                cancellation,
-                &provider,
-                &agent_model,
-            )? {
-                AgentLoopExecutionOutcome::Finished(agent_state) => return Ok(agent_state),
-                AgentLoopExecutionOutcome::Reprepare {
-                    runtime: steered_runtime,
-                    prompt: steered_prompt,
-                } => {
-                    let task_id = steered_runtime.task_id.clone();
-                    let next = prepare_agent_execution(
-                        self.app,
-                        self.state,
-                        config,
-                        &task_id,
-                        workspace_root,
-                        base_run_context.clone(),
-                        steered_runtime,
-                        steered_prompt,
-                        None,
-                        effort,
-                        cancellation,
-                    );
-                    let next = match next {
-                        Ok(prepared) => prepared,
-                        Err(AgentRunPreparationError::ControlStop(run_context)) => {
-                            return finish_agent_run_for_control_stop_with_task_state(
-                                self.app,
-                                self.state,
-                                &run_context,
-                                cancellation,
-                                None,
-                            )
-                        }
-                        Err(AgentRunPreparationError::Collaboration { error, run_context }) => {
-                            return agent_state_with_error_in_context(
-                                self.state,
-                                &run_context,
-                                format!("Collaboration failed: {error}"),
-                            )
-                        }
-                        Err(AgentRunPreparationError::Runtime { error, run_context }) => {
-                            return agent_state_with_error_in_context(
-                                self.state,
-                                &run_context,
-                                error,
-                            )
-                        }
-                    };
-                    run_context = next.run_context;
-                    runtime = next.runtime;
-                    prompt = next.prompt;
-                    collaboration = next.collaboration;
-                }
+struct DesktopAgentRunExecutor<'a, 'state> {
+    app: &'a tauri::AppHandle,
+    state: &'a tauri::State<'state, AppState>,
+    config: &'a ProviderConfig,
+    workspace_root: &'a Path,
+    effort: AgentEffort,
+    cancellation: &'a Arc<AgentRunControl>,
+    base_run_context: Metadata,
+}
+
+impl AgentRunExecutor for DesktopAgentRunExecutor<'_, '_> {
+    type Prepared = PreparedAgentExecution;
+    type Reprepare = AgentRunReprepare;
+    type Output = AgentState;
+    type Error = String;
+
+    fn execute_epoch(
+        &mut self,
+        prepared: Self::Prepared,
+    ) -> Result<AgentRunEpoch<Self::Reprepare, Self::Output>, Self::Error> {
+        let agent_model = agent_model_for_run(self.config, &prepared.run_context);
+        let provider_timeout = if prepared.collaboration.is_some() {
+            self.cancellation
+                .stage_model_call_timeout_with_recovery(
+                    RunStageClass::Finalizer,
+                    1,
+                    Duration::from_secs(AGENT_MODEL_RECOVERY_WINDOW_SECONDS),
+                )
+                .as_secs()
+                .max(1)
+        } else {
+            self.cancellation.model_call_timeout_seconds()
+        };
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url: self.config.base_url.clone(),
+            api_key: self.config.api_key.clone(),
+            model: agent_model.clone(),
+            embedding_model: self.config.model_for_role(&ModelRole::Embedder),
+            timeout_seconds: provider_timeout,
+        });
+        match execute_agent_loop_epoch_with_provider(
+            self.app,
+            self.state,
+            self.config,
+            self.workspace_root,
+            prepared.runtime,
+            prepared.prompt,
+            prepared.run_context,
+            prepared.collaboration.as_ref(),
+            self.cancellation,
+            &provider,
+            &agent_model,
+        )? {
+            AgentLoopExecutionOutcome::Finished(agent_state) => {
+                Ok(AgentRunEpoch::Finished(agent_state))
+            }
+            AgentLoopExecutionOutcome::Reprepare { runtime, prompt } => {
+                Ok(AgentRunEpoch::Reprepare(AgentRunReprepare {
+                    runtime,
+                    prompt,
+                }))
+            }
+        }
+    }
+
+    fn reprepare(
+        &mut self,
+        handoff: Self::Reprepare,
+    ) -> Result<AgentRunPreparation<Self::Prepared, Self::Output>, Self::Error> {
+        let task_id = handoff.runtime.task_id.clone();
+        match prepare_agent_execution(
+            self.app,
+            self.state,
+            self.config,
+            &task_id,
+            self.workspace_root,
+            self.base_run_context.clone(),
+            handoff.runtime,
+            handoff.prompt,
+            None,
+            self.effort,
+            self.cancellation,
+        ) {
+            Ok(prepared) => Ok(AgentRunPreparation::Prepared(prepared)),
+            Err(AgentRunPreparationError::ControlStop(run_context)) => {
+                finish_agent_run_for_control_stop_with_task_state(
+                    self.app,
+                    self.state,
+                    &run_context,
+                    self.cancellation,
+                    None,
+                )
+                .map(AgentRunPreparation::Finished)
+            }
+            Err(AgentRunPreparationError::Collaboration { error, run_context }) => {
+                agent_state_with_error_in_context(
+                    self.state,
+                    &run_context,
+                    format!("Collaboration failed: {error}"),
+                )
+                .map(AgentRunPreparation::Finished)
+            }
+            Err(AgentRunPreparationError::Runtime { error, run_context }) => {
+                agent_state_with_error_in_context(self.state, &run_context, error)
+                    .map(AgentRunPreparation::Finished)
             }
         }
     }
