@@ -68,6 +68,17 @@ scripts/check-desktop.sh
 Frontend and Tauri checks require their locked dependencies to be installed.
 See [QUALITY_GATES.md](QUALITY_GATES.md) for larger profiles.
 
+For a bounded Rust-only desktop type check while frontend dependencies are not
+installed, run:
+
+```sh
+scripts/check-desktop-rust-light.sh
+```
+
+This supplemental check omits bundle resources and the optional LanceDB
+implementation. Normal desktop, CI, and release builds enable LanceDB by
+default; only those full gates establish shipping compatibility.
+
 ## Development
 
 Start the desktop development process through the repository wrapper:

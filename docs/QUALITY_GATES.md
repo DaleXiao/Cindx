@@ -26,6 +26,12 @@ does not claim Fugu Ultra equivalence.
 - `full`: all shipping deterministic gates, sidecars, frontend production build,
   and Rust tests; heavier same-machine diagnostics remain in `performance`.
 
+`scripts/check-desktop-rust-light.sh` is a supplemental compile check, not a
+quality-gate profile. It deliberately avoids frontend bundle resources and the
+heavy LanceDB dependency graph so Rust adapter edits can receive fast type
+feedback. It does not validate vector persistence, frontend behavior, or a
+shipping bundle; the default-feature full and release gates remain required.
+
 Run a profile and keep its machine-readable report:
 
 ```bash

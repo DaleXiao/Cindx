@@ -61,6 +61,7 @@ static LANCEDB_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static LANCEDB_PATH_LOCKS: OnceLock<Mutex<BTreeMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
 
 pub const RAG_INDEX_CANCELLED: &str = "RAG indexing cancelled";
+pub const LANCEDB_STORE_DISABLED: &str = "LanceDB support is not compiled";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RagError {
@@ -177,12 +178,25 @@ pub fn lancedb_index_exists(database_path: impl AsRef<Path>) -> bool {
         .exists()
 }
 
+#[cfg(not(feature = "lancedb-store"))]
+pub fn lancedb_index_exists(_database_path: impl AsRef<Path>) -> bool {
+    false
+}
+
 #[cfg(feature = "lancedb-store")]
 pub fn replace_lancedb_index(
     database_path: impl AsRef<Path>,
     index: &RagIndex,
 ) -> Result<usize, RagError> {
     replace_lancedb_index_cancellable(database_path, index, || false)
+}
+
+#[cfg(not(feature = "lancedb-store"))]
+pub fn replace_lancedb_index(
+    _database_path: impl AsRef<Path>,
+    _index: &RagIndex,
+) -> Result<usize, RagError> {
+    Err(RagError::new(LANCEDB_STORE_DISABLED))
 }
 
 #[cfg(feature = "lancedb-store")]
@@ -301,6 +315,18 @@ pub fn replace_lancedb_index_cancellable(
     Ok(row_count)
 }
 
+#[cfg(not(feature = "lancedb-store"))]
+pub fn replace_lancedb_index_cancellable(
+    _database_path: impl AsRef<Path>,
+    _index: &RagIndex,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<usize, RagError> {
+    if should_cancel() {
+        return Err(RagError::new(RAG_INDEX_CANCELLED));
+    }
+    Err(RagError::new(LANCEDB_STORE_DISABLED))
+}
+
 #[cfg(feature = "lancedb-store")]
 pub fn search_lancedb_index(
     database_path: impl AsRef<Path>,
@@ -346,6 +372,15 @@ pub fn search_lancedb_index(
             .map_err(|error| RagError::new(format!("failed to collect LanceDB rows: {error}")))?;
         lancedb_results_from_batches(&batches)
     })
+}
+
+#[cfg(not(feature = "lancedb-store"))]
+pub fn search_lancedb_index(
+    _database_path: impl AsRef<Path>,
+    _query_embedding: &[f32],
+    _limit: usize,
+) -> Result<Vec<RagSearchResult>, RagError> {
+    Err(RagError::new(LANCEDB_STORE_DISABLED))
 }
 
 #[cfg(feature = "lancedb-store")]
@@ -2910,6 +2945,45 @@ mod tests {
             fs::read_to_string(output_path).expect("previous export should remain"),
             "stable export"
         );
+    }
+
+    #[cfg(not(feature = "lancedb-store"))]
+    #[test]
+    fn disabled_lancedb_store_fails_closed_without_creating_state() {
+        let root = temp_workspace();
+        fs::write(root.join("a.md"), "disabled lancedb store").expect("file should write");
+        let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+        let database_path = root.join(".cindx").join("lancedb");
+
+        assert!(!lancedb_index_exists(&database_path));
+        assert_eq!(
+            replace_lancedb_index(&database_path, &index)
+                .expect_err("disabled store must reject persistence")
+                .message,
+            LANCEDB_STORE_DISABLED
+        );
+        assert_eq!(
+            search_lancedb_index(&database_path, &index.chunks[0].embedding, 1)
+                .expect_err("disabled store must reject search")
+                .message,
+            LANCEDB_STORE_DISABLED
+        );
+        assert!(!database_path.exists());
+    }
+
+    #[cfg(not(feature = "lancedb-store"))]
+    #[test]
+    fn disabled_lancedb_store_preserves_cancellation_semantics() {
+        let root = temp_workspace();
+        fs::write(root.join("a.md"), "cancel disabled lancedb store").expect("file should write");
+        let index = index_workspace(&root, IndexOptions::default()).expect("index should build");
+        let database_path = root.join(".cindx").join("lancedb");
+
+        let error = replace_lancedb_index_cancellable(&database_path, &index, || true)
+            .expect_err("cancellation must remain observable");
+
+        assert_eq!(error.message, RAG_INDEX_CANCELLED);
+        assert!(!database_path.exists());
     }
 
     #[cfg(feature = "lancedb-store")]
