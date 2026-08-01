@@ -1,6 +1,6 @@
 # Current Product Baseline
 
-Current application version: `0.1.81`
+Current application version: `0.1.82`
 
 Last code-fact review: `2026-08-01`
 
@@ -81,13 +81,32 @@ completed evidence, evaluates candidates against paired and holdout gates, and
 can promote a frozen profile for future runs. It cannot mutate an in-flight
 transcript, tool result, permission, or budget.
 
+Pro also has an Auto-to-Pro transfer track. A completed Auto workflow becomes a
+teacher case only when its terminal evidence is positive, independently scored,
+usage-complete, bound to the final steer epoch, free of denied permissions and
+safety violations, and reconstructable from a finalized workflow checkpoint.
+The archived case contains redacted bounded outputs and immutable fingerprints;
+it is never accepted from a model claim alone.
+
+In background evaluation, current and challenger Pro profiles execute the same
+objective and are compared with the archived Auto result by an independent,
+position-balanced reviewer. Transfer evidence has a separate dataset identity
+and cannot count as ordinary same-effort GEPA evidence. A Pro profile can be
+promoted only when both the ordinary paired/holdout gate and the Auto-transfer
+paired/holdout gate pass. Its frozen snapshot pins both evidence sets and the
+active Auto profile fingerprint. Auto transfer reflections receive reserved
+capacity in Pro mutation input, so they cannot be displaced by a full ordinary
+reflection batch.
+
 Learned genomes, datasets, observations, and rollout state are isolated by
 project. A reflective mutation produced from one project's evidence cannot
 enter another project's candidate population, evaluation, or rollout.
 
-The current live baseline recorded `auto_gepa=false` and `pro_gepa=false`.
-There is no current evidence that an evolved profile improves external product
-quality.
+The latest provider-backed baseline recorded `auto_gepa=false` and
+`pro_gepa=false`; it predates the Auto-to-Pro transfer path. Deterministic tests
+prove the transfer boundary, evidence isolation, promotion gates, snapshot
+lineage, and mutation-input allocation. There is still no provider-backed
+matched evidence that an evolved profile improves external product quality.
 
 ## Current Evidence Boundary
 

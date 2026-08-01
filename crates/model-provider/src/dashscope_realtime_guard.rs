@@ -31,6 +31,12 @@ pub(super) fn server_error(value: &Value, api_key: &str) -> ModelError {
         .pointer("/error/message")
         .and_then(Value::as_str)
         .or_else(|| value.pointer("/error/code").and_then(Value::as_str))
+        .or_else(|| {
+            value
+                .pointer("/header/error_message")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| value.pointer("/header/error_code").and_then(Value::as_str))
         .unwrap_or("DashScope realtime request failed");
     sanitized_socket_error(raw, api_key)
 }

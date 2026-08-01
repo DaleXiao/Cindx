@@ -83,6 +83,67 @@ pub(crate) fn evaluate_prompt_candidate_pair(
     Ok(payload)
 }
 
+pub(crate) fn evaluate_prompt_candidate_pair_position_balanced(
+    config: &ProviderConfig,
+    reviewer_model: &str,
+    objective: &str,
+    candidate_a: &PromptExecutionCandidate,
+    candidate_b: &PromptExecutionCandidate,
+    evaluation_id: &str,
+    control: &Arc<AgentRunControl>,
+) -> Result<PromptPairwiseEvaluationPayload, String> {
+    let (forward, reverse) = std::thread::scope(|scope| {
+        let forward_id = format!("{evaluation_id}-forward");
+        let reverse_id = format!("{evaluation_id}-reverse");
+        let forward = scope.spawn(move || {
+            evaluate_prompt_candidate_pair(
+                config,
+                reviewer_model,
+                objective,
+                candidate_a,
+                candidate_b,
+                &forward_id,
+                control,
+            )
+        });
+        let reverse = scope.spawn(move || {
+            evaluate_prompt_candidate_pair(
+                config,
+                reviewer_model,
+                objective,
+                candidate_b,
+                candidate_a,
+                &reverse_id,
+                control,
+            )
+        });
+        (
+            forward
+                .join()
+                .unwrap_or_else(|_| Err("forward pairwise reviewer panicked".to_string())),
+            reverse
+                .join()
+                .unwrap_or_else(|_| Err("reverse pairwise reviewer panicked".to_string())),
+        )
+    });
+    let (forward, reverse) = match (forward, reverse) {
+        (Ok(forward), Ok(reverse)) => (forward, reverse_prompt_pairwise_payload(reverse)),
+        (Err(forward), Err(reverse)) => {
+            return Err(format!(
+                "both pairwise reviewers failed: forward={forward}; reverse={reverse}"
+            ));
+        }
+        (Err(error), Ok(_)) => {
+            return Err(format!("forward pairwise reviewer failed: {error}"));
+        }
+        (Ok(_), Err(error)) => {
+            return Err(format!("reverse pairwise reviewer failed: {error}"));
+        }
+    };
+    validate_prompt_pairwise_agreement(&forward, &reverse)?;
+    Ok(aggregate_prompt_pairwise_payloads(forward, reverse))
+}
+
 pub(crate) fn redact_prompt_evaluation_trace(
     trace: &mut AgentEvaluationTrace,
     redaction_secrets: &[String],

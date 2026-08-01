@@ -4690,7 +4690,7 @@ fn provider_catalog_supplies_complete_defaults_and_explicit_vision_capabilities(
     assert_eq!(alibaba.chat, "qwen3.7-plus");
     assert_eq!(alibaba.embedding, "text-embedding-v4");
     assert_eq!(alibaba.image, "qwen-image-3.0-pro");
-    assert_eq!(alibaba.voice, "qwen3.5-omni-flash-realtime");
+    assert_eq!(alibaba.voice, "qwen3-asr-flash-realtime");
     assert_eq!(alibaba.context_window_tokens, 1_000_000);
     assert!(!provider_supports_model_discovery(PROVIDER_AZURE_OPENAI));
     assert!(provider_discovers_modality(
@@ -4733,7 +4733,7 @@ fn switching_provider_replaces_stale_models_with_builtin_modality_defaults() {
     assert_eq!(config.summarizer_model, "qwen3.7-flash");
     assert_eq!(config.embedding_model, "text-embedding-v4");
     assert_eq!(config.image_model, "qwen-image-3.0-pro");
-    assert_eq!(config.voice_model, "qwen3.5-omni-flash-realtime");
+    assert_eq!(config.voice_model, "qwen3-asr-flash-realtime");
     assert!(config.api_key.is_empty());
     assert!(config.auth_verified_at_ms.is_none());
 }
@@ -4784,7 +4784,7 @@ fn discovery_does_not_disable_modalities_served_by_a_separate_api() {
     .expect("the standard Alibaba catalog should reconcile");
 
     assert_eq!(config.image_model, "qwen-image-3.0-pro");
-    assert_eq!(config.voice_model, "qwen3.5-omni-flash-realtime");
+    assert_eq!(config.voice_model, "qwen3-asr-flash-realtime");
 }
 
 #[test]
@@ -7583,6 +7583,7 @@ fn offline_prompt_dataset_stays_frozen_within_a_generation() {
             project_id: "project-a".to_string(),
             source_run_id: format!("run-{id}"),
             split: PromptEvaluationSplit::Train,
+            auto_teacher: None,
         })
         .collect::<Vec<_>>();
     let frozen_ids = discovered
@@ -7628,6 +7629,7 @@ fn offline_prompt_dataset_digest_tracks_the_frozen_cohort_not_source_runs() {
         project_id: "project-a".to_string(),
         source_run_id: source_run_id.to_string(),
         split,
+        auto_teacher: None,
     };
     let original = vec![case("run-a", PromptEvaluationSplit::Train)];
     let repeated_source = vec![case("run-b", PromptEvaluationSplit::Train)];
@@ -7641,6 +7643,408 @@ fn offline_prompt_dataset_digest_tracks_the_frozen_cohort_not_source_runs() {
         prompt_offline_dataset_digest(&original),
         prompt_offline_dataset_digest(&changed_split)
     );
+}
+
+fn test_auto_teacher_case(output: &str) -> PromptAutoTeacherCase {
+    let genome = ConductorPromptGenome::seed_for_effort("auto");
+    let plan = WorkflowPlanIr::from_adaptive_with_profile(
+        "auto-workflow".to_string(),
+        "Evaluate a completed Auto workflow",
+        "auto",
+        "adaptive",
+        "auto-worker",
+        &genome.id,
+        &AdaptiveWorkflow {
+            steps: vec![AdaptiveWorkflowStep {
+                id: "final".to_string(),
+                role: "synthesizer".to_string(),
+                model: "auto-worker".to_string(),
+                subtask: "Produce the verified answer".to_string(),
+                access: Vec::new(),
+            }],
+        },
+        WorkflowBudget {
+            max_steps: 2,
+            max_models: 1,
+            max_model_turns_per_step: 2,
+            max_tool_calls_per_step: 2,
+            max_output_tokens_per_step: 1_024,
+        },
+    );
+    PromptAutoTeacherCase {
+        source_run_id: "auto-run".to_string(),
+        profile_id: genome.id.clone(),
+        profile_sha256: prompt_genome_sha256(&genome).unwrap(),
+        output_sha256: sha256_hex(output.as_bytes()),
+        genome,
+        plan,
+        steps: vec![PromptAutoTeacherStep {
+            id: "final".to_string(),
+            role: "synthesizer".to_string(),
+            model: "auto-worker".to_string(),
+            attempts: 1,
+            status: WorkflowStepStatus::Completed,
+            output: output.to_string(),
+            errors: Vec::new(),
+            latency_ms: 10,
+            total_tokens: 100,
+            evidence_count: 1,
+        }],
+        final_output: output.to_string(),
+        participant_models: vec!["auto-worker".to_string()],
+        quality_score_bps: 9_000,
+        latency_ms: 20,
+        total_tokens: 100,
+    }
+}
+
+#[test]
+fn auto_transfer_digest_tracks_teacher_identity_without_mutating_the_normal_cohort() {
+    let case = |teacher: PromptAutoTeacherCase| PromptOfflineCase {
+        id: "coding-a".to_string(),
+        objective: "Evaluate coding-a".to_string(),
+        task_class: "coding".to_string(),
+        project_id: "project-a".to_string(),
+        source_run_id: teacher.source_run_id.clone(),
+        split: PromptEvaluationSplit::Train,
+        auto_teacher: Some(teacher),
+    };
+    let first = vec![case(test_auto_teacher_case("first verified output"))];
+    let second = vec![case(test_auto_teacher_case("second verified output"))];
+    let teacher = first[0].auto_teacher.as_ref().unwrap();
+
+    assert_eq!(
+        prompt_offline_dataset_digest(&first),
+        prompt_offline_dataset_digest(&second),
+        "Auto transfer evidence must not invalidate same-effort GEPA evidence"
+    );
+    assert_ne!(
+        prompt_auto_transfer_dataset_digest(&first, &teacher.profile_id, &teacher.profile_sha256),
+        prompt_auto_transfer_dataset_digest(&second, &teacher.profile_id, &teacher.profile_sha256),
+        "the transfer cohort must pin the archived Auto output"
+    );
+    assert!(select_prompt_auto_transfer_case(
+        &first,
+        &[],
+        ["pro-stable", "pro-challenger"],
+        &teacher.profile_id,
+        &teacher.profile_sha256,
+        PromptEvaluationSplit::Train,
+    )
+    .is_some());
+    assert!(select_prompt_auto_transfer_case(
+        &first,
+        &[],
+        ["pro-stable", "pro-challenger"],
+        &teacher.profile_id,
+        &sha256_hex(b"stale-auto-profile"),
+        PromptEvaluationSplit::Train,
+    )
+    .is_none());
+}
+
+#[test]
+fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
+    let profile_id = "pro-parent";
+    let auto_profile_id = "auto-stable";
+    let auto_profile_sha256 = sha256_hex(b"auto-stable-genome");
+    let packet = |run_id: String, case_id: String| AgentEvaluationReflectionPacket {
+        suite_id: "runtime-prompt-evolution".to_string(),
+        suite_version: 2,
+        case_id,
+        category: "coding".to_string(),
+        run_id,
+        seed: 0,
+        candidate_id: profile_id.to_string(),
+        candidate_fingerprint: sha256_hex(profile_id.as_bytes()),
+        model_fingerprints: BTreeMap::new(),
+        input: "Implement and verify a change".to_string(),
+        steps: Vec::new(),
+        final_output: "verified".to_string(),
+        verifier: AgentEvaluationVerifierOutcome {
+            source: AgentEvaluationEvidenceSource::Judge,
+            passed: true,
+            score: 0.9,
+            checks: Vec::new(),
+        },
+        actionable_feedback: ActionableSideInformation {
+            summary: "preserve verification coverage".to_string(),
+            ..ActionableSideInformation::default()
+        },
+    };
+    let observation = |
+        run_id: String,
+        case_id: String,
+        opponent_profile_id: &str,
+        provenance: PromptEvaluationProvenance,
+    | PromptEvolutionObservation {
+        profile_id: profile_id.to_string(),
+        evaluation_id: run_id.clone(),
+        case_id: case_id.clone(),
+        opponent_profile_id: Some(opponent_profile_id.to_string()),
+        task_class: "coding".to_string(),
+        split: PromptEvaluationSplit::Train,
+        mode: PromptEvaluationMode::PairedExecution,
+        format_valid: true,
+        succeeded: true,
+        quality_score: 0.9,
+        latency_ms: 1_000,
+        total_tokens: 800,
+        estimated_cost_microusd: 0,
+        safety_violations: 0,
+        relative_reward: Some(0.2),
+        step_credits: Vec::new(),
+        reflection_packet: Some(packet(run_id, case_id)),
+        provenance,
+    };
+    let mut observations = (0..6)
+        .map(|index| {
+            let run_id = format!("ordinary-{index}");
+            observation(
+                run_id.clone(),
+                format!("ordinary-case-{index}"),
+                "pro-baseline",
+                PromptEvaluationProvenance::blind_pairwise_swap(
+                    vec!["independent-judge".to_string()],
+                    vec!["candidate-worker".to_string()],
+                    "a".repeat(64),
+                    sha256_hex(profile_id.as_bytes()),
+                    sha256_hex(b"pro-baseline"),
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    observations.extend((0..3).map(|index| {
+        let run_id = format!("transfer-{index}");
+        observation(
+            run_id.clone(),
+            format!("transfer-case-{index}"),
+            auto_profile_id,
+            PromptEvaluationProvenance::blind_pairwise_swap(
+                vec!["independent-judge".to_string()],
+                vec!["candidate-worker".to_string(), "auto-worker".to_string()],
+                "b".repeat(64),
+                sha256_hex(profile_id.as_bytes()),
+                auto_profile_sha256.clone(),
+            )
+            .with_transfer(PromptTransferProvenance::auto_to_pro(
+                format!("auto-run-{index}"),
+                auto_profile_id,
+                auto_profile_sha256.clone(),
+                sha256_hex(format!("auto-output-{index}").as_bytes()),
+            )),
+        )
+    }));
+
+    let packets = prompt_mutation_reflection_packets(&observations, profile_id, "pro");
+    assert_eq!(packets.len(), 6);
+    assert_eq!(
+        packets
+            .iter()
+            .filter(|packet| packet.run_id.starts_with("ordinary-"))
+            .count(),
+        3
+    );
+    assert_eq!(
+        packets
+            .iter()
+            .filter(|packet| packet.run_id.starts_with("transfer-"))
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn completed_verified_auto_workflow_becomes_teacher_and_denied_runs_fail_closed() {
+    let teacher = test_auto_teacher_case("Verified Auto answer");
+    let mut checkpoint = WorkflowExecutionCheckpoint::new(
+        "auto-resume-key",
+        teacher.plan.clone(),
+        30,
+    );
+    checkpoint
+        .complete_step(
+            "final",
+            "auto-worker",
+            "Verified Auto answer".to_string(),
+            "[]".to_string(),
+            35,
+        )
+        .unwrap();
+    checkpoint.record_step_metrics("final", 10, 100).unwrap();
+    checkpoint
+        .finalize("Verified Auto answer".to_string(), 40)
+        .unwrap();
+    let evidence = orchestrator::LearningEvidenceV1::independent_quality(
+        orchestrator::LearningTermination::Completed,
+        orchestrator::LearningAttribution::Workflow,
+        orchestrator::LearningUsageCompleteness::Complete,
+        0,
+        "a".repeat(64),
+        orchestrator::IndependentQualitySource::CollaborationQualityGate,
+        9_000,
+        true,
+    );
+    let base = [
+        ("agent_run_id".to_string(), "verified-auto-run".to_string()),
+        ("project_id".to_string(), "project-a".to_string()),
+        ("session_id".to_string(), "session-a".to_string()),
+        ("steer_epoch".to_string(), "0".to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    let event = |sequence: u64, kind: EventKind, summary: &str, metadata: Metadata| Event {
+        id: EventId(format!("teacher-{sequence}")),
+        task_id: phase16_task_id(),
+        sequence,
+        timestamp_ms: sequence * 10,
+        kind,
+        summary: summary.to_string(),
+        metadata: metadata_with_context(metadata, &base),
+    };
+    let mut events = vec![
+        event(
+            1,
+            EventKind::TaskStatusChanged,
+            "Agent task started",
+            [
+                (
+                    "prompt".to_string(),
+                    "Evaluate a completed Auto workflow".to_string(),
+                ),
+                ("task_class".to_string(), "coding".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        event(
+            2,
+            EventKind::TaskStatusChanged,
+            "Conductor prompt profile selected",
+            [
+                (
+                    "collaboration_id".to_string(),
+                    teacher.plan.workflow_id.clone(),
+                ),
+                ("prompt_effort".to_string(), "auto".to_string()),
+                ("prompt_profile".to_string(), teacher.profile_id.clone()),
+                (
+                    "prompt_genome".to_string(),
+                    serde_json::to_string(&teacher.genome).unwrap(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        event(
+            3,
+            EventKind::TaskStatusChanged,
+            "Collaboration workflow planned",
+            [
+                (
+                    "collaboration_id".to_string(),
+                    teacher.plan.workflow_id.clone(),
+                ),
+                (
+                    "workflow_ir".to_string(),
+                    teacher.plan.to_json().unwrap(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        event(
+            4,
+            EventKind::TaskStatusChanged,
+            "Collaboration workflow checkpoint finalized",
+            [
+                (
+                    "collaboration_id".to_string(),
+                    teacher.plan.workflow_id.clone(),
+                ),
+                (
+                    "workflow_checkpoint".to_string(),
+                    checkpoint.to_json().unwrap(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        event(
+            5,
+            EventKind::MessageAdded,
+            "Assistant answer",
+            [
+                ("role".to_string(), "assistant".to_string()),
+                (
+                    "display_content".to_string(),
+                    "Verified Auto answer".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        event(
+            6,
+            EventKind::TaskStatusChanged,
+            "Agent task completed",
+            [
+                (
+                    orchestrator::LEARNING_EVIDENCE_METADATA_KEY.to_string(),
+                    evidence.to_metadata_value().unwrap(),
+                ),
+                (
+                    "run_lineage_physical_model_attempts".to_string(),
+                    "1".to_string(),
+                ),
+                (
+                    "run_lineage_provider_usage_attempts".to_string(),
+                    "1".to_string(),
+                ),
+                (
+                    "run_lineage_partial_usage_attempts".to_string(),
+                    "0".to_string(),
+                ),
+                (
+                    "run_lineage_estimated_usage_attempts".to_string(),
+                    "0".to_string(),
+                ),
+                (
+                    "run_lineage_unknown_usage_attempts".to_string(),
+                    "0".to_string(),
+                ),
+                ("run_lineage_total_tokens".to_string(), "100".to_string()),
+                ("run_lineage_prompt_tokens".to_string(), "50".to_string()),
+                (
+                    "run_lineage_completion_tokens".to_string(),
+                    "50".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+    ];
+
+    let dataset = prompt_offline_dataset(&events, "project-a");
+    let captured = dataset[0]
+        .auto_teacher
+        .as_ref()
+        .expect("verified Auto workflow should become a teacher");
+    assert_eq!(captured.final_output, "Verified Auto answer");
+    assert_eq!(captured.quality_score_bps, 9_000);
+    assert_eq!(captured.profile_sha256, teacher.profile_sha256);
+
+    events.push(event(
+        5,
+        EventKind::PermissionResolved,
+        "Permission denied",
+        [("decision".to_string(), "deny".to_string())]
+            .into_iter()
+            .collect(),
+    ));
+    assert!(prompt_offline_dataset(&events, "project-a")[0]
+        .auto_teacher
+        .is_none());
 }
 
 #[test]
@@ -7658,6 +8062,7 @@ fn offline_prompt_scheduler_prioritizes_underrepresented_task_class() {
         project_id: "project-a".to_string(),
         source_run_id: format!("run-{id}"),
         split: PromptEvaluationSplit::Train,
+        auto_teacher: None,
     })
     .collect::<Vec<_>>();
     let mut observations = ["coding-a", "coding-b"]

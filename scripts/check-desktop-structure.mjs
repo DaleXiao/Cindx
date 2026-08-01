@@ -495,6 +495,9 @@ const dashScopeRealtimeProviderSource = read(
 const dashScopeRealtimeGuardSource = read(
   "crates/model-provider/src/dashscope_realtime_guard.rs"
 );
+const dashScopeAsrTaskProviderSource = read(
+  "crates/model-provider/src/dashscope_asr_task_provider.rs"
+);
 const modelProviderCargo = read("crates/model-provider/Cargo.toml");
 const ragSource = read("crates/agent-rag/src/lib.rs");
 const graphSource = read("crates/agent-graph/src/lib.rs");
@@ -865,6 +868,8 @@ const oversizedAgentCoreModules = ["agent-runtime", "agent-memory", "orchestrato
   )
   .filter(({ lines }) => lines > 1_450);
 const modelProviderModuleBudgets = new Map([
+  ["dashscope_asr_task_provider.rs", 260],
+  ["dashscope_realtime_config.rs", 100],
   ["dashscope_realtime_guard.rs", 80],
   ["dashscope_realtime_provider.rs", 300],
   ["error.rs", 160],
@@ -2090,7 +2095,7 @@ const voiceButtonPosition = composerSource.indexOf("<VoiceInputButton");
 assert(
   voiceButtonPosition > composerSource.indexOf('className="composer-effort-control"') &&
     voiceButtonPosition < composerSource.indexOf('className="send-button composer-primary-button"') &&
-    settingsModelsImplementationSource.includes('label="Full-duplex voice"') &&
+    settingsModelsImplementationSource.includes('label="Speech recognition"') &&
     settingsModelsImplementationSource.includes("value={providerDraft.voiceModel}") &&
     voiceInputButtonSource.includes("disabled={disabled}") &&
     voiceInputButtonSource.includes('data-status={status}') &&
@@ -2138,6 +2143,11 @@ assert(
     dashScopeRealtimeProviderSource.includes('format!("Bearer {}", config.api_key.trim())') &&
     dashScopeRealtimeProviderSource.includes('"type": "input_audio_buffer.commit"') &&
     !dashScopeRealtimeProviderSource.includes('"type": "response.create"') &&
+    dashScopeAsrTaskProviderSource.includes('"action": action') &&
+    dashScopeAsrTaskProviderSource.includes('"streaming": "duplex"') &&
+    dashScopeAsrTaskProviderSource.includes('"function": "recognition"') &&
+    dashScopeAsrTaskProviderSource.includes('Message::Binary') &&
+    dashScopeAsrTaskProviderSource.includes('"finish-task"') &&
     rustLib.includes("OpenAiCompatibleRealtimeProvider") &&
     rustLib.includes("config.api_key") &&
     modelProviderSource.includes('format!("{endpoint}/realtime/calls")') &&
@@ -3235,7 +3245,9 @@ assert(
     composerSource.includes('label: "Cindx Auto"') &&
     composerSource.includes('description: "Routes each request by complexity"') &&
     composerSource.includes('label: "Cindx Pro"') &&
-    composerSource.includes('description: "Multi-model collaboration for hard tasks"') &&
+    composerSource.includes(
+      'description: "Learns from Auto and continuously improves"'
+    ) &&
     composerSource.includes('className="composer-effort-menu"') &&
     composerSource.includes('role="listbox"') &&
     composerSource.includes('role="option"') &&

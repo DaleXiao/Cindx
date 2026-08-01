@@ -160,6 +160,28 @@ run. Candidate genomes are evaluated outside the active loop and promoted only
 through the configured evidence gates. A promoted immutable profile may
 configure a future conductor/workflow run.
 
+The Pro evolution path can learn from qualified Auto outcomes without coupling
+the two foreground runtimes:
+
+1. The completion transaction reconstructs a teacher case only from a
+   completed, independently scored, usage-complete Auto workflow with a
+   finalized checkpoint and no denied permission or safety violation.
+2. The teacher profile, source run, final output, and dataset are fingerprinted;
+   bounded redacted workflow evidence is retained for background evaluation.
+3. Current and challenger Pro profiles run the same objective. An evaluator
+   that did not participate in either workflow performs a position-balanced
+   comparison against the archived Auto result.
+4. Auto-transfer observations are stored separately from same-effort GEPA
+   observations. They have their own dataset digest and promotion gate.
+5. Pro mutation reserves reflection capacity for both ordinary Pro evidence and
+   Auto-transfer evidence. Promotion requires both gates, and the frozen Pro
+   snapshot pins the active Auto source and both evidence sets.
+
+This path adds no model call to the foreground user request. Missing independent
+reviewers, incomplete evidence, changed Auto lineage, disagreement, or an
+insufficient train/holdout cohort fails closed and leaves the current stable Pro
+profile unchanged.
+
 The evolution read model scopes learned genomes, observations, offline
 datasets, and rollout state by project. Records without a durable scope are
 rebuilt from canonical events before they can participate in selection.

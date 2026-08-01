@@ -20,6 +20,14 @@ answering without tools.
 Neither report used a promoted GEPA profile. Neither report establishes Fugu
 Ultra parity.
 
+The current source adds an Auto-to-Pro transfer gate after those reports. Its
+deterministic tests establish evidence qualification, lineage isolation,
+position-balanced comparison, dual-gate promotion, frozen provenance, and
+reserved mutation input. Those are mechanism checks, not answer-quality
+evidence. A future provider-backed treatment must compare the pre-transfer Pro
+profile with a promoted transfer-trained Pro profile on frozen matched cases
+before any uplift claim is allowed.
+
 ## Evidence Levels
 
 ### 1. Contract tests

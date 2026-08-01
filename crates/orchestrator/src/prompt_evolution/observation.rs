@@ -48,6 +48,43 @@ fn default_evaluation_mode() -> PromptEvaluationMode {
 
 pub const PROMPT_EVALUATION_PROTOCOL_BLIND_PAIRWISE_SWAP_V1: &str = "blind_pairwise_swap_v1";
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptTransferProvenance {
+    pub source_effort: String,
+    pub target_effort: String,
+    pub source_run_id: String,
+    pub source_profile_id: String,
+    pub source_profile_sha256: String,
+    pub source_output_sha256: String,
+}
+
+impl PromptTransferProvenance {
+    pub fn auto_to_pro(
+        source_run_id: impl Into<String>,
+        source_profile_id: impl Into<String>,
+        source_profile_sha256: impl Into<String>,
+        source_output_sha256: impl Into<String>,
+    ) -> Self {
+        Self {
+            source_effort: "auto".to_string(),
+            target_effort: "pro".to_string(),
+            source_run_id: source_run_id.into(),
+            source_profile_id: source_profile_id.into(),
+            source_profile_sha256: source_profile_sha256.into(),
+            source_output_sha256: source_output_sha256.into(),
+        }
+    }
+
+    pub fn is_valid_auto_to_pro(&self) -> bool {
+        self.source_effort == "auto"
+            && self.target_effort == "pro"
+            && !self.source_run_id.trim().is_empty()
+            && !self.source_profile_id.trim().is_empty()
+            && is_sha256(&self.source_profile_sha256)
+            && is_sha256(&self.source_output_sha256)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PromptEvaluationProvenance {
     #[serde(default)]
@@ -64,6 +101,8 @@ pub struct PromptEvaluationProvenance {
     pub candidate_prompt_sha256: String,
     #[serde(default)]
     pub opponent_prompt_sha256: String,
+    #[serde(default)]
+    pub transfer: Option<PromptTransferProvenance>,
 }
 
 impl PromptEvaluationProvenance {
@@ -95,10 +134,16 @@ impl PromptEvaluationProvenance {
             dataset_sha256: dataset_sha256.into(),
             candidate_prompt_sha256: candidate_prompt_sha256.into(),
             opponent_prompt_sha256: opponent_prompt_sha256.into(),
+            transfer: None,
         }
     }
 
-    pub fn is_scientific(&self) -> bool {
+    pub fn with_transfer(mut self, transfer: PromptTransferProvenance) -> Self {
+        self.transfer = Some(transfer);
+        self
+    }
+
+    fn has_scientific_core(&self) -> bool {
         let evaluator_set = self
             .evaluator_models
             .iter()
@@ -121,6 +166,18 @@ impl PromptEvaluationProvenance {
             && is_sha256(&self.dataset_sha256)
             && is_sha256(&self.candidate_prompt_sha256)
             && is_sha256(&self.opponent_prompt_sha256)
+    }
+
+    pub fn is_scientific(&self) -> bool {
+        self.transfer.is_none() && self.has_scientific_core()
+    }
+
+    pub fn is_scientific_transfer(&self) -> bool {
+        self.has_scientific_core()
+            && self
+                .transfer
+                .as_ref()
+                .is_some_and(PromptTransferProvenance::is_valid_auto_to_pro)
     }
 }
 
@@ -186,6 +243,25 @@ impl PromptEvolutionObservation {
             && self.quality_score.is_finite()
             && self.relative_reward.is_some_and(f64::is_finite)
             && self.provenance.is_scientific()
+    }
+
+    pub fn is_scientific_transfer_evidence(&self) -> bool {
+        let transfer_lineage_matches = self.provenance.transfer.as_ref().is_some_and(|transfer| {
+            if self.profile_id == transfer.source_profile_id {
+                self.provenance.candidate_prompt_sha256 == transfer.source_profile_sha256
+            } else if self.opponent_profile_id.as_deref() == Some(&transfer.source_profile_id) {
+                self.provenance.opponent_prompt_sha256 == transfer.source_profile_sha256
+            } else {
+                false
+            }
+        });
+        self.mode.is_execution()
+            && !self.evaluation_id.trim().is_empty()
+            && !self.case_id.trim().is_empty()
+            && self.quality_score.is_finite()
+            && self.relative_reward.is_some_and(f64::is_finite)
+            && self.provenance.is_scientific_transfer()
+            && transfer_lineage_matches
     }
 
     pub fn evidence_identity(&self) -> String {
@@ -260,6 +336,16 @@ pub fn latest_scientific_training_dataset_digest(
         .map(|observation| observation.provenance.dataset_sha256.as_str())
 }
 
+pub fn latest_scientific_transfer_dataset_digest(
+    observations: &[PromptEvolutionObservation],
+) -> Option<&str> {
+    observations
+        .iter()
+        .rev()
+        .find(|observation| observation.is_scientific_transfer_evidence())
+        .map(|observation| observation.provenance.dataset_sha256.as_str())
+}
+
 pub fn prompt_reflection_packets(
     observations: &[PromptEvolutionObservation],
     profile_id: &str,
@@ -282,6 +368,38 @@ pub fn prompt_reflection_packets(
                 && observation.split == PromptEvaluationSplit::Train
                 && observation.mode == PromptEvaluationMode::PairedExecution
                 && observation.is_scientific_evidence()
+                && observation.provenance.dataset_sha256 == active_dataset_sha256
+        })
+        .filter_map(|observation| observation.reflection_packet.as_ref())
+        .filter(|packet| packet.candidate_id == profile_id)
+        .filter(|packet| seen_runs.insert((packet.run_id.clone(), packet.case_id.clone())))
+        .take(limit)
+        .cloned()
+        .collect()
+}
+
+pub fn prompt_transfer_reflection_packets(
+    observations: &[PromptEvolutionObservation],
+    profile_id: &str,
+    limit: usize,
+) -> Vec<AgentEvaluationReflectionPacket> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let Some(active_dataset_sha256) = latest_scientific_transfer_dataset_digest(observations)
+    else {
+        return Vec::new();
+    };
+    let mut seen_runs = BTreeSet::new();
+    observations
+        .iter()
+        .rev()
+        .filter(|observation| {
+            observation.profile_id == profile_id
+                && observation.split == PromptEvaluationSplit::Train
+                && observation.mode == PromptEvaluationMode::PairedExecution
+                && observation.is_scientific_transfer_evidence()
                 && observation.provenance.dataset_sha256 == active_dataset_sha256
         })
         .filter_map(|observation| observation.reflection_packet.as_ref())
@@ -394,6 +512,52 @@ pub struct PromptInstanceParetoArchive {
     pub candidates: Vec<PromptInstanceParetoCandidate>,
     pub case_best_scores: BTreeMap<String, f64>,
     pub profile_average_scores: BTreeMap<String, f64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scientific_provenance() -> PromptEvaluationProvenance {
+        PromptEvaluationProvenance::blind_pairwise_swap(
+            vec!["independent-reviewer".to_string()],
+            vec!["worker-a".to_string(), "worker-b".to_string()],
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+        )
+    }
+
+    #[test]
+    fn auto_transfer_evidence_is_valid_but_isolated_from_same_effort_evidence() {
+        let ordinary = scientific_provenance();
+        assert!(ordinary.is_scientific());
+        assert!(!ordinary.is_scientific_transfer());
+
+        let transfer =
+            scientific_provenance().with_transfer(PromptTransferProvenance::auto_to_pro(
+                "auto-run-1",
+                "auto-profile-1",
+                "d".repeat(64),
+                "e".repeat(64),
+            ));
+        assert!(!transfer.is_scientific());
+        assert!(transfer.is_scientific_transfer());
+    }
+
+    #[test]
+    fn malformed_auto_transfer_fails_closed() {
+        let transfer =
+            scientific_provenance().with_transfer(PromptTransferProvenance::auto_to_pro(
+                "auto-run-1",
+                "auto-profile-1",
+                "not-a-fingerprint",
+                "e".repeat(64),
+            ));
+
+        assert!(!transfer.is_scientific());
+        assert!(!transfer.is_scientific_transfer());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

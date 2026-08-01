@@ -4,11 +4,43 @@ use serde::{Deserialize, Serialize};
 
 pub const FROZEN_PROMPT_PROFILE_SCHEMA: &str = "cindx.prompt-profile-snapshot.v1";
 pub const PROMPT_PROMOTION_GATE_PROTOCOL: &str = "paired-wilson-task-diversity-v1";
+pub const PROMPT_AUTO_TRANSFER_GATE_PROTOCOL: &str = "auto-to-pro-paired-wilson-task-diversity-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptEvolutionMethod {
     GepaReflectivePaired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrozenPromptTransferEvidence {
+    pub source_effort: String,
+    pub source_profile_id: String,
+    pub source_profile_sha256: String,
+    pub dataset_sha256: String,
+    pub paired_evidence_sha256: String,
+    pub promotion_gate_protocol: String,
+}
+
+impl FrozenPromptTransferEvidence {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.source_effort != "auto" || self.source_profile_id.trim().is_empty() {
+            return Err("frozen prompt transfer source must be an Auto profile".to_string());
+        }
+        if !is_sha256(&self.source_profile_sha256)
+            || !is_sha256(&self.dataset_sha256)
+            || !is_sha256(&self.paired_evidence_sha256)
+        {
+            return Err("frozen prompt transfer fingerprints are invalid".to_string());
+        }
+        if self.promotion_gate_protocol != PROMPT_AUTO_TRANSFER_GATE_PROTOCOL {
+            return Err(format!(
+                "unsupported prompt transfer gate protocol: {}",
+                self.promotion_gate_protocol
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +54,8 @@ pub struct FrozenPromptProfileSnapshot {
     pub paired_evidence_sha256: String,
     pub evolution_method: PromptEvolutionMethod,
     pub promotion_gate_protocol: String,
+    #[serde(default)]
+    pub auto_teacher_evidence: Option<FrozenPromptTransferEvidence>,
 }
 
 impl FrozenPromptProfileSnapshot {
@@ -43,9 +77,19 @@ impl FrozenPromptProfileSnapshot {
             paired_evidence_sha256: paired_evidence_sha256.into(),
             evolution_method: PromptEvolutionMethod::GepaReflectivePaired,
             promotion_gate_protocol: PROMPT_PROMOTION_GATE_PROTOCOL.to_string(),
+            auto_teacher_evidence: None,
         };
         snapshot.validate()?;
         Ok(snapshot)
+    }
+
+    pub fn with_auto_teacher_evidence(
+        mut self,
+        evidence: FrozenPromptTransferEvidence,
+    ) -> Result<Self, String> {
+        self.auto_teacher_evidence = Some(evidence);
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn from_json_slice(value: &[u8]) -> Result<Self, String> {
@@ -96,6 +140,14 @@ impl FrozenPromptProfileSnapshot {
                 self.promotion_gate_protocol
             ));
         }
+        if let Some(evidence) = &self.auto_teacher_evidence {
+            if self.effort != "pro" {
+                return Err(
+                    "frozen Auto teacher evidence is only valid for Pro profiles".to_string(),
+                );
+            }
+            evidence.validate()?;
+        }
         Ok(())
     }
 
@@ -125,8 +177,8 @@ fn is_sha256(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn evolved_genome() -> ConductorPromptGenome {
-        ConductorPromptGenome::seed_for_effort("auto")
+    fn evolved_genome(effort: &str) -> ConductorPromptGenome {
+        ConductorPromptGenome::seed_for_effort(effort)
             .mutations()
             .into_iter()
             .next()
@@ -137,7 +189,7 @@ mod tests {
     fn valid_gepa_snapshot_round_trips_with_stable_fingerprints() {
         let snapshot = FrozenPromptProfileSnapshot::new_gepa(
             "auto",
-            evolved_genome(),
+            evolved_genome("auto"),
             "seed-auto-v1",
             "a".repeat(64),
             "b".repeat(64),
@@ -172,7 +224,7 @@ mod tests {
     fn modified_genome_is_rejected_when_the_frozen_fingerprint_is_stale() {
         let mut snapshot = FrozenPromptProfileSnapshot::new_gepa(
             "pro",
-            evolved_genome(),
+            evolved_genome("pro"),
             "seed-auto-v1",
             "a".repeat(64),
             "b".repeat(64),
@@ -184,5 +236,55 @@ mod tests {
             .validate()
             .expect_err("tampered snapshot should fail")
             .contains("fingerprint does not match"));
+    }
+
+    fn transfer_evidence() -> FrozenPromptTransferEvidence {
+        FrozenPromptTransferEvidence {
+            source_effort: "auto".to_string(),
+            source_profile_id: "auto-stable-v2".to_string(),
+            source_profile_sha256: "c".repeat(64),
+            dataset_sha256: "d".repeat(64),
+            paired_evidence_sha256: "e".repeat(64),
+            promotion_gate_protocol: PROMPT_AUTO_TRANSFER_GATE_PROTOCOL.to_string(),
+        }
+    }
+
+    #[test]
+    fn pro_snapshot_freezes_validated_auto_teacher_evidence() {
+        let snapshot = FrozenPromptProfileSnapshot::new_gepa(
+            "pro",
+            evolved_genome("pro"),
+            "seed-pro-v1",
+            "a".repeat(64),
+            "b".repeat(64),
+        )
+        .expect("Pro snapshot should validate")
+        .with_auto_teacher_evidence(transfer_evidence())
+        .expect("Auto teacher evidence should validate for Pro");
+
+        assert!(snapshot.validate().is_ok());
+        assert_eq!(
+            snapshot
+                .auto_teacher_evidence
+                .as_ref()
+                .map(|evidence| evidence.source_profile_id.as_str()),
+            Some("auto-stable-v2")
+        );
+    }
+
+    #[test]
+    fn auto_snapshot_rejects_cross_effort_teacher_evidence() {
+        let error = FrozenPromptProfileSnapshot::new_gepa(
+            "auto",
+            evolved_genome("auto"),
+            "seed-auto-v1",
+            "a".repeat(64),
+            "b".repeat(64),
+        )
+        .expect("Auto snapshot should validate")
+        .with_auto_teacher_evidence(transfer_evidence())
+        .expect_err("Auto must not consume its own evidence as cross-effort transfer");
+
+        assert!(error.contains("only valid for Pro"));
     }
 }

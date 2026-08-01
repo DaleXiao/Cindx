@@ -77,7 +77,7 @@ export function providerPresetModelGroups(providerId: ProviderId): ProviderModel
     multimodal: withModality("imageInput"),
     embedding: withModality("embedding"),
     image: withModality("imageGeneration"),
-    voice: withModality("realtime")
+    voice: [...withModality("speechRecognition"), ...withModality("realtime")]
   };
 }
 
@@ -279,7 +279,15 @@ function modelKind(model: string): "chat" | "embedding" | "image" | "voice" | "o
   const id = model.trim().toLowerCase();
   if (!id) return "other";
   if (id.includes("embedding") || id.startsWith("gte-")) return "embedding";
-  if (id.includes("realtime")) return "voice";
+  if (
+    id.includes("asr") ||
+    id.includes("transcribe") ||
+    id.includes("whisper") ||
+    id.includes("speech-recognition") ||
+    id.includes("realtime")
+  ) {
+    return "voice";
+  }
   if (
     id.includes("gpt-image") ||
     id.includes("dall-e") ||
@@ -293,12 +301,9 @@ function modelKind(model: string): "chat" | "embedding" | "image" | "voice" | "o
     return "image";
   }
   if (
-    id.includes("transcribe") ||
-    id.includes("whisper") ||
     id.includes("speech") ||
     id.includes("text-to-speech") ||
     id.includes("tts") ||
-    id.includes("asr") ||
     id.includes("rerank")
   ) {
     return "other";
