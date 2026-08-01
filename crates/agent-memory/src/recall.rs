@@ -1,9 +1,49 @@
+use crate::ledger::requirements_conflict;
 use crate::memory_text::{memory_terms, normalize_memory_text};
+use crate::requirement_scope::durable_user_requirement_spans;
 use crate::{MemoryKind, MemoryLedger, MemoryRecall, MemoryRecord, MemoryTrust};
 use std::collections::{BTreeMap, BTreeSet};
 
 const MIN_SEMANTIC_MEMORY_SCORE: f64 = 0.35;
 const MIN_FUSED_MEMORY_SCORE: f64 = 0.12;
+
+pub fn suppress_conflicting_recalls_for_current_request(
+    recalls: &mut Vec<MemoryRecall>,
+    current_request: &str,
+) -> usize {
+    let mut current_requirements = Vec::<String>::new();
+    for span in durable_user_requirement_spans(current_request)
+        .into_iter()
+        .rev()
+    {
+        let Some(statement) = current_request.get(span.start_byte..span.end_byte) else {
+            continue;
+        };
+        if current_requirements
+            .iter()
+            .any(|newer| requirements_conflict(statement, newer))
+        {
+            continue;
+        }
+        current_requirements.push(statement.to_string());
+    }
+    if current_requirements.is_empty() {
+        return 0;
+    }
+
+    let before = recalls.len();
+    recalls.retain(|recall| {
+        if recall.record.kind != MemoryKind::Requirement {
+            return true;
+        }
+        let recalled = normalize_memory_text(&recall.record.content);
+        !current_requirements.iter().any(|current| {
+            recalled != normalize_memory_text(current)
+                && requirements_conflict(&recall.record.content, current)
+        })
+    });
+    before.saturating_sub(recalls.len())
+}
 
 pub fn recall_memories_at(
     ledger: &MemoryLedger,
@@ -418,4 +458,78 @@ pub fn memory_recalls_to_markdown(recalls: &[MemoryRecall]) -> String {
     }
     output.push('\n');
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extract_durable_memories;
+    use agent_core::{Event, EventId, EventKind, Metadata, TaskId};
+
+    fn requirement_recall(sequence: u64, content: &str) -> MemoryRecall {
+        let event = Event {
+            id: EventId(format!("event-{sequence}")),
+            task_id: TaskId("task".to_string()),
+            sequence,
+            timestamp_ms: sequence,
+            kind: EventKind::MessageAdded,
+            summary: "User message".to_string(),
+            metadata: [
+                ("role".to_string(), "user".to_string()),
+                ("content".to_string(), content.to_string()),
+                ("project_id".to_string(), "project".to_string()),
+                ("session_id".to_string(), "source-session".to_string()),
+            ]
+            .into_iter()
+            .collect::<Metadata>(),
+        };
+        let record = extract_durable_memories(&[event], "project", "source-session")
+            .into_iter()
+            .next()
+            .expect("fixture must produce a durable requirement");
+        MemoryRecall {
+            record,
+            score: 1.0,
+            reasons: vec!["fixture".to_string()],
+        }
+    }
+
+    #[test]
+    fn current_explicit_requirement_suppresses_conflicting_recall() {
+        let mut recalls = vec![requirement_recall(1, "Call me Dale")];
+
+        let suppressed =
+            suppress_conflicting_recalls_for_current_request(&mut recalls, "Call me Alex");
+
+        assert_eq!(suppressed, 1);
+        assert!(recalls.is_empty());
+    }
+
+    #[test]
+    fn latest_steer_wins_without_suppressing_its_matching_recall() {
+        let mut recalls = vec![
+            requirement_recall(1, "Call me Dale"),
+            requirement_recall(2, "Call me Alex"),
+        ];
+        let objective = "Initial request:\nCall me Dale\n\nAccepted steering 1:\nCall me Alex";
+
+        let suppressed = suppress_conflicting_recalls_for_current_request(&mut recalls, objective);
+
+        assert_eq!(suppressed, 1);
+        assert_eq!(recalls.len(), 1);
+        assert_eq!(recalls[0].record.content, "Call me Alex");
+    }
+
+    #[test]
+    fn ordinary_current_question_does_not_suppress_recall() {
+        let mut recalls = vec![requirement_recall(1, "Call me Dale")];
+
+        let suppressed = suppress_conflicting_recalls_for_current_request(
+            &mut recalls,
+            "What should this parser return?",
+        );
+
+        assert_eq!(suppressed, 0);
+        assert_eq!(recalls.len(), 1);
+    }
 }

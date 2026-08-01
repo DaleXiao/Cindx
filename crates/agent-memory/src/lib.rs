@@ -14,7 +14,7 @@ pub use checkpoint::{
     checkpoint_to_markdown, conversation_memory_to_markdown, CheckpointOptions, RestoreContextPack,
     SessionCheckpoint,
 };
-pub use extraction::extract_durable_memories;
+pub use extraction::{extract_durable_memories, is_durable_tool_memory_source};
 pub use ledger::{
     apply_memory_control, merge_memory_records, quarantine_legacy_unverified_requirements,
     replay_memory_control,
@@ -22,6 +22,7 @@ pub use ledger::{
 pub use recall::{
     fuse_memory_recalls_at, memory_recalls_to_markdown, recall_memories_at,
     record_memory_observed_uses, record_memory_recalls,
+    suppress_conflicting_recalls_for_current_request,
 };
 pub use semantic::{
     parse_semantic_memory_batch, semantic_memory_extraction_prompt, validate_semantic_memory_batch,

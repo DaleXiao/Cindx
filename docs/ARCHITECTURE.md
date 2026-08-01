@@ -138,6 +138,12 @@ These are separate inputs and must remain distinguishable in trace metadata:
 Memory recall and workspace retrieval can run concurrently. Semantic search,
 file search, and direct graph lookup are independent first-stage channels;
 graph walk expands from selected seeds. Fusion must not erase source identity.
+The conductor admits these blocking foreground operations only when missing
+project evidence is expected to change the answer. Before prompt injection,
+verified current-turn requirements suppress conflicting historical
+requirements. Completed self-contained direct text-only runs still refresh
+deterministic memory state but do not spend a second model call on semantic
+curation.
 
 ## Prompt Evolution Relationship
 

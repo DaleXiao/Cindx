@@ -38,6 +38,7 @@ use crate::{
     runtime_values::current_time_millis,
     view_models::MemoryStatsView,
 };
+use agent_memory::suppress_conflicting_recalls_for_current_request;
 
 pub(crate) fn load_project_memory_ledger(
     store: &mut SqliteStore,
@@ -516,6 +517,14 @@ pub(crate) fn recall_project_memory_for_prompt(
                 .any(|source| source != session_id)
         });
     }
+    let suppressed_conflicts = run_context
+        .get("effective_prompt_objective")
+        .or_else(|| run_context.get("prompt_objective"))
+        .or_else(|| run_context.get("initial_prompt_objective"))
+        .map(|current_request| {
+            suppress_conflicting_recalls_for_current_request(&mut recalls, current_request)
+        })
+        .unwrap_or_default();
     recalls.truncate(recall_limit);
     if !cancellation.preparation_epoch_is_current(expected_epoch) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
@@ -536,6 +545,10 @@ pub(crate) fn recall_project_memory_for_prompt(
             .to_string(),
         ),
         ("selected_count".to_string(), recalls.len().to_string()),
+        (
+            "suppressed_current_request_conflicts".to_string(),
+            suppressed_conflicts.to_string(),
+        ),
         (
             "memory_policy".to_string(),
             format!("{policy:?}").to_ascii_lowercase(),

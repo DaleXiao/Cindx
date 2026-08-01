@@ -371,7 +371,7 @@ fn record_order(record: &MemoryRecord) -> (u64, u64, &str) {
     )
 }
 
-fn requirements_conflict(left: &str, right: &str) -> bool {
+pub(crate) fn requirements_conflict(left: &str, right: &str) -> bool {
     match (
         explicit_requirement_scope(left),
         explicit_requirement_scope(right),
