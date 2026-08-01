@@ -7,7 +7,6 @@ use crate::prompt_evolution_models::{
     notify_prompt_evaluation_worker, prompt_evaluation_inflight, wait_for_prompt_evaluation_worker,
 };
 use crate::prompt_pairwise_runtime::run_background_prompt_pairwise_evaluation;
-use crate::run_lifecycle::{ExclusiveKeyLease, RegisteredRunControl};
 use crate::runtime_constants::{
     BACKGROUND_WORK_IDLE_GRACE_MS, PROMPT_EVOLUTION_BACKGROUND_BATCH_LIMIT,
     PROMPT_EVOLUTION_BACKGROUND_CAMPAIGN_LIMIT,
@@ -297,22 +296,18 @@ fn process_pending_prompt_evaluation(
         );
     }
     validate_request_models(&config, request)?;
-    let Some(inflight_lease) = ExclusiveKeyLease::try_acquire(
-        prompt_evaluation_inflight(),
-        request.effort.clone(),
-        "prompt evaluation inflight",
-    )?
+    let Some(inflight_lease) = prompt_evaluation_inflight()
+        .try_acquire(request.effort.clone())
+        .map_err(|error| error.to_string())?
     else {
         return Ok(());
     };
     let control = Arc::new(AgentRunControl::new("pro"));
-    let control_lease = RegisteredRunControl::register(
-        &state.prompt_evaluation_controls,
-        request.effort.clone(),
-        Arc::clone(&control),
-        "prompt evaluation control",
-        "prompt evaluation is already active for this effort",
-    )?;
+    let control_lease = state
+        .prompt_evaluation_controls
+        .register(request.effort.clone(), Arc::clone(&control))
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "prompt evaluation is already active for this effort".to_string())?;
     let _inflight_lease = inflight_lease;
     let _control_lease = control_lease;
     if !wait_for_foreground_agent_idle(

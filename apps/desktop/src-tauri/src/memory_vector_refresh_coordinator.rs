@@ -7,9 +7,9 @@ use crate::{
         prepare_project_memory_vector_refresh, publish_prepared_memory_vector_refresh,
     },
     persistence_runtime::memory_lancedb_root_for,
-    run_lifecycle::ExclusiveKeyLease,
     runtime_constants::{MEMORY_VECTOR_MANIFEST_SCHEMA, MEMORY_VECTOR_REFRESH_INFLIGHT},
 };
+use agent_harness::ExclusiveKeyRegistry;
 use agent_memory::{MemoryLedger, MEMORY_LEDGER_SCHEMA};
 use agent_rag::lancedb_index_exists;
 use std::{
@@ -205,9 +205,11 @@ pub(crate) fn refresh_project_memory_vector_index(
     ledger: &MemoryLedger,
 ) -> Result<Option<String>, String> {
     let key = memory_vector_project_key(workspace_root, &ledger.project_id);
-    let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT.get_or_init(|| Mutex::new(BTreeSet::new()));
-    let Some(_inflight_lease) =
-        ExclusiveKeyLease::try_acquire(inflight, key, "memory vector refresh inflight")?
+    let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT
+        .get_or_init(|| ExclusiveKeyRegistry::new("memory vector refresh inflight"));
+    let Some(_inflight_lease) = inflight
+        .try_acquire(key)
+        .map_err(|error| error.to_string())?
     else {
         return Ok(None);
     };
@@ -267,9 +269,9 @@ pub(crate) fn schedule_project_memory_vector_refresh(
         },
     );
     drop(pending);
-    let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT.get_or_init(|| Mutex::new(BTreeSet::new()));
-    let Ok(Some(inflight_lease)) =
-        ExclusiveKeyLease::try_acquire(inflight, key.clone(), "memory vector refresh inflight")
+    let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT
+        .get_or_init(|| ExclusiveKeyRegistry::new("memory vector refresh inflight"));
+    let Ok(Some(inflight_lease)) = inflight.try_acquire(key.clone())
     else {
         return;
     };

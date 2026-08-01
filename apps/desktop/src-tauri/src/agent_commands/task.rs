@@ -2,6 +2,10 @@ use super::queue::*;
 use crate::agent_run_engine::{
     prepare_agent_execution, AgentRunPreparationError, PreparedAgentExecution,
 };
+use crate::suspended_run_runtime::{
+    clear_suspended_agent_run, suspended_agent_run_control_snapshot, take_suspended_agent_run,
+    SuspendedAgentRun,
+};
 use crate::*;
 
 #[tauri::command]

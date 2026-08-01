@@ -1,4 +1,8 @@
 use crate::agent_run_engine::PreparedAgentExecution;
+use crate::suspended_run_runtime::{
+    append_observations_to_suspended_run, suspended_agent_run_control_snapshot,
+    take_suspended_agent_run,
+};
 use crate::*;
 
 const PERMISSION_TOOL_OBSERVATION_SCHEMA: &str = "cindx.permission-tool-observation.v1";

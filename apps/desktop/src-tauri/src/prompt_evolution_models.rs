@@ -1,4 +1,5 @@
 use super::*;
+use agent_harness::ExclusiveKeyRegistry;
 use std::sync::{Condvar, OnceLock};
 
 static PROMPT_EVALUATION_WAKE: OnceLock<(Mutex<u64>, Condvar)> = OnceLock::new();
@@ -39,8 +40,9 @@ pub(crate) struct PromptEvolutionEvaluation {
     pub(crate) mutation_trajectories: Vec<AgentEvaluationReflectionPacket>,
 }
 
-pub(crate) fn prompt_evaluation_inflight() -> &'static Mutex<BTreeSet<String>> {
-    PROMPT_EVALUATIONS_INFLIGHT.get_or_init(|| Mutex::new(BTreeSet::new()))
+pub(crate) fn prompt_evaluation_inflight() -> &'static ExclusiveKeyRegistry {
+    PROMPT_EVALUATIONS_INFLIGHT
+        .get_or_init(|| ExclusiveKeyRegistry::new("prompt evaluation inflight"))
 }
 
 pub(crate) fn notify_prompt_evaluation_worker() {

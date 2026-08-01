@@ -12,7 +12,15 @@ use crate::{
     },
     runtime_values::{phase16_task_id, unique_id},
 };
+use agent_harness::ExclusiveKeyRegistry;
 use agent_memory::{extract_durable_memories, MemoryControlAction, MEMORY_LEDGER_SCHEMA};
+
+fn memory_vector_refresh_is_inflight(key: &str) -> bool {
+    MEMORY_VECTOR_REFRESH_INFLIGHT
+        .get_or_init(|| ExclusiveKeyRegistry::new("memory vector refresh inflight"))
+        .contains(key)
+        .expect("refresh registry should lock")
+}
 
 fn prepared_recall(project_id: &str) -> (MemoryLedger, PreparedMemoryRecall) {
     let content = "Always keep preparation persistence atomic";
@@ -818,11 +826,7 @@ fn project_deletion_cancels_inflight_and_future_memory_vector_publication() {
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
-        let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT
-            .get_or_init(|| Mutex::new(BTreeSet::new()))
-            .lock()
-            .expect("refresh registry should lock")
-            .contains(&key);
+        let inflight = memory_vector_refresh_is_inflight(&key);
         if !inflight {
             break;
         }
@@ -843,8 +847,10 @@ fn project_deletion_does_not_wait_for_an_embedding_inflight_lease() {
     let root = std::env::temp_dir().join(unique_id("memory-vector-delete-inflight"));
     let project_id = "project-memory-vector-delete-inflight";
     let key = memory_vector_project_key(&root, project_id);
-    let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT.get_or_init(|| Mutex::new(BTreeSet::new()));
-    let lease = ExclusiveKeyLease::try_acquire(inflight, key, "memory vector delete inflight test")
+    let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT
+        .get_or_init(|| ExclusiveKeyRegistry::new("memory vector refresh inflight"));
+    let lease = inflight
+        .try_acquire(key)
         .expect("inflight registry should lock")
         .expect("test should acquire the inflight lease");
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -882,11 +888,7 @@ fn same_name_project_recreation_uses_a_fresh_vector_identity_and_can_publish() {
     let key = memory_vector_project_key(&root, &recreated_project_id);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
-        let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT
-            .get_or_init(|| Mutex::new(BTreeSet::new()))
-            .lock()
-            .expect("refresh registry should lock")
-            .contains(&key);
+        let inflight = memory_vector_refresh_is_inflight(&key);
         if !inflight {
             break;
         }
@@ -1004,11 +1006,7 @@ fn older_invalidation_cannot_delete_a_registered_and_published_newer_generation(
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
-        let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT
-            .get_or_init(|| Mutex::new(BTreeSet::new()))
-            .lock()
-            .expect("refresh registry should lock")
-            .contains(&key);
+        let inflight = memory_vector_refresh_is_inflight(&key);
         if !inflight {
             break;
         }
@@ -1053,11 +1051,7 @@ fn stale_vector_refresh_cannot_overwrite_a_newer_empty_generation() {
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
-        let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT
-            .get_or_init(|| Mutex::new(BTreeSet::new()))
-            .lock()
-            .expect("refresh registry should lock")
-            .contains(&key);
+        let inflight = memory_vector_refresh_is_inflight(&key);
         if !inflight {
             break;
         }

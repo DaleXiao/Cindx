@@ -19,8 +19,8 @@ const INTEGRATION_COMMAND_HANDLERS = [
   "install_skill_url",
 ];
 
-const ROOT_GLOB_IMPORT_BUDGET = 76;
-const PRODUCTION_SUPER_GLOB_MODULE_BUDGET = 57;
+const ROOT_GLOB_IMPORT_BUDGET = 74;
+const PRODUCTION_SUPER_GLOB_MODULE_BUDGET = 56;
 
 const LEGACY_DESKTOP_PRELUDE_GLOB_MODULES = new Set([
   "agent_collaboration_runtime.rs",
@@ -206,6 +206,14 @@ export const inspectDesktopIntegrationBoundary = (root) => {
     "apps/desktop/src-tauri/src/integration_commands.rs"
   );
   const desktopPrelude = read("apps/desktop/src-tauri/src/desktop_prelude.rs");
+  const appState = read("apps/desktop/src-tauri/src/app_state.rs");
+  const runLifecycle = read("apps/desktop/src-tauri/src/run_lifecycle.rs");
+  const desktopCargo = read("apps/desktop/src-tauri/Cargo.toml");
+  const workspaceCargo = read("Cargo.toml");
+  const workspaceDefaultMembers =
+    workspaceCargo.match(/default-members\s*=\s*\[([\s\S]*?)\]/)?.[1] ?? "";
+  const harnessCargo = read("crates/agent-harness/Cargo.toml");
+  const harnessSource = read("crates/agent-harness/src/lib.rs");
   const adaptiveConductor = read(
     "apps/desktop/src-tauri/src/adaptive_conductor_runtime.rs"
   );
@@ -269,6 +277,16 @@ export const inspectDesktopIntegrationBoundary = (root) => {
     .filter((statement) => /\bagent_skills\b/.test(statement))
     .map(normalizedRustUseStatement);
   const desktopPreludeCode = rustCodeWithoutCommentsAndLiterals(desktopPrelude);
+  const appStateCode = rustCodeWithoutCommentsAndLiterals(appState);
+  const runLifecycleCode = rustCodeWithoutCommentsAndLiterals(runLifecycle);
+  const productionDesktopCode = rustFiles
+    .filter(
+      ({ entry }) =>
+        entry !== "tests.rs" &&
+        !/(?:^|[\\/])[^\\/]*_tests(?:\.rs|[\\/])/.test(entry)
+    )
+    .map(({ source }) => rustCodeWithoutCommentsAndLiterals(source))
+    .join("\n");
   const unexpectedPreludeGlobs = rustFiles
     .filter(({ source }) =>
       rustGlobImports(source).some((statement) =>
@@ -314,6 +332,39 @@ export const inspectDesktopIntegrationBoundary = (root) => {
     /\b(?:McpTransportConfig|install_skill_archive|SkillPreference)\b/.test(
       desktopPreludeCode
     ) && "prelude_legacy_symbol",
+    !/\bagent-harness\s*=\s*\{/.test(desktopCargo) &&
+      "desktop_harness_dependency",
+    !/"crates\/agent-harness"/.test(workspaceCargo) &&
+      "workspace_harness_member",
+    /\btauri\b/.test(harnessCargo) && "harness_tauri_dependency",
+    /\borchestrator-eval\b/.test(desktopCargo) &&
+      "desktop_research_dependency",
+    /\borchestrator-eval\b/.test(workspaceDefaultMembers) &&
+      "research_default_build_member",
+    !/\bpub struct RunRegistry\b/.test(harnessSource) &&
+      "missing_run_registry",
+    !/\bpub struct ExclusiveKeyRegistry\b/.test(harnessSource) &&
+      "missing_exclusive_key_registry",
+    !/\bagent_run_controls\s*:\s*RunRegistry\b/.test(appStateCode) &&
+      "app_state_agent_run_registry",
+    !/\bprompt_evaluation_controls\s*:\s*RunRegistry\b/.test(appStateCode) &&
+      "app_state_prompt_run_registry",
+    !/\bqueue_dispatching_sessions\s*:\s*ExclusiveKeyRegistry\b/.test(
+      appStateCode
+    ) && "app_state_queue_registry",
+    !/\bsession_title_refinement_sessions\s*:\s*ExclusiveKeyRegistry\b/.test(
+      appStateCode
+    ) && "app_state_title_registry",
+    !/\bsuspended_agent_runs\s*:\s*SuspendedRunStore\b/.test(appStateCode) &&
+      "app_state_suspended_store",
+    !/\bsession_output_cache\s*:\s*SessionOutputCache\b/.test(appStateCode) &&
+      "app_state_output_cache",
+    /\bstruct\s+(?:RegisteredRunControl|ExclusiveKeyLease)\b/.test(
+      runLifecycleCode
+    ) && "desktop_owned_harness_guard",
+    /\b(?:agent_run_controls|prompt_evaluation_controls|queue_dispatching_sessions|session_title_refinement_sessions|suspended_agent_runs|session_output_cache)\s*\.\s*lock\s*\(/.test(
+      productionDesktopCode
+    ) && "runtime_registry_lock_escape",
     !sameNames(INTEGRATION_COMMAND_HANDLERS, integrationDefinitions) &&
       "command_definitions",
     !sameNames(INTEGRATION_COMMAND_HANDLERS, registeredIntegrationHandlers) &&

@@ -416,6 +416,9 @@ const agentRuntimeSnapshotSource = read(
 const sessionOutputCacheSource = read(
   "apps/desktop/src-tauri/src/session_output_cache.rs"
 );
+const sessionOutputCacheStoreSource = read(
+  "apps/desktop/src-tauri/src/session_output_cache_store.rs"
+);
 const memoryProjectionRuntimeSource = read(
   "apps/desktop/src-tauri/src/memory_projection_runtime.rs"
 );
@@ -792,6 +795,7 @@ const criticalDesktopAgentModuleBudgets = new Map([
   ["runtime_values.rs", 420],
   ["session_context_service.rs", 550],
   ["session_output_cache.rs", 180],
+  ["session_output_cache_store.rs", 130],
   ["sidecar_runtime.rs", 300],
   ["semantic_memory_runtime.rs", 260],
   ["semantic_memory_worker.rs", 240],
@@ -946,7 +950,8 @@ assert(
     oversizedCriticalDesktopAgentModules.length === 0 &&
     criticalDesktopAgentModules.every(
       ({ entry, source }) =>
-        entry === "permission_service.rs" || source.includes("use crate::")
+        ["permission_service.rs", "session_output_cache_store.rs"].includes(entry) ||
+        source.includes("use crate::")
     ) &&
     rustCompositionRoot.includes("mod memory_runtime;") &&
     !read("apps/desktop/src-tauri/src/knowledge_runtime.rs").includes(
@@ -3366,13 +3371,13 @@ assert(
   "Restart recovery must transfer task state into the recovery event and retire stale run snapshots"
 );
 assert(
-  sessionOutputCacheSource.includes("SESSION_OUTPUT_CACHE_LIMIT: usize = 32") &&
+  sessionOutputCacheStoreSource.includes("SESSION_OUTPUT_CACHE_LIMIT: usize = 32") &&
     sessionOutputCacheSource.includes("event_revision_by_metadata") &&
     sessionOutputCacheSource.includes("list_by_task_and_metadata_after") &&
     sessionOutputCacheSource.includes("merge_agent_output_delta") &&
     sessionOutputCacheSource.includes("rebuild_agent_output_artifacts") &&
-    rustLib.includes("session_output_cache: Mutex<BTreeMap") &&
-    rustLib.includes("outputs.remove(session_id)") &&
+    rustLib.includes("session_output_cache: SessionOutputCache") &&
+    rustLib.includes("session_output_cache.remove_many(session_ids)") &&
     rustLib.includes(
       "delete_read_model(AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE, session_id)"
     ),

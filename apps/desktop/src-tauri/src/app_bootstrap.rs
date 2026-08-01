@@ -1,6 +1,8 @@
 use super::*;
 use crate::conductor_health_runtime::ConductorHealthLedger;
 use crate::integration_commands;
+use crate::session_output_cache_store::SessionOutputCache;
+use crate::suspended_run_runtime::SuspendedRunStore;
 
 const PERSISTENT_STORE_STARTUP_FAILURE: &str = "persistent state unavailable; startup aborted";
 
@@ -118,13 +120,19 @@ pub fn run() -> Result<(), String> {
             schedule_config: Mutex::new(schedule_config),
             schedule_last_error: Mutex::new(schedule_last_error),
             mcp_catalog: Mutex::new(mcp_catalog),
-            suspended_agent_runs: Mutex::new(BTreeMap::new()),
-            session_output_cache: Mutex::new(BTreeMap::new()),
-            agent_run_controls: Mutex::new(BTreeMap::new()),
-            prompt_evaluation_controls: Mutex::new(BTreeMap::new()),
+            suspended_agent_runs: SuspendedRunStore::default(),
+            session_output_cache: SessionOutputCache::default(),
+            agent_run_controls: agent_harness::RunRegistry::new("agent run control"),
+            prompt_evaluation_controls: agent_harness::RunRegistry::new(
+                "prompt evaluation control",
+            ),
             rag_operation_controls: Mutex::new(BTreeMap::new()),
-            queue_dispatching_sessions: Mutex::new(BTreeSet::new()),
-            session_title_refinement_sessions: Mutex::new(BTreeSet::new()),
+            queue_dispatching_sessions: agent_harness::ExclusiveKeyRegistry::new(
+                "queue dispatch",
+            ),
+            session_title_refinement_sessions: agent_harness::ExclusiveKeyRegistry::new(
+                "session title refinement",
+            ),
             workspace_knowledge_cache: Mutex::new(BTreeMap::new()),
             tool_registry_cache: Mutex::new(ToolRegistryCache::default()),
             conductor_health: Mutex::new(ConductorHealthLedger::default()),

@@ -1,4 +1,5 @@
 use super::*;
+use crate::suspended_run_runtime::clear_suspended_agent_run_for_context;
 
 pub(crate) enum AgentCompletionOutcome {
     Completed(AgentState),

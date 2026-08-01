@@ -136,13 +136,10 @@ pub(crate) fn session_deletion_block_reason(
     state: &tauri::State<'_, AppState>,
     session_ids: &[String],
 ) -> Result<Option<String>, String> {
-    let matches = |candidate: &String| session_ids.iter().any(|id| id == candidate);
     if state
         .agent_run_controls
-        .lock()
-        .map_err(|error| format!("agent run control lock poisoned: {error}"))?
-        .keys()
-        .any(matches)
+        .contains_any(session_ids.iter().map(String::as_str))
+        .map_err(|error| error.to_string())?
     {
         return Ok(Some(
             "Session cannot be deleted while its agent is active".to_string(),
@@ -150,10 +147,8 @@ pub(crate) fn session_deletion_block_reason(
     }
     if state
         .suspended_agent_runs
-        .lock()
-        .map_err(|error| format!("suspended agent runs lock poisoned: {error}"))?
-        .keys()
-        .any(matches)
+        .contains_any(session_ids)
+        ?
     {
         return Ok(Some(
             "Session cannot be deleted while its agent is suspended".to_string(),
@@ -161,10 +156,8 @@ pub(crate) fn session_deletion_block_reason(
     }
     if state
         .queue_dispatching_sessions
-        .lock()
-        .map_err(|error| format!("queue dispatch lock poisoned: {error}"))?
-        .iter()
-        .any(matches)
+        .contains_any(session_ids.iter().map(String::as_str))
+        .map_err(|error| error.to_string())?
     {
         return Ok(Some(
             "Session cannot be deleted while queued work is starting".to_string(),
@@ -206,44 +199,16 @@ pub(crate) fn clear_session_runtime_state(
     if session_ids.is_empty() {
         return Ok(());
     }
-    {
-        let mut controls = state
-            .agent_run_controls
-            .lock()
-            .map_err(|error| format!("agent run control lock poisoned: {error}"))?;
-        for session_id in session_ids {
-            if let Some(control) = controls.remove(session_id) {
-                control.request_cancel();
-            }
-        }
-    }
-    {
-        let mut suspended = state
-            .suspended_agent_runs
-            .lock()
-            .map_err(|error| format!("suspended agent runs lock poisoned: {error}"))?;
-        for session_id in session_ids {
-            suspended.remove(session_id);
-        }
-    }
-    {
-        let mut outputs = state
-            .session_output_cache
-            .lock()
-            .map_err(|error| format!("session output cache lock poisoned: {error}"))?;
-        for session_id in session_ids {
-            outputs.remove(session_id);
-        }
-    }
-    {
-        let mut dispatching = state
-            .queue_dispatching_sessions
-            .lock()
-            .map_err(|error| format!("queue dispatch lock poisoned: {error}"))?;
-        for session_id in session_ids {
-            dispatching.remove(session_id);
-        }
-    }
+    state
+        .agent_run_controls
+        .remove_many(session_ids, true)
+        .map_err(|error| error.to_string())?;
+    state.suspended_agent_runs.remove_many(session_ids)?;
+    state.session_output_cache.remove_many(session_ids)?;
+    state
+        .queue_dispatching_sessions
+        .remove_many(session_ids)
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 

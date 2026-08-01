@@ -1,6 +1,6 @@
+use agent_harness::ExclusiveKeyRegistry;
 use std::{
-    collections::BTreeSet,
-    sync::{atomic::AtomicU64, Mutex, OnceLock},
+    sync::{atomic::AtomicU64, OnceLock},
     time::Duration,
 };
 
@@ -81,9 +81,8 @@ pub(crate) const DASHSCOPE_DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-v4";
 pub(crate) const LEGACY_AGENT_SYSTEM_PROMPT: &str = "You are Cindx, a desktop-first assistant. Work carefully, be direct, and ask for clarification when the task is ambiguous.";
 
 pub(crate) static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-pub(crate) static PROMPT_EVALUATIONS_INFLIGHT: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
-pub(crate) static MEMORY_VECTOR_REFRESH_INFLIGHT: OnceLock<Mutex<BTreeSet<String>>> =
-    OnceLock::new();
+pub(crate) static PROMPT_EVALUATIONS_INFLIGHT: OnceLock<ExclusiveKeyRegistry> = OnceLock::new();
+pub(crate) static MEMORY_VECTOR_REFRESH_INFLIGHT: OnceLock<ExclusiveKeyRegistry> = OnceLock::new();
 pub(crate) const MAIN_WINDOW_REVEAL_FALLBACK_MS: u64 = 12_000;
 #[cfg(target_os = "macos")]
 pub(crate) const MACOS_TRAFFIC_LIGHT_X: f64 = 14.0;
