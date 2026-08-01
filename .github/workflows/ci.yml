@@ -80,6 +80,10 @@ jobs:
         working-directory: apps/desktop
         run: npm ci
 
+      - name: Audit frontend dependency graph
+        working-directory: apps/desktop
+        run: npm audit --audit-level=moderate
+
       - name: Run paired same-machine performance regression
         timeout-minutes: 15
         env:

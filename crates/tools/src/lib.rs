@@ -12,7 +12,7 @@ use std::{
 
 use agent_core::{
     Metadata, PermissionRequest, PermissionRequestId, PermissionRisk, TaskId, ToolCallId,
-    ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
+    ToolEffectSemantics, ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
 };
 mod browser_session_retirement;
 mod desktop_control;
@@ -45,7 +45,7 @@ pub use web_search::WebSearchTool;
 use meta_tools::{ToolInspectMeta, ToolInvokeMeta, ToolSearchMeta};
 
 #[cfg(test)]
-use agent_core::{ToolEffectSemantics, ToolExecutionConcurrency};
+use agent_core::ToolExecutionConcurrency;
 #[cfg(test)]
 use image_generation::image_output_path;
 #[cfg(test)]
@@ -248,6 +248,29 @@ impl ToolRegistry {
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools.get(name).map(|tool| tool.as_ref())
+    }
+
+    pub fn permissionless_read_tool(
+        &self,
+        invocation: &ToolInvocation,
+    ) -> Result<&dyn Tool, ToolError> {
+        let tool = self
+            .get(&invocation.tool_name)
+            .ok_or_else(|| ToolError::new(format!("unknown tool: {}", invocation.tool_name)))?;
+        let effect = tool.effect_spec(invocation);
+        if !matches!(effect.risk, ToolRisk::ReadOnly)
+            || !matches!(effect.effect_semantics, ToolEffectSemantics::ReadOnly)
+        {
+            return Err(ToolError::new(
+                "isolated workers may execute only read-only tools",
+            ));
+        }
+        if tool.permission_request(invocation).is_some() {
+            return Err(ToolError::new(
+                "isolated workers cannot execute tools that require user permission",
+            ));
+        }
+        Ok(tool)
     }
 
     pub fn install_meta_tools(&mut self) {
@@ -711,6 +734,8 @@ mod tests {
 
     struct InvalidConcurrencyTool;
 
+    struct PermissionedReadTool;
+
     struct CompletesWhileCancellationArrives {
         cancelled: Arc<AtomicBool>,
     }
@@ -813,6 +838,39 @@ mod tests {
                 invocation.id,
                 ToolOutcomeStatus::Succeeded,
                 "invalid",
+                Metadata::new(),
+            ))
+        }
+    }
+
+    impl Tool for PermissionedReadTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec::builtin(
+                "test.permissioned_read",
+                "test",
+                "Read-only fixture that still requires user permission",
+                ToolRisk::ReadOnly,
+                r#"{"type":"object","properties":{},"additionalProperties":false}"#,
+            )
+        }
+
+        fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
+            Some(PermissionRequest {
+                id: PermissionRequestId("permissioned-read".to_string()),
+                task_id: invocation.task_id.clone(),
+                risk: PermissionRisk::Sensitive,
+                action: invocation.tool_name.clone(),
+                reason: "Fixture requires explicit permission".to_string(),
+                scope: "test".to_string(),
+                metadata: Metadata::new(),
+            })
+        }
+
+        fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
+            Ok(ToolResult::text(
+                invocation.id,
+                ToolOutcomeStatus::Succeeded,
+                "must not execute without permission",
                 Metadata::new(),
             ))
         }
@@ -982,6 +1040,31 @@ mod tests {
             .expect_err("unsafe concurrency declaration must be rejected")
             .contains("read-only risk and effect semantics"));
         assert!(registry.get("invalid.concurrency").is_none());
+    }
+
+    #[test]
+    fn permissionless_read_gate_rejects_tools_that_still_require_user_approval() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(PermissionedReadTool));
+        let invocation = invocation("test.permissioned_read", "{}".to_string());
+
+        let error = registry
+            .permissionless_read_tool(&invocation)
+            .err()
+            .expect("isolated execution must not bypass a permission request");
+
+        assert!(error.message.contains("require user permission"));
+    }
+
+    #[test]
+    fn permissionless_read_gate_accepts_a_genuinely_unprivileged_read() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(CatalogTool {
+            name: "catalog.read".to_string(),
+        }));
+        let invocation = invocation("catalog.read", "{}".to_string());
+
+        assert!(registry.permissionless_read_tool(&invocation).is_ok());
     }
 
     #[test]

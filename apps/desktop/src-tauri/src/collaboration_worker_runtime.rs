@@ -482,44 +482,59 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                         }
                         (ToolOutcomeStatus::Failed, observation)
                     } else {
-                        let result = match (registry.as_ref(), cancellation.as_ref()) {
-                            (Some(registry), Some(control)) => {
-                                match execute_agent_tool_invocation_for_objective_epoch(
-                                    &state,
-                                    registry,
-                                    invocation,
-                                    &workspace_root,
-                                    &worker_context,
-                                    control,
-                                    objective_epoch,
-                                ) {
-                                    Ok(AgentToolInvocationOutcome::Completed(result)) => Ok(result),
-                                    Ok(AgentToolInvocationOutcome::RestartAfterSteer) => {
-                                        let failure = AgentFailure::cancelled(
-                                            "collaboration_interrupted",
-                                            COLLABORATION_STEER_INTERRUPTED,
-                                        );
-                                        return CollaborationCompletion::failed_worker(
-                                            failure,
-                                            None,
-                                            current_time_millis().saturating_sub(started_at_ms),
-                                            worker.completion_usage("isolated_evidence_v2"),
-                                            evidence,
-                                        );
+                        let result = match registry.as_ref() {
+                            Some(registry) => {
+                                if let Err(error) =
+                                    registry.permissionless_read_tool(&invocation)
+                                {
+                                    Ok(ToolResult::text(
+                                        invocation.id.clone(),
+                                        ToolOutcomeStatus::Denied,
+                                        error.message,
+                                        Metadata::new(),
+                                    ))
+                                } else if let Some(control) = cancellation.as_ref() {
+                                    match execute_agent_tool_invocation_for_objective_epoch(
+                                        &state,
+                                        registry,
+                                        invocation,
+                                        &workspace_root,
+                                        &worker_context,
+                                        control,
+                                        objective_epoch,
+                                    ) {
+                                        Ok(AgentToolInvocationOutcome::Completed(result)) => {
+                                            Ok(result)
+                                        }
+                                        Ok(AgentToolInvocationOutcome::RestartAfterSteer) => {
+                                            let failure = AgentFailure::cancelled(
+                                                "collaboration_interrupted",
+                                                COLLABORATION_STEER_INTERRUPTED,
+                                            );
+                                            return CollaborationCompletion::failed_worker(
+                                                failure,
+                                                None,
+                                                current_time_millis()
+                                                    .saturating_sub(started_at_ms),
+                                                worker.completion_usage("isolated_evidence_v2"),
+                                                evidence,
+                                            );
+                                        }
+                                        Err(error) => Err(error),
                                     }
-                                    Err(error) => Err(error),
+                                } else {
+                                    execute_agent_tool_invocation(
+                                        &state,
+                                        registry,
+                                        invocation,
+                                        &workspace_root,
+                                        &worker_context,
+                                    )
                                 }
                             }
-                            (Some(registry), None) => execute_agent_tool_invocation(
-                                &state,
-                                registry,
-                                invocation,
-                                &workspace_root,
-                                &worker_context,
+                            None => Err(
+                                "collaboration worker tool registry is unavailable".to_string(),
                             ),
-                            (None, _) => {
-                                Err("collaboration worker tool registry is unavailable".to_string())
-                            }
                         };
                         match result {
                             Ok(result) => {

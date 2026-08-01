@@ -9,8 +9,101 @@ pub(crate) enum AgentToolBatchOutcome {
     Paused(Box<AgentState>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentToolPermissionGateOutcome {
+    Pending,
+    Reused,
+}
+
 pub(super) fn paused_agent_tools(state: AgentState) -> AgentToolBatchOutcome {
     AgentToolBatchOutcome::Paused(Box::new(state))
+}
+
+fn evaluate_agent_tool_permission(
+    store: &mut SqliteStore,
+    runtime_task_id: &TaskId,
+    prompt: &str,
+    run_context: &Metadata,
+    session_id: Option<&str>,
+    invocation: &ToolInvocation,
+    mut request: PermissionRequest,
+) -> Result<AgentToolPermissionGateOutcome, String> {
+    request.id = PermissionRequestId(unique_id("agent-perm"));
+    request
+        .metadata
+        .insert("phase".to_string(), "16".to_string());
+    request
+        .metadata
+        .entry("tool_input".to_string())
+        .or_insert_with(|| invocation.input_json.clone());
+    request
+        .metadata
+        .insert("tool_call_id".to_string(), invocation.id.0.clone());
+    request
+        .metadata
+        .entry("tool_name".to_string())
+        .or_insert_with(|| invocation.tool_name.clone());
+    request
+        .metadata
+        .insert("agent_prompt".to_string(), prompt.to_string());
+    for (key, value) in run_context {
+        request
+            .metadata
+            .entry(key.clone())
+            .or_insert_with(|| value.clone());
+    }
+
+    if !agent_session_permission_granted(store, &phase16_task_id(), &request, session_id)
+        .map_err(|error| error.to_string())?
+    {
+        store
+            .save_permission_request(request.clone(), current_time_millis())
+            .map_err(|error| error.to_string())?;
+        append_event(
+            store,
+            runtime_task_id,
+            EventKind::PermissionRequested,
+            format!("Agent permission requested for {}", request.action),
+            metadata_with_context(
+                [
+                    ("permission_id".to_string(), request.id.0),
+                    ("tool_call_id".to_string(), invocation.id.0.clone()),
+                    ("tool".to_string(), request.action),
+                    (
+                        "risk".to_string(),
+                        permission_risk_label(&request.risk).to_string(),
+                    ),
+                    ("scope".to_string(), request.scope),
+                    ("agent_prompt".to_string(), prompt.to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                run_context,
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        return Ok(AgentToolPermissionGateOutcome::Pending);
+    }
+
+    append_event(
+        store,
+        runtime_task_id,
+        EventKind::PermissionResolved,
+        format!("Session permission reused for {}", request.action),
+        metadata_with_context(
+            [
+                ("decision".to_string(), "allow_for_session".to_string()),
+                ("tool_call_id".to_string(), invocation.id.0.clone()),
+                ("tool".to_string(), request.action),
+                ("scope".to_string(), request.scope),
+            ]
+            .into_iter()
+            .collect(),
+            run_context,
+        ),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(AgentToolPermissionGateOutcome::Reused)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -318,81 +411,20 @@ fn execute_agent_tool_batch_serial(
         };
         let tool_risk = tool.spec().risk;
 
-        if let Some(mut request) = tool.permission_request(&invocation) {
-            request.id = PermissionRequestId(unique_id("agent-perm"));
-            request
-                .metadata
-                .insert("phase".to_string(), "16".to_string());
-            request
-                .metadata
-                .entry("tool_input".to_string())
-                .or_insert_with(|| invocation.input_json.clone());
-            request
-                .metadata
-                .insert("tool_call_id".to_string(), invocation.id.0.clone());
-            request
-                .metadata
-                .entry("tool_name".to_string())
-                .or_insert_with(|| invocation.tool_name.clone());
-            request
-                .metadata
-                .insert("agent_prompt".to_string(), prompt.to_string());
-            for (key, value) in run_context {
-                request
-                    .metadata
-                    .entry(key.clone())
-                    .or_insert_with(|| value.clone());
-            }
-            if !agent_session_permission_granted(&store, &phase16_task_id(), &request, session_id)
-                .map_err(|error| error.to_string())?
+        if let Some(request) = tool.permission_request(&invocation) {
+            if evaluate_agent_tool_permission(
+                &mut store,
+                &runtime.task_id,
+                prompt,
+                run_context,
+                session_id,
+                &invocation,
+                request,
+            )? == AgentToolPermissionGateOutcome::Pending
             {
-                store
-                    .save_permission_request(request.clone(), current_time_millis())
-                    .map_err(|error| error.to_string())?;
-                append_event(
-                    &mut store,
-                    &runtime.task_id,
-                    EventKind::PermissionRequested,
-                    format!("Agent permission requested for {}", request.action),
-                    metadata_with_context(
-                        [
-                            ("permission_id".to_string(), request.id.0),
-                            ("tool_call_id".to_string(), invocation.id.0),
-                            ("tool".to_string(), request.action),
-                            (
-                                "risk".to_string(),
-                                permission_risk_label(&request.risk).to_string(),
-                            ),
-                            ("scope".to_string(), request.scope),
-                            ("agent_prompt".to_string(), prompt.to_string()),
-                        ]
-                        .into_iter()
-                        .collect(),
-                        run_context,
-                    ),
-                )
-                .map_err(|error| error.to_string())?;
                 waiting_for_permission = true;
                 continue;
             }
-            append_event(
-                &mut store,
-                &runtime.task_id,
-                EventKind::PermissionResolved,
-                format!("Session permission reused for {}", request.action),
-                metadata_with_context(
-                    [
-                        ("decision".to_string(), "allow_for_session".to_string()),
-                        ("tool_call_id".to_string(), invocation.id.0.clone()),
-                        ("tool".to_string(), request.action),
-                        ("scope".to_string(), request.scope),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    run_context,
-                ),
-            )
-            .map_err(|error| error.to_string())?;
         }
 
         let tool_name = invocation.tool_name.clone();
@@ -532,4 +564,105 @@ fn execute_agent_tool_batch_serial(
         };
     }
     Ok(AgentToolBatchOutcome::Continue)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::{
+        PermissionDecision, PermissionResolution, PermissionRisk, ToolCallId,
+    };
+
+    fn run_context(session_id: &str) -> Metadata {
+        [
+            ("session_id".to_string(), session_id.to_string()),
+            ("agent_run_id".to_string(), "run-a".to_string()),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    fn invocation() -> ToolInvocation {
+        ToolInvocation {
+            id: ToolCallId("call-a".to_string()),
+            task_id: phase16_task_id(),
+            tool_name: "file.write".to_string(),
+            input_json: r#"{"path":"notes.md","content":"safe"}"#.to_string(),
+            proposed_by_model: "test".to_string(),
+            metadata: Metadata::new(),
+        }
+    }
+
+    fn permission_request(invocation: &ToolInvocation) -> PermissionRequest {
+        PermissionRequest {
+            id: PermissionRequestId(String::new()),
+            task_id: invocation.task_id.clone(),
+            risk: PermissionRisk::Write,
+            action: invocation.tool_name.clone(),
+            reason: "Write the requested file".to_string(),
+            scope: "notes.md".to_string(),
+            metadata: Metadata::new(),
+        }
+    }
+
+    #[test]
+    fn production_permission_gate_blocks_then_reuses_only_the_resolved_session_capability() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let invocation = invocation();
+        let context = run_context("session-a");
+
+        let first = evaluate_agent_tool_permission(
+            &mut store,
+            &phase16_task_id(),
+            "write notes",
+            &context,
+            Some("session-a"),
+            &invocation,
+            permission_request(&invocation),
+        )
+        .expect("permission gate should persist a pending request");
+        assert_eq!(first, AgentToolPermissionGateOutcome::Pending);
+
+        let pending = pending_agent_permissions_for_run(
+            &store,
+            &phase16_task_id(),
+            Some("session-a"),
+            Some("run-a"),
+        )
+        .expect("pending permission should be queryable");
+        assert_eq!(pending.len(), 1);
+        store
+            .resolve_permission(PermissionResolution {
+                request_id: pending[0].id.clone(),
+                decision: PermissionDecision::AllowForSession,
+                resolved_at_ms: current_time_millis(),
+                resolved_by: "test".to_string(),
+            })
+            .expect("permission should resolve");
+
+        let reused = evaluate_agent_tool_permission(
+            &mut store,
+            &phase16_task_id(),
+            "write notes",
+            &context,
+            Some("session-a"),
+            &invocation,
+            permission_request(&invocation),
+        )
+        .expect("the exact resolved capability should be reusable");
+        assert_eq!(reused, AgentToolPermissionGateOutcome::Reused);
+
+        let other_run_context = run_context("session-b");
+        let other_session = evaluate_agent_tool_permission(
+            &mut store,
+            &phase16_task_id(),
+            "write notes",
+            &other_run_context,
+            Some("session-b"),
+            &invocation,
+            permission_request(&invocation),
+        )
+        .expect("another session should receive its own pending request");
+        assert_eq!(other_session, AgentToolPermissionGateOutcome::Pending);
+    }
 }
