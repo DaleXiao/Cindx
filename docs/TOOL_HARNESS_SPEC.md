@@ -1,5 +1,8 @@
 # Cindx Tool Kernel and Agent Harness
 
+Status: current contract. See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete
+run flow and crate relationships.
+
 ## Goals
 
 - One tool protocol for built-ins, MCP servers, and skill-assisted workflows.
@@ -15,12 +18,13 @@ The harness has one lifecycle owner per concern:
 - `agent-runtime` owns `AgentLoopState`, `AgentRunControl`, run budgets,
   cancellation, no-progress detection, repeated-action detection, and typed turn
   budget exhaustion.
-- `orchestrator` owns the Fugu execution engine: routing, bounded workflow DAGs,
-  role assignment, worker isolation, verification, recovery attempts, and durable
-  workflow checkpoints.
+- `orchestrator` owns the validated run-decision schema and portable workflow
+  semantics: task-graph state, role assignment contracts, verification,
+  frontier selection, recovery policy, and prompt evaluation.
 - The desktop adapter owns side effects: provider calls, permission prompts, tool
-  execution, event persistence, and Tauri commands. It does not define a second
-  run-control policy.
+  execution, event persistence, Tauri commands, and the execution adapters that
+  drive conductor and worker model calls. It does not define a second
+  run-control policy or a second task graph.
 - `queue_service` and `session_projection` own queue reduction and the versioned
   per-session read model. Interactive commands use compact receipts and indexed
   session deltas instead of rebuilding complete application state.
@@ -35,12 +39,15 @@ Reaching a run or turn budget is recoverable control flow: the runtime preserves
 the transcript and the desktop exposes a continuation instead of recording an
 ordinary agent failure.
 
-## Fugu and GEPA
+## Fugu-style collaboration and GEPA
 
-Fugu is the execution engine inside the harness. It may plan parallel branches,
-reuse a bounded worker pool, authorize dependency outputs, reserve a final answer
-turn, recover a failed worker, and resume from a checkpoint. It is still governed
-by the runtime cancellation and budget contract.
+Cindx's Fugu-style collaboration is not one standalone component. The
+orchestrator supplies the validated decision, workflow, task graph, frontier,
+and verification semantics; the desktop adapter performs provider-backed
+conductor and worker stages; `agent-runtime` governs cancellation and budgets.
+Together they can plan bounded parallel branches, authorize dependency outputs,
+reserve terminal delivery, recover a failed worker, and resume from a
+checkpoint.
 
 GEPA is an optimizer outside the active loop. It consumes redacted completed or
 replay trajectories, reflects on paired outcomes, and proposes a versioned prompt

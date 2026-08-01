@@ -24,7 +24,8 @@ const versionPaths = [
   path.join(desktopRoot, "package-lock.json"),
   path.join(tauriRoot, "tauri.conf.json"),
   path.join(tauriRoot, "Cargo.toml"),
-  path.join(tauriRoot, "Cargo.lock")
+  path.join(tauriRoot, "Cargo.lock"),
+  path.join(repoRoot, "docs", "CURRENT.md")
 ];
 const originals = new Map(
   versionPaths.map((filePath) => [filePath, fs.readFileSync(filePath, "utf8")])
@@ -128,6 +129,7 @@ try {
     "--version",
     version
   ]);
+  run(process.execPath, [path.join(repoRoot, "scripts", "check-docs.mjs")]);
   run(process.execPath, ["--test", path.join(repoRoot, "scripts", "versioning.test.mjs")]);
   run(process.execPath, [path.join(repoRoot, "scripts", "check-desktop-structure.mjs")]);
   run(process.execPath, [path.join(repoRoot, "scripts", "check-desktop-layout.mjs")]);

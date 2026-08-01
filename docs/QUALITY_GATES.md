@@ -6,11 +6,12 @@ does not claim Fugu Ultra equivalence.
 
 ## Profiles
 
-- `quick`: version, desktop layout, and structural UX contracts.
+- `quick`: documentation, version, desktop layout, and structural UX contracts.
 - `ci-contract`: quick checks plus routing, Evaluation v2 foundation, the
   120-case arena schema/evidence-ingestion contract, memory, and frontend state
   behavior.
-- `control-plane`: deterministic agent contracts plus Rust workspace and desktop tests.
+- `control-plane`: documentation and deterministic agent contracts plus Rust
+  workspace and desktop tests.
 - `performance`: long-session incremental projection, bounded context governance,
   graph/request reuse, frontend streaming, conductor health, and 20k-chunk RAG
   diagnostics.

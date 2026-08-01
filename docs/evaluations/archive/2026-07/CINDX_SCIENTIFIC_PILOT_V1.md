@@ -165,7 +165,8 @@ promotion report, and required promotion eligibility. The rebuilt JSON was
 byte-identical to the runner's report.
 
 Evidence is stored under
-`docs/evaluations/evidence/2026-07-23-pilot-v1/` with these SHA-256 digests:
+`docs/evaluations/archive/2026-07/evidence/2026-07-23-pilot-v1/` with these
+SHA-256 digests:
 
 | Artifact | SHA-256 |
 | --- | --- |

@@ -69,6 +69,9 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
+      - name: Check documentation baseline
+        run: node scripts/check-docs.mjs
+
       - name: Install native build tools
         run: brew install protobuf
 
@@ -92,6 +95,9 @@ jobs:
 
       - name: Stamp build version
         run: node scripts/stamp-build-version.mjs "$GITHUB_RUN_NUMBER"
+
+      - name: Check stamped documentation version
+        run: node scripts/check-docs.mjs
 
       - name: Test build version carry rules
         run: node --test scripts/versioning.test.mjs
