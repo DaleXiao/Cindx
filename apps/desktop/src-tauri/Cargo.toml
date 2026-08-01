@@ -8,6 +8,10 @@ license = "UNLICENSED"
 name = "cindx_desktop"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = ["lancedb-store"]
+lancedb-store = ["agent-rag/lancedb-store"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -18,7 +22,7 @@ agent-graph = { path = "../../../crates/agent-graph" }
 agent-harness = { path = "../../../crates/agent-harness" }
 agent-memory = { path = "../../../crates/agent-memory" }
 agent-mcp = { path = "../../../crates/agent-mcp" }
-agent-rag = { path = "../../../crates/agent-rag", features = ["lancedb-store"] }
+agent-rag = { path = "../../../crates/agent-rag" }
 agent-runtime = { path = "../../../crates/agent-runtime" }
 agent-skills = { path = "../../../crates/agent-skills" }
 agent-storage = { path = "../../../crates/agent-storage" }

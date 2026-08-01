@@ -5,30 +5,38 @@ import { fileURLToPath } from "node:url";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const target = process.env.CINDX_DESKTOP_TARGET ?? "aarch64-apple-darwin";
 const cargo = process.env.CARGO ?? "cargo";
-const result = spawnSync(
-  cargo,
-  [
-    "tree",
-    "--locked",
-    "--manifest-path",
-    "apps/desktop/src-tauri/Cargo.toml",
-    "--target",
-    target,
-    "--edges",
-    "normal",
-    "--prefix",
-    "none",
-  ],
-  { cwd: repoRoot, encoding: "utf8" }
-);
 
-if (result.status !== 0) {
-  process.stderr.write(result.stderr || result.stdout);
-  process.exit(result.status ?? 1);
+function desktopDependencyTree(extraArgs = []) {
+  const result = spawnSync(
+    cargo,
+    [
+      "tree",
+      "--locked",
+      "--manifest-path",
+      "apps/desktop/src-tauri/Cargo.toml",
+      "--target",
+      target,
+      "--edges",
+      "normal",
+      "--prefix",
+      "none",
+      ...extraArgs,
+    ],
+    { cwd: repoRoot, encoding: "utf8" }
+  );
+
+  if (result.status !== 0) {
+    process.stderr.write(result.stderr || result.stdout);
+    process.exit(result.status ?? 1);
+  }
+  return result.stdout;
 }
 
+const defaultTree = desktopDependencyTree();
+const lightweightTree = desktopDependencyTree(["--no-default-features"]);
+
 const reqwestVersions = new Set();
-for (const line of result.stdout.split("\n")) {
+for (const line of defaultTree.split("\n")) {
   const match = line.trim().match(/^reqwest v([^\s]+)/);
   if (match) reqwestVersions.add(match[1]);
 }
@@ -36,7 +44,7 @@ for (const line of result.stdout.split("\n")) {
 function dependencyVersions(name) {
   const versions = new Set();
   const prefix = `${name} v`;
-  for (const line of result.stdout.split("\n")) {
+  for (const line of defaultTree.split("\n")) {
     const dependency = line.trim();
     if (dependency.startsWith(prefix)) {
       versions.add(dependency.slice(prefix.length).split(/\s/, 1)[0]);
@@ -56,6 +64,18 @@ function versionAtLeast(version, minimum) {
   return true;
 }
 
+if (!defaultTree.includes("lancedb v")) {
+  throw new Error("macOS desktop default features must retain the production LanceDB store");
+}
+
+for (const forbidden of ["lancedb v", "lance v", "datafusion v", "arrow v"]) {
+  if (lightweightTree.includes(forbidden)) {
+    throw new Error(
+      `macOS desktop no-default-features tree must exclude heavy vector storage dependency ${forbidden.trim()}`
+    );
+  }
+}
+
 if (reqwestVersions.size !== 1 || ![...reqwestVersions][0].startsWith("0.12.")) {
   throw new Error(
     `macOS desktop must compile one reqwest 0.12.x stack; found ${
@@ -65,7 +85,7 @@ if (reqwestVersions.size !== 1 || ![...reqwestVersions][0].startsWith("0.12.")) 
 }
 
 for (const forbidden of ["aws-lc-rs v", "aws-lc-sys v"]) {
-  if (result.stdout.includes(forbidden)) {
+  if (defaultTree.includes(forbidden)) {
     throw new Error(`macOS desktop dependency tree contains forbidden ${forbidden.trim()}`);
   }
 }
@@ -86,5 +106,5 @@ for (const [name, minimum] of [
 console.log(
   `Desktop dependency policy passed (${target}, reqwest ${
     [...reqwestVersions][0]
-  }, ring TLS, patched XML and event listener stacks).`
+  }, ring TLS, patched XML and event listener stacks, explicit lightweight vector-store boundary).`
 );

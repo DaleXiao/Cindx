@@ -72,7 +72,7 @@ the same run-control and lifecycle vocabulary. They are not independent loops.
 | `agent-harness` | Active-run registry and exclusive-key leases over `AgentRunControl` | Agent policy or workflow planning |
 | `orchestrator` | Typed run decisions, workflow/task graph, role assignment, verification, frontier selection, recovery policy, prompt-genome evaluation | Tool side effects, Tauri state, provider wire protocol |
 | `agent-memory` | Durable memory extraction, trust labels, deduplication, supersession, lexical/semantic recall | Workspace file indexing |
-| `agent-rag` | Workspace chunking, embeddings, file-backed index, LanceDB index, semantic search | Graph relationships or session memory |
+| `agent-rag` | Workspace chunking, embeddings, file-backed index, optional LanceDB implementation, semantic search | Graph relationships or session memory |
 | `agent-graph` | Graph extraction, provenance, persistence, direct expansion and graph-guided retrieval inputs | Vector storage |
 | `agent-storage` | SQLite event/state contracts and implementation | Agent decisions |
 | `model-provider` | OpenAI-compatible request/response, streaming, embeddings, image-provider wire behavior | Routing or local tools |
@@ -84,6 +84,14 @@ the same run-control and lifecycle vocabulary. They are not independent loops.
 
 The root workspace excludes `orchestrator-eval` from default members so the
 research harness does not enter ordinary product builds.
+
+The desktop default feature set includes `lancedb-store`; production, CI, and
+release builds therefore retain the complete vector-store implementation. The
+desktop crate also exposes a no-default-features compile surface for fast Rust
+type checks without Arrow/DataFusion/Lance or frontend bundle resources. On
+that surface the stable RAG storage API remains type-compatible but fails
+closed with an explicit error. It is not a runtime fallback and is not a
+shipping or product-quality gate.
 
 ## Desktop Adapter Ownership
 
