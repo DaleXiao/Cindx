@@ -61,7 +61,10 @@ A new run currently follows this sequence:
   in-memory substitute.
 - Durable memory is produced from completed or explicitly eligible run
   evidence. Recall combines lexical and semantic evidence with trust,
-  deduplication, supersession, and session-diversity controls.
+  deduplication, supersession, current-request conflict suppression, and
+  session-diversity controls. Semantic curation is reserved for workflow,
+  workspace-evidence, or durable-effect runs; direct self-contained text runs
+  use deterministic projection.
 - Workspace knowledge is separate from memory. The current retrieval adapter
   supports file indexing, provider embeddings, local file persistence, and a
   production-enabled LanceDB store.

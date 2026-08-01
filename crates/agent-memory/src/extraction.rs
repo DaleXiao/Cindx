@@ -284,17 +284,14 @@ fn user_requirement_memory_record_with_source_sha256(
     record
 }
 
-fn durable_tool_memory(event: &Event) -> Option<String> {
+pub(crate) fn durable_tool_memory(event: &Event) -> Option<String> {
     if !is_successful_tool_event(event) {
         return None;
     }
     let tool = event.metadata.get("tool")?.as_str();
     match tool {
-        "file.write" => {
-            let path =
-                first_metadata_value(event, &["result_path", "path"]).unwrap_or("<unknown path>");
-            Some(format!("file.write succeeded: {path}"))
-        }
+        "file.write" => first_metadata_value(event, &["result_path", "path"])
+            .map(|path| format!("file.write succeeded: {path}")),
         "image.generate" => first_metadata_value(
             event,
             &["result_artifact_path", "artifact_path", "result_path"],
@@ -302,6 +299,10 @@ fn durable_tool_memory(event: &Event) -> Option<String> {
         .map(|path| format!("image.generate succeeded: {path}")),
         _ => None,
     }
+}
+
+pub fn is_durable_tool_memory_source(event: &Event) -> bool {
+    durable_tool_memory(event).is_some()
 }
 
 fn is_successful_tool_event(event: &Event) -> bool {

@@ -573,7 +573,7 @@ impl AgentRunDecisionHarness {
             concat!(
                 "You are the Cindx runtime Conductor. Decide how to execute the request; do not answer it. Return only one strict JSON object.\n",
                 "Treat the strongest configured single-model direct answer as the baseline. Choose workflow only when independent work, verification, or decomposition is likely to improve correctness enough to justify coordination latency and correlated-error risk. Pro prioritizes correctness but is not automatically multi-model. Auto balances correctness and latency.\n",
-                "Choose retrieval from semantic, file_search, graph_direct, graph_walk only when the answer needs workspace evidence not already present. Choose memory only when prior user/project decisions are materially relevant. Do not retrieve merely because the prompt is long, mentions code, or asks a question.\n",
+                "Choose retrieval from semantic, file_search, graph_direct, graph_walk only when the answer needs workspace evidence not already present. Choose memory only when prior user/project decisions are materially relevant. Memory and workspace retrieval are blocking foreground work: select them only when missing evidence can materially change answer quality. Greetings, capability questions, and self-contained requests should use neither. Do not retrieve merely because the prompt is long, mentions code, or asks a question.\n",
                 "Graph walk must have semantic, file_search, or graph_direct as a seed channel. Keep focused retrieval and memory queries under {query_limit} characters. Use only exact configured model strings.\n",
                 "For direct execution use max_parallelism=1, min_successful_branches=1, distinct_contributions=0, stop_policy=first_verified, and verification none or self_check. For workflow use 1..={max_parallelism} branches. Independent contributions must perform genuinely different work. Model identity does not make two contributions independent: reuse the strongest suitable model when that is best, and diversify models only when capability fit or supported evidence predicts an advantage.\n",
                 "expected_uplift_bps and confidence_bps are calibrated estimates from 0 to 10000, not advocacy. The harness will reject inconsistent budgets.\n",
@@ -746,6 +746,15 @@ mod tests {
         assert!(prompt.contains("8/10 verified"));
         assert!(prompt.contains("low-sample"));
         assert!(prompt.contains("must not override current reasoning"));
+    }
+
+    #[test]
+    fn planning_prompt_treats_memory_and_retrieval_as_blocking_work() {
+        let prompt = AgentRunDecisionHarness::new(request()).planning_prompt();
+
+        assert!(prompt.contains("Memory and workspace retrieval are blocking foreground work"));
+        assert!(prompt.contains("missing evidence can materially change answer quality"));
+        assert!(prompt.contains("Greetings, capability questions, and self-contained requests"));
     }
 
     #[test]

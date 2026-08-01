@@ -11,12 +11,14 @@ use crate::runtime_values::phase16_task_id;
 use agent_application::{AgentRunEvent, AgentRunStatus};
 use agent_core::{Event, EventKind, Message, MessageRole, Metadata, ModelRole};
 use agent_memory::{
-    parse_semantic_memory_batch, semantic_memory_extraction_prompt, validate_semantic_memory_batch,
+    is_durable_tool_memory_source, parse_semantic_memory_batch, semantic_memory_extraction_prompt,
+    validate_semantic_memory_batch,
 };
 use model_provider::{
     ModelCallMode, ModelRequest, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
     MODEL_REQUEST_CANCELLED,
 };
+use orchestrator::{AgentExecutionMode, AgentRunDecision, AgentToolRequirement};
 use std::path::PathBuf;
 
 pub(crate) fn contains_completed_agent_run(events: &[Event]) -> bool {
@@ -24,6 +26,44 @@ pub(crate) fn contains_completed_agent_run(events: &[Event]) -> bool {
         AgentRunEvent::from_event(event).map(AgentRunEvent::status)
             == Some(AgentRunStatus::Completed)
     })
+}
+
+pub(crate) fn semantic_memory_model_is_warranted(
+    run_context: &Metadata,
+    events: &[Event],
+) -> bool {
+    if events.iter().any(is_durable_tool_memory_source) {
+        return true;
+    }
+    let Some(decision) = run_context
+        .get("run_decision")
+        .and_then(|value| serde_json::from_str::<AgentRunDecision>(value).ok())
+    else {
+        return false;
+    };
+    decision.execution == AgentExecutionMode::Workflow
+        || decision.retrieval.enabled()
+        || decision.tool_requirement == AgentToolRequirement::Effects
+}
+
+fn refresh_deterministic_memory_projection(
+    state: &tauri::State<'_, AppState>,
+    workspace_root: &PathBuf,
+    config: &ProviderConfig,
+    run_context: &Metadata,
+) -> Result<(), String> {
+    let ledger = {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        refresh_project_memory_after_run(&mut store, run_context)
+            .map_err(|error| error.to_string())?
+    };
+    if let Some(ledger) = ledger {
+        schedule_project_memory_vector_refresh(workspace_root.clone(), config.clone(), ledger);
+    }
+    Ok(())
 }
 
 pub(crate) fn generate_semantic_memory(
@@ -53,6 +93,14 @@ pub(crate) fn generate_semantic_memory(
     });
     if !contains_completed_agent_run(&events) {
         return Err("semantic memory skipped because the run is not complete".to_string());
+    }
+    if !semantic_memory_model_is_warranted(run_context, &events) {
+        return refresh_deterministic_memory_projection(
+            state,
+            workspace_root,
+            config,
+            run_context,
+        );
     }
 
     let model = config.model_for_role(&ModelRole::Summarizer);
@@ -169,3 +217,7 @@ fn bounded_chars(value: &str, limit: usize) -> String {
         bounded
     }
 }
+
+#[cfg(test)]
+#[path = "semantic_memory_runtime_tests.rs"]
+mod tests;
