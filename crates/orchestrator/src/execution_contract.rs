@@ -9,9 +9,11 @@ pub const AUTO_COLLABORATION_MIN_CONFIDENCE_BPS: u16 = 5_500;
 pub const PRO_MIN_TEAM_UPLIFT_BPS: u16 = 250;
 
 pub fn minimum_team_uplift_bps(effort: &str) -> u16 {
-    (normalize_effort(effort) == "pro")
-        .then_some(PRO_MIN_TEAM_UPLIFT_BPS)
-        .unwrap_or_default()
+    if normalize_effort(effort) == "pro" {
+        PRO_MIN_TEAM_UPLIFT_BPS
+    } else {
+        0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

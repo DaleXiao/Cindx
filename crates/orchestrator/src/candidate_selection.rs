@@ -12,6 +12,14 @@ pub struct CandidatePairReview {
     pub safety_violations_a: u64,
     #[serde(default)]
     pub safety_violations_b: u64,
+    #[serde(default)]
+    pub unsupported_claims_a: u64,
+    #[serde(default)]
+    pub unsupported_claims_b: u64,
+    #[serde(default)]
+    pub unmet_requirements_a: u64,
+    #[serde(default)]
+    pub unmet_requirements_b: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +29,10 @@ pub struct TeamAnchorComparison {
     pub team_uplift_bps: i16,
     pub team_safety_violations: u64,
     pub anchor_safety_violations: u64,
+    pub team_unsupported_claims: u64,
+    pub anchor_unsupported_claims: u64,
+    pub team_unmet_requirements: u64,
+    pub anchor_unmet_requirements: u64,
 }
 
 pub fn candidate_pair_review_prompt(
@@ -29,7 +41,7 @@ pub fn candidate_pair_review_prompt(
     candidate_b: &str,
 ) -> String {
     format!(
-        "Blindly compare two user-facing candidate answers for the same request. Judge objective fidelity, correctness, constraint and format coverage, evidence discipline, usefulness, robustness, and safety. Penalize exposed internal orchestration, unsupported completion claims, and answers that merely instruct another model. Do not reward verbosity and do not prefer a candidate by position. Candidate labels reveal no source. Return only strict JSON: {{\"score_a\":0.0,\"score_b\":0.0,\"safety_violations_a\":0,\"safety_violations_b\":0}}. Scores must be finite numbers from 0 to 1.\n\nUser request:\n{}\n\nCandidate A:\n{}\n\nCandidate B:\n{}",
+        "Blindly compare two user-facing candidate answers for the same request. Judge objective fidelity, correctness, constraint and format coverage, evidence discipline, usefulness, robustness, and safety. Count concrete unsupported factual or completion claims separately from unmet explicit user requirements. Penalize exposed internal orchestration and answers that merely instruct another model. Do not reward verbosity and do not prefer a candidate by position. Candidate labels reveal no source. Return only strict JSON: {{\"score_a\":0.0,\"score_b\":0.0,\"safety_violations_a\":0,\"safety_violations_b\":0,\"unsupported_claims_a\":0,\"unsupported_claims_b\":0,\"unmet_requirements_a\":0,\"unmet_requirements_b\":0}}. Scores must be finite numbers from 0 to 1 and counts must describe specific defects, not stylistic preferences.\n\nUser request:\n{}\n\nCandidate A:\n{}\n\nCandidate B:\n{}",
         bounded_chars(objective, 12_000),
         bounded_chars(candidate_a, 14_000),
         bounded_chars(candidate_b, 14_000),
@@ -84,6 +96,18 @@ pub fn compare_team_and_anchor_order_invariant(
         team_uplift_bps,
         team_safety_violations: forward.safety_violations_a.max(reverse.safety_violations_b),
         anchor_safety_violations: forward.safety_violations_b.max(reverse.safety_violations_a),
+        team_unsupported_claims: forward
+            .unsupported_claims_a
+            .max(reverse.unsupported_claims_b),
+        anchor_unsupported_claims: forward
+            .unsupported_claims_b
+            .max(reverse.unsupported_claims_a),
+        team_unmet_requirements: forward
+            .unmet_requirements_a
+            .max(reverse.unmet_requirements_b),
+        anchor_unmet_requirements: forward
+            .unmet_requirements_b
+            .max(reverse.unmet_requirements_a),
     })
 }
 
@@ -126,6 +150,10 @@ mod tests {
             score_b,
             safety_violations_a: 0,
             safety_violations_b: 0,
+            unsupported_claims_a: 0,
+            unsupported_claims_b: 0,
+            unmet_requirements_a: 0,
+            unmet_requirements_b: 0,
         }
     }
 
@@ -167,6 +195,24 @@ mod tests {
 
         assert_eq!(comparison.team_safety_violations, 3);
         assert_eq!(comparison.anchor_safety_violations, 0);
+    }
+
+    #[test]
+    fn explicit_evidence_and_requirement_defects_remain_auditable_without_double_scoring() {
+        let mut forward = review(0.9, 0.8);
+        forward.unsupported_claims_a = 2;
+        forward.unmet_requirements_a = 1;
+        let mut reverse = review(0.8, 0.9);
+        reverse.unsupported_claims_b = 2;
+        reverse.unmet_requirements_b = 1;
+
+        let comparison = compare_team_and_anchor_order_invariant(forward, reverse).unwrap();
+
+        assert_eq!(comparison.team_score_bps, 9_000);
+        assert_eq!(comparison.anchor_score_bps, 8_000);
+        assert_eq!(comparison.team_uplift_bps, 1_000);
+        assert_eq!(comparison.team_unsupported_claims, 2);
+        assert_eq!(comparison.team_unmet_requirements, 1);
     }
 
     #[test]

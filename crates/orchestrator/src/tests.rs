@@ -499,6 +499,11 @@ fn search_teacher_prefers_reliable_efficient_topology() {
                 .into_iter()
                 .collect(),
             fallback_used: false,
+            paired_team_score_bps: None,
+            paired_anchor_score_bps: None,
+            paired_uplift_bps: None,
+            selected_anchor: false,
+            anchor_latency_ms: None,
         },
         WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
@@ -518,6 +523,11 @@ fn search_teacher_prefers_reliable_efficient_topology() {
                 .into_iter()
                 .collect(),
             fallback_used: false,
+            paired_team_score_bps: None,
+            paired_anchor_score_bps: None,
+            paired_uplift_bps: None,
+            selected_anchor: false,
+            anchor_latency_ms: None,
         },
         WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
@@ -537,6 +547,11 @@ fn search_teacher_prefers_reliable_efficient_topology() {
                 .into_iter()
                 .collect(),
             fallback_used: false,
+            paired_team_score_bps: None,
+            paired_anchor_score_bps: None,
+            paired_uplift_bps: None,
+            selected_anchor: false,
+            anchor_latency_ms: None,
         },
         WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
@@ -556,6 +571,11 @@ fn search_teacher_prefers_reliable_efficient_topology() {
                 .into_iter()
                 .collect(),
             fallback_used: false,
+            paired_team_score_bps: None,
+            paired_anchor_score_bps: None,
+            paired_uplift_bps: None,
+            selected_anchor: false,
+            anchor_latency_ms: None,
         },
         WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
@@ -573,6 +593,11 @@ fn search_teacher_prefers_reliable_efficient_topology() {
             tool_calls: 8,
             successful_tools_by_step: BTreeMap::new(),
             fallback_used: false,
+            paired_team_score_bps: None,
+            paired_anchor_score_bps: None,
+            paired_uplift_bps: None,
+            selected_anchor: false,
+            anchor_latency_ms: None,
         },
         WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
@@ -590,6 +615,11 @@ fn search_teacher_prefers_reliable_efficient_topology() {
             tool_calls: 7,
             successful_tools_by_step: BTreeMap::new(),
             fallback_used: false,
+            paired_team_score_bps: None,
+            paired_anchor_score_bps: None,
+            paired_uplift_bps: None,
+            selected_anchor: false,
+            anchor_latency_ms: None,
         },
     ];
 
@@ -629,6 +659,11 @@ fn search_teacher_withholds_under_evidenced_topology() {
             tool_calls: 2,
             successful_tools_by_step: BTreeMap::new(),
             fallback_used: false,
+            paired_team_score_bps: None,
+            paired_anchor_score_bps: None,
+            paired_uplift_bps: None,
+            selected_anchor: false,
+            anchor_latency_ms: None,
         })
         .collect::<Vec<_>>();
 
@@ -655,6 +690,11 @@ fn search_teacher_ignores_unmeasured_workflow_completions() {
             tool_calls: 1,
             successful_tools_by_step: BTreeMap::new(),
             fallback_used: false,
+            paired_team_score_bps: None,
+            paired_anchor_score_bps: None,
+            paired_uplift_bps: None,
+            selected_anchor: false,
+            anchor_latency_ms: None,
         })
         .collect::<Vec<_>>();
 
@@ -662,6 +702,64 @@ fn search_teacher_ignores_unmeasured_workflow_completions() {
     assert!(teacher
         .best_prior(&TaskClass::Research, "pro", &allowed_models, 2)
         .is_none());
+}
+
+#[test]
+fn matched_collaboration_teacher_preserves_direct_team_pairing() {
+    let plan = workflow_plan("matched-evidence", false);
+    let uplifts = [-1_000, -500, 500, 1_000];
+    let telemetry = uplifts
+        .into_iter()
+        .enumerate()
+        .map(|(index, uplift)| WorkflowExecutionTelemetry {
+            task_class: TaskClass::Research,
+            routing_signature: "research-shape".to_string(),
+            plan: plan.clone(),
+            succeeded: true,
+            quality_score: Some(0.8),
+            learning_evidence: if uplift < 0 {
+                LearningEvidenceV1::censored(
+                    LearningTermination::Completed,
+                    LearningAttribution::Workflow,
+                    LearningUsageCompleteness::Complete,
+                    Some(0),
+                    Some("0".repeat(64)),
+                )
+            } else {
+                test_quality_learning_evidence(0.8, true, LearningAttribution::Workflow)
+            },
+            latency_ms: 4_000 + index as u64 * 100,
+            total_tokens: 4_000,
+            tool_calls: 0,
+            successful_tools_by_step: BTreeMap::new(),
+            fallback_used: uplift < 0,
+            paired_team_score_bps: Some((8_000i32 + i32::from(uplift)) as u16),
+            paired_anchor_score_bps: Some(8_000),
+            paired_uplift_bps: Some(uplift),
+            selected_anchor: uplift < 0,
+            anchor_latency_ms: Some(1_000),
+        })
+        .collect::<Vec<_>>();
+
+    let teacher = MatchedCollaborationEvidenceTeacher::train(&telemetry);
+    let evidence = &teacher.calibrated_evidence()[0];
+
+    assert!(!telemetry[0].learning_evidence.is_learnable());
+    assert!(evidence.evidence_ready());
+    assert_eq!(evidence.examples, 4);
+    assert_eq!(evidence.team_wins, 2);
+    assert_eq!(evidence.below_admission_floor, 2);
+    assert_eq!(evidence.anchor_selections, 2);
+    assert_eq!(evidence.average_uplift_bps, 0);
+    assert_eq!(evidence.average_anchor_latency_ms, Some(1_000));
+    assert!(evidence.prompt_hint().contains("matched_direct_team"));
+    assert!(evidence.prompt_hint().contains("support=ready"));
+
+    let mut inconsistent = telemetry[0].clone();
+    inconsistent.paired_uplift_bps = Some(1);
+    assert!(MatchedCollaborationEvidenceTeacher::train(&[inconsistent])
+        .calibrated_evidence()
+        .is_empty());
 }
 
 #[test]

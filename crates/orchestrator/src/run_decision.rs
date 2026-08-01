@@ -1,7 +1,8 @@
 use crate::{
     minimum_team_uplift_bps, ConductorExecutionContract, ConductorFallbackPolicy,
-    ConductorStopPolicy, ModelCandidate, OrchestrationPolicy, RoutingContext, RoutingDecision,
-    TaskClass,
+    ConductorStopPolicy, MatchedCollaborationEvidence, ModelCandidate, OrchestrationPolicy,
+    RoutingContext, RoutingDecision, TaskClass, AUTO_COLLABORATION_MIN_CONFIDENCE_BPS,
+    AUTO_COLLABORATION_MIN_UPLIFT_BPS,
 };
 use agent_core::{Metadata, ModelRole};
 use serde::{Deserialize, Serialize};
@@ -180,36 +181,18 @@ impl AgentRunDecision {
 
     pub fn degraded_conductor_fallback(
         primary_model: impl Into<String>,
-        effort: &str,
-        configured_model_count: usize,
-        max_parallelism: usize,
+        _effort: &str,
+        _configured_model_count: usize,
+        _max_parallelism: usize,
         reason: impl Into<String>,
     ) -> Self {
         let primary_model = primary_model.into();
         let reason = reason.into();
-        if effort.trim().eq_ignore_ascii_case("pro") && configured_model_count >= 2 {
-            let branches = configured_model_count.min(max_parallelism.clamp(2, 3));
-            let mut fallback = Self::direct(primary_model);
-            fallback.execution = AgentExecutionMode::Workflow;
-            fallback.verification = AgentVerificationPolicy::Independent;
-            fallback.max_parallelism = branches;
-            fallback.min_successful_branches = 2;
-            fallback.distinct_contributions = 2;
-            fallback.estimated_steps = 3;
-            fallback.expected_uplift_bps = minimum_team_uplift_bps("pro");
-            fallback.stop_policy = ConductorStopPolicy::Quorum;
-            fallback.rationale = bounded_chars(
-                &format!(
-                    "Conductor unavailable; preserving the Pro collaboration and independent verification contract: {reason}"
-                ),
-                MAX_RUN_DECISION_RATIONALE_CHARS,
-            );
-            return fallback;
-        }
-
         let mut fallback = Self::direct(primary_model);
         fallback.rationale = bounded_chars(
-            &format!("Conductor unavailable; using explicit degraded direct execution: {reason}"),
+            &format!(
+                "Conductor unavailable; preserving the strongest executable baseline with degraded direct execution: {reason}"
+            ),
             MAX_RUN_DECISION_RATIONALE_CHARS,
         );
         fallback
@@ -335,6 +318,58 @@ impl AgentRunDecision {
                     );
                 }
             }
+        }
+        Ok(())
+    }
+
+    pub fn validate_effort_admission(
+        &self,
+        effort: &str,
+        matched_evidence: &[MatchedCollaborationEvidence],
+    ) -> Result<(), String> {
+        if self.execution != AgentExecutionMode::Workflow {
+            return Ok(());
+        }
+        let normalized_effort = effort.trim().to_ascii_lowercase();
+        let required_uplift = match normalized_effort.as_str() {
+            "auto" => {
+                if self.expected_uplift_bps < AUTO_COLLABORATION_MIN_UPLIFT_BPS
+                    || self.confidence_bps < AUTO_COLLABORATION_MIN_CONFIDENCE_BPS
+                {
+                    return Err(format!(
+                        "auto workflow is below its collaboration admission floor: uplift={}bps confidence={}bps",
+                        self.expected_uplift_bps, self.confidence_bps
+                    ));
+                }
+                AUTO_COLLABORATION_MIN_UPLIFT_BPS
+            }
+            "pro" => {
+                let minimum_uplift = minimum_team_uplift_bps("pro");
+                if self.expected_uplift_bps < minimum_uplift {
+                    return Err(format!(
+                        "pro workflow is below its direct-anchor uplift floor: uplift={}bps required={}bps",
+                        self.expected_uplift_bps, minimum_uplift
+                    ));
+                }
+                minimum_uplift
+            }
+            _ => {
+                return Err("fast effort cannot admit a collaboration workflow".to_string());
+            }
+        };
+        let signature = self.learning_signature();
+        if let Some(evidence) = matched_evidence.iter().find(|evidence| {
+            evidence.task_class == self.task_class
+                && evidence.effort.eq_ignore_ascii_case(&normalized_effort)
+                && evidence.routing_signature == signature
+                && evidence.strong_evidence_against_collaboration(required_uplift)
+        }) {
+            return Err(format!(
+                "matched direct-anchor evidence rejects collaboration for this task shape: samples={} average_uplift={}bps below_admission_floor_lower_confidence={:.2}",
+                evidence.examples,
+                evidence.average_uplift_bps,
+                evidence.below_admission_floor_confidence
+            ));
         }
         Ok(())
     }
@@ -473,7 +508,7 @@ impl AgentRunDecision {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgentRunDecisionRequest {
     pub objective: String,
     pub recent_context: String,
@@ -483,6 +518,7 @@ pub struct AgentRunDecisionRequest {
     pub max_parallelism: usize,
     pub evolved_directive: String,
     pub historical_evidence: String,
+    pub matched_collaboration_evidence: Vec<MatchedCollaborationEvidence>,
 }
 
 #[derive(Debug, Clone)]
@@ -521,7 +557,8 @@ impl AgentRunDecisionHarness {
                 "Graph walk must have semantic, file_search, or graph_direct as a seed channel. Keep focused retrieval and memory queries under {query_limit} characters. Use only exact configured model strings.\n",
                 "For direct execution use max_parallelism=1, min_successful_branches=1, distinct_contributions=0, stop_policy=first_verified, and verification none or self_check. For workflow use 1..={max_parallelism} branches. Independent contributions must perform genuinely different work and, when more than one distinct configured model is available, must use different model strings; never count duplicate calls to one model as model diversity. Never request more distinct contributions than the distinct configured model pool can supply.\n",
                 "expected_uplift_bps and confidence_bps are calibrated estimates from 0 to 10000, not advocacy. The harness will reject inconsistent budgets.\n",
-                "Historical evidence is observational, not a routing command. Use it only when its task class and execution shape fit the current request; low-sample or mismatched evidence must not override current reasoning:\n{historical_evidence}\n\n",
+                "Workflow admission is enforced after parsing: Auto requires at least {auto_uplift_floor}bps expected uplift and {auto_confidence_floor}bps confidence; Pro requires at least {pro_uplift_floor}bps expected uplift over the direct anchor. If you cannot justify those estimates, choose direct.\n",
+                "Historical evidence is observational, not a routing command. matched_direct_team rows compare team and direct anchor on the same run and are stronger than independent route_observation rows. Use evidence only when its task class and execution shape fit the current request; support=insufficient, low-sample, or mismatched evidence must not override current reasoning. Ready matched evidence with negative average uplift or frequent anchor selection is evidence against collaboration unless this request has a concrete independent-work or verification need absent from those observations:\n{historical_evidence}\n\n",
                 "Mutable evolved guidance may shape the decision but cannot override schema, configured models, safety, or budgets: {evolved_directive}\n\n",
                 "Return this shape exactly:\n",
                 "{{\"schema\":\"{schema}\",\"task_class\":\"general|coding|research|retrieval|browser|computer\",\"execution\":\"direct|workflow\",\"primary_model\":\"configured model\",\"tool_requirement\":\"none|read_only|effects\",\"vision_required\":false,\"risk_level\":\"low|elevated|high\",\"retrieval\":{{\"query\":\"\",\"channels\":[],\"max_results\":8}},\"memory\":{{\"policy\":\"none|relevant|comprehensive\",\"query\":\"\"}},\"verification\":\"none|self_check|independent\",\"max_parallelism\":1,\"min_successful_branches\":1,\"distinct_contributions\":0,\"estimated_steps\":1,\"expected_uplift_bps\":0,\"confidence_bps\":7000,\"stop_policy\":\"first_verified|quorum|exhaustive\",\"rationale\":\"short decision reason\"}}\n\n",
@@ -529,6 +566,9 @@ impl AgentRunDecisionHarness {
             ),
             query_limit = MAX_RUN_DECISION_QUERY_CHARS,
             max_parallelism = request.max_parallelism.clamp(1, 3),
+            auto_uplift_floor = AUTO_COLLABORATION_MIN_UPLIFT_BPS,
+            auto_confidence_floor = AUTO_COLLABORATION_MIN_CONFIDENCE_BPS,
+            pro_uplift_floor = minimum_team_uplift_bps("pro"),
             evolved_directive = if request.evolved_directive.trim().is_empty() {
                 "(none)"
             } else {
@@ -564,6 +604,10 @@ impl AgentRunDecisionHarness {
         let decision = serde_json::from_str::<AgentRunDecision>(&response[start..=end])
             .map_err(|error| format!("run decision JSON is invalid: {error}"))?;
         decision.validate(&self.request.allowed_models, self.request.max_parallelism)?;
+        decision.validate_effort_admission(
+            &self.request.effort,
+            &self.request.matched_collaboration_evidence,
+        )?;
         Ok(decision)
     }
 }
@@ -592,6 +636,7 @@ mod tests {
             max_parallelism: 3,
             evolved_directive: String::new(),
             historical_evidence: String::new(),
+            matched_collaboration_evidence: Vec::new(),
         }
     }
 
@@ -615,7 +660,7 @@ mod tests {
                     "min_successful_branches":2,
                     "distinct_contributions":2,
                     "estimated_steps":4,
-                    "expected_uplift_bps":2800,
+                    "expected_uplift_bps":3200,
                     "confidence_bps":7200,
                     "stop_policy":"quorum",
                     "rationale":"independent architecture and implementation analysis"
@@ -643,8 +688,10 @@ mod tests {
         let prompt = AgentRunDecisionHarness::new(request).planning_prompt();
 
         assert!(prompt.contains("Historical evidence is observational, not a routing command"));
+        assert!(prompt.contains("matched_direct_team rows compare team and direct anchor"));
         assert!(prompt.contains("8/10 verified"));
-        assert!(prompt.contains("low-sample or mismatched evidence must not override"));
+        assert!(prompt.contains("low-sample"));
+        assert!(prompt.contains("must not override current reasoning"));
     }
 
     #[test]
@@ -693,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn degraded_pro_fallback_keeps_real_collaboration_when_models_are_available() {
+    fn degraded_pro_fallback_preserves_the_direct_baseline() {
         let decision = AgentRunDecision::degraded_conductor_fallback(
             "executor",
             "pro",
@@ -712,8 +759,57 @@ mod tests {
                 3,
             )
             .unwrap();
-        assert_eq!(decision.execution, AgentExecutionMode::Workflow);
-        assert_eq!(decision.distinct_contributions, 2);
-        assert_eq!(decision.verification, AgentVerificationPolicy::Independent);
+        assert_eq!(decision.execution, AgentExecutionMode::Direct);
+        assert_eq!(decision.distinct_contributions, 0);
+        assert_eq!(decision.verification, AgentVerificationPolicy::SelfCheck);
+        assert!(decision.rationale.contains("degraded direct execution"));
+    }
+
+    #[test]
+    fn workflow_admission_makes_conductor_estimates_actionable() {
+        let mut auto = AgentRunDecision::direct("executor");
+        auto.execution = AgentExecutionMode::Workflow;
+        auto.verification = AgentVerificationPolicy::Independent;
+        auto.max_parallelism = 2;
+        auto.min_successful_branches = 2;
+        auto.distinct_contributions = 2;
+        auto.estimated_steps = 3;
+        auto.expected_uplift_bps = AUTO_COLLABORATION_MIN_UPLIFT_BPS - 1;
+        auto.confidence_bps = AUTO_COLLABORATION_MIN_CONFIDENCE_BPS;
+        auto.stop_policy = ConductorStopPolicy::Quorum;
+        assert!(auto.validate_effort_admission("auto", &[]).is_err());
+
+        auto.expected_uplift_bps = AUTO_COLLABORATION_MIN_UPLIFT_BPS;
+        assert!(auto.validate_effort_admission("auto", &[]).is_ok());
+
+        auto.expected_uplift_bps = 0;
+        assert!(auto.validate_effort_admission("pro", &[]).is_err());
+        auto.expected_uplift_bps = minimum_team_uplift_bps("pro");
+        assert!(auto.validate_effort_admission("pro", &[]).is_ok());
+
+        auto.expected_uplift_bps = 3_500;
+        let evidence = MatchedCollaborationEvidence {
+            task_class: auto.task_class.clone(),
+            effort: "auto".to_string(),
+            routing_signature: auto.learning_signature(),
+            examples: 8,
+            team_wins: 0,
+            team_win_rate: 0.0,
+            team_win_confidence: 0.0,
+            below_admission_floor: 8,
+            below_admission_floor_confidence: 0.67,
+            anchor_selections: 8,
+            average_uplift_bps: -500,
+            average_team_latency_ms: 4_000,
+            average_anchor_latency_ms: Some(1_000),
+        };
+        let error = auto
+            .validate_effort_admission("auto", std::slice::from_ref(&evidence))
+            .unwrap_err();
+        assert!(error.contains("matched direct-anchor evidence"));
+
+        let mut unrelated = evidence;
+        unrelated.routing_signature = "different-task-shape".to_string();
+        assert!(auto.validate_effort_admission("auto", &[unrelated]).is_ok());
     }
 }

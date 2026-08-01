@@ -567,6 +567,16 @@ pub(crate) fn workflow_execution_telemetry_from_events(
                     },
                 );
             let learning_evidence = workflow_learning_evidence(&workflow_events, planned, terminal);
+            let anchor_latency_ms = workflow_events
+                .iter()
+                .rev()
+                .find(|event| {
+                    event.kind == EventKind::ModelRequestFinished
+                        && event.metadata.get("stage").map(String::as_str)
+                            == Some("direct_anchor")
+                })
+                .and_then(|event| event.metadata.get("latency_ms"))
+                .and_then(|latency| latency.parse::<u64>().ok());
             Some(WorkflowExecutionTelemetry {
                 task_class,
                 routing_signature: planned
@@ -586,6 +596,23 @@ pub(crate) fn workflow_execution_telemetry_from_events(
                     .metadata
                     .get("fallback_used")
                     .is_some_and(|value| value == "true"),
+                paired_team_score_bps: terminal
+                    .metadata
+                    .get("anytime_team_score_bps")
+                    .and_then(|score| score.parse::<u16>().ok()),
+                paired_anchor_score_bps: terminal
+                    .metadata
+                    .get("anytime_anchor_score_bps")
+                    .and_then(|score| score.parse::<u16>().ok()),
+                paired_uplift_bps: terminal
+                    .metadata
+                    .get("anytime_team_uplift_bps")
+                    .and_then(|uplift| uplift.parse::<i16>().ok()),
+                selected_anchor: terminal
+                    .metadata
+                    .get("anytime_selected_kind")
+                    .is_some_and(|kind| kind == "direct_anchor"),
+                anchor_latency_ms,
             })
         })
         .collect()

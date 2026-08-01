@@ -1,8 +1,11 @@
 use super::{
-    wilson_lower_bound, LearningDisposition, LearningEvidenceV1, LearningUsageCompleteness,
-    TaskClass, LEARNED_ROUTER_MIN_EXAMPLES, LEARNED_ROUTER_MIN_SUCCESS_CONFIDENCE,
+    wilson_lower_bound, LearningDisposition, LearningEvidenceV1, LearningTermination,
+    LearningUsageCompleteness, TaskClass, LEARNED_ROUTER_MIN_EXAMPLES,
+    LEARNED_ROUTER_MIN_SUCCESS_CONFIDENCE,
 };
-use crate::{WorkflowPlanIr, WorkflowToolPolicy};
+use crate::{
+    minimum_team_uplift_bps, WorkflowPlanIr, WorkflowToolPolicy, AUTO_COLLABORATION_MIN_UPLIFT_BPS,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,6 +23,37 @@ pub struct WorkflowExecutionTelemetry {
     pub tool_calls: u64,
     pub successful_tools_by_step: BTreeMap<String, Vec<String>>,
     pub fallback_used: bool,
+    #[serde(default)]
+    pub paired_team_score_bps: Option<u16>,
+    #[serde(default)]
+    pub paired_anchor_score_bps: Option<u16>,
+    #[serde(default)]
+    pub paired_uplift_bps: Option<i16>,
+    #[serde(default)]
+    pub selected_anchor: bool,
+    #[serde(default)]
+    pub anchor_latency_ms: Option<u64>,
+}
+
+impl WorkflowExecutionTelemetry {
+    fn has_valid_matched_comparison(&self) -> bool {
+        let (Some(team), Some(anchor), Some(uplift)) = (
+            self.paired_team_score_bps,
+            self.paired_anchor_score_bps,
+            self.paired_uplift_bps,
+        ) else {
+            return false;
+        };
+        let scores_are_valid = team <= 10_000
+            && anchor <= 10_000
+            && i32::from(team) - i32::from(anchor) == i32::from(uplift);
+        let provenance_is_complete = self.learning_evidence.contract_is_valid()
+            && self.learning_evidence.termination == LearningTermination::Completed
+            && self.learning_evidence.usage_completeness != LearningUsageCompleteness::Missing
+            && self.learning_evidence.steer_epoch.is_some()
+            && self.learning_evidence.budget_fingerprint.is_some();
+        self.succeeded && scores_are_valid && provenance_is_complete
+    }
 }
 
 pub(super) const ADAPTIVE_WORKFLOW_PRIOR_MIN_QUALITY: f32 = 0.72;
@@ -111,6 +145,171 @@ impl WorkflowTopologyPrior {
 #[derive(Debug, Clone, Default)]
 pub struct WorkflowSearchTeacher {
     priors: Vec<WorkflowTopologyPrior>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchedCollaborationEvidence {
+    pub task_class: TaskClass,
+    pub effort: String,
+    pub routing_signature: String,
+    pub examples: usize,
+    pub team_wins: usize,
+    pub team_win_rate: f32,
+    pub team_win_confidence: f64,
+    pub below_admission_floor: usize,
+    pub below_admission_floor_confidence: f64,
+    pub anchor_selections: usize,
+    pub average_uplift_bps: i16,
+    pub average_team_latency_ms: u64,
+    pub average_anchor_latency_ms: Option<u64>,
+}
+
+impl MatchedCollaborationEvidence {
+    pub fn evidence_ready(&self) -> bool {
+        self.examples >= LEARNED_ROUTER_MIN_EXAMPLES
+    }
+
+    pub fn strong_evidence_against_collaboration(&self, required_uplift_bps: u16) -> bool {
+        self.evidence_ready()
+            && i32::from(self.average_uplift_bps) < i32::from(required_uplift_bps)
+            && self.below_admission_floor_confidence >= 0.5
+    }
+
+    pub fn prompt_hint(&self) -> String {
+        format!(
+            "matched_direct_team class={} effort={} signature={} samples={} team_wins={} team_win_rate={:.0}% team_win_lower_confidence={:.2} below_admission_floor={} below_admission_floor_lower_confidence={:.2} average_uplift_bps={} anchor_selected={} average_team_latency_ms={} average_anchor_latency_ms={} support={}",
+            self.task_class.label(),
+            self.effort,
+            self.routing_signature,
+            self.examples,
+            self.team_wins,
+            self.team_win_rate * 100.0,
+            self.team_win_confidence,
+            self.below_admission_floor,
+            self.below_admission_floor_confidence,
+            self.average_uplift_bps,
+            self.anchor_selections,
+            self.average_team_latency_ms,
+            self.average_anchor_latency_ms
+                .map(|latency| latency.to_string())
+                .unwrap_or_else(|| "unmeasured".to_string()),
+            if self.evidence_ready() {
+                "ready"
+            } else {
+                "insufficient"
+            },
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MatchedCollaborationEvidenceTeacher {
+    evidence: Vec<MatchedCollaborationEvidence>,
+}
+
+impl MatchedCollaborationEvidenceTeacher {
+    pub fn train(telemetry: &[WorkflowExecutionTelemetry]) -> Self {
+        let mut grouped =
+            BTreeMap::<(TaskClass, String, String), MatchedEvidenceAccumulator>::new();
+        for entry in telemetry
+            .iter()
+            .filter(|entry| entry.has_valid_matched_comparison())
+        {
+            grouped
+                .entry((
+                    entry.task_class.clone(),
+                    entry.plan.effort.clone(),
+                    entry.routing_signature.clone(),
+                ))
+                .or_default()
+                .record(entry);
+        }
+        let mut evidence = grouped
+            .into_iter()
+            .map(|((task_class, effort, routing_signature), accumulator)| {
+                accumulator.finish(task_class, effort, routing_signature)
+            })
+            .collect::<Vec<_>>();
+        evidence.sort_by(|left, right| {
+            right
+                .evidence_ready()
+                .cmp(&left.evidence_ready())
+                .then_with(|| right.examples.cmp(&left.examples))
+                .then_with(|| left.task_class.cmp(&right.task_class))
+                .then_with(|| left.effort.cmp(&right.effort))
+                .then_with(|| left.routing_signature.cmp(&right.routing_signature))
+        });
+        Self { evidence }
+    }
+
+    pub fn calibrated_evidence(&self) -> &[MatchedCollaborationEvidence] {
+        &self.evidence
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct MatchedEvidenceAccumulator {
+    examples: usize,
+    team_wins: usize,
+    below_admission_floor: usize,
+    anchor_selections: usize,
+    uplift_bps: i64,
+    team_latency_ms: u64,
+    anchor_latency_ms: u64,
+    anchor_latency_examples: usize,
+}
+
+impl MatchedEvidenceAccumulator {
+    fn record(&mut self, telemetry: &WorkflowExecutionTelemetry) {
+        let Some(uplift) = telemetry.paired_uplift_bps else {
+            return;
+        };
+        self.examples += 1;
+        self.team_wins += usize::from(uplift > 0 && !telemetry.selected_anchor);
+        let admission_floor = if telemetry.plan.effort.eq_ignore_ascii_case("auto") {
+            AUTO_COLLABORATION_MIN_UPLIFT_BPS
+        } else {
+            minimum_team_uplift_bps(&telemetry.plan.effort)
+        };
+        self.below_admission_floor += usize::from(i32::from(uplift) < i32::from(admission_floor));
+        self.anchor_selections += usize::from(telemetry.selected_anchor);
+        self.uplift_bps = self.uplift_bps.saturating_add(i64::from(uplift));
+        self.team_latency_ms = self.team_latency_ms.saturating_add(telemetry.latency_ms);
+        if let Some(latency) = telemetry.anchor_latency_ms {
+            self.anchor_latency_ms = self.anchor_latency_ms.saturating_add(latency);
+            self.anchor_latency_examples += 1;
+        }
+    }
+
+    fn finish(
+        self,
+        task_class: TaskClass,
+        effort: String,
+        routing_signature: String,
+    ) -> MatchedCollaborationEvidence {
+        let examples = self.examples.max(1);
+        MatchedCollaborationEvidence {
+            task_class,
+            effort,
+            routing_signature,
+            examples: self.examples,
+            team_wins: self.team_wins,
+            team_win_rate: self.team_wins as f32 / examples as f32,
+            team_win_confidence: wilson_lower_bound(self.team_wins, self.examples),
+            below_admission_floor: self.below_admission_floor,
+            below_admission_floor_confidence: wilson_lower_bound(
+                self.below_admission_floor,
+                self.examples,
+            ),
+            anchor_selections: self.anchor_selections,
+            average_uplift_bps: (self.uplift_bps / examples as i64)
+                .clamp(i64::from(i16::MIN), i64::from(i16::MAX))
+                as i16,
+            average_team_latency_ms: self.team_latency_ms / examples as u64,
+            average_anchor_latency_ms: (self.anchor_latency_examples > 0)
+                .then(|| self.anchor_latency_ms / self.anchor_latency_examples as u64),
+        }
+    }
 }
 
 impl WorkflowSearchTeacher {

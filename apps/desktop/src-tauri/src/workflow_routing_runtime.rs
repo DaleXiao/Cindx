@@ -43,26 +43,39 @@ pub(crate) fn workflow_prior_for_run(
 pub(crate) fn conductor_historical_evidence(
     state: &tauri::State<'_, AppState>,
     allowed_models: &[String],
-) -> Result<String, String> {
-    let telemetry = {
+) -> Result<(String, Vec<MatchedCollaborationEvidence>), String> {
+    let (routing_telemetry, workflow_telemetry) = {
         let mut store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        load_routing_telemetry_read_model(&mut store).map_err(|error| error.to_string())?
+        (
+            load_routing_telemetry_read_model(&mut store)
+                .map_err(|error| error.to_string())?,
+            load_workflow_telemetry_read_model(&mut store, allowed_models)
+                .map_err(|error| error.to_string())?,
+        )
     };
     let allowed = allowed_models
         .iter()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
-    let evidence = LearnedModelRouter::train(&telemetry)
+    let matched_teacher = MatchedCollaborationEvidenceTeacher::train(&workflow_telemetry);
+    let matched_evidence = matched_teacher
+        .calibrated_evidence()
+        .iter()
+        .take(8)
+        .cloned()
+        .collect::<Vec<_>>();
+    let matched = matched_evidence.iter().map(|evidence| evidence.prompt_hint());
+    let routes = LearnedModelRouter::train(&routing_telemetry)
         .calibrated_evidence()
         .into_iter()
         .filter(|route| allowed.contains(route.model.as_str()))
-        .take(12)
+        .take(8)
         .map(|route| {
             format!(
-                "class={} execution={} model={} samples={} success={:.0}% lower_confidence={:.2} quality={} verification={} latency_ms={}",
+                "route_observation class={} execution={} model={} samples={} success={:.0}% lower_confidence={:.2} quality={} verification={} latency_ms={}",
                 route.task_class.label(),
                 route.policy.label(),
                 route.model,
@@ -79,9 +92,9 @@ pub(crate) fn conductor_historical_evidence(
                     .unwrap_or_else(|| "unrated".to_string()),
                 route.average_latency_ms,
             )
-        })
-        .collect::<Vec<_>>();
-    Ok(evidence.join("\n"))
+        });
+    let evidence = matched.chain(routes).collect::<Vec<_>>();
+    Ok((evidence.join("\n"), matched_evidence))
 }
 
 pub(crate) fn parse_task_class_label(value: &str) -> Option<TaskClass> {
