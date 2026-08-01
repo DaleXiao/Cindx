@@ -1,6 +1,6 @@
 # Current Product Baseline
 
-Current application version: `0.1.80`
+Current application version: `0.1.81`
 
 Last code-fact review: `2026-08-01`
 
@@ -91,17 +91,25 @@ quality.
 
 ## Current Evidence Boundary
 
-The latest tool-using Agent pilot is
-[Cindx Agent Real-World Lite 0.1.80](evaluations/CINDX_AGENT_REALWORLD_LITE_0.1.80_2026-08-01.md).
-It found:
+The latest provider-backed Agent diagnostic is
+[Cindx Agent Real-World Lite Goal 6 0.1.80](evaluations/CINDX_AGENT_REALWORLD_LITE_G6_0.1.80_2026-08-01.md).
+It ran the same three deterministic read-only workspace tasks across a direct
+single-model ceiling, Fast, Auto, and Pro on source commit `e40960c`:
 
-- Direct completed `3/3` cases.
-- Fast completed `0/3` cases despite returning visible responses.
-- Auto completed `2/3` cases.
-- Pro completed `2/3` cases.
-- Fast persistently exhausted evidence/finalization capacity on multi-file work.
-- Auto produced a correct reviewer result but delivered a stale weaker result
-  in the contradiction case.
+- the direct ceiling and Auto each scored `1.000` across `3/3` deliveries;
+- Fast scored `0.417`; it remained incomplete on multi-file synthesis and
+  contradiction resolution;
+- Pro scored `0.333`; all three answers omitted required evidence;
+- Auto used `55.76x` the direct tokens and `7.83x` its median latency; Pro used
+  `73.43x` the tokens and `12.83x` the median latency;
+- all `12/12` runs delivered without provider errors or safety violations;
+- neither Auto nor Pro used a frozen GEPA profile.
+
+This is a small directional diagnostic, not a statistically powered ranking.
+The direct treatment received evidence inline, so it is an answer-quality
+ceiling rather than an equal tool-using baseline. The result is still enough to
+reject a current collaboration-uplift claim: Auto recovered answer completeness
+but not efficiency, while Pro regressed in both quality and cost.
 
 The latest matched GPQA diagnostic is version `0.1.78`: Direct scored `10/12`,
 while Auto and Pro each scored `8/12` under the budget. The sample is too small
@@ -111,8 +119,8 @@ Therefore the current claim is:
 
 - The control plane, local memory contract, permission boundary, and
   deterministic quality gates have substantial automated coverage.
-- Auto and Pro can help gather multi-file evidence, but they are not proven to
-  outperform the direct path in quality, latency, or tokens.
+- Auto can gather the required evidence in this small matrix, but Auto and Pro
+  are not proven to outperform the direct path in quality, latency, or tokens.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.
 
 ## Known Structural Limits

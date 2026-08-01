@@ -5,9 +5,12 @@ source revision and application version recorded inside them.
 
 ## Current Product Decision
 
-- [Cindx Agent Real-World Lite 0.1.80](CINDX_AGENT_REALWORLD_LITE_0.1.80_2026-08-01.md)
-  is the current tool-using Agent baseline. Its decision is `NO-GO` for an
-  intelligence-uplift claim.
+- [Cindx Agent Real-World Lite Goal 6 0.1.80](CINDX_AGENT_REALWORLD_LITE_G6_0.1.80_2026-08-01.md)
+  is the current provider-backed Agent diagnostic on source commit `e40960c`.
+  Auto matched the direct answer-quality ceiling, but Fast and Pro regressed and
+  collaboration cost remained high. Its decision is `NO-GO` for a collaboration
+  or intelligence-uplift claim.
+- [Sanitized machine-readable result](CINDX_AGENT_REALWORLD_LITE_G6_0.1.80_2026-08-01.json)
 
 ## Latest Matched Provider Diagnostic
 
@@ -20,7 +23,8 @@ diagnostic, not the current Agent decision baseline.
 
 ## Historical Evidence
 
-Reproducible older reports are under [archive](archive/README.md). They remain
+Reproducible older reports, including the earlier same-day `0.1.80` Agent pilot,
+are under [archive](archive/README.md). They remain
 available for regression history but must not be quoted as current behavior.
 
 Reports with unknown source revisions, superseded duplicate pilots, unfinished

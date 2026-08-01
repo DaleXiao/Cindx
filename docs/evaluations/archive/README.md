@@ -3,6 +3,12 @@
 Nothing in this directory is a current product claim. Each report applies only
 to its named version and source revision.
 
+## Retained August 2026 Evidence
+
+- `0.1.80`: earlier same-day Agent Real-World Lite pilot on commit `7cd6eb1`.
+  The later Goal 6 matrix at the evaluation root supersedes it for current
+  product decisions.
+
 ## Retained July 2026 Evidence
 
 - `0.1.51`: matched GPQA Agent Core V4 report and sanitized JSON.

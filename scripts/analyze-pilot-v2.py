@@ -6,10 +6,12 @@ from __future__ import annotations
 import argparse
 import copy
 import difflib
+import hashlib
 import json
 import math
 import statistics
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -102,6 +104,16 @@ def diagnostic_run(run: dict) -> dict:
         "failure_kind": failure_kind(run),
         "safety_violations": int(run.get("safety_violations", 0)),
     }
+
+
+def captured_at(generated_at_ms: object) -> str:
+    try:
+        timestamp = float(generated_at_ms) / 1000.0
+    except (TypeError, ValueError):
+        return "unknown"
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace(
+        "+00:00", "Z"
+    )
 
 
 def sanitize(report: dict, rerun_report: dict | None = None) -> dict:
@@ -242,6 +254,8 @@ def markdown_report(report: dict) -> str:
         "",
         f"- App: `{report.get('app_version', 'unknown')}`",
         f"- Commit: `{report.get('git_commit', 'unknown')}`",
+        f"- Captured: `{captured_at(report.get('generated_at_ms'))}`",
+        f"- Raw evidence SHA-256: `{report.get('raw_evidence_sha256', 'unknown')}`",
         f"- Runs: `{len(report.get('runs', []))}` / {expected_runs}",
         f"- GEPA frozen: `{str(report.get('gepa_frozen', False)).lower()}`",
         f"- Safety violations: `{sum(item['safety_violations'] for item in analysis['treatments'].values())}`",
@@ -251,8 +265,12 @@ def markdown_report(report: dict) -> str:
         "",
         decision,
         "",
-        f"The targeted second pass confirmed `{len(analysis['persistent_anomalies'])}` persistent anomalies and "
-        f"recovered `{len(analysis['recovered_anomalies'])}` first-pass anomalies.",
+        (
+            f"The targeted second pass confirmed `{len(analysis['persistent_anomalies'])}` persistent anomalies and "
+            f"recovered `{len(analysis['recovered_anomalies'])}` first-pass anomalies."
+            if analysis["targeted_reruns"]
+            else "No targeted second pass was run; first-pass cells remain unchanged."
+        ),
         "",
         "## Treatment Results",
         "",
@@ -383,7 +401,8 @@ def main() -> None:
     parser.add_argument("markdown", type=Path)
     parser.add_argument("--rerun", type=Path)
     args = parser.parse_args()
-    report = json.loads(args.raw.read_text())
+    raw_bytes = args.raw.read_bytes()
+    report = json.loads(raw_bytes)
     if report.get("schema") not in {
         "cindx.pilot_v2.raw.v1",
         "cindx.pilot_v2.raw.v2",
@@ -391,6 +410,11 @@ def main() -> None:
         raise SystemExit("unexpected Pilot v2 schema")
     rerun_report = json.loads(args.rerun.read_text()) if args.rerun else None
     clean = sanitize(report, rerun_report)
+    clean["raw_evidence_sha256"] = hashlib.sha256(raw_bytes).hexdigest()
+    if args.rerun:
+        clean["targeted_rerun_raw_sha256"] = hashlib.sha256(
+            args.rerun.read_bytes()
+        ).hexdigest()
     args.sanitized_json.parent.mkdir(parents=True, exist_ok=True)
     args.markdown.parent.mkdir(parents=True, exist_ok=True)
     args.sanitized_json.write_text(json.dumps(clean, indent=2, ensure_ascii=False) + "\n")
