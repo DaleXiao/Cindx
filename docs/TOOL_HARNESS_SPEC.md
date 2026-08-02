@@ -32,7 +32,9 @@ The harness has one lifecycle owner per concern:
 - `queue_service` and `session_projection` own queue reduction and the versioned
   per-session read model. Interactive commands use compact receipts and indexed
   session deltas instead of rebuilding complete application state.
-- `permission_service` owns indexed session-grant and pending-request lookup.
+- `agent-core` owns capability matching and the fail-closed rules for reusable
+  session permissions. Desktop `permission_service` owns only indexed
+  session-grant and pending-request lookup.
   `collaboration_service` owns Fugu worker request/result envelopes, continuation
   budgets, and the reserved final-answer turn; neither service performs provider
   calls or tool side effects.

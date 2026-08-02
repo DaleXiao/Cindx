@@ -395,8 +395,14 @@ const collaborationWorkerRuntimeSource = read(
 const adaptiveCollaborationFinalizationSource = read(
   "apps/desktop/src-tauri/src/adaptive_collaboration_finalization.rs"
 );
-const agentLoopServiceSource = read(
-  "apps/desktop/src-tauri/src/agent_loop_service.rs"
+const agentRuntimeModelTransportSource = read(
+  "crates/agent-runtime/src/model_transport.rs"
+);
+const agentRuntimeGroundingPolicySource = read(
+  "crates/agent-runtime/src/grounding_policy.rs"
+);
+const agentRuntimeGroundingToolsSource = read(
+  "crates/agent-runtime/src/grounding_tools.rs"
 );
 const agentLoopRuntimeSource = read(
   "apps/desktop/src-tauri/src/agent_loop_runtime.rs"
@@ -436,6 +442,9 @@ const parallelExecutionSource = read(
 );
 const permissionServiceSource = read(
   "apps/desktop/src-tauri/src/permission_service.rs"
+);
+const agentCorePermissionPolicySource = read(
+  "crates/agent-core/src/permission_policy.rs"
 );
 const queueServiceSource = read("apps/desktop/src-tauri/src/queue_service.rs");
 const agentRunEngineSource = read(
@@ -3298,17 +3307,22 @@ assert(
     "session_permission_grant_only_covers_the_same_capability"
   ) &&
     permissionServiceSource.includes("list_permission_audits_for_session") &&
-    permissionServiceSource.includes("permission_capability_matches") &&
-    permissionServiceSource.includes("granted.risk == requested.risk") &&
-    permissionServiceSource.includes("granted.action == requested.action") &&
-    permissionServiceSource.includes("permission_capability_metadata_matches") &&
+    !permissionServiceSource.includes("fn permission_capability_matches") &&
+    agentCorePermissionPolicySource.includes("pub fn permission_capability_matches") &&
+    agentCorePermissionPolicySource.includes("granted.risk == requested.risk") &&
+    agentCorePermissionPolicySource.includes("granted.action == requested.action") &&
+    agentCorePermissionPolicySource.includes("permission_capability_metadata_matches") &&
     permissionServiceSource.includes("permission_can_allow_session") &&
     agentStorageSource.includes("idx_permission_requests_session_capability_key") &&
     agentStorageSource.includes("backfill_permission_capability_keys") &&
     permissionServiceSource.includes('request.metadata.contains_key("command")') &&
     desktopAgentToolRuntimeSource.includes("agent_session_permission_granted(") &&
-    permissionServiceSource.includes("request.risk == PermissionRisk::Destructive") &&
-    permissionServiceSource.includes("session_reusable == Some(\"true\")") &&
+    agentCorePermissionPolicySource.includes(
+      "request.risk == PermissionRisk::Destructive"
+    ) &&
+    agentCorePermissionPolicySource.includes(
+      'session_reusable == Some("true")'
+    ) &&
     rustLib.includes(
       ".filter(|pending| permission_capability_matches(&request, pending))"
     ) &&
@@ -3317,6 +3331,25 @@ assert(
     composerSource.includes("pendingApproval.canAllowSession") &&
     composerSource.includes("Reuse only this exact command in this session"),
   "Allow session must reuse only the same capability and never cover destructive tools"
+);
+assert(
+  !rustLib.includes("mod agent_grounding_policy") &&
+    !rustLib.includes("mod agent_loop_service") &&
+    agentRuntimeGroundingToolsSource.includes(
+      "pub fn pin_prompt_evidence_tools"
+    ) &&
+    agentRuntimeGroundingToolsSource.includes(
+      "pub fn tool_matches_evidence_scope"
+    ) &&
+    agentRuntimeGroundingPolicySource.includes("pub fn prompt_evidence_scopes") &&
+    agentRuntimeModelTransportSource.includes(
+      "pub fn model_transport_retry_delay"
+    ) &&
+    agentRuntimeModelTransportSource.includes("pub struct ModelStreamProgress") &&
+    agentLoopRuntimeSource.includes(
+      "agent_runtime::pin_prompt_evidence_tools"
+    ),
+  "Grounding and model transport policy must remain portable agent-runtime ownership"
 );
 assert(
   rustLib.includes("execute_agent_tool_invocation") &&

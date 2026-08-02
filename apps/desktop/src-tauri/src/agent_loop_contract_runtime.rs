@@ -1,13 +1,13 @@
 use crate::desktop_prelude::*;
 use crate::{
-    agent_grounding_policy::{tool_matches_evidence_scope, PromptEvidenceScope},
     app_state::AppState,
     event_persistence::append_event,
     runtime_values::{agent_runtime_context_for_run, run_context_steer_epoch},
 };
+use agent_runtime::{tool_matches_evidence_scope, PromptEvidenceScope};
 
 #[cfg(test)]
-use crate::agent_grounding_policy::{pin_prompt_evidence_tools, prompt_evidence_scopes};
+use agent_runtime::{pin_prompt_evidence_tools, prompt_evidence_scopes};
 
 pub(crate) fn workspace_verification_policy_for_run_context(
     run_context: &Metadata,

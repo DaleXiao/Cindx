@@ -17,6 +17,8 @@ use std::{
 };
 use tools::prompt_requests_image_generation;
 
+pub(crate) use agent_runtime::{effective_agent_objective, run_context_steer_epoch};
+
 pub(crate) fn phase3_task_id() -> TaskId {
     TaskId(PHASE3_TASK_ID.to_string())
 }
@@ -80,13 +82,6 @@ pub(crate) fn current_time_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("system time should be after Unix epoch")
         .as_millis() as u64
-}
-
-pub(crate) fn run_context_steer_epoch(run_context: &Metadata) -> u64 {
-    run_context
-        .get("steer_epoch")
-        .and_then(|epoch| epoch.parse::<u64>().ok())
-        .unwrap_or_default()
 }
 
 pub(crate) fn parse_permission_decision(value: &str) -> Result<PermissionDecision, StorageError> {
@@ -263,17 +258,6 @@ pub(crate) fn add_image_generation_run_context(
             config.image_endpoint.trim().to_string()
         },
     );
-}
-
-pub(crate) fn effective_agent_objective<'a>(
-    run_context: &'a Metadata,
-    latest_prompt: &'a str,
-) -> &'a str {
-    run_context
-        .get("effective_prompt_objective")
-        .map(String::as_str)
-        .filter(|objective| !objective.trim().is_empty())
-        .unwrap_or(latest_prompt)
 }
 
 pub(crate) fn agent_runtime_context_for_run(run_context: &Metadata) -> Option<String> {
