@@ -67,8 +67,8 @@ the same run-control and lifecycle vocabulary. They are not independent loops.
 
 | Crate | Owns | Does not own |
 | --- | --- | --- |
-| `agent-core` | Shared ids, messages, events, permissions, tool and model contracts | Persistence or side effects |
-| `agent-runtime` | `AgentKernel`, loop state, run control, budgets, context governance, tool admission, terminal semantics | Provider HTTP, permission UI, actual tool execution |
+| `agent-core` | Shared ids, messages, events, permission capability policy, tool and model contracts | Persistence or side effects |
+| `agent-runtime` | `AgentKernel`, loop state, run control, budgets, context governance, grounding scope/tool policy, model transport retry/progress policy, tool admission, terminal semantics | Provider HTTP, permission UI, actual tool execution |
 | `agent-harness` | Active-run registry and exclusive-key leases over `AgentRunControl` | Agent policy or workflow planning |
 | `orchestrator` | Typed run decisions, workflow/task graph, role assignment, verification, frontier selection, recovery policy, prompt-genome evaluation | Tool side effects, Tauri state, provider wire protocol |
 | `agent-memory` | Durable memory extraction, trust labels, deduplication, supersession, lexical/semantic recall | Workspace file indexing |
@@ -101,7 +101,7 @@ touch Tauri or product state:
 - Tauri commands and event emission.
 - Provider configuration and calls through `model-provider`.
 - Tool registry construction and side effects through `tools`.
-- Permission prompts, scoped session-grant lookup, and continuation.
+- Permission prompts, indexed scoped session-grant lookup, and continuation. The portable capability-match and session-reuse policy remains in `agent-core`.
 - SQLite-backed project/session projections and runtime snapshots.
 - Browser/computer sidecar process integration.
 - Execution adapters that translate product state into the portable
@@ -111,6 +111,11 @@ touch Tauri or product state:
 This concentration is a known structural limit. New portable policy must not be
 added to the desktop prelude merely because the composition root can access all
 state.
+
+Prompt grounding classification, evidence-tool pinning, run-context objective
+selection, and model-stream retry/progress policy are portable
+`agent-runtime` responsibilities. The desktop loop supplies catalog and product
+state, then executes the resulting provider and tool side effects.
 
 ## Decision and Workflow Relationship
 

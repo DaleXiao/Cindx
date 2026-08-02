@@ -1,20 +1,18 @@
-use crate::{
-    desktop_prelude::*,
-    runtime_values::{effective_agent_objective, run_context_steer_epoch},
-};
-use agent_core::ToolEffectSemantics;
+use crate::run_context::{effective_agent_objective, run_context_steer_epoch};
+use agent_core::Metadata;
+use std::collections::BTreeSet;
 
 const MAX_CLASSIFICATION_INSTRUCTION_CHARS: usize = 16_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum PromptEvidenceScope {
+pub enum PromptEvidenceScope {
     Workspace,
     External,
     Visual,
 }
 
 impl PromptEvidenceScope {
-    pub(crate) fn requirement_id(self) -> &'static str {
+    pub fn requirement_id(self) -> &'static str {
         match self {
             Self::Workspace => "workspace_grounding",
             Self::External => "external_grounding",
@@ -23,7 +21,7 @@ impl PromptEvidenceScope {
     }
 }
 
-pub(crate) fn prompt_evidence_scopes(run_context: &Metadata) -> BTreeSet<PromptEvidenceScope> {
+pub fn prompt_evidence_scopes(run_context: &Metadata) -> BTreeSet<PromptEvidenceScope> {
     let objective = effective_agent_objective(run_context, "");
     if objective.trim().is_empty() {
         return BTreeSet::new();
@@ -64,9 +62,9 @@ fn prompt_evidence_scopes_for_instruction(instruction: &str) -> BTreeSet<PromptE
         return BTreeSet::new();
     }
     let shared_action =
-        evidence_action_requested(&instruction) || retrieval_action_requested(&instruction);
+        evidence_action_requested(instruction) || retrieval_action_requested(instruction);
 
-    evidence_clauses(&instruction)
+    evidence_clauses(instruction)
         .into_iter()
         .filter(|clause| {
             !capability_or_guidance_request(clause)
@@ -883,7 +881,7 @@ fn contains_workspace_path(value: &str) -> bool {
             return true;
         }
         let file_name = token
-            .rsplit(|character| character == '/' || character == '\\')
+            .rsplit(['/', '\\'])
             .next()
             .unwrap_or(token)
             .split(':')
@@ -955,75 +953,4 @@ fn contains_signal(value: &str, needles: &[&str]) -> bool {
             left_boundary && right_boundary
         })
     })
-}
-
-pub(crate) fn tool_matches_evidence_scope(tool: &ToolSpec, scope: PromptEvidenceScope) -> bool {
-    if tool.effect_semantics != ToolEffectSemantics::ReadOnly
-        || matches!(
-            tool.name.as_str(),
-            "file.list" | "browser.tabs" | "tool.search" | "tool.inspect"
-        )
-    {
-        return false;
-    }
-    match scope {
-        PromptEvidenceScope::Workspace => matches!(
-            tool.name.as_str(),
-            "file.read" | "file.read_many" | "file.search"
-        ),
-        PromptEvidenceScope::External => {
-            matches!(tool.name.as_str(), "web.search" | "browser.extract_text")
-        }
-        PromptEvidenceScope::Visual => matches!(
-            tool.name.as_str(),
-            "browser.capture" | "computer.screenshot"
-        ),
-    }
-}
-
-pub(crate) fn pin_prompt_evidence_tools(
-    run_context: &Metadata,
-    catalog: &[ToolSpec],
-    inline: &mut Vec<ToolSpec>,
-) -> BTreeSet<PromptEvidenceScope> {
-    let scopes = prompt_evidence_scopes(run_context);
-    if scopes.is_empty() {
-        return scopes;
-    }
-    let mut names = inline
-        .iter()
-        .map(|tool| tool.name.clone())
-        .collect::<BTreeSet<_>>();
-    for scope in &scopes {
-        if inline
-            .iter()
-            .any(|tool| tool_matches_evidence_scope(tool, *scope))
-        {
-            continue;
-        }
-        let preferred: &[&str] = match scope {
-            PromptEvidenceScope::Workspace => &["file.read", "file.search", "file.read_many"],
-            PromptEvidenceScope::External => &["web.search", "browser.extract_text"],
-            PromptEvidenceScope::Visual => &["computer.screenshot", "browser.capture"],
-        };
-        let candidate = preferred
-            .iter()
-            .find_map(|name| {
-                catalog
-                    .iter()
-                    .find(|tool| tool.name == *name && tool_matches_evidence_scope(tool, *scope))
-            })
-            .or_else(|| {
-                catalog
-                    .iter()
-                    .find(|tool| tool_matches_evidence_scope(tool, *scope))
-            });
-        if let Some(tool) = candidate {
-            if names.insert(tool.name.clone()) {
-                inline.push(tool.clone());
-            }
-        }
-    }
-    inline.sort_by(|left, right| left.name.cmp(&right.name));
-    scopes
 }

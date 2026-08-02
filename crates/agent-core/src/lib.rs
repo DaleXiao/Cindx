@@ -1,10 +1,14 @@
 use std::collections::BTreeMap;
 
 mod event_contract;
+mod permission_policy;
 
 pub use event_contract::{
     decode_event_type, insert_event_type_v1, DecodedEventType, EventTypeBuildError, EventTypeV1,
     TypedEventRef, EVENT_TYPE_METADATA_KEY,
+};
+pub use permission_policy::{
+    permission_can_allow_session, permission_capability_matches, permission_requires_exact_scope,
 };
 
 pub type Metadata = BTreeMap<String, String>;

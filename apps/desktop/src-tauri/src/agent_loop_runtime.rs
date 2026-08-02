@@ -114,7 +114,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             config.context_window_tokens,
         )
         .inline;
-    let evidence_scopes = crate::agent_grounding_policy::pin_prompt_evidence_tools(
+    let evidence_scopes = agent_runtime::pin_prompt_evidence_tools(
         &run_context,
         &registry.specs(),
         &mut tools,

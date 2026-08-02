@@ -19,11 +19,17 @@ mod control;
 mod control_steer;
 mod execution;
 mod failure;
+mod grounding_policy;
+#[cfg(test)]
+mod grounding_policy_tests;
+mod grounding_tools;
 mod kernel;
+mod model_transport;
 mod parallel;
 mod resource_ledger;
 mod result_frontier;
 mod run_budget;
+mod run_context;
 mod state_transaction;
 mod task_contract;
 mod task_state;
@@ -54,9 +60,15 @@ pub use execution::{
     NoToolAgentOutcome, NoToolAgentRequest, AGENT_EVIDENCE_PACKET_SCHEMA,
 };
 pub use failure::{AgentFailure, AgentFailureClass, AgentRecoveryAction};
+pub use grounding_policy::{prompt_evidence_scopes, PromptEvidenceScope};
+pub use grounding_tools::{pin_prompt_evidence_tools, tool_matches_evidence_scope};
 pub use kernel::{
     AgentKernel, AgentKernelInstruction, AgentKernelInstructionKind, AgentTurnPreparationError,
     PreparedAgentTurn,
+};
+pub use model_transport::{
+    exhausted_model_transport_error_stop_reason, model_response_checkpoint_evidence,
+    model_transport_retry_delay, ModelStreamProgress,
 };
 pub use parallel::{
     BoundedParallelExecutor, CancellableParallelJob, InterruptibleQuorumExecution,
@@ -74,6 +86,7 @@ pub use run_budget::{
     RunBudget, RunStageBudget, RunStageClass, CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT,
     PHYSICAL_MODEL_ATTEMPTS_PER_LOGICAL_CALL,
 };
+pub use run_context::{effective_agent_objective, run_context_steer_epoch};
 pub use state_transaction::AgentLoopAppendTransaction;
 pub use task_contract::{
     AgentTaskContract, ContractEvidence, ContractEvidenceKind, PromptEvidenceContext,

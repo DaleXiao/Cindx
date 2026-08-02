@@ -24,7 +24,6 @@ const PRODUCTION_SUPER_GLOB_MODULE_BUDGET = 56;
 
 const LEGACY_DESKTOP_PRELUDE_GLOB_MODULES = new Set([
   "agent_collaboration_runtime.rs",
-  "agent_grounding_policy.rs",
   "agent_loop_contract_runtime.rs",
   "agent_loop_runtime.rs",
   "agent_recovery_service.rs",

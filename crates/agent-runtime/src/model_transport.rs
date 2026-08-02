@@ -1,16 +1,14 @@
-use agent_runtime::{AgentRunControl, RunStopReason};
+use crate::control::{AgentRunControl, RunStopReason};
 use model_provider::{ModelError, ModelResponse, ModelResponseDisposition};
 use std::time::{Duration, Instant};
 
-pub(crate) fn exhausted_model_transport_error_stop_reason(
-    error: &ModelError,
-) -> Option<RunStopReason> {
+pub fn exhausted_model_transport_error_stop_reason(error: &ModelError) -> Option<RunStopReason> {
     error
         .is_retryable()
         .then_some(RunStopReason::ProviderUnavailable)
 }
 
-pub(crate) fn model_response_checkpoint_evidence(response: &ModelResponse) -> Option<String> {
+pub fn model_response_checkpoint_evidence(response: &ModelResponse) -> Option<String> {
     if !matches!(
         response.assessment().disposition,
         ModelResponseDisposition::Usable | ModelResponseDisposition::ToolCalls
@@ -27,30 +25,36 @@ pub(crate) fn model_response_checkpoint_evidence(response: &ModelResponse) -> Op
     (!evidence.trim().is_empty()).then_some(evidence)
 }
 
-pub(crate) fn model_transport_retry_delay(attempt: usize) -> Duration {
+pub fn model_transport_retry_delay(attempt: usize) -> Duration {
     let exponent = attempt.saturating_sub(1).min(3) as u32;
     Duration::from_millis(500_u64.saturating_mul(2_u64.pow(exponent)))
 }
 
-pub(crate) struct ModelStreamProgress {
+pub struct ModelStreamProgress {
     last_progress_at: Instant,
     last_snapshot_bytes: usize,
 }
 
+impl Default for ModelStreamProgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModelStreamProgress {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             last_progress_at: Instant::now(),
             last_snapshot_bytes: 0,
         }
     }
 
-    pub(crate) fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.last_progress_at = Instant::now();
         self.last_snapshot_bytes = 0;
     }
 
-    pub(crate) fn observe(
+    pub fn observe(
         &mut self,
         control: &AgentRunControl,
         objective_epoch: u64,

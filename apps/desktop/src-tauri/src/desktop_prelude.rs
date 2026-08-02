@@ -119,7 +119,7 @@ pub(crate) use tools::{
     ImageGenerationConfig, ToolExecutionControl, ToolRegistry, WebSearchConfig,
 };
 
-pub(crate) use crate::agent_loop_service::{
+pub(crate) use agent_runtime::{
     exhausted_model_transport_error_stop_reason, model_response_checkpoint_evidence,
     model_transport_retry_delay, ModelStreamProgress,
 };
@@ -139,9 +139,9 @@ pub(crate) use crate::parallel_execution::{
     run_model_jobs_until_quorum_interruptible, AnytimeQuorumPolicy, CancellableParallelJob,
     InterruptibleQuorumPolicy, ParallelJobCompletion, ParallelJobSupervisor,
 };
+pub(crate) use agent_core::{permission_can_allow_session, permission_capability_matches};
 pub(crate) use crate::permission_service::{
-    agent_session_permission_granted, pending_agent_permissions_for_run,
-    permission_can_allow_session, permission_capability_matches, permission_decision_label,
+    agent_session_permission_granted, pending_agent_permissions_for_run, permission_decision_label,
     permission_decision_past_tense, permission_risk_label,
 };
 pub(crate) use crate::queue_service::{
