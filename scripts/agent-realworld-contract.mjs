@@ -341,13 +341,25 @@ export function renderMarkdown(report) {
     "",
     "## Treatment Results",
     "",
-    "| Treatment | Complete | Quality | External effect | Median latency | P95 latency | Tokens | Model calls | Tool calls |",
-    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+    "| Treatment | Complete | Quality | External effect | Safety violations | Median latency | P95 latency | Tokens | Model calls | Tool calls |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
   ];
   for (const treatment of report.suite.treatments) {
     const result = report.aggregates[treatment];
     lines.push(
-      `| ${treatment} | ${percent(result.completion_rate)} | ${percent(result.quality_pass_rate)} | ${percent(result.external_effect_pass_rate)} | ${result.latency_ms.median} ms | ${result.latency_ms.p95} ms | ${result.total_tokens} | ${result.model_calls} | ${result.tool_calls} |`
+      `| ${treatment} | ${percent(result.completion_rate)} | ${percent(result.quality_pass_rate)} | ${percent(result.external_effect_pass_rate)} | ${result.safety_violations} | ${result.latency_ms.median} ms | ${result.latency_ms.p95} ms | ${result.total_tokens} | ${result.model_calls} | ${result.tool_calls} |`
+    );
+  }
+  lines.push(
+    "",
+    "## Category Quality",
+    "",
+    "| Category | Direct | Fast | Auto | Pro |",
+    "| --- | ---: | ---: | ---: | ---: |"
+  );
+  for (const [category, results] of Object.entries(report.by_category)) {
+    lines.push(
+      `| ${category} | ${percent(results.direct.quality_pass_rate)} | ${percent(results.fast.quality_pass_rate)} | ${percent(results.auto.quality_pass_rate)} | ${percent(results.pro.quality_pass_rate)} |`
     );
   }
   lines.push(
@@ -355,8 +367,7 @@ export function renderMarkdown(report) {
     "## Interpretation Boundary",
     "",
     report.decision.claim_boundary,
-    "Raw prompts and model outputs remain outside Git; this report contains hashes, deterministic verifier results, and aggregate runtime measurements only.",
-    ""
+    "Raw prompts and model outputs remain outside Git; this report contains hashes, deterministic verifier results, and aggregate runtime measurements only."
   );
   return `${lines.join("\n")}\n`;
 }

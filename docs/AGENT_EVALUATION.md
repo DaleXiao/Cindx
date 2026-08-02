@@ -8,13 +8,14 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 
 | Evidence | Version | Scope | Current conclusion |
 | --- | --- | --- | --- |
-| [Agent Real-World Lite Goal 6](evaluations/CINDX_AGENT_REALWORLD_LITE_G6_0.1.80_2026-08-01.md) | `0.1.80` | 3 read-only workspace tasks, direct ceiling/Fast/Auto/Pro, 12 matched first-pass runs | Auto matched the direct ceiling but Fast and Pro regressed; `NO-GO` for collaboration uplift |
+| [Agent Real-World V1](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.md) | `0.1.82` | 6 tool, state, memory, and safety tasks; Direct/Fast/Auto/Pro; 72 matched runs | Fast, Auto, and Pro each scored `72.2%`; Auto and Pro added no quality over Fast and had lower completion plus higher latency; `NO-GO` for orchestration uplift |
 | [Matched provider baseline](evaluations/CINDX_PROVIDER_BASELINE_0.1.78_2026-07-31.md) | `0.1.78` | 12 frozen GPQA-Diamond questions, 36 matched treatments | Direct `10/12`; Auto and Pro `8/12`; no orchestration uplift shown |
 | Deterministic quality gates | current source | Runtime, memory, queue/steer, permission, recovery, projection, performance contracts | Control-plane evidence only |
 
-The real-world pilot is the current product decision baseline because it
-exercises workspace tools and workflow composition. The GPQA run is the latest
-matched provider diagnostic; it is older and measures difficult question
+The real-world V1 matrix is the current product decision baseline because it
+exercises shipping Agent, tool, permission, RAG, and memory paths. Direct is a
+no-tools answer ceiling with task evidence supplied inline, not an equal
+product treatment. The GPQA run is older and measures difficult question
 answering without tools.
 
 Neither report used a promoted GEPA profile. Neither report establishes Fugu
@@ -82,26 +83,32 @@ reports are immutable and live under `evaluations/archive/`.
 
 ## Current Real-World Findings
 
-The latest `0.1.80` matrix was captured after the run-driver, result-selection,
-task-graph, context, retrieval, memory, GEPA-boundary, and build-boundary work in
-Goals 1-5. Auto answered all three cases completely, including the prior stale
-terminal-selection case. That is a positive integration signal, but this single
-replicate cannot establish causality or generalize beyond the three fixtures.
+The `0.1.82` matrix contains 72 matched runs: six frozen cases, four treatments,
+and three repeats. Fast, Auto, and Pro each passed `72.2%` of the complete
+matrix. Relative to Fast, Auto added `0.0` percentage points of quality, lost
+`11.1` points of completion, and added `14.3 s` paired median latency. Pro added
+`0.0` points of quality, lost `5.6` points of completion, and added `18.0 s`.
+Pro also consumed `1,765,259` tokens and recorded `1,296` recovery events,
+without a quality advantage over Fast.
 
-Fast remained incomplete on multi-file synthesis and contradiction resolution.
-Pro omitted required evidence in all three cases and consumed `73.43x` the
-direct tokens at `12.83x` its median latency. Auto consumed `55.76x` the direct
-tokens at `7.83x` its median latency. No provider error or safety violation
-occurred, so the quality failures are product behavior rather than missing
-deliveries. Neither collaborative mode had a frozen GEPA profile.
+File mutation, long-horizon migration, RAG/memory recall, and denied mutation
+all passed for every product treatment. Browser evidence was the dominant real
+failure: Fast passed `0/3`, Auto `1/3`, and Pro `0/3`; the path produced two
+600-second timeouts and three unresolved permission waits. Coding scores also
+expose a frozen-suite instrumentation defect: seven runs passed the file and
+test checks but were failed solely because `file.read_many` was not accepted as
+equivalent read evidence. The published scores remain unchanged; a future suite
+version must fix that contract before collecting new observations.
 
-These observations reject a broad collaboration-uplift claim. They do not prove
-that collaboration has no value, but they require dynamic orchestration to beat
-an equal tool-using baseline before a larger parity claim is credible.
+No run violated the denied-mutation safety check. That is positive evidence for
+this exact permission path, not proof of complete runtime security. The matrix
+rejects a current orchestration-uplift claim and gives the next goals concrete
+targets: browser stop/permission convergence, evidence-aware tool completion,
+and collaboration that must beat Fast under matched verification and latency.
 
-## Next Product Gate
+## Current Product Gate
 
-`benchmarks/agent/realworld-v1.json` freezes the next matched product baseline.
+`benchmarks/agent/realworld-v1.json` freezes this matched product baseline.
 It covers structured file mutation, code edit plus tests, browser evidence,
 long-horizon migration, indexed knowledge plus cross-session memory, and denied
 mutation. Direct, Fast, Auto, and Pro each receive three matched repeats.
@@ -121,10 +128,12 @@ when Git commit, suite hash, selection, and replicate count still match. Browser
 processes are retired by the sample's unique temporary root so one treatment
 cannot contaminate the resources or state of the next.
 
-This protocol is not evidence until a complete provider-backed matrix has run
-and its sanitized report is committed. Cancellation, interruption/resume, user
-steering, computer interaction, and adversarial instruction resistance still
-require later frozen suites; they must not be inferred from this baseline.
+The complete provider-backed matrix is recorded in
+[Agent Real-World V1](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.md)
+with its [sanitized machine-readable evidence](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.json).
+Cancellation, interruption/resume, user steering, computer interaction, and
+adversarial instruction resistance still require later frozen suites; they
+must not be inferred from this baseline.
 
 ## Running Checks
 

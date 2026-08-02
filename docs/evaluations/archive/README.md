@@ -6,8 +6,9 @@ to its named version and source revision.
 ## Retained August 2026 Evidence
 
 - `0.1.80`: earlier same-day Agent Real-World Lite pilot on commit `7cd6eb1`.
-  The later Goal 6 matrix at the evaluation root supersedes it for current
-  product decisions.
+- `0.1.80`: later Goal 6 Agent Real-World Lite matrix on commit `e40960c`.
+  The `0.1.82` Agent Real-World V1 matrix supersedes both for current product
+  decisions.
 
 ## Retained July 2026 Evidence
 
