@@ -65,6 +65,12 @@ function validateSuite(suite) {
     Number.isInteger(suite.default_replicates) && suite.default_replicates > 0,
     "suite replicate count is invalid"
   );
+  requireFact(
+    Number.isInteger(suite.per_run_timeout_seconds) &&
+      suite.per_run_timeout_seconds >= 60 &&
+      suite.per_run_timeout_seconds <= 3600,
+    "suite per-run timeout is invalid"
+  );
   requireFact(Array.isArray(suite.cases) && suite.cases.length > 0, "suite cases are missing");
   requireFact(
     JSON.stringify(suite.treatments) === JSON.stringify(["direct", "fast", "auto", "pro"]),
