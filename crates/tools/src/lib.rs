@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -152,6 +152,25 @@ pub struct ToolExposurePlan {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolExposureIntent {
+    pub preferred_namespaces: BTreeSet<String>,
+    pub deferred_namespaces: BTreeSet<String>,
+    pub required_tools: BTreeSet<String>,
+    pub prefer_read_only: bool,
+    pub prefer_effects: bool,
+}
+
+impl ToolExposureIntent {
+    pub fn is_empty(&self) -> bool {
+        self.preferred_namespaces.is_empty()
+            && self.deferred_namespaces.is_empty()
+            && self.required_tools.is_empty()
+            && !self.prefer_read_only
+            && !self.prefer_effects
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WebSearchConfig {
     pub endpoint: String,
     pub api_key: String,
@@ -288,6 +307,15 @@ impl ToolRegistry {
     }
 
     pub fn exposure_plan(&self, prompt: &str, context_window: u64) -> ToolExposurePlan {
+        self.exposure_plan_with_intent(prompt, context_window, &ToolExposureIntent::default())
+    }
+
+    pub fn exposure_plan_with_intent(
+        &self,
+        prompt: &str,
+        context_window: u64,
+        intent: &ToolExposureIntent,
+    ) -> ToolExposurePlan {
         let mut candidates = self
             .tools
             .values()
@@ -300,26 +328,38 @@ impl ToolRegistry {
             .iter()
             .filter(|spec| matches!(spec.exposure, agent_core::ToolExposure::Auto))
             .count();
-        let max_auto = if context_window < 32_000 { 10 } else { 24 };
-        if auto_count <= max_auto {
+        let default_max_auto = if context_window < 32_000 { 10 } else { 24 };
+        if intent.is_empty() && auto_count <= default_max_auto {
             return ToolExposurePlan {
                 inline: candidates,
                 deferred: Vec::new(),
             };
         }
 
+        let max_auto = if intent.is_empty() {
+            default_max_auto
+        } else {
+            default_max_auto.min(12)
+        };
         let query = prompt.to_ascii_lowercase();
         candidates.sort_by(|left, right| {
-            tool_relevance(right, &query)
-                .cmp(&tool_relevance(left, &query))
+            tool_relevance_with_intent(right, &query, intent)
+                .cmp(&tool_relevance_with_intent(left, &query, intent))
                 .then(left.name.cmp(&right.name))
         });
         let mut inline = Vec::new();
         let mut deferred = Vec::new();
         let mut auto_inline = 0usize;
         for spec in candidates {
+            let required = intent.required_tools.contains(&spec.name);
+            let explicitly_deferred = intent.deferred_namespaces.contains(&spec.namespace);
             match spec.exposure {
                 agent_core::ToolExposure::Inline => inline.push(spec),
+                _ if required => {
+                    auto_inline += 1;
+                    inline.push(spec);
+                }
+                _ if explicitly_deferred => deferred.push(spec),
                 agent_core::ToolExposure::Deferred => deferred.push(spec),
                 agent_core::ToolExposure::Auto if auto_inline < max_auto => {
                     auto_inline += 1;
@@ -365,6 +405,23 @@ fn tool_relevance(spec: &ToolSpec, query: &str) -> usize {
         if spec.description.to_ascii_lowercase().contains(token) {
             score += 1;
         }
+    }
+    score
+}
+
+fn tool_relevance_with_intent(spec: &ToolSpec, query: &str, intent: &ToolExposureIntent) -> usize {
+    let mut score = tool_relevance(spec, query);
+    if intent.required_tools.contains(&spec.name) {
+        score += 10_000;
+    }
+    if intent.preferred_namespaces.contains(&spec.namespace) {
+        score += 1_000;
+    }
+    if intent.prefer_read_only && spec.effect_semantics == ToolEffectSemantics::ReadOnly {
+        score += 100;
+    }
+    if intent.prefer_effects && spec.effect_semantics != ToolEffectSemantics::ReadOnly {
+        score += 100;
     }
     score
 }
@@ -1113,6 +1170,40 @@ mod tests {
                 .map(|spec| spec.execution_concurrency),
             Some(ToolExecutionConcurrency::Serialized)
         );
+    }
+
+    #[test]
+    fn execution_intent_keeps_browser_tools_focused_and_defers_computer_controls() {
+        let mut registry = ToolRegistry::with_workspace_tools(temp_workspace());
+        registry.install_meta_tools();
+        let intent = ToolExposureIntent {
+            preferred_namespaces: BTreeSet::from(["browser".to_string()]),
+            deferred_namespaces: BTreeSet::from(["computer".to_string()]),
+            required_tools: BTreeSet::from([
+                "browser.open".to_string(),
+                "browser.extract_text".to_string(),
+            ]),
+            prefer_effects: true,
+            ..ToolExposureIntent::default()
+        };
+
+        let plan = registry.exposure_plan_with_intent(
+            "Open the incident dashboard in the browser and create a JSON report",
+            128_000,
+            &intent,
+        );
+        let inline = plan
+            .inline
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert!(inline.contains("browser.open"));
+        assert!(inline.contains("browser.extract_text"));
+        assert!(inline.contains("file.write"));
+        assert!(!inline.iter().any(|name| name.starts_with("computer.")));
+        assert!(inline.contains("tool.search"));
+        assert!(plan.deferred.iter().any(|tool| tool.name == "computer.key"));
     }
 
     #[test]

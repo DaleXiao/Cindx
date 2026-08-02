@@ -117,6 +117,14 @@ selection, and model-stream retry/progress policy are portable
 `agent-runtime` responsibilities. The desktop loop supplies catalog and product
 state, then executes the resulting provider and tool side effects.
 
+The validated conductor decision also supplies execution intent. The desktop
+composition root converts its task class, tool requirement, and vision flag into
+a focused catalog exposure plan and prompt-epoch completion obligations. Normal
+execution and permission recovery call the same planner. Tool success from an
+older steer epoch cannot satisfy the current prompt, while replay of the same
+persisted epoch retains already recorded success. Browser observation is a
+separate evidence domain from general web retrieval and screen observation.
+
 ## Decision and Workflow Relationship
 
 `AgentRunDecision` is the validated boundary between planning and execution. It
@@ -129,6 +137,9 @@ branch quorum, estimated steps, expected uplift, confidence, and stop policy.
 - A direct decision enters the interactive loop without collaboration.
 - A workflow decision creates a bounded adaptive workflow. The task graph owns
   dependency order and runnable/resumable/degraded/exhausted states.
+- The conductor is told the actual worker capability boundary. Isolated workers
+  cannot be assigned permission-gated browser, computer, shell, or mutation work;
+  those effects remain in the foreground executor.
 - Independent workflow contributions are defined by non-overlapping task and
   evidence lineage, not by model identity. The conductor may reuse the selected
   direct-baseline model across different branches or choose another configured

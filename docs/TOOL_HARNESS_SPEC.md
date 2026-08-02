@@ -100,12 +100,23 @@ ranks the remaining tools against the user request, and exposes:
 `tool.invoke` delegates the target tool's permission request before execution.
 Meta tools cannot invoke themselves.
 
+For validated conductor decisions, catalog ranking additionally uses task class,
+read/effect intent, and active evidence domains. Explicitly required tools stay
+inline; unrelated browser or computer control namespaces can be deferred without
+removing `tool.search`/`tool.inspect`/`tool.invoke`. Required evidence tools are
+pinned after ranking. Permission continuation recomputes this exact plan from the
+persisted run context instead of falling back to a broader catalog.
+
 ## Permission continuation
 
 Each session owns its suspended `AgentLoopState`. An approval resolution executes
 or denies the original invocation, appends the result to that state, and resumes
 the same loop. Persisted transcript reconstruction is a crash-recovery fallback,
 not the normal approval path.
+
+Cold recovery preserves the conductor task class, tool requirement, vision flag,
+and prompt contract epoch. A successful tool call from an older steer epoch does
+not satisfy a newly steered prompt.
 
 Identical tool arguments may fail twice. A third identical attempt is blocked so
 the model must change its approach.

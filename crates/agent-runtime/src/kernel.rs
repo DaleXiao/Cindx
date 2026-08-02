@@ -278,6 +278,16 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             .replace_prompt_required_tool_successes(epoch, tools);
     }
 
+    pub fn replace_prompt_required_any_tool_successes(
+        &mut self,
+        epoch: u64,
+        requirements: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    ) {
+        self.state
+            .task_contract
+            .replace_prompt_required_any_tool_successes(epoch, requirements);
+    }
+
     pub fn merge_workspace_verification_policy(&mut self, policy: WorkspaceVerificationPolicy) {
         self.state
             .task_contract

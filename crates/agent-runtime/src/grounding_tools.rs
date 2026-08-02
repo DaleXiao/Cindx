@@ -19,6 +19,10 @@ pub fn tool_matches_evidence_scope(tool: &ToolSpec, scope: PromptEvidenceScope) 
         PromptEvidenceScope::External => {
             matches!(tool.name.as_str(), "web.search" | "browser.extract_text")
         }
+        PromptEvidenceScope::Browser => matches!(
+            tool.name.as_str(),
+            "browser.extract_text" | "browser.capture"
+        ),
         PromptEvidenceScope::Visual => matches!(
             tool.name.as_str(),
             "browser.capture" | "computer.screenshot"
@@ -49,6 +53,7 @@ pub fn pin_prompt_evidence_tools(
         let preferred: &[&str] = match scope {
             PromptEvidenceScope::Workspace => &["file.read", "file.search", "file.read_many"],
             PromptEvidenceScope::External => &["web.search", "browser.extract_text"],
+            PromptEvidenceScope::Browser => &["browser.extract_text", "browser.capture"],
             PromptEvidenceScope::Visual => &["computer.screenshot", "browser.capture"],
         };
         let candidate = preferred

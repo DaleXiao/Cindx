@@ -26,8 +26,8 @@ use agent_core::{EventKind, Message, Metadata, TaskId};
 use agent_runtime::AgentRunControl;
 use orchestrator::{
     AgentExecutionMode, AgentRunDecision, AgentRunDecisionHarness, AgentRunDecisionRequest,
-    ConductorExecutionContract, ConductorPromptGenome, ModelCandidate, RoutingContext,
-    RoutingDecision,
+    AgentToolRequirement, ConductorExecutionContract, ConductorPromptGenome, ModelCandidate,
+    RoutingContext, RoutingDecision,
 };
 
 #[derive(Debug, Clone)]
@@ -55,6 +55,19 @@ impl PlannedAgentRun {
         run_context.insert(
             "task_class".to_string(),
             self.decision.task_class.label().to_string(),
+        );
+        run_context.insert(
+            "tool_requirement".to_string(),
+            match self.decision.tool_requirement {
+                AgentToolRequirement::None => "none",
+                AgentToolRequirement::ReadOnly => "read_only",
+                AgentToolRequirement::Effects => "effects",
+            }
+            .to_string(),
+        );
+        run_context.insert(
+            "vision_required".to_string(),
+            self.decision.vision_required.to_string(),
         );
         run_context.insert(
             "routing_signature".to_string(),
@@ -214,6 +227,8 @@ pub(crate) fn plan_agent_run(
         evolved_directive: profile.conductor_directive(),
         historical_evidence,
         matched_collaboration_evidence,
+        execution_constraints: "The foreground executor may use permission-gated tools after user approval. Isolated workflow workers can use only exposed permissionless read-only evidence tools: they cannot operate browser/computer controls, mutate the workspace, execute shell commands, or request user approval. For interactive or effectful tasks, choose workflow only when bounded isolated analysis or verification adds independent value around foreground execution."
+            .to_string(),
     };
     let decision_id = format!(
         "{}-run-decision",
