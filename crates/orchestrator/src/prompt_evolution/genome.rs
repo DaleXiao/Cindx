@@ -507,6 +507,20 @@ impl ConductorPromptGenome {
         Ok(mutation)
     }
 
+    pub fn learned_reflective_mutation_from_response(
+        &self,
+        response: &str,
+        id: impl Into<String>,
+        trajectories: &[AgentEvaluationReflectionPacket],
+    ) -> Result<Self, String> {
+        let mutation = self.learned_mutation_from_response(response, id)?;
+        if mutation.custom_directive.trim() == self.custom_directive.trim() {
+            return Ok(mutation);
+        }
+        validate_reflective_directive(&mutation.custom_directive, trajectories)?;
+        Ok(mutation)
+    }
+
     pub fn mutations(&self) -> Vec<Self> {
         let next_generation = self.generation.saturating_add(1);
         let mut variants = Vec::new();
@@ -789,6 +803,98 @@ impl ConductorPromptGenome {
         child.custom_directive.clear();
         child
     }
+}
+
+fn normalized_leakage_text(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|character| character.to_lowercase())
+        .filter(|character| character.is_alphanumeric())
+        .collect()
+}
+
+fn contains_case_specific_overlap(directive: &str, source: &str) -> bool {
+    const MIN_OVERLAP_CHARS: usize = 32;
+    let directive = normalized_leakage_text(directive)
+        .chars()
+        .collect::<Vec<_>>();
+    let source = normalized_leakage_text(source).chars().collect::<Vec<_>>();
+    if directive.len() < MIN_OVERLAP_CHARS || source.len() < MIN_OVERLAP_CHARS {
+        return false;
+    }
+    let directive_windows = directive
+        .windows(MIN_OVERLAP_CHARS)
+        .map(|window| window.iter().collect::<String>())
+        .collect::<BTreeSet<_>>();
+    source
+        .windows(MIN_OVERLAP_CHARS)
+        .any(|window| directive_windows.contains(&window.iter().collect::<String>()))
+}
+
+fn validate_reflective_directive(
+    directive: &str,
+    trajectories: &[AgentEvaluationReflectionPacket],
+) -> Result<(), String> {
+    let normalized_directive = normalized_leakage_text(directive);
+    for trajectory in trajectories {
+        let mut identities = vec![
+            trajectory.suite_id.as_str(),
+            trajectory.case_id.as_str(),
+            trajectory.run_id.as_str(),
+            trajectory.candidate_id.as_str(),
+            trajectory.candidate_fingerprint.as_str(),
+        ];
+        identities.extend(trajectory.model_fingerprints.values().map(String::as_str));
+        identities.extend(trajectory.steps.iter().map(|step| step.model.as_str()));
+        if identities.into_iter().any(|identity| {
+            let identity = normalized_leakage_text(identity);
+            identity.chars().count() >= 6 && normalized_directive.contains(&identity)
+        }) {
+            return Err(
+                "reflective mutation must not embed case ids or participant model names"
+                    .to_string(),
+            );
+        }
+
+        let mut sources = vec![
+            trajectory.input.as_str(),
+            trajectory.final_output.as_str(),
+            trajectory.actionable_feedback.summary.as_str(),
+        ];
+        sources.extend(
+            trajectory
+                .verifier
+                .checks
+                .iter()
+                .map(|check| check.detail.as_str()),
+        );
+        sources.extend(
+            trajectory
+                .actionable_feedback
+                .passed_constraints
+                .iter()
+                .chain(&trajectory.actionable_feedback.failed_constraints)
+                .chain(&trajectory.actionable_feedback.errors)
+                .chain(&trajectory.actionable_feedback.suggested_changes)
+                .map(String::as_str),
+        );
+        for step in &trajectory.steps {
+            sources.extend([step.prompt.as_str(), step.output.as_str()]);
+            for tool_call in &step.tool_calls {
+                sources.extend([tool_call.request.as_str(), tool_call.response.as_str()]);
+            }
+        }
+        if sources
+            .into_iter()
+            .any(|source| contains_case_specific_overlap(directive, source))
+        {
+            return Err(
+                "reflective mutation must generalize feedback instead of copying case content"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

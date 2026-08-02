@@ -53,6 +53,8 @@ pub struct PromptTransferProvenance {
     pub source_effort: String,
     pub target_effort: String,
     pub source_run_id: String,
+    #[serde(default)]
+    pub source_steer_epoch: Option<u64>,
     pub source_profile_id: String,
     pub source_profile_sha256: String,
     pub source_output_sha256: String,
@@ -61,6 +63,7 @@ pub struct PromptTransferProvenance {
 impl PromptTransferProvenance {
     pub fn auto_to_pro(
         source_run_id: impl Into<String>,
+        source_steer_epoch: u64,
         source_profile_id: impl Into<String>,
         source_profile_sha256: impl Into<String>,
         source_output_sha256: impl Into<String>,
@@ -69,6 +72,7 @@ impl PromptTransferProvenance {
             source_effort: "auto".to_string(),
             target_effort: "pro".to_string(),
             source_run_id: source_run_id.into(),
+            source_steer_epoch: Some(source_steer_epoch),
             source_profile_id: source_profile_id.into(),
             source_profile_sha256: source_profile_sha256.into(),
             source_output_sha256: source_output_sha256.into(),
@@ -79,6 +83,7 @@ impl PromptTransferProvenance {
         self.source_effort == "auto"
             && self.target_effort == "pro"
             && !self.source_run_id.trim().is_empty()
+            && self.source_steer_epoch.is_some()
             && !self.source_profile_id.trim().is_empty()
             && is_sha256(&self.source_profile_sha256)
             && is_sha256(&self.source_output_sha256)
@@ -537,6 +542,7 @@ mod tests {
         let transfer =
             scientific_provenance().with_transfer(PromptTransferProvenance::auto_to_pro(
                 "auto-run-1",
+                0,
                 "auto-profile-1",
                 "d".repeat(64),
                 "e".repeat(64),
@@ -550,6 +556,7 @@ mod tests {
         let transfer =
             scientific_provenance().with_transfer(PromptTransferProvenance::auto_to_pro(
                 "auto-run-1",
+                0,
                 "auto-profile-1",
                 "not-a-fingerprint",
                 "e".repeat(64),

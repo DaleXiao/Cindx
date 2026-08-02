@@ -338,9 +338,11 @@ pub(crate) fn prompt_genome_records_from_event(event: &Event) -> Vec<PromptGenom
 pub(crate) fn prompt_observation_records_from_event(
     event: &Event,
 ) -> Vec<(String, PromptEvolutionObservation)> {
-    if event.summary != "Conductor pairwise evaluation" {
-        return Vec::new();
-    }
+    let is_transfer = match event.summary.as_str() {
+        "Conductor pairwise evaluation" => false,
+        "Conductor Auto transfer evaluation" => true,
+        _ => return Vec::new(),
+    };
     let Some(effort) = event.metadata.get("prompt_effort").cloned() else {
         return Vec::new();
     };
@@ -358,6 +360,38 @@ pub(crate) fn prompt_observation_records_from_event(
                 .map(|observation| vec![observation])
         })
         .unwrap_or_default();
+    if is_transfer {
+        let Some([candidate, teacher]) = observations.as_slice().first_chunk::<2>() else {
+            return Vec::new();
+        };
+        if observations.len() != 2
+            || effort != "pro"
+            || !candidate.is_scientific_transfer_evidence()
+            || !teacher.is_scientific_transfer_evidence()
+            || candidate.evaluation_id != teacher.evaluation_id
+            || candidate.case_id != teacher.case_id
+            || candidate.split != teacher.split
+            || candidate.mode != teacher.mode
+            || candidate.opponent_profile_id.as_deref() != Some(teacher.profile_id.as_str())
+            || teacher.opponent_profile_id.as_deref() != Some(candidate.profile_id.as_str())
+            || candidate.provenance.transfer != teacher.provenance.transfer
+        {
+            return Vec::new();
+        }
+        let Some(transfer) = candidate.provenance.transfer.as_ref() else {
+            return Vec::new();
+        };
+        let Some(project_id) = event.metadata.get("project_id") else {
+            return Vec::new();
+        };
+        if !prompt_observation_matches_scope(candidate, project_id)
+            || !prompt_observation_matches_scope(teacher, project_id)
+            || event.metadata.get("auto_teacher_profile") != Some(&transfer.source_profile_id)
+            || event.metadata.get("auto_teacher_run_id") != Some(&transfer.source_run_id)
+        {
+            return Vec::new();
+        }
+    }
     observations
         .into_iter()
         .map(|observation| (effort.clone(), observation))
@@ -632,6 +666,7 @@ pub(crate) fn build_prompt_evolution_read_model(
     }
     PromptEvolutionReadModel {
         schema: PROMPT_EVOLUTION_READ_MODEL_NAMESPACE.to_string(),
+        projection_version: PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION,
         revision,
         event_count,
         genomes,
@@ -656,6 +691,8 @@ pub(crate) fn load_prompt_evolution_read_model(
                 .ok()
                 .filter(|model| {
                     model.schema == PROMPT_EVOLUTION_READ_MODEL_NAMESPACE
+                        && model.projection_version
+                            == PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION
                         && model.revision == stored.revision
                         && model.revision <= revision.latest_sequence
                         && model.event_count <= revision.event_count
@@ -665,6 +702,7 @@ pub(crate) fn load_prompt_evolution_read_model(
     let had_stored_model = stored.is_some();
     let mut model = stored.unwrap_or_else(|| PromptEvolutionReadModel {
         schema: PROMPT_EVOLUTION_READ_MODEL_NAMESPACE.to_string(),
+        projection_version: PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION,
         revision: 0,
         event_count: 0,
         genomes: Vec::new(),

@@ -198,6 +198,7 @@ fn prompt_auto_teacher_case(
 
     Some(PromptAutoTeacherCase {
         source_run_id: run_id.to_string(),
+        steer_epoch: stable_epoch_number,
         profile_id: genome.id.clone(),
         profile_sha256,
         output_sha256,
@@ -370,7 +371,38 @@ pub(crate) fn prompt_offline_split_manifest(
         .unwrap_or_default()
 }
 
-pub(crate) fn prompt_offline_dataset(events: &[Event], project_id: &str) -> Vec<PromptOfflineCase> {
+pub(crate) fn prompt_offline_case_rank(
+    case: &PromptOfflineCase,
+    preferred_auto_profile: Option<(&str, &str)>,
+) -> (bool, bool, u16, Reverse<u64>, Reverse<u64>, String) {
+    let Some(teacher) = case.auto_teacher.as_ref() else {
+        return (
+            false,
+            false,
+            0,
+            Reverse(u64::MAX),
+            Reverse(u64::MAX),
+            case.source_run_id.clone(),
+        );
+    };
+    let preferred = preferred_auto_profile.is_some_and(|(profile_id, profile_sha256)| {
+        teacher.profile_id == profile_id && teacher.profile_sha256 == profile_sha256
+    });
+    (
+        preferred,
+        true,
+        teacher.quality_score_bps,
+        Reverse(teacher.total_tokens),
+        Reverse(teacher.latency_ms),
+        teacher.source_run_id.clone(),
+    )
+}
+
+pub(crate) fn prompt_offline_dataset(
+    events: &[Event],
+    project_id: &str,
+    preferred_auto_profile: Option<(&str, &str)>,
+) -> Vec<PromptOfflineCase> {
     let prior_splits = prompt_offline_split_manifest(events, project_id);
     let previously_assigned = prior_splits.keys().cloned().collect::<BTreeSet<_>>();
     let mut runs = BTreeMap::<String, Vec<&Event>>::new();
@@ -491,7 +523,8 @@ pub(crate) fn prompt_offline_dataset(events: &[Event], project_id: &str) -> Vec<
                 entry.insert(candidate);
             }
             std::collections::btree_map::Entry::Occupied(mut entry)
-                if entry.get().auto_teacher.is_none() && candidate.auto_teacher.is_some() =>
+                if prompt_offline_case_rank(&candidate, preferred_auto_profile)
+                    > prompt_offline_case_rank(entry.get(), preferred_auto_profile) =>
             {
                 entry.insert(candidate);
             }
@@ -709,8 +742,9 @@ pub(crate) fn prompt_auto_transfer_dataset_digest(
                 && teacher.profile_sha256 == auto_profile_sha256)
                 .then(|| {
                     format!(
-                        "{}:{:?}:{}:{}",
-                        case.id, case.split, teacher.source_run_id, teacher.output_sha256
+                        "{}:{:?}:{}:{}:{}",
+                        case.id, case.split, teacher.source_run_id, teacher.steer_epoch,
+                        teacher.output_sha256,
                     )
                 })
         })

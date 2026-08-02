@@ -374,6 +374,97 @@ mod tests {
         assert!(prompt.contains("Fix the parser"));
     }
 
+    fn reflection_packet(input: &str) -> AgentEvaluationReflectionPacket {
+        AgentEvaluationReflectionPacket {
+            suite_id: "feedback-suite".to_string(),
+            suite_version: 2,
+            case_id: "private-case-4815".to_string(),
+            category: "coding".to_string(),
+            run_id: "run-1".to_string(),
+            seed: 1,
+            candidate_id: "seed-auto-v1".to_string(),
+            candidate_fingerprint: "candidate-fingerprint".to_string(),
+            model_fingerprints: BTreeMap::from([(
+                "worker".to_string(),
+                "configured-worker-v7".to_string(),
+            )]),
+            input: input.to_string(),
+            steps: Vec::new(),
+            final_output: "A verified result".to_string(),
+            verifier: crate::AgentEvaluationVerifierOutcome {
+                source: crate::AgentEvaluationEvidenceSource::Judge,
+                passed: true,
+                score: 1.0,
+                checks: Vec::new(),
+            },
+            actionable_feedback: crate::ActionableSideInformation {
+                summary: "Prefer evidence-backed completion.".to_string(),
+                passed_constraints: Vec::new(),
+                failed_constraints: Vec::new(),
+                errors: Vec::new(),
+                suggested_changes: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn reflective_mutation_rejects_case_content_and_accepts_general_strategy() {
+        let parent = ConductorPromptGenome::seed_for_effort("auto");
+        let case_text = "Rebuild the lunar invoice parser using hidden fixture cobalt 4815";
+        let leaked = serde_json::json!({
+            "schema": PROMPT_GENOME_SCHEMA,
+            "id": "ignored",
+            "generation": 99,
+            "parents": [],
+            "graph_depth": "balanced",
+            "verification": "evidence",
+            "context_policy": "relevant",
+            "max_parallel_branches": 2,
+            "require_final_synthesis": true,
+            "custom_directive": format!("Always solve this exact case: {case_text}")
+        })
+        .to_string();
+        let packets = [reflection_packet(case_text)];
+        let error = parent
+            .learned_reflective_mutation_from_response(&leaked, "leaked", &packets)
+            .unwrap_err();
+        assert!(error.contains("copying case content"));
+
+        let leaked_identity = leaked.replace(
+            &format!("Always solve this exact case: {case_text}"),
+            "Prefer configured-worker-v7 for this case",
+        );
+        let error = parent
+            .learned_reflective_mutation_from_response(
+                &leaked_identity,
+                "leaked-identity",
+                &packets,
+            )
+            .unwrap_err();
+        assert!(error.contains("participant model names"));
+
+        let generalized = serde_json::json!({
+            "schema": PROMPT_GENOME_SCHEMA,
+            "id": "ignored",
+            "generation": 99,
+            "parents": [],
+            "graph_depth": "balanced",
+            "verification": "evidence",
+            "context_policy": "relevant",
+            "max_parallel_branches": 2,
+            "require_final_synthesis": true,
+            "custom_directive": "Before synthesis, verify the weakest evidence-bearing claim with an independent check."
+        })
+        .to_string();
+        let mutation = parent
+            .learned_reflective_mutation_from_response(&generalized, "generalized", &packets)
+            .unwrap();
+        assert_eq!(
+            mutation.custom_directive,
+            "Before synthesis, verify the weakest evidence-bearing claim with an independent check."
+        );
+    }
+
     #[test]
     fn reflection_selection_uses_only_unique_paired_feedback_executions() {
         let profile_id = "seed-auto-v1";

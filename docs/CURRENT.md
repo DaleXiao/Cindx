@@ -89,7 +89,9 @@ teacher case only when its terminal evidence is positive, independently scored,
 usage-complete, bound to the final steer epoch, free of denied permissions and
 safety violations, and reconstructable from a finalized workflow checkpoint.
 The archived case contains redacted bounded outputs and immutable fingerprints;
-it is never accepted from a model claim alone.
+it is never accepted from a model claim alone. Its source steer epoch is part
+of the transfer lineage and dataset digest, so evidence from an earlier user
+objective cannot be reused after steering.
 
 In background evaluation, current and challenger Pro profiles execute the same
 objective and are compared with the archived Auto result by an independent,
@@ -101,6 +103,22 @@ active Auto profile fingerprint. Auto transfer reflections receive reserved
 capacity in Pro mutation input, so they cannot be displaced by a full ordinary
 reflection batch.
 
+Transfer observations are appended as one mirrored pair and enter the canonical
+evolution read model only when both sides are scientific, project-scoped, and
+bound to the same archived Auto run and profile. Projection version 3 rebuilds
+older caches from canonical events instead of silently preserving the previous
+projection that omitted transfer events. Background requests are coalesced by
+project and effort; activity in one project cannot replace another project's
+pending campaign. When repeated objectives have multiple qualified Auto
+teachers, the current stable Auto profile is selected before stale profiles,
+then independently measured quality and resource use break ties.
+
+Reflective mutations may learn a general strategy from redacted trajectories,
+but a deterministic validator rejects candidate directives that contain case,
+run, candidate, or participant-model identifiers, or copy substantial spans
+from prompts, outputs, tool traces, verifier details, or actionable feedback.
+Rejected and repaired mutations pass through the same validator.
+
 Learned genomes, datasets, observations, and rollout state are isolated by
 project. A reflective mutation produced from one project's evidence cannot
 enter another project's candidate population, evaluation, or rollout.
@@ -108,8 +126,10 @@ enter another project's candidate population, evaluation, or rollout.
 The latest provider-backed baseline recorded `auto_gepa=false` and
 `pro_gepa=false`; it predates the Auto-to-Pro transfer path. Deterministic tests
 prove the transfer boundary, evidence isolation, promotion gates, snapshot
-lineage, and mutation-input allocation. There is still no provider-backed
-matched evidence that an evolved profile improves external product quality.
+lineage, canonical event projection, project-isolated scheduling, mutation
+anti-memorization boundary, and mutation-input allocation. There is still no
+provider-backed matched evidence that an evolved profile improves external
+product quality.
 
 ## Current Evidence Boundary
 

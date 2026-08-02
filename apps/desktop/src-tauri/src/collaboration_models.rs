@@ -215,6 +215,7 @@ pub(crate) struct PromptAutoTeacherStep {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PromptAutoTeacherCase {
     pub(crate) source_run_id: String,
+    pub(crate) steer_epoch: u64,
     pub(crate) profile_id: String,
     pub(crate) profile_sha256: String,
     pub(crate) output_sha256: String,
