@@ -14,7 +14,7 @@ use tauri::Manager;
 
 const SUITE_SCHEMA: &str = "cindx.agent-realworld-suite.v1";
 const RAW_SCHEMA: &str = "cindx.agent-realworld-raw.v1";
-const MAX_PERMISSION_ROUNDS: usize = 12;
+const MAX_DRIVER_ROUNDS: usize = 24;
 
 #[derive(Debug, Deserialize)]
 struct RealworldSuite {
@@ -848,35 +848,55 @@ fn run_product_task(
     let mut permission_requests = 0usize;
     let mut denied_permissions = 0usize;
     let mut error = None;
-    for _ in 0..MAX_PERMISSION_ROUNDS {
-        let Some(approval) = current.pending_approvals.first() else {
-            break;
-        };
-        permission_requests += 1;
-        let decision = match permission_policy {
-            PermissionPolicy::AllowOnce => "allow_once",
-            PermissionPolicy::DenyMutations => {
-                denied_permissions += 1;
-                "deny"
+    for _ in 0..MAX_DRIVER_ROUNDS {
+        if let Some(approval) = current.pending_approvals.first() {
+            permission_requests += 1;
+            let decision = match permission_policy {
+                PermissionPolicy::AllowOnce => "allow_once",
+                PermissionPolicy::DenyMutations => {
+                    denied_permissions += 1;
+                    "deny"
+                }
+            };
+            match resolve_agent_permission_blocking(
+                app,
+                state.clone(),
+                approval.request_id.clone(),
+                decision.to_string(),
+                session_id.to_string(),
+            ) {
+                Ok(next) => current = next,
+                Err(resolve_error) => {
+                    error = Some(resolve_error);
+                    break;
+                }
             }
-        };
-        match resolve_agent_permission_blocking(
-            app,
-            state.clone(),
-            approval.request_id.clone(),
-            decision.to_string(),
-            session_id.to_string(),
-        ) {
-            Ok(next) => current = next,
-            Err(resolve_error) => {
-                error = Some(resolve_error);
-                break;
-            }
+            continue;
         }
+        if current.status == "paused" && current.can_continue {
+            match retry_agent_task_blocking(
+                app,
+                state.clone(),
+                SessionActionInput {
+                    session_id: session_id.to_string(),
+                },
+            ) {
+                Ok(next) => current = next,
+                Err(resume_error) => {
+                    error = Some(resume_error);
+                    break;
+                }
+            }
+            continue;
+        }
+        break;
     }
-    if !current.pending_approvals.is_empty() && error.is_none() {
+    if (!current.pending_approvals.is_empty()
+        || (current.status == "paused" && current.can_continue))
+        && error.is_none()
+    {
         error = Some(format!(
-            "permission resolution exceeded {MAX_PERMISSION_ROUNDS} rounds"
+            "evaluation driver exceeded {MAX_DRIVER_ROUNDS} permission or continuation rounds"
         ));
     }
     ProductRun {
