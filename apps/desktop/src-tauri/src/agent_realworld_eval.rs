@@ -1240,17 +1240,40 @@ fn directory_size(root: &Path) -> u64 {
         .filter_map(Result::ok)
         .map(|entry| {
             let path = entry.path();
-            entry
-                .metadata()
-                .ok()
-                .map(|metadata| {
-                    if metadata.is_dir() {
-                        directory_size(&path)
-                    } else {
-                        metadata.len()
-                    }
-                })
-                .unwrap_or_default()
+            let Ok(file_type) = entry.file_type() else {
+                return 0;
+            };
+            if file_type.is_symlink() {
+                0
+            } else if file_type.is_dir() {
+                directory_size(&path)
+            } else {
+                entry
+                    .metadata()
+                    .map(|metadata| metadata.len())
+                    .unwrap_or_default()
+            }
         })
         .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::directory_size;
+    use std::fs;
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_size_does_not_follow_external_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let external = tempfile::tempdir().expect("external tempdir");
+        fs::write(external.path().join("large.bin"), vec![0_u8; 64 * 1024])
+            .expect("external fixture");
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        fs::write(workspace.path().join("local.txt"), b"local").expect("local fixture");
+        symlink(external.path(), workspace.path().join("shared-runtime")).expect("runtime symlink");
+
+        assert_eq!(directory_size(workspace.path()), 5);
+    }
 }
