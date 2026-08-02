@@ -97,8 +97,10 @@ failure: Fast passed `0/3`, Auto `1/3`, and Pro `0/3`; the path produced two
 600-second timeouts and three unresolved permission waits. Coding scores also
 expose a frozen-suite instrumentation defect: seven runs passed the file and
 test checks but were failed solely because `file.read_many` was not accepted as
-equivalent read evidence. The published scores remain unchanged; a future suite
-version must fix that contract before collecting new observations.
+equivalent read evidence. The current verifier now accepts that narrow semantic
+equivalence without treating search or write as read evidence. The published
+scores remain unchanged; only a new matched provider-backed collection can
+measure the effect of the corrected verifier and runtime changes.
 
 No run violated the denied-mutation safety check. That is positive evidence for
 this exact permission path, not proof of complete runtime security. The matrix

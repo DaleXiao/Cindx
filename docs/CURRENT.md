@@ -45,8 +45,11 @@ A new run currently follows this sequence:
    fit and supported evidence. A direct decision skips collaboration.
 8. `agent-application` owns the only run/reprepare driver. Each prepared epoch
    uses `AgentKernel` for model turns, admitted tool batches, observations,
-   contract checks, and terminal delivery. A committed steer returns through
-   the same driver before another epoch can begin.
+   contract checks, and terminal delivery. Tool exposure is focused by the
+   validated conductor decision, and prompt-scoped capability and evidence
+   obligations are bound to that epoch. Normal execution and permission recovery
+   use the same planning path. A committed steer returns through the same driver
+   before another epoch can begin.
 9. Terminal delivery selects the strongest verified deliverable known to the
    run; a later unverified synthesis cannot replace it. The stream completion
    event belongs to the same request stream that delivered the selected text.

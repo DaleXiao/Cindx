@@ -137,6 +137,8 @@ pub struct AgentTaskContract {
     #[serde(default)]
     prompt_required_tool_successes: BTreeSet<String>,
     #[serde(default)]
+    prompt_required_any_tool_successes: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default)]
     prompt_successful_tools: BTreeSet<String>,
     #[serde(default)]
     prompt_evidence_epoch: u64,
@@ -202,6 +204,40 @@ impl AgentTaskContract {
                 .retain(|key, _| !key.starts_with("prompt_tool:"));
         }
         self.prompt_required_tool_successes = required_tools;
+    }
+
+    /// Replaces capability requirements derived from the active prompt and
+    /// conductor decision. A success from an older steer epoch cannot satisfy
+    /// the current objective.
+    pub fn replace_prompt_required_any_tool_successes(
+        &mut self,
+        epoch: u64,
+        requirements: BTreeMap<String, BTreeSet<String>>,
+    ) {
+        let requirements = requirements
+            .into_iter()
+            .filter_map(|(requirement_id, tools)| {
+                let requirement_id = requirement_id.trim().to_string();
+                let tools = tools
+                    .into_iter()
+                    .map(|tool| tool.trim().to_string())
+                    .filter(|tool| !tool.is_empty())
+                    .collect::<BTreeSet<_>>();
+                (!requirement_id.is_empty() && !tools.is_empty()).then_some((requirement_id, tools))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let epoch_changed = self.prompt_requirement_epoch != epoch;
+        let requirements_changed = self.prompt_required_any_tool_successes != requirements;
+
+        if epoch_changed {
+            self.prompt_requirement_epoch = epoch;
+            self.prompt_successful_tools.clear();
+        }
+        if epoch_changed || requirements_changed {
+            self.gate_attempts
+                .retain(|key, _| !key.starts_with("prompt_any_tool:"));
+        }
+        self.prompt_required_any_tool_successes = requirements;
     }
 
     /// Replaces the substantive evidence obligation derived from the active prompt.
@@ -495,6 +531,19 @@ impl AgentTaskContract {
             })
             .collect::<Vec<_>>();
         unresolved_any_tool_requirements.extend(
+            self.prompt_required_any_tool_successes
+                .iter()
+                .filter(|(_, alternatives)| alternatives.is_disjoint(&self.prompt_successful_tools))
+                .map(|(id, alternatives)| TaskContractAnyToolRequirement {
+                    id: id.clone(),
+                    alternatives: alternatives
+                        .iter()
+                        .filter(|tool| available_tools.contains(tool.as_str()))
+                        .cloned()
+                        .collect(),
+                }),
+        );
+        unresolved_any_tool_requirements.extend(
             self.prompt_evidence_requirements
                 .iter()
                 .filter(|(_, requirement)| requirement.receipt.is_none())
@@ -609,6 +658,18 @@ impl AgentTaskContract {
         {
             self.gate_attempts
                 .remove(&format!("any_tool:{requirement_id}"));
+        }
+        for requirement_id in self
+            .prompt_required_any_tool_successes
+            .iter()
+            .filter(|(_, alternatives)| alternatives.contains(tool_name))
+            .map(|(requirement_id, _)| requirement_id.clone())
+            .collect::<Vec<_>>()
+        {
+            self.gate_attempts.remove(&format!(
+                "prompt_any_tool:{}:{requirement_id}",
+                self.prompt_requirement_epoch
+            ));
         }
         if self.required_tool_successes.contains(tool_name) {
             self.gate_attempts.remove(&format!("tool:{tool_name}"));
@@ -792,6 +853,39 @@ impl AgentTaskContract {
                 .join(", ");
             return Ok(Some(format!(
                 "The task contract is not satisfied yet. Requirement `{requirement_id}` needs substantive evidence from at least one of: {alternatives}. Use one successfully before finishing; discovery-only observations do not satisfy this requirement."
+            )));
+        }
+
+        if let Some((requirement_id, alternatives)) = self
+            .prompt_required_any_tool_successes
+            .iter()
+            .find(|(_, alternatives)| alternatives.is_disjoint(&self.prompt_successful_tools))
+            .map(|(requirement_id, alternatives)| (requirement_id.clone(), alternatives.clone()))
+        {
+            let available_alternatives = alternatives
+                .iter()
+                .filter(|tool| available_tools.contains(tool.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            if available_alternatives.is_empty() {
+                return Err(AgentFailure::contract(
+                    "required_prompt_tool_group_unavailable",
+                    format!(
+                        "task contract requirement `{requirement_id}` has no available tool alternatives"
+                    ),
+                ));
+            }
+            self.claim_gate(format!(
+                "prompt_any_tool:{}:{requirement_id}",
+                self.prompt_requirement_epoch
+            ))?;
+            let alternatives = available_alternatives
+                .iter()
+                .map(|tool| format!("`{tool}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Ok(Some(format!(
+                "The current request is not complete yet. Requirement `{requirement_id}` needs one successful action from: {alternatives}. Evidence from an earlier user objective does not satisfy it."
             )));
         }
 
@@ -1251,6 +1345,71 @@ mod tests {
             &ToolOutcomeStatus::Succeeded,
             Some(&ToolRisk::ReadOnly),
         );
+        assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
+    }
+
+    #[test]
+    fn prompt_capability_requirement_is_replaced_at_the_steer_epoch() {
+        let mut contract = AgentTaskContract::default();
+        let tools = vec![
+            tool("browser.open", ToolRisk::UsesNetwork),
+            tool("file.write", ToolRisk::WritesWorkspace),
+        ];
+        contract.replace_prompt_required_any_tool_successes(
+            3,
+            [(
+                "browser_action".to_string(),
+                BTreeSet::from(["browser.open".to_string()]),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        contract.record_tool_outcome(
+            "browser.open",
+            r#"{"url":"https://example.com"}"#,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::UsesNetwork),
+        );
+        assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
+
+        contract.replace_prompt_required_any_tool_successes(
+            4,
+            [(
+                "workspace_effect".to_string(),
+                BTreeSet::from(["file.write".to_string()]),
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        let instruction = contract
+            .completion_instruction_for_task(&tools)
+            .expect("completion gate")
+            .expect("new steer needs current evidence");
+        assert!(instruction.contains("workspace_effect"));
+        assert!(instruction.contains("file.write"));
+        assert!(!instruction.contains("browser.open"));
+    }
+
+    #[test]
+    fn replaying_the_same_prompt_capability_epoch_preserves_success() {
+        let mut contract = AgentTaskContract::default();
+        let requirements = [(
+            "effect".to_string(),
+            BTreeSet::from(["file.write".to_string()]),
+        )]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+        let tools = vec![tool("file.write", ToolRisk::WritesWorkspace)];
+        contract.replace_prompt_required_any_tool_successes(8, requirements.clone());
+        contract.record_tool_outcome(
+            "file.write",
+            r#"{"path":"result.txt"}"#,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::WritesWorkspace),
+        );
+        contract.replace_prompt_required_any_tool_successes(8, requirements);
+
         assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
     }
 

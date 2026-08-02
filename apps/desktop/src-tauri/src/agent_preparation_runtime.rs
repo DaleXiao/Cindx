@@ -82,6 +82,8 @@ fn reset_preparation_run_context(run_context: &mut Metadata) {
         "prompt_objective",
         "effective_prompt_objective",
         "task_class",
+        "tool_requirement",
+        "vision_required",
         "routing_signature",
         "collaboration_policy",
         "collaboration_profile",

@@ -4,10 +4,87 @@ use crate::{
     event_persistence::append_event,
     runtime_values::{agent_runtime_context_for_run, run_context_steer_epoch},
 };
-use agent_runtime::{tool_matches_evidence_scope, PromptEvidenceScope};
+use agent_core::ToolEffectSemantics;
+use agent_runtime::{
+    pin_prompt_evidence_tools, prompt_evidence_scopes, tool_matches_evidence_scope,
+    PromptEvidenceScope,
+};
 
-#[cfg(test)]
-use agent_runtime::{pin_prompt_evidence_tools, prompt_evidence_scopes};
+pub(crate) fn planned_agent_tools(
+    registry: &ToolRegistry,
+    run_context: &Metadata,
+    prompt: &str,
+    context_window: u64,
+) -> (Vec<ToolSpec>, BTreeSet<PromptEvidenceScope>) {
+    let catalog = registry.specs();
+    let evidence_scopes = prompt_evidence_scopes(run_context);
+    let intent = tool_exposure_intent(run_context, &evidence_scopes);
+    let mut tools = registry
+        .exposure_plan_with_intent(prompt, context_window, &intent)
+        .inline;
+    pin_prompt_evidence_tools(run_context, &catalog, &mut tools);
+    (tools, evidence_scopes)
+}
+
+fn tool_exposure_intent(
+    run_context: &Metadata,
+    evidence_scopes: &BTreeSet<PromptEvidenceScope>,
+) -> ToolExposureIntent {
+    let mut intent = ToolExposureIntent::default();
+    match run_context.get("task_class").map(String::as_str) {
+        Some("coding") => {
+            intent
+                .preferred_namespaces
+                .extend(["file", "shell"].map(str::to_string));
+        }
+        Some("research" | "retrieval") => {
+            intent
+                .preferred_namespaces
+                .extend(["web", "file"].map(str::to_string));
+        }
+        Some("browser") => {
+            intent.preferred_namespaces.insert("browser".to_string());
+            intent.deferred_namespaces.insert("computer".to_string());
+        }
+        Some("computer") => {
+            intent.preferred_namespaces.insert("computer".to_string());
+            intent.deferred_namespaces.insert("browser".to_string());
+        }
+        _ => {}
+    }
+    for scope in evidence_scopes {
+        match scope {
+            PromptEvidenceScope::Workspace => {
+                intent.preferred_namespaces.insert("file".to_string());
+            }
+            PromptEvidenceScope::External => {
+                intent.preferred_namespaces.insert("web".to_string());
+            }
+            PromptEvidenceScope::Browser => {
+                intent.preferred_namespaces.insert("browser".to_string());
+                intent.deferred_namespaces.insert("computer".to_string());
+            }
+            PromptEvidenceScope::Visual => {
+                intent
+                    .preferred_namespaces
+                    .extend(["browser", "computer"].map(str::to_string));
+            }
+        }
+    }
+    match run_context.get("tool_requirement").map(String::as_str) {
+        Some("read_only") => intent.prefer_read_only = true,
+        Some("effects") => intent.prefer_effects = true,
+        _ => {}
+    }
+    if run_context
+        .get("image_generation_required")
+        .map(String::as_str)
+        == Some("true")
+    {
+        intent.required_tools.insert("image.generate".to_string());
+    }
+    intent
+}
 
 pub(crate) fn workspace_verification_policy_for_run_context(
     run_context: &Metadata,
@@ -79,7 +156,17 @@ pub(crate) fn apply_run_task_contract_with_evidence_scopes(
         prompt_required_tools.iter().copied(),
     );
 
-    let evidence_requirements = evidence_scopes
+    let prompt_capability_requirements = prompt_capability_requirements(run_context, tools);
+    AgentKernel::new(runtime, tools).replace_prompt_required_any_tool_successes(
+        prompt_contract_epoch,
+        prompt_capability_requirements,
+    );
+
+    let mut active_evidence_scopes = evidence_scopes.clone();
+    if run_context.get("vision_required").map(String::as_str) == Some("true") {
+        active_evidence_scopes.insert(PromptEvidenceScope::Visual);
+    }
+    let evidence_requirements = active_evidence_scopes
         .iter()
         .map(|scope| {
             (
@@ -94,7 +181,7 @@ pub(crate) fn apply_run_task_contract_with_evidence_scopes(
         .collect::<BTreeMap<_, _>>();
     AgentKernel::new(runtime, tools)
         .replace_prompt_evidence_requirements(prompt_contract_epoch, evidence_requirements.clone());
-    if evidence_scopes.contains(&PromptEvidenceScope::Workspace) {
+    if active_evidence_scopes.contains(&PromptEvidenceScope::Workspace) {
         if let Some((receipt, observation)) =
             workspace_knowledge_receipt(&mut runtime.messages, prompt_contract_epoch)
         {
@@ -122,6 +209,46 @@ pub(crate) fn apply_run_task_contract_with_evidence_scopes(
         );
     }
     Ok(())
+}
+
+fn prompt_capability_requirements(
+    run_context: &Metadata,
+    tools: &[ToolSpec],
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut requirements = BTreeMap::new();
+    match run_context.get("tool_requirement").map(String::as_str) {
+        Some("read_only") => {
+            let tools = tools
+                .iter()
+                .filter(|tool| substantive_read_tool(tool))
+                .map(|tool| tool.name.clone())
+                .collect::<BTreeSet<_>>();
+            if !tools.is_empty() {
+                requirements.insert("conductor_read_evidence".to_string(), tools);
+            }
+        }
+        Some("effects") => {
+            let tools = tools
+                .iter()
+                .filter(|tool| {
+                    tool.namespace != "meta"
+                        && tool.effect_semantics != ToolEffectSemantics::ReadOnly
+                })
+                .map(|tool| tool.name.clone())
+                .collect::<BTreeSet<_>>();
+            if !tools.is_empty() {
+                requirements.insert("conductor_effect".to_string(), tools);
+            }
+        }
+        _ => {}
+    }
+    requirements
+}
+
+fn substantive_read_tool(tool: &ToolSpec) -> bool {
+    tool.namespace != "meta"
+        && tool.effect_semantics == ToolEffectSemantics::ReadOnly
+        && !matches!(tool.name.as_str(), "file.list" | "browser.tabs")
 }
 
 fn workspace_knowledge_receipt(

@@ -1,6 +1,4 @@
-use super::{
-    FixtureFile, PermissionPolicy, RealworldCase, Treatment, VerificationResult,
-};
+use super::{FixtureFile, PermissionPolicy, RealworldCase, Treatment, VerificationResult};
 use crate::sha256_hex;
 use std::collections::BTreeSet;
 use std::fs;
@@ -131,7 +129,7 @@ pub(super) fn verify_case(
             case.verification
                 .required_tools_any
                 .iter()
-                .any(|tool| tool_set.contains(tool.as_str())),
+                .any(|tool| tool_requirement_satisfied(&tool_set, tool)),
             format!(
                 "none of the required evidence tools ran: {:?}",
                 case.verification.required_tools_any
@@ -141,7 +139,7 @@ pub(super) fn verify_case(
     for tool in &case.verification.required_tools_all {
         record_check(
             &mut result,
-            tool_set.contains(tool.as_str()),
+            tool_requirement_satisfied(&tool_set, tool),
             format!("required tool {tool} did not run"),
         );
     }
@@ -165,11 +163,31 @@ pub(super) fn verify_case(
     result
 }
 
+fn tool_requirement_satisfied(observed: &BTreeSet<&str>, required: &str) -> bool {
+    observed.contains(required)
+        || matches!(required, "file.read") && observed.contains("file.read_many")
+}
+
 fn record_check(result: &mut VerificationResult, passed: bool, failure: String) {
     result.total_checks += 1;
     if passed {
         result.passed_checks += 1;
     } else {
         result.failures.push(failure);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tool_requirement_satisfied;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn batched_file_read_satisfies_the_same_read_capability() {
+        let observed = BTreeSet::from(["file.read_many"]);
+
+        assert!(tool_requirement_satisfied(&observed, "file.read"));
+        assert!(!tool_requirement_satisfied(&observed, "file.search"));
+        assert!(!tool_requirement_satisfied(&observed, "file.write"));
     }
 }

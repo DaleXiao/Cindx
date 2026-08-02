@@ -284,6 +284,103 @@ fn evidence_tools_are_pinned_after_catalog_exposure_planning() {
 }
 
 #[test]
+fn browser_decision_focuses_tools_and_defers_unrelated_computer_controls() {
+    let mut context = run_context(
+        "Open the incident dashboard in the browser and create a JSON report",
+        2,
+    );
+    context.insert("task_class".to_string(), "browser".to_string());
+    context.insert("tool_requirement".to_string(), "effects".to_string());
+    let root = std::env::temp_dir().join("cindx-browser-tool-plan");
+    let mut registry = ToolRegistry::with_workspace_tools(root);
+    registry.install_meta_tools();
+
+    let (tools, scopes) = planned_agent_tools(
+        &registry,
+        &context,
+        "Open the incident dashboard in the browser and create a JSON report",
+        128_000,
+    );
+    let names = tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<BTreeSet<_>>();
+
+    assert!(scopes.contains(&PromptEvidenceScope::Browser));
+    assert!(names.contains("browser.open"));
+    assert!(names.contains("browser.extract_text"));
+    assert!(names.contains("file.write"));
+    assert!(!names.iter().any(|name| name.starts_with("computer.")));
+    assert!(names.contains("tool.search"));
+}
+
+#[test]
+fn conductor_effect_and_browser_evidence_are_both_required_for_the_current_epoch() {
+    let tools = vec![
+        ToolSpec::builtin(
+            "browser.open",
+            "browser",
+            "open",
+            ToolRisk::UsesNetwork,
+            r#"{"type":"object"}"#,
+        )
+        .with_effect_semantics(ToolEffectSemantics::Idempotent),
+        read_tool("browser.extract_text", ToolRisk::UsesNetwork),
+    ];
+    let mut context = run_context("Inspect the rendered incident dashboard", 7);
+    context.insert("task_class".to_string(), "browser".to_string());
+    context.insert("tool_requirement".to_string(), "effects".to_string());
+    let mut runtime = start_agent_loop(
+        TaskId("browser-contract".to_string()),
+        "Inspect the rendered incident dashboard",
+        AgentRuntimeConfig::default(),
+    );
+    apply_run_task_contract(&mut runtime, &context, &tools, None)
+        .expect("browser contract applies");
+
+    apply_observation(
+        &mut runtime,
+        &tools,
+        "browser.extract_text",
+        "{}",
+        ToolOutcomeStatus::Succeeded,
+        "tool=browser.extract_text\nstatus=succeeded\noutput=\nincident active",
+    );
+    let instruction = AgentKernel::new(&mut runtime, &tools)
+        .completion_gate_for_task()
+        .expect("effect gate evaluates")
+        .expect("browser observation alone is not an effect");
+    assert!(instruction.content.contains("conductor_effect"));
+
+    AgentKernel::new(&mut runtime, &tools).apply_tool_observation(
+        &agent_runtime::AgentToolRequest {
+            call_id: ToolCallId("call-open".to_string()),
+            tool_name: "browser.open".to_string(),
+            input: r#"{"url":"https://example.com"}"#.to_string(),
+        },
+        &ToolOutcomeStatus::Succeeded,
+        Some(&ToolRisk::UsesNetwork),
+        "tool=browser.open\nstatus=succeeded\noutput=\nopened",
+    );
+    assert!(AgentKernel::new(&mut runtime, &tools)
+        .completion_gate_for_task()
+        .expect("fresh browser observation is required after navigation")
+        .is_some());
+    apply_observation(
+        &mut runtime,
+        &tools,
+        "browser.extract_text",
+        "{}",
+        ToolOutcomeStatus::Succeeded,
+        "tool=browser.extract_text\nstatus=succeeded\noutput=\nincident active",
+    );
+    assert_eq!(
+        AgentKernel::new(&mut runtime, &tools).completion_gate_for_task(),
+        Ok(None)
+    );
+}
+
+#[test]
 fn fast_direct_decision_cannot_weaken_or_invent_an_evidence_scope() {
     let direct = serde_json::to_string(&AgentRunDecision::direct("executor"))
         .expect("direct decision serializes");

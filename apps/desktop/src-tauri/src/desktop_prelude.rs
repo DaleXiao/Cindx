@@ -116,7 +116,7 @@ pub(crate) use std::sync::{Arc, Mutex};
 pub(crate) use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub(crate) use tauri::Manager;
 pub(crate) use tools::{
-    ImageGenerationConfig, ToolExecutionControl, ToolRegistry, WebSearchConfig,
+    ImageGenerationConfig, ToolExecutionControl, ToolExposureIntent, ToolRegistry, WebSearchConfig,
 };
 
 pub(crate) use agent_runtime::{

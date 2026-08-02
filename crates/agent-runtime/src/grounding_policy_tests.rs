@@ -40,6 +40,10 @@ fn prompt_evidence_scope_distinguishes_workspace_external_and_visual_work() {
             "Look at the current app window and identify the error",
             PromptEvidenceScope::Visual,
         ),
+        (
+            "Open https://example.com in the browser tool and inspect the rendered page",
+            PromptEvidenceScope::Browser,
+        ),
     ] {
         assert_eq!(
             prompt_evidence_scopes(&run_context(objective)),
@@ -47,6 +51,17 @@ fn prompt_evidence_scope_distinguishes_workspace_external_and_visual_work() {
         );
     }
     assert!(prompt_evidence_scopes(&run_context("Explain how web search works")).is_empty());
+}
+
+#[test]
+fn dynamic_browser_class_requires_browser_evidence_without_rewriting_the_prompt() {
+    let mut context = run_context("Investigate the rendered incident dashboard");
+    context.insert("task_class".to_string(), "browser".to_string());
+
+    assert_eq!(
+        prompt_evidence_scopes(&context),
+        BTreeSet::from([PromptEvidenceScope::Browser])
+    );
 }
 
 #[test]

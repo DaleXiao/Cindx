@@ -19,6 +19,8 @@ const PERMISSION_RUN_CONTEXT_KEYS: &[&str] = &[
     "steer_epoch",
     "prompt_contract_epoch",
     "task_class",
+    "tool_requirement",
+    "vision_required",
     "collaboration_profile",
     "conductor_contract",
     "run_decision",
@@ -578,16 +580,11 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         )
     });
     let registry = tool_registry_for_state(&state, &root)?;
-    let mut tools = registry
-        .exposure_plan(
-            crate::runtime_values::effective_agent_objective(&run_context, &prompt),
-            config.context_window_tokens,
-        )
-        .inline;
-    let evidence_scopes = agent_runtime::pin_prompt_evidence_tools(
+    let (tools, evidence_scopes) = crate::agent_loop_runtime::planned_agent_tools(
+        &registry,
         &run_context,
-        &registry.specs(),
-        &mut tools,
+        crate::runtime_values::effective_agent_objective(&run_context, &prompt),
+        config.context_window_tokens,
     );
     apply_run_task_contract_with_evidence_scopes(
         &mut runtime,
@@ -815,6 +812,7 @@ pub(crate) fn resolve_agent_permission_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_runtime::PromptEvidenceScope;
 
     #[test]
     fn permission_cold_recovery_preserves_verification_contract() {
@@ -842,6 +840,49 @@ mod tests {
                 .expect("restored contract decodes"),
             WorkspaceVerificationPolicy::RequiredAfterMutation
         );
+    }
+
+    #[test]
+    fn permission_cold_recovery_preserves_browser_execution_intent() {
+        let objective = "Open the incident dashboard in the browser and create a JSON report";
+        let mut run_context = Metadata::new();
+        let request_metadata = [
+            (
+                "effective_prompt_objective".to_string(),
+                objective.to_string(),
+            ),
+            ("task_class".to_string(), "browser".to_string()),
+            ("tool_requirement".to_string(), "effects".to_string()),
+            ("vision_required".to_string(), "false".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        restore_permission_run_context(&mut run_context, &request_metadata);
+
+        let root = std::env::temp_dir().join("cindx-permission-browser-tool-plan");
+        let mut registry = ToolRegistry::with_workspace_tools(root);
+        registry.install_meta_tools();
+        let (tools, evidence_scopes) = crate::agent_loop_runtime::planned_agent_tools(
+            &registry,
+            &run_context,
+            objective,
+            128_000,
+        );
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            run_context.get("tool_requirement").map(String::as_str),
+            Some("effects")
+        );
+        assert!(evidence_scopes.contains(&PromptEvidenceScope::Browser));
+        assert!(names.contains("browser.open"));
+        assert!(names.contains("browser.extract_text"));
+        assert!(names.contains("file.write"));
+        assert!(!names.iter().any(|name| name.starts_with("computer.")));
     }
 
     fn permission_run_context(steer_epoch: u64, prompt_contract_epoch: u64) -> Metadata {

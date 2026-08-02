@@ -728,6 +728,7 @@ fn goal2_execution_steer_replans_and_feeds_terminal_epoch_learning() {
             evolved_directive: String::new(),
             historical_evidence: String::new(),
             matched_collaboration_evidence: Vec::new(),
+            execution_constraints: "isolated workers are read-only".to_string(),
         });
         assert!(harness.planning_prompt().contains(objective));
         let response = serde_json::to_string(&expected).expect("decision should serialize");

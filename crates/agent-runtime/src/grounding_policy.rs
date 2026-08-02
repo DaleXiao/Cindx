@@ -8,6 +8,7 @@ const MAX_CLASSIFICATION_INSTRUCTION_CHARS: usize = 16_000;
 pub enum PromptEvidenceScope {
     Workspace,
     External,
+    Browser,
     Visual,
 }
 
@@ -16,6 +17,7 @@ impl PromptEvidenceScope {
         match self {
             Self::Workspace => "workspace_grounding",
             Self::External => "external_grounding",
+            Self::Browser => "browser_grounding",
             Self::Visual => "visual_grounding",
         }
     }
@@ -53,6 +55,12 @@ pub fn prompt_evidence_scopes(run_context: &Metadata) -> BTreeSet<PromptEvidence
             prompt_evidence_scopes_for_instruction(&instruction)
         };
         scopes.extend(classified);
+    }
+    if run_context.get("task_class").map(String::as_str) == Some("browser") {
+        scopes.insert(PromptEvidenceScope::Browser);
+    }
+    if run_context.get("vision_required").map(String::as_str) == Some("true") {
+        scopes.insert(PromptEvidenceScope::Visual);
     }
     scopes
 }
@@ -231,6 +239,27 @@ fn prompt_evidence_scope_for_clause(
             "截图",
             "屏幕",
             "界面",
+        ],
+    );
+    let browser_execution = contains_signal(
+        objective,
+        &[
+            "browser tool",
+            "in the browser",
+            "using the browser",
+            "use browser",
+            "browser.open",
+            "browser.extract_text",
+            "browser.capture",
+            "用浏览器",
+            "浏览器中",
+            "浏览器里",
+        ],
+    ) && contains_signal(
+        objective,
+        &[
+            "open", "inspect", "capture", "extract", "browse", "click", "打开", "检查", "查看",
+            "截图", "提取", "点击",
         ],
     );
     let evidence_action = evidence_action_requested(objective) || inherited_action;
@@ -413,6 +442,9 @@ fn prompt_evidence_scope_for_clause(
         .iter()
         .any(|prefix| objective_start.starts_with(prefix));
 
+    if browser_execution {
+        return Some(PromptEvidenceScope::Browser);
+    }
     if visual_target && (evidence_action || visual_observation) {
         return Some(PromptEvidenceScope::Visual);
     }

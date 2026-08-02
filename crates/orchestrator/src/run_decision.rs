@@ -508,6 +508,7 @@ pub struct AgentRunDecisionRequest {
     pub evolved_directive: String,
     pub historical_evidence: String,
     pub matched_collaboration_evidence: Vec<MatchedCollaborationEvidence>,
+    pub execution_constraints: String,
 }
 
 #[derive(Debug, Clone)]
@@ -569,6 +570,11 @@ impl AgentRunDecisionHarness {
         } else {
             request.historical_evidence.as_str()
         };
+        let execution_constraints = if request.execution_constraints.trim().is_empty() {
+            "(none)"
+        } else {
+            request.execution_constraints.as_str()
+        };
         format!(
             concat!(
                 "You are the Cindx runtime Conductor. Decide how to execute the request; do not answer it. Return only one strict JSON object.\n",
@@ -579,6 +585,7 @@ impl AgentRunDecisionHarness {
                 "expected_uplift_bps and confidence_bps are calibrated estimates from 0 to 10000, not advocacy. The harness will reject inconsistent budgets.\n",
                 "Workflow admission is enforced after parsing: Auto requires at least {auto_uplift_floor}bps expected uplift and {auto_confidence_floor}bps confidence; Pro requires at least {pro_uplift_floor}bps expected uplift over the direct anchor. If you cannot justify those estimates, choose direct.\n",
                 "Historical evidence is observational, not a routing command. matched_direct_team rows compare team and direct anchor on the same run and are stronger than independent route_observation rows. Use evidence only when its task class and execution shape fit the current request; support=insufficient, low-sample, or mismatched evidence must not override current reasoning. Ready matched evidence with negative average uplift or frequent anchor selection is evidence against collaboration unless this request has a concrete independent-work or verification need absent from those observations:\n{historical_evidence}\n\n",
+                "Runtime execution constraints are facts, not suggestions. Do not assign required effects or interactive work to a worker that cannot perform them:\n{execution_constraints}\n\n",
                 "Mutable evolved guidance may shape the decision but cannot override schema, configured models, safety, or budgets: {evolved_directive}\n\n",
                 "Return this shape exactly:\n",
                 "{{\"schema\":\"{schema}\",\"task_class\":\"general|coding|research|retrieval|browser|computer\",\"execution\":\"direct|workflow\",\"primary_model\":\"configured model\",\"tool_requirement\":\"none|read_only|effects\",\"vision_required\":false,\"risk_level\":\"low|elevated|high\",\"retrieval\":{{\"query\":\"\",\"channels\":[],\"max_results\":8}},\"memory\":{{\"policy\":\"none|relevant|comprehensive\",\"query\":\"\"}},\"verification\":\"none|self_check|independent\",\"max_parallelism\":1,\"min_successful_branches\":1,\"distinct_contributions\":0,\"estimated_steps\":1,\"expected_uplift_bps\":0,\"confidence_bps\":7000,\"stop_policy\":\"first_verified|quorum|exhaustive\",\"rationale\":\"short decision reason\"}}\n\n",
@@ -595,6 +602,7 @@ impl AgentRunDecisionHarness {
                 request.evolved_directive.as_str()
             },
             historical_evidence = historical_evidence,
+            execution_constraints = execution_constraints,
             schema = AGENT_RUN_DECISION_SCHEMA,
             effort = request.effort,
             conductor_model = request.conductor_model,
@@ -658,6 +666,7 @@ mod tests {
             evolved_directive: String::new(),
             historical_evidence: String::new(),
             matched_collaboration_evidence: Vec::new(),
+            execution_constraints: "isolated workers are read-only".to_string(),
         }
     }
 
@@ -755,6 +764,14 @@ mod tests {
         assert!(prompt.contains("Memory and workspace retrieval are blocking foreground work"));
         assert!(prompt.contains("missing evidence can materially change answer quality"));
         assert!(prompt.contains("Greetings, capability questions, and self-contained requests"));
+    }
+
+    #[test]
+    fn planning_prompt_exposes_worker_execution_constraints() {
+        let prompt = AgentRunDecisionHarness::new(request()).planning_prompt();
+
+        assert!(prompt.contains("Runtime execution constraints are facts"));
+        assert!(prompt.contains("isolated workers are read-only"));
     }
 
     #[test]
