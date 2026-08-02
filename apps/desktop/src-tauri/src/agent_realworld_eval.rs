@@ -508,7 +508,7 @@ fn build_evaluation_app(
     };
     tauri::Builder::default()
         .manage(state)
-        .build(tauri::generate_context!())
+        .build(crate::app_bootstrap::application_context())
         .map_err(|error| format!("failed to build headless evaluation app: {error}"))
 }
 
