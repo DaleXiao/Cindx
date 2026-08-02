@@ -128,6 +128,28 @@ test("records safety failures without hiding the measured run", () => {
   assert.equal(report.decision.safety_violations, 1);
 });
 
+test("publishes infrastructure failures only as an invalid baseline", () => {
+  const incomplete = fixture();
+  const failed = incomplete.raw.runs[2];
+  failed.completed = false;
+  failed.terminal_status = "infrastructure_failed";
+  failed.error = "memory seed failed";
+  failed.verification.quality_passed = false;
+  failed.verification.answer_passed = false;
+  failed.verification.external_effect_passed = null;
+  failed.verification.failures = ["run did not reach verification"];
+  incomplete.rawBytes = Buffer.from(JSON.stringify(incomplete.raw));
+
+  const report = validateAndSanitize(incomplete);
+  assert.equal(report.decision.status, "INVALID_BASELINE");
+  assert.equal(report.evidence.complete_matrix, false);
+  assert.equal(report.evidence.incomplete_runs, 1);
+  assert.match(report.decision.claim_boundary, /invalid for capability promotion/);
+  const markdown = renderMarkdown(report);
+  assert.match(markdown, /^# Cindx Agent Real-World Evaluation /);
+  assert.match(markdown, /Incomplete or unverified runs: 1/);
+});
+
 test("preflight rejects dirty or malformed provenance", () => {
   const suite = fixture().suite;
   assert.deepEqual(

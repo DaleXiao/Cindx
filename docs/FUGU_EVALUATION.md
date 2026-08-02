@@ -21,7 +21,12 @@ It applies fixed GPQA-Diamond and MRCR v2 samples to the configured direct,
 Auto, and Pro paths, preserves failures in the denominator, and publishes only
 sanitized hashes, scores, latency, and routing evidence.
 
-The current product decision baseline is
+The latest provider-backed collection attempt is
+[`Cindx Agent Real-World V2 0.1.82`](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.md).
+Four infrastructure-failed cells make it `INVALID_BASELINE`, so it cannot be
+used as parity or orchestration-uplift evidence.
+
+The latest complete product decision baseline remains
 [`Cindx Agent Real-World V1 0.1.82`](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.md).
 It is not protocol-equivalent to the matrix below and records no quality gain
 from Auto or Pro over Fast, so the Agent-intelligence uplift decision remains

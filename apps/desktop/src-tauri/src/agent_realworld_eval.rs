@@ -756,13 +756,16 @@ fn execute_case(
         );
         setup_latency_ms = setup_latency_ms.saturating_add(elapsed_ms(setup_started));
         if seed.state.status != "completed" {
+            let seed_error = seed
+                .error
+                .or_else(|| seed.state.last_error.clone())
+                .unwrap_or_else(|| format!("memory seed ended as {}", seed.state.status));
             return failed_run(
                 case,
                 treatment,
                 replicate,
                 input_sha256,
-                seed.error
-                    .unwrap_or_else(|| format!("memory seed ended as {}", seed.state.status)),
+                seed_error,
                 started,
             );
         }

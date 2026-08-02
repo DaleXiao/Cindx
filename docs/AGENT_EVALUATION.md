@@ -8,12 +8,16 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 
 | Evidence | Version | Scope | Current conclusion |
 | --- | --- | --- | --- |
+| [Agent Real-World V2](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.md) | `0.1.82` | Same 72-cell product matrix with corrected read-evidence equivalence | Latest collection attempt; four infrastructure-failed RAG/memory cells make it `INVALID_BASELINE`; retained for diagnosis only |
 | [Agent Real-World V1](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.md) | `0.1.82` | 6 tool, state, memory, and safety tasks; Direct/Fast/Auto/Pro; 72 matched runs | Fast, Auto, and Pro each scored `72.2%`; Auto and Pro added no quality over Fast and had lower completion plus higher latency; `NO-GO` for orchestration uplift |
 | [Matched provider baseline](evaluations/CINDX_PROVIDER_BASELINE_0.1.78_2026-07-31.md) | `0.1.78` | 12 frozen GPQA-Diamond questions, 36 matched treatments | Direct `10/12`; Auto and Pro `8/12`; no orchestration uplift shown |
 | Deterministic quality gates | current source | Runtime, memory, queue/steer, permission, recovery, projection, performance contracts | Control-plane evidence only |
 
-The real-world V1 matrix is the current product decision baseline because it
-exercises shipping Agent, tool, permission, RAG, and memory paths. Direct is a
+The real-world V2 collection is the latest attempt, but it is not a baseline:
+four cells failed during memory setup, before product behavior could be
+verified. The real-world V1 matrix therefore remains the latest complete
+product decision baseline because it exercises shipping Agent, tool,
+permission, RAG, and memory paths. Direct is a
 no-tools answer ceiling with task evidence supplied inline, not an equal
 product treatment. The GPQA run is older and measures difficult question
 answering without tools.
@@ -83,7 +87,18 @@ reports are immutable and live under `evaluations/archive/`.
 
 ## Current Real-World Findings
 
-The `0.1.82` matrix contains 72 matched runs: six frozen cases, four treatments,
+The latest V2 collection executed all 72 cells once and retained every result.
+Four Auto/Pro RAG-memory cells ended in infrastructure failure, so the contract
+marks the whole collection `INVALID_BASELINE`; no rerun was used to replace
+those failures. Descriptively, Direct, Fast, Auto, and Pro passed `88.9%`,
+`72.2%`, `77.8%`, and `66.7%` of quality checks, but those rates are not valid
+for promotion or treatment comparison because the matrix is incomplete. The
+collection also exposed one Fast safety-verifier failure: the protected file
+was not changed, but the run never produced the required denied-permission
+evidence. Browser runs again dominated tail latency and failure. These are
+diagnostic findings, not an intelligence-uplift result.
+
+The latest complete `0.1.82` V1 matrix contains 72 matched runs: six frozen cases, four treatments,
 and three repeats. Fast, Auto, and Pro each passed `72.2%` of the complete
 matrix. Relative to Fast, Auto added `0.0` percentage points of quality, lost
 `11.1` points of completion, and added `14.3 s` paired median latency. Pro added
@@ -115,6 +130,7 @@ protocol. V2 changes only the coding verifier's read-evidence equivalence by
 accepting `file.read_many`; objectives, fixtures, treatments, replicates, and
 all other success conditions remain unchanged from V1. The published V1 result
 remains the current measured baseline until a complete V2 matrix is collected.
+The retained V2 attempt is explicitly invalid and does not replace it.
 It covers structured file mutation, code edit plus tests, browser evidence,
 long-horizon migration, indexed knowledge plus cross-session memory, and denied
 mutation. Direct, Fast, Auto, and Pro each receive three matched repeats.
@@ -134,7 +150,10 @@ when Git commit, suite hash, selection, and replicate count still match. Browser
 processes are retired by the sample's unique temporary root so one treatment
 cannot contaminate the resources or state of the next.
 
-The complete provider-backed matrix is recorded in
+The latest invalid V2 attempt is recorded in
+[Agent Real-World V2](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.md)
+with its [sanitized machine-readable evidence](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.json).
+The latest complete provider-backed matrix is recorded in
 [Agent Real-World V1](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.md)
 with its [sanitized machine-readable evidence](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.json).
 Cancellation, interruption/resume, user steering, computer interaction, and
