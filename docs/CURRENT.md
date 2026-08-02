@@ -110,25 +110,26 @@ matched evidence that an evolved profile improves external product quality.
 
 ## Current Evidence Boundary
 
-The latest provider-backed Agent diagnostic is
-[Cindx Agent Real-World Lite Goal 6 0.1.80](evaluations/CINDX_AGENT_REALWORLD_LITE_G6_0.1.80_2026-08-01.md).
-It ran the same three deterministic read-only workspace tasks across a direct
-single-model ceiling, Fast, Auto, and Pro on source commit `e40960c`:
+The latest provider-backed Agent baseline is
+[Cindx Agent Real-World V1 0.1.82](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.md).
+It ran six frozen tasks across Direct, Fast, Auto, and Pro with three matched
+repeats on source commit `4d43e77`, for 72 observations:
 
-- the direct ceiling and Auto each scored `1.000` across `3/3` deliveries;
-- Fast scored `0.417`; it remained incomplete on multi-file synthesis and
-  contradiction resolution;
-- Pro scored `0.333`; all three answers omitted required evidence;
-- Auto used `55.76x` the direct tokens and `7.83x` its median latency; Pro used
-  `73.43x` the tokens and `12.83x` the median latency;
-- all `12/12` runs delivered without provider errors or safety violations;
-- neither Auto nor Pro used a frozen GEPA profile.
+- Direct scored `88.9%`, but is a no-tools answer ceiling with evidence inline;
+- Fast, Auto, and Pro each scored `72.2%` on the complete matrix;
+- relative to Fast, Auto had equal quality, `11.1` points lower completion, and
+  `14.3 s` higher paired median latency;
+- relative to Fast, Pro had equal quality, `5.6` points lower completion, and
+  `18.0 s` higher paired median latency;
+- all product treatments passed file, long-horizon, RAG/memory, and denied
+  mutation cases; browser evidence was the dominant failure domain;
+- no denied-mutation safety violation occurred.
 
-This is a small directional diagnostic, not a statistically powered ranking.
-The direct treatment received evidence inline, so it is an answer-quality
-ceiling rather than an equal tool-using baseline. The result is still enough to
-reject a current collaboration-uplift claim: Auto recovered answer completeness
-but not efficiency, while Pro regressed in both quality and cost.
+Seven coding failures are conservative instrumentation failures: file and test
+checks passed, but the frozen suite did not accept `file.read_many` as read
+evidence. The score remains published unchanged. This defect must be corrected
+in a new suite version before collecting the next matrix; it must not be fixed
+retroactively to improve this result.
 
 The latest matched GPQA diagnostic is version `0.1.78`: Direct scored `10/12`,
 while Auto and Pro each scored `8/12` under the budget. The sample is too small
@@ -140,6 +141,8 @@ Therefore the current claim is:
   deterministic quality gates have substantial automated coverage.
 - Auto can gather the required evidence in this small matrix, but Auto and Pro
   are not proven to outperform the direct path in quality, latency, or tokens.
+- Auto and Pro are not proven to outperform Fast; both matched Fast quality and
+  regressed in completion and latency in the current matrix.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.
 
 ## Known Structural Limits
@@ -153,9 +156,10 @@ Therefore the current claim is:
 - `agent-application` owns the portable run/reprepare and lifecycle contracts,
   but several use cases and all product side-effect adapters still live in the
   desktop composition root.
-- Provider-backed real-world coverage is small and read-only. Code editing,
-  browser/computer tasks, interruption/resume, steering, and cross-session
-  memory still need a matched repeated external-effect suite.
+- Provider-backed real-world coverage now includes file mutation, code editing,
+  browser evidence, long-horizon work, RAG/memory, and denied mutation.
+  Cancellation, interruption/resume, steering, broader computer interaction,
+  and adversarial instruction resistance still need matched repeated suites.
 
 These are current constraints, not roadmap promises. A later change may remove
 them only with code and verification evidence in the same revision.

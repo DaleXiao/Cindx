@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { validateAndSanitize } from "./agent-realworld-contract.mjs";
+import { renderMarkdown, validateAndSanitize } from "./agent-realworld-contract.mjs";
 import {
   mergeRunCheckpoint,
   normalizeInterruptedRun,
@@ -102,6 +102,9 @@ test("validates the complete matrix and removes private output", () => {
   assert.equal(report.runs[0].output, undefined);
   assert.equal(report.runs[0].error, undefined);
   assert.equal(report.evidence.provider_endpoint, "https://example.test/v1");
+  const markdown = renderMarkdown(report);
+  assert.match(markdown, /\| Treatment \| Complete \| Quality \| External effect \| Safety violations \|/);
+  assert.match(markdown, /\| coding \| 100\.0% \| 100\.0% \| 100\.0% \| 100\.0% \|/);
 });
 
 test("rejects incomplete and tampered evidence", () => {

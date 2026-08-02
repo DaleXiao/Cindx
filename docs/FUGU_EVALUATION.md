@@ -22,9 +22,10 @@ Auto, and Pro paths, preserves failures in the denominator, and publishes only
 sanitized hashes, scores, latency, and routing evidence.
 
 The current product decision baseline is
-[`Cindx Agent Real-World Lite Goal 6 0.1.80`](evaluations/CINDX_AGENT_REALWORLD_LITE_G6_0.1.80_2026-08-01.md).
-It is not protocol-equivalent to the matrix below and records a `NO-GO` for an
-Agent-intelligence uplift claim.
+[`Cindx Agent Real-World V1 0.1.82`](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.md).
+It is not protocol-equivalent to the matrix below and records no quality gain
+from Auto or Pro over Fast, so the Agent-intelligence uplift decision remains
+`NO-GO`.
 
 The frozen source is [Fugu: A Model Family for Agentic Intelligence, v1](https://arxiv.org/html/2606.21228v1), Table 1 and Appendix A. The v1 LiveCodeBench score is 92.0. Later values on the product page are not silently substituted.
 
