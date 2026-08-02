@@ -23,6 +23,10 @@ fn persistent_store_startup_error(error: &StorageError) -> String {
     format!("{PERSISTENT_STORE_STARTUP_FAILURE}: {error}")
 }
 
+pub(crate) fn application_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
 pub fn run() -> Result<(), String> {
     install_startup_panic_log();
     install_rustls_crypto_provider();
@@ -279,7 +283,7 @@ pub fn run() -> Result<(), String> {
             run_browser_tool,
             resolve_browser_permission
         ])
-        .build(tauri::generate_context!())
+        .build(application_context())
         .expect("error while building Cindx desktop app");
 
     app.run(|app_handle, event| {
