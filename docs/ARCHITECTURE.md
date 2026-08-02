@@ -183,12 +183,15 @@ the two foreground runtimes:
    completed, independently scored, usage-complete Auto workflow with a
    finalized checkpoint and no denied permission or safety violation.
 2. The teacher profile, source run, final output, and dataset are fingerprinted;
-   bounded redacted workflow evidence is retained for background evaluation.
+   its final steer epoch is pinned, and bounded redacted workflow evidence is
+   retained for background evaluation.
 3. Current and challenger Pro profiles run the same objective. An evaluator
    that did not participate in either workflow performs a position-balanced
    comparison against the archived Auto result.
 4. Auto-transfer observations are stored separately from same-effort GEPA
-   observations. They have their own dataset digest and promotion gate.
+   observations. They have their own dataset digest and promotion gate. The
+   mirrored pair is projected only when both records, project scope, and Auto
+   source lineage agree.
 5. Pro mutation reserves reflection capacity for both ordinary Pro evidence and
    Auto-transfer evidence. Promotion requires both gates, and the frozen Pro
    snapshot pins the active Auto source and both evidence sets.
@@ -198,9 +201,17 @@ reviewers, incomplete evidence, changed Auto lineage, disagreement, or an
 insufficient train/holdout cohort fails closed and leaves the current stable Pro
 profile unchanged.
 
+The background queue coalesces only requests with the same project and effort.
+Repeated objectives prefer a qualified teacher from the current stable Auto
+profile over stale profiles. Reflective mutation output is rejected if its
+custom directive copies case-specific trajectory or feedback content, including
+opaque run/model identifiers; repair output is checked by the same boundary.
+
 The evolution read model scopes learned genomes, observations, offline
 datasets, and rollout state by project. Records without a durable scope are
-rebuilt from canonical events before they can participate in selection.
+rebuilt from canonical events before they can participate in selection. Its
+projection version is explicit, so a semantic projection change forces a
+canonical replay instead of trusting a structurally compatible stale cache.
 
 Prompt evolution is not the conductor, task graph, or run loop. It cannot alter
 active permissions, transcripts, tool observations, or budgets.

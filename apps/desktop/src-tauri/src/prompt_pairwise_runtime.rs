@@ -156,6 +156,7 @@ fn evaluate_prompt_auto_transfer_pair(
     let candidate_sha256 = prompt_genome_sha256(&candidate.plan.genome)?;
     let transfer = PromptTransferProvenance::auto_to_pro(
         teacher.source_run_id.clone(),
+        teacher.steer_epoch,
         teacher.profile_id.clone(),
         teacher.profile_sha256.clone(),
         teacher.output_sha256.clone(),
@@ -336,13 +337,19 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
             .datasets
             .get(&prompt_dataset_key(effort, project_id))
             .cloned();
+        let auto_stable_profile = stable_prompt_profile_fingerprint(&scoped_model, "auto").ok();
+        let preferred_auto_profile = auto_stable_profile
+            .as_ref()
+            .map(|(profile, sha256)| (profile.id.as_str(), sha256.as_str()));
+        let discovered_dataset =
+            prompt_offline_dataset(&events, project_id, preferred_auto_profile);
         (
             evaluate_prompt_evolution_read_model(&scoped_model, effort)?,
-            prompt_offline_dataset(&events, project_id),
+            discovered_dataset,
             rollout,
             known_profiles,
             previous_dataset,
-            stable_prompt_profile_fingerprint(&scoped_model, "auto").ok(),
+            auto_stable_profile,
         )
     };
     let campaign_generation = evaluation

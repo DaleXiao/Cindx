@@ -81,6 +81,16 @@ impl PromptEvaluationRequest {
         }
         self.current_profile.validate()
     }
+
+    fn scope_key(&self) -> (&str, &str) {
+        let project_id = self
+            .run_context
+            .get("project_id")
+            .map(String::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("global");
+        (project_id, self.effort.as_str())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -236,7 +246,7 @@ fn latest_pending_prompt_evaluations_from_events(
                 values
             },
         );
-    let mut latest = BTreeMap::<String, PendingPromptEvaluation>::new();
+    let mut latest = BTreeMap::<(String, String), PendingPromptEvaluation>::new();
     for event in events.iter().filter(|event| event.summary == REQUEST_EVENT) {
         let Some(payload) = event.metadata.get(REQUEST_METADATA_KEY) else {
             continue;
@@ -252,11 +262,13 @@ fn latest_pending_prompt_evaluations_from_events(
                 .unwrap_or_default(),
             request,
         };
+        let key = candidate.request.scope_key();
+        let key = (key.0.to_string(), key.1.to_string());
         let replace = latest
-            .get(&candidate.request.effort)
+            .get(&key)
             .is_none_or(|current| candidate.sequence > current.sequence);
         if replace {
-            latest.insert(candidate.request.effort.clone(), candidate);
+            latest.insert(key, candidate);
         }
     }
     Ok(latest
@@ -504,6 +516,14 @@ mod tests {
         }
     }
 
+    fn request_for_project(effort: &str, id: &str, project_id: &str) -> PromptEvaluationRequest {
+        let mut request = request(effort, id);
+        request
+            .run_context
+            .insert("project_id".to_string(), project_id.to_string());
+        request
+    }
+
     fn event(sequence: u64, summary: &str, metadata: Metadata) -> Event {
         Event {
             id: EventId(format!("event-{sequence}")),
@@ -543,6 +563,25 @@ mod tests {
         .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].request.request_id, "newer");
+    }
+
+    #[test]
+    fn same_effort_requests_are_isolated_by_project() {
+        let project_a_old = request_for_project("pro", "project-a-old", "project-a");
+        let project_b = request_for_project("pro", "project-b", "project-b");
+        let project_a_new = request_for_project("pro", "project-a-new", "project-a");
+        let pending = latest_pending_prompt_evaluations_from_events(&[
+            request_event(1, &project_a_old),
+            request_event(2, &project_b),
+            request_event(3, &project_a_new),
+        ])
+        .unwrap();
+        let ids = pending
+            .iter()
+            .map(|pending| pending.request.request_id.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(ids, BTreeSet::from(["project-a-new", "project-b"]));
     }
 
     #[test]

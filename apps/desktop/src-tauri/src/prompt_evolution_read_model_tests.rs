@@ -507,6 +507,107 @@ fn explicit_pairwise_evaluation_observations_remain_unchanged() {
 }
 
 #[test]
+fn auto_transfer_event_enters_only_its_scoped_read_model() {
+    let project_id = "project-a";
+    let evaluation_id = scoped_prompt_evaluation_id(project_id, "auto-transfer-1");
+    let pro_profile = "pro-candidate";
+    let auto_profile = "auto-stable";
+    let pro_sha256 = sha256_hex(pro_profile.as_bytes());
+    let auto_sha256 = sha256_hex(auto_profile.as_bytes());
+    let transfer = PromptTransferProvenance::auto_to_pro(
+        "auto-source-run",
+        2,
+        auto_profile,
+        auto_sha256.clone(),
+        sha256_hex(b"verified Auto output"),
+    );
+    let observation = |profile_id: &str,
+                       opponent_id: &str,
+                       candidate_sha256: String,
+                       opponent_sha256: String,
+                       relative_reward: f64| {
+        PromptEvolutionObservation {
+            profile_id: profile_id.to_string(),
+            evaluation_id: evaluation_id.clone(),
+            case_id: "runtime-coding-transfer".to_string(),
+            opponent_profile_id: Some(opponent_id.to_string()),
+            task_class: "coding".to_string(),
+            split: PromptEvaluationSplit::Train,
+            mode: PromptEvaluationMode::PairedExecution,
+            format_valid: true,
+            succeeded: true,
+            quality_score: 0.9,
+            latency_ms: 50,
+            total_tokens: 100,
+            estimated_cost_microusd: 0,
+            safety_violations: 0,
+            relative_reward: Some(relative_reward),
+            step_credits: Vec::new(),
+            reflection_packet: None,
+            provenance: PromptEvaluationProvenance::blind_pairwise_swap(
+                vec!["independent-judge".to_string()],
+                vec!["pro-worker".to_string(), "auto-worker".to_string()],
+                "d".repeat(64),
+                candidate_sha256,
+                opponent_sha256,
+            )
+            .with_transfer(transfer.clone()),
+        }
+    };
+    let observations = vec![
+        observation(
+            pro_profile,
+            auto_profile,
+            pro_sha256.clone(),
+            auto_sha256.clone(),
+            0.2,
+        ),
+        observation(auto_profile, pro_profile, auto_sha256, pro_sha256, -0.2),
+    ];
+    let transfer_event = Event {
+        id: EventId("auto-transfer-event".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 1,
+        timestamp_ms: 1,
+        kind: EventKind::TaskStatusChanged,
+        summary: "Conductor Auto transfer evaluation".to_string(),
+        metadata: [
+            ("project_id".to_string(), project_id.to_string()),
+            ("prompt_effort".to_string(), "pro".to_string()),
+            ("evaluation_id".to_string(), evaluation_id),
+            ("auto_teacher_profile".to_string(), auto_profile.to_string()),
+            (
+                "auto_teacher_run_id".to_string(),
+                "auto-source-run".to_string(),
+            ),
+            (
+                "prompt_observations".to_string(),
+                serde_json::to_string(&observations).expect("serialize transfer observations"),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    let model = build_prompt_evolution_read_model(&[transfer_event.clone()], 1, 1);
+    let project_a = prompt_evolution_read_model_for_scope(&model, project_id);
+    let project_b = prompt_evolution_read_model_for_scope(&model, "project-b");
+    assert_eq!(project_a.observations.len(), 2);
+    assert!(project_a
+        .observations
+        .iter()
+        .all(|(_, observation)| observation.is_scientific_transfer_evidence()));
+    assert!(project_b.observations.is_empty());
+
+    let mut mismatched = transfer_event;
+    mismatched.metadata.insert(
+        "auto_teacher_run_id".to_string(),
+        "different-run".to_string(),
+    );
+    assert!(prompt_observation_records_from_event(&mismatched).is_empty());
+}
+
+#[test]
 fn learned_prompt_genomes_are_isolated_by_project_scope() {
     let mut project_a = ConductorPromptGenome::seed_for_effort("auto")
         .mutations()
@@ -563,6 +664,7 @@ fn learned_prompt_genomes_are_isolated_by_project_scope() {
 fn legacy_unscoped_prompt_genomes_force_a_read_model_rebuild() {
     let model = PromptEvolutionReadModel {
         schema: PROMPT_EVOLUTION_READ_MODEL_NAMESPACE.to_string(),
+        projection_version: PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION,
         revision: 1,
         event_count: 1,
         genomes: vec![PromptGenomeRecord {

@@ -151,7 +151,11 @@ pub(crate) fn generate_background_prompt_mutation(
         unique_id("profile")
     );
     let mut mutation_repaired = false;
-    let mutation = match parent.learned_mutation_from_response(&response, mutation_id.clone()) {
+    let mutation = match parent.learned_reflective_mutation_from_response(
+        &response,
+        mutation_id.clone(),
+        trajectories,
+    ) {
         Ok(mutation) => Ok(mutation),
         Err(initial_error) => {
             let repair_prompt = parent.mutation_repair_prompt(&response, &initial_error);
@@ -168,7 +172,11 @@ pub(crate) fn generate_background_prompt_mutation(
                 Ok(repaired_response) => {
                     mutation_repaired = true;
                     parent
-                        .learned_mutation_from_response(&repaired_response, mutation_id)
+                        .learned_reflective_mutation_from_response(
+                            &repaired_response,
+                            mutation_id,
+                            trajectories,
+                        )
                         .map_err(|repair_error| {
                             format!(
                                 "initial mutation: {initial_error}; repaired mutation: {repair_error}"

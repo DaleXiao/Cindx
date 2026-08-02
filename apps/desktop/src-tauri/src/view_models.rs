@@ -911,6 +911,8 @@ pub(crate) struct PromptOfflineDatasetState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PromptEvolutionReadModel {
     pub(crate) schema: String,
+    #[serde(default)]
+    pub(crate) projection_version: u32,
     pub(crate) revision: u64,
     pub(crate) event_count: u64,
     pub(crate) genomes: Vec<PromptGenomeRecord>,

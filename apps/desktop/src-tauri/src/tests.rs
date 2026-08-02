@@ -939,7 +939,7 @@ fn goal2_execution_steer_replans_and_feeds_terminal_epoch_learning() {
     let events = store
         .list_by_task(&phase16_task_id())
         .expect("events should load");
-    let prompt_cases = prompt_offline_dataset(&events, "project-a");
+    let prompt_cases = prompt_offline_dataset(&events, "project-a", None);
     assert_eq!(prompt_cases.len(), 1);
     assert_eq!(prompt_cases[0].objective, revised_objective);
     assert_eq!(prompt_cases[0].task_class, "research");
@@ -3568,6 +3568,7 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
     candidate.generation = 1;
     let mut model = PromptEvolutionReadModel {
         schema: PROMPT_EVOLUTION_READ_MODEL_NAMESPACE.to_string(),
+        projection_version: PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION,
         revision: 0,
         event_count: 0,
         genomes: Vec::new(),
@@ -3748,6 +3749,7 @@ fn completed_gepa_canary_persists_a_verified_frozen_profile() {
     rollout.status = "canary".to_string();
     let mut model = PromptEvolutionReadModel {
         schema: PROMPT_EVOLUTION_READ_MODEL_NAMESPACE.to_string(),
+        projection_version: PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION,
         revision: 0,
         event_count: 0,
         genomes: vec![PromptGenomeRecord {
@@ -3958,6 +3960,7 @@ fn stable_prompt_rollout_uses_the_evidence_bound_frozen_genome() {
     mutable_copy.custom_directive = "changed after certification".to_string();
     let model = PromptEvolutionReadModel {
         schema: PROMPT_EVOLUTION_READ_MODEL_NAMESPACE.to_string(),
+        projection_version: PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION,
         revision: 0,
         event_count: 0,
         genomes: vec![PromptGenomeRecord {
@@ -7131,7 +7134,7 @@ fn offline_prompt_evidence_rejects_invalid_agent_boundaries() {
             Some(EventTypeV1::AgentRunFailed.id()),
         ),
     ] {
-        assert!(prompt_offline_dataset(&events, "project-a").is_empty());
+        assert!(prompt_offline_dataset(&events, "project-a", None).is_empty());
     }
 }
 
@@ -7268,8 +7271,8 @@ fn offline_prompt_dataset_is_project_scoped_deterministic_and_split_stable() {
         None,
     ));
 
-    let first = prompt_offline_dataset(&events, "project-a");
-    let second = prompt_offline_dataset(&events, "project-a");
+    let first = prompt_offline_dataset(&events, "project-a", None);
+    let second = prompt_offline_dataset(&events, "project-a", None);
 
     assert_eq!(first, second);
     assert_eq!(first.len(), 5);
@@ -7332,7 +7335,7 @@ fn offline_prompt_dataset_is_project_scoped_deterministic_and_split_stable() {
         Some("Agent task completed"),
     ));
 
-    let grown = prompt_offline_dataset(&events, "project-a");
+    let grown = prompt_offline_dataset(&events, "project-a", None);
     for original in &first {
         assert_eq!(
             grown
@@ -7387,7 +7390,7 @@ fn offline_prompt_dataset_stratifies_task_classes_without_split_drift() {
         });
     }
 
-    let dataset = prompt_offline_dataset(&events, "project-a");
+    let dataset = prompt_offline_dataset(&events, "project-a", None);
 
     for task_class in ["coding", "research"] {
         let splits = dataset
@@ -7470,7 +7473,7 @@ fn goal2_offline_prompt_dataset_uses_only_the_terminal_steer_epoch() {
         ),
     ];
 
-    let dataset = prompt_offline_dataset(&events, "project-a");
+    let dataset = prompt_offline_dataset(&events, "project-a", None);
     assert_eq!(dataset.len(), 1);
     assert_eq!(
         dataset[0].objective,
@@ -7565,7 +7568,7 @@ fn goal2_offline_prompt_dataset_reconstructs_initial_and_accepted_steer_intent()
         ),
     ];
 
-    let dataset = prompt_offline_dataset(&events, "project-a");
+    let dataset = prompt_offline_dataset(&events, "project-a", None);
     assert_eq!(dataset.len(), 1);
     assert_eq!(
         dataset[0].objective,
@@ -7674,6 +7677,7 @@ fn test_auto_teacher_case(output: &str) -> PromptAutoTeacherCase {
     );
     PromptAutoTeacherCase {
         source_run_id: "auto-run".to_string(),
+        steer_epoch: 0,
         profile_id: genome.id.clone(),
         profile_sha256: prompt_genome_sha256(&genome).unwrap(),
         output_sha256: sha256_hex(output.as_bytes()),
@@ -7697,6 +7701,36 @@ fn test_auto_teacher_case(output: &str) -> PromptAutoTeacherCase {
         latency_ms: 20,
         total_tokens: 100,
     }
+}
+
+#[test]
+fn current_stable_auto_teacher_outranks_stale_higher_score() {
+    let case = |profile_id: &str, profile_sha256: &str, quality_score_bps: u16| {
+        let mut teacher = test_auto_teacher_case("verified output");
+        teacher.profile_id = profile_id.to_string();
+        teacher.profile_sha256 = profile_sha256.to_string();
+        teacher.quality_score_bps = quality_score_bps;
+        PromptOfflineCase {
+            id: "same-case".to_string(),
+            objective: "same objective".to_string(),
+            task_class: "coding".to_string(),
+            project_id: "project-a".to_string(),
+            source_run_id: teacher.source_run_id.clone(),
+            split: PromptEvaluationSplit::Train,
+            auto_teacher: Some(teacher),
+        }
+    };
+    let current = case("auto-current", "current-sha", 8_500);
+    let stale = case("auto-stale", "stale-sha", 9_900);
+    let preferred = Some(("auto-current", "current-sha"));
+
+    assert!(
+        prompt_offline_case_rank(&current, preferred) > prompt_offline_case_rank(&stale, preferred)
+    );
+    assert!(
+        prompt_offline_case_rank(&stale, None) > prompt_offline_case_rank(&current, None),
+        "without a stable-profile constraint the stronger verified teacher should win"
+    );
 }
 
 #[test]
@@ -7830,6 +7864,7 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
             )
             .with_transfer(PromptTransferProvenance::auto_to_pro(
                 format!("auto-run-{index}"),
+                0,
                 auto_profile_id,
                 auto_profile_sha256.clone(),
                 sha256_hex(format!("auto-output-{index}").as_bytes()),
@@ -8026,7 +8061,7 @@ fn completed_verified_auto_workflow_becomes_teacher_and_denied_runs_fail_closed(
         ),
     ];
 
-    let dataset = prompt_offline_dataset(&events, "project-a");
+    let dataset = prompt_offline_dataset(&events, "project-a", None);
     let captured = dataset[0]
         .auto_teacher
         .as_ref()
@@ -8043,7 +8078,7 @@ fn completed_verified_auto_workflow_becomes_teacher_and_denied_runs_fail_closed(
             .into_iter()
             .collect(),
     ));
-    assert!(prompt_offline_dataset(&events, "project-a")[0]
+    assert!(prompt_offline_dataset(&events, "project-a", None)[0]
         .auto_teacher
         .is_none());
 }

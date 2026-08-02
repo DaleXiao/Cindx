@@ -468,6 +468,7 @@ mod tests {
         let auto_profile_sha256 = crate::sha256_hex(b"auto-stable-genome");
         let transfer = crate::PromptTransferProvenance::auto_to_pro(
             format!("source-{evaluation_id}"),
+            0,
             "auto-stable",
             auto_profile_sha256.clone(),
             crate::sha256_hex(format!("output-{case_id}").as_bytes()),
