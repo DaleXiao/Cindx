@@ -122,10 +122,16 @@ function validateRun(run, testCase, treatment, replicate) {
   requireFact(run.verification && typeof run.verification === "object", `${key}: verification is missing`);
   requireFact(typeof run.verification.quality_passed === "boolean", `${key}: quality result is missing`);
   requireFact(typeof run.verification.answer_passed === "boolean", `${key}: answer result is missing`);
+  const infrastructureFailed = run.terminal_status === "infrastructure_failed";
+  if (infrastructureFailed) {
+    requireFact(run.completed === false, `${key}: infrastructure failure cannot be completed`);
+  }
   requireFact(
     treatment === "direct"
       ? run.verification.external_effect_passed === null
-      : typeof run.verification.external_effect_passed === "boolean",
+      : infrastructureFailed
+        ? run.verification.external_effect_passed === null
+        : typeof run.verification.external_effect_passed === "boolean",
     `${key}: external-effect boundary is incorrect`
   );
   finiteNonNegative(run.verification.safety_violations, `${key}: safety violations`);
@@ -257,6 +263,11 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
   const safetyViolations = sum(
     orderedRuns.map((run) => run.verification.safety_violations)
   );
+  const incompleteRuns = orderedRuns.filter(
+    (run) =>
+      run.terminal_status === "infrastructure_failed" ||
+      (run.treatment !== "direct" && run.verification.external_effect_passed === null)
+  );
   return {
     schema: "cindx.agent-realworld-sanitized.v1",
     suite: {
@@ -275,15 +286,23 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
       provider_id: raw.provider_id,
       provider_endpoint: endpointIdentity(raw.provider_endpoint),
       configured_models: raw.configured_models,
-      complete_matrix: true,
+      complete_matrix: incompleteRuns.length === 0,
+      incomplete_runs: incompleteRuns.length,
       product_runs: orderedRuns.filter((run) => run.product_mechanism_exercised).length,
       direct_runs: orderedRuns.filter((run) => !run.product_mechanism_exercised).length
     },
     decision: {
-      status: safetyViolations === 0 ? "VALID_BASELINE" : "SAFETY_FAILURE",
+      status:
+        incompleteRuns.length > 0
+          ? "INVALID_BASELINE"
+          : safetyViolations === 0
+            ? "VALID_BASELINE"
+            : "SAFETY_FAILURE",
       safety_violations: safetyViolations,
       claim_boundary:
-        "This is a matched product baseline, not evidence of Fugu Ultra parity or causal intelligence uplift."
+        incompleteRuns.length > 0
+          ? "Infrastructure failures make this matrix invalid for capability promotion or treatment comparison."
+          : "This is a matched product baseline, not evidence of Fugu Ultra parity or causal intelligence uplift."
     },
     aggregates,
     by_category: Object.fromEntries(
@@ -327,8 +346,9 @@ function percent(value) {
 }
 
 export function renderMarkdown(report) {
+  const reportKind = report.decision.status === "VALID_BASELINE" ? "Baseline" : "Evaluation";
   const lines = [
-    `# Cindx Agent Real-World Baseline ${report.evidence.app_version}`,
+    `# Cindx Agent Real-World ${reportKind} ${report.evidence.app_version}`,
     "",
     "## Evidence",
     "",
@@ -337,6 +357,7 @@ export function renderMarkdown(report) {
     `- Frozen suite: \`${report.suite.id}@${report.suite.version}\` (\`${report.suite.sha256}\`)`,
     `- Raw evidence SHA-256: \`${report.evidence.raw_sha256}\``,
     `- Matrix: ${report.suite.cases.length} cases × ${report.suite.treatments.length} treatments × ${report.suite.replicates} replicates`,
+    `- Incomplete or unverified runs: ${report.evidence.incomplete_runs}`,
     `- Provider: ${report.evidence.provider_id} (${report.evidence.provider_endpoint})`,
     "",
     "## Treatment Results",

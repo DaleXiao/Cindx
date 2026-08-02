@@ -133,7 +133,16 @@ product quality.
 
 ## Current Evidence Boundary
 
-The latest provider-backed Agent baseline is
+The latest provider-backed collection attempt is
+[Cindx Agent Real-World V2 0.1.82](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.md).
+It executed all 72 cells on source commit `6b2ee39`, but four Auto/Pro
+RAG-memory cells failed during setup. The publication contract therefore marks
+it `INVALID_BASELINE`; it cannot support capability promotion, treatment
+comparison, or an intelligence-uplift claim. It is retained because the setup
+failures, browser tail latency, and missing Fast permission-denial evidence are
+actionable product evidence.
+
+The latest complete provider-backed Agent baseline remains
 [Cindx Agent Real-World V1 0.1.82](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.md).
 It ran six frozen tasks across Direct, Fast, Auto, and Pro with three matched
 repeats on source commit `4d43e77`, for 72 observations:
