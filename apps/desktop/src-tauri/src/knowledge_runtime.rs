@@ -51,16 +51,16 @@ pub(crate) fn prepare_agent_knowledge_context(
     let index_started_at = Instant::now();
     let mut snapshot = cached_workspace_knowledge_snapshot_for(state, workspace_root)?;
     let index_cache_hit = snapshot.cache_hit;
-    let auto_indexed = ensure_workspace_knowledge_index(
+    let auto_indexed = ensure_workspace_knowledge_index(WorkspaceKnowledgeIndexRequest {
         workspace_root,
-        &mut snapshot.adapter,
-        index_cache_hit,
+        adapter: &mut snapshot.adapter,
+        cache_hit: index_cache_hit,
         config,
         cancellation,
         expected_epoch,
-        Some(&resource_checkpoint),
-        None,
-    )?;
+        resource_checkpoint: Some(&resource_checkpoint),
+        rag_operation: None,
+    })?;
     if workspace_knowledge_cache_needs_refresh(index_cache_hit, auto_indexed.is_some()) {
         cache_rag_adapter(state, workspace_root, &snapshot.adapter)?;
         snapshot = cached_workspace_knowledge_snapshot_for(state, workspace_root)?;
@@ -210,16 +210,30 @@ pub(crate) fn workspace_knowledge_cache_needs_refresh(
     !cache_hit || index_changed
 }
 
+pub(crate) struct WorkspaceKnowledgeIndexRequest<'a> {
+    pub(crate) workspace_root: &'a Path,
+    pub(crate) adapter: &'a mut FileRagAdapter,
+    pub(crate) cache_hit: bool,
+    pub(crate) config: &'a ProviderConfig,
+    pub(crate) cancellation: &'a Arc<AgentRunControl>,
+    pub(crate) expected_epoch: u64,
+    pub(crate) resource_checkpoint: Option<&'a AgentResourceCheckpoint<'a>>,
+    pub(crate) rag_operation: Option<&'a RagOperationControl>,
+}
+
 pub(crate) fn ensure_workspace_knowledge_index(
-    workspace_root: &Path,
-    adapter: &mut FileRagAdapter,
-    cache_hit: bool,
-    config: &ProviderConfig,
-    cancellation: &Arc<AgentRunControl>,
-    expected_epoch: u64,
-    resource_checkpoint: Option<&(dyn Fn(&AgentRunControl) -> Result<(), String> + Sync)>,
-    rag_operation: Option<&RagOperationControl>,
+    request: WorkspaceKnowledgeIndexRequest<'_>,
 ) -> Result<Option<AutomaticKnowledgeIndexResult>, String> {
+    let WorkspaceKnowledgeIndexRequest {
+        workspace_root,
+        adapter,
+        cache_hit,
+        config,
+        cancellation,
+        expected_epoch,
+        resource_checkpoint,
+        rag_operation,
+    } = request;
     if knowledge_preparation_should_interrupt(cancellation, expected_epoch) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
@@ -386,7 +400,7 @@ pub(crate) fn run_parallel_retrieval(
     retrieval_mode: &str,
     cached_graph_store: Option<&FileGraphStore>,
     cancellation: &Arc<AgentRunControl>,
-    resource_checkpoint: Option<&(dyn Fn(&AgentRunControl) -> Result<(), String> + Sync)>,
+    resource_checkpoint: Option<&AgentResourceCheckpoint<'_>>,
 ) -> Result<ParallelRetrievalResult, String> {
     let expected_epoch = cancellation.steer_epoch();
     let channels = match retrieval_mode {
@@ -434,7 +448,7 @@ pub(crate) fn run_planned_retrieval(
     cached_graph_store: Option<&FileGraphStore>,
     cancellation: &Arc<AgentRunControl>,
     expected_epoch: u64,
-    resource_checkpoint: Option<&(dyn Fn(&AgentRunControl) -> Result<(), String> + Sync)>,
+    resource_checkpoint: Option<&AgentResourceCheckpoint<'_>>,
 ) -> Result<ParallelRetrievalResult, String> {
     if knowledge_preparation_should_interrupt(cancellation, expected_epoch) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
@@ -667,7 +681,7 @@ pub(crate) fn query_embedding_for_chunks(
     query: &str,
     cancellation: &Arc<AgentRunControl>,
     expected_epoch: u64,
-    resource_checkpoint: Option<&(dyn Fn(&AgentRunControl) -> Result<(), String> + Sync)>,
+    resource_checkpoint: Option<&AgentResourceCheckpoint<'_>>,
 ) -> Result<Vec<f32>, String> {
     let Some(profile) = chunks.first() else {
         return Ok(local_query_embedding(query));

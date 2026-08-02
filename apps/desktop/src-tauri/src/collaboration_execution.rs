@@ -454,7 +454,7 @@ pub(crate) fn complete_collaboration_model_for_stage_with_recovery_control(
     prompt: String,
     cancellation: Option<Arc<AgentRunControl>>,
     limits: CollaborationCallLimits,
-    resource_checkpoint: Option<&(dyn Fn(&AgentRunControl) -> Result<(), String> + Sync)>,
+    resource_checkpoint: Option<&AgentResourceCheckpoint<'_>>,
     mut on_delta: impl FnMut(&str),
 ) -> CollaborationCompletion {
     let started_at_ms = current_time_millis();

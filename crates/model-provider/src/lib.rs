@@ -23,6 +23,7 @@ mod request_tool_calls;
 mod request_vision;
 mod response_parser;
 mod stream_delta_aggregator;
+mod streaming_finish;
 mod streaming_response;
 mod streaming_wire;
 mod usage;
@@ -35,9 +36,11 @@ use request_builder::{
     build_chat_request_json_with_tools_output_limit_and_vision,
 };
 use request_vision::ImageDataUrlCache;
-use streaming_response::consume_streaming_response;
 #[cfg(test)]
-use streaming_response::{consume_streaming_body, finish_streaming_response};
+use streaming_finish::{finish_streaming_response, StreamingResponseParts};
+#[cfg(test)]
+use streaming_response::consume_streaming_body;
+use streaming_response::consume_streaming_response;
 
 pub use dashscope_realtime_provider::{
     DashScopeRealtimeTranscriptionConfig, DashScopeRealtimeTranscriptionProvider,
@@ -1562,12 +1565,14 @@ mod tests {
     #[test]
     fn streaming_reader_accepts_non_streaming_tool_call_fallback() {
         let response = finish_streaming_response(
-            r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"file_read","arguments":"{\"input\":\"path=README.md\"}"}}]}}]}"#.to_string(),
-            false,
-            String::new(),
-            BTreeMap::new(),
-            None,
-            Metadata::new(),
+            StreamingResponseParts {
+                fallback_response: r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"file_read","arguments":"{\"input\":\"path=README.md\"}"}}]}}]}"#.to_string(),
+                fallback_truncated: false,
+                answer: String::new(),
+                streamed_tool_calls: BTreeMap::new(),
+                finish_reason: None,
+                usage: Metadata::new(),
+            },
             "test-model",
             "http://example.test/v1",
         )
@@ -1591,12 +1596,14 @@ mod tests {
             "</｜DSML｜tool_calls>"
         );
         let response = finish_streaming_response(
-            String::new(),
-            false,
-            dsml.to_string(),
-            BTreeMap::new(),
-            None,
-            Metadata::new(),
+            StreamingResponseParts {
+                fallback_response: String::new(),
+                fallback_truncated: false,
+                answer: dsml.to_string(),
+                streamed_tool_calls: BTreeMap::new(),
+                finish_reason: None,
+                usage: Metadata::new(),
+            },
             "test-model",
             "http://example.test/v1",
         )
@@ -1680,12 +1687,14 @@ mod tests {
     #[test]
     fn incomplete_dsml_tool_protocol_is_rejected() {
         let result = finish_streaming_response(
-            String::new(),
-            false,
-            "<｜DSML｜tool_calls><｜DSML｜invoke name=\"shell_run\">".to_string(),
-            BTreeMap::new(),
-            None,
-            Metadata::new(),
+            StreamingResponseParts {
+                fallback_response: String::new(),
+                fallback_truncated: false,
+                answer: "<｜DSML｜tool_calls><｜DSML｜invoke name=\"shell_run\">".to_string(),
+                streamed_tool_calls: BTreeMap::new(),
+                finish_reason: None,
+                usage: Metadata::new(),
+            },
             "test-model",
             "http://example.test/v1",
         );

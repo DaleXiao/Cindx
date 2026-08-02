@@ -4,7 +4,7 @@ use orchestrator::AgentRunDecision;
 
 #[derive(Debug, Clone)]
 pub(crate) enum ConductorDecisionOutcome {
-    Selected(AgentRunDecision),
+    Selected(Box<AgentRunDecision>),
     Exhausted,
 }
 
@@ -34,7 +34,7 @@ pub(crate) fn schedule_conductor_decision(
         match attempt(model_index, conductor_model, has_alternate_model, attempts) {
             Ok(decision) => {
                 return Ok(ConductorDecisionSchedule {
-                    outcome: ConductorDecisionOutcome::Selected(decision),
+                    outcome: ConductorDecisionOutcome::Selected(Box::new(decision)),
                     attempted_models,
                     selected_model: Some(conductor_model.clone()),
                     failure_reasons,

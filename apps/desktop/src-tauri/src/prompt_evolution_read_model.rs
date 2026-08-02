@@ -229,17 +229,18 @@ pub(crate) fn prompt_evolution_observations_from_events(
                 .find_map(|event| event.metadata.get("step_credits"))
                 .and_then(|encoded| serde_json::from_str::<Vec<PromptStepCredit>>(encoded).ok())
                 .unwrap_or_default();
-            let relative_reward = (learning_evidence.independent_quality_source
-                == Some(IndependentQualitySource::AnytimeSelector))
-            .then(|| {
+            let relative_reward = if learning_evidence.independent_quality_source
+                == Some(IndependentQualitySource::AnytimeSelector)
+            {
                 workflow_terminal
                     .metadata
                     .get("anytime_team_uplift_bps")
                     .and_then(|uplift| uplift.parse::<i16>().ok())
                     .filter(|uplift| (-10_000..=10_000).contains(uplift))
                     .map(|uplift| f64::from(uplift) / 10_000.0)
-            })
-            .flatten();
+            } else {
+                None
+            };
             Some((
                 profile_event.sequence,
                 effort,

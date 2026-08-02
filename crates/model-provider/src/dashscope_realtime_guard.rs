@@ -12,7 +12,7 @@ pub(super) fn validate_pcm(pcm: &[u8]) -> Result<(), ModelError> {
     if pcm.len() > MAX_PCM_BYTES {
         return Err(ModelError::new("Voice input exceeds the 30 second limit"));
     }
-    if pcm.len() % 2 != 0 {
+    if !pcm.len().is_multiple_of(2) {
         return Err(ModelError::new("Voice input PCM16 payload is invalid"));
     }
     Ok(())

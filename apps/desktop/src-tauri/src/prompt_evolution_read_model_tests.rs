@@ -589,7 +589,7 @@ fn auto_transfer_event_enters_only_its_scoped_read_model() {
         .collect(),
     };
 
-    let model = build_prompt_evolution_read_model(&[transfer_event.clone()], 1, 1);
+    let model = build_prompt_evolution_read_model(std::slice::from_ref(&transfer_event), 1, 1);
     let project_a = prompt_evolution_read_model_for_scope(&model, project_id);
     let project_b = prompt_evolution_read_model_for_scope(&model, "project-b");
     assert_eq!(project_a.observations.len(), 2);

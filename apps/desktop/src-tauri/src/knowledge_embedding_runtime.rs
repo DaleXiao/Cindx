@@ -5,8 +5,7 @@ pub(crate) struct CloudRagEmbedder<'a> {
     pub(crate) config: ProviderConfig,
     pub(crate) cancellation: Option<Arc<AgentRunControl>>,
     pub(crate) expected_steer_epoch: Option<u64>,
-    pub(crate) resource_checkpoint:
-        Option<&'a (dyn Fn(&AgentRunControl) -> Result<(), String> + Sync)>,
+    pub(crate) resource_checkpoint: Option<&'a AgentResourceCheckpoint<'a>>,
 }
 
 impl RagEmbedder for CloudRagEmbedder<'_> {

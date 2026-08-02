@@ -10081,16 +10081,16 @@ fn empty_workspace_knowledge_generation_is_reused() {
     let cancellation = Arc::new(AgentRunControl::new("auto"));
     let expected_epoch = cancellation.steer_epoch();
 
-    let first = ensure_workspace_knowledge_index(
-        &root,
-        &mut adapter,
-        false,
-        &ProviderConfig::default(),
-        &cancellation,
+    let first = ensure_workspace_knowledge_index(WorkspaceKnowledgeIndexRequest {
+        workspace_root: &root,
+        adapter: &mut adapter,
+        cache_hit: false,
+        config: &ProviderConfig::default(),
+        cancellation: &cancellation,
         expected_epoch,
-        None,
-        None,
-    )
+        resource_checkpoint: None,
+        rag_operation: None,
+    })
     .expect("empty generation should publish");
     assert_eq!(
         first
@@ -10102,16 +10102,16 @@ fn empty_workspace_knowledge_generation_is_reused() {
     let first_index_path = adapter.path().to_path_buf();
     assert_ne!(first_index_path, initial_index_path);
 
-    let second = ensure_workspace_knowledge_index(
-        &root,
-        &mut adapter,
-        true,
-        &ProviderConfig::default(),
-        &cancellation,
+    let second = ensure_workspace_knowledge_index(WorkspaceKnowledgeIndexRequest {
+        workspace_root: &root,
+        adapter: &mut adapter,
+        cache_hit: true,
+        config: &ProviderConfig::default(),
+        cancellation: &cancellation,
         expected_epoch,
-        None,
-        None,
-    )
+        resource_checkpoint: None,
+        rag_operation: None,
+    })
     .expect("fresh empty generation should validate");
     assert!(second.is_none());
     assert_eq!(adapter.path(), first_index_path);

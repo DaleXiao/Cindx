@@ -438,7 +438,7 @@ fn execute_agent_tool_batch_serial(
             cancellation,
             epoch_lease,
         )? {
-            AgentToolInvocationOutcome::Completed(result) => result,
+            AgentToolInvocationOutcome::Completed(result) => *result,
             AgentToolInvocationOutcome::RestartAfterSteer => {
                 if agent_run_should_stop(cancellation) {
                     return Ok(paused_agent_tools(pause_agent_loop_for_control_stop(

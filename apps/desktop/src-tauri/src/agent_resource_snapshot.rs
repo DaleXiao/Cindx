@@ -8,6 +8,9 @@ use agent_runtime::{AgentRunControl, RunResourceSnapshot};
 use agent_storage::SqliteStore;
 use serde::{Deserialize, Serialize};
 
+pub(crate) type AgentResourceCheckpoint<'a> =
+    dyn Fn(&AgentRunControl) -> Result<(), String> + Sync + 'a;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistedAgentResourceSnapshot {

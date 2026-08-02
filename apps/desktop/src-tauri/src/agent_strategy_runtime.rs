@@ -1,3 +1,5 @@
+#[path = "agent_strategy_context.rs"]
+mod context;
 #[path = "agent_strategy_preparation.rs"]
 mod preparation;
 
@@ -26,8 +28,8 @@ use agent_core::{EventKind, Message, Metadata, TaskId};
 use agent_runtime::AgentRunControl;
 use orchestrator::{
     AgentExecutionMode, AgentRunDecision, AgentRunDecisionHarness, AgentRunDecisionRequest,
-    AgentToolRequirement, ConductorExecutionContract, ConductorPromptGenome, ModelCandidate,
-    RoutingContext, RoutingDecision,
+    ConductorExecutionContract, ConductorPromptGenome, ModelCandidate, RoutingContext,
+    RoutingDecision,
 };
 
 #[derive(Debug, Clone)]
@@ -44,120 +46,39 @@ pub(crate) struct PlannedAgentRun {
     pub(crate) selected_conductor_model: Option<String>,
 }
 
-impl PlannedAgentRun {
-    pub(crate) fn apply_to_context(
-        &self,
-        run_context: &mut Metadata,
-        effort: AgentEffort,
-    ) -> Result<(), String> {
-        let requested_policy = effort.requested_policy();
-        let collaboration_policy = self.decision.policy();
-        run_context.insert(
-            "task_class".to_string(),
-            self.decision.task_class.label().to_string(),
-        );
-        run_context.insert(
-            "tool_requirement".to_string(),
-            match self.decision.tool_requirement {
-                AgentToolRequirement::None => "none",
-                AgentToolRequirement::ReadOnly => "read_only",
-                AgentToolRequirement::Effects => "effects",
-            }
-            .to_string(),
-        );
-        run_context.insert(
-            "vision_required".to_string(),
-            self.decision.vision_required.to_string(),
-        );
-        run_context.insert(
-            "routing_signature".to_string(),
-            self.decision.learning_signature(),
-        );
-        run_context.insert("agent_effort".to_string(), effort.label().to_string());
-        run_context.insert(
-            "requested_policy".to_string(),
-            requested_policy.label().to_string(),
-        );
-        run_context.insert(
-            "collaboration_policy".to_string(),
-            collaboration_policy.label().to_string(),
-        );
-        run_context.insert(
-            "collaboration_profile".to_string(),
-            if self.decision.execution == AgentExecutionMode::Workflow {
-                "adaptive"
-            } else {
-                "direct"
-            }
-            .to_string(),
-        );
-        run_context.insert(
-            "conductor_contract".to_string(),
-            self.execution_contract.to_json()?,
-        );
-        run_context.insert(
-            "expected_collaboration_uplift_bps".to_string(),
-            self.execution_contract.expected_uplift_bps.to_string(),
-        );
-        run_context.insert(
-            "agent_model".to_string(),
-            self.decision.primary_model.clone(),
-        );
-        run_context.insert(
-            "router_model".to_string(),
-            self.decision.primary_model.clone(),
-        );
-        run_context.insert("router_examples".to_string(), "0".to_string());
-        run_context.insert("router_source".to_string(), self.source.clone());
-        run_context.insert(
-            "conductor_degraded".to_string(),
-            self.degradation_reason.is_some().to_string(),
-        );
-        if let Some(reason) = &self.degradation_reason {
-            run_context.insert(
-                "conductor_failure".to_string(),
-                truncate_for_collaboration(reason, 1_200),
-            );
-        } else {
-            run_context.remove("conductor_failure");
-        }
-        run_context.insert(
-            "run_decision".to_string(),
-            serde_json::to_string(&self.decision)
-                .map_err(|error| format!("run decision serialization failed: {error}"))?,
-        );
-        run_context.insert(
-            "run_decision_attempts".to_string(),
-            self.attempts.to_string(),
-        );
-        run_context.insert(
-            "conductor_models_attempted".to_string(),
-            self.attempted_conductor_models.join(","),
-        );
-        run_context.insert(
-            "conductor_selected_model".to_string(),
-            self.selected_conductor_model.clone().unwrap_or_default(),
-        );
-        run_context.insert("prompt_profile".to_string(), self.prompt_genome.id.clone());
-        run_context.insert(
-            "prompt_genome".to_string(),
-            serde_json::to_string(&self.prompt_genome)
-                .map_err(|error| format!("prompt genome serialization failed: {error}"))?,
-        );
-        Ok(())
-    }
+pub(crate) struct AgentRunPlanningRequest<'a> {
+    pub(crate) config: &'a ProviderConfig,
+    pub(crate) task_id: &'a TaskId,
+    pub(crate) prompt: &'a str,
+    pub(crate) history: &'a [Message],
+    pub(crate) effort: AgentEffort,
+    pub(crate) cancellation: &'a AgentRunControl,
+}
+
+struct PlannedRunFinalizeInput {
+    decision: AgentRunDecision,
+    source: String,
+    attempts: usize,
+    prompt_genome: ConductorPromptGenome,
+    effort: AgentEffort,
+    degradation_reason: Option<String>,
+    attempted_conductor_models: Vec<String>,
+    selected_conductor_model: Option<String>,
 }
 
 pub(crate) fn plan_agent_run(
     state: &tauri::State<'_, AppState>,
-    config: &ProviderConfig,
-    task_id: &TaskId,
     run_context: &mut Metadata,
-    prompt: &str,
-    history: &[Message],
-    effort: AgentEffort,
-    cancellation: &AgentRunControl,
+    request: AgentRunPlanningRequest<'_>,
 ) -> Result<PlannedAgentRun, CollaborationStageError> {
+    let AgentRunPlanningRequest {
+        config,
+        task_id,
+        prompt,
+        history,
+        effort,
+        cancellation,
+    } = request;
     ensure_planning_current(cancellation)?;
     run_context.insert(
         "prompt_objective".to_string(),
@@ -181,16 +102,18 @@ pub(crate) fn plan_agent_run(
     if effort == AgentEffort::Fast {
         conductor_health_runtime::record_conductor_fast_bypass(run_context);
         let planned = finalize_planned_run(
-            AgentRunDecision::direct(fallback_model),
             prompt,
             candidates,
-            "fast_direct".to_string(),
-            0,
-            profile,
-            effort,
-            None,
-            Vec::new(),
-            None,
+            PlannedRunFinalizeInput {
+                decision: AgentRunDecision::direct(fallback_model),
+                source: "fast_direct".to_string(),
+                attempts: 0,
+                prompt_genome: profile,
+                effort,
+                degradation_reason: None,
+                attempted_conductor_models: Vec::new(),
+                selected_conductor_model: None,
+            },
         )
         .map_err(CollaborationStageError::Failed)?;
         ensure_planning_current(cancellation)?;
@@ -284,7 +207,7 @@ pub(crate) fn plan_agent_run(
             } else {
                 "dynamic_conductor_v2"
             };
-            (decision, source.to_string(), None)
+            (*decision, source.to_string(), None)
         }
         ConductorDecisionOutcome::Exhausted => {
             let reason = if failure_reasons.is_empty() {
@@ -308,16 +231,18 @@ pub(crate) fn plan_agent_run(
         }
     };
     let planned = finalize_planned_run(
-        decision,
         prompt,
         candidates,
-        source,
-        attempts,
-        profile,
-        effort,
-        degradation_reason,
-        attempted_conductor_models,
-        selected_conductor_model,
+        PlannedRunFinalizeInput {
+            decision,
+            source,
+            attempts,
+            prompt_genome: profile,
+            effort,
+            degradation_reason,
+            attempted_conductor_models,
+            selected_conductor_model,
+        },
     )
     .map_err(CollaborationStageError::Failed)?;
     ensure_planning_current(cancellation)?;
@@ -331,17 +256,20 @@ pub(crate) fn plan_agent_run(
 }
 
 fn finalize_planned_run(
-    decision: AgentRunDecision,
     prompt: &str,
     candidates: Vec<ModelCandidate>,
-    source: String,
-    attempts: usize,
-    prompt_genome: ConductorPromptGenome,
-    effort: AgentEffort,
-    degradation_reason: Option<String>,
-    attempted_conductor_models: Vec<String>,
-    selected_conductor_model: Option<String>,
+    input: PlannedRunFinalizeInput,
 ) -> Result<PlannedAgentRun, String> {
+    let PlannedRunFinalizeInput {
+        decision,
+        source,
+        attempts,
+        prompt_genome,
+        effort,
+        degradation_reason,
+        attempted_conductor_models,
+        selected_conductor_model,
+    } = input;
     let routing_context = decision.routing_context(prompt, candidates);
     let routing_decision = decision.routing_decision();
     let execution_contract = decision.execution_contract(effort.label());

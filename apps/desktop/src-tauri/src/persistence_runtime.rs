@@ -249,7 +249,7 @@ pub(crate) fn open_app_store_at(database_path: &Path) -> Result<SqliteStore, Sto
         ))
     })?;
     #[cfg(unix)]
-    fs::set_permissions(&database_path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+    fs::set_permissions(database_path, fs::Permissions::from_mode(0o600)).map_err(|error| {
         StorageError::new(format!(
             "failed to secure Cindx state database {}: {error}",
             database_path.display()

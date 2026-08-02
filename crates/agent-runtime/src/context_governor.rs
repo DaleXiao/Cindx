@@ -51,7 +51,7 @@ pub struct ContextGovernorReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextInvariantViolation {
     pub failed_invariants: Vec<String>,
-    pub report: ContextGovernorReport,
+    pub report: Box<ContextGovernorReport>,
 }
 
 impl fmt::Display for ContextInvariantViolation {
@@ -86,7 +86,7 @@ impl ContextGovernorReport {
         } else {
             Err(ContextInvariantViolation {
                 failed_invariants,
-                report: self.clone(),
+                report: Box::new(self.clone()),
             })
         }
     }

@@ -404,8 +404,8 @@ const agentRuntimeGroundingPolicySource = read(
 const agentRuntimeGroundingToolsSource = read(
   "crates/agent-runtime/src/grounding_tools.rs"
 );
-const agentLoopRuntimeSource = read(
-  "apps/desktop/src-tauri/src/agent_loop_runtime.rs"
+const agentLoopContractRuntimeSource = read(
+  "apps/desktop/src-tauri/src/agent_loop_contract_runtime.rs"
 );
 const desktopAgentToolRuntimeSource = read(
   "apps/desktop/src-tauri/src/agent_tool_runtime.rs"
@@ -798,6 +798,7 @@ const criticalDesktopAgentModuleBudgets = new Map([
   ["attachment_upload_batches.rs", 170],
   ["agent_run_engine.rs", 250],
   ["agent_conductor_runtime.rs", 140],
+  ["agent_strategy_context.rs", 140],
   ["agent_strategy_runtime.rs", 420],
   ["agent_loop_runtime.rs", 550],
   ["agent_collaboration_runtime.rs", 800],
@@ -894,6 +895,7 @@ const modelProviderModuleBudgets = new Map([
   ["request_vision.rs", 400],
   ["response_parser.rs", 380],
   ["stream_delta_aggregator.rs", 150],
+  ["streaming_finish.rs", 120],
   ["streaming_response.rs", 380],
   ["streaming_wire.rs", 160],
   ["usage.rs", 220],
@@ -921,6 +923,7 @@ const toolsModuleBudgets = new Map([
   ["process_control.rs", 30],
   ["shell.rs", 950],
   ["stream_capture.rs", 60],
+  ["tool_support.rs", 360],
   ["web_search.rs", 420],
 ]);
 const toolsModules = listRustSourceFiles(
@@ -3346,8 +3349,9 @@ assert(
       "pub fn model_transport_retry_delay"
     ) &&
     agentRuntimeModelTransportSource.includes("pub struct ModelStreamProgress") &&
-    agentLoopRuntimeSource.includes(
-      "agent_runtime::pin_prompt_evidence_tools"
+    agentLoopContractRuntimeSource.includes("use agent_runtime::{") &&
+    agentLoopContractRuntimeSource.includes(
+      "pin_prompt_evidence_tools(run_context"
     ),
   "Grounding and model transport policy must remain portable agent-runtime ownership"
 );

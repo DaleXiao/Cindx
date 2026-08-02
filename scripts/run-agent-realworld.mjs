@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const repositoryRoot = path.resolve(path.dirname(scriptPath), "..");
-const defaultSuite = path.join(repositoryRoot, "benchmarks", "agent", "realworld-v1.json");
+const defaultSuite = path.join(repositoryRoot, "benchmarks", "agent", "realworld-v2.json");
 
 function requireFact(condition, message) {
   if (!condition) throw new Error(message);

@@ -215,14 +215,14 @@
             "permissioned",
         ));
 
-        let eligible = vec![
+        let eligible = [
             invocation("call-read", "test.read"),
             invocation("call-read-two", "test.read-two"),
         ];
         assert!(parallel_tool_batch_contracts(&registry, eligible.len(), eligible.iter()).is_some());
 
         for rejected_tool in ["test.serial", "test.permissioned", "test.unknown"] {
-            let mixed = vec![
+            let mixed = [
                 invocation("call-read", "test.read"),
                 invocation("call-rejected", rejected_tool),
             ];
