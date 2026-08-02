@@ -29,6 +29,8 @@ mod agent_read_model;
 mod agent_recovery_service;
 mod agent_resource_snapshot;
 mod agent_result_evidence;
+#[cfg(feature = "realworld-eval")]
+mod agent_realworld_eval;
 mod agent_run_engine;
 mod agent_runtime_snapshot;
 mod agent_runtime_snapshot_cursor;
@@ -143,6 +145,8 @@ use agent_query_commands::*;
 use agent_read_model::*;
 use agent_run_engine::continue_agent_loop;
 pub use app_bootstrap::run;
+#[cfg(feature = "realworld-eval")]
+pub use agent_realworld_eval::run_agent_realworld_eval;
 use app_bootstrap::QuitConfirmation;
 use app_state::*;
 use attachment_commands::*;
