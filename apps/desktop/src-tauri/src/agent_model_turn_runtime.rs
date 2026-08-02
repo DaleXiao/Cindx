@@ -31,6 +31,10 @@ fn finished_agent_turn(state: AgentState) -> AgentModelTurnOutcome {
     AgentModelTurnOutcome::Finished(Box::new(state))
 }
 
+fn stop_parent_run_for_model_call_failure(cancellation: &AgentRunControl, reason: RunStopReason) {
+    cancellation.request_stop(reason);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_agent_model_turn(
     app: &tauri::AppHandle,
@@ -89,7 +93,8 @@ pub(crate) fn execute_agent_model_turn(
     match model_call {
         Ok(Some(_)) => {}
         Ok(None) => return Ok(AgentModelTurnOutcome::RestartAfterSteer),
-        Err(_) => {
+        Err(reason) => {
+            stop_parent_run_for_model_call_failure(cancellation, reason);
             return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
                 app,
                 state,
@@ -99,7 +104,7 @@ pub(crate) fn execute_agent_model_turn(
                 run_context,
                 collaboration,
                 cancellation,
-            )?))
+            )?));
         }
     }
     if !cancellation.execution_epoch_lease_is_current(epoch_lease) {
@@ -698,5 +703,27 @@ mod tests {
         prepared_streaming_request_once(&provider, &request, &mut prepared)
             .expect("successful preparation should be reused");
         assert_eq!(provider.prepares.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn finalizer_stage_exhaustion_becomes_a_recoverable_run_stop() {
+        let control = AgentRunControl::new("fast");
+        let finalizer_calls = control.budget().finalizer_model_call_reserve();
+        for _ in 0..finalizer_calls {
+            control
+                .begin_stage_model_call("executor", RunStageClass::Finalizer)
+                .expect("reserved finalizer call should start");
+            control.finish_model_call();
+        }
+        let reason = control
+            .begin_stage_model_call("executor", RunStageClass::Finalizer)
+            .expect_err("finalizer stage should be bounded");
+
+        stop_parent_run_for_model_call_failure(&control, reason);
+
+        assert_eq!(
+            control.stop_reason(),
+            Some(RunStopReason::StageBudgetExhausted)
+        );
     }
 }
