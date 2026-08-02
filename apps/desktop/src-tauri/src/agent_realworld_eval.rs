@@ -23,6 +23,7 @@ struct RealworldSuite {
     version: u32,
     description: String,
     default_replicates: u32,
+    per_run_timeout_seconds: u64,
     treatments: Vec<String>,
     cases: Vec<RealworldCase>,
 }
@@ -246,6 +247,7 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
     if replicates == 0 {
         return Err("at least one replicate is required".to_string());
     }
+    let replicate_indices = selected_replicates(replicates)?;
     let selected_case_ids = selection("CINDX_AGENT_REALWORLD_CASES");
     let selected_treatment_labels = selection("CINDX_AGENT_REALWORLD_TREATMENTS");
     let selected_cases = suite
@@ -280,11 +282,31 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
             "configured provider is required; evaluation will not synthesize results".to_string(),
         );
     }
-    let suite_temp = tempfile::Builder::new()
-        .prefix("cindx-agent-realworld-")
-        .tempdir()
-        .map_err(|error| format!("failed to create evaluation workspace: {error}"))?;
-    let bootstrap_root = suite_temp.path().join("bootstrap");
+    let managed_temp = if std::env::var_os("CINDX_AGENT_REALWORLD_TEMP_ROOT").is_none() {
+        Some(
+            tempfile::Builder::new()
+                .prefix("cindx-agent-realworld-")
+                .tempdir()
+                .map_err(|error| format!("failed to create evaluation workspace: {error}"))?,
+        )
+    } else {
+        None
+    };
+    let suite_root = match std::env::var_os("CINDX_AGENT_REALWORLD_TEMP_ROOT") {
+        Some(value) => {
+            let root = PathBuf::from(value);
+            reject_repo_output_path(&repo_root, &root)?;
+            fs::create_dir_all(&root)
+                .map_err(|error| format!("failed to create {}: {error}", root.display()))?;
+            root
+        }
+        None => managed_temp
+            .as_ref()
+            .expect("managed evaluation tempdir")
+            .path()
+            .to_path_buf(),
+    };
+    let bootstrap_root = suite_root.join("bootstrap");
     fs::create_dir_all(&bootstrap_root)
         .map_err(|error| format!("failed to create bootstrap workspace: {error}"))?;
     let sidecars = SidecarConfig::default();
@@ -297,7 +319,7 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
         .map(|case| case.id.clone())
         .collect::<Vec<_>>();
 
-    for replicate in 1..=replicates {
+    for replicate in replicate_indices {
         for case in &selected_cases {
             for treatment in &treatments {
                 eprintln!(
@@ -305,16 +327,30 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
                     case.id,
                     treatment.label()
                 );
-                let run_root = suite_temp.path().join(format!(
-                    "r{replicate}-{}-{}",
-                    case.id,
-                    treatment.label()
-                ));
+                let run_root =
+                    suite_root.join(format!("r{replicate}-{}-{}", case.id, treatment.label()));
                 materialize_case(&run_root, case)?;
+                runs.push(interrupted_run(
+                    case,
+                    *treatment,
+                    replicate,
+                    provider.model.clone(),
+                ));
+                write_raw_report(
+                    &output_path,
+                    &suite,
+                    &suite_bytes,
+                    &provider,
+                    &git_commit,
+                    replicates,
+                    &selected_case_names,
+                    &treatments,
+                    &runs,
+                )?;
                 let run = execute_case(
                     &app, &state, &provider, case, *treatment, replicate, &run_root,
                 );
-                runs.push(run);
+                *runs.last_mut().expect("pending evaluation run") = run;
                 write_raw_report(
                     &output_path,
                     &suite,
@@ -339,6 +375,9 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
 fn validate_suite(suite: &RealworldSuite) -> Result<(), String> {
     if suite.schema != SUITE_SCHEMA {
         return Err(format!("unsupported suite schema {}", suite.schema));
+    }
+    if !(60..=3600).contains(&suite.per_run_timeout_seconds) {
+        return Err("suite per-run timeout must be between 60 and 3600 seconds".to_string());
     }
     if suite.id.trim().is_empty() || suite.version == 0 || suite.default_replicates == 0 {
         return Err("suite identity and replicate count must be non-empty".to_string());
@@ -451,6 +490,21 @@ fn selection(name: &str) -> Option<BTreeSet<String>> {
         .map(str::to_string)
         .collect::<BTreeSet<_>>();
     (!values.is_empty()).then_some(values)
+}
+
+fn selected_replicates(replicates: u32) -> Result<Vec<u32>, String> {
+    let Some(value) = std::env::var("CINDX_AGENT_REALWORLD_REPLICATE_INDEX").ok() else {
+        return Ok((1..=replicates).collect());
+    };
+    let index = value
+        .parse::<u32>()
+        .map_err(|_| "CINDX_AGENT_REALWORLD_REPLICATE_INDEX must be an integer".to_string())?;
+    if !(1..=replicates).contains(&index) {
+        return Err(format!(
+            "CINDX_AGENT_REALWORLD_REPLICATE_INDEX must be between 1 and {replicates}"
+        ));
+    }
+    Ok(vec![index])
 }
 
 fn install_eval_crypto_provider() {
@@ -768,6 +822,41 @@ fn execute_case(
             workspace_bytes_after: directory_size(root),
         },
         verification,
+    }
+}
+
+fn interrupted_run(
+    case: &RealworldCase,
+    treatment: Treatment,
+    replicate: u32,
+    direct_model: String,
+) -> RawRun {
+    let product_mechanism_exercised = treatment != Treatment::Direct;
+    RawRun {
+        replicate,
+        case_id: case.id.clone(),
+        category: case.category.clone(),
+        treatment,
+        product_mechanism_exercised,
+        completed: false,
+        terminal_status: "running".to_string(),
+        configured_models: if product_mechanism_exercised {
+            Vec::new()
+        } else {
+            vec![direct_model]
+        },
+        tools_used: Vec::new(),
+        memory_records_after_seed: None,
+        input_sha256: case_input_sha256(case),
+        output_sha256: sha256_hex(&[]),
+        output: String::new(),
+        error: Some("evaluation process exited before verification".to_string()),
+        metrics: RuntimeMetrics::default(),
+        verification: VerificationResult {
+            external_effect_passed: product_mechanism_exercised.then_some(false),
+            failures: vec!["run did not reach verification".to_string()],
+            ..VerificationResult::default()
+        },
     }
 }
 
@@ -1259,7 +1348,7 @@ fn directory_size(root: &Path) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::directory_size;
+    use super::{directory_size, selected_replicates};
     use std::fs;
 
     #[cfg(unix)]
@@ -1275,5 +1364,14 @@ mod tests {
         symlink(external.path(), workspace.path().join("shared-runtime")).expect("runtime symlink");
 
         assert_eq!(directory_size(workspace.path()), 5);
+    }
+
+    #[test]
+    fn replicate_selection_is_bounded() {
+        std::env::set_var("CINDX_AGENT_REALWORLD_REPLICATE_INDEX", "2");
+        assert_eq!(selected_replicates(3).expect("selection"), vec![2]);
+        std::env::set_var("CINDX_AGENT_REALWORLD_REPLICATE_INDEX", "4");
+        assert!(selected_replicates(3).is_err());
+        std::env::remove_var("CINDX_AGENT_REALWORLD_REPLICATE_INDEX");
     }
 }

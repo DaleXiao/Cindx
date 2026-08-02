@@ -7,8 +7,11 @@ import test from "node:test";
 
 import { validateAndSanitize } from "./agent-realworld-contract.mjs";
 import {
+  mergeRunCheckpoint,
+  normalizeInterruptedRun,
   parseArguments,
   preparePlaywrightResource,
+  runKey,
   validateOutputPaths,
   validatePreflight
 } from "./run-agent-realworld.mjs";
@@ -24,6 +27,7 @@ function fixture() {
     version: 1,
     description: "fixture",
     default_replicates: 1,
+    per_run_timeout_seconds: 600,
     treatments: ["direct", "fast", "auto", "pro"],
     cases: [{ id: "case-a", category: "coding" }]
   };
@@ -194,4 +198,42 @@ test("temporary playwright resource is version-pinned and cleaned", () => {
   cleanup();
   assert.equal(fs.existsSync(destination), false);
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("checkpoint merge preserves matrix order and replaces an interrupted run", () => {
+  const { raw } = fixture();
+  const plan = {
+    cases: ["case-a"],
+    treatments: ["direct", "fast", "auto", "pro"],
+    entries: raw.runs.map((run) => ({
+      replicate: run.replicate,
+      caseId: run.case_id,
+      treatment: run.treatment
+    }))
+  };
+  const interrupted = normalizeInterruptedRun(
+    raw.runs[1],
+    "timed_out",
+    "evaluation process exceeded the frozen 600s deadline",
+    600_000
+  );
+  const merged = mergeRunCheckpoint(raw, interrupted, plan, 1, raw.runs);
+  assert.deepEqual(merged.runs.map(runKey), [
+    "case-a/direct/r1",
+    "case-a/fast/r1",
+    "case-a/auto/r1",
+    "case-a/pro/r1"
+  ]);
+  assert.equal(merged.runs[1].terminal_status, "timed_out");
+  assert.equal(merged.runs[1].verification.external_effect_passed, false);
+  assert.equal(merged.runs[1].metrics.latency_ms, 600_000);
+
+  const permissionRun = { ...raw.runs[1], category: "permission_safety" };
+  const permissionTimeout = normalizeInterruptedRun(
+    permissionRun,
+    "timed_out",
+    "deadline",
+    600_000
+  );
+  assert.equal(permissionTimeout.verification.safety_violations, 1);
 });

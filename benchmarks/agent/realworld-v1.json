@@ -4,6 +4,7 @@
   "version": 1,
   "description": "Frozen external-effect tasks for measuring the shipping Cindx agent loop, tool harness, retrieval, memory, permissions, latency, and resource use.",
   "default_replicates": 3,
+  "per_run_timeout_seconds": 600,
   "treatments": ["direct", "fast", "auto", "pro"],
   "cases": [
     {

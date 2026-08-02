@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -144,6 +145,12 @@ export function preparePlaywrightResource(root, installedApp = "/Applications/Ci
 
 export function validatePreflight({ suite, gitHead, status, requestedReplicates }) {
   requireFact(suite.schema === "cindx.agent-realworld-suite.v1", "suite schema mismatch");
+  requireFact(
+    Number.isInteger(suite.per_run_timeout_seconds) &&
+      suite.per_run_timeout_seconds >= 60 &&
+      suite.per_run_timeout_seconds <= 3600,
+    "suite per-run timeout must be between 60 and 3600 seconds"
+  );
   requireFact(/^[0-9a-f]{40}$/.test(gitHead), "Git HEAD must be a full lowercase SHA");
   requireFact(!status.trim(), "worktree must be clean before provider-backed evaluation");
   const replicates = requestedReplicates
@@ -182,11 +189,11 @@ function preflight(options) {
   };
 }
 
-function cargoInvocation() {
+function cargoBuildInvocation() {
   return {
     command: process.env.CARGO || "cargo",
     args: [
-      "run",
+      "build",
       "--locked",
       "--manifest-path",
       path.join(repositoryRoot, "apps", "desktop", "src-tauri", "Cargo.toml"),
@@ -196,6 +203,13 @@ function cargoInvocation() {
       "cindx-agent-realworld-eval"
     ]
   };
+}
+
+function evaluationBinary() {
+  const targetRoot = process.env.CARGO_TARGET_DIR
+    ? path.resolve(process.env.CARGO_TARGET_DIR)
+    : path.join(repositoryRoot, "apps", "desktop", "src-tauri", "target");
+  return path.join(targetRoot, "debug", "cindx-agent-realworld-eval");
 }
 
 function analyzerInvocation(prepared) {
@@ -215,25 +229,180 @@ function analyzerInvocation(prepared) {
   };
 }
 
-function evaluationEnvironment(base, prepared, options) {
+function evaluationEnvironment(base, prepared, entry, output, tempRoot) {
   const playwrightModules = path.join(repositoryRoot, "apps", "desktop", "node_modules");
   const nodePath = base.NODE_PATH
     ? `${playwrightModules}${path.delimiter}${base.NODE_PATH}`
     : playwrightModules;
-  const environment = {
+  return {
     ...base,
     NODE_PATH: nodePath,
     CINDX_EVAL_GIT_COMMIT: prepared.gitHead,
     CINDX_AGENT_REALWORLD_SUITE: prepared.suitePath,
-    CINDX_AGENT_REALWORLD_OUTPUT: prepared.outputs.raw,
-    CINDX_AGENT_REALWORLD_REPLICATES: String(prepared.replicates)
+    CINDX_AGENT_REALWORLD_OUTPUT: output,
+    CINDX_AGENT_REALWORLD_REPLICATES: String(prepared.replicates),
+    CINDX_AGENT_REALWORLD_REPLICATE_INDEX: String(entry.replicate),
+    CINDX_AGENT_REALWORLD_CASES: entry.caseId,
+    CINDX_AGENT_REALWORLD_TREATMENTS: entry.treatment,
+    CINDX_AGENT_REALWORLD_TEMP_ROOT: tempRoot
   };
-  for (const key of ["CINDX_AGENT_REALWORLD_CASES", "CINDX_AGENT_REALWORLD_TREATMENTS"]) {
-    delete environment[key];
+}
+
+function selectedInSuite(values, requested, label) {
+  if (!requested) return [...values];
+  const requestedValues = new Set(requested.split(",").map((value) => value.trim()).filter(Boolean));
+  const selected = values.filter((value) => requestedValues.has(value));
+  requireFact(selected.length === requestedValues.size && selected.length > 0, `${label} selection is invalid`);
+  return selected;
+}
+
+function evaluationPlan(prepared, options) {
+  const cases = selectedInSuite(
+    prepared.suite.cases.map((testCase) => testCase.id),
+    options.cases,
+    "case"
+  );
+  const treatments = selectedInSuite(prepared.suite.treatments, options.treatments, "treatment");
+  const entries = [];
+  for (let replicate = 1; replicate <= prepared.replicates; replicate += 1) {
+    for (const caseId of cases) {
+      for (const treatment of treatments) entries.push({ replicate, caseId, treatment });
+    }
   }
-  if (options.cases) environment.CINDX_AGENT_REALWORLD_CASES = options.cases;
-  if (options.treatments) environment.CINDX_AGENT_REALWORLD_TREATMENTS = options.treatments;
-  return environment;
+  return { cases, treatments, entries };
+}
+
+export function runKey(run) {
+  return `${run.case_id}/${run.treatment}/r${run.replicate}`;
+}
+
+export function normalizeInterruptedRun(run, terminalStatus, error, latencyMs) {
+  const productRun = run.treatment !== "direct";
+  const safetyUnverified = productRun && run.category === "permission_safety";
+  return {
+    ...run,
+    completed: false,
+    terminal_status: terminalStatus,
+    output: "",
+    output_sha256: crypto.createHash("sha256").update("").digest("hex"),
+    error,
+    metrics: { ...run.metrics, latency_ms: latencyMs },
+    verification: {
+      ...run.verification,
+      quality_passed: false,
+      answer_passed: false,
+      external_effect_passed: productRun ? false : null,
+      passed_checks: 0,
+      total_checks: Math.max(1, run.verification?.total_checks || 0),
+      safety_violations: safetyUnverified ? 1 : 0,
+      failures: [
+        safetyUnverified
+          ? "permission safety could not be verified before the run stopped"
+          : "run did not reach verification"
+      ]
+    }
+  };
+}
+
+function writePrivateJson(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const temporary = `${file}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(temporary, file);
+  fs.chmodSync(file, 0o600);
+}
+
+function validateCheckpoint(prepared, plan, raw) {
+  requireFact(raw?.schema === "cindx.agent-realworld-raw.v1", "checkpoint schema mismatch");
+  requireFact(raw.git_commit === prepared.gitHead, "checkpoint Git commit mismatch");
+  requireFact(raw.suite_sha256 === prepared.suiteSha256, "checkpoint suite hash mismatch");
+  requireFact(raw.requested_replicates === prepared.replicates, "checkpoint replicate count mismatch");
+  requireFact(JSON.stringify(raw.selected_cases) === JSON.stringify(plan.cases), "checkpoint case selection mismatch");
+  requireFact(
+    JSON.stringify(raw.selected_treatments) === JSON.stringify(plan.treatments),
+    "checkpoint treatment selection mismatch"
+  );
+  const expected = new Set(plan.entries.map((entry) => `${entry.caseId}/${entry.treatment}/r${entry.replicate}`));
+  const seen = new Set();
+  for (const run of raw.runs || []) {
+    const key = runKey(run);
+    requireFact(expected.has(key), `checkpoint contains unexpected run ${key}`);
+    requireFact(!seen.has(key), `checkpoint contains duplicate run ${key}`);
+    seen.add(key);
+  }
+}
+
+function checkpointRuns(prepared, plan) {
+  if (!fs.existsSync(prepared.outputs.raw)) return new Map();
+  const raw = JSON.parse(fs.readFileSync(prepared.outputs.raw, "utf8"));
+  validateCheckpoint(prepared, plan, raw);
+  return new Map(
+    raw.runs
+      .filter((run) => run.terminal_status !== "running")
+      .map((run) => [runKey(run), run])
+  );
+}
+
+export function mergeRunCheckpoint(baseReport, run, plan, replicates, existingRuns = []) {
+  const runs = new Map(existingRuns.map((item) => [runKey(item), item]));
+  runs.set(runKey(run), run);
+  return {
+    ...baseReport,
+    generated_at_ms: Date.now(),
+    requested_replicates: replicates,
+    selected_cases: [...plan.cases],
+    selected_treatments: [...plan.treatments],
+    runs: plan.entries.map((entry) => runs.get(`${entry.caseId}/${entry.treatment}/r${entry.replicate}`)).filter(Boolean)
+  };
+}
+
+function terminateRunProcesses(tempRoot) {
+  if (process.platform !== "darwin") return;
+  spawnSync("pkill", ["-TERM", "-f", tempRoot], { stdio: "ignore" });
+  spawnSync("pkill", ["-KILL", "-f", tempRoot], { stdio: "ignore" });
+}
+
+function runSingleEvaluation(binary, prepared, entry) {
+  const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cindx-agent-realworld-run-"));
+  const workspaceRoot = path.join(runRoot, "workspace");
+  const partRaw = path.join(runRoot, "raw.json");
+  const timeoutMs = prepared.suite.per_run_timeout_seconds * 1000;
+  let result;
+  try {
+    result = spawnSync(binary, [], {
+      cwd: repositoryRoot,
+      env: evaluationEnvironment(process.env, prepared, entry, partRaw, workspaceRoot),
+      stdio: "inherit",
+      timeout: timeoutMs,
+      killSignal: "SIGTERM"
+    });
+    requireFact(fs.existsSync(partRaw), `run ${entry.caseId}/${entry.treatment}/r${entry.replicate} produced no checkpoint`);
+    const report = JSON.parse(fs.readFileSync(partRaw, "utf8"));
+    requireFact(report.git_commit === prepared.gitHead, "run checkpoint Git commit mismatch");
+    requireFact(report.suite_sha256 === prepared.suiteSha256, "run checkpoint suite hash mismatch");
+    requireFact(report.runs?.length === 1, "single-run process produced an invalid run count");
+    let run = report.runs[0];
+    const timedOut = result.error?.code === "ETIMEDOUT";
+    if (timedOut) {
+      run = normalizeInterruptedRun(
+        run,
+        "timed_out",
+        `evaluation process exceeded the frozen ${prepared.suite.per_run_timeout_seconds}s deadline`,
+        timeoutMs
+      );
+    } else if (result.error || result.status !== 0 || run.terminal_status === "running") {
+      run = normalizeInterruptedRun(
+        run,
+        "infrastructure_failed",
+        result.error?.message || `evaluation process exited with status ${result.status}`,
+        run.metrics?.latency_ms || 0
+      );
+    }
+    return { report, run };
+  } finally {
+    terminateRunProcesses(workspaceRoot);
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
 }
 
 function validatePostflight(prepared) {
@@ -272,12 +441,36 @@ export function main(argv = process.argv.slice(2)) {
 
   const cleanupPlaywright = preparePlaywrightResource(repositoryRoot);
   try {
-    const cargo = cargoInvocation();
-    process.stdout.write("Running the provider-backed Direct/Fast/Auto/Pro matrix...\n");
-    checked(cargo.command, cargo.args, {
-      env: evaluationEnvironment(process.env, prepared, options),
-      stdio: "inherit"
-    });
+    const cargo = cargoBuildInvocation();
+    process.stdout.write("Building the production-path evaluation driver once...\n");
+    checked(cargo.command, cargo.args, { stdio: "inherit" });
+    const binary = evaluationBinary();
+    requireFact(fs.existsSync(binary), `evaluation binary is missing at ${binary}`);
+    const plan = evaluationPlan(prepared, options);
+    const runs = checkpointRuns(prepared, plan);
+    process.stdout.write(
+      `Running ${plan.entries.length} provider-backed Direct/Fast/Auto/Pro samples; ${runs.size} resumed.\n`
+    );
+    let report = null;
+    for (const [index, entry] of plan.entries.entries()) {
+      const key = `${entry.caseId}/${entry.treatment}/r${entry.replicate}`;
+      if (runs.has(key)) continue;
+      process.stdout.write(`[${index + 1}/${plan.entries.length}] ${key}\n`);
+      const result = runSingleEvaluation(binary, prepared, entry);
+      runs.set(key, result.run);
+      report = mergeRunCheckpoint(
+        report || result.report,
+        result.run,
+        plan,
+        prepared.replicates,
+        [...runs.values()]
+      );
+      writePrivateJson(prepared.outputs.raw, report);
+    }
+    requireFact(runs.size === plan.entries.length, "evaluation checkpoint is incomplete");
+    if (!report) {
+      report = JSON.parse(fs.readFileSync(prepared.outputs.raw, "utf8"));
+    }
     validatePostflight(prepared);
     const analyzer = analyzerInvocation(prepared);
     checked(analyzer.command, analyzer.args, { stdio: "inherit" });
