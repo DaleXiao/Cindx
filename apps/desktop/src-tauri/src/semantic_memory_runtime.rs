@@ -19,7 +19,7 @@ use model_provider::{
     MODEL_REQUEST_CANCELLED,
 };
 use orchestrator::{AgentExecutionMode, AgentRunDecision, AgentToolRequirement};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(crate) fn contains_completed_agent_run(events: &[Event]) -> bool {
     events.iter().any(|event| {
@@ -48,7 +48,7 @@ pub(crate) fn semantic_memory_model_is_warranted(
 
 fn refresh_deterministic_memory_projection(
     state: &tauri::State<'_, AppState>,
-    workspace_root: &PathBuf,
+    workspace_root: &Path,
     config: &ProviderConfig,
     run_context: &Metadata,
 ) -> Result<(), String> {
@@ -61,14 +61,14 @@ fn refresh_deterministic_memory_projection(
             .map_err(|error| error.to_string())?
     };
     if let Some(ledger) = ledger {
-        schedule_project_memory_vector_refresh(workspace_root.clone(), config.clone(), ledger);
+        schedule_project_memory_vector_refresh(workspace_root.to_path_buf(), config.clone(), ledger);
     }
     Ok(())
 }
 
 pub(crate) fn generate_semantic_memory(
     state: &tauri::State<'_, AppState>,
-    workspace_root: &PathBuf,
+    workspace_root: &Path,
     config: &ProviderConfig,
     run_context: &Metadata,
 ) -> Result<(), String> {
@@ -175,7 +175,7 @@ pub(crate) fn generate_semantic_memory(
             .map_err(|error| error.to_string())?
     };
     if let Some(ledger) = ledger {
-        schedule_project_memory_vector_refresh(workspace_root.clone(), config.clone(), ledger);
+        schedule_project_memory_vector_refresh(workspace_root.to_path_buf(), config.clone(), ledger);
     }
     Ok(())
 }

@@ -119,6 +119,7 @@ pub(crate) use tools::{
     ImageGenerationConfig, ToolExecutionControl, ToolExposureIntent, ToolRegistry, WebSearchConfig,
 };
 
+pub(crate) use crate::agent_resource_snapshot::AgentResourceCheckpoint;
 pub(crate) use agent_runtime::{
     exhausted_model_transport_error_stop_reason, model_response_checkpoint_evidence,
     model_transport_retry_delay, ModelStreamProgress,
@@ -149,7 +150,7 @@ pub(crate) use crate::queue_service::{
     PendingQueuedAgentMessage, QueuedAgentMessageActionReceipt, QueuedAgentMessagePayload,
     QueuedAgentMessageReceipt, QueuedAgentMessageView,
 };
-pub(crate) use agent_application::{AgentRunEvent, AgentRunStatus};
+pub(crate) use agent_application::{AgentRunEvent, AgentRunEventDecodeError, AgentRunStatus};
 pub(crate) use crate::schedule::{
     initial_next_run_at_ms, next_occurrence_after_ms, normalized_weekly_days,
     timestamp_ms_from_local, ScheduleCadence, ScheduleConfig, ScheduleRecord, ScheduleRunRecord,

@@ -110,7 +110,11 @@ and collaboration that must beat Fast under matched verification and latency.
 
 ## Current Product Gate
 
-`benchmarks/agent/realworld-v1.json` freezes this matched product baseline.
+`benchmarks/agent/realworld-v2.json` freezes the current matched product
+protocol. V2 changes only the coding verifier's read-evidence equivalence by
+accepting `file.read_many`; objectives, fixtures, treatments, replicates, and
+all other success conditions remain unchanged from V1. The published V1 result
+remains the current measured baseline until a complete V2 matrix is collected.
 It covers structured file mutation, code edit plus tests, browser evidence,
 long-horizon migration, indexed knowledge plus cross-session memory, and denied
 mutation. Direct, Fast, Auto, and Pro each receive three matched repeats.
@@ -155,14 +159,14 @@ The real-world Agent runner follows the same explicit opt-in boundary:
 
 ```sh
 node scripts/run-agent-realworld.mjs \
-  --raw /private/tmp/cindx-agent-realworld-v1.raw.json \
-  --sanitized docs/evaluations/CINDX_AGENT_REALWORLD_V1.json \
-  --markdown docs/evaluations/CINDX_AGENT_REALWORLD_V1.md
+  --raw /private/tmp/cindx-agent-realworld-v2.raw.json \
+  --sanitized docs/evaluations/CINDX_AGENT_REALWORLD_V2.json \
+  --markdown docs/evaluations/CINDX_AGENT_REALWORLD_V2.md
 
 node scripts/run-agent-realworld.mjs --execute \
-  --raw /private/tmp/cindx-agent-realworld-v1.raw.json \
-  --sanitized docs/evaluations/CINDX_AGENT_REALWORLD_V1.json \
-  --markdown docs/evaluations/CINDX_AGENT_REALWORLD_V1.md
+  --raw /private/tmp/cindx-agent-realworld-v2.raw.json \
+  --sanitized docs/evaluations/CINDX_AGENT_REALWORLD_V2.json \
+  --markdown docs/evaluations/CINDX_AGENT_REALWORLD_V2.md
 ```
 
 Without `--execute`, it performs only Git, provider, suite, and output-boundary

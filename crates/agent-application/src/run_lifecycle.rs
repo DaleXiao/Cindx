@@ -1,4 +1,5 @@
 use agent_core::{decode_event_type, DecodedEventType, Event, EventKind, EventTypeV1};
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentRunStatus {
@@ -102,18 +103,37 @@ pub enum AgentRunEvent {
     Cancelled,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRunEventDecodeError {
+    raw_event_type: String,
+}
+
+impl fmt::Display for AgentRunEventDecodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "invalid agent run event type: {}",
+            self.raw_event_type
+        )
+    }
+}
+
+impl std::error::Error for AgentRunEventDecodeError {}
+
 impl AgentRunEvent {
     pub fn from_event(event: &Event) -> Option<Self> {
         Self::try_from_event(event).ok().flatten()
     }
 
-    pub fn try_from_event(event: &Event) -> Result<Option<Self>, ()> {
+    pub fn try_from_event(event: &Event) -> Result<Option<Self>, AgentRunEventDecodeError> {
         if !matches!(&event.kind, EventKind::TaskStatusChanged | EventKind::Error) {
             return Ok(None);
         }
         match decode_event_type(event) {
             DecodedEventType::V1(typed) => Ok(Self::from_event_type(typed.event_type())),
-            DecodedEventType::Invalid(_) => Err(()),
+            DecodedEventType::Invalid(raw_event_type) => Err(AgentRunEventDecodeError {
+                raw_event_type: raw_event_type.to_string(),
+            }),
             DecodedEventType::Legacy => Ok(Self::from_legacy_event(event)),
         }
     }

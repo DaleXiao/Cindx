@@ -1,11 +1,12 @@
 use super::*;
 use crate::process_control::terminate_process_group;
 use crate::stream_capture::capture_stream_limited;
-use agent_core::{ToolArtifact, ToolEffectSemantics};
-use std::env;
+use agent_core::{PermissionRisk, ToolArtifact, ToolCallId, ToolEffectSemantics};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+use std::{env, fs};
 
 pub(crate) const BROWSER_CONTROL_REQUEST_SCHEMA: &str = "cindx.browser-control.v2";
 pub(crate) const BROWSER_CONTROL_RESPONSE_SCHEMA: &str = "cindx.browser-control-result.v2";

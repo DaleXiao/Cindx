@@ -504,7 +504,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                                         objective_epoch,
                                     ) {
                                         Ok(AgentToolInvocationOutcome::Completed(result)) => {
-                                            Ok(result)
+                                            Ok(*result)
                                         }
                                         Ok(AgentToolInvocationOutcome::RestartAfterSteer) => {
                                             let failure = AgentFailure::cancelled(

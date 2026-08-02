@@ -69,6 +69,9 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
+      - name: Check Rust formatting and lints
+        run: sh scripts/check-rust-quality.sh
+
       - name: Check documentation baseline
         run: node scripts/check-docs.mjs
 

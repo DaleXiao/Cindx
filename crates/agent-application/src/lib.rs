@@ -9,7 +9,8 @@ pub use artifacts::{
 };
 pub use run_execution::{execute_agent_run, AgentRunEpoch, AgentRunExecutor, AgentRunPreparation};
 pub use run_lifecycle::{
-    is_agent_model_turn_finished, is_agent_model_turn_started, AgentRunEvent, AgentRunStatus,
+    is_agent_model_turn_finished, is_agent_model_turn_started, AgentRunEvent,
+    AgentRunEventDecodeError, AgentRunStatus,
 };
 pub use sessions::{
     project_session_lifecycle, SessionLifecycleInput, SessionLifecycleProjection, SessionTitleState,

@@ -91,7 +91,9 @@ desktop crate also exposes a no-default-features compile surface for fast Rust
 type checks without Arrow/DataFusion/Lance or frontend bundle resources. On
 that surface the stable RAG storage API remains type-compatible but fails
 closed with an explicit error. It is not a runtime fallback and is not a
-shipping or product-quality gate.
+shipping or product-quality gate. CI and release use this surface for the
+desktop warning-free Clippy contract; their default-feature tests and bundle
+build continue to validate the shipping vector store.
 
 ## Desktop Adapter Ownership
 

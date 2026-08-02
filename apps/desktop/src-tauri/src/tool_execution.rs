@@ -71,7 +71,7 @@ pub(crate) fn phase5_state_with_error(
 }
 
 pub(crate) enum AgentToolInvocationOutcome {
-    Completed(ToolResult),
+    Completed(Box<ToolResult>),
     RestartAfterSteer,
 }
 
@@ -136,7 +136,7 @@ pub(crate) fn execute_agent_tool_invocation(
         run_context,
         None,
     )? {
-        AgentToolInvocationOutcome::Completed(result) => Ok(result),
+        AgentToolInvocationOutcome::Completed(result) => Ok(*result),
         AgentToolInvocationOutcome::RestartAfterSteer => {
             Err("agent tool invocation interrupted before execution".to_string())
         }
@@ -229,7 +229,7 @@ fn execute_agent_tool_invocation_inner(
         {
             return Ok(AgentToolInvocationOutcome::RestartAfterSteer);
         }
-        return Ok(AgentToolInvocationOutcome::Completed(result));
+        return Ok(AgentToolInvocationOutcome::Completed(Box::new(result)));
     }
 
     let execution_started_at = Instant::now();
@@ -382,7 +382,7 @@ fn execute_agent_tool_invocation_inner(
     if stale_epoch {
         Ok(AgentToolInvocationOutcome::RestartAfterSteer)
     } else {
-        Ok(AgentToolInvocationOutcome::Completed(result))
+        Ok(AgentToolInvocationOutcome::Completed(Box::new(result)))
     }
 }
 

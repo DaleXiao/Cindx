@@ -48,7 +48,7 @@ pub(crate) fn schedule_semantic_memory_refresh(
     let Some(run_id) = run_context.get("agent_run_id").cloned() else {
         return;
     };
-    if run_context.get("project_id").is_none() || run_context.get("session_id").is_none() {
+    if !run_context.contains_key("project_id") || !run_context.contains_key("session_id") {
         return;
     }
     let queue = SEMANTIC_MEMORY_QUEUE.get_or_init(SemanticMemoryQueue::default);

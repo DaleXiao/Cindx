@@ -23,7 +23,9 @@ fn recovery_run_context(event: &Event) -> Metadata {
     context
 }
 
-fn latest_agent_run_event(events: &[Event]) -> Result<Option<AgentRunEvent>, ()> {
+fn latest_agent_run_event(
+    events: &[Event],
+) -> Result<Option<AgentRunEvent>, AgentRunEventDecodeError> {
     for event in events.iter().rev() {
         if is_agent_queue_event(event) {
             continue;
@@ -433,7 +435,7 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
             continue;
         }
         let terminal = match AgentRunEvent::try_from_event(event) {
-            Err(()) => true,
+            Err(_) => true,
             Ok(Some(run_event)) => {
                 run_event.status().is_terminal() || matches!(run_event, AgentRunEvent::Paused)
             }

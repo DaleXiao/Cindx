@@ -6,7 +6,9 @@ use crate::agent_run_engine::{
     runtime_preparation_error, AgentRunPreparationError, PreparedAgentExecution,
 };
 use crate::agent_steer_runtime::{apply_pending_agent_steers, AgentSteerApplication};
-use crate::agent_strategy_runtime::{effective_prompt_objective_for_messages, plan_agent_run};
+use crate::agent_strategy_runtime::{
+    effective_prompt_objective_for_messages, plan_agent_run, AgentRunPlanningRequest,
+};
 use crate::app_state::AppState;
 use crate::collaboration_stage_runtime::CollaborationStageError;
 use crate::configuration_models::{AgentEffort, ProviderConfig};
@@ -192,13 +194,15 @@ pub(crate) fn prepare_agent_execution_replay(
         );
         let plan = plan_agent_run(
             state,
-            config,
-            task_id,
             &mut run_context,
-            &planning_objective,
-            &history,
-            effort,
-            cancellation,
+            AgentRunPlanningRequest {
+                config,
+                task_id,
+                prompt: &planning_objective,
+                history: &history,
+                effort,
+                cancellation,
+            },
         );
         let plan = match plan {
             Ok(plan) => plan,

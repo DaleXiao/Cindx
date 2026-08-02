@@ -5,9 +5,11 @@ pub(crate) fn prompt_mutation_reflection_packets(
     profile_id: &str,
     effort: &str,
 ) -> Vec<AgentEvaluationReflectionPacket> {
-    let mut transfer = (effort == "pro")
-        .then(|| prompt_transfer_reflection_packets(observations, profile_id, 3))
-        .unwrap_or_default();
+    let mut transfer = if effort == "pro" {
+        prompt_transfer_reflection_packets(observations, profile_id, 3)
+    } else {
+        Vec::new()
+    };
     let ordinary_limit = if transfer.is_empty() { 6 } else { 3 };
     let mut packets = prompt_reflection_packets(observations, profile_id, ordinary_limit);
     packets.append(&mut transfer);

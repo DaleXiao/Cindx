@@ -313,16 +313,30 @@ pub(crate) fn append_skill_context_for_run(
     Ok(())
 }
 
+pub(crate) struct ProjectMemorySemanticScoreRequest<'a> {
+    pub(crate) workspace_root: &'a Path,
+    pub(crate) project_id: &'a str,
+    pub(crate) ledger: &'a MemoryLedger,
+    pub(crate) config: &'a ProviderConfig,
+    pub(crate) prompt: &'a str,
+    pub(crate) cancellation: &'a Arc<AgentRunControl>,
+    pub(crate) expected_epoch: u64,
+    pub(crate) resource_checkpoint: Option<&'a AgentResourceCheckpoint<'a>>,
+}
+
 pub(crate) fn project_memory_semantic_scores(
-    workspace_root: &Path,
-    project_id: &str,
-    ledger: &MemoryLedger,
-    config: &ProviderConfig,
-    prompt: &str,
-    cancellation: &Arc<AgentRunControl>,
-    expected_epoch: u64,
-    resource_checkpoint: Option<&(dyn Fn(&AgentRunControl) -> Result<(), String> + Sync)>,
+    request: ProjectMemorySemanticScoreRequest<'_>,
 ) -> Result<(BTreeMap<String, f64>, MemoryVectorManifest), String> {
+    let ProjectMemorySemanticScoreRequest {
+        workspace_root,
+        project_id,
+        ledger,
+        config,
+        prompt,
+        cancellation,
+        expected_epoch,
+        resource_checkpoint,
+    } = request;
     let snapshot = open_memory_vector_snapshot(workspace_root, project_id)?;
     let manifest = snapshot
         .manifest
@@ -334,7 +348,7 @@ pub(crate) fn project_memory_semantic_scores(
         .is_some_and(|generation| manifest.generation_id != generation)
         || !lancedb_index_exists(&snapshot.database_path)
         || !memory_vector_manifest_matches(
-            &manifest,
+            manifest,
             &memory_vector_projection_sha256(ledger),
             config,
             current_time_millis(),
@@ -488,14 +502,16 @@ pub(crate) fn recall_project_memory_for_prompt(
         crate::agent_resource_snapshot::checkpoint_agent_run_resources(state, run_context, control)
     };
     let (semantic_scores, vector_manifest, vector_error) = match project_memory_semantic_scores(
-        workspace_root,
-        project_id,
-        &ledger,
-        config,
-        prompt,
-        cancellation,
-        expected_epoch,
-        Some(&resource_checkpoint),
+        ProjectMemorySemanticScoreRequest {
+            workspace_root,
+            project_id,
+            ledger: &ledger,
+            config,
+            prompt,
+            cancellation,
+            expected_epoch,
+            resource_checkpoint: Some(&resource_checkpoint),
+        },
     ) {
         Ok((scores, manifest)) => (scores, Some(manifest), None),
         Err(error) => (BTreeMap::new(), None, Some(error)),

@@ -45,6 +45,9 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
+      - name: Check Rust formatting and lints
+        run: sh scripts/check-rust-quality.sh
+
       - name: Install frontend dependencies
         working-directory: apps/desktop
         run: npm ci

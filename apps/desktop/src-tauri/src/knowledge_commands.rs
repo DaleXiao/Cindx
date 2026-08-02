@@ -58,16 +58,16 @@ pub(crate) fn ensure_workspace_knowledge_blocking(
     let cache_hit = snapshot.cache_hit;
     let cancellation = Arc::new(AgentRunControl::new("auto"));
     let expected_epoch = cancellation.steer_epoch();
-    let indexed = ensure_workspace_knowledge_index(
-        &root,
-        &mut snapshot.adapter,
+    let indexed = ensure_workspace_knowledge_index(WorkspaceKnowledgeIndexRequest {
+        workspace_root: &root,
+        adapter: &mut snapshot.adapter,
         cache_hit,
-        &config,
-        &cancellation,
+        config: &config,
+        cancellation: &cancellation,
         expected_epoch,
-        None,
-        None,
-    )?;
+        resource_checkpoint: None,
+        rag_operation: None,
+    })?;
     if workspace_knowledge_cache_needs_refresh(cache_hit, indexed.is_some()) {
         cache_rag_adapter(&state, &root, &snapshot.adapter)?;
         snapshot = cached_workspace_knowledge_snapshot_for(&state, &root)?;
@@ -331,16 +331,16 @@ fn prepare_manual_rag_snapshot(
     let mut snapshot = cached_workspace_knowledge_snapshot_for(state, root)?;
     let cache_hit = snapshot.cache_hit;
     let expected_epoch = cancellation.agent().steer_epoch();
-    let indexed = ensure_workspace_knowledge_index(
-        root,
-        &mut snapshot.adapter,
+    let indexed = ensure_workspace_knowledge_index(WorkspaceKnowledgeIndexRequest {
+        workspace_root: root,
+        adapter: &mut snapshot.adapter,
         cache_hit,
         config,
-        cancellation.agent(),
+        cancellation: cancellation.agent(),
         expected_epoch,
-        None,
-        Some(cancellation),
-    )?;
+        resource_checkpoint: None,
+        rag_operation: Some(cancellation),
+    })?;
     if workspace_knowledge_cache_needs_refresh(cache_hit, indexed.is_some()) {
         cache_rag_adapter(state, root, &snapshot.adapter)?;
         snapshot = cached_workspace_knowledge_snapshot_for(state, root)?;

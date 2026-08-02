@@ -32,6 +32,14 @@ heavy LanceDB dependency graph so Rust adapter edits can receive fast type
 feedback. It does not validate vector persistence, frontend behavior, or a
 shipping bundle; the default-feature full and release gates remain required.
 
+`scripts/check-rust-quality.sh` is the mandatory static Rust gate in CI and
+release. It rejects formatting drift in the portable workspace and Clippy
+warnings across both the workspace and desktop adapter. The desktop lint uses the same no-default-features
+compile surface as the light check so routine feedback does not build
+Arrow/DataFusion/Lance. Default-feature desktop tests, shipping performance
+contracts, and the release build still compile and validate the complete
+shipping dependency graph.
+
 Run a profile and keep its machine-readable report:
 
 ```bash

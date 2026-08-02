@@ -233,7 +233,7 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
         .map_err(|error| format!("failed to locate repository root: {error}"))?;
     let suite_path = std::env::var_os("CINDX_AGENT_REALWORLD_SUITE")
         .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root.join("benchmarks/agent/realworld-v1.json"));
+        .unwrap_or_else(|| repo_root.join("benchmarks/agent/realworld-v2.json"));
     let suite_bytes = fs::read(&suite_path)
         .map_err(|error| format!("failed to read {}: {error}", suite_path.display()))?;
     let suite: RealworldSuite = serde_json::from_slice(&suite_bytes)
