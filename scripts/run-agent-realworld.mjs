@@ -229,7 +229,7 @@ function analyzerInvocation(prepared) {
   };
 }
 
-function evaluationEnvironment(base, prepared, entry, output, tempRoot) {
+export function evaluationEnvironment(base, prepared, entry, output, tempRoot) {
   const playwrightModules = path.join(repositoryRoot, "apps", "desktop", "node_modules");
   const nodePath = base.NODE_PATH
     ? `${playwrightModules}${path.delimiter}${base.NODE_PATH}`
@@ -244,7 +244,8 @@ function evaluationEnvironment(base, prepared, entry, output, tempRoot) {
     CINDX_AGENT_REALWORLD_REPLICATE_INDEX: String(entry.replicate),
     CINDX_AGENT_REALWORLD_CASES: entry.caseId,
     CINDX_AGENT_REALWORLD_TREATMENTS: entry.treatment,
-    CINDX_AGENT_REALWORLD_TEMP_ROOT: tempRoot
+    CINDX_AGENT_REALWORLD_TEMP_ROOT: tempRoot,
+    CINDX_AGENT_REALWORLD_DATA_DIR: path.join(tempRoot, ".cindx-eval-data")
   };
 }
 

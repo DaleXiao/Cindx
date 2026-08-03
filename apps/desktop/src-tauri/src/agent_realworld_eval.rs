@@ -1,5 +1,3 @@
-use crate::session_output_cache_store::SessionOutputCache;
-use crate::suspended_run_runtime::SuspendedRunStore;
 use crate::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -7,15 +5,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 use tauri::Manager;
 
 mod verification;
+mod setup;
 #[cfg(test)]
 mod tests;
 
+use setup::{
+    activate_evaluation_data_root, add_recall_session, build_evaluation_app,
+    configure_run_project, seed_memory_fixture_for_case, SetupFailure, SetupFailureCode,
+    SetupFailureStage,
+};
 use verification::{case_input_sha256, direct_prompt, resolved_objective, verify_case};
 
 const SUITE_SCHEMA: &str = "cindx.agent-realworld-suite.v1";
@@ -182,6 +185,7 @@ struct RawRun {
     output_sha256: String,
     output: String,
     error: Option<String>,
+    setup_failure: Option<SetupFailure>,
     metrics: RuntimeMetrics,
     verification: VerificationResult,
 }
@@ -312,12 +316,18 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
             .path()
             .to_path_buf(),
     };
+    let evaluation_database = activate_evaluation_data_root(&suite_root)?;
     let bootstrap_root = suite_root.join("bootstrap");
     fs::create_dir_all(&bootstrap_root)
         .map_err(|error| format!("failed to create bootstrap workspace: {error}"))?;
     let sidecars = SidecarConfig::default();
     apply_sidecar_env(&sidecars);
-    let app = build_evaluation_app(provider.clone(), sidecars, &bootstrap_root)?;
+    let app = build_evaluation_app(
+        provider.clone(),
+        sidecars,
+        &bootstrap_root,
+        &evaluation_database,
+    )?;
     let state = app.state::<AppState>();
     let mut runs = Vec::new();
     let selected_case_names = selected_cases
@@ -354,7 +364,14 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
                     &runs,
                 )?;
                 let run = execute_case(
-                    &app, &state, &provider, case, *treatment, replicate, &run_root,
+                    &app,
+                    &state,
+                    &provider,
+                    case,
+                    *treatment,
+                    replicate,
+                    &run_root,
+                    &evaluation_database,
                 );
                 *runs.last_mut().expect("pending evaluation run") = run;
                 write_raw_report(
@@ -519,136 +536,6 @@ fn install_eval_crypto_provider() {
     }
 }
 
-fn build_evaluation_app(
-    provider: ProviderConfig,
-    sidecars: SidecarConfig,
-    root: &Path,
-) -> Result<tauri::App<tauri::Wry>, String> {
-    let project_sessions = isolated_project_config(root, "bootstrap");
-    let state = AppState {
-        store: Mutex::new(SqliteStore::in_memory().map_err(|error| error.to_string())?),
-        attachment_upload_batches: Mutex::new(AttachmentUploadBatches::default()),
-        manual_tool_execution_gate: Mutex::new(()),
-        provider_config: Mutex::new(provider),
-        provider_config_update: Mutex::new(()),
-        workspace_config: Mutex::new(WorkspaceConfig {
-            root: root.to_path_buf(),
-        }),
-        sidecar_config: Mutex::new(sidecars),
-        web_search_config: Mutex::new(WebSearchConfig::default()),
-        project_session_config: Mutex::new(project_sessions),
-        session_lifecycle_gate: Mutex::new(()),
-        schedule_config: Mutex::new(crate::schedule::ScheduleConfig::default()),
-        schedule_last_error: Mutex::new(None),
-        mcp_catalog: Mutex::new(McpCatalogService::load(
-            root.join(".eval-mcp.json"),
-            root.join(".eval-mcp-cache.json"),
-        )),
-        suspended_agent_runs: SuspendedRunStore::default(),
-        session_output_cache: SessionOutputCache::default(),
-        agent_run_controls: agent_harness::RunRegistry::new("agent realworld control"),
-        prompt_evaluation_controls: agent_harness::RunRegistry::new(
-            "agent realworld prompt evaluation control",
-        ),
-        rag_operation_controls: Mutex::new(BTreeMap::new()),
-        queue_dispatching_sessions: agent_harness::ExclusiveKeyRegistry::new(
-            "agent realworld queue",
-        ),
-        session_title_refinement_sessions: agent_harness::ExclusiveKeyRegistry::new(
-            "agent realworld title",
-        ),
-        workspace_knowledge_cache: Mutex::new(BTreeMap::new()),
-        tool_registry_cache: Mutex::new(ToolRegistryCache::default()),
-        conductor_health: Mutex::new(
-            crate::conductor_health_runtime::ConductorHealthLedger::default(),
-        ),
-        tool_registry_generation: AtomicU64::new(0),
-        allow_exit: AtomicBool::new(false),
-        quit_prompt_active: AtomicBool::new(false),
-    };
-    tauri::Builder::default()
-        .manage(state)
-        .build(crate::app_bootstrap::application_context())
-        .map_err(|error| format!("failed to build headless evaluation app: {error}"))
-}
-
-fn isolated_project_config(root: &Path, key: &str) -> ProjectSessionConfig {
-    let mut config = ProjectSessionConfig::default_for_root(root);
-    let project_id = format!("project-realworld-{key}");
-    let session_id = format!("session-realworld-{key}");
-    config.active_project_id = project_id.clone();
-    config.active_session_id = session_id.clone();
-    config.projects[0].id = project_id.clone();
-    config.projects[0].name = format!("Realworld {key}");
-    config.projects[0].root = root.display().to_string();
-    config.sessions[0].id = session_id;
-    config.sessions[0].project_id = project_id;
-    config.sessions[0].name = format!("Realworld {key}");
-    config
-}
-
-fn configure_run_project(
-    state: &tauri::State<'_, AppState>,
-    root: &Path,
-    key: &str,
-) -> Result<(String, String), String> {
-    let config = isolated_project_config(root, key);
-    let project_id = config.active_project_id.clone();
-    let session_id = config.active_session_id.clone();
-    *state
-        .workspace_config
-        .lock()
-        .map_err(|error| format!("workspace config lock poisoned: {error}"))? = WorkspaceConfig {
-        root: root.to_path_buf(),
-    };
-    *state
-        .project_session_config
-        .lock()
-        .map_err(|error| format!("project session lock poisoned: {error}"))? = config;
-    state
-        .workspace_knowledge_cache
-        .lock()
-        .map_err(|error| format!("knowledge cache lock poisoned: {error}"))?
-        .clear();
-    state
-        .tool_registry_cache
-        .lock()
-        .map_err(|error| format!("tool cache lock poisoned: {error}"))?
-        .clear();
-    state
-        .tool_registry_generation
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    Ok((project_id, session_id))
-}
-
-fn add_recall_session(
-    state: &tauri::State<'_, AppState>,
-    project_id: &str,
-    key: &str,
-) -> Result<String, String> {
-    let mut config = state
-        .project_session_config
-        .lock()
-        .map_err(|error| format!("project session lock poisoned: {error}"))?;
-    let mut session = config
-        .sessions
-        .first()
-        .cloned()
-        .ok_or_else(|| "evaluation project has no seed session".to_string())?;
-    let session_id = format!("session-realworld-{key}-recall");
-    session.id = session_id.clone();
-    session.project_id = project_id.to_string();
-    session.name = "Memory recall".to_string();
-    session.title_state = SessionTitleState::Pending;
-    session.seen_event_sequence = 0;
-    session.created_at_ms = current_time_millis();
-    session.updated_at_ms = session.created_at_ms;
-    session.archived_at_ms = None;
-    config.sessions.push(session);
-    config.active_session_id = session_id.clone();
-    Ok(session_id)
-}
-
 fn materialize_case(root: &Path, case: &RealworldCase) -> Result<(), String> {
     fs::create_dir_all(root)
         .map_err(|error| format!("failed to create {}: {error}", root.display()))?;
@@ -673,6 +560,7 @@ fn execute_case(
     treatment: Treatment,
     replicate: u32,
     root: &Path,
+    evaluation_database: &Path,
 ) -> RawRun {
     let input_sha256 = case_input_sha256(case);
     let started = Instant::now();
@@ -710,6 +598,7 @@ fn execute_case(
             output_sha256: sha256_hex(output.as_bytes()),
             output,
             error: completion.error,
+            setup_failure: None,
             metrics: RuntimeMetrics {
                 latency_ms: completion.latency_ms,
                 model_calls: 1,
@@ -727,60 +616,108 @@ fn execute_case(
     let key = format!("r{replicate}-{}-{}", case.id, treatment.label());
     let (project_id, mut session_id) = match configure_run_project(state, root, &key) {
         Ok(value) => value,
-        Err(error) => return failed_run(case, treatment, replicate, input_sha256, error, started),
+        Err(error) => {
+            return failed_run(
+                case,
+                treatment,
+                replicate,
+                input_sha256,
+                error,
+                started,
+                SetupFailure::new(
+                    SetupFailureStage::ProjectConfiguration,
+                    SetupFailureCode::Configuration,
+                    false,
+                ),
+                0,
+            )
+        }
     };
     let objective = resolved_objective(case, root);
     let mut setup_latency_ms = 0_u64;
     let mut memory_records_after_seed = None;
     if case.index_workspace {
         let setup_started = Instant::now();
-        if let Err(error) = index_workspace_rag_blocking(
+        let index_result = index_workspace_rag_blocking(
             app.handle(),
             RagOperationInput {
                 operation_id: unique_id("realworld-index"),
             },
-        ) {
-            return failed_run(case, treatment, replicate, input_sha256, error, started);
-        }
-        setup_latency_ms = setup_latency_ms.saturating_add(elapsed_ms(setup_started));
-    }
-    if let Some(seed_prompt) = case.seed_memory_prompt.as_deref() {
-        let setup_started = Instant::now();
-        let seed = run_product_task(
-            app.handle(),
-            state,
-            &session_id,
-            seed_prompt,
-            treatment,
-            PermissionPolicy::AllowOnce,
         );
         setup_latency_ms = setup_latency_ms.saturating_add(elapsed_ms(setup_started));
-        if seed.state.status != "completed" {
-            let seed_error = seed
-                .error
-                .or_else(|| seed.state.last_error.clone())
-                .unwrap_or_else(|| format!("memory seed ended as {}", seed.state.status));
+        if let Err(error) = index_result {
+            let setup_failure = if error == RAG_INDEX_CANCELLED {
+                SetupFailure::new(
+                    SetupFailureStage::WorkspaceIndex,
+                    SetupFailureCode::Transient,
+                    true,
+                )
+            } else {
+                SetupFailure::new(
+                    SetupFailureStage::WorkspaceIndex,
+                    SetupFailureCode::Index,
+                    false,
+                )
+            };
             return failed_run(
                 case,
                 treatment,
                 replicate,
                 input_sha256,
-                seed_error,
+                error,
                 started,
+                setup_failure,
+                setup_latency_ms,
             );
         }
-        memory_records_after_seed = state
-            .store
-            .lock()
-            .ok()
-            .and_then(|mut store| load_project_memory_ledger(&mut store, &project_id).ok())
-            .map(|ledger| ledger.records.len());
+    }
+    if let Some(seed_prompt) = case.seed_memory_prompt.as_deref() {
+        let setup_started = Instant::now();
+        let seed_result = seed_memory_fixture_for_case(
+            state,
+            evaluation_database,
+            &project_id,
+            &session_id,
+            seed_prompt,
+        );
+        setup_latency_ms = setup_latency_ms.saturating_add(elapsed_ms(setup_started));
+        memory_records_after_seed = match seed_result {
+            Ok(record_count) => Some(record_count),
+            Err((setup_failure, error)) => {
+                return failed_run(
+                    case,
+                    treatment,
+                    replicate,
+                    input_sha256,
+                    error,
+                    started,
+                    setup_failure,
+                    setup_latency_ms,
+                )
+            }
+        };
+        let session_started = Instant::now();
         session_id = match add_recall_session(state, &project_id, &key) {
             Ok(session_id) => session_id,
             Err(error) => {
-                return failed_run(case, treatment, replicate, input_sha256, error, started)
+                setup_latency_ms = setup_latency_ms.saturating_add(elapsed_ms(session_started));
+                return failed_run(
+                    case,
+                    treatment,
+                    replicate,
+                    input_sha256,
+                    error,
+                    started,
+                    SetupFailure::new(
+                        SetupFailureStage::RecallSession,
+                        SetupFailureCode::Configuration,
+                        false,
+                    ),
+                    setup_latency_ms,
+                );
             }
         };
+        setup_latency_ms = setup_latency_ms.saturating_add(elapsed_ms(session_started));
     }
 
     let product = run_product_task(
@@ -813,6 +750,7 @@ fn execute_case(
         output_sha256: sha256_hex(output.as_bytes()),
         output,
         error: product.error.or(product.state.last_error.clone()),
+        setup_failure: None,
         metrics: RuntimeMetrics {
             latency_ms: elapsed_ms(started).saturating_sub(setup_latency_ms),
             setup_latency_ms,
@@ -860,6 +798,7 @@ fn interrupted_run(
         output_sha256: sha256_hex(&[]),
         output: String::new(),
         error: Some("evaluation process exited before verification".to_string()),
+        setup_failure: None,
         metrics: RuntimeMetrics::default(),
         verification: VerificationResult {
             external_effect_passed: product_mechanism_exercised.then_some(false),
@@ -876,6 +815,8 @@ fn failed_run(
     input_sha256: String,
     error: String,
     started: Instant,
+    setup_failure: SetupFailure,
+    setup_latency_ms: u64,
 ) -> RawRun {
     RawRun {
         replicate,
@@ -892,8 +833,10 @@ fn failed_run(
         output_sha256: sha256_hex(&[]),
         output: String::new(),
         error: Some(error),
+        setup_failure: Some(setup_failure),
         metrics: RuntimeMetrics {
             latency_ms: elapsed_ms(started),
+            setup_latency_ms,
             resident_kib_after: process_resident_kib(),
             ..RuntimeMetrics::default()
         },
