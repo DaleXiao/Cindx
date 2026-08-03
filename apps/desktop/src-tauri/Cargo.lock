@@ -978,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "cindx-desktop"
-version = "0.1.90"
+version = "0.1.91"
 dependencies = [
  "agent-application",
  "agent-core",
