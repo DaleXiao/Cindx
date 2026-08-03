@@ -195,10 +195,16 @@ The Pro evolution path can learn from qualified Auto outcomes without coupling
 the two foreground runtimes:
 
 1. The completion transaction reconstructs a teacher case only from a
-   completed, independently scored, usage-complete Auto workflow with a
-   finalized checkpoint and no denied permission or safety violation.
-2. The teacher profile, source run, final output, and dataset are fingerprinted;
-   its final steer epoch is pinned, and bounded redacted workflow evidence is
+   completed, usage-complete Auto workflow with a finalized checkpoint and no
+   denied permission or safety violation. The score must be backed by a
+   completed provider receipt from a dedicated reviewer request outside the
+   workflow. A distinct evaluator model is preferred when available; if the
+   configured model is reused, its separate request and model identities remain
+   explicit evidence and the participant request itself cannot act as reviewer.
+2. The teacher profile, source run, final output, provider/model identity,
+   system prompt, policy, budget, tool contract, source/workspace evidence,
+   evaluator receipt, checkpoint, and learning receipt are fingerprinted. Its
+   final steer epoch is pinned, and bounded redacted workflow evidence is
    retained for background evaluation.
 3. Current and challenger Pro profiles run the same objective. An evaluator
    that did not participate in either workflow performs a position-balanced
@@ -210,13 +216,21 @@ the two foreground runtimes:
 5. Pro mutation reserves reflection capacity for both ordinary Pro evidence and
    Auto-transfer evidence. Promotion requires both gates, and the frozen Pro
    snapshot pins the active Auto source and both evidence sets.
+6. Canary allocation never exceeds 50 percent. Promotion atomically installs a
+   valid frozen snapshot; missing or regressed lineage rolls back to the prior
+   stable profile.
 
 This path adds no model call to the foreground user request. Missing independent
 reviewers, incomplete evidence, changed Auto lineage, disagreement, or an
 insufficient train/holdout cohort fails closed and leaves the current stable Pro
 profile unchanged.
 
-The background queue coalesces only requests with the same project and effort.
+Auto completion records a durable project-scoped Pro intent. The background
+worker dispatches it idempotently and compensates an interrupted dispatch. The
+queue coalesces only requests with the same project and
+effort, and its wall-clock, token, and physical-attempt budget persists across
+checkpoints and request-scoped action events. Missing, malformed, interrupted,
+or regressed recovery accounting fails closed.
 Repeated objectives prefer a qualified teacher from the current stable Auto
 profile over stale profiles. Reflective mutation output is rejected if its
 custom directive copies case-specific trajectory or feedback content, including

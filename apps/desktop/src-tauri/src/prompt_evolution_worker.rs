@@ -3,6 +3,10 @@ use crate::background_work_runtime::wait_for_foreground_agent_idle;
 use crate::configuration_models::ProviderConfig;
 use crate::event_persistence::append_event;
 use crate::project_session_persistence::metadata_with_context;
+use crate::prompt_evolution_campaign_budget::{
+    recover_prompt_evaluation_checkpoints, PromptEvaluationCampaignUsage,
+};
+use crate::prompt_evolution_campaign_runtime::append_prompt_evaluation_action;
 use crate::prompt_evolution_models::{
     notify_prompt_evaluation_worker, prompt_evaluation_inflight, wait_for_prompt_evaluation_worker,
 };
@@ -16,7 +20,7 @@ use crate::runtime_constants::{
     BACKGROUND_WORK_IDLE_GRACE_MS, PROMPT_EVOLUTION_BACKGROUND_BATCH_LIMIT,
     PROMPT_EVOLUTION_BACKGROUND_CAMPAIGN_LIMIT,
 };
-use crate::runtime_values::unique_id;
+use crate::runtime_values::{current_time_millis, unique_id};
 use agent_core::{Event, EventKind, Metadata, TaskId};
 use agent_runtime::AgentRunControl;
 use model_provider::MODEL_REQUEST_CANCELLED;
@@ -55,6 +59,7 @@ impl PromptEvaluationRequest {
     fn new(
         task_id: &TaskId,
         run_context: &Metadata,
+        request_id: Option<String>,
         effort: String,
         policy: String,
         worker_models: Vec<String>,
@@ -64,7 +69,7 @@ impl PromptEvaluationRequest {
     ) -> Self {
         Self {
             schema: PROMPT_EVALUATION_REQUEST_SCHEMA.to_string(),
-            request_id: unique_id("prompt-evaluation-request"),
+            request_id: request_id.unwrap_or_else(|| unique_id("prompt-evaluation-request")),
             task_id: task_id.0.clone(),
             run_context: persistent_prompt_evaluation_context(run_context),
             effort,
@@ -108,6 +113,7 @@ struct PendingPromptEvaluation {
     sequence: u64,
     request: PromptEvaluationRequest,
     completed_actions: usize,
+    campaign_usage: PromptEvaluationCampaignUsage,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -115,6 +121,7 @@ pub(crate) fn enqueue_prompt_pairwise_evaluation(
     app: &tauri::AppHandle,
     task_id: &TaskId,
     run_context: &Metadata,
+    request_id: Option<String>,
     effort: String,
     policy: String,
     worker_models: Vec<String>,
@@ -122,11 +129,18 @@ pub(crate) fn enqueue_prompt_pairwise_evaluation(
     current_profile: ConductorPromptGenome,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let fingerprint = (&effort, &policy, &worker_models, agent_budget, &current_profile);
+    let fingerprint = (
+        &effort,
+        &policy,
+        &worker_models,
+        agent_budget,
+        &current_profile,
+    );
     let configuration_sha256 = request_configuration_sha256(&state, fingerprint)?;
     let request = PromptEvaluationRequest::new(
         task_id,
         run_context,
+        request_id,
         effort,
         policy,
         worker_models,
@@ -183,6 +197,11 @@ fn prompt_evolution_worker_loop(app: tauri::AppHandle) {
         if state.allow_exit.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
+        if let Err(error) =
+            crate::prompt_evolution_transfer_outbox::dispatch_prompt_auto_transfer_intents(&app)
+        {
+            eprintln!("prompt Auto transfer intent scan failed: {error}");
+        }
         let pending = match latest_pending_prompt_evaluations(&state) {
             Ok(pending) => pending,
             Err(error) => {
@@ -199,16 +218,29 @@ fn prompt_evolution_worker_loop(app: tauri::AppHandle) {
             if state.allow_exit.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
             }
-            if let Err(error) = process_pending_prompt_evaluation(&state, &pending) {
+            let mut completed_actions = pending.completed_actions;
+            let mut campaign_usage = pending.campaign_usage.clone();
+            if let Err(error) = process_pending_prompt_evaluation(
+                &state,
+                &pending,
+                &mut completed_actions,
+                &mut campaign_usage,
+            ) {
                 if error != MODEL_REQUEST_CANCELLED {
-                    let _ = finish_prompt_evaluation_request(
+                    if let Err(status_error) = finish_prompt_evaluation_request(
                         &state,
                         &pending.request,
                         FAILED_EVENT,
-                        pending.completed_actions,
+                        completed_actions,
+                        &campaign_usage,
                         "failed",
                         Some(&error),
-                    );
+                    ) {
+                        eprintln!(
+                            "prompt evolution failed status could not be persisted: {status_error}"
+                        );
+                        return;
+                    }
                 }
             }
         }
@@ -234,35 +266,22 @@ fn latest_pending_prompt_evaluations(
 fn latest_pending_prompt_evaluations_from_events(
     events: &[Event],
 ) -> Result<Vec<PendingPromptEvaluation>, String> {
-    let terminal = events
+    let mut terminal = BTreeSet::new();
+    for event in events
         .iter()
         .filter(|event| matches!(event.summary.as_str(), COMPLETED_EVENT | FAILED_EVENT))
-        .filter_map(|event| event.metadata.get(REQUEST_ID_KEY).cloned())
-        .collect::<BTreeSet<_>>();
-    let checkpoints = events
-        .iter()
-        .filter(|event| event.summary == CHECKPOINT_EVENT)
-        .filter_map(|event| {
-            Some((
-                event.metadata.get(REQUEST_ID_KEY)?.clone(),
-                event
-                    .metadata
-                    .get("completed_actions")?
-                    .parse::<usize>()
-                    .ok()?,
-            ))
-        })
-        .fold(
-            BTreeMap::<String, usize>::new(),
-            |mut values, (id, count)| {
-                values
-                    .entry(id)
-                    .and_modify(|current| *current = (*current).max(count))
-                    .or_insert(count);
-                values
-            },
-        );
+    {
+        let request_id = event
+            .metadata
+            .get(REQUEST_ID_KEY)
+            .filter(|request_id| !request_id.trim().is_empty())
+            .cloned()
+            .ok_or_else(|| "prompt evaluation terminal request id is invalid".to_string())?;
+        terminal.insert(request_id);
+    }
+    let checkpoints = recover_prompt_evaluation_checkpoints(events)?;
     let mut latest = BTreeMap::<(String, String), PendingPromptEvaluation>::new();
+    let mut request_ids = BTreeSet::new();
     for event in events.iter().filter(|event| event.summary == REQUEST_EVENT) {
         let Some(payload) = event.metadata.get(REQUEST_METADATA_KEY) else {
             continue;
@@ -270,12 +289,25 @@ fn latest_pending_prompt_evaluations_from_events(
         let request = serde_json::from_str::<PromptEvaluationRequest>(payload)
             .map_err(|error| format!("prompt evaluation request is invalid: {error}"))?;
         request.validate()?;
+        request_ids.insert(request.request_id.clone());
+        let checkpoint = checkpoints.get(&request.request_id);
+        let checkpoint_is_valid = checkpoint.is_none_or(|checkpoint| {
+            checkpoint.is_valid_for_request_started_at(event.timestamp_ms)
+        });
         let candidate = PendingPromptEvaluation {
             sequence: event.sequence,
-            completed_actions: checkpoints
-                .get(&request.request_id)
-                .copied()
+            completed_actions: checkpoint
+                .map(|checkpoint| checkpoint.completed_actions)
                 .unwrap_or_default(),
+            campaign_usage: if checkpoint_is_valid {
+                checkpoint
+                    .map(|checkpoint| checkpoint.campaign_usage.clone())
+                    .unwrap_or_else(|| {
+                        PromptEvaluationCampaignUsage::starting_at(event.timestamp_ms)
+                    })
+            } else {
+                PromptEvaluationCampaignUsage::fail_closed()
+            },
             request,
         };
         let key = candidate.request.scope_key();
@@ -287,6 +319,13 @@ fn latest_pending_prompt_evaluations_from_events(
             latest.insert(key, candidate);
         }
     }
+    if checkpoints
+        .keys()
+        .chain(terminal.iter())
+        .any(|request_id| !request_ids.contains(request_id))
+    {
+        return Err("prompt evaluation checkpoint request id is unknown".to_string());
+    }
     Ok(latest
         .into_values()
         .filter(|pending| !terminal.contains(&pending.request.request_id))
@@ -296,18 +335,32 @@ fn latest_pending_prompt_evaluations_from_events(
 fn process_pending_prompt_evaluation(
     state: &tauri::State<'_, AppState>,
     pending: &PendingPromptEvaluation,
+    completed_actions_out: &mut usize,
+    campaign_usage_out: &mut PromptEvaluationCampaignUsage,
 ) -> Result<(), String> {
     let request = &pending.request;
-    if pending.completed_actions >= PROMPT_EVOLUTION_BACKGROUND_CAMPAIGN_LIMIT {
+    if *completed_actions_out >= PROMPT_EVOLUTION_BACKGROUND_CAMPAIGN_LIMIT {
         return finish_prompt_evaluation_request(
             state,
             request,
             COMPLETED_EVENT,
-            pending.completed_actions,
+            *completed_actions_out,
+            campaign_usage_out,
             "campaign_limit",
             None,
         );
     }
+    let Some(campaign_budget) = campaign_usage_out.remaining_budget(current_time_millis()) else {
+        return finish_prompt_evaluation_request(
+            state,
+            request,
+            COMPLETED_EVENT,
+            *completed_actions_out,
+            campaign_usage_out,
+            "campaign_resource_budget",
+            None,
+        );
+    };
     let config = state
         .provider_config
         .lock()
@@ -318,7 +371,8 @@ fn process_pending_prompt_evaluation(
             state,
             request,
             COMPLETED_EVENT,
-            pending.completed_actions,
+            *completed_actions_out,
+            campaign_usage_out,
             "disabled_or_unconfigured",
             None,
         );
@@ -330,9 +384,7 @@ fn process_pending_prompt_evaluation(
     else {
         return Ok(());
     };
-    let control = Arc::new(AgentRunControl::with_budget(
-        crate::prompt_learning_runtime::prompt_evaluation_parent_budget(),
-    ));
+    let control = Arc::new(AgentRunControl::with_budget(campaign_budget));
     let control_lease = state
         .prompt_evaluation_controls
         .register(request.effort.clone(), Arc::clone(&control))
@@ -348,12 +400,25 @@ fn process_pending_prompt_evaluation(
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
 
-    let mut completed_actions = pending.completed_actions;
+    let mut completed_actions = *completed_actions_out;
     let batch_remaining = PROMPT_EVOLUTION_BACKGROUND_CAMPAIGN_LIMIT
         .saturating_sub(completed_actions)
         .min(PROMPT_EVOLUTION_BACKGROUND_BATCH_LIMIT);
     for _ in 0..batch_remaining {
-        match run_background_prompt_pairwise_evaluation(
+        let action_index = completed_actions;
+        let action_id = format!("{}:{action_index}", request.request_id);
+        append_prompt_evaluation_action(
+            state,
+            &TaskId(request.task_id.clone()),
+            &request.run_context,
+            &request.request_id,
+            &request.effort,
+            &action_id,
+            action_index,
+            completed_actions,
+            None,
+        )?;
+        let result = run_background_prompt_pairwise_evaluation(
             state,
             &config,
             &TaskId(request.task_id.clone()),
@@ -364,41 +429,95 @@ fn process_pending_prompt_evaluation(
             request.agent_budget,
             &request.current_profile,
             &control,
-        ) {
-            Ok(true) => completed_actions = completed_actions.saturating_add(1),
+        );
+        *campaign_usage_out = pending.campaign_usage.with_control_usage(&control);
+        let next_completed_actions =
+            completed_actions.saturating_add(usize::from(matches!(&result, Ok(true))));
+        append_prompt_evaluation_action(
+            state,
+            &TaskId(request.task_id.clone()),
+            &request.run_context,
+            &request.request_id,
+            &request.effort,
+            &action_id,
+            action_index,
+            next_completed_actions,
+            Some(campaign_usage_out),
+        )?;
+        match result {
+            Ok(true) => {
+                completed_actions = next_completed_actions;
+                *completed_actions_out = completed_actions;
+            }
             Ok(false) => {
                 return finish_prompt_evaluation_request(
                     state,
                     request,
                     COMPLETED_EVENT,
                     completed_actions,
+                    campaign_usage_out,
                     "converged_or_no_work",
                     None,
                 );
             }
             Err(error) if error == MODEL_REQUEST_CANCELLED => {
-                checkpoint_prompt_evaluation_request(
+                let result = checkpoint_prompt_evaluation_request(
                     state,
                     request,
                     completed_actions,
+                    campaign_usage_out,
                     "foreground_preempted",
-                )?;
-                return Err(error);
+                );
+                return match result {
+                    Ok(()) => Err(error),
+                    Err(status_error) => Err(status_error),
+                };
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                return finish_prompt_evaluation_request(
+                    state,
+                    request,
+                    FAILED_EVENT,
+                    completed_actions,
+                    campaign_usage_out,
+                    "evaluation_failed",
+                    Some(&error),
+                );
+            }
         }
     }
+    *campaign_usage_out = pending.campaign_usage.with_control_usage(&control);
     if completed_actions >= PROMPT_EVOLUTION_BACKGROUND_CAMPAIGN_LIMIT {
         finish_prompt_evaluation_request(
             state,
             request,
             COMPLETED_EVENT,
             completed_actions,
+            campaign_usage_out,
             "campaign_limit",
             None,
         )
+    } else if campaign_usage_out
+        .remaining_budget(current_time_millis())
+        .is_none()
+    {
+        finish_prompt_evaluation_request(
+            state,
+            request,
+            COMPLETED_EVENT,
+            completed_actions,
+            campaign_usage_out,
+            "campaign_resource_budget",
+            None,
+        )
     } else {
-        checkpoint_prompt_evaluation_request(state, request, completed_actions, "batch_complete")
+        checkpoint_prompt_evaluation_request(
+            state,
+            request,
+            completed_actions,
+            campaign_usage_out,
+            "batch_complete",
+        )
     }
 }
 
@@ -428,25 +547,15 @@ fn validate_request_models(
         );
     }
     let r = request;
-    let fingerprint = (&r.effort, &r.policy, &r.worker_models, r.agent_budget, &r.current_profile);
+    let fingerprint = (
+        &r.effort,
+        &r.policy,
+        &r.worker_models,
+        r.agent_budget,
+        &r.current_profile,
+    );
     validate_request_configuration(config, &r.configuration_sha256, fingerprint)?;
     Ok(())
-}
-
-fn checkpoint_prompt_evaluation_request(
-    state: &tauri::State<'_, AppState>,
-    request: &PromptEvaluationRequest,
-    completed_actions: usize,
-    reason: &str,
-) -> Result<(), String> {
-    append_request_status(
-        state,
-        request,
-        CHECKPOINT_EVENT,
-        completed_actions,
-        reason,
-        None,
-    )
 }
 
 fn finish_prompt_evaluation_request(
@@ -454,20 +563,12 @@ fn finish_prompt_evaluation_request(
     request: &PromptEvaluationRequest,
     summary: &str,
     completed_actions: usize,
+    campaign_usage: &PromptEvaluationCampaignUsage,
     reason: &str,
     error: Option<&str>,
 ) -> Result<(), String> {
-    append_request_status(state, request, summary, completed_actions, reason, error)
-}
-
-fn append_request_status(
-    state: &tauri::State<'_, AppState>,
-    request: &PromptEvaluationRequest,
-    summary: &str,
-    completed_actions: usize,
-    reason: &str,
-    error: Option<&str>,
-) -> Result<(), String> {
+    let encoded_campaign_usage = serde_json::to_string(campaign_usage)
+        .map_err(|error| format!("prompt campaign usage serialization failed: {error}"))?;
     let mut metadata = [
         (REQUEST_ID_KEY.to_string(), request.request_id.clone()),
         ("background_evaluation".to_string(), "true".to_string()),
@@ -476,6 +577,7 @@ fn append_request_status(
             "completed_actions".to_string(),
             completed_actions.to_string(),
         ),
+        ("campaign_usage".to_string(), encoded_campaign_usage),
         ("request_status".to_string(), reason.to_string()),
     ]
     .into_iter()
@@ -495,6 +597,24 @@ fn append_request_status(
         metadata_with_context(metadata, &request.run_context),
     )
     .map_err(|error| error.to_string())
+}
+
+fn checkpoint_prompt_evaluation_request(
+    state: &tauri::State<'_, AppState>,
+    request: &PromptEvaluationRequest,
+    completed_actions: usize,
+    campaign_usage: &PromptEvaluationCampaignUsage,
+    reason: &str,
+) -> Result<(), String> {
+    finish_prompt_evaluation_request(
+        state,
+        request,
+        CHECKPOINT_EVENT,
+        completed_actions,
+        campaign_usage,
+        reason,
+        None,
+    )
 }
 
 fn persistent_prompt_evaluation_context(run_context: &Metadata) -> Metadata {
@@ -519,129 +639,5 @@ fn persistent_prompt_evaluation_context(run_context: &Metadata) -> Metadata {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use agent_core::{EventId, EventKind};
-
-    fn request(effort: &str, id: &str) -> PromptEvaluationRequest {
-        PromptEvaluationRequest {
-            schema: PROMPT_EVALUATION_REQUEST_SCHEMA.to_string(),
-            request_id: id.to_string(),
-            task_id: "task".to_string(),
-            run_context: Metadata::new(),
-            effort: effort.to_string(),
-            policy: "auto".to_string(),
-            worker_models: vec!["model".to_string()],
-            agent_budget: 1,
-            current_profile: ConductorPromptGenome::seed_for_effort(effort),
-            configuration_sha256: String::new(),
-        }
-    }
-
-    fn request_for_project(effort: &str, id: &str, project_id: &str) -> PromptEvaluationRequest {
-        let mut request = request(effort, id);
-        request
-            .run_context
-            .insert("project_id".to_string(), project_id.to_string());
-        request
-    }
-
-    fn event(sequence: u64, summary: &str, metadata: Metadata) -> Event {
-        Event {
-            id: EventId(format!("event-{sequence}")),
-            task_id: TaskId("task".to_string()),
-            sequence,
-            timestamp_ms: sequence,
-            kind: EventKind::TaskStatusChanged,
-            summary: summary.to_string(),
-            metadata,
-        }
-    }
-
-    fn request_event(sequence: u64, request: &PromptEvaluationRequest) -> Event {
-        event(
-            sequence,
-            REQUEST_EVENT,
-            [
-                (REQUEST_ID_KEY.to_string(), request.request_id.clone()),
-                (
-                    REQUEST_METADATA_KEY.to_string(),
-                    serde_json::to_string(request).unwrap(),
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        )
-    }
-
-    #[test]
-    fn newest_request_supersedes_an_older_request_for_the_same_effort() {
-        let older = request("auto", "older");
-        let newer = request("auto", "newer");
-        let pending = latest_pending_prompt_evaluations_from_events(&[
-            request_event(1, &older),
-            request_event(2, &newer),
-        ])
-        .unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].request.request_id, "newer");
-    }
-
-    #[test]
-    fn same_effort_requests_are_isolated_by_project() {
-        let project_a_old = request_for_project("pro", "project-a-old", "project-a");
-        let project_b = request_for_project("pro", "project-b", "project-b");
-        let project_a_new = request_for_project("pro", "project-a-new", "project-a");
-        let pending = latest_pending_prompt_evaluations_from_events(&[
-            request_event(1, &project_a_old),
-            request_event(2, &project_b),
-            request_event(3, &project_a_new),
-        ])
-        .unwrap();
-        let ids = pending
-            .iter()
-            .map(|pending| pending.request.request_id.as_str())
-            .collect::<BTreeSet<_>>();
-
-        assert_eq!(ids, BTreeSet::from(["project-a-new", "project-b"]));
-    }
-
-    #[test]
-    fn terminal_latest_request_does_not_resurrect_an_older_request() {
-        let older = request("auto", "older");
-        let newer = request("auto", "newer");
-        let pending = latest_pending_prompt_evaluations_from_events(&[
-            request_event(1, &older),
-            request_event(2, &newer),
-            event(
-                3,
-                COMPLETED_EVENT,
-                [(REQUEST_ID_KEY.to_string(), "newer".to_string())]
-                    .into_iter()
-                    .collect(),
-            ),
-        ])
-        .unwrap();
-        assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn checkpoint_preserves_campaign_progress_for_restart() {
-        let request = request("pro", "resume");
-        let pending = latest_pending_prompt_evaluations_from_events(&[
-            request_event(1, &request),
-            event(
-                2,
-                CHECKPOINT_EVENT,
-                [
-                    (REQUEST_ID_KEY.to_string(), "resume".to_string()),
-                    ("completed_actions".to_string(), "4".to_string()),
-                ]
-                .into_iter()
-                .collect(),
-            ),
-        ])
-        .unwrap();
-        assert_eq!(pending[0].completed_actions, 4);
-    }
-}
+#[path = "prompt_evolution_worker_tests.rs"]
+mod tests;

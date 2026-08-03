@@ -220,7 +220,7 @@ pub fn evaluate_prompt_auto_transfer_gate(
         None,
         &[],
         |observation| {
-            observation.is_scientific_transfer_evidence()
+            observation.is_source_attested_transfer_evidence()
                 && observation
                     .provenance
                     .transfer
@@ -251,7 +251,7 @@ pub fn evaluate_prompt_auto_transfer_gate_in_cohort_with_failures(
         Some(cohort_sha256),
         failures,
         |observation| {
-            observation.is_strict_matched_transfer_evidence()
+            observation.is_strict_source_attested_transfer_evidence()
                 && observation
                     .provenance
                     .transfer
@@ -369,10 +369,6 @@ where
         })
         .collect::<Vec<_>>();
 
-    let complete_keys = candidate_keys
-        .intersection(&stable_keys)
-        .cloned()
-        .collect::<BTreeSet<_>>();
     let mut failure_by_pair = BTreeMap::<PairKey, &PromptPromotionFailurePenalty>::new();
     for failure in failure_penalties.iter().filter(|failure| {
         active_cohort_sha256 == Some(failure.cohort_sha256.as_str())
@@ -384,9 +380,6 @@ where
             continue;
         }
         let key = PairKey::from_failure(failure);
-        if complete_keys.contains(&key) {
-            continue;
-        }
         if failure_by_pair
             .insert(key, failure)
             .is_some_and(|existing| existing != failure)
@@ -394,6 +387,14 @@ where
             blockers.insert(PromptPromotionBlocker::InvalidEvidenceShape);
         }
     }
+
+    let complete_candidate = complete_candidate
+        .into_iter()
+        .filter(|observation| {
+            PairKey::from_observation(observation)
+                .is_some_and(|key| !failure_by_pair.contains_key(&key))
+        })
+        .collect::<Vec<_>>();
 
     let train = complete_candidate
         .iter()
@@ -679,7 +680,23 @@ mod tests {
             "auto-stable",
             auto_profile_sha256.clone(),
             crate::sha256_hex(format!("output-{case_id}").as_bytes()),
-        );
+        )
+        .with_source_context(&crate::AutoTeacherSourceContextV1 {
+            schema: crate::AUTO_TEACHER_SOURCE_CONTEXT_SCHEMA_V1.to_string(),
+            provider_sha256: "1".repeat(64),
+            model_pool_sha256: "2".repeat(64),
+            system_prompt_sha256: "3".repeat(64),
+            policy_sha256: "4".repeat(64),
+            budget_sha256: "5".repeat(64),
+            tool_contract_sha256: "6".repeat(64),
+            source_revision_sha256: "7".repeat(64),
+            workspace_revision_sha256: "8".repeat(64),
+            evaluator_identity_sha256: "9".repeat(64),
+            evaluator_receipt_sha256: "a".repeat(64),
+            checkpoint_sha256: "b".repeat(64),
+            learning_receipt_sha256: "c".repeat(64),
+        })
+        .unwrap();
         let mut candidate = observation(
             "candidate",
             "auto-stable",
@@ -852,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn unobserved_treatment_failure_enters_the_denominator_and_later_pair_recovers() {
+    fn treatment_failure_cannot_be_overridden_by_a_later_pair_for_the_same_attempt() {
         let cohort = "c".repeat(64);
         let mut evidence = complete_evidence();
         bind_matched_cohort(&mut evidence, &cohort);
@@ -889,7 +906,7 @@ mod tests {
         );
         bind_matched_cohort(&mut recovered, &cohort);
         evidence.extend(recovered);
-        let recovered = evaluate_prompt_promotion_gate_with_failures_in_cohort(
+        let still_failed = evaluate_prompt_promotion_gate_with_failures_in_cohort(
             &evidence,
             &[failure],
             "candidate",
@@ -897,8 +914,9 @@ mod tests {
             &cohort,
             config(),
         );
-        assert_eq!(recovered.holdout_runs, 3);
-        assert_eq!(recovered.confidence.losses, 0);
+        assert_eq!(still_failed.holdout_runs, 3);
+        assert_eq!(still_failed.confidence.losses, 1);
+        assert!(still_failed.holdout_average_reward < 0.9);
     }
 
     #[test]

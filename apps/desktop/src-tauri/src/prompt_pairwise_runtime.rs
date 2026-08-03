@@ -66,10 +66,24 @@ pub(crate) fn schedule_prompt_pairwise_evaluation(
     agent_budget: usize,
     current_profile: ConductorPromptGenome,
 ) {
+    let schedule_auto_transfer = effort == "auto";
+    if schedule_auto_transfer {
+        if let Err(error) =
+            crate::prompt_evolution_transfer_outbox::persist_prompt_auto_transfer_intent(
+                &app,
+                &task_id,
+                &run_context,
+            )
+        {
+            eprintln!("prompt Auto transfer intent could not be persisted: {error}");
+            return;
+        }
+    }
     if let Err(error) = enqueue_prompt_pairwise_evaluation(
         &app,
         &task_id,
         &run_context,
+        None,
         effort,
         policy,
         worker_models,
@@ -78,6 +92,75 @@ pub(crate) fn schedule_prompt_pairwise_evaluation(
     ) {
         eprintln!("prompt evaluation request could not be persisted: {error}");
     }
+}
+
+fn prompt_auto_transfer_request(
+    config: &ProviderConfig,
+    model: &PromptEvolutionReadModel,
+) -> Result<(String, String, Vec<String>, usize, ConductorPromptGenome), String> {
+    let effort = AgentPolicy::Pro.label().to_string();
+    let agent_budget = AgentPolicy::Pro.max_parallelism();
+    let worker_models = collaboration_candidate_models(config, agent_budget);
+    if worker_models.is_empty() {
+        return Err("Pro prompt evaluation has no configured worker model".to_string());
+    }
+    let (current_profile, _) = stable_prompt_profile_fingerprint(model, &effort)?;
+    Ok((
+        effort,
+        OrchestrationPolicy::BestOfN {
+            candidates: agent_budget,
+        }
+        .label()
+        .to_string(),
+        worker_models,
+        agent_budget,
+        current_profile.with_effort_delivery_contract(AgentPolicy::Pro.label()),
+    ))
+}
+
+pub(crate) fn enqueue_prompt_auto_transfer_evaluation(
+    app: &tauri::AppHandle,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    request_id: Option<String>,
+) -> Result<bool, String> {
+    let Some(project_id) = run_context
+        .get("project_id")
+        .map(String::as_str)
+        .filter(|project_id| !project_id.trim().is_empty())
+    else {
+        return Ok(false);
+    };
+    let state = app.state::<AppState>();
+    let config = state
+        .provider_config
+        .lock()
+        .map_err(|error| format!("provider config lock poisoned: {error}"))?
+        .clone();
+    if !config.prompt_evolution_enabled || !config.is_ready() {
+        return Ok(false);
+    }
+    let scoped_model = crate::prompt_evolution_store_runtime::with_prompt_evolution_store(
+        &state,
+        |store| {
+        let model = load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
+        Ok(prompt_evolution_read_model_for_scope(&model, project_id))
+        },
+    )?;
+    let (effort, policy, worker_models, agent_budget, current_profile) =
+        prompt_auto_transfer_request(&config, &scoped_model)?;
+    enqueue_prompt_pairwise_evaluation(
+        app,
+        task_id,
+        run_context,
+        request_id,
+        effort,
+        policy,
+        worker_models,
+        agent_budget,
+        current_profile,
+    )?;
+    Ok(true)
 }
 
 fn prompt_evaluation_model_partition(
@@ -154,9 +237,8 @@ fn prompt_pairwise_campaign_snapshot(
         orchestrator::latest_scientific_dataset_digest(&evaluation.observations);
     let is_active_scientific = |observation: &&PromptEvolutionObservation| {
         observation.is_scientific_evidence()
-            && active_cohort_sha256.is_some_and(|digest| {
-                observation.scientific_cohort_sha256() == Some(digest)
-            })
+            && active_cohort_sha256
+                .is_some_and(|digest| observation.scientific_cohort_sha256() == Some(digest))
     };
     let paired_runs = evaluation
         .observations
@@ -242,60 +324,35 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         .map(|root| validate_workspace_root(root))
         .transpose()?
         .unwrap_or(active_workspace_root(state)?);
-    let (
-        evaluation,
-        discovered_dataset,
-        rollout,
-        known_profiles,
-        previous_dataset,
-        auto_stable_profile,
-        scoped_model,
-    ) = {
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|error| format!("store lock poisoned: {error}"))?;
-        let model =
-            load_prompt_evolution_read_model(&mut store).map_err(|error| error.to_string())?;
+    let (model, scoped_model, events) =
+        crate::prompt_evolution_store_runtime::with_prompt_evolution_store(state, |store| {
+        let model = load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
         let scoped_model = prompt_evolution_read_model_for_scope(&model, project_id);
         let events = store
             .list_by_task_and_metadata(task_id, "project_id", project_id)
             .map_err(|error| error.to_string())?;
-        let rollout = scoped_model.rollouts.get(effort).cloned();
-        let known_profiles = scoped_model
-            .genomes
-            .iter()
-            .filter(|record| record.effort == effort)
-            .map(|record| record.genome.clone())
-            .collect::<Vec<_>>();
-        let previous_dataset = model
-            .datasets
-            .get(&prompt_dataset_key(effort, project_id))
-            .cloned();
-        let auto_stable_profile = stable_prompt_profile_fingerprint(&scoped_model, "auto").ok();
-        let preferred_auto_profile = auto_stable_profile
-            .as_ref()
-            .map(|(profile, sha256)| (profile.id.as_str(), sha256.as_str()));
-        let discovered_dataset = prompt_learning_dataset(
-            &events,
-            project_id,
-            preferred_auto_profile,
-        )
+            Ok((model, scoped_model, events))
+        })?;
+    let rollout = scoped_model.rollouts.get(effort).cloned();
+    let known_profiles = scoped_model
+        .genomes
+        .iter()
+        .filter(|record| record.effort == effort)
+        .map(|record| record.genome.clone())
+        .collect::<Vec<_>>();
+    let previous_dataset = model
+        .datasets
+        .get(&prompt_dataset_key(effort, project_id))
+        .cloned();
+    let auto_stable_profile = stable_prompt_profile_fingerprint(&scoped_model, "auto").ok();
+    let preferred_auto_profile = auto_stable_profile
+        .as_ref()
+        .map(|(profile, sha256)| (profile.id.as_str(), sha256.as_str()));
+    let discovered_dataset = prompt_learning_dataset(&events, project_id, preferred_auto_profile)
         .into_iter()
-        .filter(|case| {
-            crate::prompt_learning_runtime::prompt_learning_case_is_safe(case, config)
-        })
+        .filter(|case| crate::prompt_learning_runtime::prompt_learning_case_is_safe(case, config))
         .collect();
-        (
-            evaluate_prompt_evolution_read_model(&scoped_model, effort)?,
-            discovered_dataset,
-            rollout,
-            known_profiles,
-            previous_dataset,
-            auto_stable_profile,
-            scoped_model,
-        )
-    };
+    let evaluation = evaluate_prompt_evolution_read_model(&scoped_model, effort)?;
     let campaign_generation = evaluation
         .population
         .iter()
@@ -308,9 +365,10 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         previous_dataset.as_ref(),
         campaign_generation,
     )?;
-    if dataset.iter().any(|case| {
-        !crate::prompt_learning_runtime::prompt_learning_case_is_safe(case, config)
-    }) {
+    if dataset
+        .iter()
+        .any(|case| !crate::prompt_learning_runtime::prompt_learning_case_is_safe(case, config))
+    {
         return Err("frozen prompt dataset contains residual sensitive data".to_string());
     }
     if dataset.len() < PROMPT_EVOLUTION_OFFLINE_MIN_CASES {
@@ -518,11 +576,8 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
     let excluded_reviewer_models = auto_teacher
         .map(|teacher| teacher.participant_models.iter().cloned().collect())
         .unwrap_or_default();
-    let (evaluation_worker_models, reserved_evaluator_models) = prompt_evaluation_model_partition(
-        config,
-        worker_models,
-        &excluded_reviewer_models,
-    );
+    let (evaluation_worker_models, reserved_evaluator_models) =
+        prompt_evaluation_model_partition(config, worker_models, &excluded_reviewer_models);
     if reserved_evaluator_models.is_empty() {
         return Ok(false);
     }
@@ -553,11 +608,8 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
             PromptEvaluationMode::Live => "prompt-live",
         }),
     );
-    let mut candidate_lanes = PromptTreatmentControlGroup::new(
-        control.as_ref(),
-        2,
-        PROMPT_MATCHED_EVALUATION_LANES,
-    )?;
+    let mut candidate_lanes =
+        PromptTreatmentControlGroup::new(control.as_ref(), 2, PROMPT_MATCHED_EVALUATION_LANES)?;
     let current_control = candidate_lanes.lane(0);
     let challenger_control = candidate_lanes.lane(1);
     let matched_treatment_budget = candidate_lanes.lane_budget();
@@ -823,21 +875,20 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
     }
     if control.should_stop() {
         let reason = control.stop_reason();
-        let (status, reason_code, error) = if reason
-            == Some(agent_runtime::RunStopReason::UserCancelled)
-        {
-            (
-                PromptEvaluationAttemptStatus::ForegroundPreempted,
-                "foreground_preempted",
-                MODEL_REQUEST_CANCELLED.to_string(),
-            )
-        } else {
-            (
-                PromptEvaluationAttemptStatus::InfrastructureInvalid,
-                "parent_budget_exhausted",
-                "prompt evaluation parent budget expired before persistence".to_string(),
-            )
-        };
+        let (status, reason_code, error) =
+            if reason == Some(agent_runtime::RunStopReason::UserCancelled) {
+                (
+                    PromptEvaluationAttemptStatus::ForegroundPreempted,
+                    "foreground_preempted",
+                    MODEL_REQUEST_CANCELLED.to_string(),
+                )
+            } else {
+                (
+                    PromptEvaluationAttemptStatus::InfrastructureInvalid,
+                    "parent_budget_exhausted",
+                    "prompt evaluation parent budget expired before persistence".to_string(),
+                )
+            };
         attempt.finish(status, reason_code)?;
         return Err(error);
     }
@@ -918,7 +969,9 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
     );
     let lease = match control.execution_epoch_lease() {
         agent_runtime::RunEpochLeaseOutcome::Acquired(lease) => lease,
-        agent_runtime::RunEpochLeaseOutcome::Stopped(agent_runtime::RunStopReason::UserCancelled) => {
+        agent_runtime::RunEpochLeaseOutcome::Stopped(
+            agent_runtime::RunStopReason::UserCancelled,
+        ) => {
             attempt.finish(
                 PromptEvaluationAttemptStatus::ForegroundPreempted,
                 "foreground_preempted",
@@ -1006,16 +1059,15 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         &reviewer_model,
         [candidate_a, candidate_b],
     )?;
-    let next_evaluation = {
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let next_evaluation = crate::prompt_evolution_store_runtime::with_prompt_evolution_store(
+        state,
+        |store| {
         let model =
-            load_prompt_evolution_read_model(&mut store).map_err(|error| error.to_string())?;
+            load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
         let scoped_model = prompt_evolution_read_model_for_scope(&model, project_id);
-        evaluate_prompt_evolution_read_model(&scoped_model, effort)?
-    };
+            evaluate_prompt_evolution_read_model(&scoped_model, effort)
+        },
+    )?;
     if let Some(parent) = next_evaluation.mutation_parent.as_ref() {
         if attempted_mutation_parent.as_deref() != Some(parent.id.as_str()) {
             let _ = generate_background_prompt_mutation(
@@ -1031,4 +1083,30 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod scheduling_tests {
+    use super::*;
+
+    #[test]
+    fn auto_transfer_followup_uses_the_current_pro_contract() {
+        let config = ProviderConfig {
+            planner_model: "planner".to_string(),
+            executor_model: "executor".to_string(),
+            reviewer_model: "reviewer".to_string(),
+            ..ProviderConfig::default()
+        };
+        let model = build_prompt_evolution_read_model(&[], 0, 0);
+
+        let (effort, policy, worker_models, agent_budget, profile) =
+            prompt_auto_transfer_request(&config, &model).unwrap();
+
+        assert_eq!(effort, "pro");
+        assert_eq!(policy, "best_of_n");
+        assert_eq!(agent_budget, AgentPolicy::Pro.max_parallelism());
+        assert_eq!(worker_models, vec!["planner", "executor", "reviewer"]);
+        assert_eq!(profile.id, ConductorPromptGenome::seed_for_effort("pro").id);
+        assert!(profile.require_final_synthesis);
+    }
 }

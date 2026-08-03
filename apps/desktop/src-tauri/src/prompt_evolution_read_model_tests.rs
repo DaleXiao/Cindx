@@ -1,13 +1,13 @@
 use super::*;
-use agent_core::{EventTypeV1, EVENT_TYPE_METADATA_KEY};
 use crate::prompt_attempt_runtime::{
     PROMPT_EVALUATION_ATTEMPT_EVENT, PROMPT_EVALUATION_ATTEMPT_METADATA_KEY,
 };
+use agent_core::{EventTypeV1, EVENT_TYPE_METADATA_KEY};
 use orchestrator::{
-    LearningAttribution, LearningTermination, PromptDatasetCaseIdentityV1,
-    PromptDatasetIdentityV1, PromptEvaluationAttemptEventV1, PromptEvaluationAttemptStatus,
-    PromptExecutionContextV1, PromptLearningCohortV1, PromptMatchedEvaluationIdentityV1,
-    PromptTransferProvenance, PromptTreatmentIdentityV1, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
+    LearningAttribution, LearningTermination, PromptDatasetCaseIdentityV1, PromptDatasetIdentityV1,
+    PromptEvaluationAttemptEventV1, PromptEvaluationAttemptStatus, PromptExecutionContextV1,
+    PromptLearningCohortV1, PromptMatchedEvaluationIdentityV1, PromptTransferProvenance,
+    PromptTreatmentIdentityV1, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
 };
 
 fn context_metadata() -> Metadata {
@@ -40,6 +40,43 @@ fn event(
         summary: summary.to_string(),
         metadata,
     }
+}
+
+fn prompt_rollout_event(
+    sequence: u64,
+    status: &str,
+    stable_profile_id: &str,
+    canary_profile_id: Option<&str>,
+    canary_percent: u8,
+    rollback_count: usize,
+    frozen_profile: Option<&FrozenPromptProfileSnapshot>,
+) -> Event {
+    event(
+        sequence,
+        EventKind::TaskStatusChanged,
+        "Conductor prompt rollout updated",
+        [
+            ("project_id".to_string(), "project-a".to_string()),
+            ("prompt_effort".to_string(), "auto".to_string()),
+            ("prompt_rollout_scope".to_string(), "project-a".to_string()),
+            ("stable_profile".to_string(), stable_profile_id.to_string()),
+            (
+                "canary_profile".to_string(),
+                canary_profile_id.unwrap_or_default().to_string(),
+            ),
+            ("canary_percent".to_string(), canary_percent.to_string()),
+            ("rollout_status".to_string(), status.to_string()),
+            ("evidence_checkpoint".to_string(), sequence.to_string()),
+            ("live_checkpoint".to_string(), sequence.to_string()),
+            ("rollback_count".to_string(), rollback_count.to_string()),
+            (
+                "frozen_prompt_profile".to_string(),
+                frozen_profile
+                    .map(|snapshot| serde_json::to_string(snapshot).unwrap())
+                    .unwrap_or_default(),
+            ),
+        ],
+    )
 }
 
 fn complete_run_lineage(total_tokens: &str) -> Vec<(String, String)> {
@@ -555,13 +592,30 @@ fn auto_transfer_event_enters_only_its_scoped_read_model() {
         PromptEvaluationMode::PairedExecution,
     )
     .unwrap();
+    let source_context = orchestrator::AutoTeacherSourceContextV1 {
+        schema: orchestrator::AUTO_TEACHER_SOURCE_CONTEXT_SCHEMA_V1.to_string(),
+        provider_sha256: "1".repeat(64),
+        model_pool_sha256: "2".repeat(64),
+        system_prompt_sha256: "3".repeat(64),
+        policy_sha256: "4".repeat(64),
+        budget_sha256: "5".repeat(64),
+        tool_contract_sha256: "6".repeat(64),
+        source_revision_sha256: "7".repeat(64),
+        workspace_revision_sha256: "8".repeat(64),
+        evaluator_identity_sha256: "9".repeat(64),
+        evaluator_receipt_sha256: "a".repeat(64),
+        checkpoint_sha256: "b".repeat(64),
+        learning_receipt_sha256: "c".repeat(64),
+    };
     let transfer = PromptTransferProvenance::auto_to_pro(
         "auto-source-run",
         2,
         auto_profile,
         auto_sha256.clone(),
         sha256_hex(b"verified Auto output"),
-    );
+    )
+    .with_source_context(&source_context)
+    .unwrap();
     let observation = |profile_id: &str,
                        opponent_id: &str,
                        candidate_sha256: String,
@@ -607,7 +661,7 @@ fn auto_transfer_event_enters_only_its_scoped_read_model() {
         observation(
             auto_profile,
             pro_profile,
-            auto_sha256,
+            auto_sha256.clone(),
             pro_sha256.clone(),
             -0.2,
         ),
@@ -638,6 +692,21 @@ fn auto_transfer_event_enters_only_its_scoped_read_model() {
     };
 
     let mut model = build_prompt_evolution_read_model(std::slice::from_ref(&transfer_event), 1, 1);
+    assert!(
+        model.observations.is_empty(),
+        "a transfer event cannot attest its own canonical Auto source"
+    );
+    model.observations = prompt_observation_records_from_event_with_canonical_teacher(
+        &transfer_event,
+        Some(CanonicalPromptAutoTeacher {
+            source_run_id: "auto-source-run",
+            steer_epoch: 2,
+            profile_id: auto_profile,
+            profile_sha256: &auto_sha256,
+            output_sha256: &sha256_hex(b"verified Auto output"),
+            source_context: &source_context,
+        }),
+    );
     assert_eq!(model.observations.len(), 2);
     assert!(prompt_evolution_read_model_for_scope(&model, project_id)
         .observations
@@ -664,9 +733,7 @@ fn auto_transfer_event_enters_only_its_scoped_read_model() {
         "",
     )
     .unwrap();
-    model
-        .cohorts
-        .insert(cohort.cohort_sha256.clone(), cohort);
+    model.cohorts.insert(cohort.cohort_sha256.clone(), cohort);
     model.attempts.insert(
         started.identity.evaluation_id.clone(),
         PromptEvaluationAttemptState {
@@ -769,6 +836,116 @@ fn legacy_unscoped_prompt_genomes_force_a_read_model_rebuild() {
 }
 
 #[test]
+fn prompt_rollout_replay_rejects_forged_stable_canary_and_status() {
+    let seed = ConductorPromptGenome::seed_for_effort("auto");
+    let candidate = seed
+        .mutations()
+        .into_iter()
+        .next()
+        .expect("Auto seed should provide a canary");
+    let snapshot_only_canary =
+        prompt_rollout_event(2, "canary", &seed.id, Some(&candidate.id), 10, 0, None);
+    let events = vec![
+        prompt_rollout_event(1, "stable", "forged-stable", None, 0, 0, None),
+        snapshot_only_canary,
+        prompt_rollout_event(
+            3,
+            "canary",
+            "forged-stable",
+            Some(&candidate.id),
+            20,
+            0,
+            None,
+        ),
+        prompt_rollout_event(4, "canary", &seed.id, Some(&candidate.id), 51, 0, None),
+        prompt_rollout_event(5, "stable", &seed.id, Some(&candidate.id), 10, 0, None),
+        prompt_rollout_event(6, "future", &seed.id, None, 0, 0, None),
+    ];
+
+    let model = build_prompt_evolution_read_model(&events, 6, events.len() as u64);
+    assert!(model.rollouts.is_empty());
+}
+
+#[test]
+fn prompt_rollout_transition_accepts_legal_rollback_and_atomic_promotion() {
+    let seed = ConductorPromptGenome::seed_for_effort("auto");
+    let candidate = seed
+        .mutations()
+        .into_iter()
+        .next()
+        .expect("Auto seed should provide a canary");
+    let frozen = FrozenPromptProfileSnapshot::new_gepa(
+        "auto",
+        candidate.clone(),
+        seed.id.clone(),
+        "a".repeat(64),
+        "b".repeat(64),
+    )
+    .expect("promotion snapshot should be valid");
+    let events = vec![
+        prompt_rollout_event(1, "canary", &seed.id, Some(&candidate.id), 10, 0, None),
+        prompt_rollout_event(2, "canary", &seed.id, Some(&candidate.id), 50, 0, None),
+        prompt_rollout_event(3, "rolled_back", &seed.id, None, 0, 1, None),
+        prompt_rollout_event(4, "canary", &seed.id, Some(&candidate.id), 10, 1, None),
+        prompt_rollout_event(5, "promoted", &candidate.id, None, 0, 1, Some(&frozen)),
+        prompt_rollout_event(6, "stable", &candidate.id, None, 0, 1, Some(&frozen)),
+    ];
+
+    let mut previous = None;
+    for event in &events {
+        let (_, effort, rollout) = prompt_rollout_record_from_event(event).unwrap();
+        assert!(prompt_rollout_transition_is_valid(
+            &effort,
+            previous.as_ref(),
+            &rollout
+        ));
+        previous = Some(rollout);
+    }
+    let rollout = previous.expect("legal rollout history should remain structurally valid");
+    assert_eq!(rollout.status, "stable");
+    assert_eq!(rollout.stable_profile_id, candidate.id);
+    assert_eq!(rollout.rollback_count, 1);
+    assert_eq!(rollout.frozen_profile.as_ref(), Some(&frozen));
+}
+
+#[test]
+fn prompt_rollout_replay_rejects_snapshot_only_initial_promotion() {
+    let seed = ConductorPromptGenome::seed_for_effort("auto");
+    let candidate = seed
+        .mutations()
+        .into_iter()
+        .next()
+        .expect("Auto seed should provide a promoted profile");
+    let frozen = FrozenPromptProfileSnapshot::new_gepa(
+        "auto",
+        candidate.clone(),
+        seed.id.clone(),
+        "c".repeat(64),
+        "d".repeat(64),
+    )
+    .expect("promotion snapshot should be valid");
+    let snapshot_only =
+        prompt_rollout_event(1, "promoted", &candidate.id, None, 0, 0, Some(&frozen));
+    let mut wrong_anchor = frozen.clone();
+    wrong_anchor.stable_profile_id = "forged-previous-stable".to_string();
+    let invalid = prompt_rollout_event(
+        1,
+        "promoted",
+        &candidate.id,
+        None,
+        0,
+        0,
+        Some(&wrong_anchor),
+    );
+
+    let rejected_snapshot = build_prompt_evolution_read_model(&[snapshot_only], 1, 1);
+    let rejected = build_prompt_evolution_read_model(&[invalid], 1, 1);
+
+    assert!(rejected_snapshot.rollouts.is_empty());
+    assert!(rejected.rollouts.is_empty());
+}
+
+#[test]
 fn matched_attempt_lifecycle_persists_one_terminal_and_keeps_failures_in_the_read_model() {
     let dataset = PromptDatasetIdentityV1::new(
         "project-a",
@@ -842,10 +1019,7 @@ fn matched_attempt_lifecycle_persists_one_terminal_and_keeps_failures_in_the_rea
         summary: PROMPT_EVALUATION_ATTEMPT_EVENT.to_string(),
         metadata: [
             ("project_id".to_string(), "project-a".to_string()),
-            (
-                "prompt_evaluation_id".to_string(),
-                evaluation_id.clone(),
-            ),
+            ("prompt_evaluation_id".to_string(), evaluation_id.clone()),
             (
                 PROMPT_EVALUATION_ATTEMPT_METADATA_KEY.to_string(),
                 serde_json::to_string(attempt).unwrap(),
@@ -909,12 +1083,9 @@ fn matched_attempt_lifecycle_persists_one_terminal_and_keeps_failures_in_the_rea
     model
         .observations
         .push(("auto".to_string(), observation.clone()));
-    assert_eq!(
-        prompt_evolution_read_model_for_scope(&model, "project-a")
-            .observations
-            .len(),
-        1
-    );
+    assert!(prompt_evolution_read_model_for_scope(&model, "project-a")
+        .observations
+        .is_empty());
 
     let mut missing_terminal = build_prompt_evolution_read_model(&[started_event], 1, 1);
     missing_terminal

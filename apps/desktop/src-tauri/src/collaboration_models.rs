@@ -219,6 +219,7 @@ pub(crate) struct PromptAutoTeacherCase {
     pub(crate) profile_id: String,
     pub(crate) profile_sha256: String,
     pub(crate) output_sha256: String,
+    pub(crate) source_context: orchestrator::AutoTeacherSourceContextV1,
     pub(crate) genome: ConductorPromptGenome,
     pub(crate) plan: WorkflowPlanIr,
     pub(crate) steps: Vec<PromptAutoTeacherStep>,

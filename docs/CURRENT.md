@@ -106,10 +106,22 @@ Pro also has an Auto-to-Pro transfer track. A completed Auto workflow becomes a
 teacher case only when its terminal evidence is positive, independently scored,
 usage-complete, bound to the final steer epoch, free of denied permissions and
 safety violations, and reconstructable from a finalized workflow checkpoint.
-The archived case contains redacted bounded outputs and immutable fingerprints;
-it is never accepted from a model claim alone. Its source steer epoch is part
-of the transfer lineage and dataset digest, so evidence from an earlier user
-objective cannot be reused after steering.
+The independent score must carry a completed provider request receipt from a
+dedicated reviewer request that did not author or execute the workflow;
+synthetic or legacy scores cannot become teachers. A different evaluator model
+is preferred when one is available, while same-model review remains explicitly
+represented as a separate request rather than model diversity. The receipt
+hashes the exact bounded artifact reviewed by that provider call, and the
+archived teacher output is reconstructed from a matching persisted model result
+or finalized checkpoint rather than a later unreviewed user-facing answer. The
+evaluator request identity is checked against the runtime coordinator,
+checkpoint steps, repairs, synthesis, and terminal artifact author, not only the
+declared plan. The archived case contains
+redacted bounded outputs and fingerprints for provider/model identity, system
+prompt, policy, budget, tool contract, source/workspace evidence, evaluator
+receipt, finalized checkpoint, and learning receipt. Its source steer epoch is
+part of the transfer lineage and dataset digest, so evidence from an earlier
+user objective cannot be reused after steering.
 
 In background evaluation, current and challenger Pro profiles execute the same
 objective and are compared with the archived Auto result by an independent,
@@ -123,13 +135,24 @@ reflection batch.
 
 Transfer observations are appended as one mirrored pair and enter the canonical
 evolution read model only when both sides are scientific, project-scoped, and
-bound to the same archived Auto run and profile. Projection version 3 rebuilds
-older caches from canonical events instead of silently preserving the previous
-projection that omitted transfer events. Background requests are coalesced by
-project and effort; activity in one project cannot replace another project's
-pending campaign. When repeated objectives have multiple qualified Auto
-teachers, the current stable Auto profile is selected before stale profiles,
-then independently measured quality and resource use break ties.
+bound to the same source-attested Auto run and profile. Legacy transfer records
+without this lineage fail closed. Projection version 3 rebuilds older caches
+from canonical events instead of silently preserving the previous projection
+that omitted transfer events. A completed Auto run schedules its project-scoped
+Pro learning intent durably; the background worker dispatches and idempotently
+replays that intent after interruption. Background requests are
+coalesced by project and effort; activity in one project cannot replace another
+project's pending campaign. Campaign wall time, tokens, and physical provider
+attempts survive request-scoped action events as well as checkpoints and are
+never replenished by malformed or interrupted recovery state. When repeated
+objectives have multiple qualified Auto teachers, the
+current stable Auto profile is selected before stale profiles, then
+independently measured quality and resource use break ties.
+
+Canary traffic is capped at 50 percent. A challenger can become the stable
+profile only by first producing a valid immutable frozen snapshot; missing or
+regressed ordinary/transfer lineage rolls the canary back and preserves the
+previous stable profile.
 
 Reflective mutations may learn a general strategy from redacted trajectories,
 but a deterministic validator rejects candidate directives that contain case,

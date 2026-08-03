@@ -1,4 +1,8 @@
 use super::*;
+use crate::prompt_evolution_projection_contract::{
+    prompt_auto_teacher_source_key, prompt_transfer_matches_canonical_teacher,
+    CanonicalPromptAutoTeacher,
+};
 use orchestrator::{
     IndependentQualitySource, LearningAttribution, LearningDisposition, LearningEvidenceV1,
     LearningUsageCompleteness,
@@ -62,9 +66,9 @@ pub(crate) fn prompt_genomes_from_events(
     population
 }
 
-pub(crate) fn prompt_evolution_observations_from_events(
+fn prompt_evolution_observation_records_from_events(
     events: &[Event],
-) -> Vec<(String, PromptEvolutionObservation)> {
+) -> Vec<(u64, String, PromptEvolutionObservation)> {
     let mut workflows = BTreeMap::<String, Vec<&Event>>::new();
     let mut agent_runs = BTreeMap::<String, Vec<&Event>>::new();
     for event in events {
@@ -242,7 +246,7 @@ pub(crate) fn prompt_evolution_observations_from_events(
                 None
             };
             Some((
-                profile_event.sequence,
+                terminal.sequence,
                 effort,
                 PromptEvolutionObservation {
                     profile_id,
@@ -274,13 +278,40 @@ pub(crate) fn prompt_evolution_observations_from_events(
             ))
         })
         .collect::<Vec<_>>();
-    runs.extend(events.iter().flat_map(|event| {
-        prompt_observation_records_from_event(event)
-            .into_iter()
-            .map(|(effort, observation)| (event.sequence, effort, observation))
-    }));
+    let mut auto_teacher_cache = BTreeMap::<(String, String), Option<PromptAutoTeacherCase>>::new();
+    for event in events {
+        let source_key = prompt_auto_teacher_source_key(event);
+        if let Some((project_id, source_run_id)) = source_key.as_ref() {
+            auto_teacher_cache
+                .entry((project_id.clone(), source_run_id.clone()))
+                .or_insert_with(|| {
+                    crate::prompt_evidence_runtime::reconstruct_prompt_auto_teacher_from_canonical_events(
+                        events,
+                        project_id,
+                        source_run_id,
+                    )
+                });
+        }
+        let canonical_teacher = source_key
+            .as_ref()
+            .and_then(|key| auto_teacher_cache.get(key))
+            .and_then(Option::as_ref)
+            .map(CanonicalPromptAutoTeacher::from);
+        runs.extend(
+            prompt_observation_records_from_event_with_canonical_teacher(event, canonical_teacher)
+                .into_iter()
+                .map(|(effort, observation)| (event.sequence, effort, observation)),
+        );
+    }
     runs.sort_by_key(|(sequence, _, _)| *sequence);
-    runs.into_iter()
+    runs
+}
+
+pub(crate) fn prompt_evolution_observations_from_events(
+    events: &[Event],
+) -> Vec<(String, PromptEvolutionObservation)> {
+    prompt_evolution_observation_records_from_events(events)
+        .into_iter()
         .map(|(_, effort, observation)| (effort, observation))
         .collect()
 }
@@ -336,8 +367,9 @@ pub(crate) fn prompt_genome_records_from_event(event: &Event) -> Vec<PromptGenom
         .collect()
 }
 
-pub(crate) fn prompt_observation_records_from_event(
+fn prompt_observation_records_from_event_with_canonical_teacher(
     event: &Event,
+    canonical_teacher: Option<CanonicalPromptAutoTeacher<'_>>,
 ) -> Vec<(String, PromptEvolutionObservation)> {
     let is_transfer = match event.summary.as_str() {
         "Conductor pairwise evaluation" => false,
@@ -395,8 +427,8 @@ pub(crate) fn prompt_observation_records_from_event(
         };
         if observations.len() != 2
             || effort != "pro"
-            || !candidate.is_strict_matched_transfer_evidence()
-            || !teacher.is_strict_matched_transfer_evidence()
+            || !candidate.is_strict_source_attested_transfer_evidence()
+            || !teacher.is_strict_source_attested_transfer_evidence()
             || candidate.evaluation_id != teacher.evaluation_id
             || candidate.case_id != teacher.case_id
             || candidate.split != teacher.split
@@ -404,12 +436,14 @@ pub(crate) fn prompt_observation_records_from_event(
             || candidate.opponent_profile_id.as_deref() != Some(teacher.profile_id.as_str())
             || teacher.opponent_profile_id.as_deref() != Some(candidate.profile_id.as_str())
             || candidate.provenance.transfer != teacher.provenance.transfer
-            || candidate.provenance.matched_evaluation
-                != teacher.provenance.matched_evaluation
+            || candidate.provenance.matched_evaluation != teacher.provenance.matched_evaluation
         {
             return Vec::new();
         }
         let Some(transfer) = candidate.provenance.transfer.as_ref() else {
+            return Vec::new();
+        };
+        let Some(canonical_teacher) = canonical_teacher else {
             return Vec::new();
         };
         let Some(project_id) = event.metadata.get("project_id") else {
@@ -419,6 +453,8 @@ pub(crate) fn prompt_observation_records_from_event(
             || !prompt_observation_matches_scope(teacher, project_id)
             || event.metadata.get("auto_teacher_profile") != Some(&transfer.source_profile_id)
             || event.metadata.get("auto_teacher_run_id") != Some(&transfer.source_run_id)
+            || teacher.profile_id != canonical_teacher.profile_id
+            || !prompt_transfer_matches_canonical_teacher(transfer, canonical_teacher)
         {
             return Vec::new();
         }
@@ -429,9 +465,14 @@ pub(crate) fn prompt_observation_records_from_event(
         .collect()
 }
 
-pub(crate) fn prompt_rollout_record_from_event(
+#[cfg(test)]
+pub(crate) fn prompt_observation_records_from_event(
     event: &Event,
-) -> Option<(String, PromptRolloutState)> {
+) -> Vec<(String, PromptEvolutionObservation)> {
+    prompt_observation_records_from_event_with_canonical_teacher(event, None)
+}
+
+fn prompt_rollout_record_from_event(event: &Event) -> Option<(String, String, PromptRolloutState)> {
     if event.summary != "Conductor prompt rollout updated" {
         return None;
     }
@@ -458,40 +499,50 @@ pub(crate) fn prompt_rollout_record_from_event(
             .metadata
             .get(key)
             .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or_default()
     };
     let status = event
         .metadata
         .get("rollout_status")
-        .cloned()
-        .unwrap_or_else(|| "stable".to_string());
-    let frozen_profile = event
-        .metadata
-        .get("frozen_prompt_profile")
-        .filter(|value| !value.trim().is_empty())
-        .and_then(|value| serde_json::from_str::<FrozenPromptProfileSnapshot>(value).ok())
-        .filter(|snapshot| {
-            snapshot.validate().is_ok()
-                && snapshot.effort == effort
-                && snapshot.genome.id == stable_profile_id
-        });
-    if status == "promoted" && frozen_profile.is_none() {
+        .filter(|status| {
+            matches!(
+                status.as_str(),
+                "stable" | "evaluating" | "canary" | "rolled_back" | "promoted"
+            )
+        })?
+        .clone();
+    let frozen_profile = match optional_text("frozen_prompt_profile") {
+        Some(value) => Some(
+            serde_json::from_str::<FrozenPromptProfileSnapshot>(&value)
+                .ok()
+                .filter(|snapshot| {
+                    snapshot.validate().is_ok()
+                        && snapshot.effort == effort
+                        && snapshot.genome.id == stable_profile_id
+                })?,
+        ),
+        None => None,
+    };
+    let canary_profile_id = optional_text("canary_profile");
+    let canary_percent = event.metadata.get("canary_percent")?.parse::<u8>().ok()?;
+    let has_canary = status == "canary"
+        && canary_profile_id
+            .as_ref()
+            .is_some_and(|canary| canary != &stable_profile_id)
+        && (1..=50).contains(&canary_percent);
+    let has_no_canary = status != "canary" && canary_profile_id.is_none() && canary_percent == 0;
+    if !has_canary && !has_no_canary {
         return None;
     }
     Some((
         rollout_key,
+        effort,
         PromptRolloutState {
             stable_profile_id,
-            canary_profile_id: optional_text("canary_profile"),
-            canary_percent: event
-                .metadata
-                .get("canary_percent")
-                .and_then(|value| value.parse::<u8>().ok())
-                .unwrap_or_default()
-                .min(100),
-            evidence_checkpoint: parse_usize("evidence_checkpoint"),
-            live_checkpoint: parse_usize("live_checkpoint"),
-            rollback_count: parse_usize("rollback_count"),
+            canary_profile_id,
+            canary_percent,
+            evidence_checkpoint: parse_usize("evidence_checkpoint")?,
+            live_checkpoint: parse_usize("live_checkpoint")?,
+            rollback_count: parse_usize("rollback_count")?,
             status,
             last_reason: optional_text("rollout_reason"),
             promotion_confidence: event
@@ -502,6 +553,86 @@ pub(crate) fn prompt_rollout_record_from_event(
             frozen_profile,
         },
     ))
+}
+
+fn prompt_rollout_transition_is_valid(
+    effort: &str,
+    previous: Option<&PromptRolloutState>,
+    next: &PromptRolloutState,
+) -> bool {
+    let seed_id = ConductorPromptGenome::seed_for_effort(effort).id;
+    let frozen_is_valid = |snapshot: &FrozenPromptProfileSnapshot| {
+        snapshot.validate().is_ok()
+            && snapshot.effort == effort
+            && snapshot.genome.id == next.stable_profile_id
+    };
+    let Some(previous) = previous else {
+        return if next.status == "promoted" {
+            next.stable_profile_id != seed_id
+                && next.rollback_count == 0
+                && next.frozen_profile.as_ref().is_some_and(|snapshot| {
+                    frozen_is_valid(snapshot) && snapshot.stable_profile_id == seed_id
+                })
+        } else {
+            next.status != "rolled_back"
+                && next.stable_profile_id == seed_id
+                && next.frozen_profile.is_none()
+                && next.rollback_count == 0
+        };
+    };
+    let expected_rollback_count = if next.status == "rolled_back" {
+        previous.rollback_count.checked_add(1)
+    } else {
+        Some(previous.rollback_count)
+    };
+    if expected_rollback_count != Some(next.rollback_count) {
+        return false;
+    }
+    if previous.canary_profile_id.is_some()
+        && !matches!(next.status.as_str(), "canary" | "rolled_back" | "promoted")
+    {
+        return false;
+    }
+    if previous.canary_profile_id.is_none() && next.status == "rolled_back" {
+        return false;
+    }
+    if next.status == "promoted" {
+        previous.canary_profile_id.as_deref() == Some(next.stable_profile_id.as_str())
+            && next.stable_profile_id != previous.stable_profile_id
+            && next.frozen_profile.as_ref().is_some_and(|snapshot| {
+                frozen_is_valid(snapshot)
+                    && snapshot.stable_profile_id == previous.stable_profile_id
+            })
+    } else {
+        next.stable_profile_id == previous.stable_profile_id
+            && next.frozen_profile == previous.frozen_profile
+    }
+}
+
+fn apply_prompt_rollout_event(model: &mut PromptEvolutionReadModel, event: &Event) {
+    let Some((key, effort, rollout)) = prompt_rollout_record_from_event(event) else {
+        return;
+    };
+    let previous = model.rollouts.get(&key).cloned();
+    if !prompt_rollout_transition_is_valid(&effort, previous.as_ref(), &rollout) {
+        return;
+    }
+    let scope = event
+        .metadata
+        .get("prompt_rollout_scope")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .unwrap_or("global");
+    let scoped = prompt_evolution_read_model_for_scope(model, scope);
+    if crate::prompt_rollout_runtime::prompt_rollout_transition_has_canonical_evidence(
+        &scoped,
+        &effort,
+        previous.as_ref(),
+        &rollout,
+    ) {
+        model.rollouts.insert(key, rollout);
+    }
 }
 
 const PROMPT_EVIDENCE_SCOPE_SEPARATOR: &str = "::";
@@ -567,7 +698,8 @@ pub(crate) fn prompt_evolution_read_model_for_scope(
                                         )
                                         && attempt.terminal.as_ref().is_some_and(|terminal| {
                                             terminal.identity == *identity
-                                                && terminal.enters_effect_denominator()
+                                                && terminal.status
+                                                    == PromptEvaluationAttemptStatus::CompletedPair
                                         })
                                 })
                     }),
@@ -638,11 +770,13 @@ fn upsert_prompt_learning_cohort(
     while cohorts.len() > crate::prompt_attempt_runtime::PROMPT_LEARNING_COHORT_RETENTION {
         let Some(oldest) = cohort_sequences
             .iter()
-            .min_by(|(left_digest, left_sequence), (right_digest, right_sequence)| {
-                left_sequence
-                    .cmp(right_sequence)
-                    .then_with(|| left_digest.cmp(right_digest))
-            })
+            .min_by(
+                |(left_digest, left_sequence), (right_digest, right_sequence)| {
+                    left_sequence
+                        .cmp(right_sequence)
+                        .then_with(|| left_digest.cmp(right_digest))
+                },
+            )
             .map(|(digest, _)| digest.clone())
         else {
             break;
@@ -759,14 +893,11 @@ pub(crate) fn upsert_prompt_genome(
     records: &mut Vec<PromptGenomeRecord>,
     record: PromptGenomeRecord,
 ) {
-    if let Some(existing) = records
-        .iter_mut()
-        .find(|existing| {
-            existing.scope == record.scope
-                && existing.effort == record.effort
-                && existing.genome.id == record.genome.id
-        })
-    {
+    if let Some(existing) = records.iter_mut().find(|existing| {
+        existing.scope == record.scope
+            && existing.effort == record.effort
+            && existing.genome.id == record.genome.id
+    }) {
         *existing = record;
     } else {
         records.push(record);
@@ -794,49 +925,60 @@ pub(crate) fn build_prompt_evolution_read_model(
     revision: u64,
     event_count: u64,
 ) -> PromptEvolutionReadModel {
-    let mut genomes = Vec::new();
-    let mut rollouts = BTreeMap::new();
-    let mut datasets = BTreeMap::new();
-    let mut attempts = BTreeMap::new();
-    let mut cohorts = BTreeMap::new();
-    let mut cohort_sequences = BTreeMap::new();
-    for event in events {
-        for record in prompt_genome_records_from_event(event) {
-            upsert_prompt_genome(&mut genomes, record);
-        }
-        if let Some((effort, rollout)) = prompt_rollout_record_from_event(event) {
-            rollouts.insert(effort, rollout);
-        }
-        if let Some((key, dataset)) = prompt_dataset_record_from_event(event) {
-            datasets.insert(key, dataset);
-        }
-        if let Some(attempt) = crate::prompt_attempt_runtime::prompt_evaluation_attempt_from_event(event)
-        {
-            upsert_prompt_evaluation_attempt(&mut attempts, attempt);
-        }
-        if let Some(cohort) = crate::prompt_attempt_runtime::prompt_learning_cohort_from_event(event)
-        {
-            upsert_prompt_learning_cohort(
-                &mut cohorts,
-                &mut cohort_sequences,
-                cohort,
-                event.sequence,
-            );
-        }
-    }
-    PromptEvolutionReadModel {
+    let mut model = PromptEvolutionReadModel {
         schema: PROMPT_EVOLUTION_READ_MODEL_NAMESPACE.to_string(),
         projection_version: PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION,
         revision,
         event_count,
-        genomes,
-        observations: prompt_evolution_observations_from_events(events),
-        attempts,
-        cohorts,
-        cohort_sequences,
-        rollouts,
-        datasets,
+        genomes: Vec::new(),
+        observations: Vec::new(),
+        attempts: BTreeMap::new(),
+        cohorts: BTreeMap::new(),
+        cohort_sequences: BTreeMap::new(),
+        rollouts: BTreeMap::new(),
+        datasets: BTreeMap::new(),
+    };
+    let mut observations_by_sequence =
+        BTreeMap::<u64, Vec<(String, PromptEvolutionObservation)>>::new();
+    for (sequence, effort, observation) in prompt_evolution_observation_records_from_events(events)
+    {
+        observations_by_sequence
+            .entry(sequence)
+            .or_default()
+            .push((effort, observation));
     }
+    let mut ordered_events = events.iter().collect::<Vec<_>>();
+    ordered_events.sort_by_key(|event| event.sequence);
+    for event in ordered_events {
+        for record in prompt_genome_records_from_event(event) {
+            upsert_prompt_genome(&mut model.genomes, record);
+        }
+        if let Some((key, dataset)) = prompt_dataset_record_from_event(event) {
+            model.datasets.insert(key, dataset);
+        }
+        if let Some(attempt) =
+            crate::prompt_attempt_runtime::prompt_evaluation_attempt_from_event(event)
+        {
+            upsert_prompt_evaluation_attempt(&mut model.attempts, attempt);
+        }
+        if let Some(cohort) =
+            crate::prompt_attempt_runtime::prompt_learning_cohort_from_event(event)
+        {
+            upsert_prompt_learning_cohort(
+                &mut model.cohorts,
+                &mut model.cohort_sequences,
+                cohort,
+                event.sequence,
+            );
+        }
+        if let Some(observations) = observations_by_sequence.remove(&event.sequence) {
+            for (effort, observation) in observations {
+                upsert_prompt_observation(&mut model.observations, effort, observation);
+            }
+        }
+        apply_prompt_rollout_event(&mut model, event);
+    }
+    model
 }
 
 pub(crate) fn load_prompt_evolution_read_model(
@@ -895,12 +1037,11 @@ pub(crate) fn load_prompt_evolution_read_model(
         );
     } else if !delta.is_empty() {
         changed = true;
+        let mut auto_teacher_cache =
+            BTreeMap::<(String, String), Option<PromptAutoTeacherCase>>::new();
         for event in &delta {
             for record in prompt_genome_records_from_event(event) {
                 upsert_prompt_genome(&mut model.genomes, record);
-            }
-            if let Some((effort, rollout)) = prompt_rollout_record_from_event(event) {
-                model.rollouts.insert(effort, rollout);
             }
             if let Some((key, dataset)) = prompt_dataset_record_from_event(event) {
                 model.datasets.insert(key, dataset);
@@ -920,36 +1061,59 @@ pub(crate) fn load_prompt_evolution_read_model(
                     event.sequence,
                 );
             }
-            for (effort, observation) in prompt_observation_records_from_event(event) {
-                upsert_prompt_observation(&mut model.observations, effort, observation);
-            }
-        }
-        let terminal_scopes = delta
-            .iter()
-            .filter_map(|event| {
-                if is_agent_run_terminal(event) {
-                    event
-                        .metadata
-                        .get("agent_run_id")
-                        .map(|id| ("agent_run_id", id.clone()))
-                } else if matches!(
-                    event.summary.as_str(),
-                    "Collaboration workflow completed" | "Collaboration workflow failed"
-                ) {
-                    event
-                        .metadata
-                        .get("collaboration_id")
-                        .map(|id| ("collaboration_id", id.clone()))
-                } else {
-                    None
+            let source_key = prompt_auto_teacher_source_key(event);
+            if let Some((project_id, source_run_id)) = source_key.as_ref() {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    auto_teacher_cache.entry((project_id.clone(), source_run_id.clone()))
+                {
+                    let source_events =
+                        store.list_by_task_and_metadata(&task_id, "agent_run_id", source_run_id)?;
+                    let teacher = crate::prompt_evidence_runtime::reconstruct_prompt_auto_teacher_from_canonical_events(
+                        &source_events,
+                        project_id,
+                        source_run_id,
+                    );
+                    entry.insert(teacher);
                 }
-            })
-            .collect::<BTreeSet<_>>();
-        for (scope, value) in terminal_scopes {
-            let scoped_events = store.list_by_task_and_metadata(&task_id, scope, &value)?;
-            for (effort, observation) in prompt_evolution_observations_from_events(&scoped_events) {
+            }
+            let canonical_teacher = source_key
+                .as_ref()
+                .and_then(|key| auto_teacher_cache.get(key))
+                .and_then(Option::as_ref)
+                .map(CanonicalPromptAutoTeacher::from);
+            for (effort, observation) in
+                prompt_observation_records_from_event_with_canonical_teacher(
+                    event,
+                    canonical_teacher,
+                )
+            {
                 upsert_prompt_observation(&mut model.observations, effort, observation);
             }
+            let terminal_scope = if is_agent_run_terminal(event) {
+                event
+                    .metadata
+                    .get("agent_run_id")
+                    .map(|id| ("agent_run_id", id.as_str()))
+            } else if matches!(
+                event.summary.as_str(),
+                "Collaboration workflow completed" | "Collaboration workflow failed"
+            ) {
+                event
+                    .metadata
+                    .get("collaboration_id")
+                    .map(|id| ("collaboration_id", id.as_str()))
+            } else {
+                None
+            };
+            if let Some((scope, value)) = terminal_scope {
+                let scoped_events = store.list_by_task_and_metadata(&task_id, scope, value)?;
+                for (effort, observation) in
+                    prompt_evolution_observations_from_events(&scoped_events)
+                {
+                    upsert_prompt_observation(&mut model.observations, effort, observation);
+                }
+            }
+            apply_prompt_rollout_event(&mut model, event);
         }
         model.revision = revision.latest_sequence;
         model.event_count = revision.event_count;

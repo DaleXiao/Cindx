@@ -1,4 +1,4 @@
-use super::ConductorPromptGenome;
+use super::{AutoTeacherSourceContextV1, ConductorPromptGenome};
 use crate::AgentEvaluationReflectionPacket;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -58,6 +58,14 @@ pub struct PromptTransferProvenance {
     pub source_profile_id: String,
     pub source_profile_sha256: String,
     pub source_output_sha256: String,
+    #[serde(default)]
+    pub source_context_sha256: String,
+    #[serde(default)]
+    pub evaluator_receipt_sha256: String,
+    #[serde(default)]
+    pub checkpoint_sha256: String,
+    #[serde(default)]
+    pub learning_receipt_sha256: String,
 }
 
 impl PromptTransferProvenance {
@@ -76,7 +84,22 @@ impl PromptTransferProvenance {
             source_profile_id: source_profile_id.into(),
             source_profile_sha256: source_profile_sha256.into(),
             source_output_sha256: source_output_sha256.into(),
+            source_context_sha256: String::new(),
+            evaluator_receipt_sha256: String::new(),
+            checkpoint_sha256: String::new(),
+            learning_receipt_sha256: String::new(),
         }
+    }
+
+    pub fn with_source_context(
+        mut self,
+        context: &AutoTeacherSourceContextV1,
+    ) -> Result<Self, String> {
+        self.source_context_sha256 = context.digest()?;
+        self.evaluator_receipt_sha256 = context.evaluator_receipt_sha256.clone();
+        self.checkpoint_sha256 = context.checkpoint_sha256.clone();
+        self.learning_receipt_sha256 = context.learning_receipt_sha256.clone();
+        Ok(self)
     }
 
     pub fn is_valid_auto_to_pro(&self) -> bool {
@@ -87,6 +110,18 @@ impl PromptTransferProvenance {
             && !self.source_profile_id.trim().is_empty()
             && is_sha256(&self.source_profile_sha256)
             && is_sha256(&self.source_output_sha256)
+    }
+
+    pub fn has_strict_source_lineage(&self) -> bool {
+        self.is_valid_auto_to_pro()
+            && [
+                &self.source_context_sha256,
+                &self.evaluator_receipt_sha256,
+                &self.checkpoint_sha256,
+                &self.learning_receipt_sha256,
+            ]
+            .into_iter()
+            .all(|digest| is_sha256(digest))
     }
 }
 
@@ -196,6 +231,14 @@ impl PromptEvaluationProvenance {
                 .is_some_and(PromptTransferProvenance::is_valid_auto_to_pro)
     }
 
+    pub fn is_source_attested_transfer(&self) -> bool {
+        self.is_scientific_transfer()
+            && self
+                .transfer
+                .as_ref()
+                .is_some_and(PromptTransferProvenance::has_strict_source_lineage)
+    }
+
     pub fn is_strict_matched(&self) -> bool {
         self.has_scientific_core()
             && self.matched_evaluation.as_ref().is_some_and(|identity| {
@@ -287,6 +330,10 @@ impl PromptEvolutionObservation {
             && transfer_lineage_matches
     }
 
+    pub fn is_source_attested_transfer_evidence(&self) -> bool {
+        self.is_scientific_transfer_evidence() && self.provenance.is_source_attested_transfer()
+    }
+
     pub fn is_strict_matched_evidence(&self) -> bool {
         self.is_scientific_evidence()
             && self
@@ -315,6 +362,10 @@ impl PromptEvolutionObservation {
                         && identity.split == self.split
                         && identity.mode == self.mode
                 })
+    }
+
+    pub fn is_strict_source_attested_transfer_evidence(&self) -> bool {
+        self.is_strict_matched_transfer_evidence() && self.is_source_attested_transfer_evidence()
     }
 
     pub fn scientific_cohort_sha256(&self) -> Option<&str> {
@@ -411,7 +462,7 @@ pub fn latest_scientific_transfer_dataset_digest(
     observations
         .iter()
         .rev()
-        .filter(|observation| observation.is_scientific_transfer_evidence())
+        .filter(|observation| observation.is_source_attested_transfer_evidence())
         .find_map(|observation| observation.scientific_cohort_sha256())
 }
 
@@ -468,7 +519,7 @@ pub fn prompt_transfer_reflection_packets(
             observation.profile_id == profile_id
                 && observation.split == PromptEvaluationSplit::Train
                 && observation.mode == PromptEvaluationMode::PairedExecution
-                && observation.is_scientific_transfer_evidence()
+                && observation.is_source_attested_transfer_evidence()
                 && observation.scientific_cohort_sha256() == Some(active_dataset_sha256)
         })
         .filter_map(|observation| observation.reflection_packet.as_ref())
@@ -587,6 +638,24 @@ pub struct PromptInstanceParetoArchive {
 mod tests {
     use super::*;
 
+    fn source_context() -> AutoTeacherSourceContextV1 {
+        AutoTeacherSourceContextV1 {
+            schema: super::super::AUTO_TEACHER_SOURCE_CONTEXT_SCHEMA_V1.to_string(),
+            provider_sha256: "1".repeat(64),
+            model_pool_sha256: "2".repeat(64),
+            system_prompt_sha256: "3".repeat(64),
+            policy_sha256: "4".repeat(64),
+            budget_sha256: "5".repeat(64),
+            tool_contract_sha256: "6".repeat(64),
+            source_revision_sha256: "7".repeat(64),
+            workspace_revision_sha256: "8".repeat(64),
+            evaluator_identity_sha256: "9".repeat(64),
+            evaluator_receipt_sha256: "a".repeat(64),
+            checkpoint_sha256: "b".repeat(64),
+            learning_receipt_sha256: "c".repeat(64),
+        }
+    }
+
     fn scientific_provenance() -> PromptEvaluationProvenance {
         PromptEvaluationProvenance::blind_pairwise_swap(
             vec!["independent-reviewer".to_string()],
@@ -613,6 +682,20 @@ mod tests {
             ));
         assert!(!transfer.is_scientific());
         assert!(transfer.is_scientific_transfer());
+        assert!(!transfer.is_source_attested_transfer());
+
+        let attested = scientific_provenance().with_transfer(
+            PromptTransferProvenance::auto_to_pro(
+                "auto-run-1",
+                0,
+                "auto-profile-1",
+                "d".repeat(64),
+                "e".repeat(64),
+            )
+            .with_source_context(&source_context())
+            .unwrap(),
+        );
+        assert!(attested.is_source_attested_transfer());
     }
 
     #[test]
@@ -628,6 +711,22 @@ mod tests {
 
         assert!(!transfer.is_scientific());
         assert!(!transfer.is_scientific_transfer());
+    }
+
+    #[test]
+    fn legacy_transfer_serde_replay_cannot_gain_strict_lineage() {
+        let encoded = r#"{
+            "source_effort":"auto",
+            "target_effort":"pro",
+            "source_run_id":"run",
+            "source_steer_epoch":0,
+            "source_profile_id":"profile",
+            "source_profile_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "source_output_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }"#;
+        let legacy: PromptTransferProvenance = serde_json::from_str(encoded).unwrap();
+        assert!(legacy.is_valid_auto_to_pro());
+        assert!(!legacy.has_strict_source_lineage());
     }
 }
 

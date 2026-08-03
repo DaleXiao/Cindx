@@ -1,4 +1,5 @@
 use super::*;
+use orchestrator::PromptTransferProvenance;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_conductor_prompt_profile(
@@ -552,10 +553,12 @@ pub(crate) fn complete_prompt_evaluation_worker(
                             }
                         });
                         match registry.permissionless_read_tool(&invocation) {
-                            Ok(tool) => match tool.execute_with_control(invocation, &tool_control) {
-                                Ok(result) => (result.status, result.output),
-                                Err(error) => (ToolOutcomeStatus::Failed, error.message),
-                            },
+                            Ok(tool) => {
+                                match tool.execute_with_control(invocation, &tool_control) {
+                                    Ok(result) => (result.status, result.output),
+                                    Err(error) => (ToolOutcomeStatus::Failed, error.message),
+                                }
+                            }
                             Err(error) => (ToolOutcomeStatus::Denied, error.message),
                         }
                     };
@@ -669,18 +672,12 @@ pub(crate) fn append_prompt_evaluation_status(
     .map_err(|error| error.to_string())
 }
 
-pub(crate) fn append_prompt_pairwise_observations(
-    state: &tauri::State<'_, AppState>,
-    task_id: &TaskId,
-    run_context: &Metadata,
-    effort: &str,
-    mode: PromptEvaluationMode,
+fn validate_prompt_pairwise_observations(
     observations: [&PromptEvolutionObservation; 2],
-    genomes: [&ConductorPromptGenome; 2],
 ) -> Result<(), String> {
     if !observations
         .iter()
-        .all(|observation| observation.is_strict_matched_transfer_evidence())
+        .all(|observation| observation.is_strict_matched_evidence())
         || observations[0].provenance.matched_evaluation
             != observations[1].provenance.matched_evaluation
         || observations[0].profile_id
@@ -694,40 +691,63 @@ pub(crate) fn append_prompt_pairwise_observations(
                 .as_deref()
                 .unwrap_or_default()
     {
-        return Err("prompt transfer pair is not strict matched evidence".to_string());
+        return Err(
+            "prompt pairwise observations are not strict reciprocal matched evidence".to_string(),
+        );
     }
+    Ok(())
+}
+
+pub(crate) fn append_prompt_pairwise_observations(
+    state: &tauri::State<'_, AppState>,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    effort: &str,
+    mode: PromptEvaluationMode,
+    observations: [&PromptEvolutionObservation; 2],
+    genomes: [&ConductorPromptGenome; 2],
+) -> Result<(), String> {
+    validate_prompt_pairwise_observations(observations)?;
     let encoded_observations = serde_json::to_string(&observations)
         .map_err(|error| format!("prompt observations serialization failed: {error}"))?;
     let encoded_genomes = serde_json::to_string(&genomes)
         .map_err(|error| format!("prompt genomes serialization failed: {error}"))?;
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let model = load_prompt_evolution_read_model(&mut store).map_err(|error| error.to_string())?;
-    let identity = observations[0]
-        .provenance
-        .matched_evaluation
-        .as_ref()
-        .ok_or_else(|| "prompt transfer pair is missing matched identity".to_string())?;
-    let cohort = model
-        .cohorts
-        .get(&identity.cohort_sha256)
-        .ok_or_else(|| "prompt transfer cohort is not persisted".to_string())?;
-    let attempt = model
-        .attempts
-        .get(&identity.evaluation_id)
-        .ok_or_else(|| "prompt transfer attempt is not persisted".to_string())?;
-    if !crate::prompt_attempt_runtime::prompt_matched_identity_belongs_to_cohort(identity, cohort)
-        || !observations.iter().all(|observation| {
+    crate::prompt_evolution_store_runtime::with_prompt_evolution_store(state, |store| {
+        let model =
+            load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
+        let identity = observations[0]
+            .provenance
+            .matched_evaluation
+            .as_ref()
+            .ok_or_else(|| {
+                "prompt pairwise observations are missing matched identity".to_string()
+            })?;
+        let cohort = model
+            .cohorts
+            .get(&identity.cohort_sha256)
+            .ok_or_else(|| "prompt pairwise cohort is not persisted".to_string())?;
+        let attempt = model
+            .attempts
+            .get(&identity.evaluation_id)
+            .ok_or_else(|| "prompt pairwise attempt is not persisted".to_string())?;
+        if !crate::prompt_attempt_runtime::prompt_matched_identity_belongs_to_cohort(
+            identity, cohort,
+        ) || !observations.iter().all(|observation| {
             crate::prompt_attempt_runtime::prompt_observation_matches_attempt(
                 observation,
                 &attempt.started,
             )
-        })
-    {
-        return Err("prompt transfer pair does not match its persisted attempt".to_string());
-    }
+        }) {
+            return Err(
+                "prompt pairwise observations do not match their persisted attempt".to_string(),
+            );
+        }
+        Ok(())
+    })?;
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
     append_event(
         &mut store,
         task_id,
@@ -771,6 +791,57 @@ pub(crate) fn append_prompt_pairwise_observations(
     .map_err(|error| error.to_string())
 }
 
+fn validate_prompt_transfer_observations(
+    observations: [&PromptEvolutionObservation; 2],
+    expected_transfer: &PromptTransferProvenance,
+) -> Result<(), String> {
+    if !observations
+        .iter()
+        .all(|observation| observation.is_strict_source_attested_transfer_evidence())
+        || observations[0].provenance.matched_evaluation
+            != observations[1].provenance.matched_evaluation
+        || observations[0].provenance.transfer != observations[1].provenance.transfer
+        || observations[0].provenance.transfer.as_ref() != Some(expected_transfer)
+        || observations[0].profile_id
+            != observations[1]
+                .opponent_profile_id
+                .as_deref()
+                .unwrap_or_default()
+        || observations[1].profile_id
+            != observations[0]
+                .opponent_profile_id
+                .as_deref()
+                .unwrap_or_default()
+        || observations[0].evaluation_id != observations[1].evaluation_id
+        || observations[0].case_id != observations[1].case_id
+        || observations[0].split != observations[1].split
+        || observations[0].mode != observations[1].mode
+    {
+        return Err(
+            "prompt transfer observations are not strict reciprocal source-attested matched evidence"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn prompt_transfer_provenance_for_teacher(
+    teacher: &PromptAutoTeacherCase,
+) -> Result<PromptTransferProvenance, String> {
+    teacher.source_context.validate()?;
+    if sha256_hex(teacher.final_output.as_bytes()) != teacher.output_sha256 {
+        return Err("Auto teacher output digest does not match its archived artifact".to_string());
+    }
+    PromptTransferProvenance::auto_to_pro(
+        teacher.source_run_id.clone(),
+        teacher.steer_epoch,
+        teacher.profile_id.clone(),
+        teacher.profile_sha256.clone(),
+        teacher.output_sha256.clone(),
+    )
+    .with_source_context(&teacher.source_context)
+}
+
 pub(crate) fn append_prompt_transfer_observations(
     state: &tauri::State<'_, AppState>,
     task_id: &TaskId,
@@ -778,7 +849,10 @@ pub(crate) fn append_prompt_transfer_observations(
     effort: &str,
     mode: PromptEvaluationMode,
     observations: [&PromptEvolutionObservation; 2],
+    teacher: &PromptAutoTeacherCase,
 ) -> Result<(), String> {
+    let expected_transfer = prompt_transfer_provenance_for_teacher(teacher)?;
+    validate_prompt_transfer_observations(observations, &expected_transfer)?;
     let encoded_observations = serde_json::to_string(&observations)
         .map_err(|error| format!("prompt transfer serialization failed: {error}"))?;
     let transfer = observations[0]
@@ -786,9 +860,38 @@ pub(crate) fn append_prompt_transfer_observations(
         .transfer
         .as_ref()
         .ok_or_else(|| "prompt transfer observation is missing provenance".to_string())?;
-    if observations[1].provenance.transfer.as_ref() != Some(transfer) {
-        return Err("prompt transfer pair has mismatched provenance".to_string());
-    }
+    crate::prompt_evolution_store_runtime::with_prompt_evolution_store(state, |store| {
+        let model =
+            load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
+        let identity = observations[0]
+            .provenance
+            .matched_evaluation
+            .as_ref()
+            .ok_or_else(|| {
+                "prompt transfer observations are missing matched identity".to_string()
+            })?;
+        let cohort = model
+            .cohorts
+            .get(&identity.cohort_sha256)
+            .ok_or_else(|| "prompt transfer cohort is not persisted".to_string())?;
+        let attempt = model
+            .attempts
+            .get(&identity.evaluation_id)
+            .ok_or_else(|| "prompt transfer attempt is not persisted".to_string())?;
+        if !crate::prompt_attempt_runtime::prompt_matched_identity_belongs_to_cohort(
+            identity, cohort,
+        ) || !observations.iter().all(|observation| {
+            crate::prompt_attempt_runtime::prompt_observation_matches_attempt(
+                observation,
+                &attempt.started,
+            )
+        }) {
+            return Err(
+                "prompt transfer observations do not match their persisted attempt".to_string(),
+            );
+        }
+        Ok(())
+    })?;
     let mut store = state
         .store
         .lock()
@@ -837,4 +940,218 @@ pub(crate) fn append_prompt_transfer_observations(
         ),
     )
     .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orchestrator::{AutoTeacherSourceContextV1, PromptTransferProvenance};
+
+    fn matched_identity() -> PromptMatchedEvaluationIdentityV1 {
+        PromptMatchedEvaluationIdentityV1 {
+            schema: "cindx.prompt-matched-evaluation.v1".to_string(),
+            evaluation_id: "project-a::pair-1".to_string(),
+            cohort_sha256: "c".repeat(64),
+            dataset_sha256: "d".repeat(64),
+            case_id: "case-a".to_string(),
+            objective_sha256: "a".repeat(64),
+            split: PromptEvaluationSplit::Train,
+            mode: PromptEvaluationMode::PairedExecution,
+        }
+    }
+
+    fn observation(
+        profile_id: &str,
+        opponent_profile_id: &str,
+        identity: PromptMatchedEvaluationIdentityV1,
+    ) -> PromptEvolutionObservation {
+        PromptEvolutionObservation {
+            profile_id: profile_id.to_string(),
+            evaluation_id: identity.evaluation_id.clone(),
+            case_id: identity.case_id.clone(),
+            opponent_profile_id: Some(opponent_profile_id.to_string()),
+            task_class: "coding".to_string(),
+            split: identity.split,
+            mode: identity.mode,
+            format_valid: true,
+            succeeded: true,
+            quality_score: 0.9,
+            latency_ms: 10,
+            total_tokens: 20,
+            estimated_cost_microusd: 0,
+            safety_violations: 0,
+            relative_reward: Some(0.2),
+            step_credits: Vec::new(),
+            reflection_packet: None,
+            provenance: PromptEvaluationProvenance::blind_pairwise_swap(
+                vec!["judge".to_string()],
+                vec!["worker".to_string()],
+                identity.dataset_sha256.clone(),
+                sha256_hex(profile_id.as_bytes()),
+                sha256_hex(opponent_profile_id.as_bytes()),
+            )
+            .with_matched_evaluation(identity),
+        }
+    }
+
+    fn ordinary_pair() -> [PromptEvolutionObservation; 2] {
+        let identity = matched_identity();
+        [
+            observation("profile-a", "profile-b", identity.clone()),
+            observation("profile-b", "profile-a", identity),
+        ]
+    }
+
+    fn source_attested_transfer() -> PromptTransferProvenance {
+        let context = AutoTeacherSourceContextV1 {
+            schema: "cindx.auto-teacher-source-context.v1".to_string(),
+            provider_sha256: "1".repeat(64),
+            model_pool_sha256: "2".repeat(64),
+            system_prompt_sha256: "3".repeat(64),
+            policy_sha256: "4".repeat(64),
+            budget_sha256: "5".repeat(64),
+            tool_contract_sha256: "6".repeat(64),
+            source_revision_sha256: "7".repeat(64),
+            workspace_revision_sha256: "8".repeat(64),
+            evaluator_identity_sha256: "9".repeat(64),
+            evaluator_receipt_sha256: "a".repeat(64),
+            checkpoint_sha256: "b".repeat(64),
+            learning_receipt_sha256: "c".repeat(64),
+        };
+        PromptTransferProvenance::auto_to_pro(
+            "auto-run",
+            1,
+            "profile-a",
+            sha256_hex(b"profile-a"),
+            sha256_hex(b"auto-output"),
+        )
+        .with_source_context(&context)
+        .expect("valid source context")
+    }
+
+    fn strict_transfer_pair() -> [PromptEvolutionObservation; 2] {
+        let mut pair = ordinary_pair();
+        let transfer = source_attested_transfer();
+        pair.iter_mut()
+            .for_each(|observation| observation.provenance.transfer = Some(transfer.clone()));
+        pair
+    }
+
+    #[test]
+    fn strict_ordinary_pair_is_accepted_by_pairwise_boundary() {
+        let pair = ordinary_pair();
+
+        assert!(validate_prompt_pairwise_observations([&pair[0], &pair[1]]).is_ok());
+    }
+
+    #[test]
+    fn transfer_pair_is_rejected_by_ordinary_pairwise_boundary() {
+        let pair = strict_transfer_pair();
+
+        assert!(pair
+            .iter()
+            .all(PromptEvolutionObservation::is_strict_source_attested_transfer_evidence));
+        assert!(validate_prompt_pairwise_observations([&pair[0], &pair[1]]).is_err());
+    }
+
+    #[test]
+    fn strict_source_attested_transfer_pair_is_accepted() {
+        let pair = strict_transfer_pair();
+
+        let expected = source_attested_transfer();
+        assert!(validate_prompt_transfer_observations([&pair[0], &pair[1]], &expected).is_ok());
+    }
+
+    #[test]
+    fn unattested_or_mismatched_transfer_pair_is_rejected() {
+        let mut unattested = ordinary_pair();
+        let transfer = PromptTransferProvenance::auto_to_pro(
+            "auto-run",
+            1,
+            "profile-a",
+            sha256_hex(b"profile-a"),
+            sha256_hex(b"auto-output"),
+        );
+        unattested
+            .iter_mut()
+            .for_each(|observation| observation.provenance.transfer = Some(transfer.clone()));
+        assert!(unattested
+            .iter()
+            .all(PromptEvolutionObservation::is_strict_matched_transfer_evidence));
+        let expected = source_attested_transfer();
+        assert!(
+            validate_prompt_transfer_observations([&unattested[0], &unattested[1]], &expected,)
+                .is_err()
+        );
+
+        let mut transfer_mismatch = strict_transfer_pair();
+        transfer_mismatch[1]
+            .provenance
+            .transfer
+            .as_mut()
+            .expect("transfer provenance")
+            .source_run_id = "other-auto-run".to_string();
+        assert!(transfer_mismatch
+            .iter()
+            .all(PromptEvolutionObservation::is_strict_source_attested_transfer_evidence));
+        assert!(validate_prompt_transfer_observations(
+            [&transfer_mismatch[0], &transfer_mismatch[1]],
+            &expected,
+        )
+        .is_err());
+
+        let mut synthetic_digest = strict_transfer_pair();
+        synthetic_digest.iter_mut().for_each(|observation| {
+            observation
+                .provenance
+                .transfer
+                .as_mut()
+                .expect("transfer provenance")
+                .source_context_sha256 = "f".repeat(64);
+        });
+        assert!(synthetic_digest
+            .iter()
+            .all(PromptEvolutionObservation::is_strict_source_attested_transfer_evidence));
+        assert!(validate_prompt_transfer_observations(
+            [&synthetic_digest[0], &synthetic_digest[1]],
+            &expected,
+        )
+        .is_err());
+
+        let mut reciprocal_mismatch = strict_transfer_pair();
+        reciprocal_mismatch[0].opponent_profile_id = Some("profile-c".to_string());
+        assert!(validate_prompt_transfer_observations(
+            [&reciprocal_mismatch[0], &reciprocal_mismatch[1]],
+            &expected,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn matched_identity_or_reciprocal_profile_mismatch_is_rejected() {
+        let mut identity_mismatch = ordinary_pair();
+        identity_mismatch[1].evaluation_id = "project-a::pair-2".to_string();
+        identity_mismatch[1]
+            .provenance
+            .matched_evaluation
+            .as_mut()
+            .expect("matched identity")
+            .evaluation_id = "project-a::pair-2".to_string();
+        assert!(identity_mismatch
+            .iter()
+            .all(PromptEvolutionObservation::is_strict_matched_evidence));
+        assert!(validate_prompt_pairwise_observations([
+            &identity_mismatch[0],
+            &identity_mismatch[1],
+        ])
+        .is_err());
+
+        let mut reciprocal_mismatch = ordinary_pair();
+        reciprocal_mismatch[1].opponent_profile_id = Some("profile-c".to_string());
+        assert!(validate_prompt_pairwise_observations([
+            &reciprocal_mismatch[0],
+            &reciprocal_mismatch[1],
+        ])
+        .is_err());
+    }
 }

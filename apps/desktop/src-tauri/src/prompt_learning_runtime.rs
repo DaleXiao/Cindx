@@ -420,7 +420,7 @@ fn prompt_configuration_fingerprints(
     ))
 }
 
-fn prompt_source_revision() -> Result<&'static str, String> {
+pub(crate) fn prompt_source_revision() -> Result<&'static str, String> {
     if let Some(revision) = option_env!("CINDX_SOURCE_REVISION").filter(|revision| {
         matches!(revision.len(), 40 | 64) && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
     }) {
@@ -434,6 +434,34 @@ fn prompt_source_revision() -> Result<&'static str, String> {
     Err("verified Cindx source revision is unavailable for prompt replay".to_string())
 }
 
+pub(crate) fn prompt_event_sha256(event: &Event) -> Result<String, String> {
+    let kind = match &event.kind {
+        EventKind::TaskCreated => "task_created",
+        EventKind::TaskStatusChanged => "task_status_changed",
+        EventKind::MessageAdded => "message_added",
+        EventKind::ModelRequestStarted => "model_request_started",
+        EventKind::ModelRequestFinished => "model_request_finished",
+        EventKind::ToolCallProposed => "tool_call_proposed",
+        EventKind::ToolCallStarted => "tool_call_started",
+        EventKind::ToolCallFinished => "tool_call_finished",
+        EventKind::PermissionRequested => "permission_requested",
+        EventKind::PermissionResolved => "permission_resolved",
+        EventKind::RetrievalPerformed => "retrieval_performed",
+        EventKind::Error => "error",
+    };
+    serde_json::to_vec(&(
+        &event.id.0,
+        &event.task_id.0,
+        event.sequence,
+        event.timestamp_ms,
+        kind,
+        &event.summary,
+        &event.metadata,
+    ))
+    .map(|encoded| sha256_hex(&encoded))
+    .map_err(|error| format!("prompt event serialization failed: {error}"))
+}
+
 pub(crate) fn prompt_learning_cohort(
     dataset: &[PromptOfflineCase],
     generation: u32,
@@ -442,7 +470,7 @@ pub(crate) fn prompt_learning_cohort(
     PromptLearningCohortV1::new(prompt_dataset_identity(dataset, generation)?, execution)
 }
 
-fn prompt_evaluation_tool_contract_sha256(workspace_root: &Path) -> String {
+pub(crate) fn prompt_evaluation_tool_contract_sha256(workspace_root: &Path) -> String {
     let mut specs = ToolRegistry::with_workspace_tools(workspace_root.to_path_buf()).specs();
     specs.sort_by(|left, right| left.name.cmp(&right.name));
     let canonical = specs

@@ -499,6 +499,11 @@ pub(super) fn finalize_adaptive_collaboration(
                         prompt_learning_eligible.to_string(),
                     ),
                     (
+                        crate::prompt_evolution_transfer_outbox::AUTO_TRANSFER_REQUIRED_KEY
+                            .to_string(),
+                        (config.prompt_evolution_enabled && effort == "auto").to_string(),
+                    ),
+                    (
                         "latency_ms".to_string(),
                         current_time_millis()
                             .saturating_sub(workflow_started_at_ms)
