@@ -8,7 +8,10 @@ use crate::agent_conductor_scheduler::{schedule_conductor_decision, ConductorDec
 use crate::agent_preparation_runtime::{
     preparation_prompt_parts, remove_stale_preparation_context,
 };
-use crate::agent_strategy_runtime::{effective_prompt_objective_for_messages, PlannedAgentRun};
+use crate::agent_strategy_runtime::{
+    effective_prompt_objective_for_messages, should_evaluate_strategy_profile,
+    AgentPlanningSource, PlannedAgentRun,
+};
 use crate::collaboration_execution::collaboration_model_failure;
 use crate::collaboration_stage_runtime::{
     collaboration_stage_result, collaboration_stage_terminal_presentation, CollaborationStageError,
@@ -75,16 +78,21 @@ fn test_conductor_harness(models: Vec<String>, agent_budget: usize) -> Conductor
     })
 }
 
-fn test_planned_agent_run(decision: AgentRunDecision, effort: AgentEffort) -> PlannedAgentRun {
+fn test_planned_agent_run(decision: AgentRunDecision, effort: AgentPolicy) -> PlannedAgentRun {
     let routing_context = decision.routing_context("update the workspace", Vec::new());
     let routing_decision = decision.routing_decision();
     let execution_contract = decision.execution_contract(effort.label());
     PlannedAgentRun {
+        policy: effort,
         decision,
         routing_context,
         routing_decision,
         execution_contract,
-        source: "test".to_string(),
+        source: if effort == AgentPolicy::Fast {
+            AgentPlanningSource::FastDirect
+        } else {
+            AgentPlanningSource::DynamicConductor
+        },
         attempts: 1,
         prompt_genome: ConductorPromptGenome::seed_for_effort(effort.label()),
         degradation_reason: None,
@@ -114,24 +122,24 @@ fn conductor_verification_policies_reach_the_persistent_task_contract() {
     for (decision, effort, expected) in [
         (
             none,
-            AgentEffort::Fast,
+            AgentPolicy::Fast,
             WorkspaceVerificationPolicy::NotRequired,
         ),
         (
             AgentRunDecision::direct("executor"),
-            AgentEffort::Auto,
+            AgentPolicy::Auto,
             WorkspaceVerificationPolicy::RequiredAfterMutation,
         ),
         (
             independent,
-            AgentEffort::Pro,
+            AgentPolicy::Pro,
             WorkspaceVerificationPolicy::RequiredAfterMutation,
         ),
     ] {
         let planned = test_planned_agent_run(decision, effort);
         let mut run_context = Metadata::new();
         planned
-            .apply_to_context(&mut run_context, effort)
+            .apply_to_context(&mut run_context)
             .expect("plan should populate run context");
         let encoded = run_context
             .get("conductor_contract")
@@ -735,7 +743,7 @@ fn goal2_execution_steer_replans_and_feeds_terminal_epoch_learning() {
         let decision = harness
             .parse(&response)
             .expect("deterministic conductor decision should validate");
-        test_planned_agent_run(decision, AgentEffort::Auto)
+        test_planned_agent_run(decision, AgentPolicy::Auto)
     };
 
     let base_context = [
@@ -796,7 +804,7 @@ fn goal2_execution_steer_replans_and_feeds_terminal_epoch_learning() {
         initial_objective.clone(),
     );
     initial_plan
-        .apply_to_context(&mut initial_context, AgentEffort::Auto)
+        .apply_to_context(&mut initial_context)
         .expect("initial plan should populate context");
     append_event(
         &mut store,
@@ -880,7 +888,7 @@ fn goal2_execution_steer_replans_and_feeds_terminal_epoch_learning() {
         revised_objective.clone(),
     );
     revised_plan
-        .apply_to_context(&mut revised_context, AgentEffort::Auto)
+        .apply_to_context(&mut revised_context)
         .expect("revised plan should populate context");
     append_event(
         &mut store,
@@ -4953,23 +4961,84 @@ fn run_context_selects_the_primary_model_without_collapsing_to_executor() {
 #[test]
 fn agent_effort_keeps_auto_and_pro_under_dynamic_policy_selection() {
     assert_eq!(
-        AgentEffort::parse("fast").requested_policy(),
+        AgentPolicy::parse_ingress("fast").requested_policy(),
         OrchestrationPolicy::Single
     );
     assert_eq!(
-        AgentEffort::parse("auto").requested_policy(),
+        AgentPolicy::parse_ingress("auto").requested_policy(),
         OrchestrationPolicy::AutoRouter
     );
     assert_eq!(
-        AgentEffort::parse("pro").requested_policy(),
+        AgentPolicy::parse_ingress("pro").requested_policy(),
         OrchestrationPolicy::AutoRouter
     );
-    assert_eq!(AgentEffort::parse("unknown"), AgentEffort::Auto);
+    assert_eq!(AgentPolicy::parse_ingress("unknown"), AgentPolicy::Auto);
+    assert_eq!(persisted_agent_policy(None), Ok(AgentPolicy::Auto));
+    assert_eq!(
+        persisted_agent_policy(Some("pro")),
+        Ok(AgentPolicy::Pro)
+    );
+    assert!(persisted_agent_policy(Some("Pro")).is_err());
+    assert!(persisted_agent_policy(Some("future")).is_err());
+}
+
+#[test]
+fn typed_agent_policy_provenance_preserves_the_legacy_runtime_wire() {
+    for (policy, expected_policy, expected_source) in [
+        (AgentPolicy::Fast, "single", "fast_direct"),
+        (AgentPolicy::Auto, "auto_router", "dynamic_conductor_v2"),
+        (AgentPolicy::Pro, "auto_router", "dynamic_conductor_v2"),
+    ] {
+        let planned = test_planned_agent_run(AgentRunDecision::direct("executor"), policy);
+        let mut context = Metadata::new();
+        planned
+            .apply_to_context(&mut context)
+            .expect("typed policy should adapt to the stable metadata wire");
+        assert_eq!(context.get("agent_effort").map(String::as_str), Some(policy.label()));
+        assert_eq!(
+            context.get("requested_policy").map(String::as_str),
+            Some(expected_policy)
+        );
+        assert_eq!(
+            context.get("router_source").map(String::as_str),
+            Some(expected_source)
+        );
+    }
+
+    for (source, label) in [
+        (AgentPlanningSource::FastDirect, "fast_direct"),
+        (
+            AgentPlanningSource::DynamicConductor,
+            "dynamic_conductor_v2",
+        ),
+        (
+            AgentPlanningSource::DynamicConductorReplanned,
+            "dynamic_conductor_replanned",
+        ),
+        (
+            AgentPlanningSource::DegradedDirect,
+            "dynamic_conductor_degraded_direct",
+        ),
+        (
+            AgentPlanningSource::DegradedWorkflow,
+            "dynamic_conductor_degraded_workflow",
+        ),
+    ] {
+        assert_eq!(source.label(), label);
+    }
+}
+
+#[test]
+fn fast_policy_never_enters_prompt_evolution_selection() {
+    assert!(!should_evaluate_strategy_profile(AgentPolicy::Fast, true));
+    assert!(!should_evaluate_strategy_profile(AgentPolicy::Auto, false));
+    assert!(should_evaluate_strategy_profile(AgentPolicy::Auto, true));
+    assert!(should_evaluate_strategy_profile(AgentPolicy::Pro, true));
 }
 
 #[test]
 fn retry_recovers_effort_from_the_active_run() {
-    let event = Event {
+    let mut event = Event {
         id: EventId("run-start".to_string()),
         task_id: phase16_task_id(),
         sequence: 1,
@@ -4981,8 +5050,17 @@ fn retry_recovers_effort_from_the_active_run() {
             .collect(),
     };
 
-    assert_eq!(agent_effort_from_active_events(&[event]), AgentEffort::Pro);
-    assert_eq!(agent_effort_from_active_events(&[]), AgentEffort::Auto);
+    assert_eq!(
+        persisted_agent_policy_from_active_events(std::slice::from_ref(&event)),
+        Ok(AgentPolicy::Pro)
+    );
+
+    event.metadata.insert("agent_effort".to_string(), "future".to_string());
+    assert!(persisted_agent_policy_from_active_events(&[event]).is_err());
+    assert_eq!(
+        persisted_agent_policy_from_active_events(&[]),
+        Ok(AgentPolicy::Auto)
+    );
 }
 
 #[test]

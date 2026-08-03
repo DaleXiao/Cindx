@@ -113,40 +113,16 @@ impl Default for PersonalizationConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentEffort {
-    Fast,
-    Auto,
-    Pro,
-}
-
-impl AgentEffort {
-    pub(crate) fn parse(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "fast" => Self::Fast,
-            "pro" => Self::Pro,
-            _ => Self::Auto,
-        }
-    }
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Fast => "fast",
-            Self::Auto => "auto",
-            Self::Pro => "pro",
-        }
-    }
-
-    pub(crate) fn requested_policy(self) -> OrchestrationPolicy {
-        match self {
-            Self::Fast => OrchestrationPolicy::Single,
-            Self::Auto | Self::Pro => OrchestrationPolicy::AutoRouter,
-        }
-    }
-}
-
 pub(crate) fn default_agent_effort() -> String {
-    AgentEffort::Auto.label().to_string()
+    AgentPolicy::Auto.label().to_string()
+}
+
+pub(crate) fn persisted_agent_policy(value: Option<&str>) -> Result<AgentPolicy, String> {
+    match value {
+        None => Ok(AgentPolicy::Auto),
+        Some(value) => AgentPolicy::parse_persisted(value)
+            .ok_or_else(|| format!("persisted agent policy is invalid: {value}")),
+    }
 }
 
 impl Default for ProviderConfig {

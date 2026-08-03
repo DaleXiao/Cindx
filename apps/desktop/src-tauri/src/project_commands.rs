@@ -316,7 +316,7 @@ pub(crate) fn set_session_effort(
     state: tauri::State<'_, AppState>,
     input: SessionEffortInput,
 ) -> Result<ProjectSessionState, String> {
-    let effort = AgentEffort::parse(&input.effort).label().to_string();
+    let effort = AgentPolicy::parse_ingress(&input.effort).label().to_string();
     let mut config = state
         .project_session_config
         .lock()

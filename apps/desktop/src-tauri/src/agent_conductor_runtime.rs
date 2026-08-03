@@ -3,10 +3,10 @@ use crate::collaboration_execution::CollaborationCallLimits;
 use crate::collaboration_stage_runtime::{
     run_conductor_collaboration_stage, CollaborationStageError,
 };
-use crate::configuration_models::{AgentEffort, ProviderConfig};
+use crate::configuration_models::ProviderConfig;
 use agent_core::{Metadata, ModelRole, TaskId};
 use orchestrator::{
-    AgentRunDecision, AgentRunDecisionHarness, ModelCandidate, CONDUCTOR_MAX_ATTEMPTS,
+    AgentPolicy, AgentRunDecision, AgentRunDecisionHarness, ModelCandidate, CONDUCTOR_MAX_ATTEMPTS,
 };
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -118,10 +118,10 @@ pub(crate) fn unique_configured_models(candidates: &[ModelCandidate]) -> Vec<Str
 
 pub(crate) fn preferred_fallback_model(
     config: &ProviderConfig,
-    effort: AgentEffort,
+    effort: AgentPolicy,
     allowed_models: &[String],
 ) -> String {
-    let preferred = if effort == AgentEffort::Fast && !config.model.trim().is_empty() {
+    let preferred = if effort.uses_default_model() && !config.model.trim().is_empty() {
         config.model.trim()
     } else {
         config.executor_model.trim()

@@ -416,6 +416,9 @@ const agentRecoveryServiceSource = read(
 const agentConductorRuntimeSource = read(
   "apps/desktop/src-tauri/src/agent_conductor_runtime.rs"
 );
+const agentTaskCommandSource = read(
+  "apps/desktop/src-tauri/src/agent_commands/task.rs"
+);
 const agentRuntimeSnapshotSource = read(
   "apps/desktop/src-tauri/src/agent_runtime_snapshot.rs"
 );
@@ -1635,7 +1638,9 @@ assert(
     rustLib.includes("&plan.decision") &&
     rustLib.includes("let retrieve_workspace = decision.retrieval.enabled()") &&
     rustLib.includes("let workspace_handle = retrieve_workspace.then") &&
-    rustLib.includes("if effort == AgentEffort::Fast") &&
+    rustLib.includes("if !effort.uses_conductor()") &&
+    rustLib.includes("if !should_evaluate_strategy_profile(") &&
+    rustLib.includes("fn fast_policy_never_enters_prompt_evolution_selection()") &&
     rustLib.includes('"dynamic_conductor_v2"') &&
     rustLib.includes('"dynamic_conductor_replanned"') &&
     rustLib.includes('"dynamic_conductor_degraded_workflow"') &&
@@ -3251,6 +3256,13 @@ assert(
   "Agent commands and event boundaries must remain isolated by session"
 );
 assert(
+  agentTaskCommandSource.includes("fn persisted_agent_policy_from_active_events(") &&
+    (agentTaskCommandSource.match(
+      /persisted_agent_policy_from_active_events\(&active_events\)\?/g
+    )?.length ?? 0) === 2,
+  "Runtime retries must decode persisted agent policy strictly before resuming"
+);
+assert(
   composerSource.includes("const EFFORT_OPTIONS") &&
     composerSource.includes('label: "Cindx Fast"') &&
     composerSource.includes('description: "One model for quick, focused tasks"') &&
@@ -3273,12 +3285,13 @@ assert(
     tauriBridge.includes("effort: AgentEffort") &&
     tauriBridge.includes("export async function setSessionEffort") &&
     tauriBridge.includes("currentTime: currentAgentTimeContext(), effort, attachments") &&
-    rustLib.includes("enum AgentEffort") &&
+    orchestratorSource.includes("pub enum AgentPolicy") &&
+    orchestratorSource.includes("pub fn parse_persisted(value: &str) -> Option<Self>") &&
     rustLib.includes("fn set_session_effort(") &&
     rustLib.includes("fn update_session_effort(") &&
     rustLib.includes("session_effort_updates_only_the_selected_session") &&
     rustLib.includes('"agent_effort".to_string()') &&
-    rustLib.includes("agent_effort_from_active_events"),
+    rustLib.includes("persisted_agent_policy_from_active_events"),
   "Composer effort must persist per session, default independently, and survive retries and traces"
 );
 assert(

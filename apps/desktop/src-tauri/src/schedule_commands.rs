@@ -139,7 +139,7 @@ pub(crate) fn upsert_schedule(
             )
         })
         .unwrap_or((now, Vec::new(), None));
-    let effort = AgentEffort::parse(&input.effort).label().to_string();
+    let effort = AgentPolicy::parse_ingress(&input.effort).label().to_string();
     let execution_session_id = ensure_schedule_execution_session(
         &state,
         &id,
@@ -431,7 +431,7 @@ pub(crate) fn ensure_schedule_execution_session(
         })
     }) {
         let next_name = format!("{} · Schedule", schedule_name.trim());
-        let next_effort = AgentEffort::parse(effort).label().to_string();
+        let next_effort = AgentPolicy::parse_ingress(effort).label().to_string();
         let execution_session_id = session.id.clone();
         let mut changed = false;
         if session.name != next_name
@@ -459,7 +459,7 @@ pub(crate) fn ensure_schedule_execution_session(
         name: format!("{} · Schedule", schedule_name.trim()),
         title_state: SessionTitleState::Manual,
         detail: SCHEDULE_EXECUTION_SESSION_DETAIL.to_string(),
-        effort: AgentEffort::parse(effort).label().to_string(),
+        effort: AgentPolicy::parse_ingress(effort).label().to_string(),
         seen_event_sequence: 0,
         created_at_ms: now,
         updated_at_ms: now,

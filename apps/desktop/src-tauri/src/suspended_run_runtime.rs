@@ -2,11 +2,13 @@ use crate::{
     agent_query_commands::active_agent_run_control,
     app_state::{AppState, ResolvedToolObservation},
     collaboration_service::AgentCollaboration,
+    configuration_models::persisted_agent_policy,
     runtime_values::current_time_millis,
     tool_execution::append_visual_reference_message,
 };
 use agent_core::{MessageRole, Metadata};
 use agent_runtime::{AgentKernel, RunControlSnapshot};
+use orchestrator::AgentPolicy;
 use std::{collections::BTreeMap, path::PathBuf, sync::Mutex};
 
 const SUSPENDED_AGENT_RUN_LIMIT: usize = 16;
@@ -84,6 +86,20 @@ impl SuspendedRunStore {
         })
     }
 
+    fn agent_policy(
+        &self,
+        session_id: &str,
+        now_ms: u64,
+    ) -> Result<Option<AgentPolicy>, String> {
+        self.with_runs(|runs| {
+            Self::purge_expired(runs, now_ms);
+            runs.get(session_id).map(|run| {
+                persisted_agent_policy(run.run_context.get("agent_effort").map(String::as_str))
+            })
+        })?
+        .transpose()
+    }
+
     pub(crate) fn contains_any(&self, session_ids: &[String]) -> Result<bool, String> {
         let now_ms = current_time_millis();
         self.with_runs(|runs| {
@@ -128,6 +144,15 @@ pub(crate) fn suspended_agent_run_control_snapshot(
     state
         .suspended_agent_runs
         .control_snapshot(session_id, current_time_millis())
+}
+
+pub(crate) fn suspended_agent_run_policy(
+    state: &tauri::State<'_, AppState>,
+    session_id: &str,
+) -> Result<Option<AgentPolicy>, String> {
+    state
+        .suspended_agent_runs
+        .agent_policy(session_id, current_time_millis())
 }
 
 pub(crate) fn clear_suspended_agent_run(

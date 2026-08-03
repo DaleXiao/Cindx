@@ -1,11 +1,11 @@
 use crate::app_state::AppState;
 use crate::collaboration_service::truncate_for_collaboration;
 use crate::collaboration_stage_runtime::CollaborationStageError;
-use crate::configuration_models::{AgentEffort, ProviderConfig};
+use crate::configuration_models::ProviderConfig;
 use crate::prompt_evolution_runtime::prompt_evolution_evaluation_for_run;
 use agent_core::{Message, MessageRole, Metadata};
 use agent_runtime::AgentRunControl;
-use orchestrator::ConductorPromptGenome;
+use orchestrator::{AgentPolicy, ConductorPromptGenome, PromptEvolutionStrategy};
 use std::collections::BTreeSet;
 
 const EFFECTIVE_OBJECTIVE_MAX_CHARS: usize = 6_000;
@@ -167,18 +167,28 @@ pub(super) fn ensure_planning_current(
 pub(super) fn selected_strategy_profile(
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,
-    effort: AgentEffort,
+    effort: AgentPolicy,
     run_context: &Metadata,
 ) -> (ConductorPromptGenome, String) {
-    if config.prompt_evolution_enabled {
-        if let Ok(evaluation) =
-            prompt_evolution_evaluation_for_run(state, effort.label(), run_context)
-        {
-            return (evaluation.next_profile, evaluation.next_mode);
-        }
+    if !should_evaluate_strategy_profile(effort, config.prompt_evolution_enabled) {
+        return (
+            ConductorPromptGenome::seed_for_effort(effort.label()),
+            "seed_fallback".to_string(),
+        );
+    }
+    if let Ok(evaluation) = prompt_evolution_evaluation_for_run(state, effort.label(), run_context) {
+        return (evaluation.next_profile, evaluation.next_mode);
     }
     (
         ConductorPromptGenome::seed_for_effort(effort.label()),
         "seed_fallback".to_string(),
     )
+}
+
+pub(crate) fn should_evaluate_strategy_profile(
+    effort: AgentPolicy,
+    prompt_evolution_enabled: bool,
+) -> bool {
+    prompt_evolution_enabled
+        && effort.prompt_evolution() != PromptEvolutionStrategy::Disabled
 }

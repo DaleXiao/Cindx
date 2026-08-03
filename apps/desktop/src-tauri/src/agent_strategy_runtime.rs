@@ -6,6 +6,8 @@ mod preparation;
 pub(crate) use self::preparation::{
     cumulative_effective_prompt_objective, effective_prompt_objective_for_messages,
 };
+#[cfg(test)]
+pub(crate) use self::preparation::should_evaluate_strategy_profile;
 use self::preparation::{ensure_planning_current, selected_strategy_profile};
 use crate::agent_conductor_runtime::{
     attempt_conductor_decision, conductor_model_sequence, preferred_fallback_model,
@@ -18,7 +20,7 @@ use crate::app_state::AppState;
 use crate::collaboration_service::{collaboration_recent_context, truncate_for_collaboration};
 use crate::collaboration_stage_runtime::CollaborationStageError;
 use crate::conductor_health_runtime;
-use crate::configuration_models::{AgentEffort, ProviderConfig};
+use crate::configuration_models::ProviderConfig;
 use crate::event_persistence::append_event;
 use crate::project_session_persistence::metadata_with_context;
 use crate::workflow_routing_runtime::{
@@ -27,18 +29,19 @@ use crate::workflow_routing_runtime::{
 use agent_core::{EventKind, Message, Metadata, TaskId};
 use agent_runtime::AgentRunControl;
 use orchestrator::{
-    AgentExecutionMode, AgentRunDecision, AgentRunDecisionHarness, AgentRunDecisionRequest,
-    ConductorExecutionContract, ConductorPromptGenome, ModelCandidate, RoutingContext,
-    RoutingDecision,
+    AgentExecutionMode, AgentPolicy, AgentRunDecision, AgentRunDecisionHarness,
+    AgentRunDecisionRequest, ConductorExecutionContract, ConductorPromptGenome, ModelCandidate,
+    RoutingContext, RoutingDecision,
 };
 
 #[derive(Debug, Clone)]
 pub(crate) struct PlannedAgentRun {
+    pub(crate) policy: AgentPolicy,
     pub(crate) decision: AgentRunDecision,
     pub(crate) routing_context: RoutingContext,
     pub(crate) routing_decision: RoutingDecision,
     pub(crate) execution_contract: ConductorExecutionContract,
-    pub(crate) source: String,
+    pub(crate) source: AgentPlanningSource,
     pub(crate) attempts: usize,
     pub(crate) prompt_genome: ConductorPromptGenome,
     pub(crate) degradation_reason: Option<String>,
@@ -46,21 +49,42 @@ pub(crate) struct PlannedAgentRun {
     pub(crate) selected_conductor_model: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentPlanningSource {
+    FastDirect,
+    DynamicConductor,
+    DynamicConductorReplanned,
+    DegradedDirect,
+    DegradedWorkflow,
+}
+
+impl AgentPlanningSource {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::FastDirect => "fast_direct",
+            Self::DynamicConductor => "dynamic_conductor_v2",
+            Self::DynamicConductorReplanned => "dynamic_conductor_replanned",
+            Self::DegradedDirect => "dynamic_conductor_degraded_direct",
+            Self::DegradedWorkflow => "dynamic_conductor_degraded_workflow",
+        }
+    }
+}
+
 pub(crate) struct AgentRunPlanningRequest<'a> {
     pub(crate) config: &'a ProviderConfig,
     pub(crate) task_id: &'a TaskId,
     pub(crate) prompt: &'a str,
     pub(crate) history: &'a [Message],
-    pub(crate) effort: AgentEffort,
+    pub(crate) effort: AgentPolicy,
     pub(crate) cancellation: &'a AgentRunControl,
 }
 
 struct PlannedRunFinalizeInput {
     decision: AgentRunDecision,
-    source: String,
+    source: AgentPlanningSource,
     attempts: usize,
     prompt_genome: ConductorPromptGenome,
-    effort: AgentEffort,
+    effort: AgentPolicy,
     degradation_reason: Option<String>,
     attempted_conductor_models: Vec<String>,
     selected_conductor_model: Option<String>,
@@ -99,14 +123,14 @@ pub(crate) fn plan_agent_run(
     let fallback_model = preferred_fallback_model(config, effort, &allowed_models);
     let (profile, profile_source) = selected_strategy_profile(state, config, effort, run_context);
 
-    if effort == AgentEffort::Fast {
+    if !effort.uses_conductor() {
         conductor_health_runtime::record_conductor_fast_bypass(run_context);
         let planned = finalize_planned_run(
             prompt,
             candidates,
             PlannedRunFinalizeInput {
                 decision: AgentRunDecision::direct(fallback_model),
-                source: "fast_direct".to_string(),
+                source: AgentPlanningSource::FastDirect,
                 attempts: 0,
                 prompt_genome: profile,
                 effort,
@@ -118,14 +142,14 @@ pub(crate) fn plan_agent_run(
         .map_err(CollaborationStageError::Failed)?;
         ensure_planning_current(cancellation)?;
         planned
-            .apply_to_context(run_context, effort)
+            .apply_to_context(run_context)
             .map_err(CollaborationStageError::Failed)?;
         run_context.insert("prompt_profile_source".to_string(), profile_source.clone());
         record_planned_agent_run(state, task_id, run_context, &planned, &profile_source)
             .map_err(CollaborationStageError::Failed)?;
         return Ok(planned);
     }
-    let max_parallelism = if effort == AgentEffort::Pro { 3 } else { 2 };
+    let max_parallelism = effort.max_parallelism();
     let configured_conductor_models = conductor_model_sequence(config);
     let (provider_scope, health_generation, conductor_models) =
         conductor_health_runtime::route_conductor_models(
@@ -203,11 +227,11 @@ pub(crate) fn plan_agent_run(
     let (decision, source, degradation_reason) = match outcome {
         ConductorDecisionOutcome::Selected(decision) => {
             let source = if attempted_conductor_models.len() > 1 {
-                "dynamic_conductor_replanned"
+                AgentPlanningSource::DynamicConductorReplanned
             } else {
-                "dynamic_conductor_v2"
+                AgentPlanningSource::DynamicConductor
             };
-            (*decision, source.to_string(), None)
+            (*decision, source, None)
         }
         ConductorDecisionOutcome::Exhausted => {
             let reason = if failure_reasons.is_empty() {
@@ -223,11 +247,11 @@ pub(crate) fn plan_agent_run(
                 &reason,
             );
             let source = if decision.execution == AgentExecutionMode::Workflow {
-                "dynamic_conductor_degraded_workflow"
+                AgentPlanningSource::DegradedWorkflow
             } else {
-                "dynamic_conductor_degraded_direct"
+                AgentPlanningSource::DegradedDirect
             };
-            (decision, source.to_string(), Some(reason))
+            (decision, source, Some(reason))
         }
     };
     let planned = finalize_planned_run(
@@ -247,7 +271,7 @@ pub(crate) fn plan_agent_run(
     .map_err(CollaborationStageError::Failed)?;
     ensure_planning_current(cancellation)?;
     planned
-        .apply_to_context(run_context, effort)
+        .apply_to_context(run_context)
         .map_err(CollaborationStageError::Failed)?;
     run_context.insert("prompt_profile_source".to_string(), profile_source.clone());
     record_planned_agent_run(state, task_id, run_context, &planned, &profile_source)
@@ -274,6 +298,7 @@ fn finalize_planned_run(
     let routing_decision = decision.routing_decision();
     let execution_contract = decision.execution_contract(effort.label());
     Ok(PlannedAgentRun {
+        policy: effort,
         decision,
         routing_context,
         routing_decision,
@@ -314,7 +339,10 @@ fn record_planned_agent_run(
         "Agent run decision selected",
         metadata_with_context(
             [
-                ("decision_source".to_string(), planned.source.clone()),
+                (
+                    "decision_source".to_string(),
+                    planned.source.label().to_string(),
+                ),
                 (
                     "decision_attempts".to_string(),
                     planned.attempts.to_string(),
