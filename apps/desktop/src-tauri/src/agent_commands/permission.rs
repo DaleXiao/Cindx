@@ -1227,6 +1227,7 @@ mod tests {
         ));
         apply_run_task_contract(&mut original, &run_context, &tools, None)
             .expect("contract applies before permission pause");
+        let ledger_before_pause = original.task_contract.outcome_ledger_shadow(4);
         let snapshot = AgentTaskStateSnapshot::capture(&original);
         let original_message_count = original.messages.len();
 
@@ -1283,6 +1284,11 @@ mod tests {
         )
         .expect("blocked checkpoint should restore from its recorded message boundary");
         assert_eq!(boundary, original_message_count);
+        assert_eq!(
+            restored.task_contract.outcome_ledger_shadow(4),
+            ledger_before_pause,
+            "permission pause and cold recovery must preserve the shadow contract"
+        );
 
         apply_run_task_contract(&mut restored, &run_context, &tools, None)
             .expect("contract reapplies after recovery");
@@ -1336,6 +1342,24 @@ mod tests {
                 .count(),
             3
         );
+        let recovered_ledger = restored.task_contract.outcome_ledger_shadow(4);
+        let screenshot_evidence = recovered_ledger
+            .evidence
+            .iter()
+            .filter(|evidence| evidence.source == "computer.screenshot")
+            .map(|evidence| evidence.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(screenshot_evidence.len(), 2);
+        assert!(screenshot_evidence.contains(&agent_runtime::ContractEvidenceKind::Grounding));
+        assert!(
+            screenshot_evidence
+                .contains(&agent_runtime::ContractEvidenceKind::InteractionObservation),
+            "unexpected screenshot evidence: {screenshot_evidence:?}"
+        );
+        assert!(recovered_ledger
+            .evidence
+            .iter()
+            .all(|evidence| evidence.source != "shell.run"));
     }
 
     #[test]
