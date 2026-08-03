@@ -236,6 +236,36 @@ profile over stale profiles. Reflective mutation output is rejected if its
 custom directive copies case-specific trajectory or feedback content, including
 opaque run/model identifiers; repair output is checked by the same boundary.
 
+A promoted Pro profile can teach a later Auto challenger only through the
+separate Pro-to-Auto distillation track:
+
+1. The teacher must be the current project-scoped frozen Pro champion. Its
+   attestation binds both ordinary Pro evidence and the Auto-to-Pro transfer
+   evidence that qualified it; legacy or incomplete snapshots cannot teach.
+2. Distillation derives a bounded Auto-compatible child from the stable Auto
+   parent and only the learned delta relative to the Pro seed. It never copies
+   the Pro genome, custom directive, budget, or parallel topology into Auto.
+3. The teacher, Auto parent, child, source datasets, cohorts, receipts, and
+   flattened ancestor lineage are fingerprinted. Teacher cases and equivalent
+   objectives are excluded from both the fresh train and holdout splits, and a
+   missing typed source manifest fails closed.
+4. Pro-to-Auto observations use their own explicit evolution method, dataset,
+   cohort, and matched-attempt lineage. Ordinary Auto evidence and Auto-to-Pro
+   evidence cannot satisfy this gate or overwrite the stable Auto parent's
+   provenance.
+5. The background outbox is durable and idempotent, but does not scan or launch
+   distillation while a foreground Agent run is active. Campaign work remains
+   bounded, cancellable, project-scoped, and isolated from ordinary Auto
+   evolution requests.
+6. A passing matched train/holdout gate starts a 10 percent canary. Fresh live
+   evidence advances it through 25 and 50 percent; safety, quality, latency,
+   token, lineage, or gate regression rolls back to the frozen stable Auto
+   profile. Only the final stage can install a new frozen Auto snapshot.
+
+These contracts make self-distillation controlled and replayable. Deterministic
+tests establish eligibility, isolation, reachability, and rollback behavior;
+they do not establish provider-backed intelligence improvement.
+
 The evolution read model scopes learned genomes, observations, offline
 datasets, and rollout state by project. Records without a durable scope are
 rebuilt from canonical events before they can participate in selection. Its

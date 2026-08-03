@@ -149,6 +149,24 @@ objectives have multiple qualified Auto teachers, the
 current stable Auto profile is selected before stale profiles, then
 independently measured quality and resource use break ties.
 
+The current tree also contains a separate controlled Pro-to-Auto distillation
+track. Only the active frozen Pro champion can be a teacher, and its attestation
+must replay both its ordinary Pro gate and Auto-to-Pro source lineage. The
+runtime derives an Auto-bounded child from the stable Auto parent rather than
+copying Pro budgets, topology, directives, or genome wholesale. Teacher and
+ancestor cases or equivalent objectives cannot enter the fresh train/holdout
+cohort; missing manifests, stale teachers, mixed lineage, treatment failures,
+timeouts, or permission denials fail closed.
+
+Distillation dispatch is asynchronous, project-scoped, idempotent, bounded, and
+suppressed while a foreground Agent run is active. A real matched gate can
+start a 10 percent Auto canary; fresh live evidence is required for the 25 and
+50 percent stages and final frozen promotion. Safety, quality, latency, token,
+gate, or lineage regression rolls back to the prior stable Auto profile. The
+deterministic suite verifies these mechanism contracts only. No current
+provider-backed result demonstrates that the distilled Auto child is more
+intelligent than the stable Auto baseline.
+
 Canary traffic is capped at 50 percent. A challenger can become the stable
 profile only by first producing a valid immutable frozen snapshot; missing or
 regressed ordinary/transfer lineage rolls the canary back and preserves the
