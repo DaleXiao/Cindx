@@ -11115,6 +11115,23 @@ fn startup_recovery_preserves_pending_permission_as_blocked() {
         reconcile_interrupted_agent_runs(&mut store).expect("recovery should be idempotent"),
         0
     );
+    let claimed = claim_agent_recovery_envelope(
+        &mut store,
+        &context,
+        &["blocked"],
+        "permission_resolved",
+    )
+    .expect("blocked recovery claim should succeed")
+    .expect("blocked checkpoint should exist");
+    assert_eq!(claimed.attempts, 1);
+    let duplicate = claim_agent_recovery_envelope(
+        &mut store,
+        &context,
+        &["blocked"],
+        "permission_resolved",
+    )
+    .expect_err("a blocked recovery must not be claimed twice");
+    assert!(duplicate.contains("already claimed"));
 }
 
 #[test]

@@ -15,6 +15,39 @@ enum AgentToolPermissionGateOutcome {
     Reused,
 }
 
+fn pending_permission_matches_exact_invocation(
+    pending: &PermissionRequest,
+    candidate: &PermissionRequest,
+) -> bool {
+    const IDENTITY_KEYS: [&str; 9] = [
+        "tool_call_id",
+        "tool_name",
+        "tool_input_fingerprint",
+        "project_id",
+        "session_id",
+        "agent_run_id",
+        "collaboration_id",
+        "steer_epoch",
+        "prompt_contract_epoch",
+    ];
+
+    pending.task_id == candidate.task_id
+        && pending.action == candidate.action
+        && pending.risk == candidate.risk
+        && pending.scope == candidate.scope
+        && IDENTITY_KEYS.iter().all(|key| {
+            pending.metadata.get(*key).map(String::as_str)
+                == candidate.metadata.get(*key).map(String::as_str)
+        })
+}
+
+fn runtime_has_tool_observation(runtime: &agent_runtime::AgentLoopState, call_id: &str) -> bool {
+    runtime.messages.iter().any(|message| {
+        message.role == MessageRole::Tool
+            && message.metadata.get("tool_call_id").map(String::as_str) == Some(call_id)
+    })
+}
+
 pub(super) fn paused_agent_tools(state: AgentState) -> AgentToolBatchOutcome {
     AgentToolBatchOutcome::Paused(Box::new(state))
 }
@@ -28,7 +61,6 @@ fn evaluate_agent_tool_permission(
     invocation: &ToolInvocation,
     mut request: PermissionRequest,
 ) -> Result<AgentToolPermissionGateOutcome, String> {
-    request.id = PermissionRequestId(unique_id("agent-perm"));
     request
         .metadata
         .insert("phase".to_string(), "16".to_string());
@@ -43,6 +75,10 @@ fn evaluate_agent_tool_permission(
         .metadata
         .entry("tool_name".to_string())
         .or_insert_with(|| invocation.tool_name.clone());
+    request.metadata.insert(
+        "tool_input_fingerprint".to_string(),
+        tool_input_fingerprint(&invocation.tool_name, &invocation.input_json),
+    );
     request
         .metadata
         .insert("agent_prompt".to_string(), prompt.to_string());
@@ -56,6 +92,21 @@ fn evaluate_agent_tool_permission(
     if !agent_session_permission_granted(store, &phase16_task_id(), &request, session_id)
         .map_err(|error| error.to_string())?
     {
+        let pending = pending_agent_permissions_for_run(
+            store,
+            &request.task_id,
+            session_id,
+            request.metadata.get("agent_run_id").map(String::as_str),
+        )
+        .map_err(|error| error.to_string())?;
+        if pending
+            .iter()
+            .any(|pending| pending_permission_matches_exact_invocation(pending, &request))
+        {
+            return Ok(AgentToolPermissionGateOutcome::Pending);
+        }
+
+        request.id = PermissionRequestId(unique_id("agent-perm"));
         store
             .save_permission_request(request.clone(), current_time_millis())
             .map_err(|error| error.to_string())?;
@@ -295,20 +346,38 @@ fn execute_agent_tool_batch_serial(
             )?));
         }
         let mut invocation = AgentKernel::new(&mut *runtime, tools).tool_invocation(&call);
+        for (key, value) in run_context {
+            invocation
+                .metadata
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
         let tool = registry.get(&call.tool_name);
         if let Some(tool) = tool {
             let effect_spec = tool.effect_spec(&invocation);
             agent_runtime::apply_tool_spec_runtime_metadata(&mut invocation, &effect_spec);
         }
+        let permission_request = tool.and_then(|tool| tool.permission_request(&invocation));
         let mut store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        append_tool_proposed_event(&mut store, &invocation, Some(run_context))
-            .map_err(|error| error.to_string())?;
+        let completed_result = if permission_request.is_some() {
+            completed_exact_tool_result(&store, &invocation).map_err(|error| error.to_string())?
+        } else {
+            None
+        };
+        if completed_result.is_some() && runtime_has_tool_observation(runtime, &call.call_id.0) {
+            continue;
+        }
+        if completed_result.is_none() {
+            append_tool_proposed_event(&mut store, &invocation, Some(run_context))
+                .map_err(|error| error.to_string())?;
+        }
 
-        if AgentKernel::new(&mut *runtime, tools).repeated_tool_failure_count(&call)
-            >= MAX_IDENTICAL_TOOL_FAILURES
+        if completed_result.is_none()
+            && AgentKernel::new(&mut *runtime, tools).repeated_tool_failure_count(&call)
+                >= MAX_IDENTICAL_TOOL_FAILURES
         {
             let observation = observation_from_tool_result(
                             &call.tool_name,
@@ -411,48 +480,54 @@ fn execute_agent_tool_batch_serial(
         };
         let tool_risk = tool.spec().risk;
 
-        if let Some(request) = tool.permission_request(&invocation) {
-            if evaluate_agent_tool_permission(
-                &mut store,
-                &runtime.task_id,
-                prompt,
-                run_context,
-                session_id,
-                &invocation,
-                request,
-            )? == AgentToolPermissionGateOutcome::Pending
-            {
-                waiting_for_permission = true;
-                continue;
+        if completed_result.is_none() {
+            if let Some(request) = permission_request {
+                if evaluate_agent_tool_permission(
+                    &mut store,
+                    &runtime.task_id,
+                    prompt,
+                    run_context,
+                    session_id,
+                    &invocation,
+                    request,
+                )? == AgentToolPermissionGateOutcome::Pending
+                {
+                    waiting_for_permission = true;
+                    continue;
+                }
             }
         }
 
         let tool_name = invocation.tool_name.clone();
         drop(store);
-        let result = match execute_agent_tool_invocation_for_epoch(
-            state,
-            registry,
-            invocation,
-            workspace_root,
-            run_context,
-            cancellation,
-            epoch_lease,
-        )? {
-            AgentToolInvocationOutcome::Completed(result) => *result,
-            AgentToolInvocationOutcome::RestartAfterSteer => {
-                if agent_run_should_stop(cancellation) {
-                    return Ok(paused_agent_tools(pause_agent_loop_for_control_stop(
-                        app,
-                        state,
-                        workspace_root,
-                        &*runtime,
-                        prompt,
-                        run_context,
-                        active_collaboration,
-                        cancellation,
-                    )?));
+        let result = if let Some(result) = completed_result {
+            result
+        } else {
+            match execute_agent_tool_invocation_for_epoch(
+                state,
+                registry,
+                invocation,
+                workspace_root,
+                run_context,
+                cancellation,
+                epoch_lease,
+            )? {
+                AgentToolInvocationOutcome::Completed(result) => *result,
+                AgentToolInvocationOutcome::RestartAfterSteer => {
+                    if agent_run_should_stop(cancellation) {
+                        return Ok(paused_agent_tools(pause_agent_loop_for_control_stop(
+                            app,
+                            state,
+                            workspace_root,
+                            &*runtime,
+                            prompt,
+                            run_context,
+                            active_collaboration,
+                            cancellation,
+                        )?));
+                    }
+                    return Ok(AgentToolBatchOutcome::RestartAfterSteer);
                 }
-                return Ok(AgentToolBatchOutcome::RestartAfterSteer);
             }
         };
         let observation = observation_from_agent_tool_result(&tool_name, &result);
@@ -569,17 +644,29 @@ fn execute_agent_tool_batch_serial(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{
-        PermissionDecision, PermissionResolution, PermissionRisk, ToolCallId,
-    };
+    use agent_core::{PermissionDecision, PermissionResolution, PermissionRisk, ToolCallId};
 
-    fn run_context(session_id: &str) -> Metadata {
+    fn run_context_for(
+        session_id: &str,
+        agent_run_id: &str,
+        prompt_contract_epoch: u64,
+    ) -> Metadata {
         [
+            ("project_id".to_string(), "project-a".to_string()),
             ("session_id".to_string(), session_id.to_string()),
-            ("agent_run_id".to_string(), "run-a".to_string()),
+            ("agent_run_id".to_string(), agent_run_id.to_string()),
+            ("steer_epoch".to_string(), prompt_contract_epoch.to_string()),
+            (
+                "prompt_contract_epoch".to_string(),
+                prompt_contract_epoch.to_string(),
+            ),
         ]
         .into_iter()
         .collect()
+    }
+
+    fn run_context(session_id: &str) -> Metadata {
+        run_context_for(session_id, "run-a", 0)
     }
 
     fn invocation() -> ToolInvocation {
@@ -603,6 +690,189 @@ mod tests {
             scope: "notes.md".to_string(),
             metadata: Metadata::new(),
         }
+    }
+
+    fn pending_match_candidate(
+        invocation: &ToolInvocation,
+        context: &Metadata,
+    ) -> PermissionRequest {
+        let mut request = permission_request(invocation);
+        request
+            .metadata
+            .insert("tool_call_id".to_string(), invocation.id.0.clone());
+        request
+            .metadata
+            .insert("tool_name".to_string(), invocation.tool_name.clone());
+        request.metadata.insert(
+            "tool_input_fingerprint".to_string(),
+            tool_input_fingerprint(&invocation.tool_name, &invocation.input_json),
+        );
+        request.metadata.extend(context.clone());
+        request
+    }
+
+    #[test]
+    fn exact_replay_does_not_reapply_an_observation_already_in_the_runtime() {
+        let mut runtime = start_agent_loop(
+            TaskId("replay-observation".to_string()),
+            "write notes",
+            AgentRuntimeConfig::default(),
+        );
+        runtime.messages.push(Message {
+            role: MessageRole::Tool,
+            content: "written".to_string(),
+            metadata: [("tool_call_id".to_string(), "call-a".to_string())]
+                .into_iter()
+                .collect(),
+        });
+
+        assert!(runtime_has_tool_observation(&runtime, "call-a"));
+        assert!(!runtime_has_tool_observation(&runtime, "call-b"));
+    }
+
+    #[test]
+    fn pending_permission_match_requires_exact_capability_and_invocation_identity() {
+        let invocation = invocation();
+        let candidate = pending_match_candidate(&invocation, &run_context("session-a"));
+        assert!(pending_permission_matches_exact_invocation(
+            &candidate, &candidate
+        ));
+
+        let mut changed = candidate.clone();
+        changed.action = "file.delete".to_string();
+        assert!(!pending_permission_matches_exact_invocation(
+            &changed, &candidate
+        ));
+        let mut changed = candidate.clone();
+        changed.risk = PermissionRisk::Destructive;
+        assert!(!pending_permission_matches_exact_invocation(
+            &changed, &candidate
+        ));
+        let mut changed = candidate.clone();
+        changed.scope = "other.md".to_string();
+        assert!(!pending_permission_matches_exact_invocation(
+            &changed, &candidate
+        ));
+        for key in [
+            "tool_call_id",
+            "tool_name",
+            "tool_input_fingerprint",
+            "project_id",
+            "session_id",
+            "agent_run_id",
+            "collaboration_id",
+            "steer_epoch",
+            "prompt_contract_epoch",
+        ] {
+            let mut changed = candidate.clone();
+            changed
+                .metadata
+                .insert(key.to_string(), "other".to_string());
+            assert!(
+                !pending_permission_matches_exact_invocation(&changed, &candidate),
+                "{key} must be part of the exact pending identity"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_permission_gate_coalesces_only_exact_canonical_call_and_lineage() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let invocation = invocation();
+        let context = run_context("session-a");
+
+        for input_json in [
+            r#"{"path":"notes.md","content":"safe"}"#,
+            r#"{"content":"safe","path":"notes.md"}"#,
+        ] {
+            let mut equivalent = invocation.clone();
+            equivalent.input_json = input_json.to_string();
+            assert_eq!(
+                evaluate_agent_tool_permission(
+                    &mut store,
+                    &phase16_task_id(),
+                    "write notes",
+                    &context,
+                    Some("session-a"),
+                    &equivalent,
+                    permission_request(&equivalent),
+                )
+                .expect("equivalent request should reach the pending gate"),
+                AgentToolPermissionGateOutcome::Pending
+            );
+        }
+
+        let mut different_call = invocation.clone();
+        different_call.id = ToolCallId("call-b".to_string());
+        evaluate_agent_tool_permission(
+            &mut store,
+            &phase16_task_id(),
+            "write notes",
+            &context,
+            Some("session-a"),
+            &different_call,
+            permission_request(&different_call),
+        )
+        .expect("a different call id should remain independently permissioned");
+
+        let next_epoch = run_context_for("session-a", "run-a", 1);
+        evaluate_agent_tool_permission(
+            &mut store,
+            &phase16_task_id(),
+            "write notes",
+            &next_epoch,
+            Some("session-a"),
+            &invocation,
+            permission_request(&invocation),
+        )
+        .expect("a different prompt contract epoch should remain independent");
+
+        let next_run = run_context_for("session-a", "run-b", 0);
+        evaluate_agent_tool_permission(
+            &mut store,
+            &phase16_task_id(),
+            "write notes",
+            &next_run,
+            Some("session-a"),
+            &invocation,
+            permission_request(&invocation),
+        )
+        .expect("a different run should remain independent");
+
+        let next_session = run_context_for("session-b", "run-a", 0);
+        evaluate_agent_tool_permission(
+            &mut store,
+            &phase16_task_id(),
+            "write notes",
+            &next_session,
+            Some("session-b"),
+            &invocation,
+            permission_request(&invocation),
+        )
+        .expect("a different session should remain independent");
+
+        let events = store
+            .list_by_task(&phase16_task_id())
+            .expect("permission events should be readable");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == EventKind::PermissionRequested)
+                .count(),
+            5,
+            "the canonical duplicate must not create a sixth permission event"
+        );
+        assert_eq!(
+            pending_agent_permissions_for_run(
+                &store,
+                &phase16_task_id(),
+                Some("session-a"),
+                Some("run-a")
+            )
+            .expect("run-a permissions should be queryable")
+            .len(),
+            3
+        );
     }
 
     #[test]

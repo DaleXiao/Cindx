@@ -1,13 +1,15 @@
 use crate::{
     advance_with_model_response, append_internal_instruction, append_steering_instruction,
     append_tool_observation, model_request_for_turn_with_context_budget,
-    model_request_for_turn_with_context_budget_and_overlays, record_tool_outcome_with_risk,
+    model_request_for_turn_with_context_budget_and_overlays, persisted_tool_input_placeholder,
+    record_persisted_tool_outcome_with_risk, record_tool_outcome_with_risk,
     repeated_tool_failure_count, tool_invocation_from_request, AgentAdvance, AgentLoopState,
     AgentTaskStateSnapshot, AgentToolRequest, AgentTurnBudgetExhausted, ContextGovernorReport,
     ContextInvariantViolation, WorkspaceVerificationPolicy,
 };
 use agent_core::{
-    Message, MessageRole, Metadata, ToolInvocation, ToolOutcomeStatus, ToolRisk, ToolSpec,
+    Message, MessageRole, Metadata, ToolCallId, ToolInvocation, ToolOutcomeStatus, ToolRisk,
+    ToolSpec,
 };
 use model_provider::{ModelRequest, ModelResponse};
 
@@ -398,6 +400,38 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         }
         append_tool_observation(self.state, request.call_id.clone(), observation);
     }
+
+    pub fn apply_persisted_tool_observation(
+        &mut self,
+        call_id: ToolCallId,
+        tool_name: &str,
+        input_fingerprint: &str,
+        status: &ToolOutcomeStatus,
+        risk: Option<&ToolRisk>,
+        observation: &str,
+    ) {
+        record_persisted_tool_outcome_with_risk(
+            self.state,
+            tool_name,
+            input_fingerprint,
+            status,
+            risk,
+        );
+        if matches!(status, ToolOutcomeStatus::Succeeded) {
+            let evidence_epoch = self.state.task_contract.prompt_evidence_epoch();
+            let persisted_input = persisted_tool_input_placeholder(input_fingerprint);
+            self.state
+                .task_contract
+                .record_prompt_tool_evidence_observation_at(
+                    evidence_epoch,
+                    tool_name,
+                    tool_name,
+                    &persisted_input,
+                    observation,
+                );
+        }
+        append_tool_observation(self.state, call_id, observation);
+    }
 }
 
 fn deferred_tool_name(request: &AgentToolRequest) -> Option<String> {
@@ -565,6 +599,72 @@ mod tests {
             state.messages.last().unwrap().metadata["tool_call_id"],
             "call-1"
         );
+    }
+
+    #[test]
+    fn persisted_failures_rejoin_the_canonical_counter_without_raw_input() {
+        let mut state = start_agent_loop(
+            TaskId("persisted-failure".to_string()),
+            "inspect the workspace",
+            AgentRuntimeConfig::default(),
+        );
+        let tools = vec![read_tool()];
+        let request = request();
+        let input_fingerprint = crate::tool_input_fingerprint(&request.tool_name, &request.input);
+
+        for call_id in ["persisted-1", "persisted-2"] {
+            AgentKernel::new(&mut state, &tools).apply_persisted_tool_observation(
+                ToolCallId(call_id.to_string()),
+                &request.tool_name,
+                &input_fingerprint,
+                &ToolOutcomeStatus::Denied,
+                Some(&ToolRisk::ReadOnly),
+                "tool=file.read\nstatus=denied\noutput=permission denied",
+            );
+        }
+
+        assert_eq!(
+            AgentKernel::new(&mut state, &tools).repeated_tool_failure_count(&request),
+            2
+        );
+        assert_eq!(
+            AgentKernel::new(&mut state, &tools).repeated_tool_failure_count(&AgentToolRequest {
+                call_id: ToolCallId("changed".to_string()),
+                tool_name: request.tool_name.clone(),
+                input: r#"{"path":"CHANGELOG.md"}"#.to_string(),
+            }),
+            0
+        );
+        assert!(state
+            .failed_tool_signatures
+            .keys()
+            .all(|signature| !signature.contains("README.md")));
+    }
+
+    #[test]
+    fn persisted_success_preserves_tool_and_grounding_contracts() {
+        let mut state = start_agent_loop(
+            TaskId("persisted-success".to_string()),
+            "inspect the workspace",
+            AgentRuntimeConfig::default(),
+        );
+        let tools = vec![read_tool()];
+        let request = request();
+        let input_fingerprint = crate::tool_input_fingerprint(&request.tool_name, &request.input);
+        state.task_contract.require_tool_success("file.read");
+        let mut kernel = AgentKernel::new(&mut state, &tools);
+        kernel.replace_prompt_evidence_requirement(1, Some("workspace_grounding"), ["file.read"]);
+
+        kernel.apply_persisted_tool_observation(
+            ToolCallId("persisted-success-1".to_string()),
+            &request.tool_name,
+            &input_fingerprint,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ReadOnly),
+            "tool=file.read\nstatus=succeeded\noutput=workspace evidence",
+        );
+
+        assert_eq!(kernel.completion_gate_for_task(), Ok(None));
     }
 
     #[test]
