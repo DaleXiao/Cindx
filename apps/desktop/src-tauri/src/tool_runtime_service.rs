@@ -66,6 +66,38 @@ pub(super) fn completed_tool_result(
     ))
 }
 
+pub(super) fn completed_exact_tool_result(
+    store: &SqliteStore,
+    invocation: &ToolInvocation,
+) -> Result<Option<ToolResult>, StorageError> {
+    let events = store.list_by_task_and_tool_call_id(&invocation.task_id, &invocation.id.0)?;
+    let matching_lineage = events
+        .into_iter()
+        .filter(|event| permission_replay_lineage_matches(&event.metadata, invocation))
+        .collect::<Vec<_>>();
+    Ok(completed_tool_result_from_events(
+        &matching_lineage,
+        invocation,
+    ))
+}
+
+fn permission_replay_lineage_matches(
+    event_metadata: &Metadata,
+    invocation: &ToolInvocation,
+) -> bool {
+    let Some(expected) = invocation
+        .metadata
+        .get("prompt_contract_epoch")
+        .or_else(|| invocation.metadata.get("steer_epoch"))
+    else {
+        return false;
+    };
+    event_metadata
+        .get("prompt_contract_epoch")
+        .or_else(|| event_metadata.get("steer_epoch"))
+        == Some(expected)
+}
+
 fn completed_tool_result_from_events(
     events: &[Event],
     invocation: &ToolInvocation,
@@ -304,6 +336,7 @@ fn result_from_finished_event(
 mod tests {
     use super::*;
     use agent_core::{EventId, TaskId, ToolArtifact};
+    use agent_storage::EventStore;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn invocation(input_json: &str) -> ToolInvocation {
@@ -445,6 +478,62 @@ mod tests {
             .metadata
             .insert("session_id".to_string(), "session-2".to_string());
         assert!(completed_tool_result_from_events(&[event], &other_session).is_none());
+    }
+
+    #[test]
+    fn permission_replay_requires_the_same_prompt_contract_epoch() {
+        let mut invocation = invocation(r#"{"path":"a.txt"}"#);
+        invocation
+            .metadata
+            .insert("prompt_contract_epoch".to_string(), "3".to_string());
+        let mut matching = Metadata::new();
+        matching.insert("prompt_contract_epoch".to_string(), "3".to_string());
+        assert!(permission_replay_lineage_matches(&matching, &invocation));
+
+        matching.insert("prompt_contract_epoch".to_string(), "4".to_string());
+        assert!(!permission_replay_lineage_matches(&matching, &invocation));
+        matching.clear();
+        assert!(!permission_replay_lineage_matches(&matching, &invocation));
+        invocation.metadata.remove("prompt_contract_epoch");
+        matching.insert("prompt_contract_epoch".to_string(), "3".to_string());
+        assert!(!permission_replay_lineage_matches(&matching, &invocation));
+    }
+
+    #[test]
+    fn completed_exact_result_is_reused_only_within_its_permission_lineage() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let mut invocation = invocation(r#"{"path":"a.txt"}"#);
+        invocation
+            .metadata
+            .insert("prompt_contract_epoch".to_string(), "3".to_string());
+        let mut result = ToolResult::text(
+            invocation.id.clone(),
+            ToolOutcomeStatus::Succeeded,
+            "written",
+            Metadata::new(),
+        );
+        let fingerprint = tool_input_fingerprint(&invocation.tool_name, &invocation.input_json);
+        finalize_tool_result(
+            &mut result,
+            &invocation.id,
+            &fingerprint,
+            Duration::from_millis(12),
+        );
+        let mut event = finished_event(&invocation, &result);
+        event
+            .metadata
+            .insert("prompt_contract_epoch".to_string(), "3".to_string());
+        store.append(event).expect("finished event should persist");
+
+        assert!(completed_exact_tool_result(&store, &invocation)
+            .expect("exact replay lookup should succeed")
+            .is_some());
+        invocation
+            .metadata
+            .insert("prompt_contract_epoch".to_string(), "4".to_string());
+        assert!(completed_exact_tool_result(&store, &invocation)
+            .expect("changed-lineage lookup should succeed")
+            .is_none());
     }
 
     #[test]

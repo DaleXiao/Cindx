@@ -116,6 +116,7 @@ pub const DEFAULT_MAX_AGENT_TURNS: usize = 24;
 pub const DEFAULT_COLLABORATION_WORKER_TURNS: usize = 5;
 pub const MAX_COLLABORATION_WORKER_TOOL_CALLS: usize = 6;
 pub const MAX_IDENTICAL_TOOL_FAILURES: usize = 2;
+pub(crate) const TOOL_FAILURE_SIGNATURE_SCHEMA: &str = "cindx.tool-failure.v1";
 pub const CORE_AGENT_SYSTEM_PROMPT: &str = include_str!("core_prompt.txt");
 pub const DEFAULT_AGENT_SYSTEM_PROMPT: &str = CORE_AGENT_SYSTEM_PROMPT;
 
@@ -819,11 +820,17 @@ pub fn repeated_tool_failure_count(
     tool_name: &str,
     input_json: &str,
 ) -> usize {
-    state
+    let current = state
         .failed_tool_signatures
         .get(&tool_signature(tool_name, input_json))
         .copied()
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let legacy = state
+        .failed_tool_signatures
+        .get(&legacy_tool_signature(tool_name, input_json))
+        .copied()
+        .unwrap_or_default();
+    current.saturating_add(legacy)
 }
 
 pub fn record_tool_outcome(
@@ -843,13 +850,20 @@ pub fn record_tool_outcome_with_risk(
     risk: Option<&ToolRisk>,
 ) {
     let signature = tool_signature(tool_name, input_json);
+    let legacy_signature = legacy_tool_signature(tool_name, input_json);
     if matches!(
         status,
         ToolOutcomeStatus::Failed | ToolOutcomeStatus::Denied
     ) {
-        *state.failed_tool_signatures.entry(signature).or_default() += 1;
+        let legacy_count = state
+            .failed_tool_signatures
+            .remove(&legacy_signature)
+            .unwrap_or_default();
+        let count = state.failed_tool_signatures.entry(signature).or_default();
+        *count = count.saturating_add(legacy_count).saturating_add(1);
     } else {
         state.failed_tool_signatures.remove(&signature);
+        state.failed_tool_signatures.remove(&legacy_signature);
     }
 
     let pending_before = state.task_contract.pending_interactions().len();
@@ -863,6 +877,45 @@ pub fn record_tool_outcome_with_risk(
             .saturating_add(pending_before - pending_after);
     }
     sync_contract_projections(state);
+}
+
+fn record_persisted_tool_outcome_with_risk(
+    state: &mut AgentLoopState,
+    tool_name: &str,
+    input_fingerprint: &str,
+    status: &ToolOutcomeStatus,
+    risk: Option<&ToolRisk>,
+) {
+    let signature = tool_failure_signature_from_input_fingerprint(input_fingerprint);
+    if matches!(
+        status,
+        ToolOutcomeStatus::Failed | ToolOutcomeStatus::Denied
+    ) {
+        let count = state.failed_tool_signatures.entry(signature).or_default();
+        *count = count.saturating_add(1);
+    } else {
+        state.failed_tool_signatures.remove(&signature);
+    }
+
+    let pending_before = state.task_contract.pending_interactions().len();
+    let persisted_input = persisted_tool_input_placeholder(input_fingerprint);
+    state
+        .task_contract
+        .record_tool_outcome(tool_name, &persisted_input, status, risk);
+    let pending_after = state.task_contract.pending_interactions().len();
+    if pending_after < pending_before {
+        state.verified_interactions = state
+            .verified_interactions
+            .saturating_add(pending_before - pending_after);
+    }
+    sync_contract_projections(state);
+}
+
+fn persisted_tool_input_placeholder(input_fingerprint: &str) -> String {
+    serde_json::json!({
+        "permission_input_fingerprint": input_fingerprint,
+    })
+    .to_string()
 }
 
 fn rebuild_interaction_verification_state(state: &mut AgentLoopState) {
@@ -942,10 +995,54 @@ pub fn completion_verification_instruction(
 }
 
 fn tool_signature(tool_name: &str, input_json: &str) -> String {
+    tool_failure_signature_from_input_fingerprint(&tool_input_fingerprint(tool_name, input_json))
+}
+
+fn tool_failure_signature_from_input_fingerprint(input_fingerprint: &str) -> String {
+    let input_fingerprint = input_fingerprint.trim();
+    let canonical_fingerprint = if input_fingerprint.len() == 64
+        && input_fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        input_fingerprint.to_ascii_lowercase()
+    } else {
+        tool_input_fingerprint("persisted-tool-input-fingerprint", input_fingerprint)
+    };
+    format!("{TOOL_FAILURE_SIGNATURE_SCHEMA}:{canonical_fingerprint}")
+}
+
+fn legacy_tool_signature(tool_name: &str, input_json: &str) -> String {
     let canonical = serde_json::from_str::<serde_json::Value>(input_json)
         .map(|value| value.to_string())
         .unwrap_or_else(|_| input_json.trim().to_string());
     format!("{tool_name}\n{canonical}")
+}
+
+fn normalized_failed_tool_signatures(
+    signatures: &BTreeMap<String, usize>,
+) -> BTreeMap<String, usize> {
+    let mut normalized = BTreeMap::<String, usize>::new();
+    for (signature, count) in signatures {
+        if *count == 0 {
+            continue;
+        }
+        let normalized_signature = if let Some(fingerprint) =
+            signature.strip_prefix(&format!("{TOOL_FAILURE_SIGNATURE_SCHEMA}:"))
+        {
+            tool_failure_signature_from_input_fingerprint(fingerprint)
+        } else if let Some((tool_name, input_json)) = signature.split_once('\n') {
+            tool_signature(tool_name, input_json)
+        } else {
+            tool_failure_signature_from_input_fingerprint(&tool_input_fingerprint(
+                "legacy-tool-failure-signature",
+                signature,
+            ))
+        };
+        let normalized_count = normalized.entry(normalized_signature).or_default();
+        *normalized_count = normalized_count.saturating_add(*count);
+    }
+    normalized
 }
 
 pub fn agent_system_prompt(tools: &[ToolSpec]) -> String {

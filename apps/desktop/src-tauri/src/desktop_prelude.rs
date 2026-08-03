@@ -160,6 +160,6 @@ pub(crate) use crate::session_projection::{
     load_agent_session_read_model, load_agent_session_read_model_snapshot,
 };
 pub(crate) use crate::tool_runtime_service::{
-    completed_tool_result, failed_tool_result, finalize_tool_result, tool_input_fingerprint,
-    tool_invocation_context, tool_invocation_event_metadata,
+    completed_exact_tool_result, completed_tool_result, failed_tool_result, finalize_tool_result,
+    tool_input_fingerprint, tool_invocation_context, tool_invocation_event_metadata,
 };

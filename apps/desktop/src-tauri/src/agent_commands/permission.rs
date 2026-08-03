@@ -96,6 +96,18 @@ struct PersistedPermissionObservation {
     observation: String,
 }
 
+fn persisted_permission_observation_payload_matches(
+    left: &PersistedPermissionObservation,
+    right: &PersistedPermissionObservation,
+) -> bool {
+    left.permission_id == right.permission_id
+        && left.call_id == right.call_id
+        && left.tool_name == right.tool_name
+        && left.input_fingerprint == right.input_fingerprint
+        && left.status == right.status
+        && left.observation == right.observation
+}
+
 fn persisted_tool_outcome_status(value: &str) -> Option<ToolOutcomeStatus> {
     match value {
         "succeeded" => Some(ToolOutcomeStatus::Succeeded),
@@ -118,7 +130,7 @@ fn persisted_permission_observations(
     };
     let prompt_contract_epoch = permission_prompt_contract_epoch(run_context).to_string();
 
-    transcript
+    let candidates = transcript
         .iter()
         .enumerate()
         .filter_map(|(message_index, message)| {
@@ -178,6 +190,33 @@ fn persisted_permission_observations(
                 status,
                 observation: message.content.clone(),
             })
+        })
+        .collect::<Vec<_>>();
+    let mut first_by_id = BTreeMap::<String, usize>::new();
+    let mut conflicting_ids = BTreeSet::new();
+    for (index, observation) in candidates.iter().enumerate() {
+        match first_by_id.get(&observation.permission_id.0).copied() {
+            Some(first_index)
+                if !persisted_permission_observation_payload_matches(
+                    &candidates[first_index],
+                    observation,
+                ) =>
+            {
+                conflicting_ids.insert(observation.permission_id.0.clone());
+            }
+            Some(_) => {}
+            None => {
+                first_by_id.insert(observation.permission_id.0.clone(), index);
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, observation)| {
+            (!conflicting_ids.contains(&observation.permission_id.0)
+                && first_by_id.get(&observation.permission_id.0) == Some(&index))
+            .then_some(observation)
         })
         .collect()
 }
@@ -526,7 +565,6 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
 
     if let Some(session_id) = session_id {
         if let Some(mut suspended) = take_suspended_agent_run(&state, session_id)? {
-            cancellation.extend_runtime_budget(&mut suspended.runtime);
             for (key, value) in &run_context {
                 suspended.run_context.insert(key.clone(), value.clone());
             }
@@ -597,26 +635,19 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         .iter()
         .filter(|observation| observation.message_index >= replay_boundary)
     {
-        let request = AgentToolRequest {
-            call_id: resolved.call_id.clone(),
-            tool_name: resolved.tool_name.clone(),
-            input: serde_json::json!({
-                "permission_input_fingerprint": resolved.input_fingerprint,
-            })
-            .to_string(),
-        };
         let risk = registry
             .get(&resolved.tool_name)
             .map(|tool| tool.spec().risk);
-        AgentKernel::new(&mut runtime, &tools).apply_tool_observation(
-            &request,
+        AgentKernel::new(&mut runtime, &tools).apply_persisted_tool_observation(
+            resolved.call_id.clone(),
+            &resolved.tool_name,
+            &resolved.input_fingerprint,
             &resolved.status,
             risk.as_ref(),
             &resolved.observation,
         );
     }
     runtime.messages = transcript;
-    cancellation.extend_runtime_budget(&mut runtime);
     let effort = AgentEffort::parse(
         run_context
             .get("agent_effort")
@@ -1144,6 +1175,34 @@ mod tests {
     }
 
     #[test]
+    fn persisted_permission_observations_replay_each_permission_only_once() {
+        let run_context = permission_run_context(4, 0);
+        let observation = permission_message_with_id(
+            "permission-a",
+            "call-a",
+            "shell.run",
+            ToolOutcomeStatus::Denied,
+            "denied",
+            &run_context,
+        );
+
+        let observations = persisted_permission_observations(
+            &[observation.clone(), observation.clone()],
+            &run_context,
+        );
+
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].permission_id.0, "permission-a");
+
+        let mut conflicting = observation.clone();
+        conflicting
+            .metadata
+            .insert("tool_call_id".to_string(), "call-b".to_string());
+        assert!(persisted_permission_observations(&[observation, conflicting], &run_context)
+            .is_empty());
+    }
+
+    #[test]
     fn cold_recovery_replays_all_permission_observations_without_duplicates() {
         let run_context = permission_run_context(4, 0);
         let tools = vec![ToolSpec::builtin(
@@ -1200,6 +1259,13 @@ mod tests {
             "denied",
             &run_context,
         ));
+        transcript.push(permission_message(
+            "call-c",
+            "shell.run",
+            ToolOutcomeStatus::Denied,
+            "denied again",
+            &run_context,
+        ));
 
         let observations = persisted_permission_observations(&transcript, &run_context);
         assert_eq!(
@@ -1207,7 +1273,7 @@ mod tests {
                 .iter()
                 .map(|observation| observation.call_id.0.as_str())
                 .collect::<Vec<_>>(),
-            vec!["call-a", "call-b"]
+            vec!["call-a", "call-b", "call-c"]
         );
         let (mut restored, boundary) = restore_permission_snapshot_from_boundary(
             &snapshot,
@@ -1224,23 +1290,37 @@ mod tests {
             .iter()
             .filter(|observation| observation.message_index >= boundary)
         {
-            let request = AgentToolRequest {
-                call_id: observation.call_id.clone(),
-                tool_name: observation.tool_name.clone(),
-                input: serde_json::json!({
-                    "permission_input_fingerprint": observation.input_fingerprint,
-                })
-                .to_string(),
-            };
             let risk = (observation.tool_name == "computer.screenshot")
                 .then_some(ToolRisk::SensitiveContext);
-            AgentKernel::new(&mut restored, &tools).apply_tool_observation(
-                &request,
+            AgentKernel::new(&mut restored, &tools).apply_persisted_tool_observation(
+                observation.call_id.clone(),
+                &observation.tool_name,
+                &observation.input_fingerprint,
                 &observation.status,
                 risk.as_ref(),
                 &observation.observation,
             );
         }
+        assert_eq!(
+            AgentKernel::new(&mut restored, &tools).repeated_tool_failure_count(
+                &AgentToolRequest {
+                    call_id: agent_core::ToolCallId("probe-same".to_string()),
+                    tool_name: "shell.run".to_string(),
+                    input: r#"{"secret":"super-secret"}"#.to_string(),
+                }
+            ),
+            MAX_IDENTICAL_TOOL_FAILURES
+        );
+        assert_eq!(
+            AgentKernel::new(&mut restored, &tools).repeated_tool_failure_count(
+                &AgentToolRequest {
+                    call_id: agent_core::ToolCallId("probe-changed".to_string()),
+                    tool_name: "shell.run".to_string(),
+                    input: r#"{"secret":"different"}"#.to_string(),
+                }
+            ),
+            0
+        );
         restored.messages = transcript.clone();
 
         assert_eq!(
@@ -1254,7 +1334,7 @@ mod tests {
                 .iter()
                 .filter(|message| message.role == MessageRole::Tool)
                 .count(),
-            2
+            3
         );
     }
 

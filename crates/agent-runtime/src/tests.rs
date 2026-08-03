@@ -33,6 +33,40 @@ fn repeated_identical_tool_failures_are_counted_by_canonical_arguments() {
         repeated_tool_failure_count(&state, "shell.run", r#"{"command":"false","cwd":"."}"#),
         MAX_IDENTICAL_TOOL_FAILURES
     );
+    assert_eq!(state.failed_tool_signatures.len(), 1);
+    let signature = state.failed_tool_signatures.keys().next().unwrap();
+    assert!(signature.starts_with(&format!("{TOOL_FAILURE_SIGNATURE_SCHEMA}:")));
+    assert!(!signature.contains("command"));
+    assert!(!signature.contains("false"));
+}
+
+#[test]
+fn legacy_raw_failure_signatures_are_counted_and_migrated_on_record() {
+    let mut state = start_agent_loop(
+        TaskId("legacy-failure-signature".to_string()),
+        "test",
+        AgentRuntimeConfig::default(),
+    );
+    let input = r#"{"command":"false","cwd":"."}"#;
+    state
+        .failed_tool_signatures
+        .insert(legacy_tool_signature("shell.run", input), 1);
+
+    assert_eq!(repeated_tool_failure_count(&state, "shell.run", input), 1);
+
+    record_tool_outcome(
+        &mut state,
+        "shell.run",
+        r#"{"cwd":".","command":"false"}"#,
+        &ToolOutcomeStatus::Denied,
+    );
+
+    assert_eq!(repeated_tool_failure_count(&state, "shell.run", input), 2);
+    assert_eq!(state.failed_tool_signatures.len(), 1);
+    assert!(state
+        .failed_tool_signatures
+        .keys()
+        .all(|signature| signature.starts_with(&format!("{TOOL_FAILURE_SIGNATURE_SCHEMA}:"))));
 }
 
 #[test]

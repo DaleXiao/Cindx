@@ -1,4 +1,5 @@
 use crate::{
+    normalized_failed_tool_signatures,
     task_state_lineage::{
         is_durable_message, is_transient_run_context, text_fingerprint, AgentTaskStateLineage,
         AgentTranscriptFingerprintAccumulator,
@@ -103,7 +104,9 @@ impl AgentTaskStateSnapshot {
             durable_message_count: lineage.durable_message_count,
             turn: state.turn,
             max_turns: state.max_turns,
-            failed_tool_signatures: state.failed_tool_signatures.clone(),
+            failed_tool_signatures: normalized_failed_tool_signatures(
+                &state.failed_tool_signatures,
+            ),
             consecutive_empty_responses: state.consecutive_empty_responses,
             successful_mutations: state.successful_mutations,
             verified_after_last_mutation: state.verified_after_last_mutation,
@@ -185,7 +188,7 @@ impl AgentTaskStateSnapshot {
             messages,
             turn: self.turn,
             max_turns: self.max_turns,
-            failed_tool_signatures: self.failed_tool_signatures.clone(),
+            failed_tool_signatures: normalized_failed_tool_signatures(&self.failed_tool_signatures),
             consecutive_empty_responses: self.consecutive_empty_responses,
             successful_mutations: self.successful_mutations,
             verified_after_last_mutation: self.verified_after_last_mutation,
@@ -278,8 +281,9 @@ fn durable_messages(messages: &[Message]) -> Vec<&Message> {
 mod tests {
     use super::*;
     use crate::{
-        record_tool_outcome_with_risk, start_agent_loop, AgentRuntimeConfig,
-        WorkspaceVerificationPolicy,
+        record_tool_outcome, record_tool_outcome_with_risk, repeated_tool_failure_count,
+        start_agent_loop, AgentRuntimeConfig, WorkspaceVerificationPolicy,
+        TOOL_FAILURE_SIGNATURE_SCHEMA,
     };
     use agent_core::{MessageRole, Metadata, TaskId, ToolOutcomeStatus, ToolRisk};
 
@@ -291,9 +295,14 @@ mod tests {
             AgentRuntimeConfig { max_turns: 32 },
         );
         state.turn = 7;
-        state
-            .failed_tool_signatures
-            .insert("shell.run:abc".to_string(), 2);
+        for _ in 0..2 {
+            record_tool_outcome(
+                &mut state,
+                "shell.run",
+                r#"{"command":"false","cwd":"."}"#,
+                &ToolOutcomeStatus::Failed,
+            );
+        }
         state.task_contract.merge_workspace_verification_policy(
             WorkspaceVerificationPolicy::RequiredAfterMutation,
         );
@@ -324,6 +333,37 @@ mod tests {
             .expect("matching transcript restores");
 
         assert_eq!(restored, state);
+    }
+
+    #[test]
+    fn legacy_raw_failure_keys_are_sanitized_without_losing_the_counter() {
+        let mut state = start_agent_loop(
+            TaskId("legacy-failure-checkpoint".to_string()),
+            "recover a failed tool",
+            AgentRuntimeConfig::default(),
+        );
+        let input = r#"{"command":"printenv TOP_SECRET_TOKEN","cwd":"."}"#;
+        state
+            .failed_tool_signatures
+            .insert(format!("shell.run\n{input}"), 2);
+
+        let snapshot = AgentTaskStateSnapshot::capture(&state);
+        let encoded = snapshot.to_json().expect("checkpoint encodes");
+
+        assert!(!encoded.contains("TOP_SECRET_TOKEN"));
+        assert!(snapshot
+            .failed_tool_signatures
+            .keys()
+            .all(|signature| signature.starts_with(&format!("{TOOL_FAILURE_SIGNATURE_SCHEMA}:"))));
+
+        let restored = AgentTaskStateSnapshot::from_json(&encoded)
+            .expect("checkpoint decodes")
+            .restore(state.user_prompt.clone(), state.messages.clone())
+            .expect("matching transcript restores");
+        assert_eq!(
+            repeated_tool_failure_count(&restored, "shell.run", input),
+            2
+        );
     }
 
     #[test]
